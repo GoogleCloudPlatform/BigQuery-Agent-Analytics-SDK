@@ -34,6 +34,15 @@ in Python from the row's flags. It is **not** G1 — no category names are
 frozen, the six-week clock has still not started, and the partner job, D4
 boundary, and live-trace ingestion remain parked.
 
+An **example scenario pack** also exists
+(`examples/evalbench_week0_full_idea.md`, run with
+`bash examples/evalbench_week0_full_idea.sh --fixture`): it demonstrates
+every Week 0 human gate below as one concrete story on the widget-stock
+failed session. Everything in it is labeled EXAMPLE / illustrative / not a
+freeze — `g1_frozen` stays false, the six-week clock has **not** started,
+and no real partner is named (the example partner is "Acme Retail
+Support"). **Week 0 remains human-gated**; the pack clears nothing.
+
 ---
 
 ## Preface — what was verified before acceptance

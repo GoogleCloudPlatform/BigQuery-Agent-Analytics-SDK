@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **EXAMPLE Week 0 scenario pack (#435 slice 10)** — new
+  `examples/evalbench_week0_full_idea.md` / `.sh --fixture` walk all five
+  Week 0 human gates of `docs/agentforensics_mvp_plan.md` (partner + SANA
+  relationship, runtime + route, pilot-benchmark rubric, D4 boundary memo,
+  preregistration) as one concrete story on the widget-stock failed session,
+  ending in the mechanical `taxonomy_categories` row and an EXAMPLE mapping
+  onto SANA-seeded names in `examples/fixtures/week0_example_*.json`.
+  Offline only (no BigQuery, no network) and entirely illustrative: not a
+  freeze, `g1_frozen` stays false, the six-week clock has not started, no
+  real partner is named, and `src/` is untouched — Week 0 remains
+  human-gated.
 - **Failed-session rows carry scaffold taxonomy categories (#435 slice 9)**
   — `failed_sessions()` / `bq-agent-sdk evalbench-failed-sessions` now
   attach `taxonomy_categories` to each session row: `EvalBenchSession`

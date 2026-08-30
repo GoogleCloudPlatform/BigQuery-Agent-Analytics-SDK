@@ -1,0 +1,38 @@
+{
+  "example": true,
+  "illustrative": true,
+  "not_a_freeze": true,
+  "g1_frozen": false,
+  "clock_started": false,
+  "selected_benchmark": "widget-stock support",
+  "session_id": "7e352c34-4c1c-4395-acd5-fb3c8f215346",
+  "eval_id": "7e352c34",
+  "job_id": "mvp-e2e-real-traces",
+  "criteria": {
+    "collaborator_relevance": {
+      "name": "collaborator relevance",
+      "result": "pass",
+      "reason": "Retail support inventory questions are exactly what the example partner (Acme Retail Support) debugs."
+    },
+    "failure_mode_coverage": {
+      "name": "failure-mode coverage",
+      "result": "pass",
+      "reason": "Covers silent non-completion: the agent never answered the widget-stock question."
+    },
+    "score_availability": {
+      "name": "score availability / threshold-definability",
+      "result": "pass",
+      "reason": "goal_completion is 0.0 against a definable threshold of 1."
+    },
+    "ground_truth_depth": {
+      "name": "ground-truth depth",
+      "result": "pass",
+      "reason": "Sibling session ab7535a5 answered \"There are 0 widgets in stock.\" — a gold answer for the same prompt."
+    },
+    "trace_fidelity": {
+      "name": "trace fidelity",
+      "result": "pass",
+      "reason": "Real ADK events: USER_MESSAGE_RECEIVED -> INVOCATION_STARTING -> AGENT_STARTING, then silence."
+    }
+  }
+}
