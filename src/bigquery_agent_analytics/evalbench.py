@@ -21,10 +21,12 @@ time into the mirror-table row contract tracked by issue #97.
 immutable, versioned snapshot into BQAA-owned tables -- never the ADK
 plugin's production ``agent_events`` table. Events, imported scores, and a
 manifest row are staged with load jobs and then published by one BigQuery
-multi-statement transaction, so a failed re-import cannot leave a partial
-corpus behind. ``failed_sessions_sql`` reads one pinned ``import_version`` and
-implements the W0.4 contract: ``returncode == 0`` means *completed*, and only
-the per-benchmark score policy decides *passed*.
+multi-statement transaction that first claims a pre-existing lock row, so a
+failed re-import cannot leave a partial corpus behind and two first-time
+imports of one version cannot both commit. ``failed_sessions_sql`` reads one
+pinned ``import_version`` and implements the W0.4 contract:
+``returncode == 0`` means *completed*, and only the per-benchmark score
+policy decides *passed*.
 """
 
 from __future__ import annotations
@@ -74,6 +76,16 @@ DEFAULT_SCORES_TABLE = "evalbench_scores_imported"
 # that dataset, so a second manifest can never route around the version
 # immutability guard of the first.
 MANIFEST_TABLE = "evalbench_import_manifest"
+# The dataset's publish lock. It holds one sentinel row that every publish
+# transaction UPDATEs before touching the manifest, events, or scores.
+# BigQuery cancels a transaction that mutates rows another concurrent
+# transaction has already mutated, but reads, appends, and keyed DELETEs that
+# match nothing never conflict -- so under snapshot isolation two first-time
+# imports that both began before either committed would otherwise both
+# observe "no manifest row" and both commit. Like the manifest, the lock
+# table is fixed per dataset and never caller-selectable.
+LOCK_TABLE = "evalbench_import_lock"
+_IMPORT_LOCK_ID = "evalbench-import"
 # The ADK plugin's production table. EvalBench imports publish only to
 # BQAA-owned mirror tables, so this name is rejected before any BigQuery call.
 _RESERVED_DESTINATION_TABLES = frozenset({"agent_events"})
@@ -133,6 +145,13 @@ _MANIFEST_SCHEMA_FIELDS = (
     ("score_row_count", "INT64", "REQUIRED"),
     ("imported_at", "TIMESTAMP", "REQUIRED"),
 )
+_LOCK_SCHEMA_FIELDS = (
+    ("lock_id", "STRING", "REQUIRED"),
+    ("claim_count", "INT64", "REQUIRED"),
+    ("claimed_at", "TIMESTAMP", "NULLABLE"),
+    ("claimed_job_id", "STRING", "NULLABLE"),
+    ("claimed_import_version", "STRING", "NULLABLE"),
+)
 _FINGERPRINT_KEYS = (
     "results_fingerprint",
     "scores_fingerprint",
@@ -145,18 +164,43 @@ FROM `{manifest_table}`
 WHERE job_id = @job_id AND import_version = @import_version
 """
 
+# Seeds the lock sentinel outside the publish transaction. Two importers that
+# both find the table empty may each insert a sentinel (INSERTs never
+# conflict); that is harmless because the claim UPDATE below matches every
+# sentinel row, so both transactions still mutate the same row(s).
+_SEED_LOCK_QUERY = """\
+INSERT INTO `{lock_table}` (lock_id, claim_count)
+SELECT '{lock_id}', 0
+FROM UNNEST([1])
+WHERE NOT EXISTS (
+  SELECT 1 FROM `{lock_table}` WHERE lock_id = '{lock_id}'
+)
+"""
+
 # One multi-statement script publishes events, scores, and the manifest
-# together. The manifest guard runs *inside* the transaction: two importers
-# that both observed no manifest row before publishing cannot both commit a
-# different corpus under one immutable version, because BigQuery serializes
-# conflicting DML on the manifest table and the later transaction re-reads the
-# earlier row and raises. DML inside BEGIN/COMMIT is all-or-nothing, so a
-# failure anywhere (including the guard) leaves the previously published
-# version (or nothing) in place.
+# together. Its first statement claims the dataset lock by UPDATE-ing the
+# pre-existing sentinel row. Per BigQuery's transaction concurrency contract
+# ("if a transaction mutates rows in a table, other transactions that mutate
+# rows in the same table cannot run concurrently; conflicting transactions
+# are cancelled") at most one of two concurrent publishes survives, even when
+# both began from a snapshot that showed no manifest row. The manifest guard
+# then runs inside the same transaction as defence in depth: an importer
+# whose *pre-publish* read was stale but whose transaction started after the
+# other commit sees the committed row and raises before deleting anything.
+# DML inside BEGIN/COMMIT is all-or-nothing, so a failure anywhere leaves the
+# previously published version (or nothing) in place.
 _PUBLISH_CONFLICT_MESSAGE = (
     "evalbench import conflict: this import_version was already published"
     " with different source fingerprints or destination tables"
 )
+_LOCK_MISSING_MESSAGE = (
+    "evalbench import lock sentinel is missing; the publish transaction"
+    " cannot serialize against concurrent imports"
+)
+# Substring of the error BigQuery raises for the transaction it cancels when
+# two transactions mutate the same rows ("Transaction is aborted due to
+# concurrent update against table ...").
+_CONCURRENT_UPDATE_MARKER = "concurrent update"
 _DESTINATION_CONFLICT_PREDICATE = (
     "events_table != @events_table OR scores_table != @scores_table"
 )
@@ -169,6 +213,15 @@ _PUBLISH_SCRIPT = """\
 DECLARE conflicting_manifest_rows INT64 DEFAULT 0;
 BEGIN
   BEGIN TRANSACTION;
+  UPDATE `{lock_table}`
+  SET claim_count = claim_count + 1,
+      claimed_at = CURRENT_TIMESTAMP(),
+      claimed_job_id = @job_id,
+      claimed_import_version = @import_version
+  WHERE lock_id = '{lock_id}';
+  IF @@row_count = 0 THEN
+    RAISE USING MESSAGE = '{lock_missing_message}';
+  END IF;
   SET conflicting_manifest_rows = (
     SELECT COUNT(*)
     FROM `{manifest_table}`
@@ -392,17 +445,24 @@ class EvalBenchRun:
     constructed without them.
 
     ``session_id``/``trace_id`` are ``evalbench:{job_id}:{scenario_id}`` for
-    a plain read. When ``import_version`` is given (as ``materialize`` does)
-    the identity becomes ``evalbench:{job_id}:{import_version}:{scenario_id}``
-    and every synthetic span id derives from it, so retained import versions
-    of one job never share a trace or session in the mirror table and
-    readers that filter only by ``trace_id`` see exactly one version. Each
-    component is escaped (see ``_session_identity``) so a ``:`` inside
-    ``import_version`` or ``scenario_id`` cannot make two different
-    ``(job_id, import_version, scenario_id)`` tuples share an identity.
+    a plain read, and the invocation/span ids hash that identity exactly as
+    v0.5.1 did, so re-mapping an existing run keeps its stored trace
+    references. When ``import_version`` is given (as ``materialize`` does)
+    the identity moves to the distinct published namespace
+    ``evalbench-import:{job_id}:{import_version}:{scenario_id}`` and every
+    synthetic span id derives from it with injective framing, so retained
+    import versions of one job never share a trace or session in the mirror
+    table and readers that filter only by ``trace_id`` see exactly one
+    version. Each published component is escaped (see ``_session_identity``)
+    so a ``:`` inside ``import_version`` or ``scenario_id`` cannot make two
+    different ``(job_id, import_version, scenario_id)`` tuples share an
+    identity, and no published identity can equal a plain-read one.
     """
     if import_version is not None:
       _validate_import_version(import_version)
+      stable_id = _published_stable_id
+    else:
+      stable_id = _stable_id
     config = _config_values(self.config_rows)
     agent = _agent_name(config)
     config_run_time = _first_run_time(self.config_rows)
@@ -437,8 +497,8 @@ class EvalBenchRun:
       session_id = _session_identity(
           self.job_id, scenario_id, import_version=import_version
       )
-      invocation_id = _stable_id(session_id, "invocation", length=32)
-      root_span_id = _stable_id(session_id, "user", length=16)
+      invocation_id = stable_id(session_id, "invocation", length=32)
+      root_span_id = stable_id(session_id, "user", length=16)
       attributes = _base_attributes(
           result=result,
           project_id=self.project_id,
@@ -487,9 +547,7 @@ class EvalBenchRun:
         tool_result = tool_call.get("result")
         tool_error = _usable_text(tool_call.get("error"))
         tool_status = "ERROR" if tool_error else "OK"
-        tool_span_id = _stable_id(
-            session_id, "tool", str(tool_index), length=16
-        )
+        tool_span_id = stable_id(session_id, "tool", str(tool_index), length=16)
         start_summary = f"{tool_name}({_compact_json(tool_args)})"
         rows.append(
             _event_row(
@@ -546,7 +604,7 @@ class EvalBenchRun:
               agent=agent,
               session_id=session_id,
               invocation_id=invocation_id,
-              span_id=_stable_id(session_id, "agent-completed", length=16),
+              span_id=stable_id(session_id, "agent-completed", length=16),
               parent_span_id=root_span_id,
               content={
                   "response": final_response,
@@ -633,7 +691,8 @@ class EvalBenchRun:
     caller-selectable: every import into the dataset, whatever
     ``events_table``/``scores_table`` it writes, checks the same registry
     before deleting any published rows, so one version cannot be
-    re-published around an earlier manifest row.
+    re-published around an earlier manifest row. The dataset's publish lock
+    (``LOCK_TABLE``, ``evalbench_import_lock``) is fixed for the same reason.
 
     Publishing is atomic: event, score, and manifest rows are loaded into
     per-import staging tables, then a single multi-statement transaction
@@ -646,9 +705,12 @@ class EvalBenchRun:
     no-op (``status == "unchanged"``) and a changed source becomes a new
     version. An explicit ``import_version`` whose stored fingerprints no
     longer match the source raises ``ValueError`` unless ``replace=True``.
-    The same check is repeated inside the publish transaction, so two
-    importers racing on a first-time version cannot both commit different
-    content. A published version is bound to the ``events_table`` /
+    The publish transaction first claims the dataset lock by updating its
+    pre-existing sentinel row, so two importers racing on a first-time
+    version cannot both commit: BigQuery cancels the second transaction that
+    mutates the same row, and the cancelled importer raises ``ValueError``
+    with nothing written. The fingerprint check is repeated inside the same
+    transaction as well. A published version is bound to the ``events_table`` /
     ``scores_table`` recorded in its manifest: re-importing it with other
     destination tables raises (even with ``replace=True``) instead of
     reporting a no-op against tables that were never written or orphaning
@@ -690,6 +752,7 @@ class EvalBenchRun:
     events_ref = f"{prefix}.{events_table}"
     scores_ref = f"{prefix}.{scores_table}"
     manifest_ref = f"{prefix}.{MANIFEST_TABLE}"
+    lock_ref = f"{prefix}.{LOCK_TABLE}"
 
     # Map before touching BigQuery so mapping errors never leave staging
     # tables behind or partially created targets.
@@ -723,6 +786,7 @@ class EvalBenchRun:
         events_ref=events_ref,
         scores_ref=scores_ref,
         manifest_ref=manifest_ref,
+        lock_ref=lock_ref,
     )
 
     existing = _read_manifest(
@@ -780,10 +844,14 @@ class EvalBenchRun:
           [manifest],
           _schema(_MANIFEST_SCHEMA_FIELDS),
       )
+      # The sentinel must exist *before* the transaction starts so the
+      # claim UPDATE mutates a row visible in the transaction snapshot.
+      _seed_import_lock(client, lock_ref=lock_ref, location=self.location)
       script = _publish_script(
           events_ref=events_ref,
           scores_ref=scores_ref,
           manifest_ref=manifest_ref,
+          lock_ref=lock_ref,
           events_staging=events_staging,
           scores_staging=scores_staging,
           manifest_staging=manifest_staging,
@@ -814,6 +882,15 @@ class EvalBenchRun:
               "source fingerprints or destination tables; nothing was "
               "written. Re-run to get status 'unchanged', or pass a new "
               "import_version (or omit it to derive one from the source)"
+          ) from exc
+        if _CONCURRENT_UPDATE_MARKER in str(exc).lower():
+          raise ValueError(
+              f"EvalBench job {self.job_id!r} import_version "
+              f"{import_version!r}: BigQuery cancelled this publish because a "
+              f"concurrent import into {prefix!r} claimed the import lock "
+              f"({lock_ref!r}) first; nothing was written. Re-run: the "
+              "result is 'unchanged' if the other import published identical "
+              "content, otherwise the fingerprint conflict is reported"
           ) from exc
         raise
     finally:
@@ -1082,17 +1159,21 @@ def _publish_script(
     events_ref: str,
     scores_ref: str,
     manifest_ref: str,
+    lock_ref: str,
     events_staging: str,
     scores_staging: str,
     manifest_staging: str,
     replace: bool,
 ) -> str:
-  """Render the publish transaction with its in-transaction manifest guard.
+  """Render the publish transaction: lock claim, manifest guard, DML.
 
-  Without ``replace`` the guard rejects an existing manifest row whose
-  fingerprints *or* destination tables differ from this import; with
-  ``replace`` fingerprints may drift but the destination binding still
-  holds, so a version can never be silently relocated.
+  The transaction always starts by UPDATE-ing the lock sentinel, which is
+  the only statement guaranteed to mutate an existing row (the keyed DELETEs
+  match nothing on a first import and INSERTs never conflict). Without
+  ``replace`` the guard rejects an existing manifest row whose fingerprints
+  *or* destination tables differ from this import; with ``replace``
+  fingerprints may drift but the destination binding still holds, so a
+  version can never be silently relocated.
   """
   if replace:
     conflict_predicate = _DESTINATION_CONFLICT_PREDICATE
@@ -1106,6 +1187,9 @@ def _publish_script(
       events_table=events_ref,
       scores_table=scores_ref,
       manifest_table=manifest_ref,
+      lock_table=lock_ref,
+      lock_id=_IMPORT_LOCK_ID,
+      lock_missing_message=_LOCK_MISSING_MESSAGE,
       events_staging=events_staging,
       scores_staging=scores_staging,
       manifest_staging=manifest_staging,
@@ -1141,12 +1225,24 @@ def _check_destination_binding(
   )
 
 
-# Identity components are joined with ":"; a literal ":" or "\" inside a
-# component is escaped ("\:" and "\\") so the join is injective and decodes
-# back to the original tuple. ``import_version`` admits ":" and ``scenario_id``
-# is arbitrary source text, so without escaping
-# ``(import_version="release:1", scenario_id="case")`` and
-# ``(import_version="release", scenario_id="1:case")`` would collide.
+# Two identity families, deliberately kept apart:
+#
+# * Plain reads (``to_agent_event_rows()`` without ``import_version``) keep
+#   the v0.5.1 public contract verbatim: ``evalbench:{job_id}:{scenario_id}``
+#   with no escaping, and span/invocation ids hashed by the legacy
+#   ``_stable_id``. Changing either would break stored trace references of
+#   runs mapped before this release.
+# * Published versions use the ``evalbench-import`` namespace, whose
+#   components are joined with ":" and escaped ("\:" and "\\") so the join
+#   is injective and decodes back to the original tuple. ``import_version``
+#   admits ":" and ``scenario_id`` is arbitrary source text, so without
+#   escaping ``(import_version="release:1", scenario_id="case")`` and
+#   ``(import_version="release", scenario_id="1:case")`` would collide.
+#
+# The namespaces cannot alias each other: every plain identity starts with
+# ``evalbench:`` and every published one with ``evalbench-import:``.
+_LEGACY_IDENTITY_PREFIX = "evalbench"
+_PUBLISHED_IDENTITY_PREFIX = "evalbench-import"
 _IDENTITY_SEPARATOR = ":"
 _IDENTITY_ESCAPES = str.maketrans({"\\": "\\\\", _IDENTITY_SEPARATOR: "\\:"})
 
@@ -1160,18 +1256,22 @@ def _session_identity(
 ) -> str:
   """Session/trace identity shared by event rows and score rows.
 
-  ``evalbench:{job_id}:{scenario_id}`` for a plain read and
-  ``evalbench:{job_id}:{import_version}:{scenario_id}`` for a published
-  version, with every component escaped so the encoding of the tuple is
-  unambiguous. Components without ``:`` or ``\\`` (the common case) render
-  verbatim. The two forms differ in component count, so a plain read of a
-  scenario named ``v1:case`` can never alias published version ``v1``.
+  ``evalbench:{job_id}:{scenario_id}`` (unescaped, the v0.5.1 contract) for
+  a plain read and ``evalbench-import:{job_id}:{import_version}:{scenario_id}``
+  with every component escaped for a published version. Published
+  components without ``:`` or ``\\`` (the common case) render verbatim.
   """
-  parts = ["evalbench", job_id]
-  if import_version is not None:
-    parts.append(import_version)
-  parts.append(scenario_id)
-  return _IDENTITY_SEPARATOR.join(_identity_component(part) for part in parts)
+  if import_version is None:
+    return _IDENTITY_SEPARATOR.join(
+        (_LEGACY_IDENTITY_PREFIX, job_id, scenario_id)
+    )
+  return _IDENTITY_SEPARATOR.join(
+      [_PUBLISHED_IDENTITY_PREFIX]
+      + [
+          _identity_component(part)
+          for part in (job_id, import_version, scenario_id)
+      ]
+  )
 
 
 def _validate_import_version(import_version: Any) -> None:
@@ -1281,7 +1381,12 @@ def _event_schema() -> list:
 
 
 def _ensure_import_tables(
-    client: Any, *, events_ref: str, scores_ref: str, manifest_ref: str
+    client: Any,
+    *,
+    events_ref: str,
+    scores_ref: str,
+    manifest_ref: str,
+    lock_ref: str,
 ) -> None:
   events = bigquery.Table(events_ref, schema=_event_schema())
   events.time_partitioning = bigquery.TimePartitioning(field="timestamp")
@@ -1296,6 +1401,27 @@ def _ensure_import_tables(
       manifest_ref, schema=_schema(_MANIFEST_SCHEMA_FIELDS)
   )
   client.create_table(manifest, exists_ok=True)
+
+  lock = bigquery.Table(lock_ref, schema=_schema(_LOCK_SCHEMA_FIELDS))
+  client.create_table(lock, exists_ok=True)
+
+
+def _seed_import_lock(
+    client: Any, *, lock_ref: str, location: Optional[str]
+) -> None:
+  """Insert the lock sentinel if the dataset does not have one yet.
+
+  Runs as its own committed DML job before the publish transaction, so the
+  transaction's snapshot contains the row its claim UPDATE mutates.
+  """
+  job_config = with_sdk_labels(
+      bigquery.QueryJobConfig(), feature=_IMPORT_FEATURE
+  )
+  query_args: dict[str, Any] = {"job_config": job_config}
+  if location is not None:
+    query_args["location"] = location
+  query = _SEED_LOCK_QUERY.format(lock_table=lock_ref, lock_id=_IMPORT_LOCK_ID)
+  client.query(query, **query_args).result()
 
 
 def _drop_staging_tables(client: Any, staging_refs: tuple[str, ...]) -> None:
@@ -1884,14 +2010,27 @@ def _event_row(
 
 
 def _stable_id(*parts: str, length: int) -> str:
-  """Deterministic hex id of a tuple of strings.
+  """Legacy (v0.5.1) deterministic hex id used by plain-read identities.
+
+  Frozen on purpose: ``to_agent_event_rows()`` without ``import_version``
+  must keep producing the invocation/span ids it produced in v0.5.1.
+  """
+  digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+  return digest[:length]
+
+
+def _published_stable_id(*parts: str, length: int) -> str:
+  """Deterministic hex id for published (versioned) identities.
 
   Parts are length-prefixed before hashing so the encoding is injective even
   when a part (such as a session id built from arbitrary scenario text)
   contains the joiner: ``("a\\x1fb", "c")`` and ``("a", "b\\x1fc")`` hash
-  differently.
+  differently. The framing is tagged with the published namespace so it can
+  never reproduce a legacy digest either.
   """
-  encoded = "\x1f".join(f"{len(part)}:{part}" for part in parts)
+  encoded = "\x1f".join(
+      [_PUBLISHED_IDENTITY_PREFIX] + [f"{len(part)}:{part}" for part in parts]
+  )
   digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
   return digest[:length]
 

@@ -85,27 +85,36 @@ rather than silently reproducing the first one.
 Each scenario uses this identity:
 
 ```text
-# plain read (to_agent_event_rows())
+# plain read (to_agent_event_rows()) -- the v0.5.1 contract, unchanged
 session_id = trace_id = evalbench:{job_id}:{scenario_id}
 # published snapshot (materialize / to_agent_event_rows(import_version=...))
-session_id = trace_id = evalbench:{job_id}:{import_version}:{scenario_id}
+session_id = trace_id = evalbench-import:{job_id}:{import_version}:{scenario_id}
 agent      = evalbench:{orchestrator}:{generator}
 ```
 
-Published identities are version-specific, and every synthetic span and
-invocation id derives from them, so retained import versions of one job never
-share a trace or session in the mirror table: a reader that filters only by
-`trace_id` (such as `Client.get_trace`) sees exactly one version. Imported
-score rows use the same identity, so score joins stay aligned. Published rows
-also carry `attributes.evalbench_import_version`.
+The plain-read identity is frozen: `session_id`/`trace_id` are the unescaped
+`evalbench:{job_id}:{scenario_id}` and the synthetic `invocation_id`,
+`span_id`, and `parent_span_id` values are the same SHA-256-derived ids v0.5.1
+produced (the unit tests pin golden vectors), so re-mapping an existing run
+after an upgrade keeps its stored trace references.
 
-The identity encodes the `(job_id, import_version, scenario_id)` tuple
-unambiguously: a literal `:` or `\` inside a component is escaped as `\:` /
-`\\`, so `(import_version="release:1", scenario_id="case")` and
+Published identities live in a separate `evalbench-import:` namespace, are
+version-specific, and every synthetic span and invocation id derives from
+them with injective framing, so retained import versions of one job never
+share a trace or session in the mirror table — and never share one with a
+plain read either: a reader that filters only by `trace_id` (such as
+`Client.get_trace`) sees exactly one version. Imported score rows use the
+same identity, so score joins stay aligned. Published rows also carry
+`attributes.evalbench_import_version`.
+
+The published identity encodes the `(job_id, import_version, scenario_id)`
+tuple unambiguously: a literal `:` or `\` inside a component is escaped as
+`\:` / `\\`, so `(import_version="release:1", scenario_id="case")` and
 `(import_version="release", scenario_id="1:case")` get different
-`session_id`s (`…:release\:1:case` vs `…:release:1\:case`), and a plain read
-of a scenario named `v1:case` never aliases published version `v1`. Components
-without those characters (the common case) render verbatim.
+`session_id`s (`…:release\:1:case` vs `…:release:1\:case`). Components
+without those characters (the common case) render verbatim. A plain read of a
+scenario named `v1:case` (`evalbench:job:v1:case`) cannot alias published
+version `v1` (`evalbench-import:job:v1:case`) because the prefixes differ.
 
 `orchestrator`, `generator`, and the run timestamp come from EvalBench's
 flattened `configs` rows. If a historical run lacks config metadata, the agent
@@ -158,13 +167,15 @@ print(result.status, result.import_version, result.events_table)
 ```
 
 `materialize()` writes three BQAA-owned tables in the target dataset (which
-must already exist; the tables are created on first use):
+must already exist; the tables are created on first use) and serializes
+publishes through a fourth, fixed lock table:
 
 | Table | Default name | Contents |
 |---|---|---|
 | Events | `evalbench_agent_events` | `agent_events` columns plus `job_id`, `import_version`; partitioned by `timestamp`, clustered by `job_id, import_version, session_id` |
 | Scores | `evalbench_scores_imported` | `job_id`, `import_version`, `scenario_id`, `session_id`, `comparator`, `score FLOAT64`, `source_row JSON` (the verbatim EvalBench score row) |
 | Manifest | `evalbench_import_manifest` (fixed) | one row per `(job_id, import_version)` — see below |
+| Lock | `evalbench_import_lock` (fixed) | one sentinel row (`lock_id = 'evalbench-import'`, `claim_count`, `claimed_at`, `claimed_job_id`, `claimed_import_version`) that every publish transaction updates first |
 
 The extra event columns are appended after the `agent_events` contract, so
 `Client.get_session_trace` and the other explicit-column readers work
@@ -173,14 +184,22 @@ unchanged when pointed at the mirror table.
 ### Atomic publish
 
 Event, score, and manifest rows are loaded into per-import staging tables
-(`<table>_staging_<hex>`) and then published by **one** BigQuery
-multi-statement transaction:
+(`<table>_staging_<hex>`). The lock sentinel is then seeded by its own
+committed DML job (`INSERT … WHERE NOT EXISTS`, a no-op once it exists) so
+that it is part of the snapshot of the transaction that follows, and the rows
+are published by **one** BigQuery multi-statement transaction:
 
 ```sql
 DECLARE conflicting_manifest_rows INT64 DEFAULT 0;
 BEGIN
   BEGIN TRANSACTION;
-  -- Compare-and-swap: re-check the manifest *inside* the transaction.
+  -- Claim the dataset lock: the only statement guaranteed to mutate a row.
+  UPDATE `…evalbench_import_lock`
+  SET claim_count = claim_count + 1, claimed_at = CURRENT_TIMESTAMP(),
+      claimed_job_id = @job_id, claimed_import_version = @import_version
+  WHERE lock_id = 'evalbench-import';
+  IF @@row_count = 0 THEN RAISE USING MESSAGE = '…sentinel is missing…'; END IF;
+  -- Defence in depth: re-check the manifest *inside* the transaction.
   SET conflicting_manifest_rows = (
     SELECT COUNT(*) FROM `…evalbench_import_manifest`
     WHERE job_id = @job_id AND import_version = @import_version
@@ -205,13 +224,31 @@ There is no delete-then-append window: a failure before `COMMIT` leaves the
 previously published version (or nothing) in place. Mapping errors (missing
 prompt, duplicate scenario ids) are raised before any BigQuery write.
 
+Why a lock row: BigQuery transactions use snapshot isolation, and
+[concurrent transactions are cancelled only when they mutate rows in the
+same table](https://cloud.google.com/bigquery/docs/transactions#transaction_concurrency)
+— reads and appends run concurrently, and [`INSERT` never conflicts with
+other DML](https://cloud.google.com/bigquery/docs/data-manipulation-language#dml_statement_conflicts).
+Two first-time imports of one `(job_id, import_version)` that both began
+before either committed would therefore both see no manifest row, both run
+keyed `DELETE`s that match nothing, and both `INSERT` — two manifests and a
+mixed corpus under one supposedly immutable version. The claim `UPDATE`
+always mutates the pre-existing sentinel, so at most one of the two
+transactions commits; BigQuery cancels the other with a "concurrent update"
+error, which `materialize()` reports as `ValueError` (nothing written).
+Re-running that importer then reports `unchanged` or the fingerprint error as
+usual. The same claim also serializes replace/re-import publishes into the
+dataset.
+
 The manifest check runs both before staging (so an unchanged source is a
-cheap no-op) and again inside the transaction. Two importers that both saw no
-manifest row for the same explicit `import_version` therefore cannot both
-commit different content: BigQuery serializes conflicting DML on the manifest
-table, the later transaction re-reads the earlier row, and the guard raises
-(`ValueError` in Python, nothing written). Re-running that importer then
-reports `unchanged` or the fingerprint error as usual.
+cheap no-op) and again inside the transaction, after the claim. An importer
+whose pre-publish read was stale but whose transaction started after another
+commit sees the committed row there and the guard raises (`ValueError` in
+Python, nothing written) before any `DELETE` runs.
+
+The unit tests exercise this with a stub that models the snapshot-isolation
+rules above (both transactions start from one snapshot, only a mutation of
+the sentinel conflicts); they do not run against live BigQuery.
 
 Staging tables are created with a six-hour expiration and dropped after
 `COMMIT` on a best-effort basis; a failed drop is logged and never turns a
@@ -230,7 +267,7 @@ order-independent fingerprints of the source `results`, `scores`, and
 | Same as above with `replace=True` | atomically re-published, `status = "replaced"` |
 | Explicit `import_version` whose fingerprints changed | `ValueError` (pass a new version, omit it to derive one, or `replace=True`) |
 | Manifest row exists but records other `events_table`/`scores_table` | `ValueError`, even with `replace=True`; nothing written |
-| Two importers race on a first-time version with different content | the first commit wins; the second raises `ValueError` from the in-transaction guard |
+| Two importers race on a first-time version with different content | the first to commit wins; the second is cancelled on the lock claim (or, if its transaction started later, refused by the in-transaction guard) and raises `ValueError` |
 | Derived version and the source changed | a new `import_version`; earlier versions are retained |
 
 A given `(job_id, import_version)` therefore never accumulates duplicates, and
@@ -239,7 +276,8 @@ The manifest is the single import registry of the target dataset; its name is
 fixed (`evalbench_import_manifest`, `evalbench.MANIFEST_TABLE`) rather than a
 `materialize` argument, so every import into the dataset — whatever
 `events_table`/`scores_table` it writes — checks the same registry before
-deleting published rows. A second manifest cannot be used to re-publish
+deleting published rows. The lock table (`evalbench_import_lock`,
+`evalbench.LOCK_TABLE`) is fixed for the same reason. A second manifest cannot be used to re-publish
 changed source under an existing version around the first manifest row.
 An `unchanged` result always refers to the tables that were actually written;
 to publish the same version elsewhere, choose a new `import_version` (moving
@@ -346,9 +384,10 @@ therefore populates it on every emitted event.
 ## Current Boundaries
 
 - Runs are imported one `job_id` at a time and held in memory.
-- The target dataset must exist; only the three tables are auto-created.
-- Concurrent imports of the same `(job_id, import_version)` serialize on
-  BigQuery's transaction locks; a conflicting import fails rather than
-  corrupting the corpus.
+- The target dataset must exist; only the four tables are auto-created.
+- Concurrent publishes into one dataset serialize on the lock sentinel
+  (coarse: one publish at a time per dataset); the loser fails with
+  `ValueError` and nothing written rather than corrupting the corpus, and
+  can simply be re-run.
 - Live BigQuery integration coverage for `materialize()` is not yet gated
   into the test suite; the unit tests use a stubbed client.

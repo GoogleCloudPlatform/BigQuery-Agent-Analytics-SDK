@@ -426,26 +426,75 @@ class _FakeJob:
     return self._rows
 
 
+class _FakeSnapshot:
+  """What one BigQuery transaction sees: the committed state at its start."""
+
+  def __init__(self, rows: list[dict], lock_rows: int, lock_claims: int):
+    self.rows = rows
+    self.lock_rows = lock_rows
+    self.lock_claims = lock_claims
+
+
 class _FakeManifestStore:
-  """Committed manifest rows shared by several fake clients (one BigQuery)."""
+  """Committed state of one target dataset shared by several fake clients.
+
+  ``rows`` is the manifest registry; ``events``/``scores`` are the published
+  mirror tables; ``lock_rows`` counts sentinel rows in
+  ``evalbench_import_lock`` and ``lock_claims`` is the sentinel's
+  ``claim_count`` (every committed publish mutates it).
+  """
 
   def __init__(self, rows: list[dict] | None = None) -> None:
     self.rows: list[dict] = list(rows or [])
+    self.events: list[dict] = []
+    self.scores: list[dict] = []
+    self.lock_rows = 0
+    self.lock_claims = 0
+
+  def snapshot(self) -> _FakeSnapshot:
+    return _FakeSnapshot(
+        rows=[dict(row) for row in self.rows],
+        lock_rows=self.lock_rows,
+        lock_claims=self.lock_claims,
+    )
 
 
 _RAISE_MESSAGE = re.compile(r"RAISE USING MESSAGE = '([^']*)'")
+_CONCURRENT_UPDATE_ERROR = (
+    "400 Transaction is aborted due to concurrent update against table"
+    " {lock_table}. Transaction ID: fake"
+)
+
+
+def _same_version(row: dict, params: dict) -> bool:
+  return (
+      row["job_id"] == params["job_id"]
+      and row["import_version"] == params["import_version"]
+  )
 
 
 class _FakeWriteClient:
   """Records loads, queries, and table DDL issued by ``materialize``.
 
-  The publish transaction is emulated against a ``_FakeManifestStore``: the
-  guard predicate rendered in the script is evaluated against the committed
-  rows with the query parameters, the script's own ``RAISE`` message is
-  surfaced on conflict, and otherwise the staged manifest row replaces the
-  committed one. ``stale_manifest_reads`` makes the pre-publish manifest read
-  return nothing, which is how two importers that both observed no row are
-  interleaved deterministically.
+  The publish transaction is emulated against a ``_FakeManifestStore`` with
+  BigQuery's snapshot-isolation rules
+  (https://cloud.google.com/bigquery/docs/transactions#transaction_concurrency):
+
+  * every read inside the transaction (the manifest guard) sees the
+    ``_FakeSnapshot`` taken when the transaction began, never later commits;
+  * appends never conflict, and a keyed ``DELETE`` that matches nothing
+    mutates nothing, so neither can fail a concurrent transaction;
+  * the lock claim ``UPDATE`` mutates the pre-existing sentinel row. If a
+    concurrent transaction committed a mutation of that row after this
+    transaction's snapshot (``lock_claims`` moved), BigQuery cancels this
+    transaction with the "concurrent update" error, which is what the fake
+    raises. Only one of two concurrent publishes can therefore commit.
+
+  ``stale_manifest_reads`` makes the pre-publish manifest read return
+  nothing; ``transaction_snapshot`` pins the snapshot the transaction itself
+  starts from (default: the committed state when ``BEGIN TRANSACTION`` runs).
+  Passing one snapshot to two clients models two transactions that both
+  began before either committed.
   """
 
   def __init__(
@@ -454,12 +503,14 @@ class _FakeWriteClient:
       manifest_rows: list[dict] | None = None,
       store: _FakeManifestStore | None = None,
       stale_manifest_reads: bool = False,
+      transaction_snapshot: _FakeSnapshot | None = None,
       load_error: Exception | None = None,
       transaction_error: Exception | None = None,
       delete_error: Exception | None = None,
   ) -> None:
     self.store = store or _FakeManifestStore(manifest_rows)
     self.stale_manifest_reads = stale_manifest_reads
+    self.transaction_snapshot = transaction_snapshot
     self.load_error = load_error
     self.transaction_error = transaction_error
     self.delete_error = delete_error
@@ -485,27 +536,44 @@ class _FakeWriteClient:
     if "BEGIN TRANSACTION" in query:
       if self.transaction_error is not None:
         return _FakeJob(error=self.transaction_error)
-      return self._publish(query, params)
+      snapshot = self.transaction_snapshot or self.store.snapshot()
+      return self._publish(query, params, snapshot)
+    if ".evalbench_import_lock`" in query and query.startswith("INSERT INTO"):
+      # Seeding is INSERT-only, so it never conflicts and may run twice.
+      assert params == {}
+      if self.store.lock_rows == 0:
+        self.store.lock_rows = 1
+      return _FakeJob()
     if ".evalbench_import_manifest`" in query:
       if self.stale_manifest_reads:
         return _FakeJob([])
       return _FakeJob(
-          [
-              row
-              for row in self.store.rows
-              if row["job_id"] == params["job_id"]
-              and row["import_version"] == params["import_version"]
-          ]
+          [row for row in self.store.rows if _same_version(row, params)]
       )
     raise AssertionError(f"unexpected query: {query}")
 
-  def _publish(self, script: str, params: dict) -> _FakeJob:
-    def same_version(row: dict) -> bool:
-      return (
-          row["job_id"] == params["job_id"]
-          and row["import_version"] == params["import_version"]
+  def _publish(
+      self, script: str, params: dict, snapshot: _FakeSnapshot
+  ) -> _FakeJob:
+    # 1. Lock claim: the script's first statement after BEGIN TRANSACTION.
+    lock_table = re.search(r"UPDATE `([^`]+)`", script).group(1)
+    assert lock_table.endswith(".evalbench_import_lock")
+    assert script.index("UPDATE `") < script.index(
+        "conflicting_manifest_rows ="
+    )
+    if snapshot.lock_rows == 0:
+      # ``IF @@row_count = 0 THEN RAISE``: nothing was mutated.
+      message = _RAISE_MESSAGE.findall(script)[0]
+      return _FakeJob(error=RuntimeError(f"400 {message}"))
+    if snapshot.lock_claims != self.store.lock_claims:
+      # Another transaction mutated the sentinel after this snapshot.
+      return _FakeJob(
+          error=RuntimeError(
+              _CONCURRENT_UPDATE_ERROR.format(lock_table=lock_table)
+          )
       )
 
+    # 2. Manifest guard, evaluated against the transaction's snapshot.
     predicates = []
     if "results_fingerprint != @results_fingerprint" in script:
       predicates.append(
@@ -525,20 +593,28 @@ class _FakeWriteClient:
       )
     conflicts = [
         row
-        for row in self.store.rows
-        if same_version(row) and any(pred(row) for pred in predicates)
+        for row in snapshot.rows
+        if _same_version(row, params) and any(pred(row) for pred in predicates)
     ]
     if conflicts:
-      message = _RAISE_MESSAGE.search(script).group(1)
+      message = _RAISE_MESSAGE.findall(script)[-1]
       return _FakeJob(error=RuntimeError(f"400 {message}"))
-    staged_manifest = next(
-        rows
-        for dest, rows, _ in self.loads
-        if "evalbench_import_manifest" in dest
-    )
-    self.store.rows = [
-        row for row in self.store.rows if not same_version(row)
-    ] + list(staged_manifest)
+
+    # 3. Commit: keyed DELETEs then INSERTs from staging, plus the claim.
+    def staged(table: str) -> list[dict]:
+      return next(rows for dest, rows, _ in self.loads if table in dest)
+
+    store = self.store
+    store.lock_claims += 1
+    store.events = [
+        row for row in store.events if not _same_version(row, params)
+    ] + staged(params["events_table"] + "_staging_")
+    store.scores = [
+        row for row in store.scores if not _same_version(row, params)
+    ] + staged(params["scores_table"] + "_staging_")
+    store.rows = [
+        row for row in store.rows if not _same_version(row, params)
+    ] + staged("evalbench_import_manifest")
     return _FakeJob()
 
   def load_table_from_json(self, rows, destination, job_config=None):
@@ -598,6 +674,14 @@ def _transaction_queries(fake: _FakeWriteClient) -> list[str]:
   return [sql for sql, _ in fake.queries if "BEGIN TRANSACTION" in sql]
 
 
+def _lock_seed_queries(fake: _FakeWriteClient) -> list[str]:
+  return [
+      sql
+      for sql, _ in fake.queries
+      if sql.startswith("INSERT INTO") and ".evalbench_import_lock`" in sql
+  ]
+
+
 def test_materialize_publishes_events_scores_and_manifest_atomically() -> None:
   fake = _FakeWriteClient()
   run = _scored_run()
@@ -631,6 +715,9 @@ def test_materialize_publishes_events_scores_and_manifest_atomically() -> None:
   assert all("_staging_" in ref for ref in staged)
   assert set(fake.deleted) == staged
 
+  # The fixed lock table is created alongside the three mirror tables.
+  assert "analytics-project.bqaa.evalbench_import_lock" in fake.created
+
   # Exactly one transaction publishes all three tables; no delete-then-append.
   transactions = _transaction_queries(fake)
   assert len(transactions) == 1
@@ -638,6 +725,13 @@ def test_materialize_publishes_events_scores_and_manifest_atomically() -> None:
   assert script.count("DELETE FROM") == 3
   assert script.count("INSERT INTO") == 3
   assert script.index("BEGIN TRANSACTION") < script.index("DELETE FROM")
+  # The lock sentinel is seeded by its own committed job before the
+  # transaction begins, so the claim UPDATE has a row to mutate.
+  seeds = _lock_seed_queries(fake)
+  assert len(seeds) == 1
+  order = [sql for sql, _ in fake.queries]
+  assert order.index(seeds[0]) < order.index(script)
+  assert "WHERE NOT EXISTS" in seeds[0]
   assert script.index("INSERT INTO") < script.index("COMMIT TRANSACTION")
   assert "job-123" not in script
   _, kwargs = next(
@@ -668,8 +762,8 @@ def test_materialize_publishes_events_scores_and_manifest_atomically() -> None:
   )
   version = result.import_version
   assert {row["session_id"] for row in score_rows} == {
-      f"evalbench:job-123:{version}:ok-1",
-      f"evalbench:job-123:{version}:crash-1",
+      f"evalbench-import:job-123:{version}:ok-1",
+      f"evalbench-import:job-123:{version}:crash-1",
   }
   # Score joins stay aligned with the version-specific event identity.
   assert {row["session_id"] for row in score_rows} == {
@@ -910,8 +1004,17 @@ def test_publish_script_guards_manifest_inside_the_transaction() -> None:
   )
   script = _transaction_queries(fake)[0]
 
+  # The claim UPDATE of the pre-existing sentinel is the first statement of
+  # the transaction: it is the only statement guaranteed to mutate a row, so
+  # it is what BigQuery serializes concurrent publishes on.
+  claim = script.index("UPDATE `source-project.bqaa.evalbench_import_lock`")
   guard = script.index("conflicting_manifest_rows = (")
-  assert script.index("BEGIN TRANSACTION") < guard < script.index("DELETE FROM")
+  assert script.index("BEGIN TRANSACTION") < claim < guard
+  assert guard < script.index("DELETE FROM")
+  assert "SET claim_count = claim_count + 1" in script
+  assert f"WHERE lock_id = '{evalbench._IMPORT_LOCK_ID}'" in script
+  assert script.index("IF @@row_count = 0 THEN") < guard
+  assert evalbench._LOCK_MISSING_MESSAGE in script
   assert "RAISE USING MESSAGE" in script
   assert script.index("RAISE USING MESSAGE") < script.index("DELETE FROM")
   assert "results_fingerprint != @results_fingerprint" in script
@@ -948,10 +1051,9 @@ def test_publish_script_replace_skips_fingerprint_guard_only() -> None:
   assert "events_table != @events_table" in script
 
 
-def test_materialize_concurrent_first_imports_cannot_overwrite_version() -> (
-    None
-):
-  """Two importers both see no manifest row; only the first may commit."""
+def test_materialize_stale_pre_read_is_caught_by_transaction_guard() -> None:
+  """Importer B's pre-read is stale but its transaction starts after A
+  committed, so the in-transaction manifest guard refuses it."""
   store = _FakeManifestStore()
   importer_a = _FakeWriteClient(store=store, stale_manifest_reads=True)
   importer_b = _FakeWriteClient(store=store, stale_manifest_reads=True)
@@ -992,6 +1094,112 @@ def test_materialize_concurrent_first_imports_cannot_overwrite_version() -> (
   assert store.rows == [replaced.manifest]
 
 
+def _published_rows(fake: _FakeWriteClient, table: str) -> list[dict]:
+  return next(rows for dest, rows, _ in fake.loads if table in dest)
+
+
+def test_materialize_concurrent_first_imports_serialize_on_lock_sentinel() -> (
+    None
+):
+  """Codex P1: two *truly concurrent* first imports of one version.
+
+  Both transactions begin from the same snapshot, before either commits, so
+  under BigQuery snapshot isolation both guards see no manifest row and both
+  keyed DELETEs match nothing; INSERTs never conflict. Without a real claim
+  both would commit and the version would hold two manifests and a mixed
+  corpus. The claim UPDATE of the pre-existing sentinel is a row mutation,
+  so BigQuery cancels the second transaction that performs it
+  (transactions#transaction_concurrency: "conflicting transactions are
+  cancelled"). The fake models exactly that rule; it is not a live BigQuery
+  test.
+  """
+  store = _FakeManifestStore()
+  store.lock_rows = 1  # sentinel seeded by an earlier import into the dataset
+  shared_snapshot = store.snapshot()  # both transactions begin here
+  importer_a = _FakeWriteClient(
+      store=store,
+      stale_manifest_reads=True,
+      transaction_snapshot=shared_snapshot,
+  )
+  importer_b = _FakeWriteClient(
+      store=store,
+      stale_manifest_reads=True,
+      transaction_snapshot=shared_snapshot,
+  )
+  run_a = _scored_run()
+  run_b = _scored_run(
+      extra_result={
+          "eval_id": "late-1",
+          "prompt": "Different content under the same explicit version",
+          "stdout": json.dumps({"response": "late"}),
+      }
+  )
+
+  first = run_a.materialize(
+      target_dataset="bqaa", import_version="v1", bq_client=importer_a
+  )
+  assert first.status == "imported"
+  assert store.lock_claims == 1
+  assert store.rows == [first.manifest]
+
+  # B's snapshot predates A's commit: its guard sees nothing, but its claim
+  # UPDATE conflicts with A's committed mutation of the sentinel, so BigQuery
+  # cancels B. Nothing B staged reaches the published tables.
+  with pytest.raises(ValueError, match="claimed the import lock") as info:
+    run_b.materialize(
+        target_dataset="bqaa", import_version="v1", bq_client=importer_b
+    )
+  assert "concurrent update" in str(info.value.__cause__)
+  assert len(_transaction_queries(importer_b)) == 1
+  assert store.lock_claims == 1
+  assert store.rows == [first.manifest]
+  assert store.events == _published_rows(importer_a, "evalbench_agent_events")
+  assert store.scores == _published_rows(
+      importer_a, "evalbench_scores_imported"
+  )
+  # No mixed corpus: B's extra scenario never landed.
+  assert all(
+      row["attributes"]["evalbench_scenario_id"] != "late-1"
+      for row in store.events
+  )
+  staged = {destination for destination, _, _ in importer_b.loads}
+  assert set(importer_b.deleted) == staged
+
+  # Re-running B against the committed state reports the real conflict
+  # before staging anything; identical content would report "unchanged".
+  retry = _FakeWriteClient(store=store)
+  with pytest.raises(ValueError, match="different source fingerprints"):
+    run_b.materialize(
+        target_dataset="bqaa", import_version="v1", bq_client=retry
+    )
+  assert retry.loads == []
+  same = run_a.materialize(
+      target_dataset="bqaa",
+      import_version="v1",
+      bq_client=_FakeWriteClient(store=store),
+  )
+  assert same.status == "unchanged"
+  assert store.lock_claims == 1
+
+
+def test_materialize_lock_claim_requires_seeded_sentinel() -> None:
+  """If the sentinel is not in the transaction snapshot the claim mutates
+  nothing, and the ``@@row_count`` guard aborts rather than publishing
+  without serialization."""
+  store = _FakeManifestStore()
+  fake = _FakeWriteClient(
+      store=store, transaction_snapshot=store.snapshot()  # lock_rows == 0
+  )
+  with pytest.raises(RuntimeError, match="lock sentinel is missing"):
+    _scored_run().materialize(
+        target_dataset="bqaa", import_version="v1", bq_client=fake
+    )
+  assert store.rows == []
+  assert store.events == []
+  staged = {destination for destination, _, _ in fake.loads}
+  assert set(fake.deleted) == staged
+
+
 def test_materialize_publishes_version_specific_identities() -> None:
   run = _scored_run()
   fake_v1 = _FakeWriteClient()
@@ -1007,8 +1215,8 @@ def test_materialize_publishes_version_specific_identities() -> None:
   v1 = published_events(fake_v1)
   v2 = published_events(fake_v2)
   assert {row["trace_id"] for row in v1} == {
-      "evalbench:job-123:v1:ok-1",
-      "evalbench:job-123:v1:crash-1",
+      "evalbench-import:job-123:v1:ok-1",
+      "evalbench-import:job-123:v1:crash-1",
   }
   assert all(row["session_id"] == row["trace_id"] for row in v1)
   # A reader that filters only by trace_id (Client.get_trace /
@@ -1069,8 +1277,17 @@ def test_materialize_consults_canonical_registry_for_custom_tables() -> None:
   registry = "analytics-project.bqaa.evalbench_import_manifest"
   assert result.manifest_table == registry
   assert evalbench.MANIFEST_TABLE == "evalbench_import_manifest"
-  pre_reads = [sql for sql, _ in fake.queries if "BEGIN TRANSACTION" not in sql]
+  pre_reads = [
+      sql
+      for sql, _ in fake.queries
+      if "BEGIN TRANSACTION" not in sql and sql not in _lock_seed_queries(fake)
+  ]
   assert pre_reads and all(f"`{registry}`" in sql for sql in pre_reads)
+  # The lock is the dataset's fixed lock table as well, never a custom one.
+  assert all(
+      "`analytics-project.bqaa.evalbench_import_lock`" in sql
+      for sql in _lock_seed_queries(fake)
+  )
   script = _transaction_queries(fake)[0]
   assert f"FROM `{registry}`" in script
   assert f"DELETE FROM `{registry}`" in script
@@ -1138,7 +1355,7 @@ def _colliding_runs() -> (
     tuple[tuple[EvalBenchRun, str], tuple[EvalBenchRun, str]]
 ):
   """Two ``(run, import_version)`` pairs whose naive ``:``-joined identity
-  would both read ``evalbench:job-123:release:1:case``."""
+  would both read ``evalbench-import:job-123:release:1:case``."""
 
   def run_for(scenario_id: str) -> EvalBenchRun:
     return _scored_run(
@@ -1169,22 +1386,37 @@ def test_session_identity_escapes_delimiters() -> None:
       "job-123", "1:case", import_version="release"
   )
   assert left != right
-  assert left == "evalbench:job-123:release\\:1:case"
-  assert right == "evalbench:job-123:release:1\\:case"
-  # Backslashes in a component are escaped too, so escaping is reversible.
+  assert left == "evalbench-import:job-123:release\\:1:case"
+  assert right == "evalbench-import:job-123:release:1\\:case"
+  # Backslashes in a published component are escaped too, so escaping is
+  # reversible.
   assert (
-      evalbench._session_identity("job-123", "a\\:b", import_version=None)
-      == "evalbench:job-123:a\\\\\\:b"
+      evalbench._session_identity("job-123", "a\\:b", import_version="v1")
+      == "evalbench-import:job-123:v1:a\\\\\\:b"
   )
-  # A plain read of scenario ``v1:case`` never aliases published ``v1``.
-  assert evalbench._session_identity(
-      "job-123", "v1:case", import_version=None
-  ) != evalbench._session_identity("job-123", "case", import_version="v1")
   # Common case (no delimiters) keeps the documented readable form.
   assert (
       evalbench._session_identity("job-123", "ok-1", import_version="v1")
-      == "evalbench:job-123:v1:ok-1"
+      == "evalbench-import:job-123:v1:ok-1"
   )
+
+
+def test_published_identities_never_alias_plain_reads() -> None:
+  """The two families live in disjoint namespaces: every plain identity
+  starts with ``evalbench:`` and every published one with
+  ``evalbench-import:``, whatever the (unescaped) plain components contain."""
+  plain = evalbench._session_identity("job-123", "v1:case", import_version=None)
+  assert plain == "evalbench:job-123:v1:case"  # v0.5.1 form, unescaped
+  assert plain != evalbench._session_identity(
+      "job-123", "case", import_version="v1"
+  )
+  # Even a scenario id that spells out the published namespace cannot alias
+  # it, because the plain prefix is fixed and differs.
+  contrived = evalbench._session_identity(
+      "job-123", "import:job-123:v1:case", import_version=None
+  )
+  assert contrived.startswith("evalbench:")
+  assert not contrived.startswith("evalbench-import:")
 
 
 @pytest.mark.parametrize(
@@ -1230,16 +1462,125 @@ def test_versioned_score_identities_are_collision_safe() -> None:
       row["session_id"]
       for row in run_a.to_agent_event_rows(import_version=version_a)
   }
-  assert scores_a == {"evalbench:job-123:release\\:1:case"}
+  assert scores_a == {"evalbench-import:job-123:release\\:1:case"}
   assert scores_a <= events_a
 
 
-def test_stable_id_is_not_ambiguous_across_part_boundaries() -> None:
-  assert evalbench._stable_id("a\x1fb", "c", length=16) != evalbench._stable_id(
+def test_published_stable_id_is_not_ambiguous_across_part_boundaries() -> None:
+  published = evalbench._published_stable_id
+  assert published("a\x1fb", "c", length=16) != published(
       "a", "b\x1fc", length=16
   )
-  assert evalbench._stable_id("ab", "c", length=16) != evalbench._stable_id(
-      "a", "bc", length=16
+  assert published("ab", "c", length=16) != published("a", "bc", length=16)
+  # Distinct framing from the legacy hash, so a published span id can never
+  # reproduce a v0.5.1 one for the same parts.
+  assert published("x", "user", length=16) != evalbench._stable_id(
+      "x", "user", length=16
+  )
+
+
+# Golden vectors produced by the v0.5.1 module (commit 3fb6a00,
+# ``to_agent_event_rows()`` without ``import_version``) for a single-tool
+# scenario. They pin the public unversioned identity contract: session/trace
+# ids are the unescaped ``evalbench:{job_id}:{scenario_id}`` and the
+# invocation/span ids come from the legacy ``_stable_id`` hash.
+_V051_IDENTITY_VECTORS = {
+    "case": {
+        "session_id": "evalbench:job-123:case",
+        "invocation_id": "f567e6f5a86a69f608edb2751cc3771c",
+        "root_span_id": "fe515c0a118b87b6",
+        "tool_span_id": "4bd7d835aaebbb51",
+        "completed_span_id": "0628e23feb7a53c8",
+    },
+    # A scenario id containing the delimiter stays verbatim (no escaping).
+    "v1:case": {
+        "session_id": "evalbench:job-123:v1:case",
+        "invocation_id": "1916bbd16e0d961e89622a612952e96a",
+        "root_span_id": "9bde893b313678b5",
+        "tool_span_id": "6ab0da7e7d3e8bd4",
+        "completed_span_id": "bd312c799fb82468",
+    },
+    "refund-1": {
+        "session_id": "evalbench:job-123:refund-1",
+        "invocation_id": "c89ad7e24957d27a83c903f2f1e2a372",
+        "root_span_id": "a8bcda92a6445014",
+        "tool_span_id": "0374231379db3981",
+        "completed_span_id": "7dac2cffcd509c0b",
+    },
+}
+
+
+def _golden_run(scenario_id: str) -> EvalBenchRun:
+  return _run(
+      {
+          "eval_id": scenario_id,
+          "prompt": "Prompt",
+          "stdout": json.dumps(
+              {
+                  "response": "done",
+                  "tool_calls": [
+                      {"tool_name": "search", "args": {"q": "x"}, "result": "r"}
+                  ],
+              }
+          ),
+          "returncode": 0,
+          "run_time": _RUN_TIME,
+      }
+  )
+
+
+@pytest.mark.parametrize("scenario_id", sorted(_V051_IDENTITY_VECTORS))
+def test_unversioned_identities_match_v051_golden_vectors(
+    scenario_id: str,
+) -> None:
+  expected = _V051_IDENTITY_VECTORS[scenario_id]
+  rows = _golden_run(scenario_id).to_agent_event_rows()
+  by_type = {row["event_type"]: row for row in rows}
+  assert set(by_type) == {
+      "USER_MESSAGE_RECEIVED",
+      "TOOL_STARTING",
+      "TOOL_COMPLETED",
+      "AGENT_COMPLETED",
+  }
+  assert {row["session_id"] for row in rows} == {expected["session_id"]}
+  assert {row["trace_id"] for row in rows} == {expected["session_id"]}
+  assert {row["invocation_id"] for row in rows} == {expected["invocation_id"]}
+  user = by_type["USER_MESSAGE_RECEIVED"]
+  assert (user["span_id"], user["parent_span_id"]) == (
+      expected["root_span_id"],
+      None,
+  )
+  for event_type in ("TOOL_STARTING", "TOOL_COMPLETED"):
+    assert by_type[event_type]["span_id"] == expected["tool_span_id"]
+    assert by_type[event_type]["parent_span_id"] == expected["root_span_id"]
+  completed = by_type["AGENT_COMPLETED"]
+  assert completed["span_id"] == expected["completed_span_id"]
+  assert completed["parent_span_id"] == expected["root_span_id"]
+
+
+def test_legacy_stable_id_hash_is_frozen() -> None:
+  assert (
+      evalbench._stable_id("evalbench:job-123:case", "invocation", length=32)
+      == _V051_IDENTITY_VECTORS["case"]["invocation_id"]
+  )
+  assert (
+      evalbench._stable_id("evalbench:job-123:case", "user", length=16)
+      == _V051_IDENTITY_VECTORS["case"]["root_span_id"]
+  )
+
+
+def test_published_identities_differ_from_unversioned_ones() -> None:
+  """Publishing a run under a version never reuses a plain-read id, so the
+  two families can coexist in one table without sharing traces or spans."""
+  run = _golden_run("case")
+  plain = run.to_agent_event_rows()
+  published = run.to_agent_event_rows(import_version="v1")
+  for column in ("session_id", "trace_id", "invocation_id", "span_id"):
+    assert {row[column] for row in plain}.isdisjoint(
+        row[column] for row in published
+    ), column
+  assert all(
+      row["session_id"].startswith("evalbench-import:") for row in published
   )
 
 
@@ -1303,8 +1644,8 @@ def test_score_rows_resolve_nested_scenario_ids_like_results() -> None:
   ).to_score_rows(import_version="v1")
   assert [row["scenario_id"] for row in rows] == ["crash-1", "ok-1"]
   assert [row["session_id"] for row in rows] == [
-      "evalbench:job-123:v1:crash-1",
-      "evalbench:job-123:v1:ok-1",
+      "evalbench-import:job-123:v1:crash-1",
+      "evalbench-import:job-123:v1:ok-1",
   ]
 
 
@@ -1370,21 +1711,21 @@ def test_classify_sessions_counts_low_scoring_completed_runs_as_failed() -> (
   verdicts = _verdicts(run, EvalScorePolicy({"goal_completion": 0.5}))
 
   assert set(verdicts) == {
-      "evalbench:job-123:v1:ok-1",
-      "evalbench:job-123:v1:crash-1",
-      "evalbench:job-123:v1:wrong-1",
+      "evalbench-import:job-123:v1:ok-1",
+      "evalbench-import:job-123:v1:crash-1",
+      "evalbench-import:job-123:v1:wrong-1",
   }
-  passed = verdicts["evalbench:job-123:v1:ok-1"]
+  passed = verdicts["evalbench-import:job-123:v1:ok-1"]
   assert passed.failed is False
   assert passed.process_failed is False
   assert passed.score_failed is False
 
-  crashed = verdicts["evalbench:job-123:v1:crash-1"]
+  crashed = verdicts["evalbench-import:job-123:v1:crash-1"]
   assert crashed.failed is True
   assert crashed.process_failed is True
   assert crashed.missing_completion is True
 
-  wrong = verdicts["evalbench:job-123:v1:wrong-1"]
+  wrong = verdicts["evalbench-import:job-123:v1:wrong-1"]
   assert wrong.failed is True
   assert wrong.process_failed is False
   assert wrong.missing_completion is False
@@ -1393,8 +1734,8 @@ def test_classify_sessions_counts_low_scoring_completed_runs_as_failed() -> (
 
   failed = sorted(v.session_id for v in verdicts.values() if v.failed)
   assert failed == [
-      "evalbench:job-123:v1:crash-1",
-      "evalbench:job-123:v1:wrong-1",
+      "evalbench-import:job-123:v1:crash-1",
+      "evalbench-import:job-123:v1:wrong-1",
   ]
 
 
@@ -1403,7 +1744,7 @@ def test_classify_sessions_returncode_zero_without_scores_is_not_a_pass() -> (
 ):
   run = _scored_run(scores=())
   verdicts = _verdicts(run, EvalScorePolicy({"goal_completion": 0.5}))
-  completed = verdicts["evalbench:job-123:v1:ok-1"]
+  completed = verdicts["evalbench-import:job-123:v1:ok-1"]
   assert completed.process_failed is False
   assert completed.score_failed is True
   assert completed.failed is True
@@ -1412,7 +1753,7 @@ def test_classify_sessions_returncode_zero_without_scores_is_not_a_pass() -> (
   lenient = _verdicts(
       run, EvalScorePolicy({"goal_completion": 0.5}, missing_score_fails=False)
   )
-  assert lenient["evalbench:job-123:v1:ok-1"].failed is False
+  assert lenient["evalbench-import:job-123:v1:ok-1"].failed is False
 
 
 def test_stderr_is_a_process_failure_even_when_returncode_is_zero() -> None:
@@ -1454,12 +1795,12 @@ def test_stderr_is_a_process_failure_even_when_returncode_is_zero() -> None:
 
   # Python reference: a process failure despite a passing score.
   verdicts = _verdicts(run, EvalScorePolicy({"goal_completion": 0.5}))
-  noisy = verdicts["evalbench:job-123:v1:noisy-1"]
+  noisy = verdicts["evalbench-import:job-123:v1:noisy-1"]
   assert noisy.process_failed is True
   assert noisy.missing_completion is False
   assert noisy.score_failed is False
   assert noisy.failed is True
-  assert verdicts["evalbench:job-123:v1:ok-1"].failed is False
+  assert verdicts["evalbench-import:job-123:v1:ok-1"].failed is False
 
   # SQL path: process failure is any ERROR event in the session, never the
   # exit code, so the published ERROR row above fails the denominator.
@@ -1483,7 +1824,7 @@ def test_classify_sessions_and_sql_collapse_duplicate_comparator_rows() -> None:
   )
   verdicts = _verdicts(run, EvalScorePolicy({"goal_completion": 0.5}))
   # One entry per comparator carrying the lowest failing score.
-  assert verdicts["evalbench:job-123:v1:ok-1"].failing_scores == {
+  assert verdicts["evalbench-import:job-123:v1:ok-1"].failing_scores == {
       "goal_completion": 0.1
   }
 
@@ -1502,8 +1843,8 @@ def test_classify_sessions_and_sql_collapse_duplicate_comparator_rows() -> None:
 
 def test_classify_sessions_without_policy_only_uses_process_signals() -> None:
   verdicts = _verdicts(_scored_run(), EvalScorePolicy())
-  assert verdicts["evalbench:job-123:v1:ok-1"].failed is False
-  assert verdicts["evalbench:job-123:v1:crash-1"].failed is True
+  assert verdicts["evalbench-import:job-123:v1:ok-1"].failed is False
+  assert verdicts["evalbench-import:job-123:v1:crash-1"].failed is True
 
 
 def test_failed_sessions_sql_pins_import_version_and_renders_policy() -> None:
