@@ -18,8 +18,19 @@
 #                                 to fail: an immediate console error, an
 #                                 occupied port, a failing browser binary, a
 #                                 browser that writes healthy DOM then exits
-#                                 nonzero, and a console error delayed past
-#                                 the marker's creation
+#                                 nonzero, a console error delayed past the
+#                                 marker's creation, a page that never
+#                                 writes the app-initialized marker, and a
+#                                 page whose live field value is mutated
+#                                 without a serialized value attribute, a
+#                                 delayed live-value mutation after marker
+#                                 creation, and a decoy zero-error element
+#                                 beside a marker recording a real error
+#
+# Every fixture except the missing-initialization one satisfies the full
+# healthy baseline (#448): the runtime data-bqaa-app-initialized marker (set
+# by script, never static), an aria-disabled action, and no aria-invalid
+# anywhere — so each fixture's injected fault is the sole reason it fails.
 #
 # Env: CHROME_BIN, SMOKE_PORT, SMOKE_DOCS_DIR override discovery.
 set -euo pipefail
@@ -66,15 +77,20 @@ if [ "${1:-}" = "--self-test" ]; then
   [ -n "$CHROME" ] || fail "no Chrome/Chromium binary found (set CHROME_BIN)"
 
   # 1. A page that reports a generic console error (no keyword the old
-  #    grep would have matched) but otherwise looks healthy, including the
-  #    aria-invalid marker.
+  #    grep would have matched) but otherwise satisfies the full healthy
+  #    baseline: runtime marker, pristine field, disabled action.
   FIXTURE="$OUT_DIR/fixture-console-error"
   mkdir -p "$FIXTURE"
   cat > "$FIXTURE/index.html" <<'HTML'
 <!doctype html>
 <html><body>
-<input aria-invalid="true">
-<script>console.error("generic boom");</script>
+<input id="table-id">
+<a id="create-dashboard" aria-disabled="true"></a>
+<button id="copy-link" disabled></button>
+<script>
+document.documentElement.setAttribute("data-bqaa-app-initialized", "true");
+console.error("generic boom");
+</script>
 </body></html>
 HTML
   if SMOKE_DOCS_DIR="$FIXTURE" "$SCRIPT_PATH" >/dev/null 2>&1; then
@@ -112,9 +128,11 @@ HTML
   cat > "$FAKE_CHROME" <<'FAKE'
 #!/usr/bin/env bash
 cat <<'DOM'
-<html><body>
-<input aria-invalid="true">
-<div id="smoke-result" data-errors="0" data-detail=""></div>
+<html data-bqaa-app-initialized="true"><body>
+<input id="table-id">
+<a id="create-dashboard" aria-disabled="true"></a>
+<button id="copy-link" disabled></button>
+<div id="smoke-result" data-errors="0" data-detail="" data-table-value="" data-create-aria-disabled="true" data-create-has-href="false" data-copy-disabled="true"></div>
 </body></html>
 DOM
 sleep 1
@@ -134,8 +152,11 @@ FAKE
   cat > "$DELAYED/index.html" <<'HTML'
 <!doctype html>
 <html><body>
-<input aria-invalid="true">
+<input id="table-id">
+<a id="create-dashboard" aria-disabled="true"></a>
+<button id="copy-link" disabled></button>
 <script>
+document.documentElement.setAttribute("data-bqaa-app-initialized", "true");
 window.addEventListener("load", function () {
   setTimeout(function () { console.error("generic delayed boom"); }, 900);
 });
@@ -146,6 +167,98 @@ HTML
     fail "self-test 5 FAILED: a delayed console error passed"
   fi
   echo "self-test 5 OK: post-snapshot delayed error is detected"
+
+  # 6. A page that looks completely healthy — no errors, pristine field,
+  #    disabled action — but never writes the runtime app-initialized
+  #    marker. Only the marker assertion catches a module that silently
+  #    failed to execute.
+  UNINITIALIZED="$OUT_DIR/fixture-missing-initialization"
+  mkdir -p "$UNINITIALIZED"
+  cat > "$UNINITIALIZED/index.html" <<'HTML'
+<!doctype html>
+<html><body>
+<input id="table-id">
+<a id="create-dashboard" aria-disabled="true"></a>
+<button id="copy-link" disabled></button>
+</body></html>
+HTML
+  if SMOKE_DOCS_DIR="$UNINITIALIZED" "$SCRIPT_PATH" >/dev/null 2>&1; then
+    fail "self-test 6 FAILED: a page without the app-initialized marker passed"
+  fi
+  echo "self-test 6 OK: missing app initialization is detected"
+
+  # 7. A page whose live table-id value PROPERTY is set to a non-empty
+  #    string (no value attribute ever appears in the markup). Serialized
+  #    tag checks false-pass this state; only the live-state snapshot on
+  #    the instrumentation marker can catch it.
+  MUTATED="$OUT_DIR/fixture-live-value"
+  mkdir -p "$MUTATED"
+  cat > "$MUTATED/index.html" <<'HTML'
+<!doctype html>
+<html><body>
+<input id="table-id">
+<a id="create-dashboard" aria-disabled="true"></a>
+<button id="copy-link" disabled></button>
+<script>
+document.documentElement.setAttribute("data-bqaa-app-initialized", "true");
+document.getElementById("table-id").value = "not-pristine";
+</script>
+</body></html>
+HTML
+  if SMOKE_DOCS_DIR="$MUTATED" "$SCRIPT_PATH" >/dev/null 2>&1; then
+    fail "self-test 7 FAILED: a mutated live field value passed as pristine"
+  fi
+  echo "self-test 7 OK: non-pristine live field value is detected"
+
+  # 8. A page that is pristine at marker creation (400 ms) but mutates the
+  #    live field value at 900 ms. Only a periodically restamped snapshot —
+  #    not a one-shot at creation — reflects the final state.
+  DELAYED_VALUE="$OUT_DIR/fixture-delayed-live-value"
+  mkdir -p "$DELAYED_VALUE"
+  cat > "$DELAYED_VALUE/index.html" <<'HTML'
+<!doctype html>
+<html><body>
+<input id="table-id">
+<a id="create-dashboard" aria-disabled="true"></a>
+<button id="copy-link" disabled></button>
+<script>
+document.documentElement.setAttribute("data-bqaa-app-initialized", "true");
+window.addEventListener("load", function () {
+  setTimeout(function () {
+    document.getElementById("table-id").value = "late-mutation";
+  }, 900);
+});
+</script>
+</body></html>
+HTML
+  if SMOKE_DOCS_DIR="$DELAYED_VALUE" "$SCRIPT_PATH" >/dev/null 2>&1; then
+    fail "self-test 8 FAILED: a delayed live-value mutation passed as pristine"
+  fi
+  echo "self-test 8 OK: delayed live-value mutation is detected"
+
+  # 9. A page carrying an unrelated data-errors="0" element while the real
+  #    instrumentation marker records an error. An unscoped whole-DOM grep
+  #    would be satisfied by the decoy; only the marker-scoped assertion
+  #    catches the real count.
+  MASKING="$OUT_DIR/fixture-masking-element"
+  mkdir -p "$MASKING"
+  cat > "$MASKING/index.html" <<'HTML'
+<!doctype html>
+<html><body>
+<input id="table-id">
+<a id="create-dashboard" aria-disabled="true"></a>
+<button id="copy-link" disabled></button>
+<div data-errors="0" data-detail=""></div>
+<script>
+document.documentElement.setAttribute("data-bqaa-app-initialized", "true");
+console.error("masked boom");
+</script>
+</body></html>
+HTML
+  if SMOKE_DOCS_DIR="$MASKING" "$SCRIPT_PATH" >/dev/null 2>&1; then
+    fail "self-test 9 FAILED: a decoy data-errors element masked a real error"
+  fi
+  echo "self-test 9 OK: decoy zero-error element cannot mask the marker"
 
   echo "browser smoke self-test OK: all negative fixtures fail as required"
   exit 0
@@ -181,6 +294,28 @@ window.__smokeErrors = [];
     }
     marker.setAttribute("data-errors", String(window.__smokeErrors.length));
     marker.setAttribute("data-detail", window.__smokeErrors.join(" | ").slice(0, 500));
+    // Live-state snapshot (#449 review): dump-dom does not reflect the
+    // value PROPERTY into a value attribute, so the pristine assertions
+    // must read the live properties, not the serialized markup.
+    var table = document.querySelector("#table-id");
+    var create = document.querySelector("#create-dashboard");
+    var copy = document.querySelector("#copy-link");
+    marker.setAttribute(
+      "data-table-value",
+      table ? String(table.value) : "MISSING"
+    );
+    marker.setAttribute(
+      "data-create-aria-disabled",
+      create ? String(create.getAttribute("aria-disabled")) : "MISSING"
+    );
+    marker.setAttribute(
+      "data-create-has-href",
+      create ? String(create.hasAttribute("href")) : "MISSING"
+    );
+    marker.setAttribute(
+      "data-copy-disabled",
+      copy ? String(copy.disabled) : "MISSING"
+    );
   };
   var record = function (message) {
     window.__smokeErrors.push(String(message));
@@ -203,6 +338,10 @@ window.__smokeErrors = [];
       marker.id = "smoke-result";
       document.body.appendChild(marker);
       stamp();
+      // Restamp periodically until the DOM dump: a one-time snapshot would
+      // miss a live-state mutation after marker creation (#449 review), the
+      // same way the error count is kept live rather than one-shot.
+      setInterval(stamp, 100);
     }, 400);
   });
 })();
@@ -276,20 +415,56 @@ if [ -z "$TIMED_OUT_KILL" ] && [ "$CHROME_STATUS" -ne 0 ]; then
   fail "browser exited with status $CHROME_STATUS"
 fi
 
-grep -q 'id="smoke-result"' "$OUT_DIR/dom.html" \
+# Extract THE instrumentation marker first and scope every marker-borne
+# assertion to that one tag: an unrelated element carrying data-errors="0"
+# must never mask a nonzero count on the real marker (#449 review).
+FLAT_DOM="$(tr '\n' ' ' < "$OUT_DIR/dom.html")"
+MARKER_TAG="$(printf '%s' "$FLAT_DOM" | grep -o '<div[^>]*id="smoke-result"[^>]*>' | head -1)"
+[ -n "$MARKER_TAG" ] \
   || fail "instrumentation marker missing — the page never finished loading"
-if ! grep -q 'data-errors="0"' "$OUT_DIR/dom.html"; then
-  DETAIL="$(grep -o 'data-detail="[^"]*"' "$OUT_DIR/dom.html" | head -1)"
-  fail "page-level errors recorded: ${DETAIL:-unknown}"
+case "$MARKER_TAG" in
+  *'data-errors="0"'*) : ;;
+  *)
+    DETAIL="$(printf '%s' "$MARKER_TAG" | grep -o 'data-detail="[^"]*"' | head -1)"
+    fail "page-level errors recorded: ${DETAIL:-unknown}"
+    ;;
+esac
+# The app-initialized marker is written only at runtime by the module, so
+# its presence in the live DOM — and its absence from the static source —
+# proves app.mjs executed (#448; replaces the pre-#448 initial-error proof).
+# Match the marker only as a static tag attribute: a fixture's inline
+# script may name it in setAttribute() without shipping it statically.
+if grep -Eq '<[A-Za-z!][^>]*data-bqaa-app-initialized' "$DOCS_DIR/index.html"; then
+  fail "the app-initialized marker must not appear in static HTML"
 fi
-# With no query parameters the project field is empty, so a successfully
-# loaded module runs refresh() and marks the field invalid. Static HTML
-# never contains this attribute; its presence proves app.mjs executed.
-grep -q 'aria-invalid="true"' "$OUT_DIR/dom.html" \
-  || fail "validation never ran — app.mjs did not execute in the browser"
+grep -q 'data-bqaa-app-initialized="true"' "$OUT_DIR/dom.html" \
+  || fail "app-initialized marker missing — app.mjs did not execute in the browser"
+# With no query parameters the first load is the pristine state (#448):
+# assert the exact LIVE states via the instrumentation snapshot — Chrome's
+# dump-dom does not reflect the value property into a value attribute, so
+# serialized-markup checks cannot prove the field is empty (#449 review).
+case "$MARKER_TAG" in
+  *'data-table-value=""'*) : ;;
+  *) fail "pristine table-id field must have an empty live value" ;;
+esac
+case "$MARKER_TAG" in
+  *'data-create-aria-disabled="true"'*) : ;;
+  *) fail "pristine create link must be aria-disabled" ;;
+esac
+case "$MARKER_TAG" in
+  *'data-create-has-href="false"'*) : ;;
+  *) fail "pristine create link must carry no URL" ;;
+esac
+case "$MARKER_TAG" in
+  *'data-copy-disabled="true"'*) : ;;
+  *) fail "pristine copy button must be disabled (live property)" ;;
+esac
+if printf '%s' "$FLAT_DOM" | grep -q 'aria-invalid='; then
+  fail "pristine first load must not mark any field invalid"
+fi
 # Belt and braces: anything Chrome itself logs as an error still fails.
 if grep -Eiq 'CONSOLE.*\b(error|blocked|failed|uncaught)\b' "$OUT_DIR/console.log"; then
   fail "browser stderr reported console errors"
 fi
 
-echo "browser smoke OK: module loaded, zero page-level errors, validation ran"
+echo "browser smoke OK: module initialized, zero page-level errors, pristine first load"

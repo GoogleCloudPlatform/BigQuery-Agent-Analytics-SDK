@@ -606,6 +606,8 @@ def _format_feedback_snippet(
   Collapses internal whitespace runs (including newlines) to a single
   space so the snippet fits on one CI log line, then truncates to
   ``max_chars`` with a trailing ``…`` when the original was longer.
+  Escapes backslashes and double quotes so the result is safe inside the
+  emitted ``feedback="..."`` field.
   Returns ``None`` for empty / whitespace-only input so callers can
   cleanly skip the field.
   """
@@ -614,10 +616,25 @@ def _format_feedback_snippet(
   collapsed = " ".join(feedback.split())
   if not collapsed:
     return None
-  if len(collapsed) <= max_chars:
-    return collapsed
-  # Reserve one char for the ellipsis to keep the visual width capped.
-  return collapsed[: max_chars - 1].rstrip() + "\u2026"
+
+  escaped = collapsed.replace("\\", "\\\\").replace('"', '\\"')
+
+  if len(escaped) <= max_chars:
+    return escaped
+
+  # Reserve one character for the ellipsis.
+  budget = max_chars - 1
+  parts = []
+  length = 0
+
+  for char in collapsed:
+    escaped_char = char.replace("\\", "\\\\").replace('"', '\\"')
+    if length + len(escaped_char) > budget:
+      break
+    parts.append(escaped_char)
+    length += len(escaped_char)
+
+  return "".join(parts).rstrip() + "\u2026"
 
 
 def _emit_evaluate_failures(

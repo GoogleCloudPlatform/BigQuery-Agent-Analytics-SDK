@@ -121,12 +121,13 @@ own snapshot of the old geometry — create a fresh copy from the configurator
 to pick up the fix.
 
 For the standard BQAA layout, open the
-[three-field dashboard configurator](https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/)
-and enter only:
-
-1. GCP project ID;
-2. BigQuery dataset ID;
-3. BQAA table ID (normally `agent_events`).
+[dashboard configurator](https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/)
+and enter only the **fully qualified BQAA table ID** —
+`project.dataset.table`, one value naming all three identifiers (the
+standard table segment is `agent_events`). Paste it straight from the
+BigQuery console's copy-table-ID control or paste the console table link;
+backticks, a legacy colon after the project, and a trailing `;` or `,` are
+cleaned up automatically (#448).
 
 For portable Linking API substitution, table IDs may use ASCII letters, digits,
 underscores, and hyphens, such as `events_agent_cur-phenix`. Dataset IDs retain

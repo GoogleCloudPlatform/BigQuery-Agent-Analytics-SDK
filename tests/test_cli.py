@@ -617,8 +617,8 @@ class TestEvaluate:
                 passed=False,
                 details={},
                 llm_feedback=(
-                    "The agent confirmed a booking but the booking"
-                    " tool never ran for that session."
+                    'The agent added "(Design)" to Jordan Lee\'s name, '
+                    "which was not present in the user's request or any provided context."
                 ),
             ),
         ],
@@ -646,7 +646,9 @@ class TestEvaluate:
     assert "score=0.3" in combined
     # Feedback snippet appears, quoted, with the actual justification.
     assert 'feedback="' in combined
-    assert "booking tool never ran" in combined
+    assert "(Design)" in combined
+    assert '\\"(Design)\\"' in combined
+    assert "Jordan Lee's name" in combined
 
   @patch("bigquery_agent_analytics.cli._build_client")
   def test_evaluate_exit_code_llm_judge_truncates_long_feedback(
@@ -1006,6 +1008,30 @@ class TestFormatFeedbackSnippet:
 
     out = _format_feedback_snippet("y" * 200, max_chars=50)
     assert len(out) == 50
+    assert out.endswith("\u2026")
+
+  def test_escapes_quotes_and_backslashes(self):
+    from bigquery_agent_analytics.cli import _format_feedback_snippet
+
+    out = _format_feedback_snippet(
+        'The agent added "(Design)" and used path\\to\\file.'
+    )
+    assert out == 'The agent added \\"(Design)\\" and used path\\\\to\\\\file.'
+
+  def test_quote_only_feedback_respects_max_chars_after_escaping(self):
+    from bigquery_agent_analytics.cli import _format_feedback_snippet
+
+    out = _format_feedback_snippet('"' * 120, max_chars=120)
+
+    assert len(out) <= 120
+    assert out.endswith("\u2026")
+
+  def test_backslash_only_feedback_respects_max_chars_after_escaping(self):
+    from bigquery_agent_analytics.cli import _format_feedback_snippet
+
+    out = _format_feedback_snippet("\\" * 120, max_chars=120)
+
+    assert len(out) <= 120
     assert out.endswith("\u2026")
 
 
