@@ -20,9 +20,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EVALBENCH_FIXTURE=1`) prints annotated sample output for all three
   steps without calling BigQuery so the demo is recordable and CI-safe,
   and live mode calls the three CLIs from `BQ_AGENT_*` / `EVALBENCH_*`
-  environment variables. Walkthrough in `examples/evalbench_mvp_e2e.md`;
-  `tests/test_evalbench_mvp_e2e.py` runs the fixture path. No CLI or
-  Python behavior changes; `examples/evalbench_score_gate.sh` stays the
+  environment variables. `--synth` (or `EVALBENCH_SYNTH=1`) is live mode
+  without an EvalBench run: step 0 runs the new
+  `examples/evalbench_synth_from_traces.py`, which folds a real BQAA
+  `agent_events` table into EvalBench-shaped `configs`/`results`/`scores`
+  tables (one scenario per session; prompts and responses are the real
+  trace text, never invented; `goal_completion` = 1.0 when the session
+  reached `AGENT_COMPLETED`, else 0.0), then steps 1–3 run on that job
+  with the demo's default dataset names. Walkthrough in
+  `examples/evalbench_mvp_e2e.md`; `tests/test_evalbench_mvp_e2e.py` runs
+  the fixture path and the offline `--synth` guards, and
+  `tests/test_evalbench_synth_from_traces.py` checks the synthesizer's
+  mapping in memory and round-trips its rows through
+  `EvalBenchRun.to_agent_event_rows` / `to_score_rows`. No CLI or Python
+  library behavior changes; `examples/evalbench_score_gate.sh` stays the
   CI gate.
 - **EvalBench LLM-judge scoring of one import version (#435 slice 3, #97)**
   — new `bq-agent-sdk evalbench-score` command: a thin wrapper over the

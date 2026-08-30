@@ -128,3 +128,43 @@ def test_unknown_argument_is_rejected() -> None:
   result = _run("--bogus")
   assert result.returncode == 2
   assert "unknown argument '--bogus'" in result.stderr
+
+
+def test_synth_mode_rejects_split_projects_before_any_command() -> None:
+  # --synth builds the EvalBench-shaped dataset and the mirror dataset in one
+  # project, so split projects stop the script before step 0 runs anything.
+  result = _run(
+      "--synth",
+      env={
+          "BQ_AGENT_PROJECT": "analytics-project",
+          "EVALBENCH_PROJECT": "benchmark-project",
+          "EVALBENCH_PYTHON": "/nonexistent/python",
+      },
+  )
+  assert result.returncode == 1
+  assert "EVALBENCH_PROJECT=benchmark-project differs" in result.stderr
+  assert "=== Step 0" not in result.stdout
+
+
+def test_synth_mode_defaults_names_and_runs_step_zero_first() -> None:
+  # With a project set, --synth fills in the demo's dataset/job defaults and
+  # step 0 is the first thing it runs. An interpreter that cannot start makes
+  # step 0 fail (exit 2) before any BigQuery call.
+  result = _run(
+      "--synth",
+      env={
+          "BQ_AGENT_PROJECT": "analytics-project",
+          "EVALBENCH_PYTHON": "/nonexistent/python",
+      },
+  )
+  assert result.returncode == 2
+  assert "=== Step 0: synthesize EvalBench tables from real traces ===" in (
+      result.stdout
+  )
+  assert "=== Step 1" not in result.stdout
+  assert (
+      "job mvp-e2e-real-traces (analytics-project.bqaa_evalbench_mvp_demo ->"
+      " analytics-project.bqaa_evalbench_mvp_mirror)"
+  ) in result.stdout
+  assert "bqaa_e2e_real.agent_events ->" in result.stdout
+  assert "step failed: /nonexistent/python" in result.stderr

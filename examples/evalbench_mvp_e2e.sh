@@ -46,6 +46,7 @@
 #
 # Usage:
 #   bash examples/evalbench_mvp_e2e.sh             # live: calls BigQuery
+#   bash examples/evalbench_mvp_e2e.sh --synth     # live, on real traces
 #   bash examples/evalbench_mvp_e2e.sh --fixture   # offline: sample output
 #   EVALBENCH_FIXTURE=1 bash examples/evalbench_mvp_e2e.sh
 #
@@ -53,6 +54,24 @@
 # invokes the live CLI: it prints the same three step banners followed by
 # annotated sample output shaped like each command's real output, and
 # exits 0. Use it to record the demo or to run this script in CI.
+#
+# --synth (or EVALBENCH_SYNTH=1) is live mode without an EvalBench run:
+# step 0 runs examples/evalbench_synth_from_traces.py, which folds a real
+# BQAA agent_events table into EvalBench-shaped configs/results/scores
+# tables (one scenario per session; every prompt and response is the real
+# trace text, never invented; goal_completion = 1.0 when the session
+# reached AGENT_COMPLETED, else 0.0), then steps 1-3 run on that job. Every
+# variable has a default so it works with just gcloud configured:
+#
+#   BQ_AGENT_PROJECT        gcloud's current project (or set it)
+#   EVALBENCH_PROJECT       = BQ_AGENT_PROJECT (synth writes both datasets)
+#   EVALBENCH_SOURCE_TABLE  bqaa_e2e_real.agent_events  (the real traces)
+#   EVALBENCH_DATASET       bqaa_evalbench_mvp_demo     (built by step 0)
+#   BQ_AGENT_DATASET        bqaa_evalbench_mvp_mirror   (import target)
+#   EVALBENCH_JOB_ID        mvp-e2e-real-traces
+#   EVALBENCH_MIN_SCORE     goal_completion=1  (--min-score for steps 1-2;
+#                           set to "" to omit)
+#   EVALBENCH_PYTHON        python3 (interpreter with google-cloud-bigquery)
 #
 # Exit codes (live mode):
 #   0 all three steps ran (step 3 exits 0 even when sessions fail the
@@ -69,12 +88,14 @@ usage() {
 }
 
 FIXTURE="${EVALBENCH_FIXTURE:-0}"
+SYNTH="${EVALBENCH_SYNTH:-0}"
 for arg in "$@"; do
   case "${arg}" in
     --fixture) FIXTURE=1 ;;
+    --synth) SYNTH=1 ;;
     -h|--help) usage; exit 0 ;;
     *)
-      echo "Error: unknown argument '${arg}'; expected --fixture or --help" >&2
+      echo "Error: unknown argument '${arg}'; expected --fixture, --synth or --help" >&2
       exit 2
       ;;
   esac
@@ -216,6 +237,28 @@ JSON
 fi
 
 # --------------------------------------------------------------------------- #
+# Synth mode defaults: the demo's own names, on gcloud's current project.
+# --------------------------------------------------------------------------- #
+if [[ "${SYNTH}" == "1" ]]; then
+  if [[ -z "${BQ_AGENT_PROJECT:-}" ]] && command -v gcloud >/dev/null 2>&1; then
+    BQ_AGENT_PROJECT="$(gcloud config get-value project 2>/dev/null || true)"
+  fi
+  : "${BQ_AGENT_PROJECT:?set BQ_AGENT_PROJECT (or gcloud config set project ...)}"
+  EVALBENCH_PROJECT="${EVALBENCH_PROJECT:-${BQ_AGENT_PROJECT}}"
+  if [[ "${EVALBENCH_PROJECT}" != "${BQ_AGENT_PROJECT}" ]]; then
+    echo "Error: --synth builds the EvalBench dataset and the mirror dataset in" \
+      "one project; EVALBENCH_PROJECT=${EVALBENCH_PROJECT} differs from" \
+      "BQ_AGENT_PROJECT=${BQ_AGENT_PROJECT}" >&2
+    exit 1
+  fi
+  EVALBENCH_SOURCE_TABLE="${EVALBENCH_SOURCE_TABLE:-bqaa_e2e_real.agent_events}"
+  EVALBENCH_DATASET="${EVALBENCH_DATASET:-bqaa_evalbench_mvp_demo}"
+  BQ_AGENT_DATASET="${BQ_AGENT_DATASET:-bqaa_evalbench_mvp_mirror}"
+  EVALBENCH_JOB_ID="${EVALBENCH_JOB_ID:-mvp-e2e-real-traces}"
+  EVALBENCH_MIN_SCORE="${EVALBENCH_MIN_SCORE-goal_completion=1}"
+fi
+
+# --------------------------------------------------------------------------- #
 # Live mode: calls BigQuery through the three CLIs.
 # --------------------------------------------------------------------------- #
 : "${BQ_AGENT_PROJECT:?set BQ_AGENT_PROJECT}"
@@ -227,6 +270,10 @@ fi
 version_args=()
 if [[ -n "${EVALBENCH_IMPORT_VERSION:-}" ]]; then
   version_args+=(--import-version "${EVALBENCH_IMPORT_VERSION}")
+fi
+min_score_args=()
+if [[ -n "${EVALBENCH_MIN_SCORE:-}" ]]; then
+  min_score_args+=(--min-score "${EVALBENCH_MIN_SCORE}")
 fi
 
 run_step() {
@@ -240,6 +287,19 @@ run_step() {
 echo "EvalBench MVP e2e: job ${EVALBENCH_JOB_ID}" \
   "(${EVALBENCH_PROJECT}.${EVALBENCH_DATASET} -> ${BQ_AGENT_PROJECT}.${BQ_AGENT_DATASET})"
 
+if [[ "${SYNTH}" == "1" ]]; then
+  banner "Step 0: synthesize EvalBench tables from real traces"
+  note "${EVALBENCH_SOURCE_TABLE} -> ${EVALBENCH_PROJECT}.${EVALBENCH_DATASET}.{configs,results,scores}"
+  note "one scenario per session; prompts and responses are the real trace text"
+  run_step "${EVALBENCH_PYTHON:-python3}" \
+    "$(dirname "${BASH_SOURCE[0]}")/evalbench_synth_from_traces.py" \
+    --project "${EVALBENCH_PROJECT}" \
+    --source-table "${EVALBENCH_SOURCE_TABLE}" \
+    --evalbench-dataset "${EVALBENCH_DATASET}" \
+    --mirror-dataset "${BQ_AGENT_DATASET}" \
+    --job-id "${EVALBENCH_JOB_ID}"
+fi
+
 banner "Step 1: evalbench-import"
 run_step bq-agent-sdk evalbench-import \
   --project-id "${EVALBENCH_PROJECT}" \
@@ -248,6 +308,7 @@ run_step bq-agent-sdk evalbench-import \
   --target-project "${BQ_AGENT_PROJECT}" \
   --target-dataset "${BQ_AGENT_DATASET}" \
   ${version_args[@]+"${version_args[@]}"} \
+  ${min_score_args[@]+"${min_score_args[@]}"} \
   --format json
 
 banner "Step 2: evalbench-failed-sessions"
@@ -256,6 +317,7 @@ run_step bq-agent-sdk evalbench-failed-sessions \
   --target-dataset "${BQ_AGENT_DATASET}" \
   --job-id "${EVALBENCH_JOB_ID}" \
   ${version_args[@]+"${version_args[@]}"} \
+  ${min_score_args[@]+"${min_score_args[@]}"} \
   --format table
 
 banner "Step 3: evalbench-score"

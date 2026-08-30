@@ -606,8 +606,14 @@ shows the CI gate form.
 one job (import → failed-sessions → score); `--fixture` (or
 `EVALBENCH_FIXTURE=1`) prints annotated sample output for all three steps
 without touching BigQuery, so the walkthrough can be recorded or run in
-CI. `examples/evalbench_mvp_e2e.md` explains each step, the environment
-variables, and fixture versus live mode.
+CI. `--synth` (or `EVALBENCH_SYNTH=1`) is the live path when no EvalBench
+run exists: step 0 runs `examples/evalbench_synth_from_traces.py`, which
+folds a real BQAA `agent_events` table into EvalBench-shaped
+`configs`/`results`/`scores` tables (one scenario per session, prompts and
+responses taken verbatim from the traces, `goal_completion` = 1.0 when the
+session reached `AGENT_COMPLETED`), and steps 1–3 then run on that job.
+`examples/evalbench_mvp_e2e.md` explains each step, the environment
+variables, and fixture versus synth versus live mode.
 
 ## Why These Fields Matter
 
