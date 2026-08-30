@@ -7,6 +7,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-29
+
+### Release highlights
+
+An evaluation-focused wheel update and a rebuilt dashboard entrance. The
+wheel gains the EvalBench BigQuery run reader
+(`bigquery_agent_analytics.evalbench`), the canonical evaluation rubrics
+(`bigquery_agent_analytics.evaluation_rubrics`), and the golden Q&A
+matching producer (`bigquery_agent_analytics.golden_matching`), plus a CLI
+judge-feedback escaping fix. The published Looker Studio configurator (repo/live-template
+side) collapses its three identifier fields into a single fully qualified
+table-ID input, and the template's external accessibility is now an
+attested, monitored contract after a real external-user failure (#445).
+
+### Added
+
+- **EvalBench BigQuery run reader (#444)** — new
+  `bigquery_agent_analytics.evalbench` module: reads EvalBench evaluation
+  runs from BigQuery and maps imported runs onto BQAA traces, with
+  corrected imported-trace semantics. Reference doc in `docs/evalbench.md`.
+- **Canonical evaluation rubrics in core (#430, #431)** — new
+  `bigquery_agent_analytics.evaluation_rubrics` module extracts the
+  canonical 8-metric rubric data (response usefulness with the
+  scope-conditional declined category, task grounding, correctness, tool
+  usage, specificity, scope compliance, first-time-right, failure
+  attribution) and the interpreter (`builtin_metric_config()`,
+  `build_metrics()`) from `quality_report`, which now consumes them.
+  Rubric reference doc in `docs/evaluation_rubrics.md`.
+- **Golden Q&A matching in core (#428, #432)** — new
+  `bigquery_agent_analytics.golden_matching` module, the producer side of
+  answer-key grounding whose consumer landed in #378: `embed_texts()`
+  (L2-normalised vectors with bounded 429/503 retry),
+  `DEFAULT_GOLDEN_THRESHOLD` (0.92), and `match_golden_qa()` mapping
+  session questions to golden expected answers and out-of-scope decline
+  notes ready for `evaluate_categorical(per_session_context=...)` —
+  extracted verbatim from `quality_report`, which now consumes it, with
+  the three names exported at the package top level.
+
+### Fixed
+
+- **CLI: LLM judge feedback rendering (#438)** — judge feedback quotes are
+  escaped and the max-length cap is applied correctly.
+- **Examples (#426, #427)** — the Colab notebook authenticates before
+  creating the BigQuery client, and the context-graph example reads
+  `BQ_LOCATION` with a discoverable dataset location.
+
+### Dashboard (repo and live-template side, not in the wheel)
+
+- **Single fully-qualified table-ID entrance (#448, #449)** — the
+  configurator's three identifier fields collapse into one
+  `project.dataset.table` input (superseding #403's separate-fields
+  decision while keeping its per-segment diagnostics): a five-state
+  fail-closed field machine, whole-field vs segment-level error classes
+  with sentinel collisions gating Ready, an explicit Enter activation
+  bridge (repeat/IME-safe), billing-gated actionability, paste takeover for
+  every supported form, and unchanged three-parameter setup links and
+  Linking API URLs. The browser smoke re-anchors on a runtime
+  app-initialized marker with a live-state snapshot and nine negative
+  fixtures.
+- **BigQuery Console table links accepted (#424)** — pasting a Console
+  table URL fills the configurator; unambiguous single-table workspaces on
+  both supported hosts parse, everything else fails closed.
+- **External template access is an attested contract (#445, #446)** — after
+  an external user hit the terminal "This report isn't shared with you"
+  dialog, `bindings/report_template.yaml` gains a two-control
+  `external_access_verification` attestation (Permissions API link-role
+  read with the `datastudio.readonly` scope; dated external-identity copy
+  canary scoped by identity class), a durable `known_live_issues` record,
+  an evidence-consistent status contract enforced by tests, and a weekly
+  staleness workflow (`external-access-staleness.yml`) that opens a
+  tracking issue when the canary is overdue. All user-facing docs now name
+  the terminal dialog and stop advising users to wait it out.
+- **End-user manual (#425)** — `dashboard/looker_studio/USER_MANUAL.md`:
+  prerequisites, three-step setup, page guide, troubleshooting.
+
+### Grafana
+
+- **Metric correctness and scan bounds (#373 follow-ups, #433)** — LLM
+  calls are counted per distinct trace/span (streaming chunks no longer
+  overcount), every public-demo query enforces a strict half-open 72-hour
+  window per table scan, and the sync lint gains block-comment stripping,
+  foreign-table-path detection, and negative regression tests.
+- **One-command local run (#421, #422)** — from checkout to a rendering
+  dashboard against a local fixture dataset.
+
+### Documentation
+
+- LangSmith re-export guidance corrected and the 24-hour ingest window
+  documented (#423); thinking-token accounting clarified (#441); BigQuery
+  concept-index semantics clarified (#439); time-series point-marker
+  requirement recorded (#437).
+
+### Infrastructure
+
+- CI pins `pyink<26` so the Format check tracks the style the repository
+  is actually formatted in (#447).
+
 ## [0.5.0] - 2026-08-11
 
 ### Release highlights
