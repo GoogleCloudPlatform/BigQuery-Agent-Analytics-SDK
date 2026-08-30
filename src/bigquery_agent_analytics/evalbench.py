@@ -2438,6 +2438,7 @@ def import_sessions(
     target_dataset: str,
     job_id: str,
     import_version: Optional[str] = None,
+    events_table: Optional[str] = None,
     location: Optional[str] = None,
     bq_client: Optional[Any] = None,
 ) -> EvalBenchImportSessions:
@@ -2451,11 +2452,30 @@ def import_sessions(
   to the table it was published to. The result feeds ``Client.evaluate``
   through ``EvalBenchImportSessions.trace_filter()`` -- the
   ``bq-agent-sdk evalbench-score`` path (#97).
+
+  The manifest is written by the importer and read here under the scorer's
+  identity, so the persisted ``events_table`` is never trusted as-is: it
+  must be the canonical ``target_project.target_dataset.<mirror table>``
+  reference (every segment re-validated, the ADK plugin's ``agent_events``
+  rejected) before it is formatted into the session query. When
+  ``events_table`` names the mirror table the caller expects (the CLI's
+  ``--table-id``), the stored binding must match it, again before any
+  events-table statement is submitted.
+
+  Args:
+      events_table: Optional mirror table name in ``target_dataset`` the
+        version is expected to be published in. Validated before any
+        BigQuery call; a mismatch with the manifest raises ``ValueError``
+        before the events table is read.
   """
   _validate_source_segment("target_project", target_project)
   _validate_source_segment("target_dataset", target_dataset)
   if not isinstance(job_id, str) or not job_id:
     raise ValueError("job_id must be a non-empty string")
+  expected_events_ref: Optional[str] = None
+  if events_table is not None:
+    _validate_destination_table("events_table", events_table)
+    expected_events_ref = f"{target_project}.{target_dataset}.{events_table}"
   manifest_ref = f"{target_project}.{target_dataset}.{MANIFEST_TABLE}"
   client = bq_client or make_bq_client(target_project, location=location)
   import_version, manifest = _resolve_manifest(
@@ -2466,7 +2486,19 @@ def import_sessions(
       location=location,
       feature=_SCORE_FEATURE,
   )
-  events_ref = str(manifest["events_table"])
+  events_ref = _validate_manifest_events_table(
+      manifest.get("events_table"),
+      target_project=target_project,
+      target_dataset=target_dataset,
+      job_id=job_id,
+      import_version=import_version,
+  )
+  if expected_events_ref is not None and events_ref != expected_events_ref:
+    raise ValueError(
+        f"EvalBench job {job_id!r} import_version {import_version!r} is"
+        f" published in {events_ref!r}, not {expected_events_ref!r}; pass"
+        " the events_table it was published to"
+    )
   job_config = bigquery.QueryJobConfig(
       query_parameters=_import_parameters(job_id, import_version)
   )
@@ -3065,6 +3097,50 @@ def _validate_destination_table(name: str, value: Any) -> None:
         "EvalBench imports publish only to BQAA-owned mirror tables such as "
         f"{DEFAULT_EVENTS_TABLE!r}"
     )
+
+
+def _validate_manifest_events_table(
+    value: Any,
+    *,
+    target_project: str,
+    target_dataset: str,
+    job_id: str,
+    import_version: str,
+) -> str:
+  """Re-validate a persisted manifest ``events_table`` before querying it.
+
+  The importer validates every segment before publishing, but the manifest
+  is read back under a different identity (the scorer), so the stored
+  value is treated as untrusted input: it must be exactly
+  ``target_project.target_dataset.<table>`` with the table segment passing
+  ``_validate_destination_table`` (segment charset, reserved
+  ``agent_events``). Anything else -- a closed backtick, a semicolon, a
+  reference into another project or dataset -- raises before the value can
+  be formatted into a statement.
+  """
+  context = (
+      f"EvalBench job {job_id!r} import_version {import_version!r} manifest"
+      " events_table"
+  )
+  if not isinstance(value, str) or not value:
+    raise ValueError(f"{context} must be a non-empty string, got {value!r}")
+  segments = value.split(".")
+  if len(segments) != 3:
+    raise ValueError(
+        f"{context} must be a canonical project.dataset.table reference,"
+        f" got {value!r}"
+    )
+  project, dataset, table = segments
+  try:
+    _validate_destination_table("events_table", table)
+  except ValueError as exc:
+    raise ValueError(f"{context} {value!r} is invalid: {exc}") from exc
+  if project != target_project or dataset != target_dataset:
+    raise ValueError(
+        f"{context} {value!r} is outside the scored dataset"
+        f" {target_project!r}.{target_dataset!r}"
+    )
+  return f"{project}.{dataset}.{table}"
 
 
 def _find_scenario_id(row: Mapping[str, Any]) -> Optional[str]:

@@ -143,6 +143,7 @@ def test_scores_latest_version_with_correctness_judge_by_default(
           "job_id": "job-123",
           "import_version": None,
           "location": None,
+          "events_table": "evalbench_agent_events",
           "bq_client": client.bq_client,
       }
   ]
@@ -263,6 +264,79 @@ def test_table_not_bound_to_version_exits_2(
   assert result.exit_code == 2
   assert "analytics-project.bqaa.evalbench_agent_events" in result.output
   assert "analytics-project.bqaa.other_events" in result.output
+  client.evaluate.assert_not_called()
+
+
+def test_requested_table_is_handed_to_import_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """``--table-id`` reaches ``import_sessions`` so the binding is checked
+  there, before any events-table query (not only after the pin returns)."""
+  _, _, pin_calls = _patch(monkeypatch)
+
+  result = runner.invoke(app, _BASE_ARGS + ["--table-id", "other_events"])
+
+  assert result.exit_code == 2
+  assert [c["events_table"] for c in pin_calls] == ["other_events"]
+
+
+class _RecordingBQClient:
+  """Real ``import_sessions`` fake: answers the manifest, records calls."""
+
+  def __init__(self, manifest: dict) -> None:
+    self._manifest = manifest
+    self.calls: list[str] = []
+
+  def query(self, sql: str, **kwargs):
+    self.calls.append(sql)
+    result = MagicMock()
+    result.result.return_value = [dict(self._manifest)]
+    return result
+
+
+@pytest.mark.parametrize(
+    "stored_events_table",
+    [
+        "analytics-project.bqaa.evalbench_agent_events`; DROP TABLE"
+        " `analytics-project.bqaa.agent_events",
+        "analytics-project.bqaa.evalbench_agent_events; SELECT 1",
+        "other-project.bqaa.evalbench_agent_events",
+        "analytics-project.bqaa.agent_events",
+    ],
+)
+def test_hostile_manifest_events_table_exits_2_before_events_query(
+    monkeypatch: pytest.MonkeyPatch, stored_events_table: str
+) -> None:
+  """Regression for the confused-deputy manifest ``events_table``.
+
+  The manifest writer and the scorer are different identities. A stored
+  ``events_table`` that is not the canonical ``project.dataset.<table>``
+  the scorer requested must fail before any events-table statement is
+  submitted -- only the manifest lookup may run.
+  """
+  bq_client = _RecordingBQClient(
+      {
+          "job_id": "job-123",
+          "import_version": "v2",
+          "events_table": stored_events_table,
+          "scores_table": "analytics-project.bqaa.evalbench_scores_imported",
+          "imported_at": _NOW,
+          "generation_id": "gen-v2",
+      }
+  )
+  client = MagicMock()
+  client.bq_client = bq_client
+  monkeypatch.setattr(cli, "_build_client", lambda *a, **kw: client)
+
+  result = runner.invoke(app, _BASE_ARGS + ["--import-version", "v2"])
+
+  assert result.exit_code == 2, result.output
+  assert "events_table" in result.output
+  assert len(bq_client.calls) == 1
+  assert "evalbench_import_manifest" in bq_client.calls[0]
+  assert not any(
+      sql.startswith("SELECT DISTINCT session_id") for sql in bq_client.calls
+  )
   client.evaluate.assert_not_called()
 
 

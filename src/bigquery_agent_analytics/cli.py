@@ -2633,11 +2633,16 @@ def evalbench_score(
         endpoint=endpoint,
         connection_id=connection_id,
     )
+    # ``events_table`` makes ``import_sessions`` check the manifest's
+    # binding against --table-id (and re-validate the stored reference)
+    # before any events-table query is submitted; the comparison below is
+    # only a second line of defense on the returned pin.
     pinned = import_sessions(
         target_project=project_id,
         target_dataset=dataset_id,
         job_id=job_id,
         import_version=import_version,
+        events_table=table_id,
         location=location,
         bq_client=client.bq_client,
     )

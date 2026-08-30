@@ -224,6 +224,141 @@ def test_malformed_version_and_job_are_rejected() -> None:
   assert client.calls == []
 
 
+_HOSTILE_EVENTS_TABLES = (
+    # Closes the identifier and appends a second statement.
+    "analytics-project.bqaa.evalbench_agent_events`; DROP TABLE"
+    " `analytics-project.bqaa.agent_events",
+    # Semicolon-delimited script without a closing backtick.
+    "analytics-project.bqaa.evalbench_agent_events; SELECT 1",
+    # Bound to another project / dataset than the one being scored.
+    "other-project.bqaa.evalbench_agent_events",
+    "analytics-project.other.evalbench_agent_events",
+    # Not a canonical three-part reference.
+    "evalbench_agent_events",
+    "analytics-project.bqaa",
+    "analytics-project.bqaa.evalbench_agent_events.extra",
+    # The reserved ADK plugin table.
+    "analytics-project.bqaa.agent_events",
+    "analytics-project.bqaa.AGENT_EVENTS",
+    "",
+)
+
+
+def _hostile_client(events_table: object) -> _FakeClient:
+  manifest = _manifest("v2", datetime(2026, 4, 2, tzinfo=timezone.utc))
+  manifest["events_table"] = events_table
+  return _FakeClient(
+      manifests=[manifest],
+      sessions={"v2": ["evalbench-import:job-123:v2:a"]},
+  )
+
+
+@pytest.mark.parametrize("events_table", _HOSTILE_EVENTS_TABLES + (None, 7))
+def test_hostile_manifest_events_table_raises_before_reading_events(
+    events_table: object,
+) -> None:
+  """A persisted ``events_table`` is re-validated before it is queried.
+
+  The manifest writer and the scorer are different identities; a stored
+  value that is not ``target_project.target_dataset.<mirror table>`` must
+  never be formatted into the session query (confused deputy).
+  """
+  client = _hostile_client(events_table)
+
+  with pytest.raises(ValueError, match="events_table"):
+    evalbench.import_sessions(
+        target_project="analytics-project",
+        target_dataset="bqaa",
+        job_id="job-123",
+        bq_client=client,
+    )
+  assert len(client.calls) == 1
+  assert f"`{_MANIFEST_REF}`" in client.calls[0]["sql"]
+  assert not any(
+      c["sql"].startswith("SELECT DISTINCT session_id") for c in client.calls
+  )
+
+
+def test_hostile_manifest_events_table_is_rejected_for_pinned_version() -> None:
+  client = _hostile_client(_HOSTILE_EVENTS_TABLES[0])
+
+  with pytest.raises(ValueError, match="events_table"):
+    evalbench.import_sessions(
+        target_project="analytics-project",
+        target_dataset="bqaa",
+        job_id="job-123",
+        import_version="v2",
+        bq_client=client,
+    )
+  assert len(client.calls) == 1
+  assert not any(
+      c["sql"].startswith("SELECT DISTINCT session_id") for c in client.calls
+  )
+
+
+def test_expected_events_table_mismatch_raises_before_reading_events() -> None:
+  client = _client()
+
+  with pytest.raises(ValueError) as excinfo:
+    evalbench.import_sessions(
+        target_project="analytics-project",
+        target_dataset="bqaa",
+        job_id="job-123",
+        events_table="other_events",
+        bq_client=client,
+    )
+  message = str(excinfo.value)
+  assert _EVENTS_REF in message
+  assert "analytics-project.bqaa.other_events" in message
+  assert len(client.calls) == 1
+  assert f"`{_MANIFEST_REF}`" in client.calls[0]["sql"]
+
+
+def test_expected_events_table_match_reads_sessions() -> None:
+  client = _client()
+
+  pinned = evalbench.import_sessions(
+      target_project="analytics-project",
+      target_dataset="bqaa",
+      job_id="job-123",
+      events_table="evalbench_agent_events",
+      bq_client=client,
+  )
+
+  assert pinned.events_table == _EVENTS_REF
+  assert pinned.session_ids == (
+      "evalbench-import:job-123:v2:a",
+      "evalbench-import:job-123:v2:b",
+  )
+  assert len(client.calls) == 2
+
+
+@pytest.mark.parametrize(
+    "events_table",
+    [
+        "agent_events",
+        "AGENT_EVENTS",
+        "evalbench_agent_events`; SELECT 1",
+        "",
+        7,
+    ],
+)
+def test_expected_events_table_is_validated_before_any_query(
+    events_table: object,
+) -> None:
+  client = _client()
+
+  with pytest.raises(ValueError, match="events_table"):
+    evalbench.import_sessions(
+        target_project="analytics-project",
+        target_dataset="bqaa",
+        job_id="job-123",
+        events_table=events_table,
+        bq_client=client,
+    )
+  assert client.calls == []
+
+
 def test_trace_filter_pins_job_and_exact_sessions() -> None:
   pinned = evalbench.import_sessions(
       target_project="analytics-project",
