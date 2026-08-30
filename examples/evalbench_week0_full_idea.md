@@ -8,6 +8,15 @@ Retail Support*). Week 0 of
 [`docs/agentforensics_mvp_plan.md`](../docs/agentforensics_mvp_plan.md)
 remains human-gated.
 
+> **Predates the G1 freeze
+> ([#461](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/461)):**
+> this walkthrough is the pre-freeze illustrative story. Production has
+> since frozen taxonomy **v0.1.0** (`g1_frozen: true`) and
+> `failed_sessions` now emits the frozen names (`task/planning`,
+> `finalization`, `tool blockers`) in `taxonomy_categories` — not the
+> mechanical flag ids shown below. Only this example pack keeps the
+> pre-freeze behavior.
+
 What it does show: all **five Week 0 human gates** of the plan of record
 ([#435](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/435))
 worked through as **one concrete story** on the widget-stock failed
@@ -112,6 +121,13 @@ Then the through-line the gates exist to serve:
    scaffold config stays `0.0.0-scaffold`, `g1_frozen: false`.
 10. **`Punchline`** — *This widget-stock session failed because the
     agent never answered; goal_completion=0.0.*
+
+> **Post-[#461](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/461)
+> note:** items 8–9 describe the pre-freeze scaffold and predate the G1
+> freeze. Production `failure_taxonomy.py` is now G1-frozen at v0.1.0
+> (`g1_frozen: true`) and emits the frozen category names
+> (`task/planning`, `finalization`, `tool blockers`) in
+> `taxonomy_categories`, not the mechanical flag ids.
 
 ## What this pack is NOT
 

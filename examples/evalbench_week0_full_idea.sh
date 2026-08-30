@@ -21,6 +21,12 @@
 # false, the six-week clock has NOT started, and no real partner is named
 # (the example partner is "Acme Retail Support").
 #
+# NOTE: this pack PREDATES the G1 freeze (PR #461). Production has since
+# frozen taxonomy v0.1.0 (g1_frozen: true) and failed_sessions now emits the
+# frozen names (task/planning, finalization, tool blockers) in
+# taxonomy_categories — not the mechanical flag ids shown below. Only this
+# example pack keeps the pre-freeze behavior.
+#
 # This pack is --fixture only: no BigQuery, no network, no live judge.
 #
 #   bash examples/evalbench_week0_full_idea.sh --fixture
@@ -133,6 +139,8 @@ echo "                AGENT_STARTING, then silence"
 echo "  it never called check_inventory; no LLM_RESPONSE; no AGENT_COMPLETED"
 echo
 
+# Pre-freeze snapshot: since PR #461, production failed_sessions emits the
+# frozen v0.1.0 names in taxonomy_categories, not these mechanical flag ids.
 echo "=== This session in failed_sessions (mechanical taxonomy_categories) ==="
 echo "The slice-9 consumer attaches the mechanical scaffold categories to"
 echo "the row — which gates tripped, not why the agent failed:"
