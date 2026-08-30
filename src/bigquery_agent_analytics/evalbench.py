@@ -38,6 +38,7 @@ from datetime import timedelta
 from datetime import timezone
 import hashlib
 import json
+import logging
 import math
 import re
 from typing import Any, Optional
@@ -68,7 +69,12 @@ WHERE job_id = @job_id
 DEFAULT_EVENTS_TABLE = "evalbench_agent_events"
 DEFAULT_SCORES_TABLE = "evalbench_scores_imported"
 DEFAULT_MANIFEST_TABLE = "evalbench_import_manifest"
+# The ADK plugin's production table. EvalBench imports publish only to
+# BQAA-owned mirror tables, so this name is rejected before any BigQuery call.
+_RESERVED_DESTINATION_TABLES = frozenset({"agent_events"})
 _IMPORT_FEATURE = "evalbench-import"
+_STAGING_TABLE_TTL = timedelta(hours=6)
+_LOGGER = logging.getLogger(__name__)
 _IMPORT_VERSION_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _COMPARATOR_PATTERN = re.compile(r"^[A-Za-z0-9_.:/-]{1,128}$")
 
@@ -134,24 +140,57 @@ FROM `{manifest_table}`
 WHERE job_id = @job_id AND import_version = @import_version
 """
 
-# One multi-statement transaction publishes events, scores, and the manifest
-# together. DML inside BEGIN/COMMIT is all-or-nothing, so a failure anywhere
-# leaves the previously published version (or nothing) in place.
+# One multi-statement script publishes events, scores, and the manifest
+# together. The manifest guard runs *inside* the transaction: two importers
+# that both observed no manifest row before publishing cannot both commit a
+# different corpus under one immutable version, because BigQuery serializes
+# conflicting DML on the manifest table and the later transaction re-reads the
+# earlier row and raises. DML inside BEGIN/COMMIT is all-or-nothing, so a
+# failure anywhere (including the guard) leaves the previously published
+# version (or nothing) in place.
+_PUBLISH_CONFLICT_MESSAGE = (
+    "evalbench import conflict: this import_version was already published"
+    " with different source fingerprints or destination tables"
+)
+_DESTINATION_CONFLICT_PREDICATE = (
+    "events_table != @events_table OR scores_table != @scores_table"
+)
+_FINGERPRINT_CONFLICT_PREDICATE = (
+    "results_fingerprint != @results_fingerprint"
+    " OR scores_fingerprint != @scores_fingerprint"
+    " OR configs_fingerprint != @configs_fingerprint"
+)
 _PUBLISH_SCRIPT = """\
-BEGIN TRANSACTION;
-DELETE FROM `{events_table}`
-WHERE job_id = @job_id AND import_version = @import_version;
-DELETE FROM `{scores_table}`
-WHERE job_id = @job_id AND import_version = @import_version;
-DELETE FROM `{manifest_table}`
-WHERE job_id = @job_id AND import_version = @import_version;
-INSERT INTO `{events_table}` ({event_columns})
-SELECT {event_columns} FROM `{events_staging}`;
-INSERT INTO `{scores_table}` ({score_columns})
-SELECT {score_columns} FROM `{scores_staging}`;
-INSERT INTO `{manifest_table}` ({manifest_columns})
-SELECT {manifest_columns} FROM `{manifest_staging}`;
-COMMIT TRANSACTION;
+DECLARE conflicting_manifest_rows INT64 DEFAULT 0;
+BEGIN
+  BEGIN TRANSACTION;
+  SET conflicting_manifest_rows = (
+    SELECT COUNT(*)
+    FROM `{manifest_table}`
+    WHERE job_id = @job_id
+      AND import_version = @import_version
+      AND ({conflict_predicate})
+  );
+  IF conflicting_manifest_rows > 0 THEN
+    RAISE USING MESSAGE = '{conflict_message}';
+  END IF;
+  DELETE FROM `{events_table}`
+  WHERE job_id = @job_id AND import_version = @import_version;
+  DELETE FROM `{scores_table}`
+  WHERE job_id = @job_id AND import_version = @import_version;
+  DELETE FROM `{manifest_table}`
+  WHERE job_id = @job_id AND import_version = @import_version;
+  INSERT INTO `{events_table}` ({event_columns})
+  SELECT {event_columns} FROM `{events_staging}`;
+  INSERT INTO `{scores_table}` ({score_columns})
+  SELECT {score_columns} FROM `{scores_staging}`;
+  INSERT INTO `{manifest_table}` ({manifest_columns})
+  SELECT {manifest_columns} FROM `{manifest_staging}`;
+  COMMIT TRANSACTION;
+EXCEPTION WHEN ERROR THEN
+  ROLLBACK TRANSACTION;
+  RAISE;
+END;
 """
 
 _FAILED_SESSIONS_BASE = """\
@@ -174,18 +213,12 @@ policy AS (
 {policy_rows}
   ])
 ),
-score_gate AS (
+comparator_gate AS (
   SELECT
     s.session_id,
-    COUNTIF({fail_predicate}) AS failing_score_count,
-    ARRAY_AGG(
-      IF(
-        {fail_predicate},
-        STRUCT(p.comparator AS comparator, sc.score AS score),
-        NULL
-      )
-      IGNORE NULLS
-    ) AS failing_scores
+    p.comparator,
+    LOGICAL_OR({fail_predicate}) AS failing,
+    MIN(IF(sc.score < p.min_score, sc.score, NULL)) AS failing_score
   FROM sessions AS s
   CROSS JOIN policy AS p
   LEFT JOIN `{scores_table}` AS sc
@@ -193,7 +226,23 @@ score_gate AS (
     AND sc.import_version = @import_version
     AND sc.session_id = s.session_id
     AND sc.comparator = p.comparator
-  GROUP BY s.session_id
+  GROUP BY s.session_id, p.comparator
+),
+score_gate AS (
+  SELECT
+    session_id,
+    COUNTIF(failing) AS failing_score_count,
+    ARRAY_AGG(
+      IF(
+        failing,
+        STRUCT(comparator AS comparator, failing_score AS score),
+        NULL
+      )
+      IGNORE NULLS
+      ORDER BY comparator
+    ) AS failing_scores
+  FROM comparator_gate
+  GROUP BY session_id
 )
 SELECT
   s.session_id,
@@ -325,7 +374,9 @@ class EvalBenchRun:
         ),
     )
 
-  def to_agent_event_rows(self) -> list[dict[str, Any]]:
+  def to_agent_event_rows(
+      self, *, import_version: Optional[str] = None
+  ) -> list[dict[str, Any]]:
     """Convert loaded results to BQAA-compatible synthetic event rows.
 
     Supports both EvalBench's NL2SQL field names
@@ -334,7 +385,16 @@ class EvalBenchRun:
     missing final output omits ``AGENT_COMPLETED``. A missing prompt or
     scenario identifier is a hard error because no valid session can be
     constructed without them.
+
+    ``session_id``/``trace_id`` are ``evalbench:{job_id}:{scenario_id}`` for
+    a plain read. When ``import_version`` is given (as ``materialize`` does)
+    the identity becomes ``evalbench:{job_id}:{import_version}:{scenario_id}``
+    and every synthetic span id derives from it, so retained import versions
+    of one job never share a trace or session in the mirror table and
+    readers that filter only by ``trace_id`` see exactly one version.
     """
+    if import_version is not None:
+      _validate_import_version(import_version)
     config = _config_values(self.config_rows)
     agent = _agent_name(config)
     config_run_time = _first_run_time(self.config_rows)
@@ -366,7 +426,9 @@ class EvalBenchRun:
       run_time = _result_run_time(result) or config_run_time
       missing_run_time = run_time is None
       run_time = run_time or _UNKNOWN_RUN_TIME
-      session_id = f"evalbench:{self.job_id}:{scenario_id}"
+      session_id = _session_identity(
+          self.job_id, scenario_id, import_version=import_version
+      )
       invocation_id = _stable_id(session_id, "invocation", length=32)
       root_span_id = _stable_id(session_id, "user", length=16)
       attributes = _base_attributes(
@@ -377,6 +439,8 @@ class EvalBenchRun:
           scenario_id=scenario_id,
           agent=agent,
       )
+      if import_version is not None:
+        attributes["evalbench_import_version"] = import_version
       if missing_run_time:
         attributes["evalbench_run_time_missing"] = True
 
@@ -495,6 +559,8 @@ class EvalBenchRun:
     Each source row is preserved verbatim in ``source_row``; ``scenario_id``,
     ``session_id``, ``comparator``, and a float ``score`` are lifted out so the
     failed-session view can join scores to events without parsing JSON.
+    ``session_id`` uses the same version-specific identity as
+    ``to_agent_event_rows(import_version=...)`` so score joins stay aligned.
     Unparseable scores become ``NULL`` rather than being dropped.
     """
     _validate_import_version(import_version)
@@ -508,7 +574,9 @@ class EvalBenchRun:
           "import_version": import_version,
           "scenario_id": scenario_id,
           "session_id": (
-              f"evalbench:{self.job_id}:{scenario_id}"
+              _session_identity(
+                  self.job_id, scenario_id, import_version=import_version
+              )
               if scenario_id is not None
               else None
           ),
@@ -565,6 +633,13 @@ class EvalBenchRun:
     no-op (``status == "unchanged"``) and a changed source becomes a new
     version. An explicit ``import_version`` whose stored fingerprints no
     longer match the source raises ``ValueError`` unless ``replace=True``.
+    The same check is repeated inside the publish transaction, so two
+    importers racing on a first-time version cannot both commit different
+    content. A published version is bound to the ``events_table`` /
+    ``scores_table`` recorded in its manifest: re-importing it with other
+    destination tables raises (even with ``replace=True``) instead of
+    reporting a no-op against tables that were never written or orphaning
+    the old rows; use a new ``import_version`` to publish elsewhere.
 
     Args:
       target_dataset: BQAA-owned dataset that receives the mirror tables.
@@ -587,9 +662,9 @@ class EvalBenchRun:
     target_project = target_project or self.project_id
     _validate_source_segment("target_project", target_project)
     _validate_source_segment("target_dataset", target_dataset)
-    _validate_source_segment("events_table", events_table)
-    _validate_source_segment("scores_table", scores_table)
-    _validate_source_segment("manifest_table", manifest_table)
+    _validate_destination_table("events_table", events_table)
+    _validate_destination_table("scores_table", scores_table)
+    _validate_destination_table("manifest_table", manifest_table)
     if imported_at is None:
       imported_at = datetime.now(timezone.utc)
     elif imported_at.tzinfo is None:
@@ -609,7 +684,7 @@ class EvalBenchRun:
     # tables behind or partially created targets.
     event_rows = [
         {**row, "job_id": self.job_id, "import_version": import_version}
-        for row in self.to_agent_event_rows()
+        for row in self.to_agent_event_rows(import_version=import_version)
     ]
     score_rows = self.to_score_rows(import_version=import_version)
     manifest = {
@@ -648,6 +723,13 @@ class EvalBenchRun:
     )
     status = "imported"
     if existing is not None:
+      _check_destination_binding(
+          existing,
+          job_id=self.job_id,
+          import_version=import_version,
+          events_ref=events_ref,
+          scores_ref=scores_ref,
+      )
       unchanged = all(
           existing.get(key) == fingerprints[key] for key in _FINGERPRINT_KEYS
       )
@@ -687,30 +769,49 @@ class EvalBenchRun:
           [manifest],
           _schema(_MANIFEST_SCHEMA_FIELDS),
       )
-      script = _PUBLISH_SCRIPT.format(
-          events_table=events_ref,
-          scores_table=scores_ref,
-          manifest_table=manifest_ref,
+      script = _publish_script(
+          events_ref=events_ref,
+          scores_ref=scores_ref,
+          manifest_ref=manifest_ref,
           events_staging=events_staging,
           scores_staging=scores_staging,
           manifest_staging=manifest_staging,
-          event_columns=", ".join(_EVENT_COLUMNS),
-          score_columns=", ".join(name for name, _, _ in _SCORE_SCHEMA_FIELDS),
-          manifest_columns=", ".join(
-              name for name, _, _ in _MANIFEST_SCHEMA_FIELDS
-          ),
+          replace=replace,
       )
       job_config = bigquery.QueryJobConfig(
-          query_parameters=_import_parameters(self.job_id, import_version)
+          query_parameters=_publish_parameters(
+              job_id=self.job_id,
+              import_version=import_version,
+              fingerprints=fingerprints,
+              events_ref=events_ref,
+              scores_ref=scores_ref,
+          )
       )
       job_config = with_sdk_labels(job_config, feature=_IMPORT_FEATURE)
       query_args: dict[str, Any] = {"job_config": job_config}
       if self.location is not None:
         query_args["location"] = self.location
-      client.query(script, **query_args).result()
+      try:
+        client.query(script, **query_args).result()
+      except ValueError:
+        raise
+      except Exception as exc:  # noqa: BLE001
+        if _PUBLISH_CONFLICT_MESSAGE in str(exc):
+          raise ValueError(
+              f"EvalBench job {self.job_id!r} import_version "
+              f"{import_version!r} was published concurrently with different "
+              "source fingerprints or destination tables; nothing was "
+              "written. Re-run to get status 'unchanged', or pass a new "
+              "import_version (or omit it to derive one from the source)"
+          ) from exc
+        raise
     finally:
-      for staging_ref in (events_staging, scores_staging, manifest_staging):
-        client.delete_table(staging_ref, not_found_ok=True)
+      # Staging cleanup is best-effort: a failed DROP must not turn a
+      # committed publish into an error (or mask the real failure), and the
+      # staging tables carry an expiration so leftovers cannot accumulate.
+      _drop_staging_tables(
+          client, (events_staging, scores_staging, manifest_staging)
+      )
 
     return EvalBenchImportResult(
         job_id=self.job_id,
@@ -942,6 +1043,102 @@ def _import_parameters(
   ]
 
 
+def _publish_parameters(
+    *,
+    job_id: str,
+    import_version: str,
+    fingerprints: Mapping[str, str],
+    events_ref: str,
+    scores_ref: str,
+) -> list[bigquery.ScalarQueryParameter]:
+  """``_import_parameters`` plus the values the transaction guard compares."""
+  parameters = _import_parameters(job_id, import_version)
+  for key in _FINGERPRINT_KEYS:
+    parameters.append(
+        bigquery.ScalarQueryParameter(key, "STRING", fingerprints[key])
+    )
+  parameters.append(
+      bigquery.ScalarQueryParameter("events_table", "STRING", events_ref)
+  )
+  parameters.append(
+      bigquery.ScalarQueryParameter("scores_table", "STRING", scores_ref)
+  )
+  return parameters
+
+
+def _publish_script(
+    *,
+    events_ref: str,
+    scores_ref: str,
+    manifest_ref: str,
+    events_staging: str,
+    scores_staging: str,
+    manifest_staging: str,
+    replace: bool,
+) -> str:
+  """Render the publish transaction with its in-transaction manifest guard.
+
+  Without ``replace`` the guard rejects an existing manifest row whose
+  fingerprints *or* destination tables differ from this import; with
+  ``replace`` fingerprints may drift but the destination binding still
+  holds, so a version can never be silently relocated.
+  """
+  if replace:
+    conflict_predicate = _DESTINATION_CONFLICT_PREDICATE
+  else:
+    conflict_predicate = (
+        _FINGERPRINT_CONFLICT_PREDICATE
+        + " OR "
+        + _DESTINATION_CONFLICT_PREDICATE
+    )
+  return _PUBLISH_SCRIPT.format(
+      events_table=events_ref,
+      scores_table=scores_ref,
+      manifest_table=manifest_ref,
+      events_staging=events_staging,
+      scores_staging=scores_staging,
+      manifest_staging=manifest_staging,
+      conflict_predicate=conflict_predicate,
+      conflict_message=_PUBLISH_CONFLICT_MESSAGE,
+      event_columns=", ".join(_EVENT_COLUMNS),
+      score_columns=", ".join(name for name, _, _ in _SCORE_SCHEMA_FIELDS),
+      manifest_columns=", ".join(
+          name for name, _, _ in _MANIFEST_SCHEMA_FIELDS
+      ),
+  )
+
+
+def _check_destination_binding(
+    existing: Mapping[str, Any],
+    *,
+    job_id: str,
+    import_version: str,
+    events_ref: str,
+    scores_ref: str,
+) -> None:
+  """Reject a re-import whose destination tables differ from the manifest."""
+  stored = (existing.get("events_table"), existing.get("scores_table"))
+  if stored == (events_ref, scores_ref):
+    return
+  raise ValueError(
+      f"EvalBench job {job_id!r} import_version {import_version!r} is "
+      f"published in events_table={stored[0]!r} scores_table={stored[1]!r}, "
+      f"not the requested events_table={events_ref!r} "
+      f"scores_table={scores_ref!r}; a version stays bound to the tables in "
+      "its manifest. Point at those tables, or publish to the new tables "
+      "under a new import_version"
+  )
+
+
+def _session_identity(
+    job_id: str, scenario_id: str, *, import_version: Optional[str]
+) -> str:
+  """Session/trace identity shared by event rows and score rows."""
+  if import_version is None:
+    return f"evalbench:{job_id}:{scenario_id}"
+  return f"evalbench:{job_id}:{import_version}:{scenario_id}"
+
+
 def _validate_import_version(import_version: Any) -> None:
   if not isinstance(
       import_version, str
@@ -971,11 +1168,7 @@ def _fingerprint_rows(rows: tuple[dict[str, Any], ...]) -> str:
 
 
 def _score_scenario_id(score: Mapping[str, Any]) -> Optional[str]:
-  for key in ("id", "eval_id", "scenario_id", "prompt_id"):
-    text = _usable_text(score.get(key))
-    if text is not None:
-      return text
-  return None
+  return _find_scenario_id(score)
 
 
 def _score_comparator(score: Mapping[str, Any]) -> Optional[str]:
@@ -1070,6 +1263,20 @@ def _ensure_import_tables(
   client.create_table(manifest, exists_ok=True)
 
 
+def _drop_staging_tables(client: Any, staging_refs: tuple[str, ...]) -> None:
+  for staging_ref in staging_refs:
+    try:
+      client.delete_table(staging_ref, not_found_ok=True)
+    except Exception as exc:  # noqa: BLE001
+      _LOGGER.warning(
+          "evalbench import: could not drop staging table %s (%s); it expires"
+          " automatically after %s",
+          staging_ref,
+          exc,
+          _STAGING_TABLE_TTL,
+      )
+
+
 def _read_manifest(
     client: Any,
     *,
@@ -1105,15 +1312,17 @@ def _load_staging(
   Load jobs write to managed storage, so the publish transaction that runs
   next sees every row (streaming inserts would sit in a buffer the DML
   cannot read). Nested ``content``/``attributes`` objects are loaded as JSON
-  values via newline-delimited JSON.
+  values via newline-delimited JSON. The staging table is created with an
+  expiration first, so a staging table that outlives a crashed import (or a
+  failed cleanup) is garbage-collected by BigQuery.
   """
+  table = bigquery.Table(staging_ref, schema=schema)
+  table.expires = datetime.now(timezone.utc) + _STAGING_TABLE_TTL
+  client.create_table(table, exists_ok=True)
   if not rows:
-    client.create_table(
-        bigquery.Table(staging_ref, schema=schema), exists_ok=True
-    )
     return
   job_config = bigquery.LoadJobConfig(
-      write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+      write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
       source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
       autodetect=False,
       schema=schema,
@@ -1172,23 +1381,48 @@ def _validate_source_segment(name: str, value: Any) -> None:
     )
 
 
-def _scenario_id(result: Mapping[str, Any]) -> str:
-  scenario = _as_mapping(_structured(result.get("scenario")))
-  nested_result = _as_mapping(_structured(result.get("eval_results")))
+def _validate_destination_table(name: str, value: Any) -> None:
+  """Validate a mirror table name and reject the ADK plugin's ``agent_events``.
+
+  Runs before any BigQuery operation so the production telemetry table can
+  never be created, staged into, or published to by an EvalBench import.
+  """
+  _validate_source_segment(name, value)
+  if value.lower() in _RESERVED_DESTINATION_TABLES:
+    raise ValueError(
+        f"{name} must not be the reserved ADK plugin table {value!r}; "
+        "EvalBench imports publish only to BQAA-owned mirror tables such as "
+        f"{DEFAULT_EVENTS_TABLE!r}"
+    )
+
+
+def _find_scenario_id(row: Mapping[str, Any]) -> Optional[str]:
+  """Locate the scenario id in a result or score row (same lookup order)."""
+  scenario = _as_mapping(_structured(row.get("scenario")))
+  nested_result = _as_mapping(_structured(row.get("eval_results")))
   nested_scenario = _as_mapping(_structured(nested_result.get("scenario")))
   for value in (
-      result.get("id"),
-      result.get("eval_id"),
+      row.get("id"),
+      row.get("eval_id"),
+      row.get("scenario_id"),
       scenario.get("id"),
       nested_result.get("eval_id"),
       nested_result.get("id"),
+      nested_result.get("scenario_id"),
       nested_scenario.get("id"),
-      result.get("prompt_id"),
+      row.get("prompt_id"),
   ):
     text = _usable_text(value)
     if text is not None:
       return text
-  raise ValueError("EvalBench result is missing id/eval_id")
+  return None
+
+
+def _scenario_id(result: Mapping[str, Any]) -> str:
+  scenario_id = _find_scenario_id(result)
+  if scenario_id is None:
+    raise ValueError("EvalBench result is missing id/eval_id")
+  return scenario_id
 
 
 def _prompt(result: Mapping[str, Any]) -> Optional[str]:
@@ -1448,9 +1682,12 @@ def _source_error_message(
   returncode = result.get("returncode")
   if _failed_returncode(returncode):
     parts.append(f"returncode: {returncode}")
-    stderr = _usable_text(error_fields.get("stderr"))
-    if stderr is not None:
-      parts.append(f"stderr: {stderr}")
+  # stderr is a process failure in its own right: a process that exited 0
+  # and produced a final response but also wrote to stderr is still not a
+  # clean completion, so it must not be published as status OK.
+  stderr = _usable_text(error_fields.get("stderr"))
+  if stderr is not None:
+    parts.append(f"stderr: {stderr}")
   return "; ".join(parts) if parts else None
 
 
@@ -1664,6 +1901,12 @@ def _json_safe(value: Any) -> Any:
     return value.isoformat()
   if isinstance(value, date):
     return value.isoformat()
+  if isinstance(value, float) and not math.isfinite(value):
+    # JSON has no NaN/Infinity; BigQuery's NDJSON loader rejects the Python
+    # extensions, so keep the value as text rather than failing the load.
+    if math.isnan(value):
+      return "NaN"
+    return "Infinity" if value > 0 else "-Infinity"
   if value is None or isinstance(value, (str, int, float, bool)):
     return value
   return str(value)

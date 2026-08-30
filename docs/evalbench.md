@@ -85,9 +85,19 @@ rather than silently reproducing the first one.
 Each scenario uses this identity:
 
 ```text
+# plain read (to_agent_event_rows())
 session_id = trace_id = evalbench:{job_id}:{scenario_id}
+# published snapshot (materialize / to_agent_event_rows(import_version=...))
+session_id = trace_id = evalbench:{job_id}:{import_version}:{scenario_id}
 agent      = evalbench:{orchestrator}:{generator}
 ```
+
+Published identities are version-specific, and every synthetic span and
+invocation id derives from them, so retained import versions of one job never
+share a trace or session in the mirror table: a reader that filters only by
+`trace_id` (such as `Client.get_trace`) sees exactly one version. Imported
+score rows use the same identity, so score joins stay aligned. Published rows
+also carry `attributes.evalbench_import_version`.
 
 `orchestrator`, `generator`, and the run timestamp come from EvalBench's
 flattened `configs` rows. If a historical run lacks config metadata, the agent
@@ -121,7 +131,13 @@ for every model used by the run.
 
 Source failures surface as `status = 'ERROR'` plus `error_message`: a
 non-zero (or non-numeric) `returncode`, `stderr`, and the `*_error` columns
-are collected into `attributes.evalbench_error_fields`.
+are collected into `attributes.evalbench_error_fields`. Usable `stderr` is a
+process failure on its own, independent of `returncode`: a scenario that
+exited `0` and produced a final response but also wrote to `stderr` is
+published with `status = 'ERROR'` on its terminal row, never as a clean `OK`.
+
+The destination table names are validated before any BigQuery call, and the
+ADK plugin's production table name `agent_events` is rejected outright.
 
 ## Materialize A Snapshot
 
@@ -153,20 +169,45 @@ Event, score, and manifest rows are loaded into per-import staging tables
 multi-statement transaction:
 
 ```sql
-BEGIN TRANSACTION;
-DELETE FROM `…evalbench_agent_events`     WHERE job_id = @job_id AND import_version = @import_version;
-DELETE FROM `…evalbench_scores_imported`  WHERE job_id = @job_id AND import_version = @import_version;
-DELETE FROM `…evalbench_import_manifest`  WHERE job_id = @job_id AND import_version = @import_version;
-INSERT INTO `…evalbench_agent_events`    (…) SELECT … FROM `…evalbench_agent_events_staging_…`;
-INSERT INTO `…evalbench_scores_imported` (…) SELECT … FROM `…evalbench_scores_imported_staging_…`;
-INSERT INTO `…evalbench_import_manifest` (…) SELECT … FROM `…evalbench_import_manifest_staging_…`;
-COMMIT TRANSACTION;
+DECLARE conflicting_manifest_rows INT64 DEFAULT 0;
+BEGIN
+  BEGIN TRANSACTION;
+  -- Compare-and-swap: re-check the manifest *inside* the transaction.
+  SET conflicting_manifest_rows = (
+    SELECT COUNT(*) FROM `…evalbench_import_manifest`
+    WHERE job_id = @job_id AND import_version = @import_version
+      AND (results_fingerprint != @results_fingerprint OR …   -- omitted with replace=True
+           OR events_table != @events_table OR scores_table != @scores_table)
+  );
+  IF conflicting_manifest_rows > 0 THEN RAISE USING MESSAGE = '…'; END IF;
+  DELETE FROM `…evalbench_agent_events`     WHERE job_id = @job_id AND import_version = @import_version;
+  DELETE FROM `…evalbench_scores_imported`  WHERE job_id = @job_id AND import_version = @import_version;
+  DELETE FROM `…evalbench_import_manifest`  WHERE job_id = @job_id AND import_version = @import_version;
+  INSERT INTO `…evalbench_agent_events`    (…) SELECT … FROM `…evalbench_agent_events_staging_…`;
+  INSERT INTO `…evalbench_scores_imported` (…) SELECT … FROM `…evalbench_scores_imported_staging_…`;
+  INSERT INTO `…evalbench_import_manifest` (…) SELECT … FROM `…evalbench_import_manifest_staging_…`;
+  COMMIT TRANSACTION;
+EXCEPTION WHEN ERROR THEN
+  ROLLBACK TRANSACTION;
+  RAISE;
+END;
 ```
 
 There is no delete-then-append window: a failure before `COMMIT` leaves the
-previously published version (or nothing) in place, and staging tables are
-always dropped. Mapping errors (missing prompt, duplicate scenario ids) are
-raised before any BigQuery write.
+previously published version (or nothing) in place. Mapping errors (missing
+prompt, duplicate scenario ids) are raised before any BigQuery write.
+
+The manifest check runs both before staging (so an unchanged source is a
+cheap no-op) and again inside the transaction. Two importers that both saw no
+manifest row for the same explicit `import_version` therefore cannot both
+commit different content: BigQuery serializes conflicting DML on the manifest
+table, the later transaction re-reads the earlier row, and the guard raises
+(`ValueError` in Python, nothing written). Re-running that importer then
+reports `unchanged` or the fingerprint error as usual.
+
+Staging tables are created with a six-hour expiration and dropped after
+`COMMIT` on a best-effort basis; a failed drop is logged and never turns a
+committed publish into an error.
 
 ### Import versions and idempotency
 
@@ -180,9 +221,15 @@ order-independent fingerprints of the source `results`, `scores`, and
 | Manifest row exists with identical fingerprints | nothing written, `status = "unchanged"` |
 | Same as above with `replace=True` | atomically re-published, `status = "replaced"` |
 | Explicit `import_version` whose fingerprints changed | `ValueError` (pass a new version, omit it to derive one, or `replace=True`) |
+| Manifest row exists but records other `events_table`/`scores_table` | `ValueError`, even with `replace=True`; nothing written |
+| Two importers race on a first-time version with different content | the first commit wins; the second raises `ValueError` from the in-transaction guard |
 | Derived version and the source changed | a new `import_version`; earlier versions are retained |
 
-A given `(job_id, import_version)` therefore never accumulates duplicates.
+A given `(job_id, import_version)` therefore never accumulates duplicates, and
+a published version stays bound to the destination tables in its manifest.
+An `unchanged` result always refers to the tables that were actually written;
+to publish the same version elsewhere, choose a new `import_version` (moving
+rows between tables is not supported, so `replace=True` cannot orphan them).
 
 ### Manifest
 
@@ -206,7 +253,8 @@ The manifest row binds every published version to its source:
 scenario **passed**. A session is *failed* when any of the following holds:
 
 - **process failure** — any event has `status = 'ERROR'` (non-zero
-  `returncode`, `stderr`, or a source `*_error` column);
+  `returncode`, usable `stderr` regardless of `returncode`, or a source
+  `*_error` column);
 - **missing completion** — the session has no `AGENT_COMPLETED` event;
 - **score failure** — the per-benchmark `EvalScorePolicy` is not met.
 
@@ -261,8 +309,10 @@ bq-agent-sdk evalbench-import \
 
 The command prints the `EvalBenchImportResult` (including the manifest) and
 exits `0` for `imported`, `replaced`, or `unchanged`, and `2` on invalid
-input, a changed source under an explicit `--import-version`, or a BigQuery
-error. There is no `evalbench-score` command.
+input (including `--events-table agent_events`, which is rejected before any
+BigQuery call), a changed source under an explicit `--import-version`, a
+version already bound to other destination tables, or a BigQuery error. There
+is no `evalbench-score` command.
 
 ## Why These Fields Matter
 

@@ -166,6 +166,33 @@ def test_evalbench_import_rejects_bad_snapshot_timestamp(
   assert calls == []
 
 
+@pytest.mark.parametrize("option", ["--events-table", "--scores-table"])
+def test_evalbench_import_rejects_reserved_agent_events_table(
+    monkeypatch: pytest.MonkeyPatch, option: str
+) -> None:
+  calls = _patch_from_bigquery(monkeypatch)
+  result = runner.invoke(
+      app,
+      [
+          "evalbench-import",
+          "--project-id",
+          "source-project",
+          "--evalbench-dataset",
+          "evalbench",
+          "--job-id",
+          "job-123",
+          "--target-dataset",
+          "bqaa",
+          option,
+          "agent_events",
+      ],
+  )
+  assert result.exit_code == 2, result.output
+  assert "reserved ADK plugin table 'agent_events'" in result.output
+  # Rejected before any BigQuery read or write.
+  assert calls == []
+
+
 def test_evalbench_import_surfaces_materialize_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

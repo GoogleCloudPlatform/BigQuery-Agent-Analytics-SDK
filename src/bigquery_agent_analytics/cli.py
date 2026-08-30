@@ -2317,12 +2317,19 @@ def evalbench_import(
 
   Exit codes:
       0 — imported, replaced, or unchanged (see ``status`` in the output).
-      2 — invalid input, a changed source under an explicit
-          --import-version, or a BigQuery error.
+      2 — invalid input (including the reserved ``agent_events`` table
+          name), a changed source under an explicit --import-version, a
+          version already bound to other destination tables, or a BigQuery
+          error.
   """
   try:
     from .evalbench import _parse_timestamp
+    from .evalbench import _validate_destination_table
     from .evalbench import EvalBenchRun
+
+    # Reject the reserved ADK plugin table before any BigQuery read or write.
+    _validate_destination_table("events_table", events_table)
+    _validate_destination_table("scores_table", scores_table)
 
     parsed_snapshot = None
     if snapshot_at is not None:
