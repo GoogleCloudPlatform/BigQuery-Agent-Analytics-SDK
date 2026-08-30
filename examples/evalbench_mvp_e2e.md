@@ -1,84 +1,107 @@
-# EvalBench MVP end to end: import → failed-sessions → score
+# EvalBench MVP end to end: one failed session, import → failed-sessions → score
 
 `examples/evalbench_mvp_e2e.sh` walks the EvalBench import bridge
 ([#435](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/435),
 [#97](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/97))
-on **one EvalBench job**, in the order a user would run it: mirror the job
-into BigQuery Agent Analytics, list the failed sessions of that one
-published version, then score that same version with the LLM judge.
-Reference for every command is in [`docs/evalbench.md`](../docs/evalbench.md).
+by following **one real session that failed** through the three CLI
+steps. Reference for every command is in
+[`docs/evalbench.md`](../docs/evalbench.md).
 
 ```bash
-bash examples/evalbench_mvp_e2e.sh --fixture   # offline, recordable
-bash examples/evalbench_mvp_e2e.sh --synth     # live, job built from real traces
-bash examples/evalbench_mvp_e2e.sh             # live, against an EvalBench job
+bash examples/evalbench_mvp_e2e.sh --fixture   # offline: the story below, recordable
+bash examples/evalbench_mvp_e2e.sh --synth     # live: build the job from the real traces, then steps 1-3
+bash examples/evalbench_mvp_e2e.sh             # live: steps 1-3 on an existing EvalBench job
 ```
 
-## The three steps
+`--fixture` is the path to record: no BigQuery, no live CLI, exit `0`.
 
-| Step | Command | What it does | What you should see |
-|------|---------|--------------|---------------------|
-| 1 | `bq-agent-sdk evalbench-import` | Reads the job's `results`/`scores`/`configs` rows from the EvalBench dataset and publishes them atomically as one `import_version` into the BQAA-owned mirror tables (`evalbench_agent_events`, `evalbench_scores_imported`), records the version in `evalbench_import_manifest`, and pins the `evalbench_failed_sessions` view to it. | The `EvalBenchImportResult`: `status` (`imported` / `replaced` / `unchanged`), row counts, the `manifest` row (source fingerprints, `generation_id`, `view_policy`), and `failed_sessions_view`. |
-| 2 | `bq-agent-sdk evalbench-failed-sessions` | Resolves exactly one published version from the manifest (the job's latest successful import unless `EVALBENCH_IMPORT_VERSION` pins one) and lists its failed sessions — the W0.4 denominator. | One row per failed session: versioned `session_id` (`evalbench-import:{job_id}:{import_version}:{scenario_id}`), `process_failed`, `missing_completion`, `score_failed`, `failing_scores`. Each `session_id` drills into `Client.get_session_trace` without mixing versions. |
-| 3 | `bq-agent-sdk evalbench-score` | Runs `LLMAsJudge` (default `correctness`) through the ordinary `Client.evaluate` path over the mirror table, narrowed to the pinned session ids of that same version. The ADK plugin's `agent_events` table is never read. | The ordinary `EvaluationReport` (`total_sessions`, `pass_rate`, `aggregate_scores`) plus `details.evalbench` naming the scored `job_id`, `import_version`, `events_table`, and `pinned_sessions`. |
+## The session
 
-Each step prints a banner (`=== Step 1: evalbench-import ===`, and so on)
-followed by the command it runs and that command's output, so a recording
-and `tests/test_evalbench_mvp_e2e.py` can both follow along.
+A terse support agent was asked how many widgets are in stock and never
+answered. The session is a real trace from `bqaa_e2e_real.agent_events`
+(reference project `test-project-0728-467323`, 7 sessions / 77 events of
+`support_agent` handling inventory and ticket requests), folded by
+`--synth` into scenario `7e352c34` of EvalBench job `mvp-e2e-real-traces`:
 
-Step 3 here exits `0` even when sessions fail the judge — the demo shows
-the scorecard, it does not gate on it. The CI gate form (step 3 alone with
+| | |
+|---|---|
+| agent | `support_agent` — *"You are a terse support agent. Use tools when asked about inventory or tickets. Keep answers to one sentence."* |
+| user | `real-user-0` |
+| session_id | `7e352c34-4c1c-4395-acd5-fb3c8f215346` |
+| scenario_id / eval_id | `7e352c34` |
+| prompt | `How many widgets are in stock?` |
+| events | `USER_MESSAGE_RECEIVED` → `INVOCATION_STARTING` → `AGENT_STARTING`, then silence |
+| final_response / tool_calls / error_message | `null` / `[]` / `null`; `returncode` `1` |
+
+Sibling session `ab7535a5` asked the same question and answered
+*"There are 0 widgets in stock."* — so the agent could do it; this session
+just never did.
+
+## The story, in six beats
+
+The fixture prints these in order, each under an `=== ... ===` banner a
+viewer can read; `tests/test_evalbench_mvp_e2e.py` asserts the same order.
+
+1. **`This agent was asked to check widget stock. Here is the session.`** —
+   agent, system prompt, user, `session_id`, `scenario_id`.
+2. **`What happened`** — the prompt verbatim, `agent: (no response)`, the
+   three events and the silence after `AGENT_STARTING`: no
+   `check_inventory` tool call, no `LLM_RESPONSE`, no `AGENT_COMPLETED`.
+3. **`Import those traces into EvalBench so we can query this failure`**,
+   then `=== Step 1: evalbench-import ===` — `bq-agent-sdk evalbench-import`
+   mirrors the job's `results`/`scores`/`configs` into the BQAA-owned
+   tables as one `import_version`, records the version in
+   `evalbench_import_manifest` (`generation_id`, source fingerprints,
+   `view_policy`), and pins the `evalbench_failed_sessions` view to it.
+   The result: `status: imported`, 7 scenarios → 27 events + 7 score rows,
+   `failed_sessions_view`. We import so the next step can list this
+   session.
+4. **`This session in failed_sessions`**, then
+   `=== Step 2: evalbench-failed-sessions ===` — 1 of 7 sessions failed,
+   and this is the row:
+
+   ```
+   session_id                                        scenario_id  process_failed  missing_completion  score_failed  failing_scores
+   evalbench-import:mvp-e2e-real-traces:v1:7e352c34  7e352c34     True            True                True          [{"comparator": "goal_completion", "score": 0.0}]
+   ```
+
+   `process_failed` (returncode 1), `missing_completion` (no
+   `AGENT_COMPLETED`), `score_failed` (`goal_completion` 0.0 misses
+   `--min-score goal_completion=1`). The `session_id` embeds the version,
+   so `Client.get_session_trace` drills into `v1`'s rows only.
+5. **`Score this session`**, then `=== Step 3: evalbench-score ===` —
+   `Client.evaluate` + `LLMAsJudge` (`correctness`) over the same version,
+   narrowed to its 7 pinned session ids; `details.evalbench` names the
+   job, version, table, and `pinned_sessions: 7`. For this scenario the
+   imported `goal_completion` is 0.0, yet the live judge scored the
+   unanswered session `1.0` with `llm_feedback: null` — there was nothing
+   to judge. That is why `failed_sessions`, not the judge, is the W0.4
+   denominator.
+6. **`Punchline`** — one sentence:
+   *This widget-stock session failed because the agent never answered;
+   goal_completion=0.0.*
+
+Step 3 exits `0` even when sessions fail the judge — the demo shows the
+scorecard, it does not gate on it. The CI gate form (step 3 alone with
 `--exit-code`) stays in
 [`examples/evalbench_score_gate.sh`](evalbench_score_gate.sh).
 
-## Environment variables (live mode)
+## Modes
 
-| Variable | Meaning |
-|----------|---------|
-| `BQ_AGENT_PROJECT` | Project holding the BQAA mirror tables (import target; steps 2 and 3 read from here). |
-| `BQ_AGENT_DATASET` | BQAA-owned target dataset (must exist; the tables and view are auto-created). |
-| `EVALBENCH_PROJECT` | Project holding the EvalBench BigQuery dataset (import source). |
-| `EVALBENCH_DATASET` | The EvalBench dataset with `results`, `scores`, `configs`. |
-| `EVALBENCH_JOB_ID` | The one EvalBench `job_id` to walk. |
-| `EVALBENCH_IMPORT_VERSION` | Optional. Pins one version for all three steps; otherwise step 1 mints one and steps 2–3 use the job's latest successful import. |
-| `EVALBENCH_JUDGE` | Optional. `correctness` (default), `hallucination`, or `sentiment` for step 3. |
-| `EVALBENCH_MIN_SCORE` | Optional. A `COMPARATOR=MIN` gate passed as `--min-score` to steps 1 and 2 (rendered into the failed-session view). `--synth` defaults it to `goal_completion=1`; set it to `""` to omit. |
+**`--fixture`** (or `EVALBENCH_FIXTURE=1`) prints the six beats above with
+sample output shaped like each command's real output. Names default to
+`analytics-project.bqaa` (mirror) / `benchmark-project.evalbench` (source)
+/ job `mvp-e2e-real-traces` / `import_version` `v1`; `BQ_AGENT_PROJECT`,
+`BQ_AGENT_DATASET`, `EVALBENCH_PROJECT`, `EVALBENCH_DATASET`,
+`EVALBENCH_JOB_ID` and `EVALBENCH_IMPORT_VERSION` rename what is printed
+(including the versioned `session_id`); the protagonist scenario stays
+`7e352c34`. If `--fixture` and `--synth` are both given, `--fixture` wins
+and nothing is written.
 
-Missing required variables stop the script (exit `1`) before any command
-runs. A step's own exit code (`2` for invalid input, an unpublished
-job/version, or a BigQuery error — see the CLI section of
-[`docs/evalbench.md`](../docs/evalbench.md#cli)) stops the script with exit `2`.
-
-The intended job family is **gemini-cli-tools**: supply a real
-`EVALBENCH_JOB_ID` from an EvalBench run of the gemini-cli tools suite and
-the script mirrors, lists, and scores that run. Any EvalBench job whose
-`results`/`scores`/`configs` rows carry the `job_id` works the same way.
-
-## `--fixture` vs live
-
-`--fixture` (or `EVALBENCH_FIXTURE=1`) is the offline path: **no BigQuery
-call is made and the live CLI is not invoked.** The script prints the same
-three banners and, under each, the command it would run and annotated
-sample output shaped like that command's real output (an import result with
-`manifest` and `failed_sessions_view`, a small failed-sessions table, a
-score report with `details.evalbench`), then exits `0`. Sample identities
-default to `analytics-project.bqaa` / `benchmark-project.evalbench` / job
-`gemini-cli-tools-2026-08-30`; set the environment variables above to
-change the names that appear. This is the path to record, and the path
-`tests/test_evalbench_mvp_e2e.py` runs.
-
-Live mode requires the environment variables, needs Application Default
-Credentials with read access to the EvalBench dataset and write access to
-the target dataset, and calls the three CLIs in order. Step 3 additionally
-needs the `AI.GENERATE`-capable connection `bq-agent-sdk evaluate` uses
-(`--endpoint` / `--connection-id` defaults apply).
-
-## `--synth`: the live demo built from real traces
-
-`--synth` (or `EVALBENCH_SYNTH=1`) is live mode for when **no EvalBench
-run exists**. It adds a step 0 that runs
+**`--synth`** (or `EVALBENCH_SYNTH=1`) replays the story live when no
+EvalBench run exists. It adds a step 0 that runs
 [`examples/evalbench_synth_from_traces.py`](evalbench_synth_from_traces.py)
-and then runs steps 1–3 unchanged on the job it produced:
+and then runs steps 1–3 on the job it produced:
 
 ```
 === Step 0: synthesize EvalBench tables from real traces ===
@@ -87,6 +110,39 @@ and then runs steps 1–3 unchanged on the job it produced:
 { "job_id": "mvp-e2e-real-traces", "source_event_count": 77, "scenarios": 7,
   "completed": 6, "not_completed": 1, "skipped_sessions": [], ... }
 ```
+
+The recorded run on the reference project produced exactly the story
+above: 7 scenarios, 6 completed, 1 (`7e352c34`) stopped after
+`AGENT_STARTING`; step 1 imported 27 events + 7 score rows; step 2 listed
+that one session; step 3's `correctness` judge scored all 7 sessions 1.0,
+the unanswered one with `llm_feedback: null`.
+
+**Live** (no flag) runs steps 1–3 on an EvalBench job you already have.
+It needs Application Default Credentials with read access to the
+EvalBench dataset and write access to the target dataset; step 3
+additionally needs the `AI.GENERATE`-capable connection
+`bq-agent-sdk evaluate` uses (`--endpoint` / `--connection-id` defaults
+apply). Missing required variables stop the script (exit `1`) before any
+command runs; a step's own exit code (`2` for invalid input, an
+unpublished job/version, or a BigQuery error — see
+[`docs/evalbench.md`](../docs/evalbench.md#cli)) stops it with exit `2`.
+
+## Environment variables
+
+| Variable | Live mode | `--synth` default |
+|----------|-----------|-------------------|
+| `BQ_AGENT_PROJECT` | Required. Project holding the BQAA mirror tables. | gcloud's current project |
+| `BQ_AGENT_DATASET` | Required. BQAA-owned target dataset (must exist; tables and view are auto-created). | `bqaa_evalbench_mvp_mirror` |
+| `EVALBENCH_PROJECT` | Required. Project holding the EvalBench dataset. | `= BQ_AGENT_PROJECT` (step 0 builds both datasets in one project; a different value is an error) |
+| `EVALBENCH_DATASET` | Required. The EvalBench dataset with `results`, `scores`, `configs`. | `bqaa_evalbench_mvp_demo` (built by step 0) |
+| `EVALBENCH_JOB_ID` | Required. The one EvalBench `job_id` to walk. | `mvp-e2e-real-traces` |
+| `EVALBENCH_SOURCE_TABLE` | — | `bqaa_e2e_real.agent_events` — the real traces (`dataset.table` or `project.dataset.table`) |
+| `EVALBENCH_IMPORT_VERSION` | Optional. Pins one version for all three steps; otherwise step 1 mints one and steps 2–3 use the job's latest successful import. | same |
+| `EVALBENCH_MIN_SCORE` | Optional `COMPARATOR=MIN` gate passed as `--min-score` to steps 1 and 2. | `goal_completion=1` (`""` to omit) |
+| `EVALBENCH_JUDGE` | Optional. `correctness` (default), `hallucination`, or `sentiment` for step 3. | same |
+| `EVALBENCH_PYTHON` | — | `python3` — an interpreter with `google-cloud-bigquery` (e.g. the repo venv's) |
+
+## How step 0 folds a trace into a scenario
 
 The synthesizer reads a real BQAA `agent_events` table (the ADK plugin's
 output for an agent that actually ran) and folds **each trace into one
@@ -98,9 +154,9 @@ and user B's answer:
 
 | EvalBench column | Taken from the trace's events |
 |------------------|--------------------------------|
-| `results.id` / `eval_id` | The first eight characters of the `session_id`; the full id if that would collide; `session_id:user_id:root_agent_name` if session ids themselves are reused (components percent-escaped, `:` → `%3A`, `%` → `%25`, `~` → `%7E`; a NULL component is `~`, so distinct identities never share an id). |
+| `results.id` / `eval_id` | The first eight characters of the `session_id` (`7e352c34`); the full id if that would collide; `session_id:user_id:root_agent_name` if session ids themselves are reused (components percent-escaped, `:` → `%3A`, `%` → `%25`, `~` → `%7E`; a NULL component is `~`, so distinct identities never share an id). |
 | `results.prompt` / `nl_prompt` | `USER_MESSAGE_RECEIVED` → `content.text_summary`. Required: a trace without one is **skipped**, never given an invented prompt. |
-| `results.final_response` / `stdout` | `AGENT_COMPLETED` text if the plugin logged any, else the last `LLM_RESPONSE` → `content.response` (the ADK plugin logs `AGENT_COMPLETED` without content; `AGENT_RESPONSE` is accepted as an alias). Omitted when the trace never answered. |
+| `results.final_response` / `stdout` | `AGENT_COMPLETED` text if the plugin logged any, else the last `LLM_RESPONSE` → `content.response` (the ADK plugin logs `AGENT_COMPLETED` without content; `AGENT_RESPONSE` is accepted as an alias). Omitted when the trace never answered — as for `7e352c34`. |
 | `results.returncode` | `0` if an `AGENT_COMPLETED` event exists, else `1` (*completed*, not *correct*). |
 | `results.run_time` | Timestamp of the `USER_MESSAGE_RECEIVED` event. |
 | `results.tool_calls` | `TOOL_STARTING` / `TOOL_COMPLETED` (or `TOOL_ERROR`) pairs, matched by `span_id`, as a JSON list of `{tool_name, args, result, error}`. |
@@ -115,43 +171,12 @@ session finished; whether the answer was right is step 3's job. Rows are
 deterministic (no "now" timestamps), so re-running step 0 on unchanged
 traces reproduces the importer's source fingerprints and step 1 reports
 `status: unchanged` instead of minting a new version. The script creates
-both datasets when missing, overwrites the three tables on each run, and
+both datasets when missing, overwrites the three tables on each run,
 refuses to write into the source dataset or the ADK plugin's
 `agent_analytics` dataset, and validates every project / dataset / table
 name as a plain identifier (`^[A-Za-z0-9_-]+$`, the SDK's own policy)
 before creating a BigQuery client or building any SQL. `--dry-run` prints
 the rows instead of writing.
-
-Every variable has a default so the whole thing works with only `gcloud`
-configured (`BQ_AGENT_PROJECT` falls back to `gcloud config get-value
-project`):
-
-| Variable | `--synth` default |
-|----------|-------------------|
-| `BQ_AGENT_PROJECT` | gcloud's current project |
-| `EVALBENCH_PROJECT` | `= BQ_AGENT_PROJECT` (step 0 builds both datasets in one project; a different value is an error) |
-| `EVALBENCH_SOURCE_TABLE` | `bqaa_e2e_real.agent_events` — the real traces (`dataset.table` or `project.dataset.table`) |
-| `EVALBENCH_DATASET` | `bqaa_evalbench_mvp_demo` — the EvalBench-shaped dataset step 0 builds |
-| `BQ_AGENT_DATASET` | `bqaa_evalbench_mvp_mirror` — the mirror dataset steps 1–3 use |
-| `EVALBENCH_JOB_ID` | `mvp-e2e-real-traces` |
-| `EVALBENCH_MIN_SCORE` | `goal_completion=1` |
-| `EVALBENCH_PYTHON` | `python3` — an interpreter with `google-cloud-bigquery` (e.g. the repo venv's) |
-
-On the reference project (`test-project-0728-467323`, dataset
-`bqaa_e2e_real`, 7 sessions / 77 events of a terse support agent handling
-inventory and ticket requests) the recorded run produced 7 scenarios, 6
-completed and 1 (`7e352c34`, "How many widgets are in stock?") that stopped
-after `AGENT_STARTING`. Step 1 imported them as 27 events and 7 score rows;
-step 2 listed exactly that one session with `process_failed`,
-`missing_completion`, and `score_failed` (`goal_completion: 0.0`) all true;
-step 3's `correctness` judge scored all 7 sessions 1.0 with per-session
-feedback — including 1.0 with `llm_feedback: null` for the session that
-never answered, which is why the failed-session view of step 2, not the
-judge, is the W0.4 denominator.
-
-`--synth` and `--fixture` are exclusive in purpose: `--fixture` prints
-sample output without BigQuery; `--synth` calls BigQuery four times. If
-both are given, `--fixture` wins (nothing is written).
 
 ## Related
 

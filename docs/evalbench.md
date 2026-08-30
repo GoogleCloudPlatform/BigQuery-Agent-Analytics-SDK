@@ -603,10 +603,12 @@ version with no sessions — or a BigQuery error. `examples/evalbench_score_gate
 shows the CI gate form.
 
 `examples/evalbench_mvp_e2e.sh` runs the three commands above in order on
-one job (import → failed-sessions → score); `--fixture` (or
-`EVALBENCH_FIXTURE=1`) prints annotated sample output for all three steps
-without touching BigQuery, so the walkthrough can be recorded or run in
-CI. `--synth` (or `EVALBENCH_SYNTH=1`) is the live path when no EvalBench
+one job (import → failed-sessions → score), following one failed
+support-agent session ("How many widgets are in stock?", never answered)
+from its trace to its `goal_completion=0.0`; `--fixture` (or
+`EVALBENCH_FIXTURE=1`) tells that story with sample output for all three
+steps without touching BigQuery, so the walkthrough can be recorded or run
+in CI. `--synth` (or `EVALBENCH_SYNTH=1`) is the live path when no EvalBench
 run exists: step 0 runs `examples/evalbench_synth_from_traces.py`, which
 folds a real BQAA `agent_events` table into EvalBench-shaped
 `configs`/`results`/`scores` tables (one scenario per session, prompts and

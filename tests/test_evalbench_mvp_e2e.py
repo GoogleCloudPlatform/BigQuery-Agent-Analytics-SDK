@@ -31,10 +31,23 @@ _SCRIPT = (
     Path(__file__).resolve().parents[1] / "examples" / "evalbench_mvp_e2e.sh"
 )
 
+# The fixture tells one session's story in six beats; each CLI step banner
+# serves the beat it follows.
 _BANNERS = (
+    "=== This agent was asked to check widget stock. Here is the session. ===",
+    "=== What happened ===",
+    "=== Import those traces into EvalBench so we can query this failure ===",
     "=== Step 1: evalbench-import ===",
+    "=== This session in failed_sessions ===",
     "=== Step 2: evalbench-failed-sessions ===",
+    "=== Score this session ===",
     "=== Step 3: evalbench-score ===",
+    "=== Punchline ===",
+)
+
+_PUNCHLINE = (
+    "This widget-stock session failed because the agent never answered;"
+    " goal_completion=0.0."
 )
 
 pytestmark = pytest.mark.skipif(
@@ -62,33 +75,58 @@ def _run(*args: str, env: dict[str, str] | None = None):
 def _assert_fixture_walkthrough(stdout: str) -> None:
   for banner in _BANNERS:
     assert banner in stdout
-  # Banners appear in pipeline order.
+  # Story beats and step banners appear in narrative order.
   positions = [stdout.index(b) for b in _BANNERS]
   assert positions == sorted(positions)
-  # Step 1: import result with manifest + failed_sessions_view.
-  assert '"status": "imported"' in stdout
-  assert '"manifest": {' in stdout
-  assert '"generation_id"' in stdout
+  setup = stdout[positions[0] : positions[1]]
+  happened = stdout[positions[1] : positions[2]]
+  imported = stdout[positions[2] : positions[4]]
+  failed = stdout[positions[4] : positions[6]]
+  scored = stdout[positions[6] : positions[8]]
+  punchline = stdout[positions[8] :]
+  # 1. Setup: the protagonist session.
+  assert "support_agent" in setup
+  assert "real-user-0" in setup
+  assert "7e352c34-4c1c-4395-acd5-fb3c8f215346" in setup
+  assert "scenario_id:   7e352c34" in setup
+  # 2. What happened: the verbatim prompt and no answer.
+  assert "How many widgets are in stock?" in happened
+  assert "(no response)" in happened
+  assert "AGENT_STARTING" in happened
+  assert "no AGENT_COMPLETED" in happened
+  # 3. Import result with manifest + failed_sessions_view.
+  assert '"status": "imported"' in imported
+  assert '"manifest": {' in imported
+  assert '"generation_id"' in imported
   assert (
       '"failed_sessions_view": "analytics-project.bqaa.evalbench_failed_sessions"'
-      in stdout
+      in imported
   )
-  # Step 2: a failed-sessions table with versioned session ids.
-  assert "session_id" in stdout
-  assert "evalbench-import:gemini-cli-tools-2026-08-30:v1:read-file" in stdout
-  assert "session_count=4 failed_count=2" in stdout
-  # Step 3: a score report with details.evalbench.
-  assert '"details": {' in stdout
-  assert '"evalbench": {' in stdout
-  assert '"pinned_sessions": 4' in stdout
-  assert '"pass_rate": 0.75' in stdout
+  # 4. This session's one failed_sessions row, with the versioned id.
+  assert "session_id" in failed
+  assert "evalbench-import:mvp-e2e-real-traces:v1:7e352c34" in failed
+  assert "process_failed" in failed
+  assert "missing_completion" in failed
+  assert '[{"comparator": "goal_completion", "score": 0.0}]' in failed
+  assert "1 of 7 sessions failed" in failed
+  assert "session_count=7 failed_count=1" in failed
+  # 5. Score report with details.evalbench; the judge is not the denominator.
+  assert '"details": {' in scored
+  assert '"evalbench": {' in scored
+  assert '"pinned_sessions": 7' in scored
+  assert '"pass_rate": 1.0' in scored
+  assert '"llm_feedback": null' in scored
+  assert "goal_completion is 0.0" in scored
+  # 6. Punchline: exactly one sentence, then nothing else.
+  assert punchline.strip().splitlines()[1:] == [_PUNCHLINE]
 
 
-def test_fixture_flag_walks_three_steps_and_exits_zero() -> None:
+def test_fixture_flag_tells_the_session_story_and_exits_zero() -> None:
   result = _run("--fixture")
   assert result.returncode == 0, result.stderr
   assert result.stderr == ""
   assert "fixture mode" in result.stdout
+  assert _PUNCHLINE in result.stdout
   _assert_fixture_walkthrough(result.stdout)
 
 
@@ -109,7 +147,10 @@ def test_fixture_uses_supplied_names_without_bigquery() -> None:
       },
   )
   assert result.returncode == 0, result.stderr
-  assert "evalbench-import:gemini-cli-tools-42:v3:read-file" in result.stdout
+  # The names change; the protagonist session does not.
+  assert "evalbench-import:gemini-cli-tools-42:v3:7e352c34" in result.stdout
+  assert "How many widgets are in stock?" in result.stdout
+  assert _PUNCHLINE in result.stdout
   assert (
       '"failed_sessions_view": "my-analytics.mirror.evalbench_failed_sessions"'
       in result.stdout

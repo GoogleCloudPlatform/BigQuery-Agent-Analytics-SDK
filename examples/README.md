@@ -46,7 +46,7 @@ artifacts that demonstrate SDK capabilities.
 | [e2e_demo.py](e2e_demo.py) | Complete end-to-end workflow |
 | [cli_agent_tool.py](cli_agent_tool.py) | CLI agent tool example with structured ambiguous-session retry selectors |
 | [ci_eval_pipeline.sh](ci_eval_pipeline.sh) | CI evaluation pipeline |
-| [evalbench_mvp_e2e.sh](evalbench_mvp_e2e.sh) | EvalBench MVP end to end on one job: `evalbench-import` → `evalbench-failed-sessions` → `evalbench-score`; `--fixture` runs offline, `--synth` first builds the job from real traces (walkthrough: [evalbench_mvp_e2e.md](evalbench_mvp_e2e.md)) |
+| [evalbench_mvp_e2e.sh](evalbench_mvp_e2e.sh) | EvalBench MVP end to end, told through one failed support-agent session ("How many widgets are in stock?", never answered): `evalbench-import` → `evalbench-failed-sessions` → `evalbench-score`; `--fixture` runs the story offline, `--synth` replays it live from real traces (walkthrough: [evalbench_mvp_e2e.md](evalbench_mvp_e2e.md)) |
 | [evalbench_synth_from_traces.py](evalbench_synth_from_traces.py) | Fold a real BQAA `agent_events` table into EvalBench-shaped `configs`/`results`/`scores` tables (one scenario per session, real prompts and responses, `goal_completion` from `AGENT_COMPLETED`) for the demo above |
 | [evalbench_score_gate.sh](evalbench_score_gate.sh) | CI gate on the LLM-judge score of one EvalBench import version |
 

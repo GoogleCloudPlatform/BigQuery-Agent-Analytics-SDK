@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **EvalBench MVP e2e demo tells one session's story (#435 slice 5, #97)**
+  — the `--fixture` walkthrough of `examples/evalbench_mvp_e2e.sh` now
+  follows `support_agent` session `7e352c34` ("How many widgets are in
+  stock?", never answered; trace stops after `AGENT_STARTING`) through
+  import → its one `failed_sessions` row → score, ending on the punchline
+  `goal_completion=0.0`, instead of touring CLI flags; fixture defaults are
+  job `mvp-e2e-real-traces` / 7 scenarios, matching the `--synth` run.
 - **AgentForensics MVP plan of record (#435)** — `docs/agentforensics_mvp_plan.md`
   lands the FINAL v4 execution plan: Week 0 pre-clock gate, the six-week MVP
   table with preregistered exit criteria, labeler ledger, staged Part II, and
