@@ -9,8 +9,10 @@ never writes into the ADK plugin's production `agent_events` table.
 This covers the reader and deterministic row mapping from
 [issue #97](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/97)
 and the MVP snapshot + failed-session denominator from
-[issue #435](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/435).
-Localization, failure taxonomy, and other harnesses are later slices.
+[issue #435](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/435):
+the versioned writer (slice 1) and the queryable `evalbench_failed_sessions`
+view plus version-pinned consumer (slice 2). Localization, failure taxonomy,
+and other harnesses are later slices.
 
 ## Data Flow
 
@@ -20,8 +22,11 @@ EvalBench BigQuery dataset                BQAA-owned target dataset
 configs  -- job_id = @job_id --+          evalbench_agent_events
 results  -- job_id = @job_id --+--> EvalBenchRun --> evalbench_scores_imported
 scores   -- job_id = @job_id --+   (in memory)      evalbench_import_manifest
-                                                     ^
+                                                     ^         |
                               one transaction per (job_id, import_version)
+                                                               v
+                                          evalbench_failed_sessions (VIEW,
+                                          pinned to the job's latest import)
 ```
 
 All three source queries filter by the parameterized `job_id` in SQL. The
@@ -176,6 +181,7 @@ publishes through a fourth, fixed lock table:
 | Scores | `evalbench_scores_imported` | `job_id`, `import_version`, `scenario_id`, `session_id`, `comparator`, `score FLOAT64`, `source_row JSON` (the verbatim EvalBench score row) |
 | Manifest | `evalbench_import_manifest` (fixed) | one row per `(job_id, import_version)` — see below |
 | Lock | `evalbench_import_lock` (fixed) | one sentinel row (`lock_id = 'evalbench-import'`, `claim_count`, `claimed_at`, `claimed_job_id`, `claimed_import_version`) that every publish transaction updates first |
+| Failed sessions | `evalbench_failed_sessions` (view) | `failed_sessions_sql()` pinned to the job's latest successful import — see [Queryable view](#queryable-view) |
 
 The extra event columns are appended after the `agent_events` contract, so
 `Client.get_session_trace` and the other explicit-column readers work
@@ -295,7 +301,9 @@ The manifest row binds every published version to its source:
 | `results_fingerprint`, `scores_fingerprint`, `configs_fingerprint` | SHA-256 content fingerprints |
 | `events_table`, `scores_table` | fully-qualified published tables |
 | `event_row_count`, `score_row_count` | rows published |
-| `imported_at` | publish timestamp (UTC) |
+| `imported_at` | publish timestamp (UTC; caller-supplied via `imported_at=`, so two publishes may share it) |
+| `generation_id` | opaque id of this committed generation of the row: minted by every publish (a `replace=True` of the same version label included) and by every committed change of `view_policy`; never shared |
+| `view_policy` | the score gate the failed-session view renders for this version (canonical JSON of the `EvalScorePolicy`, `NULL` for none) — committed manifest state, never taken from the view |
 
 `EvalBenchImportResult.manifest` returns the same row in memory.
 
@@ -348,6 +356,144 @@ threshold, with the offending score or `NULL`).
 reference implementation of the same contract over `to_agent_event_rows()`
 and `to_score_rows()` output; the unit tests pin the two to each other.
 
+### Queryable view
+
+Every successful `materialize()` call (`imported`, `replaced`, *and*
+`unchanged`) also keeps one view in the target dataset — default name
+`evalbench_failed_sessions` (`evalbench.DEFAULT_FAILED_SESSIONS_VIEW`),
+overridable with `failed_sessions_view=` / `--failed-sessions-view`, or
+`None` / `--skip-failed-sessions-view` to manage no view — whose body is
+`failed_sessions_sql()` with `@job_id` and `@import_version` rendered as
+string literals. Views cannot take query parameters, so the pin lives in
+the definition itself, and the view can never scan another version. The
+view's query text (its description names the pinned version too) is:
+
+```sql
+-- evalbench_failed_sessions pin: {"generation_id": "3f9c2c1e0b7a4d6e9a1b5c8d7e6f4a2b", "import_version": "v2", "job_id": "abc123", "policy": {"min_scores": {"goal_completion": 0.9}, "missing_score_fails": true}}
+WITH sessions AS (
+  SELECT ...
+  FROM `analytics-project.bqaa.evalbench_agent_events`
+  WHERE job_id = "abc123" AND import_version = "v2"
+  ...
+```
+
+The pin records the job, the version, the manifest generation it renders
+(`generation_id`, the row's opaque id — a `replace=True` of the same
+version label is a new generation, and so is a committed policy change;
+`imported_at` is caller-chosen and may repeat, so it is not the
+generation), and the score policy rendered into the view (`null` without
+one). The view body is a pure function of the latest manifest row: the
+gate it renders is the row's committed `view_policy`, never something the
+view says about itself. Nothing in the pin proves ownership: the importer
+treats a view as its own only when the pin names a version that job
+committed to the manifest *and* the body is byte-for-byte what the
+importer renders for that manifest row — with the row's own `view_policy`
+when the pin names the row's current `generation_id`, so a canonical
+rendering of the current generation under any other gate is foreign; or,
+for a view a superseded generation left behind, the pinned generation and
+policy over the row's own tables, in which case the view is only ever
+advanced to the committed rendering, so whatever gate it carries is never
+preserved. The comparison is exact — BigQuery returns a view's query text
+verbatim, and whitespace inside a rendered literal (`job_id = "job  x"`
+versus `"job x"`) changes which rows the view reads, so no whitespace
+normalization is applied. A pin copied or forged onto other SQL (however
+self-consistent), a contract-shaped body for an unpublished version or
+over other tables, or a managed view whose body somebody edited or
+reformatted, is a foreign object and is refused. The importer never uses
+`CREATE OR REPLACE VIEW`; it creates the view with create-if-absent and
+replaces it with an ETag-conditional update, after re-reading both the
+view and the latest manifest row immediately before writing.
+
+Pinning rules:
+
+| Situation | View |
+|---|---|
+| First import of a job | created, pinned to that version |
+| New `import_version` of the same job | replaced, pinned to the new version (the job's latest `imported_at` in the manifest) |
+| No-op re-import (`unchanged`) | untouched; created only if it does not exist yet (corpora published before views existed) |
+| `replace=True` of an older version | re-pinned to it — the replace refreshed `imported_at`, so it *is* the latest successful import |
+| `policy=` / `--min-score` given, changed, or dropped | the gate is committed to the manifest row (`view_policy`): a publish records it with the row, and an `unchanged` re-import that names another gate commits it to the row it found — under a new `generation_id`, and only if that row is still the generation it found — before the view is re-rendered from the row (including a later same-version call *without* a policy, which removes the gate); nothing is written when version and policy both match |
+| `policy=` on a call whose version is **not** the latest import | the gate is recorded on that version's own row; the view renders the latest version's row, so a view already pinned to the latest generation is left exactly as it is, and a view that is absent or behind is created or advanced carrying the latest row's committed gate (never this call's, and never the gate the stale view happened to carry) |
+| `policy=` on a call whose *generation* is not the one the manifest holds (a concurrent `replace=True` of the same version — even with the same `imported_at` — committed a newer `generation_id`) | as above: neither the version label nor the timestamp decides, the committed generation does. Every generation is rendered into the pin, so the newer replacement always rewrites the view (bumping its ETag) even when version, gate and SQL are otherwise identical; a delayed older caller's conditional replace then fails, re-reads, and renders the newer generation's committed gate |
+| A view at that name that *is* the importer's rendering of the current generation, but under a gate the manifest row does not record | `ValueError` before anything is written, from every later call (an older version's unchanged re-import included): the view cannot vouch for its own gate, only the manifest can |
+| View at that name pinned to **another job** | `ValueError` before anything is written; use one `failed_sessions_view` name per job |
+| A table, a view the importer did not create, a copied pin over other SQL, or a managed view whose query was edited, at that name | `ValueError` before anything is written (before the import tables are even created); the importer never replaces objects whose definition it cannot vouch for — drop the object or pick another name |
+| Two imports of one job race on the view | the loser of the create race (`409`) or ETag check (`412`) re-reads the view and the latest manifest and re-decides, up to three times, so a delayed writer never overwrites a newer pin — nor re-renders it with its own (older) policy; a race against **another job's** view fails closed with the import already published |
+
+"Latest successful import" is the manifest row with the newest
+`imported_at` (ties broken by `import_version`), which is also what the
+Python consumer below resolves when no version is pinned, so the two agree.
+The view is rewritten only when its rendered definition (pinned version,
+policy, or SQL) would change, and is written after the publish transaction
+committed; if the write fails (for example a missing
+`bigquery.tables.update` permission, or a view that kept changing
+underneath the conditional replace) `materialize()` raises a `ValueError`
+naming the published version, and simply re-running it retries the view
+(`status == "unchanged"`). A specific older version is queried
+with the parameterized `failed_sessions_sql()` shown above or with
+`failed_sessions(import_version=...)`.
+
+### Version-pinned consumer
+
+`failed_sessions()` lists the failed sessions of exactly one published
+version and never mixes two:
+
+```python
+from bigquery_agent_analytics.evalbench import EvalScorePolicy, failed_sessions
+
+listing = failed_sessions(
+    target_project="analytics-project",
+    target_dataset="bqaa",
+    job_id="abc123",
+    # import_version="v1",   # pin one version; default: latest successful import
+    policy=EvalScorePolicy({"goal_completion": 0.5}),
+)
+print(listing.import_version, listing.failed_count, "of", listing.session_count)
+for session in listing.sessions:
+    print(session.session_id, session.scenario_id, session.failing_scores)
+```
+
+The version is resolved from the manifest *before* any event row is read:
+an explicit `import_version` must have a manifest row (otherwise
+`ValueError`), and the default is the job's latest successful import. The
+query is `failed_sessions_sql()` over the `events_table`/`scores_table`
+recorded in that manifest row (a version stays bound to the tables it was
+published to), executed with `import_query_parameters(job_id,
+import_version)`. `EvalBenchFailedSessions.sessions` holds the failed rows
+(`include_passed=True` returns every session); each `EvalBenchSession`
+carries `job_id`, `import_version`, the versioned `session_id`/`trace_id`,
+`scenario_id`, `started_at`, the four flags, and `failing_scores`.
+`EvalBenchSession.verdict()` is the matching `SessionVerdict`, so the
+listing is interchangeable with `classify_sessions()` output.
+
+### Drill-down without mixing versions
+
+Published rows use the version-specific identity
+`evalbench-import:{job_id}:{import_version}:{scenario_id}` for both
+`session_id` and `trace_id`, so a `Client` pointed at the mirror table
+resolves one version by construction — there is no other version under
+that identity to merge:
+
+```python
+from bigquery_agent_analytics import Client
+
+client = Client(
+    project_id="analytics-project",
+    dataset_id="bqaa",
+    table_id="evalbench_agent_events",   # the mirror table, never agent_events
+)
+for session in listing.sessions:
+    trace = client.get_session_trace(**session.trace_selector())
+    # equivalently: trace = session.get_trace(client)
+```
+
+`trace_selector()` returns `{"session_id": ..., "experiment_id": job_id}`:
+the session id already pins the import version, and the `experiment_id`
+pin matches `attributes.experiment_id` on every published row, so the
+selector is unambiguous for the identity-resolving reader. Extra
+`get_session_trace` keyword arguments (for example `event_types=`) pass
+through `session.get_trace(client, ...)`.
+
 ## CLI
 
 ```bash
@@ -359,12 +505,32 @@ bq-agent-sdk evalbench-import \
   [--location US] [--format json|text|table]
 ```
 
-The command prints the `EvalBenchImportResult` (including the manifest) and
-exits `0` for `imported`, `replaced`, or `unchanged`, and `2` on invalid
-input (including `--events-table agent_events`, which is rejected before any
-BigQuery call), a changed source under an explicit `--import-version`, a
-version already bound to other destination tables, or a BigQuery error. There
-is no `evalbench-score` command.
+The command prints the `EvalBenchImportResult` (including the manifest and
+the `failed_sessions_view` it left pinned) and exits `0` for `imported`,
+`replaced`, or `unchanged`, and `2` on invalid input (including
+`--events-table agent_events` or a malformed `--min-score`, both rejected
+before any BigQuery call), a changed source under an explicit
+`--import-version`, a version already bound to other destination tables, a
+failed-session view at that name that belongs to another job, or a BigQuery
+error. `--failed-sessions-view NAME` picks the view name,
+`--skip-failed-sessions-view` manages none, and repeatable
+`--min-score COMPARATOR=MIN_SCORE` (with `--missing-score-passes` to relax
+the missing-score rule) renders an `EvalScorePolicy` into the view.
+
+```bash
+bq-agent-sdk evalbench-failed-sessions \
+  --project-id analytics-project --target-dataset bqaa --job-id abc123 \
+  [--import-version v1] [--min-score goal_completion=0.5]... \
+  [--missing-score-passes] [--include-passed] \
+  [--location US] [--format json|text|table]
+```
+
+Prints the `EvalBenchFailedSessions` listing (`--format table` prints one
+row per session) for exactly one published version — the job's latest
+successful import unless `--import-version` pins one — and exits `0` when
+the listing was produced (possibly empty) or `2` on invalid input, a job or
+version with no published import, or a BigQuery error. There is no
+`evalbench-score` command.
 
 ## Why These Fields Matter
 
@@ -384,7 +550,11 @@ therefore populates it on every emitted event.
 ## Current Boundaries
 
 - Runs are imported one `job_id` at a time and held in memory.
-- The target dataset must exist; only the four tables are auto-created.
+- The target dataset must exist; only the four tables and the
+  failed-session view are auto-created.
+- One `evalbench_failed_sessions` view is pinned to one job; datasets that
+  hold several jobs need one `--failed-sessions-view` name per job (the
+  importer refuses to re-point another job's view).
 - Concurrent publishes into one dataset serialize on the lock sentinel
   (coarse: one publish at a time per dataset); the loser fails with
   `ValueError` and nothing written rather than corrupting the corpus, and

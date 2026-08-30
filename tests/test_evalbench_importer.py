@@ -15,19 +15,28 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import dataclasses
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
+import hashlib
+import inspect
 import json
 import math
 import re
 
+from google.api_core.exceptions import Conflict
+from google.api_core.exceptions import NotFound
+from google.api_core.exceptions import PreconditionFailed
 import pytest
 
 from bigquery_agent_analytics import evalbench
 from bigquery_agent_analytics.evalbench import classify_sessions
 from bigquery_agent_analytics.evalbench import EvalBenchRun
+from bigquery_agent_analytics.evalbench import EvalBenchSession
 from bigquery_agent_analytics.evalbench import EvalScorePolicy
+from bigquery_agent_analytics.evalbench import failed_sessions
 from bigquery_agent_analytics.evalbench import failed_sessions_sql
 
 _RUN_TIME = datetime(2026, 4, 29, 12, 30, tzinfo=timezone.utc)
@@ -498,6 +507,30 @@ class _FakeManifestStore:
     self.scores: list[dict] = []
     self.lock_rows = 0
     self.lock_claims = 0
+    # The manifest table's live schema (``None`` until created) and ETag.
+    # Every DML the fake runs against the manifest is checked against it,
+    # as BigQuery would reject a column the table does not have.
+    self.manifest_schema: list | None = None
+    self.manifest_etag = "manifest-etag-0"
+    self.schema_updates = 0
+    # view ref -> query text (``Table.view_query``) and its current ETag.
+    self.views: dict[str, str] = {}
+    self.view_etags: dict[str, str] = {}
+    self._etag_counter = 0
+
+  def write_view(self, view_ref: str, view_query: str) -> None:
+    self._etag_counter += 1
+    self.views[view_ref] = view_query
+    self.view_etags[view_ref] = f"etag-{self._etag_counter}"
+
+  def set_manifest_schema(self, schema: list) -> None:
+    self.manifest_schema = list(schema)
+    self.schema_updates += 1
+    self.manifest_etag = f"manifest-etag-{self.schema_updates}"
+
+  def manifest_columns(self) -> set[str]:
+    assert self.manifest_schema is not None, "manifest table does not exist"
+    return {field.name for field in self.manifest_schema}
 
   def snapshot(self) -> _FakeSnapshot:
     return _FakeSnapshot(
@@ -521,6 +554,55 @@ def _same_version(row: dict, params: dict) -> bool:
       row["job_id"] == params["job_id"]
       and row["import_version"] == params["import_version"]
   )
+
+
+class _FakeTable:
+  """What ``client.get_table`` returns for the manifest: schema and ETag."""
+
+  table_type = "TABLE"
+  view_query = None
+
+  def __init__(self, ref: str, schema: list, etag: str) -> None:
+    self.schema = list(schema)
+    self.etag = etag
+    self.project, self.dataset_id, self.table_id = ref.split(".")
+
+
+def _history_entry(row: dict) -> str:
+  """``TO_JSON_STRING(STRUCT(generation_id, view_policy))`` of a row."""
+  return json.dumps(
+      {
+          "generation_id": row.get("generation_id"),
+          "view_policy": row.get("view_policy"),
+      },
+      separators=(",", ":"),
+  )
+
+
+def _legacy_generation(row: dict) -> str:
+  """``_BACKFILL_GENERATION_QUERY``'s derived id for a slice-1 row."""
+  key = f"evalbench-import-manifest:{row['import_version']}:{row['job_id']}"
+  return hashlib.md5(key.encode("utf-8")).hexdigest()
+
+
+class _FakeView:
+  """What ``client.get_table`` returns for a view: query text and ETag."""
+
+  table_type = "VIEW"
+
+  def __init__(
+      self, view_query: str, etag: str | None = "etag-foreign", ref: str = ""
+  ) -> None:
+    self.view_query = view_query
+    self.etag = etag
+    self.description = None
+    parts = ref.split(".") if ref else ["", "", ""]
+    self.project, self.dataset_id, self.table_id = parts
+
+
+_POLICY_ROW = re.compile(
+    r"STRUCT\('([^']+)' AS comparator, ([-+0-9.eE]+) AS min_score\)"
+)
 
 
 class _FakeWriteClient:
@@ -558,29 +640,130 @@ class _FakeWriteClient:
       load_error: Exception | None = None,
       transaction_error: Exception | None = None,
       delete_error: Exception | None = None,
+      view_error: Exception | None = None,
+      foreign_objects: dict[str, object] | None = None,
+      before_view_write: Callable[[], None] | None = None,
+      before_schema_update: Callable[[], None] | None = None,
   ) -> None:
     self.store = store or _FakeManifestStore(manifest_rows)
+    # Runs inside every manifest schema update, *after* the importer read
+    # the table and decided which columns to add: a concurrent upgrade
+    # that lands in that window.
+    self.before_schema_update = before_schema_update
     self.stale_manifest_reads = stale_manifest_reads
     self.transaction_attempted = False
     self.transaction_snapshot = transaction_snapshot
     self.load_error = load_error
     self.transaction_error = transaction_error
     self.delete_error = delete_error
+    self.view_error = view_error
+    # Runs once, inside this client's first view write, *after* the importer
+    # read the view and the latest manifest and decided what to write: a
+    # concurrent import that lands in that window.
+    self.before_view_write = before_view_write
+    # Objects that exist at a ref but were not created by the importer.
+    self.foreign_objects = dict(foreign_objects or {})
+    # (kind, view ref, number of queries issued so far) per view write.
+    self.view_writes: list[tuple[str, str, int]] = []
     self.loads: list[tuple[str, list[dict], object]] = []
     self.queries: list[tuple[str, dict]] = []
     self.created: list[str] = []
     self.created_tables: list[object] = []
     self.deleted: list[str] = []
+    self.get_table_calls: list[str] = []
 
   @property
   def manifest_rows(self) -> list[dict]:
     return self.store.rows
 
   def create_table(self, table, exists_ok: bool = False):
-    assert exists_ok is True
-    self.created.append(f"{table.project}.{table.dataset_id}.{table.table_id}")
-    self.created_tables.append(table)
+    ref = f"{table.project}.{table.dataset_id}.{table.table_id}"
+    if getattr(table, "view_query", None) is None:
+      assert exists_ok is True
+      self.created.append(ref)
+      self.created_tables.append(table)
+      if ref.endswith(".evalbench_import_manifest"):
+        # ``exists_ok`` returns the existing table *unchanged*: its schema
+        # is whatever release created it, not what this caller passed.
+        if self.store.manifest_schema is None:
+          self.store.set_manifest_schema(table.schema)
+        return _FakeTable(
+            ref, self.store.manifest_schema, self.store.manifest_etag
+        )
+      return table
+    # Views: create-if-absent through the tables API, never exists_ok.
+    assert exists_ok is False
+    assert isinstance(table.view_query, str) and table.description
+    self._run_before_view_write()
+    if self.view_error is not None:
+      raise self.view_error
+    if ref in self.foreign_objects or ref in self.store.views:
+      raise Conflict(f"409 Already Exists: Table {ref}")
+    self.store.write_view(ref, table.view_query)
+    self.view_writes.append(("create", ref, len(self.queries)))
     return table
+
+  def update_table(self, table, fields):
+    ref = f"{table.project}.{table.dataset_id}.{table.table_id}"
+    if fields == ["schema"]:
+      assert ref.endswith(".evalbench_import_manifest")
+      assert self.store.manifest_schema is not None
+      if self.before_schema_update is not None:
+        self.before_schema_update()
+      if table.etag != self.store.manifest_etag:
+        raise PreconditionFailed(f"412 Precondition Failed: {ref}")
+      # BigQuery only ever *adds* NULLABLE or REPEATED columns in place.
+      existing = {field.name for field in self.store.manifest_schema}
+      added = [field for field in table.schema if field.name not in existing]
+      assert added, "schema update that adds nothing"
+      assert [f.name for f in table.schema][: len(existing)] == [
+          f.name for f in self.store.manifest_schema
+      ]
+      assert all(field.mode in ("NULLABLE", "REPEATED") for field in added)
+      self.store.set_manifest_schema(table.schema)
+      # Existing rows read the new columns back as NULL (or an empty
+      # array for a REPEATED column); nothing is backfilled by the DDL.
+      for row in self.store.rows:
+        for field in added:
+          row.setdefault(field.name, [] if field.mode == "REPEATED" else None)
+      return _FakeTable(
+          ref, self.store.manifest_schema, self.store.manifest_etag
+      )
+    assert "view_query" in fields
+    self._run_before_view_write()
+    if self.view_error is not None:
+      raise self.view_error
+    if ref not in self.store.views:
+      raise NotFound(ref)
+    # ``If-Match``: the write only lands if the ETag read is still current.
+    if table.etag != self.store.view_etags[ref]:
+      raise PreconditionFailed(f"412 Precondition Failed: {ref}")
+    self.store.write_view(ref, table.view_query)
+    self.view_writes.append(("update", ref, len(self.queries)))
+    return table
+
+  def _run_before_view_write(self) -> None:
+    hook, self.before_view_write = self.before_view_write, None
+    if hook is not None:
+      hook()
+
+  def get_table(self, table_ref: str):
+    self.get_table_calls.append(table_ref)
+    if table_ref in self.foreign_objects:
+      return self.foreign_objects[table_ref]
+    if table_ref.endswith(".evalbench_import_manifest"):
+      if self.store.manifest_schema is None:
+        raise NotFound(table_ref)
+      return _FakeTable(
+          table_ref, self.store.manifest_schema, self.store.manifest_etag
+      )
+    if table_ref in self.store.views:
+      return _FakeView(
+          self.store.views[table_ref],
+          etag=self.store.view_etags[table_ref],
+          ref=table_ref,
+      )
+    raise NotFound(table_ref)
 
   def query(self, query: str, **kwargs) -> _FakeJob:
     self.queries.append((query, kwargs))
@@ -591,6 +774,57 @@ class _FakeWriteClient:
         return _FakeJob(error=self.transaction_error)
       snapshot = self.transaction_snapshot or self.store.snapshot()
       return self._publish(query, params, snapshot)
+    assert not query.startswith("CREATE"), "views are written via the API"
+    if query.startswith("WITH sessions AS"):
+      return _FakeJob(self._failed_sessions(query, params))
+    if (
+        ".evalbench_import_manifest`" in query
+        and "ORDER BY imported_at DESC" in query
+    ):
+      assert set(params) == {"job_id"}
+      latest = sorted(
+          (row for row in self.store.rows if row["job_id"] == params["job_id"]),
+          key=lambda row: (row["imported_at"], row["import_version"]),
+          reverse=True,
+      )
+      return _FakeJob([dict(row) for row in latest[:1]])
+    if ".evalbench_import_manifest`" in query and query.startswith("UPDATE"):
+      columns = self.store.manifest_columns()
+      if "WHERE generation_id IS NULL" in query:
+        # ``_BACKFILL_GENERATION_QUERY``: derived, so idempotent.
+        assert params == {}
+        assert "generation_id" in columns
+        assert "TO_HEX(MD5(" in query
+        for row in self.store.rows:
+          if row.get("generation_id") is None:
+            row["generation_id"] = _legacy_generation(row)
+        return _FakeJob()
+      # ``_RECORD_VIEW_POLICY_QUERY``: keyed on the generation the caller
+      # read, so it lands on nothing once the row was re-published; the
+      # generation it supersedes joins the row's committed history.
+      assert set(params) == {
+          "job_id",
+          "import_version",
+          "expected_generation_id",
+          "generation_id",
+          "view_policy",
+      }
+      assert "generation_id = @expected_generation_id" in query
+      assert {"view_policy", "generation_id", "superseded_generations"} <= (
+          columns
+      )
+      assert "ARRAY_CONCAT(" in query and "TO_JSON_STRING(STRUCT(" in query
+      for row in self.store.rows:
+        if (
+            _same_version(row, params)
+            and row.get("generation_id") == params["expected_generation_id"]
+        ):
+          row["superseded_generations"] = list(
+              row.get("superseded_generations") or []
+          ) + [_history_entry(row)]
+          row["view_policy"] = params["view_policy"]
+          row["generation_id"] = params["generation_id"]
+      return _FakeJob()
     if ".evalbench_import_lock`" in query and query.startswith("INSERT INTO"):
       # Seeding is INSERT-only, so it never conflicts and may run twice.
       assert params == {}
@@ -598,7 +832,16 @@ class _FakeWriteClient:
         self.store.lock_rows = 1
       return _FakeJob()
     if ".evalbench_import_manifest`" in query:
-      if self.stale_manifest_reads and not self.transaction_attempted:
+      feature = kwargs["job_config"].labels["sdk_feature"]
+      if (
+          self.stale_manifest_reads
+          and not self.transaction_attempted
+          and feature == "evalbench-import"
+      ):
+        # Only the import's own pre-read of the version it is publishing
+        # can be stale (it raced another importer's commit). The view
+        # ownership lookup (labelled for the view feature) reads the row an
+        # existing view pins, which committed before that view was written.
         return _FakeJob([])
       return _FakeJob(
           [row for row in self.store.rows if _same_version(row, params)]
@@ -667,21 +910,105 @@ class _FakeWriteClient:
       return _FakeJob(error=RuntimeError(f"400 {identical_guard.group(1)}"))
 
     # 3. Commit: keyed DELETEs then INSERTs from staging, plus the claim.
+    #    The script names *this* publish's staging tables, so several
+    #    publishes through one fake (several versions) each insert their own
+    #    staged rows rather than the first load that matches a table name.
+    staging_refs = re.findall(
+        r"SELECT [^\n]+ FROM `([^`]+_staging_[0-9a-f]+)`", script
+    )
+    assert len(staging_refs) == 3, script
+
     def staged(table: str) -> list[dict]:
-      return next(rows for dest, rows, _ in self.loads if table in dest)
+      (ref,) = [
+          ref for ref in staging_refs if ref.startswith(table + "_staging_")
+      ]
+      return next(rows for dest, rows, _ in reversed(self.loads) if dest == ref)
 
     store = self.store
+    manifest_table = lock_table.rsplit(".", 1)[0] + ".evalbench_import_manifest"
+    # The manifest INSERT names its columns; every one must exist on the
+    # live table (a slice-1 manifest lacks the generation columns).
+    inserted = re.search(
+        r"INSERT INTO `" + re.escape(manifest_table) + r"` \(([^)]*)\)",
+        script,
+    ).group(1)
+    insert_columns = [name.strip() for name in inserted.split(",")]
+    missing = set(insert_columns) - store.manifest_columns()
+    assert not missing, f"manifest INSERT names absent columns {missing}"
+    assert "superseded_generations" in insert_columns
+    assert "SET prior_generations = IFNULL((" in script
+    assert script.index("SET prior_generations") < script.index(
+        f"DELETE FROM `{manifest_table}`"
+    )
+    # ``prior_generations``: the replaced row's history plus the generation
+    # this publish supersedes, read from the transaction's snapshot.
+    prior = [row for row in snapshot.rows if _same_version(row, params)]
+    history = [
+        entry
+        for row in prior
+        for entry in list(row.get("superseded_generations") or [])
+        + [_history_entry(row)]
+    ]
+    manifest_rows = []
+    for row in staged(manifest_table):
+      assert set(row) - {"superseded_generations"} == set(insert_columns) - {
+          "superseded_generations"
+      }
+      manifest_rows.append({**row, "superseded_generations": history})
+
     store.lock_claims += 1
     store.events = [
         row for row in store.events if not _same_version(row, params)
-    ] + staged(params["events_table"] + "_staging_")
+    ] + staged(params["events_table"])
     store.scores = [
         row for row in store.scores if not _same_version(row, params)
-    ] + staged(params["scores_table"] + "_staging_")
+    ] + staged(params["scores_table"])
     store.rows = [
         row for row in store.rows if not _same_version(row, params)
-    ] + staged("evalbench_import_manifest")
+    ] + manifest_rows
     return _FakeJob()
+
+  def _failed_sessions(self, query: str, params: dict) -> list[dict]:
+    """Emulate ``failed_sessions_sql`` with the reference implementation.
+
+    The policy is read back from the rendered SQL, and only the rows of the
+    parameterized ``(job_id, import_version)`` take part, which is exactly
+    the isolation the SQL's ``WHERE`` clauses provide.
+    """
+    assert set(params) == {"job_id", "import_version"}
+    thresholds = {
+        comparator: float(value)
+        for comparator, value in _POLICY_ROW.findall(query)
+    }
+    policy = EvalScorePolicy(
+        thresholds,
+        missing_score_fails=(
+            "sc.score IS NULL OR" in query if thresholds else True
+        ),
+    )
+    events = [row for row in self.store.events if _same_version(row, params)]
+    scores = [row for row in self.store.scores if _same_version(row, params)]
+    started_at: dict[str, str] = {}
+    for row in events:
+      started_at[row["session_id"]] = min(
+          started_at.get(row["session_id"], row["timestamp"]), row["timestamp"]
+      )
+    return [
+        {
+            "session_id": verdict.session_id,
+            "scenario_id": verdict.scenario_id,
+            "started_at": started_at[verdict.session_id],
+            "process_failed": verdict.process_failed,
+            "missing_completion": verdict.missing_completion,
+            "score_failed": verdict.score_failed,
+            "failed": verdict.failed,
+            "failing_scores": [
+                {"comparator": comparator, "score": score}
+                for comparator, score in sorted(verdict.failing_scores.items())
+            ],
+        }
+        for verdict in classify_sessions(events, scores, policy)
+    ]
 
   def load_table_from_json(self, rows, destination, job_config=None):
     self.loads.append((destination, list(rows), job_config))
@@ -861,6 +1188,9 @@ def test_materialize_publishes_events_scores_and_manifest_atomically() -> None:
   ):
     assert len(manifest[key]) == 64
   assert manifest["imported_at"]
+  # One opaque generation per publish; the gate is committed with the row.
+  assert re.fullmatch(r"[0-9a-f]{32}", manifest["generation_id"])
+  assert manifest["view_policy"] is None
   assert result.manifest == manifest
 
 
@@ -2071,3 +2401,1693 @@ def test_failed_sessions_sql_without_policy_still_counts_process_failures() -> (
   sql = failed_sessions_sql(target_project="p", target_dataset="d")
   assert "status = 'ERROR'" in sql
   assert "min_score" not in sql
+
+
+# --- failed_sessions view and version-pinned consumer (#435 slice 2) ---
+
+_TARGET = {"target_project": "analytics-project", "target_dataset": "bqaa"}
+_VIEW_REF = "analytics-project.bqaa.evalbench_failed_sessions"
+_PIN_LINE = "-- evalbench_failed_sessions pin: "
+_T1 = datetime(2026, 5, 1, 8, 0, tzinfo=timezone.utc)
+
+
+def _row(fake: _FakeWriteClient, import_version: str) -> dict:
+  (row,) = [
+      row
+      for row in fake.manifest_rows
+      if row["import_version"] == import_version
+  ]
+  return row
+
+
+def _generation(fake: _FakeWriteClient, import_version: str = "v1") -> str:
+  """The opaque generation the committed manifest row currently carries."""
+  return _row(fake, import_version)["generation_id"]
+
+
+def _policy_json(min_score: float) -> str:
+  return json.dumps(
+      {
+          "min_scores": {"goal_completion": min_score},
+          "missing_score_fails": True,
+      },
+      sort_keys=True,
+  )
+
+
+_WRONG_RESULT = {
+    "eval_id": "wrong-1",
+    "prompt": "Completed but wrong answer",
+    "stdout": json.dumps({"response": "42"}),
+    "returncode": 0,
+}
+_WRONG_SCORES = (
+    {"eval_id": "ok-1", "comparator": "goal_completion", "score": 1},
+    {"eval_id": "crash-1", "comparator": "goal_completion", "score": 0},
+    {"eval_id": "wrong-1", "comparator": "goal_completion", "score": 0.2},
+)
+
+
+def _view_writes(fake: _FakeWriteClient) -> list[tuple[str, str, int]]:
+  return fake.view_writes
+
+
+def _full_pin(fake: _FakeWriteClient, view_ref: str = _VIEW_REF) -> dict:
+  first_line = fake.store.views[view_ref].splitlines()[0]
+  assert first_line.startswith(_PIN_LINE)
+  return json.loads(first_line[len(_PIN_LINE) :])
+
+
+def _view_pin(fake: _FakeWriteClient, view_ref: str = _VIEW_REF) -> dict:
+  pin = _full_pin(fake, view_ref)
+  return {"job_id": pin["job_id"], "import_version": pin["import_version"]}
+
+
+def _listing_query(fake: _FakeWriteClient) -> tuple[str, dict]:
+  (query,) = [
+      (sql, kwargs)
+      for sql, kwargs in fake.queries
+      if sql.startswith("WITH sessions AS")
+  ]
+  sql, kwargs = query
+  return sql, {p.name: p.value for p in kwargs["job_config"].query_parameters}
+
+
+def test_materialize_pins_failed_sessions_view_to_the_published_version() -> (
+    None
+):
+  fake = _FakeWriteClient()
+
+  result = _scored_run().materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+
+  assert result.failed_sessions_view == _VIEW_REF
+  ((kind, ref, after_queries),) = _view_writes(fake)
+  assert (kind, ref) == ("create", _VIEW_REF)
+  # The view is created only after the publish transaction committed, and
+  # its pin was re-read (get_table) right before writing, not only up front.
+  statements = [sql for sql, _ in fake.queries]
+  assert after_queries > max(
+      i for i, sql in enumerate(statements) if "BEGIN TRANSACTION" in sql
+  )
+  assert [ref for ref in fake.get_table_calls if ref == _VIEW_REF] == [
+      _VIEW_REF,
+      _VIEW_REF,
+  ]
+  body = fake.store.views[_VIEW_REF]
+  # The pin says what the view is bound to; nothing in it (no digest) is
+  # taken as proof of ownership -- see the forged-pin tests below.
+  assert _full_pin(fake) == {
+      "job_id": "job-123",
+      "import_version": "v1",
+      "generation_id": _generation(fake, "v1"),
+      "policy": None,
+  }
+  # The body is failed_sessions_sql pinned as literals: no parameters, and
+  # no other version can be read.
+  assert body.endswith(
+      failed_sessions_sql(**_TARGET, job_id="job-123", import_version="v1")
+  )
+  assert "@job_id" not in body and "@import_version" not in body
+  assert 'job_id = "job-123" AND import_version = "v1"' in body
+  assert "`analytics-project.bqaa.evalbench_agent_events`" in body
+  assert "returncode" not in body
+
+
+def test_materialize_renders_policy_into_the_view() -> None:
+  fake = _FakeWriteClient()
+  _scored_run().materialize(
+      **_TARGET,
+      import_version="v1",
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake,
+  )
+  body = fake.store.views[_VIEW_REF]
+  assert "STRUCT('goal_completion' AS comparator, 0.5 AS min_score)" in body
+  assert "`analytics-project.bqaa.evalbench_scores_imported`" in body
+  assert body.count('import_version = "v1"') == 2
+  assert _full_pin(fake)["policy"] == {
+      "min_scores": {"goal_completion": 0.5},
+      "missing_score_fails": True,
+  }
+
+
+def test_materialize_unchanged_reimport_leaves_view_untouched() -> None:
+  fake = _FakeWriteClient()
+  run = _scored_run()
+  run.materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert len(_view_writes(fake)) == 1
+
+  result = run.materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert result.status == "unchanged"
+  assert result.failed_sessions_view == _VIEW_REF
+  assert len(_view_writes(fake)) == 1
+
+  # A corpus published before views existed gets its view on the next no-op.
+  del fake.store.views[_VIEW_REF]
+  result = run.materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert result.status == "unchanged"
+  assert len(_view_writes(fake)) == 2
+  assert _view_pin(fake) == {"job_id": "job-123", "import_version": "v1"}
+
+
+def test_materialize_view_tracks_the_latest_successful_import() -> None:
+  fake = _FakeWriteClient()
+  run_v1 = _scored_run()
+  run_v2 = _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES)
+
+  run_v1.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  run_v2.materialize(
+      **_TARGET,
+      import_version="v2",
+      imported_at=_T1 + timedelta(hours=1),
+      bq_client=fake,
+  )
+  assert _view_pin(fake)["import_version"] == "v2"
+  assert 'import_version = "v1"' not in fake.store.views[_VIEW_REF]
+
+  # A no-op re-import of the older version does not move the view back.
+  unchanged = run_v1.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  assert unchanged.status == "unchanged"
+  assert _view_pin(fake)["import_version"] == "v2"
+  assert len(_view_writes(fake)) == 2
+
+  # Re-publishing the older version makes it the latest import again.
+  replaced = run_v1.materialize(
+      **_TARGET,
+      import_version="v1",
+      replace=True,
+      imported_at=_T1 + timedelta(hours=2),
+      bq_client=fake,
+  )
+  assert replaced.status == "replaced"
+  assert _view_pin(fake)["import_version"] == "v1"
+  assert [kind for kind, _, _ in _view_writes(fake)] == [
+      "create",
+      "update",
+      "update",
+  ]
+
+
+def test_materialize_refuses_a_view_pinned_to_another_job() -> None:
+  fake = _FakeWriteClient()
+  other = dataclasses.replace(_scored_run(), job_id="job-other")
+  other.materialize(**_TARGET, import_version="v1", bq_client=fake)
+
+  with pytest.raises(ValueError, match="pinned to EvalBench job 'job-other'"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  # Refused before staging or publishing anything for job-123.
+  assert all(row["job_id"] == "job-other" for row in fake.manifest_rows)
+  assert all("job-other" in dest for dest, _, _ in fake.loads) or all(
+      "job-123" not in json.dumps(rows) for _, rows, _ in fake.loads
+  )
+  assert _view_pin(fake)["job_id"] == "job-other"
+
+  # A per-job view name resolves the clash.
+  result = _scored_run().materialize(
+      **_TARGET,
+      import_version="v1",
+      failed_sessions_view="evalbench_failed_sessions_job_123",
+      bq_client=fake,
+  )
+  assert result.status == "imported"
+  assert result.failed_sessions_view == (
+      "analytics-project.bqaa.evalbench_failed_sessions_job_123"
+  )
+  assert _view_pin(fake, result.failed_sessions_view)["job_id"] == "job-123"
+  assert _view_pin(fake)["job_id"] == "job-other"
+
+
+@pytest.mark.parametrize(
+    "foreign",
+    [
+        type("Table", (), {"table_type": "TABLE", "view_query": None})(),
+        _FakeView("SELECT 1"),
+        _FakeView("-- evalbench_failed_sessions pin: not json\nSELECT 1"),
+        # A well-formed pin (with a stray digest claim) over foreign SQL.
+        _FakeView(
+            _PIN_LINE
+            + json.dumps(
+                {
+                    "import_version": "v1",
+                    "generation_id": "0" * 32,
+                    "job_id": "job-123",
+                    "policy": None,
+                    "query_sha256": "0" * 64,
+                }
+            )
+            + "\nSELECT 1"
+        ),
+        # A pin without a policy field over foreign SQL.
+        _FakeView(
+            _PIN_LINE
+            + json.dumps(
+                {
+                    "import_version": "v1",
+                    "generation_id": "0" * 32,
+                    "job_id": "job-123",
+                }
+            )
+            + "\nSELECT 1"
+        ),
+        # A pin without a generation over foreign SQL.
+        _FakeView(
+            _PIN_LINE
+            + json.dumps(
+                {"import_version": "v1", "job_id": "job-123", "policy": None}
+            )
+            + "\nSELECT 1"
+        ),
+        # A pin comment and nothing else.
+        _FakeView(
+            _PIN_LINE
+            + json.dumps(
+                {
+                    "import_version": "v1",
+                    "generation_id": "0" * 32,
+                    "job_id": "job-123",
+                    "policy": None,
+                }
+            )
+        ),
+    ],
+)
+def test_materialize_never_replaces_objects_it_did_not_create(
+    foreign: object,
+) -> None:
+  fake = _FakeWriteClient(foreign_objects={_VIEW_REF: foreign})
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert fake.loads == []
+  assert fake.transaction_attempted is False
+  # Refused before the import tables were even created (or touched); at
+  # most the manifest was consulted for the version the pin claims.
+  assert fake.created == []
+  assert all(".evalbench_import_manifest`" in sql for sql, _ in fake.queries)
+  assert _view_writes(fake) == []
+
+
+def test_materialize_refuses_a_forged_marker_copied_from_a_managed_view() -> (
+    None
+):
+  """The pin comment is not the authority; the definition it hashes is."""
+  fake = _FakeWriteClient()
+  _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  genuine = fake.store.views[_VIEW_REF]
+  pin_line, query = genuine.split("\n", 1)
+
+  # The exact pin line, copied verbatim onto a user-managed view with its
+  # own SQL: same job, same version, matching everything but the query.
+  forged = pin_line + "\nSELECT 'not the contract' AS session_id"
+  fake.store.write_view(_VIEW_REF, forged)
+  before = list(fake.view_writes)
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(**_TARGET, import_version="v2", bq_client=fake)
+  assert fake.store.views[_VIEW_REF] == forged
+  assert fake.view_writes == before
+  assert not any(row["import_version"] == "v2" for row in fake.manifest_rows)
+
+  # Likewise a managed view whose body drifted (someone edited the query):
+  # the pin still parses, the hash no longer matches, so it is not ours.
+  fake.store.write_view(
+      _VIEW_REF, pin_line + "\n" + query.replace("session_id", "sid")
+  )
+  with pytest.raises(ValueError, match="definition was changed"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert fake.view_writes == before
+
+  # Reformatted whitespace is not the importer's text either: BigQuery
+  # returns view_query verbatim, and whitespace inside a rendered literal
+  # is significant (see the literal-whitespace test below), so the check
+  # is byte-for-byte.
+  fake.store.write_view(_VIEW_REF, pin_line + "\n  " + "  ".join(query.split()))
+  with pytest.raises(ValueError, match="definition was changed"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert fake.view_writes == before
+
+  # The genuine text is recognized, and a no-op re-import writes nothing.
+  fake.store.write_view(_VIEW_REF, genuine)
+  result = _scored_run().materialize(
+      **_TARGET, import_version="v1", bq_client=fake
+  )
+  assert result.status == "unchanged"
+  assert fake.view_writes == before
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "evalbench_agent_events",
+        "evalbench_scores_imported",
+        "evalbench_import_manifest",
+        "evalbench_import_lock",
+        "agent_events",
+        "bad name",
+    ],
+)
+def test_materialize_rejects_unsafe_view_names(name: str) -> None:
+  fake = _FakeWriteClient()
+  with pytest.raises(ValueError):
+    _scored_run().materialize(
+        **_TARGET, failed_sessions_view=name, bq_client=fake
+    )
+  assert fake.queries == []
+  assert fake.created == []
+
+
+def test_materialize_can_skip_the_view() -> None:
+  fake = _FakeWriteClient()
+  result = _scored_run().materialize(
+      **_TARGET, failed_sessions_view=None, bq_client=fake
+  )
+  assert result.status == "imported"
+  assert result.failed_sessions_view is None
+  assert _VIEW_REF not in fake.get_table_calls
+  assert _view_writes(fake) == []
+
+
+def test_materialize_reports_a_view_failure_after_publishing() -> None:
+  fake = _FakeWriteClient(
+      view_error=RuntimeError("403 no bigquery.tables.update")
+  )
+  with pytest.raises(
+      ValueError, match="is published .status 'imported'."
+  ) as exc:
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert "403 no bigquery.tables.update" in str(exc.value)
+  assert len(fake.manifest_rows) == 1
+  assert _VIEW_REF not in fake.store.views
+  # The retry path: the import is a no-op and the view gets created.
+  fake.view_error = None
+  result = _scored_run().materialize(
+      **_TARGET, import_version="v1", bq_client=fake
+  )
+  assert result.status == "unchanged"
+  assert _view_pin(fake) == {"job_id": "job-123", "import_version": "v1"}
+
+
+def test_materialize_policy_change_on_the_same_version_rerenders_the_view() -> (
+    None
+):
+  """The pin covers the policy: a later same-version call without a policy
+  must not leave the earlier score gate baked into the view."""
+  fake = _FakeWriteClient()
+  run = _scored_run()
+  gate = "STRUCT('goal_completion' AS comparator, 0.9 AS min_score)"
+
+  run.materialize(
+      **_TARGET,
+      import_version="v1",
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      bq_client=fake,
+  )
+  assert gate in fake.store.views[_VIEW_REF]
+  assert len(_view_writes(fake)) == 1
+
+  # Same policy, same version: nothing to do.
+  result = run.materialize(
+      **_TARGET,
+      import_version="v1",
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      bq_client=fake,
+  )
+  assert result.status == "unchanged"
+  assert len(_view_writes(fake)) == 1
+
+  assert _row(fake, "v1")["view_policy"] == _policy_json(0.9)
+  first_generation = _generation(fake)
+
+  # No policy: the gate must go, even though (job_id, import_version) and
+  # the import itself are unchanged. The change is committed to the
+  # manifest row as a new generation before the view is re-rendered.
+  result = run.materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert result.status == "unchanged"
+  assert len(_view_writes(fake)) == 2
+  assert _row(fake, "v1")["view_policy"] is None
+  assert _generation(fake) != first_generation
+  assert _full_pin(fake)["generation_id"] == _generation(fake)
+  body = fake.store.views[_VIEW_REF]
+  assert gate not in body and "policy AS" not in body
+  assert _full_pin(fake)["policy"] is None
+  assert body.endswith(
+      failed_sessions_sql(**_TARGET, job_id="job-123", import_version="v1")
+  )
+
+  # Changed threshold, then the missing-score rule: each re-renders once.
+  run.materialize(
+      **_TARGET,
+      import_version="v1",
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake,
+  )
+  assert len(_view_writes(fake)) == 3
+  assert "0.5 AS min_score" in fake.store.views[_VIEW_REF]
+  run.materialize(
+      **_TARGET,
+      import_version="v1",
+      policy=EvalScorePolicy(
+          {"goal_completion": 0.5}, missing_score_fails=False
+      ),
+      bq_client=fake,
+  )
+  assert len(_view_writes(fake)) == 4
+  assert _full_pin(fake)["policy"]["missing_score_fails"] is False
+
+
+def test_materialize_same_job_create_race_keeps_the_newer_pin() -> None:
+  """Two first imports of one job: the loser of the create race must not
+  overwrite the winner's newer pin, and both must report success."""
+  store = _FakeManifestStore()
+  fake_v2 = _FakeWriteClient(store=store)
+  run_v2 = _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES)
+
+  def v2_lands_first() -> None:
+    # v1 has read "no view" and "latest = v1" and is about to create.
+    result = run_v2.materialize(
+        **_TARGET,
+        import_version="v2",
+        imported_at=_T1 + timedelta(hours=1),
+        bq_client=fake_v2,
+    )
+    assert result.status == "imported"
+    assert _view_pin(fake_v2)["import_version"] == "v2"
+
+  fake_v1 = _FakeWriteClient(store=store, before_view_write=v2_lands_first)
+  result = _scored_run().materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake_v1
+  )
+
+  assert result.status == "imported"
+  assert result.failed_sessions_view == _VIEW_REF
+  # v1's stale create hit Conflict; the retry re-read the view (v2) and the
+  # latest manifest (v2), found them in agreement, and wrote nothing.
+  assert _view_pin(fake_v1)["import_version"] == "v2"
+  assert fake_v1.view_writes == []
+  assert [kind for kind, _, _ in fake_v2.view_writes] == ["create"]
+  assert fake_v1.get_table_calls.count(_VIEW_REF) == 3
+
+
+def test_materialize_same_job_update_race_is_etag_guarded() -> None:
+  """An existing view: the delayed writer's replace must fail its ETag
+  check rather than clobber the newer pin another import just wrote."""
+  store = _FakeManifestStore()
+  setup = _FakeWriteClient(store=store)
+  _scored_run().materialize(
+      **_TARGET, import_version="v0", imported_at=_T1, bq_client=setup
+  )
+  stale_etag = store.view_etags[_VIEW_REF]
+
+  fake_v2 = _FakeWriteClient(store=store)
+  run_v2 = _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES)
+
+  def v2_lands_first() -> None:
+    run_v2.materialize(
+        **_TARGET,
+        import_version="v2",
+        imported_at=_T1 + timedelta(hours=2),
+        bq_client=fake_v2,
+    )
+    assert _view_pin(fake_v2)["import_version"] == "v2"
+    assert store.view_etags[_VIEW_REF] != stale_etag
+
+  fake_v1 = _FakeWriteClient(store=store, before_view_write=v2_lands_first)
+  result = _scored_run(extra_result=_WRONG_RESULT).materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1 + timedelta(hours=1),
+      bq_client=fake_v1,
+  )
+
+  assert result.status == "imported"
+  assert _view_pin(fake_v1)["import_version"] == "v2"
+  assert 'import_version = "v1"' not in store.views[_VIEW_REF]
+  assert fake_v1.view_writes == []
+  assert [kind for kind, _, _ in fake_v2.view_writes] == ["update"]
+
+
+def test_materialize_cross_job_view_race_fails_closed() -> None:
+  """Two jobs pass the up-front check (no view yet); the one that loses the
+  create race must refuse to replace the other job's view and say so."""
+  store = _FakeManifestStore()
+  fake_other = _FakeWriteClient(store=store)
+  other = dataclasses.replace(_scored_run(), job_id="job-other")
+
+  def other_job_lands_first() -> None:
+    other.materialize(**_TARGET, import_version="v1", bq_client=fake_other)
+
+  fake = _FakeWriteClient(store=store, before_view_write=other_job_lands_first)
+  with pytest.raises(ValueError) as exc:
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+
+  message = str(exc.value)
+  assert "is published (status 'imported')" in message
+  assert "pinned to EvalBench job 'job-other'" in message
+  assert _view_pin(fake)["job_id"] == "job-other"
+  assert fake.view_writes == []
+  # job-123's import itself is committed; only the view was refused.
+  assert {row["job_id"] for row in store.rows} == {"job-123", "job-other"}
+
+
+def test_materialize_view_sync_gives_up_after_bounded_retries() -> None:
+  store = _FakeManifestStore()
+
+  class _AlwaysRacing(_FakeWriteClient):
+
+    def create_table(self, table, exists_ok: bool = False):
+      if getattr(table, "view_query", None) is None:
+        return super().create_table(table, exists_ok=exists_ok)
+      self.view_writes.append(("create", "", len(self.queries)))
+      raise Conflict("409 Already Exists")
+
+  fake = _AlwaysRacing(store=store)
+  with pytest.raises(ValueError, match="changed concurrently 3 times") as exc:
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert "is published (status 'imported')" in str(exc.value)
+  assert len(fake.view_writes) == 3
+  assert _VIEW_REF not in store.views
+
+
+def _sql_sha256(query: str) -> str:
+  return hashlib.sha256(" ".join(query.split()).encode()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        None,
+        # A structurally valid policy pin as well: still foreign.
+        {"min_scores": {"goal_completion": 0.9}, "missing_score_fails": True},
+    ],
+)
+def test_materialize_refuses_a_foreign_view_with_a_self_consistent_pin(
+    policy: dict | None,
+) -> None:
+  """A digest the view supplies about itself is not proof of ownership.
+
+  A foreign view can carry a same-job pin over arbitrary SQL *and* a
+  correctly recomputed hash of that SQL. Ownership must instead be decided
+  against what the importer would render for a committed manifest row.
+  """
+  fake = _FakeWriteClient()
+  _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  before = list(fake.view_writes)
+
+  foreign_sql = "SELECT 'foreign-owned' AS session_id"
+  pin = {
+      "import_version": "v1",
+      "job_id": "job-123",
+      "policy": policy,
+      "query_sha256": _sql_sha256(foreign_sql),
+  }
+  forged = _PIN_LINE + json.dumps(pin, sort_keys=True) + "\n" + foreign_sql
+  fake.store.write_view(_VIEW_REF, forged)
+
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(**_TARGET, import_version="v2", bq_client=fake)
+  assert fake.store.views[_VIEW_REF] == forged
+  assert fake.view_writes == before
+  assert not any(row["import_version"] == "v2" for row in fake.manifest_rows)
+
+
+def test_materialize_refuses_a_contract_shaped_view_for_an_unpublished_version() -> (
+    None
+):
+  """Even a body that *is* the importer's rendering counts only for a
+  version this job actually committed to the manifest (and the tables that
+  row names): a pin to an unpublished version, or a rendering over other
+  tables, is foreign."""
+  fake = _FakeWriteClient()
+  _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  (published,) = fake.manifest_rows
+  before = list(fake.view_writes)
+
+  unpublished = {**published, "import_version": "v9"}
+  fake.store.write_view(
+      _VIEW_REF,
+      evalbench._failed_sessions_view_body(manifest=unpublished, policy=None),
+  )
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+
+  relocated = {
+      **published,
+      "events_table": "analytics-project.bqaa.somebody_elses_events",
+  }
+  fake.store.write_view(
+      _VIEW_REF,
+      evalbench._failed_sessions_view_body(manifest=relocated, policy=None),
+  )
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert fake.view_writes == before
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        "not a mapping",
+        {"min_scores": {"goal_completion": 0.9}},
+        {"min_scores": {}, "missing_score_fails": True},
+        {"min_scores": {"goal_completion": "0.9"}, "missing_score_fails": True},
+        {"min_scores": {"goal_completion": True}, "missing_score_fails": True},
+        {"min_scores": {"goal_completion": 0.9}, "missing_score_fails": 1},
+        {"min_scores": {"bad name": 0.9}, "missing_score_fails": True},
+        {
+            "min_scores": {"goal_completion": 0.9},
+            "missing_score_fails": True,
+            "extra": 1,
+        },
+    ],
+)
+def test_materialize_refuses_a_pin_with_a_malformed_policy(policy) -> None:
+  fake = _FakeWriteClient()
+  _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  _, query = fake.store.views[_VIEW_REF].split("\n", 1)
+  pin = {**_full_pin(fake), "policy": policy}
+  fake.store.write_view(_VIEW_REF, _PIN_LINE + json.dumps(pin) + "\n" + query)
+  before = list(fake.view_writes)
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert fake.view_writes == before
+
+
+def test_materialize_view_policy_rendering_is_canonical() -> None:
+  """The same gate given in another key order (or as ints) renders the same
+  view, so the importer recognizes its own definition and writes nothing."""
+  fake = _FakeWriteClient()
+  run = _scored_run()
+  run.materialize(
+      **_TARGET,
+      import_version="v1",
+      policy=EvalScorePolicy({"goal_completion": 1, "accuracy": 0.5}),
+      bq_client=fake,
+  )
+  assert len(_view_writes(fake)) == 1
+  result = run.materialize(
+      **_TARGET,
+      import_version="v1",
+      policy=EvalScorePolicy({"accuracy": 0.5, "goal_completion": 1.0}),
+      bq_client=fake,
+  )
+  assert result.status == "unchanged"
+  assert len(_view_writes(fake)) == 1
+  assert _full_pin(fake)["policy"]["min_scores"] == {
+      "accuracy": 0.5,
+      "goal_completion": 1.0,
+  }
+
+
+def test_materialize_etag_retry_never_applies_a_stale_policy_to_a_newer_version() -> (
+    None
+):
+  """v1 (gate 0.9) reads the view, pauses; v2 (no policy) lands and rewrites
+  the view; v1's replace fails its ETag check and retries. The retry sees
+  v2 as latest -- a version v1 did not publish -- so it must not re-render
+  v2 with v1's policy: v2's own import decided there is no gate."""
+  store = _FakeManifestStore()
+  setup = _FakeWriteClient(store=store)
+  _scored_run().materialize(
+      **_TARGET, import_version="v0", imported_at=_T1, bq_client=setup
+  )
+
+  fake_v2 = _FakeWriteClient(store=store)
+  run_v2 = _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES)
+
+  def v2_lands_first() -> None:
+    result = run_v2.materialize(
+        **_TARGET,
+        import_version="v2",
+        imported_at=_T1 + timedelta(hours=2),
+        bq_client=fake_v2,
+    )
+    assert result.status == "imported"
+    assert _full_pin(fake_v2)["policy"] is None
+
+  fake_v1 = _FakeWriteClient(store=store, before_view_write=v2_lands_first)
+  result = _scored_run(extra_result=_WRONG_RESULT).materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1 + timedelta(hours=1),
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      bq_client=fake_v1,
+  )
+
+  assert result.status == "imported"
+  assert result.failed_sessions_view == _VIEW_REF
+  assert fake_v1.view_writes == []
+  assert [kind for kind, _, _ in fake_v2.view_writes] == ["update"]
+  assert _full_pin(fake_v1) == {
+      "import_version": "v2",
+      "generation_id": _generation(fake_v1, "v2"),
+      "job_id": "job-123",
+      "policy": None,
+  }
+  assert "0.9 AS min_score" not in store.views[_VIEW_REF]
+
+
+def test_materialize_older_version_advances_a_stale_view_without_its_policy() -> (
+    None
+):
+  """A view left behind (the latest import managed no view) is still moved
+  to the latest version by a later, older-version call -- rendered with
+  the gate the latest version's manifest row committed (none here), not
+  the older call's policy and not the gate the stale view happened to
+  carry. The older call's policy is recorded on its own version's row."""
+  fake = _FakeWriteClient()
+  run_v1 = _scored_run()
+  run_v1.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1,
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      bq_client=fake,
+  )
+  _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES).materialize(
+      **_TARGET,
+      import_version="v2",
+      imported_at=_T1 + timedelta(hours=1),
+      failed_sessions_view=None,
+      bq_client=fake,
+  )
+  assert _view_pin(fake)["import_version"] == "v1"
+
+  result = run_v1.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1,
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake,
+  )
+  assert result.status == "unchanged"
+  assert _full_pin(fake) == {
+      "import_version": "v2",
+      "generation_id": _generation(fake, "v2"),
+      "job_id": "job-123",
+      "policy": None,
+  }
+  assert "min_score" not in fake.store.views[_VIEW_REF]
+  assert [kind for kind, _, _ in _view_writes(fake)] == ["create", "update"]
+  assert _row(fake, "v1")["view_policy"] == _policy_json(0.5)
+  assert _row(fake, "v2")["view_policy"] is None
+
+  # A re-run of the same older call is then a no-op.
+  run_v1.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1,
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake,
+  )
+  assert len(_view_writes(fake)) == 2
+
+
+def test_materialize_older_version_creates_a_missing_view_without_a_gate() -> (
+    None
+):
+  """No view yet and the latest version's import managed none: an older
+  version's call still creates the view for the latest version, but with
+  no gate -- its policy is not that version's to set."""
+  fake = _FakeWriteClient()
+  _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES).materialize(
+      **_TARGET,
+      import_version="v2",
+      imported_at=_T1 + timedelta(hours=1),
+      failed_sessions_view=None,
+      bq_client=fake,
+  )
+  assert _VIEW_REF not in fake.store.views
+
+  result = _scored_run().materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1,
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      bq_client=fake,
+  )
+  assert result.status == "imported"
+  assert result.failed_sessions_view == _VIEW_REF
+  assert _full_pin(fake) == {
+      "import_version": "v2",
+      "generation_id": _generation(fake, "v2"),
+      "job_id": "job-123",
+      "policy": None,
+  }
+  assert "min_score" not in fake.store.views[_VIEW_REF]
+  assert [kind for kind, _, _ in _view_writes(fake)] == ["create"]
+
+
+def test_materialize_refuses_a_view_whose_literal_whitespace_changed() -> None:
+  """Whitespace inside a rendered literal is significant: ``job_id =
+  "job  x"`` and ``job_id = "job x"`` read different rows. A foreign view
+  that keeps the genuine pin but collapses the literal is not the
+  importer's definition; it must be refused (and never accepted as an
+  ``unchanged`` no-op that leaves the wrong literal in place)."""
+  run = dataclasses.replace(_scored_run(), job_id="job  x")
+  fake = _FakeWriteClient()
+  run.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  genuine = fake.store.views[_VIEW_REF]
+  pin_line, query = genuine.split("\n", 1)
+  assert 'job_id = "job  x"' in query
+  before = list(fake.view_writes)
+
+  forged = pin_line + "\n" + query.replace('"job  x"', '"job x"')
+  assert forged != genuine
+  fake.store.write_view(_VIEW_REF, forged)
+  with pytest.raises(ValueError, match="definition was changed"):
+    run.materialize(**_TARGET, import_version="v1", bq_client=fake)
+  with pytest.raises(ValueError, match="definition was changed"):
+    run.materialize(**_TARGET, import_version="v2", bq_client=fake)
+  assert fake.store.views[_VIEW_REF] == forged
+  assert fake.view_writes == before
+  assert not any(row["import_version"] == "v2" for row in fake.manifest_rows)
+
+  # The genuine text is recognized, and the no-op writes nothing.
+  fake.store.write_view(_VIEW_REF, genuine)
+  result = run.materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert result.status == "unchanged"
+  assert fake.view_writes == before
+
+
+@pytest.mark.parametrize(
+    "older_imported_at",
+    [
+        pytest.param(_T1 + timedelta(hours=1), id="distinct-timestamps"),
+        # ``imported_at`` is caller-supplied: two replaces of one version
+        # may carry the very same timestamp, so it cannot be the
+        # generation. Only the opaque generation_id is.
+        pytest.param(_T1 + timedelta(hours=2), id="equal-timestamps"),
+    ],
+)
+def test_materialize_same_version_replace_race_keeps_the_newer_generations_policy(
+    older_imported_at: datetime,
+) -> None:
+  """Two ``replace=True`` calls of one version label publish two manifest
+  generations. The older generation's caller (gate 0.9) reads the view and
+  pauses before its replace; the newer generation's caller (no gate) lands
+  and re-pins the view. The version string is the same for both -- and so
+  may be ``imported_at`` -- so authority must be decided by the committed
+  generation: the delayed caller's replace must neither land its gate over
+  the newer generation nor be accepted on retry."""
+  store = _FakeManifestStore()
+  setup = _FakeWriteClient(store=store)
+  _scored_run().materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=setup
+  )
+  stale_etag = store.view_etags[_VIEW_REF]
+
+  fake_newer = _FakeWriteClient(store=store)
+
+  def newer_generation_lands_first() -> None:
+    result = _scored_run().materialize(
+        **_TARGET,
+        import_version="v1",
+        replace=True,
+        imported_at=_T1 + timedelta(hours=2),
+        bq_client=fake_newer,
+    )
+    assert result.status == "replaced"
+    # Same version, same (absent) gate, same SQL as the view already
+    # carried -- yet a new generation is a new pin, so the view was
+    # rewritten and its ETag moved under the delayed older caller. Without
+    # that, the older caller's conditional replace would land unchallenged.
+    assert [kind for kind, _, _ in fake_newer.view_writes] == ["update"]
+    assert store.view_etags[_VIEW_REF] != stale_etag
+
+  fake_older = _FakeWriteClient(
+      store=store, before_view_write=newer_generation_lands_first
+  )
+  result = _scored_run().materialize(
+      **_TARGET,
+      import_version="v1",
+      replace=True,
+      imported_at=older_imported_at,
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      bq_client=fake_older,
+  )
+
+  assert result.status == "replaced"
+  assert result.failed_sessions_view == _VIEW_REF
+  # The older caller's replace hit its ETag check; the retry found the view
+  # pinned to the generation the manifest holds and left it alone.
+  assert fake_older.view_writes == []
+  (row,) = store.rows
+  assert row["imported_at"] == (_T1 + timedelta(hours=2)).isoformat()
+  assert row["view_policy"] is None
+  newer_generation = row["generation_id"]
+  assert newer_generation != result.manifest["generation_id"]
+  assert _full_pin(fake_older) == {
+      "import_version": "v1",
+      "generation_id": newer_generation,
+      "job_id": "job-123",
+      "policy": None,
+  }
+  assert "0.9 AS min_score" not in store.views[_VIEW_REF]
+
+  # A later same-version call that finds this generation committed may set
+  # the gate -- committed to the row under a new generation, then rendered
+  # -- and the delayed caller's gate stays gone.
+  result = _scored_run().materialize(
+      **_TARGET,
+      import_version="v1",
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake_older,
+  )
+  assert result.status == "unchanged"
+  (row,) = store.rows
+  assert row["view_policy"] == _policy_json(0.5)
+  assert row["generation_id"] != newer_generation
+  assert _full_pin(fake_older)["generation_id"] == row["generation_id"]
+  assert "0.5 AS min_score" in store.views[_VIEW_REF]
+
+
+@pytest.mark.parametrize(
+    "generation_id",
+    [
+        "not a generation",
+        # Canonical form only: 32 lowercase hex digits.
+        "0" * 31,
+        "0" * 33,
+        "A" * 32,
+        "2026-05-01T08:00:00.000000+00:00",
+        1777622400,
+        None,
+    ],
+)
+def test_materialize_refuses_a_pin_with_a_malformed_generation(
+    generation_id,
+) -> None:
+  fake = _FakeWriteClient()
+  _scored_run().materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  _, query = fake.store.views[_VIEW_REF].split("\n", 1)
+  pin = {**_full_pin(fake), "generation_id": generation_id}
+  fake.store.write_view(
+      _VIEW_REF, _PIN_LINE + json.dumps(pin, sort_keys=True) + "\n" + query
+  )
+  before = list(fake.view_writes)
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert fake.view_writes == before
+
+
+def test_materialize_refuses_a_canonical_policy_forgery() -> None:
+  """The gate is committed manifest state, so the view cannot vouch for it.
+
+  A foreign writer takes a committed manifest row (the latest version,
+  published without a gate) and writes exactly what the importer would
+  render for it under ``goal_completion >= 0.9`` -- the canonical body,
+  the current generation, a matching policy pin. Nothing in that text is
+  wrong; only the manifest row says there is no gate. Every later call,
+  including an unchanged re-import of an *older* version (which must not
+  render its own gate anyway), has to fail closed rather than accept the
+  view as its own and leave the forged gate standing.
+  """
+  fake = _FakeWriteClient()
+  _scored_run().materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES).materialize(
+      **_TARGET,
+      import_version="v2",
+      imported_at=_T1 + timedelta(hours=1),
+      bq_client=fake,
+  )
+  genuine = fake.store.views[_VIEW_REF]
+  assert _view_pin(fake)["import_version"] == "v2"
+  assert _row(fake, "v2")["view_policy"] is None
+
+  forged = evalbench._failed_sessions_view_body(
+      manifest=_row(fake, "v2"),
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+  )
+  assert forged != genuine
+  assert "0.9 AS min_score" in forged
+  assert _full_pin_of(forged)["generation_id"] == _generation(fake, "v2")
+  fake.store.write_view(_VIEW_REF, forged)
+  before = list(fake.view_writes)
+
+  # The non-latest version, unchanged: refused up front, nothing written.
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(
+        **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+    )
+  assert fake.store.views[_VIEW_REF] == forged
+  assert fake.view_writes == before
+  # The latest version itself, and a new version: likewise.
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES).materialize(
+        **_TARGET, import_version="v2", bq_client=fake
+    )
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(**_TARGET, import_version="v3", bq_client=fake)
+  assert fake.store.views[_VIEW_REF] == forged
+  assert fake.view_writes == before
+  assert {row["import_version"] for row in fake.manifest_rows} == {"v1", "v2"}
+  assert _row(fake, "v2")["view_policy"] is None
+
+  # The same forgery under a well-formed generation the manifest never
+  # committed (neither current nor in the row's history) is exactly what a
+  # view a superseded generation left behind would look like -- but the
+  # only thing that says so is the view. Nothing committed can vouch for
+  # it, so it is refused rather than authenticated and replaced.
+  forged_stale = evalbench._failed_sessions_view_body(
+      manifest=_row(fake, "v2"),
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      generation_id="f" * 32,
+  )
+  assert _row(fake, "v2")["superseded_generations"] == []
+  fake.store.write_view(_VIEW_REF, forged_stale)
+  before = list(fake.view_writes)
+  for kwargs in (
+      {"import_version": "v1", "imported_at": _T1},
+      {"import_version": "v2", "replace": True},
+      {"import_version": "v3"},
+  ):
+    with pytest.raises(
+        ValueError, match="not an evalbench failed_sessions view"
+    ):
+      _scored_run().materialize(**_TARGET, **kwargs, bq_client=fake)
+    assert fake.store.views[_VIEW_REF] == forged_stale
+    assert fake.view_writes == before
+  assert {row["import_version"] for row in fake.manifest_rows} == {"v1", "v2"}
+  assert _generation(fake, "v2") == _full_pin_of(genuine)["generation_id"]
+
+
+def test_materialize_authenticates_a_superseded_view_from_committed_history() -> (
+    None
+):
+  """A view a superseded generation left behind is recognized only through
+  the manifest's own record of that generation: the row's
+  ``superseded_generations`` history names the generation and the gate it
+  carried, and that -- never the view's pin -- is what the body is checked
+  against. A pin naming a real superseded generation under any other gate
+  is a forgery and is refused."""
+  fake = _FakeWriteClient()
+  run = _scored_run()
+  run.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1,
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      bq_client=fake,
+  )
+  first_generation = _generation(fake)
+  stale_view = fake.store.views[_VIEW_REF]
+  assert _full_pin_of(stale_view)["generation_id"] == first_generation
+
+  # A policy change commits a new generation; the history records the one
+  # it supersedes together with the gate that generation rendered.
+  run.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1,
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake,
+  )
+  second_generation = _generation(fake)
+  assert second_generation != first_generation
+  assert [
+      json.loads(e) for e in _row(fake, "v1")["superseded_generations"]
+  ] == [{"generation_id": first_generation, "view_policy": _policy_json(0.9)}]
+  assert _full_pin(fake)["generation_id"] == second_generation
+
+  # Put the first generation's view back (as if the re-render had never
+  # landed): it verifies from the history and is advanced, not preserved.
+  fake.store.write_view(_VIEW_REF, stale_view)
+  writes = len(fake.view_writes)
+  result = run.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1,
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake,
+  )
+  assert result.status == "unchanged"
+  assert len(fake.view_writes) == writes + 1
+  assert _full_pin(fake)["generation_id"] == second_generation
+  assert "0.5 AS min_score" in fake.store.views[_VIEW_REF]
+  assert "0.9 AS min_score" not in fake.store.views[_VIEW_REF]
+
+  # The same superseded generation under a gate the history does not
+  # record for it -- the current gate, or none -- is not that view.
+  for policy in (EvalScorePolicy({"goal_completion": 0.5}), None):
+    forged = evalbench._failed_sessions_view_body(
+        manifest=_row(fake, "v1"),
+        policy=policy,
+        generation_id=first_generation,
+    )
+    assert forged != stale_view
+    fake.store.write_view(_VIEW_REF, forged)
+    writes = len(fake.view_writes)
+    with pytest.raises(
+        ValueError, match="not an evalbench failed_sessions view"
+    ):
+      run.materialize(**_TARGET, import_version="v1", bq_client=fake)
+    assert fake.store.views[_VIEW_REF] == forged
+    assert len(fake.view_writes) == writes
+
+  # A ``replace`` supersedes a generation too, and the history keeps
+  # every generation the row ever had, oldest first.
+  fake.store.write_view(_VIEW_REF, stale_view)
+  result = run.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1 + timedelta(hours=1),
+      replace=True,
+      bq_client=fake,
+  )
+  assert result.status == "replaced"
+  third_generation = _generation(fake)
+  assert third_generation not in (first_generation, second_generation)
+  assert [
+      json.loads(e) for e in _row(fake, "v1")["superseded_generations"]
+  ] == [
+      {"generation_id": first_generation, "view_policy": _policy_json(0.9)},
+      {"generation_id": second_generation, "view_policy": _policy_json(0.5)},
+  ]
+  assert result.manifest["superseded_generations"] == (
+      _row(fake, "v1")["superseded_generations"]
+  )
+  assert _full_pin(fake)["generation_id"] == third_generation
+  assert "min_score" not in fake.store.views[_VIEW_REF]
+
+
+# The manifest schema slice 1 (#451) shipped: no generation, no committed
+# view policy, no generation history. Pinned by name so that a change to
+# ``_MANIFEST_SCHEMA_FIELDS`` that would alter what an upgrade has to add
+# fails here rather than on a live dataset.
+_SLICE_1_MANIFEST_COLUMNS = (
+    "job_id",
+    "import_version",
+    "source_project",
+    "source_dataset",
+    "source_snapshot_at",
+    "results_count",
+    "scores_count",
+    "configs_count",
+    "results_fingerprint",
+    "scores_fingerprint",
+    "configs_fingerprint",
+    "events_table",
+    "scores_table",
+    "event_row_count",
+    "score_row_count",
+    "imported_at",
+)
+_GENERATION_COLUMNS = ("generation_id", "view_policy", "superseded_generations")
+
+
+def _slice_1_schema() -> list:
+  fields = {name: field for name, *field in evalbench._MANIFEST_SCHEMA_FIELDS}
+  assert set(fields) == set(_SLICE_1_MANIFEST_COLUMNS) | set(
+      _GENERATION_COLUMNS
+  )
+  return evalbench._schema(
+      tuple((name, *fields[name]) for name in _SLICE_1_MANIFEST_COLUMNS)
+  )
+
+
+def _downgrade_to_slice_1(fake: _FakeWriteClient) -> None:
+  """Leave the fake's dataset as the slice-1 release left it.
+
+  The manifest has the slice-1 columns only, every row carries only those
+  columns, and there is no failed_sessions view (slice 1 wrote none).
+  """
+  fake.store.set_manifest_schema(_slice_1_schema())
+  for row in fake.store.rows:
+    for column in _GENERATION_COLUMNS:
+      row.pop(column, None)
+    assert set(row) == set(_SLICE_1_MANIFEST_COLUMNS)
+  fake.store.views.clear()
+  fake.store.view_etags.clear()
+  fake.view_writes.clear()
+  fake.queries.clear()
+
+
+def _backfill_queries(fake: _FakeWriteClient) -> list[int]:
+  return [
+      i
+      for i, (sql, _) in enumerate(fake.queries)
+      if sql.startswith("UPDATE") and "WHERE generation_id IS NULL" in sql
+  ]
+
+
+def _manifest_reads(fake: _FakeWriteClient) -> list[int]:
+  return [
+      i
+      for i, (sql, _) in enumerate(fake.queries)
+      if sql.startswith("SELECT *") and ".evalbench_import_manifest`" in sql
+  ]
+
+
+def test_materialize_upgrades_a_slice_1_manifest_in_place() -> None:
+  """A dataset published by slice 1 (#451) is upgraded before it is read:
+  the generation columns are added to the live manifest, every legacy row
+  gets a generation derived from its key, and only then does the import
+  proceed -- an unchanged re-import pins the view to the backfilled
+  generation, and a later replace supersedes that generation into the
+  row's committed history like any other."""
+  fake = _FakeWriteClient()
+  run = _scored_run()
+  run.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  _downgrade_to_slice_1(fake)
+  legacy = dict(_row(fake, "v1"))
+  upgrades_before = fake.store.schema_updates
+
+  result = run.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  assert result.status == "unchanged"
+  # One schema update: the three columns appended, in declared order,
+  # after the slice-1 columns, without touching what was there.
+  assert fake.store.schema_updates == upgrades_before + 1
+  assert tuple(f.name for f in fake.store.manifest_schema) == (
+      _SLICE_1_MANIFEST_COLUMNS + _GENERATION_COLUMNS
+  )
+  modes = {f.name: f.mode for f in fake.store.manifest_schema}
+  assert modes["generation_id"] == "NULLABLE"
+  assert modes["view_policy"] == "NULLABLE"
+  assert modes["superseded_generations"] == "REPEATED"
+  # The backfill ran once, before the first manifest read.
+  (backfill,) = _backfill_queries(fake)
+  assert backfill < min(_manifest_reads(fake))
+  row = _row(fake, "v1")
+  assert {k: v for k, v in row.items() if k in _SLICE_1_MANIFEST_COLUMNS} == (
+      legacy
+  )
+  assert row["generation_id"] == _legacy_generation(legacy)
+  assert evalbench._GENERATION_ID_PATTERN.fullmatch(row["generation_id"])
+  assert row["view_policy"] is None
+  assert row["superseded_generations"] == []
+  assert result.manifest == row
+  # The view is created from the upgraded row, pinned to the backfilled
+  # generation, and recognized as the importer's on the next read.
+  assert [kind for kind, _, _ in fake.view_writes] == ["create"]
+  assert _full_pin(fake)["generation_id"] == _legacy_generation(legacy)
+  assert fake.store.views[_VIEW_REF] == evalbench._committed_view_body(row)
+  assert evalbench._read_managed_view(
+      fake,
+      view_ref=_VIEW_REF,
+      manifest_ref=result.manifest_table,
+      location=None,
+  ).pin["generation_id"] == _legacy_generation(legacy)
+
+  # Idempotent: an upgraded manifest costs one metadata read and no DML.
+  fake.queries.clear()
+  result = run.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  assert result.status == "unchanged"
+  assert fake.store.schema_updates == upgrades_before + 1
+  assert _backfill_queries(fake) == []
+  assert [kind for kind, _, _ in fake.view_writes] == ["create"]
+  assert _row(fake, "v1") == row
+
+  # The backfilled generation is a real one: a policy change supersedes it
+  # into the row's history, and the view pinned to it is authenticated
+  # from that history and advanced.
+  stale_view = fake.store.views[_VIEW_REF]
+  result = run.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1,
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      bq_client=fake,
+  )
+  assert result.status == "unchanged"
+  assert _generation(fake) != _legacy_generation(legacy)
+  assert [
+      json.loads(e) for e in _row(fake, "v1")["superseded_generations"]
+  ] == [{"generation_id": _legacy_generation(legacy), "view_policy": None}]
+  assert _full_pin(fake)["generation_id"] == _generation(fake)
+  fake.store.write_view(_VIEW_REF, stale_view)
+  assert evalbench._read_managed_view(
+      fake,
+      view_ref=_VIEW_REF,
+      manifest_ref=result.manifest_table,
+      location=None,
+  ).pin["generation_id"] == _legacy_generation(legacy)
+
+  # A replace of the legacy version and a brand-new version both publish
+  # through the upgraded manifest (the INSERT names every column).
+  second_generation = _generation(fake)
+  result = run.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1 + timedelta(hours=1),
+      replace=True,
+      bq_client=fake,
+  )
+  assert result.status == "replaced"
+  assert _generation(fake) not in (
+      _legacy_generation(legacy),
+      second_generation,
+  )
+  assert [
+      json.loads(e) for e in _row(fake, "v1")["superseded_generations"]
+  ] == [
+      {"generation_id": _legacy_generation(legacy), "view_policy": None},
+      {"generation_id": second_generation, "view_policy": _policy_json(0.9)},
+  ]
+  result = run.materialize(
+      **_TARGET,
+      import_version="v2",
+      imported_at=_T1 + timedelta(hours=2),
+      bq_client=fake,
+  )
+  assert result.status == "imported"
+  assert _row(fake, "v2")["superseded_generations"] == []
+  assert evalbench._GENERATION_ID_PATTERN.fullmatch(_generation(fake, "v2"))
+  assert _view_pin(fake)["import_version"] == "v2"
+  assert fake.store.schema_updates == upgrades_before + 1
+
+
+def test_materialize_finishes_an_interrupted_manifest_upgrade() -> None:
+  """An upgrade that added the columns but died before the backfill leaves
+  rows without a generation under a complete schema. The next import finds
+  nothing to add, notices the row it handles has no generation, backfills,
+  and proceeds; the backfill is derived, so finishing it twice is safe."""
+  fake = _FakeWriteClient()
+  run = _scored_run()
+  run.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  run.materialize(
+      **_TARGET,
+      import_version="v2",
+      imported_at=_T1 + timedelta(hours=1),
+      bq_client=fake,
+  )
+  # Schema complete, every row as the DDL alone would leave it.
+  for row in fake.store.rows:
+    row["generation_id"] = None
+    row["view_policy"] = None
+    row["superseded_generations"] = []
+  fake.store.views.clear()
+  fake.store.view_etags.clear()
+  fake.view_writes.clear()
+  fake.queries.clear()
+  upgrades_before = fake.store.schema_updates
+
+  result = run.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  assert result.status == "unchanged"
+  assert fake.store.schema_updates == upgrades_before
+  assert len(_backfill_queries(fake)) == 1
+  # The backfill is table-wide: the version this call did not touch got
+  # its generation too, so the view (which tracks the latest, v2) pins it.
+  for version in ("v1", "v2"):
+    assert _generation(fake, version) == _legacy_generation(_row(fake, version))
+  assert result.manifest["generation_id"] == _generation(fake, "v1")
+  assert _view_pin(fake)["import_version"] == "v2"
+  assert _full_pin(fake)["generation_id"] == _generation(fake, "v2")
+  assert fake.store.views[_VIEW_REF] == evalbench._committed_view_body(
+      _row(fake, "v2")
+  )
+
+
+def test_materialize_tolerates_a_concurrent_manifest_upgrade() -> None:
+  """Two importers upgrading one slice-1 dataset at once: the schema update
+  is ETag-conditional, so the loser re-reads, finds the columns already
+  there, and continues -- finishing the backfill itself if the winner had
+  not yet -- and both converge on the same derived generation. A manifest
+  that keeps changing under the upgrade fails closed."""
+  fake = _FakeWriteClient()
+  run = _scored_run()
+  run.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  _downgrade_to_slice_1(fake)
+  legacy = dict(_row(fake, "v1"))
+  upgrades_before = fake.store.schema_updates
+
+  def other_importer_adds_the_columns() -> None:
+    fake.before_schema_update = None
+    fake.store.set_manifest_schema(
+        evalbench._schema(evalbench._MANIFEST_SCHEMA_FIELDS)
+    )
+    for row in fake.store.rows:
+      row.setdefault("generation_id", None)
+      row.setdefault("view_policy", None)
+      row.setdefault("superseded_generations", [])
+
+  fake.before_schema_update = other_importer_adds_the_columns
+  result = run.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  assert result.status == "unchanged"
+  # Only the other importer's update landed; this one re-read and moved on.
+  assert fake.store.schema_updates == upgrades_before + 1
+  assert tuple(f.name for f in fake.store.manifest_schema) == (
+      _SLICE_1_MANIFEST_COLUMNS + _GENERATION_COLUMNS
+  )
+  assert len(_backfill_queries(fake)) == 1
+  assert _generation(fake) == _legacy_generation(legacy)
+  assert _full_pin(fake)["generation_id"] == _legacy_generation(legacy)
+
+  # A manifest whose ETag moves on every attempt without gaining the
+  # columns exhausts the bounded retry and is refused, untouched.
+  fake = _FakeWriteClient()
+  run.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  _downgrade_to_slice_1(fake)
+  upgrades_before = fake.store.schema_updates
+  fake.before_schema_update = lambda: fake.store.set_manifest_schema(
+      _slice_1_schema()
+  )
+  with pytest.raises(ValueError, match="changed concurrently"):
+    run.materialize(
+        **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+    )
+  assert (
+      fake.store.schema_updates
+      == upgrades_before + evalbench._SCHEMA_UPGRADE_ATTEMPTS
+  )
+  assert tuple(f.name for f in fake.store.manifest_schema) == (
+      _SLICE_1_MANIFEST_COLUMNS
+  )
+  assert _backfill_queries(fake) == []
+  assert fake.view_writes == []
+  assert "generation_id" not in _row(fake, "v1")
+
+
+def _full_pin_of(view_query: str) -> dict:
+  first_line = view_query.splitlines()[0]
+  assert first_line.startswith(_PIN_LINE)
+  return json.loads(first_line[len(_PIN_LINE) :])
+
+
+def test_failed_sessions_sql_pins_literals_with_escaping() -> None:
+  job_id = 'job "q" \\ x\nnew'
+  sql = failed_sessions_sql(
+      target_project="p", target_dataset="d", job_id=job_id, import_version="v1"
+  )
+  assert "@" not in sql
+  assert 'job_id = "job \\"q\\" \\\\ x\\nnew" AND import_version = "v1"' in sql
+  # The literal never breaks the line the pin is on.
+  assert "x\nnew" not in sql
+
+  with pytest.raises(ValueError, match="pinned together"):
+    failed_sessions_sql(target_project="p", target_dataset="d", job_id="j")
+  with pytest.raises(ValueError, match="pinned together"):
+    failed_sessions_sql(
+        target_project="p", target_dataset="d", import_version="v1"
+    )
+  with pytest.raises(ValueError, match="import_version"):
+    failed_sessions_sql(
+        target_project="p",
+        target_dataset="d",
+        job_id="j",
+        import_version="not a version!",
+    )
+
+
+def test_failed_sessions_matches_classify_sessions_for_the_pinned_version() -> (
+    None
+):
+  fake = _FakeWriteClient()
+  run = _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES)
+  policy = EvalScorePolicy({"goal_completion": 0.5})
+  run.materialize(**_TARGET, import_version="v1", policy=policy, bq_client=fake)
+
+  listing = failed_sessions(
+      **_TARGET, job_id="job-123", policy=policy, bq_client=fake
+  )
+
+  assert listing.import_version == "v1"
+  assert listing.events_table == "analytics-project.bqaa.evalbench_agent_events"
+  assert listing.session_count == 3
+  assert listing.failed_count == 2
+  verdicts = classify_sessions(
+      run.to_agent_event_rows(import_version="v1"),
+      run.to_score_rows(import_version="v1"),
+      policy,
+  )
+  assert [s.verdict() for s in listing.sessions] == [
+      v for v in verdicts if v.failed
+  ]
+  assert [s.session_id for s in listing.sessions] == [
+      "evalbench-import:job-123:v1:crash-1",
+      "evalbench-import:job-123:v1:wrong-1",
+  ]
+  for session in listing.sessions:
+    assert session.trace_id == session.session_id
+    assert (session.job_id, session.import_version) == ("job-123", "v1")
+    assert isinstance(session.started_at, datetime)
+  assert listing.sessions[1].failing_scores == {"goal_completion": 0.2}
+  assert listing.to_dict()["sessions"][1]["failing_scores"] == {
+      "goal_completion": 0.2
+  }
+
+  # The contract query ran parameterized against the pinned version.
+  sql, params = _listing_query(fake)
+  assert params == {"job_id": "job-123", "import_version": "v1"}
+  assert "`analytics-project.bqaa.evalbench_agent_events`" in sql
+  assert "STRUCT('goal_completion' AS comparator, 0.5 AS min_score)" in sql
+
+  everything = failed_sessions(
+      **_TARGET,
+      job_id="job-123",
+      policy=policy,
+      include_passed=True,
+      bq_client=fake,
+  )
+  assert [s.verdict() for s in everything.sessions] == verdicts
+  assert (everything.session_count, everything.failed_count) == (3, 2)
+
+
+def test_failed_sessions_never_mixes_import_versions() -> None:
+  fake = _FakeWriteClient()
+  policy = EvalScorePolicy({"goal_completion": 0.5})
+  _scored_run().materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES).materialize(
+      **_TARGET,
+      import_version="v2",
+      imported_at=_T1 + timedelta(hours=1),
+      bq_client=fake,
+  )
+
+  latest = failed_sessions(
+      **_TARGET, job_id="job-123", policy=policy, bq_client=fake
+  )
+  assert latest.import_version == "v2"
+  assert {s.session_id for s in latest.sessions} == {
+      "evalbench-import:job-123:v2:crash-1",
+      "evalbench-import:job-123:v2:wrong-1",
+  }
+
+  pinned = failed_sessions(
+      **_TARGET,
+      job_id="job-123",
+      import_version="v1",
+      policy=policy,
+      bq_client=fake,
+  )
+  assert pinned.import_version == "v1"
+  assert {s.session_id for s in pinned.sessions} == {
+      "evalbench-import:job-123:v1:crash-1"
+  }
+  assert pinned.manifest["import_version"] == "v1"
+
+  with pytest.raises(ValueError, match="'v3' is not published"):
+    failed_sessions(
+        **_TARGET, job_id="job-123", import_version="v3", bq_client=fake
+    )
+  with pytest.raises(ValueError, match="no published import"):
+    failed_sessions(**_TARGET, job_id="job-none", bq_client=fake)
+  with pytest.raises(ValueError, match="import_version must match"):
+    failed_sessions(
+        **_TARGET,
+        job_id="job-123",
+        import_version="bad version!",
+        bq_client=fake,
+    )
+
+
+def test_failed_sessions_reads_the_tables_bound_in_the_manifest() -> None:
+  fake = _FakeWriteClient()
+  _scored_run().materialize(
+      **_TARGET,
+      events_table="evalbench_events_custom",
+      scores_table="evalbench_scores_custom",
+      import_version="v1",
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake,
+  )
+  assert "`analytics-project.bqaa.evalbench_events_custom`" in (
+      fake.store.views[_VIEW_REF]
+  )
+  assert "`analytics-project.bqaa.evalbench_scores_custom`" in (
+      fake.store.views[_VIEW_REF]
+  )
+
+  listing = failed_sessions(
+      **_TARGET,
+      job_id="job-123",
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake,
+  )
+  assert (
+      listing.events_table == "analytics-project.bqaa.evalbench_events_custom"
+  )
+  assert (
+      listing.scores_table == "analytics-project.bqaa.evalbench_scores_custom"
+  )
+  sql, _ = _listing_query(fake)
+  assert "`analytics-project.bqaa.evalbench_events_custom`" in sql
+  assert "`analytics-project.bqaa.evalbench_scores_custom`" in sql
+  assert "evalbench_agent_events" not in sql
+
+
+def test_session_trace_selector_pins_the_versioned_identity() -> None:
+  from bigquery_agent_analytics.client import Client
+
+  session = EvalBenchSession(
+      job_id="job-123",
+      import_version="v1",
+      session_id="evalbench-import:job-123:v1:crash-1",
+      trace_id="evalbench-import:job-123:v1:crash-1",
+      scenario_id="crash-1",
+      started_at=None,
+      process_failed=True,
+      missing_completion=True,
+      score_failed=False,
+      failed=True,
+  )
+  selector = session.trace_selector()
+  assert selector == {
+      "session_id": "evalbench-import:job-123:v1:crash-1",
+      "experiment_id": "job-123",
+  }
+  # Accepted verbatim by the existing reader (no new client surface).
+  inspect.signature(Client.get_session_trace).bind(None, **selector)
+
+  class _Recorder:
+
+    def get_session_trace(self, **kwargs):
+      self.kwargs = kwargs
+      return "trace"
+
+  recorder = _Recorder()
+  assert session.get_trace(recorder, event_types=["AGENT_COMPLETED"]) == "trace"
+  assert recorder.kwargs == {**selector, "event_types": ["AGENT_COMPLETED"]}
+  # Another version of the same scenario is a different identity.
+  assert selector["session_id"] != evalbench._session_identity(
+      "job-123", "crash-1", import_version="v2"
+  )
