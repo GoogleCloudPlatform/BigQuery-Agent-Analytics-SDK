@@ -112,17 +112,22 @@ _IMPORT_LOCK_ID = "evalbench-import"
 # is a pure function of the latest manifest row. Nothing the view says
 # about itself proves ownership: a view is the importer's only when the
 # pin names a version this job committed to the manifest and the body is
-# byte-for-byte what the importer renders for that manifest row -- with
-# the row's own policy when the pin names the row's current generation, or
-# for a view left behind by a superseded generation, the pinned policy
-# over the row's tables, in which case it is only ever advanced to the
-# committed rendering, never preserved. (BigQuery returns a view's query
-# text verbatim, and whitespace inside a literal is significant, so no
+# byte-for-byte what the importer renders for that manifest row from
+# committed metadata alone -- the row's own policy when the pin names the
+# row's current generation, or, for a view left behind by a superseded
+# generation, the policy the row's ``superseded_generations`` history
+# recorded for that generation when it was replaced (every publish and
+# policy change appends the generation it supersedes). A generation the
+# manifest never committed cannot be verified and is refused; a
+# superseded view that verifies is only ever advanced to the committed
+# rendering, never preserved. (BigQuery returns a view's query text
+# verbatim, and whitespace inside a literal is significant, so no
 # normalization is applied.) Anything else at that name -- a table, a
 # foreign view, a copied marker (however self-consistent) over other SQL, a
 # rendering for an unpublished version, a canonical rendering of the
-# current generation under another policy, or a managed view somebody
-# edited or reformatted -- is refused, never replaced. Writes go through
+# current generation under another policy, a rendering under a generation
+# or policy the manifest does not hold, or a managed view somebody edited
+# or reformatted -- is refused, never replaced. Writes go through
 # the tables API rather than ``CREATE OR REPLACE VIEW``: create-if-absent,
 # and ETag-conditional replace after re-reading the view and the latest
 # manifest, so two concurrent imports cannot overwrite each other's pin.
@@ -192,12 +197,30 @@ _MANIFEST_SCHEMA_FIELDS = (
     # Opaque id of this committed generation of the row: minted by every
     # publish and by every committed change of ``view_policy``. Callers
     # choose ``imported_at``, so two publishes may share it; nothing shares
-    # a ``generation_id``.
-    ("generation_id", "STRING", "REQUIRED"),
+    # a ``generation_id``. Declared NULLABLE only so the column can be
+    # added to a manifest created before generations existed (slice 1);
+    # ``_ensure_manifest_schema`` backfills every row, and every row the
+    # importer writes carries one.
+    ("generation_id", "STRING", "NULLABLE"),
     # The score gate the failed_sessions view renders for this version
     # (canonical JSON of ``_policy_pin``, NULL for none). The view carries
     # what this column says, never what the view itself claims.
     ("view_policy", "STRING", "NULLABLE"),
+    # Committed history of the generations this row has had, oldest first:
+    # one ``TO_JSON_STRING(STRUCT(generation_id, view_policy))`` per
+    # superseded generation, appended by the publish transaction (a
+    # ``replace``) and by ``_RECORD_VIEW_POLICY_QUERY``. It is what lets a
+    # view a superseded generation left behind be authenticated from
+    # committed metadata rather than from its own pin.
+    ("superseded_generations", "STRING", "REPEATED"),
+)
+# Manifest columns the importer stages and inserts verbatim; the history
+# column is computed inside the publish transaction from the row it
+# replaces (``_PUBLISH_SCRIPT``), never taken from the staged row.
+_STAGED_MANIFEST_COLUMNS = tuple(
+    name
+    for name, _, _ in _MANIFEST_SCHEMA_FIELDS
+    if name != "superseded_generations"
 )
 _LOCK_SCHEMA_FIELDS = (
     ("lock_id", "STRING", "REQUIRED"),
@@ -247,10 +270,28 @@ LIMIT 1
 # superseded and re-rendered from the row.
 _RECORD_VIEW_POLICY_QUERY = """\
 UPDATE `{manifest_table}`
-SET view_policy = @view_policy, generation_id = @generation_id
+SET view_policy = @view_policy,
+    generation_id = @generation_id,
+    superseded_generations = ARRAY_CONCAT(
+        IFNULL(superseded_generations, []),
+        [TO_JSON_STRING(STRUCT(
+            generation_id AS generation_id, view_policy AS view_policy))])
 WHERE job_id = @job_id
   AND import_version = @import_version
   AND generation_id = @expected_generation_id
+"""
+
+# Gives every manifest row published before generations existed (slice 1)
+# a ``generation_id``. The id is derived from the row key rather than
+# minted at random so that two importers upgrading one dataset at once
+# converge on the same value: the backfill is idempotent whichever of them
+# commits first (or both do). ``import_version`` cannot contain ``:``
+# (``_IMPORT_VERSION_PATTERN``), so the key is unambiguous.
+_BACKFILL_GENERATION_QUERY = """\
+UPDATE `{manifest_table}`
+SET generation_id = TO_HEX(MD5(CONCAT(
+    'evalbench-import-manifest:', import_version, ':', job_id)))
+WHERE generation_id IS NULL
 """
 
 # The managed view's query text (``Table.view_query``): the pin comment on
@@ -337,6 +378,7 @@ _REPLACE_IDENTICAL_NOTE = (
 _PUBLISH_SCRIPT = """\
 DECLARE existing_manifest_rows INT64 DEFAULT 0;
 DECLARE conflicting_manifest_rows INT64 DEFAULT 0;
+DECLARE prior_generations ARRAY<STRING> DEFAULT [];
 BEGIN
   BEGIN TRANSACTION;
   UPDATE `{lock_table}`
@@ -365,6 +407,16 @@ BEGIN
     RAISE USING MESSAGE = '{conflict_message}';
   END IF;
 {identical_guard}\
+  -- The generation this publish supersedes (if any) joins the row's
+  -- committed history, so a view still pinned to it stays verifiable.
+  SET prior_generations = IFNULL((
+    SELECT ARRAY_CONCAT(
+        IFNULL(superseded_generations, []),
+        [TO_JSON_STRING(STRUCT(
+            generation_id AS generation_id, view_policy AS view_policy))])
+    FROM `{manifest_table}`
+    WHERE job_id = @job_id AND import_version = @import_version
+  ), []);
   DELETE FROM `{events_table}`
   WHERE job_id = @job_id AND import_version = @import_version;
   DELETE FROM `{scores_table}`
@@ -375,8 +427,8 @@ BEGIN
   SELECT {event_columns} FROM `{events_staging}`;
   INSERT INTO `{scores_table}` ({score_columns})
   SELECT {score_columns} FROM `{scores_staging}`;
-  INSERT INTO `{manifest_table}` ({manifest_columns})
-  SELECT {manifest_columns} FROM `{manifest_staging}`;
+  INSERT INTO `{manifest_table}` ({manifest_columns}, superseded_generations)
+  SELECT {manifest_columns}, prior_generations FROM `{manifest_staging}`;
   COMMIT TRANSACTION;
 EXCEPTION WHEN ERROR THEN
   ROLLBACK TRANSACTION;
@@ -973,9 +1025,20 @@ class EvalBenchRun:
         "imported_at": imported_at.isoformat(),
         "generation_id": generation_id,
         "view_policy": _policy_column(policy),
+        # Staged as empty; the publish transaction carries the replaced
+        # row's history forward (``_PUBLISH_SCRIPT``).
+        "superseded_generations": [],
     }
 
     client = bq_client or make_bq_client(target_project, location=self.location)
+
+    # A manifest created by an earlier release (slice 1: no generations, no
+    # view policy, no history) is upgraded in place before anything reads
+    # or writes it, so an unchanged re-import finds a generation and a
+    # publish finds its columns. Nothing is created here.
+    _ensure_manifest_schema(
+        client, manifest_ref=manifest_ref, location=self.location
+    )
 
     # The view binding is checked before any table is created or written so
     # a name clash with another job's view (or a foreign object) aborts
@@ -1026,6 +1089,19 @@ class EvalBenchRun:
         import_version=import_version,
         location=self.location,
     )
+    if existing is not None and existing.get("generation_id") is None:
+      # An upgrade interrupted between the schema change and the backfill
+      # left this row without a generation; finish it (idempotently).
+      _backfill_generation_ids(
+          client, manifest_ref=manifest_ref, location=self.location
+      )
+      existing = _read_manifest(
+          client,
+          manifest_ref=manifest_ref,
+          job_id=self.job_id,
+          import_version=import_version,
+          location=self.location,
+      )
     status = "imported"
     if existing is not None:
       _check_destination_binding(
@@ -1153,6 +1229,17 @@ class EvalBenchRun:
           client, (events_staging, scores_staging, manifest_staging)
       )
 
+    # The committed row is what the result reports: the transaction adds
+    # the generation history a ``replace`` supersedes, which is not known
+    # from the (possibly stale) pre-read. Nothing deletes manifest rows, so
+    # the local copy is only a defensive fallback.
+    committed = _read_manifest(
+        client,
+        manifest_ref=manifest_ref,
+        job_id=self.job_id,
+        import_version=import_version,
+        location=self.location,
+    )
     return finish(
         EvalBenchImportResult(
             job_id=self.job_id,
@@ -1163,7 +1250,7 @@ class EvalBenchRun:
             manifest_table=manifest_ref,
             event_row_count=len(event_rows),
             score_row_count=len(score_rows),
-            manifest=manifest,
+            manifest=committed if committed is not None else manifest,
         )
     )
 
@@ -1557,9 +1644,52 @@ def _manifest_generation_id(manifest: Mapping[str, Any]) -> str:
     raise ValueError(
         f"manifest row for job {manifest.get('job_id')!r} import_version "
         f"{manifest.get('import_version')!r} has no generation_id;"
-        " re-publish the version with replace=True"
+        " re-run materialize() to upgrade the manifest, or re-publish the"
+        " version with replace=True"
     )
   return value
+
+
+def _superseded_generations(
+    manifest: Mapping[str, Any],
+) -> dict[str, Optional[str]]:
+  """The row's committed history: superseded ``generation_id`` -> policy.
+
+  Parsed strictly (it is trusted state written only by the publish
+  transaction and ``_record_view_policy``). Entries without a generation
+  (a legacy row replaced before its backfill) name nothing a view could
+  have been pinned to and are skipped.
+  """
+  history: dict[str, Optional[str]] = {}
+  for raw in manifest.get("superseded_generations") or ():
+    try:
+      entry = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError as exc:
+      raise ValueError(
+          f"manifest superseded_generations entry {raw!r} is not JSON"
+      ) from exc
+    if not isinstance(entry, Mapping):
+      raise ValueError(
+          f"manifest superseded_generations entry {raw!r} is malformed"
+      )
+    generation_id = entry.get("generation_id")
+    if generation_id is None:
+      continue
+    if not isinstance(
+        generation_id, str
+    ) or not _GENERATION_ID_PATTERN.fullmatch(generation_id):
+      raise ValueError(
+          f"manifest superseded_generations entry {raw!r} has a malformed"
+          " generation_id"
+      )
+    policy = entry.get("view_policy")
+    if policy is not None and not isinstance(policy, str):
+      raise ValueError(
+          f"manifest superseded_generations entry {raw!r} has a malformed"
+          " view_policy"
+      )
+    history[generation_id] = policy
+  return history
 
 
 def _view_pin(
@@ -1630,11 +1760,15 @@ def _parse_view_pin(
 
 @dataclasses.dataclass(frozen=True)
 class _ManagedView:
-  """A view at the managed name that the importer recognizes as its own."""
+  """A view at the managed name that the importer recognizes as its own.
+
+  ``pin`` is what the view claims, verified against the manifest; the gate
+  it renders was checked against committed state and is not carried here,
+  since nothing downstream may act on a view's own policy claim.
+  """
 
   table: Any
   pin: dict[str, Any]
-  policy: Optional[EvalScorePolicy]
 
   @property
   def view_query(self) -> str:
@@ -1653,22 +1787,25 @@ def _read_managed_view(
   ``None`` means nothing exists at ``view_ref``. The view is the importer's
   only if its pin names a version the pinned job committed to the manifest
   *and* its body is byte-for-byte what the importer renders for that
-  manifest row. When the pin names the row's *current* generation the
-  rendering uses the row's committed ``view_policy`` -- the pin's own
-  policy claim is never the reference, so a canonical rendering of the
-  current generation under any other gate is foreign. When the pin names a
-  superseded generation (the row was re-published or its policy
-  re-committed after the view was written, and nothing else records that
-  generation) the body must be the rendering of the pinned generation and
-  policy over the row's own tables; such a view is only ever advanced to
-  the committed rendering by ``_reconcile_failed_sessions_view``, so
-  whatever gate it carries is never preserved. The comparison is exact:
-  BigQuery returns a view's query text verbatim, and whitespace inside a
-  rendered literal (a ``job_id``) changes which rows the view reads, so no
-  normalization is safe. A table, a view somebody else wrote, a copied or
-  forged marker over other SQL, a rendering for an unpublished version or
-  over other tables, or an edited or reformatted body all raise. The
-  importer only ever replaces views whose definition it can vouch for.
+  manifest row from committed metadata alone. When the pin names the row's
+  *current* generation the rendering uses the row's committed
+  ``view_policy``; when it names a generation the row's
+  ``superseded_generations`` history records (the row was re-published or
+  its policy re-committed after the view was written) the rendering uses
+  the policy that history committed for that generation. The pin's own
+  policy claim is never the reference, so a canonical rendering of any
+  generation under another gate is foreign -- and so is a rendering under
+  a generation the manifest never committed, however well-formed: nothing
+  trusted can vouch for it. A view of a superseded generation that does
+  verify is only ever advanced to the committed rendering by
+  ``_reconcile_failed_sessions_view``, so whatever gate it carries is
+  never preserved. The comparison is exact: BigQuery returns a view's
+  query text verbatim, and whitespace inside a rendered literal (a
+  ``job_id``) changes which rows the view reads, so no normalization is
+  safe. A table, a view somebody else wrote, a copied or forged marker
+  over other SQL, a rendering for an unpublished version or over other
+  tables, or an edited or reformatted body all raise. The importer only
+  ever replaces views whose definition it can vouch for.
   """
   try:
     table = client.get_table(view_ref)
@@ -1677,7 +1814,7 @@ def _read_managed_view(
   view_query = getattr(table, "view_query", None)
   parsed = _parse_view_pin(view_query) if isinstance(view_query, str) else None
   if parsed is not None:
-    pin, policy = parsed
+    pin, _ = parsed
     try:
       pinned = _read_manifest(
           client,
@@ -1692,16 +1829,9 @@ def _read_managed_view(
       # cannot be one the importer wrote.
       pinned = None
     if pinned is not None:
-      if pin["generation_id"] == _manifest_generation_id(pinned):
-        expected = _committed_view_body(pinned)
-      else:
-        expected = _failed_sessions_view_body(
-            manifest=pinned,
-            policy=policy,
-            generation_id=pin["generation_id"],
-        )
-      if view_query == expected:
-        return _ManagedView(table=table, pin=pin, policy=policy)
+      expected = _committed_generation_view_body(pinned, pin["generation_id"])
+      if expected is not None and view_query == expected:
+        return _ManagedView(table=table, pin=pin)
   raise ValueError(
       f"{view_ref!r} exists but is not an evalbench failed_sessions view"
       " created by materialize() (or its definition was changed); choose"
@@ -1742,6 +1872,31 @@ def _committed_view_body(manifest: Mapping[str, Any]) -> str:
       manifest=manifest,
       policy=_policy_from_column(manifest.get("view_policy")),
       generation_id=_manifest_generation_id(manifest),
+  )
+
+
+def _committed_generation_view_body(
+    manifest: Mapping[str, Any], generation_id: str
+) -> Optional[str]:
+  """The rendering the importer wrote for ``generation_id`` of this row.
+
+  The row's current generation renders with its ``view_policy``; a
+  generation in the row's ``superseded_generations`` history renders with
+  the policy committed for it there, over the row's tables (a version's
+  destination never changes). ``None`` for a generation the manifest never
+  committed -- including a row that has no generation yet, which no view
+  was ever written for -- so the caller cannot vouch for it.
+  """
+  current = manifest.get("generation_id")
+  if isinstance(current, str) and generation_id == current:
+    return _committed_view_body(manifest)
+  history = _superseded_generations(manifest)
+  if generation_id not in history:
+    return None
+  return _failed_sessions_view_body(
+      manifest=manifest,
+      policy=_policy_from_column(history[generation_id]),
+      generation_id=generation_id,
   )
 
 
@@ -1934,6 +2089,13 @@ def _reconcile_failed_sessions_view(
           f"EvalBench job {job_id!r} has no manifest row in {manifest_ref!r}"
           " after publishing; cannot pin the failed_sessions view"
       )
+    if latest.get("generation_id") is None:
+      # The latest row predates generations and its backfill was
+      # interrupted; finish it and re-decide.
+      _backfill_generation_ids(
+          client, manifest_ref=manifest_ref, location=location
+      )
+      continue
     body = _committed_view_body(latest)
     description = _failed_sessions_view_description(latest)
     if existing is None:
@@ -2310,9 +2472,7 @@ def _publish_script(
       identical_guard=identical_guard,
       event_columns=", ".join(_EVENT_COLUMNS),
       score_columns=", ".join(name for name, _, _ in _SCORE_SCHEMA_FIELDS),
-      manifest_columns=", ".join(
-          name for name, _, _ in _MANIFEST_SCHEMA_FIELDS
-      ),
+      manifest_columns=", ".join(_STAGED_MANIFEST_COLUMNS),
   )
 
 
@@ -2491,6 +2651,66 @@ def _event_schema() -> list:
       bigquery.SchemaField("job_id", "STRING", mode="REQUIRED"),
       bigquery.SchemaField("import_version", "STRING", mode="REQUIRED"),
   ]
+
+
+_SCHEMA_UPGRADE_ATTEMPTS = 3
+
+
+def _ensure_manifest_schema(
+    client: Any, *, manifest_ref: str, location: Optional[str]
+) -> None:
+  """Upgrade a manifest table an earlier release created, idempotently.
+
+  Slice 1 (#451) created ``evalbench_import_manifest`` without
+  ``generation_id``, ``view_policy`` and ``superseded_generations``;
+  ``create_table(exists_ok=True)`` returns such a table unchanged. Any
+  column of ``_MANIFEST_SCHEMA_FIELDS`` the live table lacks is added
+  through the tables API (ETag-conditional, re-read and retried when a
+  concurrent upgrade lands first), then every row without a generation is
+  given one (``_BACKFILL_GENERATION_QUERY``). A table that already has the
+  full schema costs one metadata read and nothing else; a manifest that
+  does not exist yet is left for ``_ensure_import_tables`` to create with
+  the full schema.
+  """
+  try:
+    table = client.get_table(manifest_ref)
+  except NotFound:
+    return
+  wanted = _schema(_MANIFEST_SCHEMA_FIELDS)
+  for _ in range(_SCHEMA_UPGRADE_ATTEMPTS):
+    present = {field.name for field in table.schema}
+    missing = [field for field in wanted if field.name not in present]
+    if not missing:
+      return
+    table.schema = list(table.schema) + missing
+    try:
+      client.update_table(table, ["schema"])
+    except PreconditionFailed:
+      table = client.get_table(manifest_ref)
+      continue
+    _backfill_generation_ids(
+        client, manifest_ref=manifest_ref, location=location
+    )
+    return
+  raise ValueError(
+      f"manifest table {manifest_ref!r} changed concurrently"
+      f" {_SCHEMA_UPGRADE_ATTEMPTS} times while adding"
+      f" {[field.name for field in missing]}; re-run materialize()"
+  )
+
+
+def _backfill_generation_ids(
+    client: Any, *, manifest_ref: str, location: Optional[str]
+) -> None:
+  """Give every manifest row without a ``generation_id`` its derived one."""
+  job_config = with_sdk_labels(
+      bigquery.QueryJobConfig(), feature=_IMPORT_FEATURE
+  )
+  query_args: dict[str, Any] = {"job_config": job_config}
+  if location is not None:
+    query_args["location"] = location
+  query = _BACKFILL_GENERATION_QUERY.format(manifest_table=manifest_ref)
+  client.query(query, **query_args).result()
 
 
 def _ensure_import_tables(

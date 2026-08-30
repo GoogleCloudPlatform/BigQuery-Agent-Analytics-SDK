@@ -507,6 +507,12 @@ class _FakeManifestStore:
     self.scores: list[dict] = []
     self.lock_rows = 0
     self.lock_claims = 0
+    # The manifest table's live schema (``None`` until created) and ETag.
+    # Every DML the fake runs against the manifest is checked against it,
+    # as BigQuery would reject a column the table does not have.
+    self.manifest_schema: list | None = None
+    self.manifest_etag = "manifest-etag-0"
+    self.schema_updates = 0
     # view ref -> query text (``Table.view_query``) and its current ETag.
     self.views: dict[str, str] = {}
     self.view_etags: dict[str, str] = {}
@@ -516,6 +522,15 @@ class _FakeManifestStore:
     self._etag_counter += 1
     self.views[view_ref] = view_query
     self.view_etags[view_ref] = f"etag-{self._etag_counter}"
+
+  def set_manifest_schema(self, schema: list) -> None:
+    self.manifest_schema = list(schema)
+    self.schema_updates += 1
+    self.manifest_etag = f"manifest-etag-{self.schema_updates}"
+
+  def manifest_columns(self) -> set[str]:
+    assert self.manifest_schema is not None, "manifest table does not exist"
+    return {field.name for field in self.manifest_schema}
 
   def snapshot(self) -> _FakeSnapshot:
     return _FakeSnapshot(
@@ -539,6 +554,35 @@ def _same_version(row: dict, params: dict) -> bool:
       row["job_id"] == params["job_id"]
       and row["import_version"] == params["import_version"]
   )
+
+
+class _FakeTable:
+  """What ``client.get_table`` returns for the manifest: schema and ETag."""
+
+  table_type = "TABLE"
+  view_query = None
+
+  def __init__(self, ref: str, schema: list, etag: str) -> None:
+    self.schema = list(schema)
+    self.etag = etag
+    self.project, self.dataset_id, self.table_id = ref.split(".")
+
+
+def _history_entry(row: dict) -> str:
+  """``TO_JSON_STRING(STRUCT(generation_id, view_policy))`` of a row."""
+  return json.dumps(
+      {
+          "generation_id": row.get("generation_id"),
+          "view_policy": row.get("view_policy"),
+      },
+      separators=(",", ":"),
+  )
+
+
+def _legacy_generation(row: dict) -> str:
+  """``_BACKFILL_GENERATION_QUERY``'s derived id for a slice-1 row."""
+  key = f"evalbench-import-manifest:{row['import_version']}:{row['job_id']}"
+  return hashlib.md5(key.encode("utf-8")).hexdigest()
 
 
 class _FakeView:
@@ -599,8 +643,13 @@ class _FakeWriteClient:
       view_error: Exception | None = None,
       foreign_objects: dict[str, object] | None = None,
       before_view_write: Callable[[], None] | None = None,
+      before_schema_update: Callable[[], None] | None = None,
   ) -> None:
     self.store = store or _FakeManifestStore(manifest_rows)
+    # Runs inside every manifest schema update, *after* the importer read
+    # the table and decided which columns to add: a concurrent upgrade
+    # that lands in that window.
+    self.before_schema_update = before_schema_update
     self.stale_manifest_reads = stale_manifest_reads
     self.transaction_attempted = False
     self.transaction_snapshot = transaction_snapshot
@@ -633,6 +682,14 @@ class _FakeWriteClient:
       assert exists_ok is True
       self.created.append(ref)
       self.created_tables.append(table)
+      if ref.endswith(".evalbench_import_manifest"):
+        # ``exists_ok`` returns the existing table *unchanged*: its schema
+        # is whatever release created it, not what this caller passed.
+        if self.store.manifest_schema is None:
+          self.store.set_manifest_schema(table.schema)
+        return _FakeTable(
+            ref, self.store.manifest_schema, self.store.manifest_etag
+        )
       return table
     # Views: create-if-absent through the tables API, never exists_ok.
     assert exists_ok is False
@@ -648,6 +705,30 @@ class _FakeWriteClient:
 
   def update_table(self, table, fields):
     ref = f"{table.project}.{table.dataset_id}.{table.table_id}"
+    if fields == ["schema"]:
+      assert ref.endswith(".evalbench_import_manifest")
+      assert self.store.manifest_schema is not None
+      if self.before_schema_update is not None:
+        self.before_schema_update()
+      if table.etag != self.store.manifest_etag:
+        raise PreconditionFailed(f"412 Precondition Failed: {ref}")
+      # BigQuery only ever *adds* NULLABLE or REPEATED columns in place.
+      existing = {field.name for field in self.store.manifest_schema}
+      added = [field for field in table.schema if field.name not in existing]
+      assert added, "schema update that adds nothing"
+      assert [f.name for f in table.schema][: len(existing)] == [
+          f.name for f in self.store.manifest_schema
+      ]
+      assert all(field.mode in ("NULLABLE", "REPEATED") for field in added)
+      self.store.set_manifest_schema(table.schema)
+      # Existing rows read the new columns back as NULL (or an empty
+      # array for a REPEATED column); nothing is backfilled by the DDL.
+      for row in self.store.rows:
+        for field in added:
+          row.setdefault(field.name, [] if field.mode == "REPEATED" else None)
+      return _FakeTable(
+          ref, self.store.manifest_schema, self.store.manifest_etag
+      )
     assert "view_query" in fields
     self._run_before_view_write()
     if self.view_error is not None:
@@ -670,6 +751,12 @@ class _FakeWriteClient:
     self.get_table_calls.append(table_ref)
     if table_ref in self.foreign_objects:
       return self.foreign_objects[table_ref]
+    if table_ref.endswith(".evalbench_import_manifest"):
+      if self.store.manifest_schema is None:
+        raise NotFound(table_ref)
+      return _FakeTable(
+          table_ref, self.store.manifest_schema, self.store.manifest_etag
+      )
     if table_ref in self.store.views:
       return _FakeView(
           self.store.views[table_ref],
@@ -702,8 +789,19 @@ class _FakeWriteClient:
       )
       return _FakeJob([dict(row) for row in latest[:1]])
     if ".evalbench_import_manifest`" in query and query.startswith("UPDATE"):
+      columns = self.store.manifest_columns()
+      if "WHERE generation_id IS NULL" in query:
+        # ``_BACKFILL_GENERATION_QUERY``: derived, so idempotent.
+        assert params == {}
+        assert "generation_id" in columns
+        assert "TO_HEX(MD5(" in query
+        for row in self.store.rows:
+          if row.get("generation_id") is None:
+            row["generation_id"] = _legacy_generation(row)
+        return _FakeJob()
       # ``_RECORD_VIEW_POLICY_QUERY``: keyed on the generation the caller
-      # read, so it lands on nothing once the row was re-published.
+      # read, so it lands on nothing once the row was re-published; the
+      # generation it supersedes joins the row's committed history.
       assert set(params) == {
           "job_id",
           "import_version",
@@ -712,11 +810,18 @@ class _FakeWriteClient:
           "view_policy",
       }
       assert "generation_id = @expected_generation_id" in query
+      assert {"view_policy", "generation_id", "superseded_generations"} <= (
+          columns
+      )
+      assert "ARRAY_CONCAT(" in query and "TO_JSON_STRING(STRUCT(" in query
       for row in self.store.rows:
         if (
             _same_version(row, params)
-            and row["generation_id"] == params["expected_generation_id"]
+            and row.get("generation_id") == params["expected_generation_id"]
         ):
+          row["superseded_generations"] = list(
+              row.get("superseded_generations") or []
+          ) + [_history_entry(row)]
           row["view_policy"] = params["view_policy"]
           row["generation_id"] = params["generation_id"]
       return _FakeJob()
@@ -820,6 +925,37 @@ class _FakeWriteClient:
       return next(rows for dest, rows, _ in reversed(self.loads) if dest == ref)
 
     store = self.store
+    manifest_table = lock_table.rsplit(".", 1)[0] + ".evalbench_import_manifest"
+    # The manifest INSERT names its columns; every one must exist on the
+    # live table (a slice-1 manifest lacks the generation columns).
+    inserted = re.search(
+        r"INSERT INTO `" + re.escape(manifest_table) + r"` \(([^)]*)\)",
+        script,
+    ).group(1)
+    insert_columns = [name.strip() for name in inserted.split(",")]
+    missing = set(insert_columns) - store.manifest_columns()
+    assert not missing, f"manifest INSERT names absent columns {missing}"
+    assert "superseded_generations" in insert_columns
+    assert "SET prior_generations = IFNULL((" in script
+    assert script.index("SET prior_generations") < script.index(
+        f"DELETE FROM `{manifest_table}`"
+    )
+    # ``prior_generations``: the replaced row's history plus the generation
+    # this publish supersedes, read from the transaction's snapshot.
+    prior = [row for row in snapshot.rows if _same_version(row, params)]
+    history = [
+        entry
+        for row in prior
+        for entry in list(row.get("superseded_generations") or [])
+        + [_history_entry(row)]
+    ]
+    manifest_rows = []
+    for row in staged(manifest_table):
+      assert set(row) - {"superseded_generations"} == set(insert_columns) - {
+          "superseded_generations"
+      }
+      manifest_rows.append({**row, "superseded_generations": history})
+
     store.lock_claims += 1
     store.events = [
         row for row in store.events if not _same_version(row, params)
@@ -829,7 +965,7 @@ class _FakeWriteClient:
     ] + staged(params["scores_table"])
     store.rows = [
         row for row in store.rows if not _same_version(row, params)
-    ] + staged(lock_table.rsplit(".", 1)[0] + ".evalbench_import_manifest")
+    ] + manifest_rows
     return _FakeJob()
 
   def _failed_sessions(self, query: str, params: dict) -> list[dict]:
@@ -2355,7 +2491,10 @@ def test_materialize_pins_failed_sessions_view_to_the_published_version() -> (
   assert after_queries > max(
       i for i, sql in enumerate(statements) if "BEGIN TRANSACTION" in sql
   )
-  assert fake.get_table_calls == [_VIEW_REF, _VIEW_REF]
+  assert [ref for ref in fake.get_table_calls if ref == _VIEW_REF] == [
+      _VIEW_REF,
+      _VIEW_REF,
+  ]
   body = fake.store.views[_VIEW_REF]
   # The pin says what the view is bound to; nothing in it (no digest) is
   # taken as proof of ownership -- see the forged-pin tests below.
@@ -2628,7 +2767,7 @@ def test_materialize_can_skip_the_view() -> None:
   )
   assert result.status == "imported"
   assert result.failed_sessions_view is None
-  assert fake.get_table_calls == []
+  assert _VIEW_REF not in fake.get_table_calls
   assert _view_writes(fake) == []
 
 
@@ -3316,24 +3455,434 @@ def test_materialize_refuses_a_canonical_policy_forgery() -> None:
   assert {row["import_version"] for row in fake.manifest_rows} == {"v1", "v2"}
   assert _row(fake, "v2")["view_policy"] is None
 
-  # The same forgery under a generation the manifest does not hold looks
-  # like a view a superseded generation left behind; that is never
-  # preserved either -- it is re-rendered from the committed row.
-  fake.store.write_view(
-      _VIEW_REF,
-      evalbench._failed_sessions_view_body(
-          manifest=_row(fake, "v2"),
-          policy=EvalScorePolicy({"goal_completion": 0.9}),
-          generation_id="f" * 32,
-      ),
+  # The same forgery under a well-formed generation the manifest never
+  # committed (neither current nor in the row's history) is exactly what a
+  # view a superseded generation left behind would look like -- but the
+  # only thing that says so is the view. Nothing committed can vouch for
+  # it, so it is refused rather than authenticated and replaced.
+  forged_stale = evalbench._failed_sessions_view_body(
+      manifest=_row(fake, "v2"),
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      generation_id="f" * 32,
   )
-  result = _scored_run().materialize(
+  assert _row(fake, "v2")["superseded_generations"] == []
+  fake.store.write_view(_VIEW_REF, forged_stale)
+  before = list(fake.view_writes)
+  for kwargs in (
+      {"import_version": "v1", "imported_at": _T1},
+      {"import_version": "v2", "replace": True},
+      {"import_version": "v3"},
+  ):
+    with pytest.raises(
+        ValueError, match="not an evalbench failed_sessions view"
+    ):
+      _scored_run().materialize(**_TARGET, **kwargs, bq_client=fake)
+    assert fake.store.views[_VIEW_REF] == forged_stale
+    assert fake.view_writes == before
+  assert {row["import_version"] for row in fake.manifest_rows} == {"v1", "v2"}
+  assert _generation(fake, "v2") == _full_pin_of(genuine)["generation_id"]
+
+
+def test_materialize_authenticates_a_superseded_view_from_committed_history() -> (
+    None
+):
+  """A view a superseded generation left behind is recognized only through
+  the manifest's own record of that generation: the row's
+  ``superseded_generations`` history names the generation and the gate it
+  carried, and that -- never the view's pin -- is what the body is checked
+  against. A pin naming a real superseded generation under any other gate
+  is a forgery and is refused."""
+  fake = _FakeWriteClient()
+  run = _scored_run()
+  run.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1,
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      bq_client=fake,
+  )
+  first_generation = _generation(fake)
+  stale_view = fake.store.views[_VIEW_REF]
+  assert _full_pin_of(stale_view)["generation_id"] == first_generation
+
+  # A policy change commits a new generation; the history records the one
+  # it supersedes together with the gate that generation rendered.
+  run.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1,
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake,
+  )
+  second_generation = _generation(fake)
+  assert second_generation != first_generation
+  assert [
+      json.loads(e) for e in _row(fake, "v1")["superseded_generations"]
+  ] == [{"generation_id": first_generation, "view_policy": _policy_json(0.9)}]
+  assert _full_pin(fake)["generation_id"] == second_generation
+
+  # Put the first generation's view back (as if the re-render had never
+  # landed): it verifies from the history and is advanced, not preserved.
+  fake.store.write_view(_VIEW_REF, stale_view)
+  writes = len(fake.view_writes)
+  result = run.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1,
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake,
+  )
+  assert result.status == "unchanged"
+  assert len(fake.view_writes) == writes + 1
+  assert _full_pin(fake)["generation_id"] == second_generation
+  assert "0.5 AS min_score" in fake.store.views[_VIEW_REF]
+  assert "0.9 AS min_score" not in fake.store.views[_VIEW_REF]
+
+  # The same superseded generation under a gate the history does not
+  # record for it -- the current gate, or none -- is not that view.
+  for policy in (EvalScorePolicy({"goal_completion": 0.5}), None):
+    forged = evalbench._failed_sessions_view_body(
+        manifest=_row(fake, "v1"),
+        policy=policy,
+        generation_id=first_generation,
+    )
+    assert forged != stale_view
+    fake.store.write_view(_VIEW_REF, forged)
+    writes = len(fake.view_writes)
+    with pytest.raises(
+        ValueError, match="not an evalbench failed_sessions view"
+    ):
+      run.materialize(**_TARGET, import_version="v1", bq_client=fake)
+    assert fake.store.views[_VIEW_REF] == forged
+    assert len(fake.view_writes) == writes
+
+  # A ``replace`` supersedes a generation too, and the history keeps
+  # every generation the row ever had, oldest first.
+  fake.store.write_view(_VIEW_REF, stale_view)
+  result = run.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1 + timedelta(hours=1),
+      replace=True,
+      bq_client=fake,
+  )
+  assert result.status == "replaced"
+  third_generation = _generation(fake)
+  assert third_generation not in (first_generation, second_generation)
+  assert [
+      json.loads(e) for e in _row(fake, "v1")["superseded_generations"]
+  ] == [
+      {"generation_id": first_generation, "view_policy": _policy_json(0.9)},
+      {"generation_id": second_generation, "view_policy": _policy_json(0.5)},
+  ]
+  assert result.manifest["superseded_generations"] == (
+      _row(fake, "v1")["superseded_generations"]
+  )
+  assert _full_pin(fake)["generation_id"] == third_generation
+  assert "min_score" not in fake.store.views[_VIEW_REF]
+
+
+# The manifest schema slice 1 (#451) shipped: no generation, no committed
+# view policy, no generation history. Pinned by name so that a change to
+# ``_MANIFEST_SCHEMA_FIELDS`` that would alter what an upgrade has to add
+# fails here rather than on a live dataset.
+_SLICE_1_MANIFEST_COLUMNS = (
+    "job_id",
+    "import_version",
+    "source_project",
+    "source_dataset",
+    "source_snapshot_at",
+    "results_count",
+    "scores_count",
+    "configs_count",
+    "results_fingerprint",
+    "scores_fingerprint",
+    "configs_fingerprint",
+    "events_table",
+    "scores_table",
+    "event_row_count",
+    "score_row_count",
+    "imported_at",
+)
+_GENERATION_COLUMNS = ("generation_id", "view_policy", "superseded_generations")
+
+
+def _slice_1_schema() -> list:
+  fields = {name: field for name, *field in evalbench._MANIFEST_SCHEMA_FIELDS}
+  assert set(fields) == set(_SLICE_1_MANIFEST_COLUMNS) | set(
+      _GENERATION_COLUMNS
+  )
+  return evalbench._schema(
+      tuple((name, *fields[name]) for name in _SLICE_1_MANIFEST_COLUMNS)
+  )
+
+
+def _downgrade_to_slice_1(fake: _FakeWriteClient) -> None:
+  """Leave the fake's dataset as the slice-1 release left it.
+
+  The manifest has the slice-1 columns only, every row carries only those
+  columns, and there is no failed_sessions view (slice 1 wrote none).
+  """
+  fake.store.set_manifest_schema(_slice_1_schema())
+  for row in fake.store.rows:
+    for column in _GENERATION_COLUMNS:
+      row.pop(column, None)
+    assert set(row) == set(_SLICE_1_MANIFEST_COLUMNS)
+  fake.store.views.clear()
+  fake.store.view_etags.clear()
+  fake.view_writes.clear()
+  fake.queries.clear()
+
+
+def _backfill_queries(fake: _FakeWriteClient) -> list[int]:
+  return [
+      i
+      for i, (sql, _) in enumerate(fake.queries)
+      if sql.startswith("UPDATE") and "WHERE generation_id IS NULL" in sql
+  ]
+
+
+def _manifest_reads(fake: _FakeWriteClient) -> list[int]:
+  return [
+      i
+      for i, (sql, _) in enumerate(fake.queries)
+      if sql.startswith("SELECT *") and ".evalbench_import_manifest`" in sql
+  ]
+
+
+def test_materialize_upgrades_a_slice_1_manifest_in_place() -> None:
+  """A dataset published by slice 1 (#451) is upgraded before it is read:
+  the generation columns are added to the live manifest, every legacy row
+  gets a generation derived from its key, and only then does the import
+  proceed -- an unchanged re-import pins the view to the backfilled
+  generation, and a later replace supersedes that generation into the
+  row's committed history like any other."""
+  fake = _FakeWriteClient()
+  run = _scored_run()
+  run.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  _downgrade_to_slice_1(fake)
+  legacy = dict(_row(fake, "v1"))
+  upgrades_before = fake.store.schema_updates
+
+  result = run.materialize(
       **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
   )
   assert result.status == "unchanged"
-  assert fake.store.views[_VIEW_REF] == genuine
-  assert "min_score" not in fake.store.views[_VIEW_REF]
+  # One schema update: the three columns appended, in declared order,
+  # after the slice-1 columns, without touching what was there.
+  assert fake.store.schema_updates == upgrades_before + 1
+  assert tuple(f.name for f in fake.store.manifest_schema) == (
+      _SLICE_1_MANIFEST_COLUMNS + _GENERATION_COLUMNS
+  )
+  modes = {f.name: f.mode for f in fake.store.manifest_schema}
+  assert modes["generation_id"] == "NULLABLE"
+  assert modes["view_policy"] == "NULLABLE"
+  assert modes["superseded_generations"] == "REPEATED"
+  # The backfill ran once, before the first manifest read.
+  (backfill,) = _backfill_queries(fake)
+  assert backfill < min(_manifest_reads(fake))
+  row = _row(fake, "v1")
+  assert {k: v for k, v in row.items() if k in _SLICE_1_MANIFEST_COLUMNS} == (
+      legacy
+  )
+  assert row["generation_id"] == _legacy_generation(legacy)
+  assert evalbench._GENERATION_ID_PATTERN.fullmatch(row["generation_id"])
+  assert row["view_policy"] is None
+  assert row["superseded_generations"] == []
+  assert result.manifest == row
+  # The view is created from the upgraded row, pinned to the backfilled
+  # generation, and recognized as the importer's on the next read.
+  assert [kind for kind, _, _ in fake.view_writes] == ["create"]
+  assert _full_pin(fake)["generation_id"] == _legacy_generation(legacy)
+  assert fake.store.views[_VIEW_REF] == evalbench._committed_view_body(row)
+  assert evalbench._read_managed_view(
+      fake,
+      view_ref=_VIEW_REF,
+      manifest_ref=result.manifest_table,
+      location=None,
+  ).pin["generation_id"] == _legacy_generation(legacy)
+
+  # Idempotent: an upgraded manifest costs one metadata read and no DML.
+  fake.queries.clear()
+  result = run.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  assert result.status == "unchanged"
+  assert fake.store.schema_updates == upgrades_before + 1
+  assert _backfill_queries(fake) == []
+  assert [kind for kind, _, _ in fake.view_writes] == ["create"]
+  assert _row(fake, "v1") == row
+
+  # The backfilled generation is a real one: a policy change supersedes it
+  # into the row's history, and the view pinned to it is authenticated
+  # from that history and advanced.
+  stale_view = fake.store.views[_VIEW_REF]
+  result = run.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1,
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      bq_client=fake,
+  )
+  assert result.status == "unchanged"
+  assert _generation(fake) != _legacy_generation(legacy)
+  assert [
+      json.loads(e) for e in _row(fake, "v1")["superseded_generations"]
+  ] == [{"generation_id": _legacy_generation(legacy), "view_policy": None}]
+  assert _full_pin(fake)["generation_id"] == _generation(fake)
+  fake.store.write_view(_VIEW_REF, stale_view)
+  assert evalbench._read_managed_view(
+      fake,
+      view_ref=_VIEW_REF,
+      manifest_ref=result.manifest_table,
+      location=None,
+  ).pin["generation_id"] == _legacy_generation(legacy)
+
+  # A replace of the legacy version and a brand-new version both publish
+  # through the upgraded manifest (the INSERT names every column).
+  second_generation = _generation(fake)
+  result = run.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1 + timedelta(hours=1),
+      replace=True,
+      bq_client=fake,
+  )
+  assert result.status == "replaced"
+  assert _generation(fake) not in (
+      _legacy_generation(legacy),
+      second_generation,
+  )
+  assert [
+      json.loads(e) for e in _row(fake, "v1")["superseded_generations"]
+  ] == [
+      {"generation_id": _legacy_generation(legacy), "view_policy": None},
+      {"generation_id": second_generation, "view_policy": _policy_json(0.9)},
+  ]
+  result = run.materialize(
+      **_TARGET,
+      import_version="v2",
+      imported_at=_T1 + timedelta(hours=2),
+      bq_client=fake,
+  )
+  assert result.status == "imported"
+  assert _row(fake, "v2")["superseded_generations"] == []
+  assert evalbench._GENERATION_ID_PATTERN.fullmatch(_generation(fake, "v2"))
+  assert _view_pin(fake)["import_version"] == "v2"
+  assert fake.store.schema_updates == upgrades_before + 1
+
+
+def test_materialize_finishes_an_interrupted_manifest_upgrade() -> None:
+  """An upgrade that added the columns but died before the backfill leaves
+  rows without a generation under a complete schema. The next import finds
+  nothing to add, notices the row it handles has no generation, backfills,
+  and proceeds; the backfill is derived, so finishing it twice is safe."""
+  fake = _FakeWriteClient()
+  run = _scored_run()
+  run.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  run.materialize(
+      **_TARGET,
+      import_version="v2",
+      imported_at=_T1 + timedelta(hours=1),
+      bq_client=fake,
+  )
+  # Schema complete, every row as the DDL alone would leave it.
+  for row in fake.store.rows:
+    row["generation_id"] = None
+    row["view_policy"] = None
+    row["superseded_generations"] = []
+  fake.store.views.clear()
+  fake.store.view_etags.clear()
+  fake.view_writes.clear()
+  fake.queries.clear()
+  upgrades_before = fake.store.schema_updates
+
+  result = run.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  assert result.status == "unchanged"
+  assert fake.store.schema_updates == upgrades_before
+  assert len(_backfill_queries(fake)) == 1
+  # The backfill is table-wide: the version this call did not touch got
+  # its generation too, so the view (which tracks the latest, v2) pins it.
+  for version in ("v1", "v2"):
+    assert _generation(fake, version) == _legacy_generation(_row(fake, version))
+  assert result.manifest["generation_id"] == _generation(fake, "v1")
+  assert _view_pin(fake)["import_version"] == "v2"
   assert _full_pin(fake)["generation_id"] == _generation(fake, "v2")
+  assert fake.store.views[_VIEW_REF] == evalbench._committed_view_body(
+      _row(fake, "v2")
+  )
+
+
+def test_materialize_tolerates_a_concurrent_manifest_upgrade() -> None:
+  """Two importers upgrading one slice-1 dataset at once: the schema update
+  is ETag-conditional, so the loser re-reads, finds the columns already
+  there, and continues -- finishing the backfill itself if the winner had
+  not yet -- and both converge on the same derived generation. A manifest
+  that keeps changing under the upgrade fails closed."""
+  fake = _FakeWriteClient()
+  run = _scored_run()
+  run.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  _downgrade_to_slice_1(fake)
+  legacy = dict(_row(fake, "v1"))
+  upgrades_before = fake.store.schema_updates
+
+  def other_importer_adds_the_columns() -> None:
+    fake.before_schema_update = None
+    fake.store.set_manifest_schema(
+        evalbench._schema(evalbench._MANIFEST_SCHEMA_FIELDS)
+    )
+    for row in fake.store.rows:
+      row.setdefault("generation_id", None)
+      row.setdefault("view_policy", None)
+      row.setdefault("superseded_generations", [])
+
+  fake.before_schema_update = other_importer_adds_the_columns
+  result = run.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  assert result.status == "unchanged"
+  # Only the other importer's update landed; this one re-read and moved on.
+  assert fake.store.schema_updates == upgrades_before + 1
+  assert tuple(f.name for f in fake.store.manifest_schema) == (
+      _SLICE_1_MANIFEST_COLUMNS + _GENERATION_COLUMNS
+  )
+  assert len(_backfill_queries(fake)) == 1
+  assert _generation(fake) == _legacy_generation(legacy)
+  assert _full_pin(fake)["generation_id"] == _legacy_generation(legacy)
+
+  # A manifest whose ETag moves on every attempt without gaining the
+  # columns exhausts the bounded retry and is refused, untouched.
+  fake = _FakeWriteClient()
+  run.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  _downgrade_to_slice_1(fake)
+  upgrades_before = fake.store.schema_updates
+  fake.before_schema_update = lambda: fake.store.set_manifest_schema(
+      _slice_1_schema()
+  )
+  with pytest.raises(ValueError, match="changed concurrently"):
+    run.materialize(
+        **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+    )
+  assert (
+      fake.store.schema_updates
+      == upgrades_before + evalbench._SCHEMA_UPGRADE_ATTEMPTS
+  )
+  assert tuple(f.name for f in fake.store.manifest_schema) == (
+      _SLICE_1_MANIFEST_COLUMNS
+  )
+  assert _backfill_queries(fake) == []
+  assert fake.view_writes == []
+  assert "generation_id" not in _row(fake, "v1")
 
 
 def _full_pin_of(view_query: str) -> dict:
