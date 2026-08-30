@@ -52,7 +52,13 @@ distinct ids):
   results.returncode         0 if AGENT_COMPLETED was logged, else 1
   results.run_time           timestamp of the USER_MESSAGE_RECEIVED event
   results.tool_calls         JSON list of TOOL_STARTING / TOOL_COMPLETED pairs
-  results.error_message      first error_message logged in the trace
+  results.error              first non-tool event with status=ERROR or an
+                             error_message (the importer reads this field
+                             and publishes the session as status=ERROR, so a
+                             completed-but-errored trace stays a failed
+                             session); NULL for clean traces
+  results.error_message      first error_message logged in the trace, kept
+                             verbatim for provenance (tool errors included)
   results.source_session_id  the trace identity, alongside
     / source_user_id         source_root_agent_name and source_table
   scores                     comparator=goal_completion, score=1.0|0.0
@@ -105,6 +111,10 @@ _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 # contract (``event_semantics.RESPONSE_EVENT_TYPES``); ``AGENT_RESPONSE`` is
 # kept as a compatibility alias for producers that used that name.
 _RESPONSE_EVENT_TYPES = frozenset({"LLM_RESPONSE", "AGENT_RESPONSE"})
+# Tool outcome events carry their own error into ``tool_calls[].error`` (the
+# importer replays them as ``TOOL_ERROR`` rows); they are not a trace-level
+# ``error``.
+_TOOL_OUTCOME_EVENT_TYPES = frozenset({"TOOL_COMPLETED", "TOOL_ERROR"})
 
 _RESULT_SCHEMA = (
     ("job_id", "STRING", "REQUIRED"),
@@ -117,6 +127,7 @@ _RESULT_SCHEMA = (
     ("returncode", "INT64", "REQUIRED"),
     ("run_time", "TIMESTAMP", "REQUIRED"),
     ("tool_calls", "STRING", "REQUIRED"),
+    ("error", "STRING", "NULLABLE"),
     ("error_message", "STRING", "NULLABLE"),
     ("source_session_id", "STRING", "REQUIRED"),
     ("source_user_id", "STRING", "NULLABLE"),
@@ -191,7 +202,8 @@ class _Session:
   completed: bool = False
   completed_text: Optional[str] = None
   last_response: Optional[str] = None
-  error_message: Optional[str] = None
+  error: Optional[str] = None  # first non-tool source error (importer field)
+  error_message: Optional[str] = None  # first error_message, for provenance
   tool_calls: list[dict[str, Any]] = dataclasses.field(default_factory=list)
   _open_by_span: dict[str, dict[str, Any]] = dataclasses.field(
       default_factory=dict
@@ -300,6 +312,12 @@ def synthesize(
             "returncode": 0 if session.completed else 1,
             "run_time": session.run_time,
             "tool_calls": json.dumps(session.tool_calls, sort_keys=True),
+            # ``error`` is one of the fields EvalBenchRun._source_error_fields
+            # reads, so a source trace that completed with status=ERROR is
+            # published as status=ERROR (process_failed) rather than as a
+            # clean AGENT_COMPLETED. ``returncode`` / goal_completion stay
+            # tied to completion only.
+            "error": session.error,
             "error_message": session.error_message,
             "source_session_id": session.session_id,
             "source_user_id": session.user_id,
@@ -409,6 +427,12 @@ def _fold_event(session: _Session, row: Mapping[str, Any]) -> None:
   error = _text(row.get("error_message"))
   if error is not None and session.error_message is None:
     session.error_message = error
+  if (
+      session.error is None
+      and event_type not in _TOOL_OUTCOME_EVENT_TYPES
+      and (error is not None or _text(row.get("status")) == "ERROR")
+  ):
+    session.error = error or f"{event_type or 'event'} status=ERROR"
 
   if event_type == "USER_MESSAGE_RECEIVED":
     if session.prompt is None:

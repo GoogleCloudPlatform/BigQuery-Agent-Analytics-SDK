@@ -27,6 +27,7 @@ import json
 
 import pytest
 
+from bigquery_agent_analytics.evalbench import classify_sessions
 from bigquery_agent_analytics.evalbench import EvalBenchRun
 from examples import evalbench_synth_from_traces as synth
 
@@ -685,3 +686,86 @@ def test_scenario_id_encoding_is_deterministic_and_injective() -> None:
   assert ids[("s", "", None)] == "s::~"
   assert ids[("", None, None)] == ":~:~"
   assert all(value.strip() for value in ids.values())
+
+
+def test_completed_trace_with_source_error_stays_a_failed_session() -> None:
+  # Codex P1 (round 3) on PR #455: a trace can reach AGENT_COMPLETED with
+  # status=ERROR / error_message and no TOOL_ERROR at all. The synthesizer
+  # used to write that failure only to results.error_message, which the
+  # importer does not read, so the session round-tripped as status=OK and
+  # the failed-sessions view reported process_failed=false.
+  events = [
+      _event("s1", "USER_MESSAGE_RECEIVED", {"text_summary": "hi"}),
+      _event("s1", "LLM_RESPONSE", {"response": "partial answer"}, offset=1),
+      _event(
+          "s1",
+          "AGENT_COMPLETED",
+          None,
+          offset=2,
+          status="ERROR",
+          error_message="model call failed: 503",
+      ),
+  ]
+  tables = synth.synthesize(events, job_id="j", source_table="t")
+  (result,) = tables.results
+  # Completion and goal_completion stay tied to AGENT_COMPLETED ...
+  assert result["returncode"] == 0
+  assert tables.scores[0]["score"] == 1.0
+  # ... but the failure is emitted in an importer-recognized field and kept
+  # verbatim for provenance.
+  assert result["error"] == "model call failed: 503"
+  assert result["error_message"] == "model call failed: 503"
+  assert "error" in [name for name, _, _ in synth._RESULT_SCHEMA]
+
+  run = EvalBenchRun(
+      project_id="p",
+      evalbench_dataset="d",
+      job_id="j",
+      results=tuple(tables.results),
+      scores=tuple(tables.scores),
+      config_rows=tuple(tables.configs),
+  )
+  rows = run.to_agent_event_rows(import_version="v1")
+  assert [r["event_type"] for r in rows] == [
+      "USER_MESSAGE_RECEIVED",
+      "AGENT_COMPLETED",
+  ]
+  terminal = rows[-1]
+  assert terminal["status"] == "ERROR"
+  assert "model call failed: 503" in terminal["error_message"]
+  (verdict,) = classify_sessions(rows, run.to_score_rows(import_version="v1"))
+  assert verdict.process_failed is True
+  assert verdict.missing_completion is False
+
+
+def test_tool_error_alone_does_not_mark_the_completion_row_as_error() -> None:
+  # A recovered tool error is already a TOOL_ERROR row (status=ERROR); it
+  # must not also be promoted to a session-level ``error``.
+  tables = synth.synthesize(_events(), job_id="j", source_table="t")
+  done = next(
+      r for r in tables.results if r["source_session_id"] == _SESSION_DONE
+  )
+  assert done["error"] is None
+  assert done["error_message"] == "inventory backend timed out"
+
+
+def test_clean_completed_trace_has_no_error_field() -> None:
+  events = [
+      _event("s1", "USER_MESSAGE_RECEIVED", {"text_summary": "hi"}),
+      _event("s1", "AGENT_COMPLETED", {"text": "done"}, offset=1),
+  ]
+  (result,) = synth.synthesize(events, job_id="j", source_table="t").results
+  assert result["error"] is None
+  assert result["error_message"] is None
+
+
+def test_non_tool_error_status_without_message_is_still_an_error() -> None:
+  events = [
+      _event("s1", "USER_MESSAGE_RECEIVED", {"text_summary": "hi"}),
+      _event("s1", "LLM_RESPONSE", {"response": "x"}, offset=1, status="ERROR"),
+      _event("s1", "AGENT_COMPLETED", None, offset=2),
+  ]
+  (result,) = synth.synthesize(events, job_id="j", source_table="t").results
+  assert result["returncode"] == 0
+  assert result["error"] == "LLM_RESPONSE status=ERROR"
+  assert result["error_message"] is None

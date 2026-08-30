@@ -44,9 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the fixture path and the offline `--synth` guards, and
   `tests/test_evalbench_synth_from_traces.py` checks the synthesizer's
   mapping in memory and round-trips its rows through
-  `EvalBenchRun.to_agent_event_rows` / `to_score_rows`. No CLI or Python
-  library behavior changes; `examples/evalbench_score_gate.sh` stays the
-  CI gate.
+  `EvalBenchRun.to_agent_event_rows` / `to_score_rows`. A source trace
+  that reached `AGENT_COMPLETED` with a non-tool `status=ERROR` /
+  `error_message` is written with the importer-recognized `results.error`
+  field (alongside `error_message` for provenance), so it imports as
+  `status=ERROR` and stays `process_failed` in `failed_sessions`;
+  `returncode` / `goal_completion` remain tied to completion only. No CLI
+  or Python library behavior changes; `examples/evalbench_score_gate.sh`
+  stays the CI gate.
 - **EvalBench LLM-judge scoring of one import version (#435 slice 3, #97)**
   — new `bq-agent-sdk evalbench-score` command: a thin wrapper over the
   existing `Client.evaluate` + `LLMAsJudge` (`correctness` |
