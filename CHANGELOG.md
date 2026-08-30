@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **EvalBench LLM-judge scoring of one import version (#435 slice 3, #97)**
+  — new `bq-agent-sdk evalbench-score` command: a thin wrapper over the
+  existing `Client.evaluate` + `LLMAsJudge` (`correctness` |
+  `hallucination` | `sentiment`, `--threshold`, `--strict`, `--exit-code`
+  with the same exit codes and `FAIL` lines as `evaluate`) that points the
+  client at the mirror events table and scores exactly one published
+  version of `--job-id` — the latest successful import unless
+  `--import-version` pins one. `evalbench.import_sessions()` resolves the
+  version from the manifest and lists its session identities;
+  `EvalBenchImportSessions.trace_filter()` renders them as
+  `TraceFilter(experiment_id=job_id, session_ids=..., limit=...)`, so the
+  version pin reaches `Client.evaluate` without changing it. The report's
+  `details.evalbench` names the scored job, version, table, and pinned
+  session count. Reference in `docs/evalbench.md`; CI gate example in
+  `examples/evalbench_score_gate.sh`.
 - **EvalBench failed-session view and version-pinned consumer (#435, slice 2)**
   — `EvalBenchRun.materialize()` now keeps an `evalbench_failed_sessions`
   view in the target dataset pinned (as literals) to the job's latest

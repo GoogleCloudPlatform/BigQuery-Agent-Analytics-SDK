@@ -33,6 +33,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import sys
 from typing import Any, Optional
@@ -2500,6 +2501,173 @@ def evalbench_failed_sessions(
       typer.echo(format_output(result.sessions, fmt))
     else:
       typer.echo(format_output(result.to_dict(), fmt))
+  except typer.Exit:
+    raise
+  except Exception as exc:  # noqa: BLE001
+    typer.echo(f"Error: {exc}", err=True)
+    raise typer.Exit(code=2)
+
+
+@app.command("evalbench-score")
+def evalbench_score(
+    project_id: str = typer.Option(
+        ...,
+        envvar="BQ_AGENT_PROJECT",
+        help="Project holding the BQAA-owned dataset the job was imported into.",
+    ),
+    dataset_id: str = typer.Option(
+        ...,
+        envvar="BQ_AGENT_DATASET",
+        help="BQAA-owned dataset holding the mirror tables and manifest.",
+    ),
+    table_id: str = typer.Option(
+        "evalbench_agent_events",
+        "--table-id",
+        help=(
+            "Mirror event table the version was published to (never the ADK"
+            " plugin's agent_events)."
+        ),
+    ),
+    job_id: str = typer.Option(
+        ..., "--job-id", help="EvalBench job_id to score."
+    ),
+    evaluator: str = typer.Option(
+        "correctness",
+        "--evaluator",
+        help="LLM judge: correctness|hallucination|sentiment.",
+    ),
+    threshold: Optional[float] = typer.Option(
+        None,
+        "--threshold",
+        help="Pass/fail threshold 0-1 (uses the judge default if omitted).",
+    ),
+    import_version: Optional[str] = typer.Option(
+        None,
+        "--import-version",
+        help=(
+            "Score one published import version. Defaults to the job's"
+            " latest successful import (the version the failed-session"
+            " view tracks)."
+        ),
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help=(
+            "Stamp parse-error metadata on judge rows with empty or NULL"
+            " typed output (same as `evaluate --strict`)."
+        ),
+    ),
+    exit_code: bool = typer.Option(
+        False,
+        "--exit-code",
+        help="Return exit code 1 when any session fails the judge threshold.",
+    ),
+    endpoint: Optional[str] = typer.Option(
+        None, "--endpoint", help="AI.GENERATE endpoint for the LLM judge."
+    ),
+    connection_id: Optional[str] = typer.Option(
+        None, "--connection-id", help="BQ connection ID for AI.GENERATE."
+    ),
+    location: Optional[str] = typer.Option(
+        None, "--location", help="BigQuery location."
+    ),
+    fmt: str = typer.Option(
+        "json", "--format", help="Output format: json|text|table."
+    ),
+) -> None:
+  """Score one published EvalBench import version with the LLM judge.
+
+  A thin wrapper over ``Client.evaluate`` + ``LLMAsJudge``: the client is
+  pointed at the mirror events table, the version is resolved from the
+  import manifest exactly as ``evalbench-failed-sessions`` does (latest
+  successful import unless ``--import-version`` pins one), and the judge
+  runs over ``TraceFilter(experiment_id=job_id)`` narrowed to that version's
+  session ids, so retained versions of one job are never mixed. The report
+  is the ordinary ``EvaluationReport`` with ``details.evalbench`` naming the
+  scored job, version, table, and pinned session count.
+
+  Exit codes:
+      0 — the scorecard was produced (failures included, without
+          ``--exit-code``).
+      1 — ``--exit-code`` and at least one session failed the threshold.
+      2 — invalid input (unknown ``--evaluator``, a ``--threshold``
+          outside ``[0.0, 1.0]`` or non-finite, the reserved
+          ``agent_events`` table, a job or version with no published
+          import, a ``--table-id`` the version was not published to, a
+          version with no sessions), or a BigQuery error.
+  """
+  try:
+    from .evalbench import _validate_destination_table
+    from .evalbench import import_sessions
+
+    entry = _LLM_JUDGES.get(evaluator)
+    if not entry:
+      typer.echo(
+          f"Error: unknown evaluator: {evaluator!r}; expected"
+          " correctness|hallucination|sentiment.",
+          err=True,
+      )
+      raise typer.Exit(code=2)
+    # Reject the reserved ADK plugin table before any BigQuery call.
+    _validate_destination_table("table_id", table_id)
+    # Judge scores are 0-1; a NaN/inf or out-of-range threshold would
+    # otherwise reach the judge and, with --exit-code, green-gate CI.
+    if threshold is not None and not (
+        math.isfinite(threshold) and 0.0 <= threshold <= 1.0
+    ):
+      typer.echo(
+          "Error: --threshold must be a finite value in [0.0, 1.0], got"
+          f" {threshold!r}.",
+          err=True,
+      )
+      raise typer.Exit(code=2)
+    with_t, without_t = entry
+    judge = with_t(threshold) if threshold is not None else without_t()
+
+    client = _build_client(
+        project_id,
+        dataset_id,
+        table_id,
+        location,
+        endpoint=endpoint,
+        connection_id=connection_id,
+    )
+    # ``events_table`` makes ``import_sessions`` check the manifest's
+    # binding against --table-id (and re-validate the stored reference)
+    # before any events-table query is submitted; the comparison below is
+    # only a second line of defense on the returned pin.
+    pinned = import_sessions(
+        target_project=project_id,
+        target_dataset=dataset_id,
+        job_id=job_id,
+        import_version=import_version,
+        events_table=table_id,
+        location=location,
+        bq_client=client.bq_client,
+    )
+    events_ref = f"{project_id}.{dataset_id}.{table_id}"
+    if pinned.events_table != events_ref:
+      raise ValueError(
+          f"EvalBench job {job_id!r} import_version"
+          f" {pinned.import_version!r} is published in"
+          f" {pinned.events_table!r}, not {events_ref!r}; pass the"
+          " --table-id it was published to"
+      )
+    report = client.evaluate(
+        evaluator=judge, filters=pinned.trace_filter(), strict=strict
+    )
+    report.details["evalbench"] = {
+        "job_id": pinned.job_id,
+        "import_version": pinned.import_version,
+        "events_table": pinned.events_table,
+        "pinned_sessions": pinned.session_count,
+    }
+    typer.echo(format_output(report, fmt))
+
+    if exit_code and report.pass_rate < 1.0:
+      _emit_evaluate_failures(report)
+      raise typer.Exit(code=1)
   except typer.Exit:
     raise
   except Exception as exc:  # noqa: BLE001
