@@ -104,15 +104,19 @@ _IMPORT_LOCK_ID = "evalbench-import"
 # ``failed_sessions_sql`` with ``@job_id``/``@import_version`` rendered as
 # string literals, so the view never scans another version. The pin is
 # recorded in a leading SQL comment (``_VIEW_PIN_MARKER``) that also carries
-# the rendered score policy and a hash of the canonical query below it, so
-# the marker alone never proves ownership: a view is the importer's only
-# when its body is byte-for-byte (modulo whitespace) what the importer
-# renders for that pin. Anything else at that name -- a table, a foreign
-# view, a view carrying a copied marker over other SQL, or a managed view
-# somebody edited -- is refused, never replaced. Writes go through the
-# tables API rather than ``CREATE OR REPLACE VIEW``: create-if-absent, and
-# ETag-conditional replace after re-reading the view and the latest
-# manifest, so two concurrent imports cannot overwrite each other's pin.
+# the rendered score policy. Nothing the view says about itself proves
+# ownership: a view is the importer's only when the pin names a version
+# this job committed to the manifest and the body is byte-for-byte (modulo
+# whitespace) what the importer renders for that manifest row and policy.
+# Anything else at that name -- a table, a foreign view, a copied marker
+# (however self-consistent) over other SQL, a rendering for an unpublished
+# version, or a managed view somebody edited -- is refused, never replaced.
+# Writes go through the tables API rather than ``CREATE OR REPLACE VIEW``:
+# create-if-absent, and ETag-conditional replace after re-reading the view
+# and the latest manifest, so two concurrent imports cannot overwrite each
+# other's pin. The policy rendered into the view is decided by the import
+# of the version the view pins; an import of any other version never
+# rewrites a view already pinned to the latest one.
 DEFAULT_FAILED_SESSIONS_VIEW = "evalbench_failed_sessions"
 _VIEW_PIN_MARKER = "-- evalbench_failed_sessions pin: "
 # Bounded retries when the view changes underneath a conditional write.
@@ -936,7 +940,13 @@ class EvalBenchRun:
     # re-reads it right before writing; this early read is the fail-fast
     # path, not the authority.
     if view_ref is not None:
-      _check_view_binding(client, view_ref=view_ref, job_id=self.job_id)
+      _check_view_binding(
+          client,
+          view_ref=view_ref,
+          manifest_ref=manifest_ref,
+          job_id=self.job_id,
+          location=self.location,
+      )
 
     _ensure_import_tables(
         client,
@@ -1403,14 +1413,60 @@ def _policy_pin(policy: Optional[EvalScorePolicy]) -> Optional[dict[str, Any]]:
   }
 
 
+def _canonical_policy(
+    policy: Optional[EvalScorePolicy],
+) -> Optional[EvalScorePolicy]:
+  """``policy`` in the one form the view renders (sorted, float, or none).
+
+  Rendering from the canonical form makes the view body a pure function of
+  (manifest row, policy pin), whatever key order the caller used.
+  """
+  pin = _policy_pin(policy)
+  if pin is None:
+    return None
+  return EvalScorePolicy(
+      pin["min_scores"], missing_score_fails=pin["missing_score_fails"]
+  )
+
+
+def _policy_from_pin(value: Any) -> Optional[EvalScorePolicy]:
+  """Parse a pin's ``policy`` strictly; ``ValueError`` if it is not one.
+
+  Only exactly what ``_policy_pin`` emits is accepted (and it must
+  round-trip), so a view carrying anything else is not the importer's.
+  """
+  if value is None:
+    return None
+  if not isinstance(value, dict) or set(value) != {
+      "min_scores",
+      "missing_score_fails",
+  }:
+    raise ValueError("policy pin must have min_scores and missing_score_fails")
+  min_scores = value["min_scores"]
+  missing_score_fails = value["missing_score_fails"]
+  if (
+      not isinstance(min_scores, dict)
+      or not min_scores
+      or not isinstance(missing_score_fails, bool)
+  ):
+    raise ValueError("policy pin is malformed")
+  for comparator, min_score in min_scores.items():
+    if (
+        not isinstance(comparator, str)
+        or isinstance(min_score, bool)
+        or not isinstance(min_score, (int, float))
+    ):
+      raise ValueError("policy pin min_scores is malformed")
+  policy = EvalScorePolicy(min_scores, missing_score_fails=missing_score_fails)
+  if _policy_pin(policy) != value:
+    raise ValueError("policy pin is not canonical")
+  return policy
+
+
 def _normalize_sql(text: str) -> str:
   # BigQuery stores a view's query text verbatim; collapsing whitespace only
   # guards against incidental reformatting, never against changed SQL.
   return " ".join(text.split())
-
-
-def _sql_digest(query: str) -> str:
-  return hashlib.sha256(_normalize_sql(query).encode("utf-8")).hexdigest()
 
 
 def _view_pin(
@@ -1418,14 +1474,12 @@ def _view_pin(
     import_version: str,
     *,
     policy: Optional[EvalScorePolicy],
-    query: str,
 ) -> dict[str, Any]:
-  """The pin comment payload: what the view is bound to, and to what SQL."""
+  """The pin comment payload: what the view is bound to."""
   return {
       "job_id": job_id,
       "import_version": import_version,
       "policy": _policy_pin(policy),
-      "query_sha256": _sql_digest(query),
   }
 
 
@@ -1434,16 +1488,16 @@ def _view_pin_comment(pin: Mapping[str, Any]) -> str:
   return _VIEW_PIN_MARKER + json.dumps(pin, sort_keys=True, ensure_ascii=True)
 
 
-def _parse_view_pin(view_query: str) -> Optional[dict[str, Any]]:
-  """Return the pin a managed view carries, or ``None`` if it is not ours.
+def _parse_view_pin(
+    view_query: str,
+) -> Optional[tuple[dict[str, Any], Optional[EvalScorePolicy]]]:
+  """Parse the pin comment a view starts with: what it *claims* to be.
 
-  Ours means: the first nonblank line is a well-formed pin comment *and*
-  the query below it hashes to the ``query_sha256`` the pin records. A
-  copied marker over other SQL, or a managed view whose body was edited,
-  fails the second half and is treated as foreign.
+  Returns the pin and its policy, or ``None`` when the first nonblank line
+  is not a well-formed pin. This is a claim only; ``_read_managed_view``
+  decides ownership by re-rendering the claimed definition.
   """
-  lines = view_query.splitlines()
-  for index, raw in enumerate(lines):
+  for raw in view_query.splitlines():
     line = raw.strip()
     if not line:
       continue
@@ -1457,18 +1511,20 @@ def _parse_view_pin(view_query: str) -> Optional[dict[str, Any]]:
         isinstance(pin, dict)
         and isinstance(pin.get("job_id"), str)
         and isinstance(pin.get("import_version"), str)
-        and isinstance(pin.get("query_sha256"), str)
     ):
       return None
-    query = "\n".join(lines[index + 1 :])
-    if not query.strip() or _sql_digest(query) != pin["query_sha256"]:
+    try:
+      policy = _policy_from_pin(pin.get("policy"))
+    except ValueError:
       return None
-    return {
-        "job_id": pin["job_id"],
-        "import_version": pin["import_version"],
-        "policy": pin.get("policy"),
-        "query_sha256": pin["query_sha256"],
-    }
+    return (
+        {
+            "job_id": pin["job_id"],
+            "import_version": pin["import_version"],
+            "policy": pin.get("policy"),
+        },
+        policy,
+    )
   return None
 
 
@@ -1478,42 +1534,76 @@ class _ManagedView:
 
   table: Any
   pin: dict[str, Any]
+  policy: Optional[EvalScorePolicy]
 
   @property
   def view_query(self) -> str:
     return str(self.table.view_query)
 
 
-def _read_managed_view(client: Any, *, view_ref: str) -> Optional[_ManagedView]:
+def _read_managed_view(
+    client: Any,
+    *,
+    view_ref: str,
+    manifest_ref: str,
+    location: Optional[str],
+) -> Optional[_ManagedView]:
   """Return the managed view at ``view_ref`` with its pin and ETag.
 
-  ``None`` means nothing exists at ``view_ref``. Anything else that is not a
-  view carrying the importer's pin *over the query that pin hashes* (a
-  table, a view somebody else wrote, a copied marker, an edited body)
-  raises: the importer only ever replaces views whose definition it can
-  vouch for.
+  ``None`` means nothing exists at ``view_ref``. The view is the importer's
+  only if its pin names a version the pinned job committed to the manifest
+  *and* its body is exactly (modulo whitespace) what the importer renders
+  for that manifest row and the pinned policy. Nothing the view carries
+  about itself is trusted: a table, a view somebody else wrote, a copied
+  or forged marker over other SQL, a rendering for an unpublished version
+  or over other tables, or an edited body all raise. The importer only ever
+  replaces views whose definition it can vouch for.
   """
   try:
     table = client.get_table(view_ref)
   except NotFound:
     return None
   view_query = getattr(table, "view_query", None)
-  pin = _parse_view_pin(view_query) if isinstance(view_query, str) else None
-  if pin is None:
-    raise ValueError(
-        f"{view_ref!r} exists but is not an evalbench failed_sessions view"
-        " created by materialize() (or its definition was changed); choose"
-        " another failed_sessions_view name (or None to skip the view)"
-        " rather than replacing it"
-    )
-  return _ManagedView(table=table, pin=pin)
+  parsed = _parse_view_pin(view_query) if isinstance(view_query, str) else None
+  if parsed is not None:
+    pin, policy = parsed
+    try:
+      pinned = _read_manifest(
+          client,
+          manifest_ref=manifest_ref,
+          job_id=pin["job_id"],
+          import_version=pin["import_version"],
+          location=location,
+          feature=_VIEW_FEATURE,
+      )
+    except NotFound:
+      # No manifest table: nothing was ever published here, so the view
+      # cannot be one the importer wrote.
+      pinned = None
+    if pinned is not None and _normalize_sql(view_query) == _normalize_sql(
+        _failed_sessions_view_body(manifest=pinned, policy=policy)
+    ):
+      return _ManagedView(table=table, pin=pin, policy=policy)
+  raise ValueError(
+      f"{view_ref!r} exists but is not an evalbench failed_sessions view"
+      " created by materialize() (or its definition was changed); choose"
+      " another failed_sessions_view name (or None to skip the view)"
+      " rather than replacing it"
+  )
 
 
 def _check_view_binding(
-    client: Any, *, view_ref: str, job_id: str
+    client: Any,
+    *,
+    view_ref: str,
+    manifest_ref: str,
+    job_id: str,
+    location: Optional[str],
 ) -> Optional[_ManagedView]:
   """Refuse a view the importer does not own or that belongs to another job."""
-  existing = _read_managed_view(client, view_ref=view_ref)
+  existing = _read_managed_view(
+      client, view_ref=view_ref, manifest_ref=manifest_ref, location=location
+  )
   if existing is not None and existing.pin["job_id"] != job_id:
     raise ValueError(
         f"failed_sessions view {view_ref!r} is pinned to EvalBench job "
@@ -1529,9 +1619,14 @@ def _failed_sessions_view_body(
     manifest: Mapping[str, Any],
     policy: Optional[EvalScorePolicy],
 ) -> str:
-  """The managed view's query text pinned to one manifest row's version."""
+  """The managed view's query text pinned to one manifest row's version.
+
+  A pure function of the manifest row and the canonical policy, which is
+  what lets ``_read_managed_view`` re-render and compare.
+  """
   job_id = str(manifest["job_id"])
   import_version = str(manifest["import_version"])
+  policy = _canonical_policy(policy)
   query = _failed_sessions_sql_for_refs(
       events_ref=str(manifest["events_table"]),
       scores_ref=str(manifest["scores_table"]),
@@ -1539,7 +1634,7 @@ def _failed_sessions_view_body(
       job_id=job_id,
       import_version=import_version,
   )
-  pin = _view_pin(job_id, import_version, policy=policy, query=query)
+  pin = _view_pin(job_id, import_version, policy=policy)
   return _VIEW_BODY.format(pin_comment=_view_pin_comment(pin), query=query)
 
 
@@ -1571,7 +1666,9 @@ def _sync_failed_sessions_view(
   refreshes ``imported_at`` -- does. The write is skipped when the existing
   view's query already is what would be rendered (same version, same policy,
   same SQL), so a no-op re-import never rewrites the view, while adding,
-  changing, or dropping the policy does.
+  changing, or dropping the policy does -- when ``import_version`` *is* the
+  latest import. Only that version's import decides the policy the view
+  carries; see ``_reconcile_failed_sessions_view``.
   """
   try:
     _reconcile_failed_sessions_view(
@@ -1579,6 +1676,7 @@ def _sync_failed_sessions_view(
         view_ref=view_ref,
         manifest_ref=manifest_ref,
         job_id=job_id,
+        import_version=import_version,
         policy=policy,
         location=location,
     )
@@ -1599,6 +1697,7 @@ def _reconcile_failed_sessions_view(
     view_ref: str,
     manifest_ref: str,
     job_id: str,
+    import_version: str,
     policy: Optional[EvalScorePolicy],
     location: Optional[str],
 ) -> None:
@@ -1613,9 +1712,23 @@ def _reconcile_failed_sessions_view(
   a bounded number of times, then fails closed -- a stale pin is never
   written over a newer one, and success is never reported for a view that
   was not verified.
+
+  ``policy`` is authoritative only while ``import_version`` -- the version
+  this invocation handled -- is the latest import. When the (re-)read latest
+  version is another one, its own import decided the policy: a view
+  already pinned to it is left exactly as it is (so a delayed retry cannot
+  attach an older caller's gate to a newer version), and a view that is
+  absent or still behind is created or advanced carrying the gate it
+  already had (none for a new view), not this caller's.
   """
   for _ in range(_VIEW_SYNC_ATTEMPTS):
-    existing = _check_view_binding(client, view_ref=view_ref, job_id=job_id)
+    existing = _check_view_binding(
+        client,
+        view_ref=view_ref,
+        manifest_ref=manifest_ref,
+        job_id=job_id,
+        location=location,
+    )
     latest = _read_latest_manifest(
         client, manifest_ref=manifest_ref, job_id=job_id, location=location
     )
@@ -1624,7 +1737,16 @@ def _reconcile_failed_sessions_view(
           f"EvalBench job {job_id!r} has no manifest row in {manifest_ref!r}"
           " after publishing; cannot pin the failed_sessions view"
       )
-    body = _failed_sessions_view_body(manifest=latest, policy=policy)
+    latest_version = str(latest["import_version"])
+    if latest_version == import_version:
+      render_policy = policy
+    elif existing is None:
+      render_policy = None
+    elif existing.pin["import_version"] == latest_version:
+      return
+    else:
+      render_policy = existing.policy
+    body = _failed_sessions_view_body(manifest=latest, policy=render_policy)
     description = _failed_sessions_view_description(latest)
     if existing is None:
       table = bigquery.Table(view_ref)
@@ -2248,11 +2370,12 @@ def _read_manifest(
     job_id: str,
     import_version: str,
     location: Optional[str],
+    feature: str = _IMPORT_FEATURE,
 ) -> Optional[dict[str, Any]]:
   job_config = bigquery.QueryJobConfig(
       query_parameters=_import_parameters(job_id, import_version)
   )
-  job_config = with_sdk_labels(job_config, feature=_IMPORT_FEATURE)
+  job_config = with_sdk_labels(job_config, feature=feature)
   query_args: dict[str, Any] = {"job_config": job_config}
   if location is not None:
     query_args["location"] = location

@@ -367,7 +367,7 @@ the definition itself, and the view can never scan another version. The
 view's query text (its description names the pinned version too) is:
 
 ```sql
--- evalbench_failed_sessions pin: {"import_version": "v2", "job_id": "abc123", "policy": {"min_scores": {"goal_completion": 0.9}, "missing_score_fails": true}, "query_sha256": "…"}
+-- evalbench_failed_sessions pin: {"import_version": "v2", "job_id": "abc123", "policy": {"min_scores": {"goal_completion": 0.9}, "missing_score_fails": true}}
 WITH sessions AS (
   SELECT ...
   FROM `analytics-project.bqaa.evalbench_agent_events`
@@ -375,15 +375,18 @@ WITH sessions AS (
   ...
 ```
 
-The pin records the job, the version, the score policy rendered into the
-view (`null` without one), and the SHA-256 of the query below it. The
-comment alone never proves ownership: the importer treats a view as its
-own only when the query hashes to what the pin says — a pin copied onto
-other SQL, or a managed view whose body somebody edited, is a foreign
-object and is refused. The importer never uses `CREATE OR REPLACE VIEW`;
-it creates the view with create-if-absent and replaces it with an
-ETag-conditional update, after re-reading both the view and the latest
-manifest row immediately before writing.
+The pin records the job, the version, and the score policy rendered into
+the view (`null` without one). Nothing the view says about itself proves
+ownership: the importer treats a view as its own only when the pin names
+a version that job committed to the manifest *and* the body is exactly
+(modulo whitespace) what the importer renders for that manifest row and
+policy. A pin copied or forged onto other SQL (however self-consistent), a
+contract-shaped body for an unpublished version or over other tables, or
+a managed view whose body somebody edited, is a foreign object and is
+refused. The importer never uses `CREATE OR REPLACE VIEW`; it creates the
+view with create-if-absent and replaces it with an ETag-conditional
+update, after re-reading both the view and the latest manifest row
+immediately before writing.
 
 Pinning rules:
 
@@ -394,9 +397,10 @@ Pinning rules:
 | No-op re-import (`unchanged`) | untouched; created only if it does not exist yet (corpora published before views existed) |
 | `replace=True` of an older version | re-pinned to it — the replace refreshed `imported_at`, so it *is* the latest successful import |
 | `policy=` / `--min-score` given, changed, or dropped | the score gate is part of the pin: the view is re-rendered whenever the policy differs from the one it carries (including a later same-version call *without* a policy, which removes the gate), and left alone when version and policy both match |
+| `policy=` on a call whose version is **not** the latest import | the gate is decided by the import of the version the view pins: a view already pinned to the latest version is left exactly as it is, and a view that is absent or behind is created or advanced carrying the gate it already had (none for a new view), never this call's |
 | View at that name pinned to **another job** | `ValueError` before anything is written; use one `failed_sessions_view` name per job |
 | A table, a view the importer did not create, a copied pin over other SQL, or a managed view whose query was edited, at that name | `ValueError` before anything is written (before the import tables are even created); the importer never replaces objects whose definition it cannot vouch for — drop the object or pick another name |
-| Two imports of one job race on the view | the loser of the create race (`409`) or ETag check (`412`) re-reads the view and the latest manifest and re-decides, up to three times, so a delayed writer never overwrites a newer pin; a race against **another job's** view fails closed with the import already published |
+| Two imports of one job race on the view | the loser of the create race (`409`) or ETag check (`412`) re-reads the view and the latest manifest and re-decides, up to three times, so a delayed writer never overwrites a newer pin — nor re-renders it with its own (older) policy; a race against **another job's** view fails closed with the import already published |
 
 "Latest successful import" is the manifest row with the newest
 `imported_at` (ties broken by `import_version`), which is also what the

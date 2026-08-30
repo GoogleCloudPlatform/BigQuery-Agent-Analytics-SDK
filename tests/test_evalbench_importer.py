@@ -708,7 +708,16 @@ class _FakeWriteClient:
         self.store.lock_rows = 1
       return _FakeJob()
     if ".evalbench_import_manifest`" in query:
-      if self.stale_manifest_reads and not self.transaction_attempted:
+      feature = kwargs["job_config"].labels["sdk_feature"]
+      if (
+          self.stale_manifest_reads
+          and not self.transaction_attempted
+          and feature == "evalbench-import"
+      ):
+        # Only the import's own pre-read of the version it is publishing
+        # can be stale (it raced another importer's commit). The view
+        # ownership lookup (labelled for the view feature) reads the row an
+        # existing view pins, which committed before that view was written.
         return _FakeJob([])
       return _FakeJob(
           [row for row in self.store.rows if _same_version(row, params)]
@@ -2300,15 +2309,13 @@ def test_materialize_pins_failed_sessions_view_to_the_published_version() -> (
   )
   assert fake.get_table_calls == [_VIEW_REF, _VIEW_REF]
   body = fake.store.views[_VIEW_REF]
-  assert _view_pin(fake) == {"job_id": "job-123", "import_version": "v1"}
-  pin = _full_pin(fake)
-  assert pin["policy"] is None
-  assert (
-      pin["query_sha256"]
-      == hashlib.sha256(
-          " ".join(body.split("\n", 1)[1].split()).encode()
-      ).hexdigest()
-  )
+  # The pin says what the view is bound to; nothing in it (no digest) is
+  # taken as proof of ownership -- see the forged-pin tests below.
+  assert _full_pin(fake) == {
+      "job_id": "job-123",
+      "import_version": "v1",
+      "policy": None,
+  }
   # The body is failed_sessions_sql pinned as literals: no parameters, and
   # no other version can be read.
   assert body.endswith(
@@ -2434,7 +2441,7 @@ def test_materialize_refuses_a_view_pinned_to_another_job() -> None:
         type("Table", (), {"table_type": "TABLE", "view_query": None})(),
         _FakeView("SELECT 1"),
         _FakeView("-- evalbench_failed_sessions pin: not json\nSELECT 1"),
-        # A syntactically valid pin (hash field and all) over foreign SQL.
+        # A well-formed pin (with a stray digest claim) over foreign SQL.
         _FakeView(
             _PIN_LINE
             + json.dumps(
@@ -2447,7 +2454,7 @@ def test_materialize_refuses_a_view_pinned_to_another_job() -> None:
             )
             + "\nSELECT 1"
         ),
-        # A pin without the query hash never proves ownership.
+        # A pin without a policy field over foreign SQL.
         _FakeView(
             _PIN_LINE
             + json.dumps({"import_version": "v1", "job_id": "job-123"})
@@ -2457,12 +2464,7 @@ def test_materialize_refuses_a_view_pinned_to_another_job() -> None:
         _FakeView(
             _PIN_LINE
             + json.dumps(
-                {
-                    "import_version": "v1",
-                    "job_id": "job-123",
-                    "policy": None,
-                    "query_sha256": hashlib.sha256(b"").hexdigest(),
-                }
+                {"import_version": "v1", "job_id": "job-123", "policy": None}
             )
         ),
     ],
@@ -2475,9 +2477,10 @@ def test_materialize_never_replaces_objects_it_did_not_create(
     _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
   assert fake.loads == []
   assert fake.transaction_attempted is False
-  # Refused before the import tables were even created (or touched).
+  # Refused before the import tables were even created (or touched); at
+  # most the manifest was consulted for the version the pin claims.
   assert fake.created == []
-  assert fake.queries == []
+  assert all(".evalbench_import_manifest`" in sql for sql, _ in fake.queries)
   assert _view_writes(fake) == []
 
 
@@ -2743,6 +2746,273 @@ def test_materialize_view_sync_gives_up_after_bounded_retries() -> None:
   assert "is published (status 'imported')" in str(exc.value)
   assert len(fake.view_writes) == 3
   assert _VIEW_REF not in store.views
+
+
+def _sql_sha256(query: str) -> str:
+  return hashlib.sha256(" ".join(query.split()).encode()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        None,
+        # A structurally valid policy pin as well: still foreign.
+        {"min_scores": {"goal_completion": 0.9}, "missing_score_fails": True},
+    ],
+)
+def test_materialize_refuses_a_foreign_view_with_a_self_consistent_pin(
+    policy: dict | None,
+) -> None:
+  """A digest the view supplies about itself is not proof of ownership.
+
+  A foreign view can carry a same-job pin over arbitrary SQL *and* a
+  correctly recomputed hash of that SQL. Ownership must instead be decided
+  against what the importer would render for a committed manifest row.
+  """
+  fake = _FakeWriteClient()
+  _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  before = list(fake.view_writes)
+
+  foreign_sql = "SELECT 'foreign-owned' AS session_id"
+  pin = {
+      "import_version": "v1",
+      "job_id": "job-123",
+      "policy": policy,
+      "query_sha256": _sql_sha256(foreign_sql),
+  }
+  forged = _PIN_LINE + json.dumps(pin, sort_keys=True) + "\n" + foreign_sql
+  fake.store.write_view(_VIEW_REF, forged)
+
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(**_TARGET, import_version="v2", bq_client=fake)
+  assert fake.store.views[_VIEW_REF] == forged
+  assert fake.view_writes == before
+  assert not any(row["import_version"] == "v2" for row in fake.manifest_rows)
+
+
+def test_materialize_refuses_a_contract_shaped_view_for_an_unpublished_version() -> (
+    None
+):
+  """Even a body that *is* the importer's rendering counts only for a
+  version this job actually committed to the manifest (and the tables that
+  row names): a pin to an unpublished version, or a rendering over other
+  tables, is foreign."""
+  fake = _FakeWriteClient()
+  _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  (published,) = fake.manifest_rows
+  before = list(fake.view_writes)
+
+  unpublished = {**published, "import_version": "v9"}
+  fake.store.write_view(
+      _VIEW_REF,
+      evalbench._failed_sessions_view_body(manifest=unpublished, policy=None),
+  )
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+
+  relocated = {
+      **published,
+      "events_table": "analytics-project.bqaa.somebody_elses_events",
+  }
+  fake.store.write_view(
+      _VIEW_REF,
+      evalbench._failed_sessions_view_body(manifest=relocated, policy=None),
+  )
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert fake.view_writes == before
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        "not a mapping",
+        {"min_scores": {"goal_completion": 0.9}},
+        {"min_scores": {}, "missing_score_fails": True},
+        {"min_scores": {"goal_completion": "0.9"}, "missing_score_fails": True},
+        {"min_scores": {"goal_completion": True}, "missing_score_fails": True},
+        {"min_scores": {"goal_completion": 0.9}, "missing_score_fails": 1},
+        {"min_scores": {"bad name": 0.9}, "missing_score_fails": True},
+        {
+            "min_scores": {"goal_completion": 0.9},
+            "missing_score_fails": True,
+            "extra": 1,
+        },
+    ],
+)
+def test_materialize_refuses_a_pin_with_a_malformed_policy(policy) -> None:
+  fake = _FakeWriteClient()
+  _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  _, query = fake.store.views[_VIEW_REF].split("\n", 1)
+  pin = {"import_version": "v1", "job_id": "job-123", "policy": policy}
+  fake.store.write_view(_VIEW_REF, _PIN_LINE + json.dumps(pin) + "\n" + query)
+  before = list(fake.view_writes)
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert fake.view_writes == before
+
+
+def test_materialize_view_policy_rendering_is_canonical() -> None:
+  """The same gate given in another key order (or as ints) renders the same
+  view, so the importer recognizes its own definition and writes nothing."""
+  fake = _FakeWriteClient()
+  run = _scored_run()
+  run.materialize(
+      **_TARGET,
+      import_version="v1",
+      policy=EvalScorePolicy({"goal_completion": 1, "accuracy": 0.5}),
+      bq_client=fake,
+  )
+  assert len(_view_writes(fake)) == 1
+  result = run.materialize(
+      **_TARGET,
+      import_version="v1",
+      policy=EvalScorePolicy({"accuracy": 0.5, "goal_completion": 1.0}),
+      bq_client=fake,
+  )
+  assert result.status == "unchanged"
+  assert len(_view_writes(fake)) == 1
+  assert _full_pin(fake)["policy"]["min_scores"] == {
+      "accuracy": 0.5,
+      "goal_completion": 1.0,
+  }
+
+
+def test_materialize_etag_retry_never_applies_a_stale_policy_to_a_newer_version() -> (
+    None
+):
+  """v1 (gate 0.9) reads the view, pauses; v2 (no policy) lands and rewrites
+  the view; v1's replace fails its ETag check and retries. The retry sees
+  v2 as latest -- a version v1 did not publish -- so it must not re-render
+  v2 with v1's policy: v2's own import decided there is no gate."""
+  store = _FakeManifestStore()
+  setup = _FakeWriteClient(store=store)
+  _scored_run().materialize(
+      **_TARGET, import_version="v0", imported_at=_T1, bq_client=setup
+  )
+
+  fake_v2 = _FakeWriteClient(store=store)
+  run_v2 = _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES)
+
+  def v2_lands_first() -> None:
+    result = run_v2.materialize(
+        **_TARGET,
+        import_version="v2",
+        imported_at=_T1 + timedelta(hours=2),
+        bq_client=fake_v2,
+    )
+    assert result.status == "imported"
+    assert _full_pin(fake_v2)["policy"] is None
+
+  fake_v1 = _FakeWriteClient(store=store, before_view_write=v2_lands_first)
+  result = _scored_run(extra_result=_WRONG_RESULT).materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1 + timedelta(hours=1),
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      bq_client=fake_v1,
+  )
+
+  assert result.status == "imported"
+  assert result.failed_sessions_view == _VIEW_REF
+  assert fake_v1.view_writes == []
+  assert [kind for kind, _, _ in fake_v2.view_writes] == ["update"]
+  assert _full_pin(fake_v1) == {
+      "import_version": "v2",
+      "job_id": "job-123",
+      "policy": None,
+  }
+  assert "0.9 AS min_score" not in store.views[_VIEW_REF]
+
+
+def test_materialize_older_version_advances_a_stale_view_without_its_policy() -> (
+    None
+):
+  """A view left behind (the latest import managed no view) is still moved
+  to the latest version by a later, older-version call -- but the gate it
+  carries is view state that only the latest version's own import may
+  change, so the older call's policy is not rendered into it."""
+  fake = _FakeWriteClient()
+  run_v1 = _scored_run()
+  run_v1.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1,
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      bq_client=fake,
+  )
+  _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES).materialize(
+      **_TARGET,
+      import_version="v2",
+      imported_at=_T1 + timedelta(hours=1),
+      failed_sessions_view=None,
+      bq_client=fake,
+  )
+  assert _view_pin(fake)["import_version"] == "v1"
+
+  result = run_v1.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1,
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake,
+  )
+  assert result.status == "unchanged"
+  assert _full_pin(fake) == {
+      "import_version": "v2",
+      "job_id": "job-123",
+      "policy": {
+          "min_scores": {"goal_completion": 0.9},
+          "missing_score_fails": True,
+      },
+  }
+  assert [kind for kind, _, _ in _view_writes(fake)] == ["create", "update"]
+
+  # A re-run of the same older call is then a no-op.
+  run_v1.materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1,
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake,
+  )
+  assert len(_view_writes(fake)) == 2
+
+
+def test_materialize_older_version_creates_a_missing_view_without_a_gate() -> (
+    None
+):
+  """No view yet and the latest version's import managed none: an older
+  version's call still creates the view for the latest version, but with
+  no gate -- its policy is not that version's to set."""
+  fake = _FakeWriteClient()
+  _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES).materialize(
+      **_TARGET,
+      import_version="v2",
+      imported_at=_T1 + timedelta(hours=1),
+      failed_sessions_view=None,
+      bq_client=fake,
+  )
+  assert _VIEW_REF not in fake.store.views
+
+  result = _scored_run().materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1,
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      bq_client=fake,
+  )
+  assert result.status == "imported"
+  assert result.failed_sessions_view == _VIEW_REF
+  assert _full_pin(fake) == {
+      "import_version": "v2",
+      "job_id": "job-123",
+      "policy": None,
+  }
+  assert "min_score" not in fake.store.views[_VIEW_REF]
+  assert [kind for kind, _, _ in _view_writes(fake)] == ["create"]
 
 
 def test_failed_sessions_sql_pins_literals_with_escaping() -> None:
