@@ -68,7 +68,12 @@ WHERE job_id = @job_id
 
 DEFAULT_EVENTS_TABLE = "evalbench_agent_events"
 DEFAULT_SCORES_TABLE = "evalbench_scores_imported"
-DEFAULT_MANIFEST_TABLE = "evalbench_import_manifest"
+# The one import registry per target dataset. It is deliberately not
+# caller-selectable: every import into ``{target_project}.{target_dataset}``
+# consults this table before deleting rows from *any* events/scores table in
+# that dataset, so a second manifest can never route around the version
+# immutability guard of the first.
+MANIFEST_TABLE = "evalbench_import_manifest"
 # The ADK plugin's production table. EvalBench imports publish only to
 # BQAA-owned mirror tables, so this name is rejected before any BigQuery call.
 _RESERVED_DESTINATION_TABLES = frozenset({"agent_events"})
@@ -391,7 +396,10 @@ class EvalBenchRun:
     the identity becomes ``evalbench:{job_id}:{import_version}:{scenario_id}``
     and every synthetic span id derives from it, so retained import versions
     of one job never share a trace or session in the mirror table and
-    readers that filter only by ``trace_id`` see exactly one version.
+    readers that filter only by ``trace_id`` see exactly one version. Each
+    component is escaped (see ``_session_identity``) so a ``:`` inside
+    ``import_version`` or ``scenario_id`` cannot make two different
+    ``(job_id, import_version, scenario_id)`` tuples share an identity.
     """
     if import_version is not None:
       _validate_import_version(import_version)
@@ -607,7 +615,6 @@ class EvalBenchRun:
       target_project: Optional[str] = None,
       events_table: str = DEFAULT_EVENTS_TABLE,
       scores_table: str = DEFAULT_SCORES_TABLE,
-      manifest_table: str = DEFAULT_MANIFEST_TABLE,
       import_version: Optional[str] = None,
       replace: bool = False,
       imported_at: Optional[datetime] = None,
@@ -616,11 +623,17 @@ class EvalBenchRun:
     """Publish this run as one immutable import version in BQAA-owned tables.
 
     The target is always a BQAA-owned mirror (default
-    ``evalbench_agent_events`` / ``evalbench_scores_imported`` /
-    ``evalbench_import_manifest``); the ADK plugin's production
-    ``agent_events`` table is never written. ``target_project`` may differ
-    from the source ``project_id``. The target dataset must already exist;
-    the three tables are created on first use.
+    ``evalbench_agent_events`` / ``evalbench_scores_imported``); the ADK
+    plugin's production ``agent_events`` table is never written.
+    ``target_project`` may differ from the source ``project_id``. The target
+    dataset must already exist; the three tables are created on first use.
+
+    The manifest is the single import registry of the target dataset
+    (``MANIFEST_TABLE``, ``evalbench_import_manifest``) and is not
+    caller-selectable: every import into the dataset, whatever
+    ``events_table``/``scores_table`` it writes, checks the same registry
+    before deleting any published rows, so one version cannot be
+    re-published around an earlier manifest row.
 
     Publishing is atomic: event, score, and manifest rows are loaded into
     per-import staging tables, then a single multi-statement transaction
@@ -646,7 +659,6 @@ class EvalBenchRun:
       target_project: Target project; defaults to the source ``project_id``.
       events_table: Mirror event table name in ``target_dataset``.
       scores_table: Imported score table name in ``target_dataset``.
-      manifest_table: Manifest table name in ``target_dataset``.
       import_version: Optional caller-chosen version label. Defaults to the
         first 16 hex digits of the combined source fingerprint.
       replace: Re-publish even when an identical version already exists
@@ -664,7 +676,6 @@ class EvalBenchRun:
     _validate_source_segment("target_dataset", target_dataset)
     _validate_destination_table("events_table", events_table)
     _validate_destination_table("scores_table", scores_table)
-    _validate_destination_table("manifest_table", manifest_table)
     if imported_at is None:
       imported_at = datetime.now(timezone.utc)
     elif imported_at.tzinfo is None:
@@ -678,7 +689,7 @@ class EvalBenchRun:
     prefix = f"{target_project}.{target_dataset}"
     events_ref = f"{prefix}.{events_table}"
     scores_ref = f"{prefix}.{scores_table}"
-    manifest_ref = f"{prefix}.{manifest_table}"
+    manifest_ref = f"{prefix}.{MANIFEST_TABLE}"
 
     # Map before touching BigQuery so mapping errors never leave staging
     # tables behind or partially created targets.
@@ -1130,13 +1141,37 @@ def _check_destination_binding(
   )
 
 
+# Identity components are joined with ":"; a literal ":" or "\" inside a
+# component is escaped ("\:" and "\\") so the join is injective and decodes
+# back to the original tuple. ``import_version`` admits ":" and ``scenario_id``
+# is arbitrary source text, so without escaping
+# ``(import_version="release:1", scenario_id="case")`` and
+# ``(import_version="release", scenario_id="1:case")`` would collide.
+_IDENTITY_SEPARATOR = ":"
+_IDENTITY_ESCAPES = str.maketrans({"\\": "\\\\", _IDENTITY_SEPARATOR: "\\:"})
+
+
+def _identity_component(value: str) -> str:
+  return value.translate(_IDENTITY_ESCAPES)
+
+
 def _session_identity(
     job_id: str, scenario_id: str, *, import_version: Optional[str]
 ) -> str:
-  """Session/trace identity shared by event rows and score rows."""
-  if import_version is None:
-    return f"evalbench:{job_id}:{scenario_id}"
-  return f"evalbench:{job_id}:{import_version}:{scenario_id}"
+  """Session/trace identity shared by event rows and score rows.
+
+  ``evalbench:{job_id}:{scenario_id}`` for a plain read and
+  ``evalbench:{job_id}:{import_version}:{scenario_id}`` for a published
+  version, with every component escaped so the encoding of the tuple is
+  unambiguous. Components without ``:`` or ``\\`` (the common case) render
+  verbatim. The two forms differ in component count, so a plain read of a
+  scenario named ``v1:case`` can never alias published version ``v1``.
+  """
+  parts = ["evalbench", job_id]
+  if import_version is not None:
+    parts.append(import_version)
+  parts.append(scenario_id)
+  return _IDENTITY_SEPARATOR.join(_identity_component(part) for part in parts)
 
 
 def _validate_import_version(import_version: Any) -> None:
@@ -1849,7 +1884,15 @@ def _event_row(
 
 
 def _stable_id(*parts: str, length: int) -> str:
-  digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+  """Deterministic hex id of a tuple of strings.
+
+  Parts are length-prefixed before hashing so the encoding is injective even
+  when a part (such as a session id built from arbitrary scenario text)
+  contains the joiner: ``("a\\x1fb", "c")`` and ``("a", "b\\x1fc")`` hash
+  differently.
+  """
+  encoded = "\x1f".join(f"{len(part)}:{part}" for part in parts)
+  digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
   return digest[:length]
 
 

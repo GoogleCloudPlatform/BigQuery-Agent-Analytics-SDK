@@ -99,6 +99,14 @@ share a trace or session in the mirror table: a reader that filters only by
 score rows use the same identity, so score joins stay aligned. Published rows
 also carry `attributes.evalbench_import_version`.
 
+The identity encodes the `(job_id, import_version, scenario_id)` tuple
+unambiguously: a literal `:` or `\` inside a component is escaped as `\:` /
+`\\`, so `(import_version="release:1", scenario_id="case")` and
+`(import_version="release", scenario_id="1:case")` get different
+`session_id`s (`…:release\:1:case` vs `…:release:1\:case`), and a plain read
+of a scenario named `v1:case` never aliases published version `v1`. Components
+without those characters (the common case) render verbatim.
+
 `orchestrator`, `generator`, and the run timestamp come from EvalBench's
 flattened `configs` rows. If a historical run lacks config metadata, the agent
 components become `unknown`; if no timestamp is available, the mapper uses the
@@ -156,7 +164,7 @@ must already exist; the tables are created on first use):
 |---|---|---|
 | Events | `evalbench_agent_events` | `agent_events` columns plus `job_id`, `import_version`; partitioned by `timestamp`, clustered by `job_id, import_version, session_id` |
 | Scores | `evalbench_scores_imported` | `job_id`, `import_version`, `scenario_id`, `session_id`, `comparator`, `score FLOAT64`, `source_row JSON` (the verbatim EvalBench score row) |
-| Manifest | `evalbench_import_manifest` | one row per `(job_id, import_version)` — see below |
+| Manifest | `evalbench_import_manifest` (fixed) | one row per `(job_id, import_version)` — see below |
 
 The extra event columns are appended after the `agent_events` contract, so
 `Client.get_session_trace` and the other explicit-column readers work
@@ -227,6 +235,12 @@ order-independent fingerprints of the source `results`, `scores`, and
 
 A given `(job_id, import_version)` therefore never accumulates duplicates, and
 a published version stays bound to the destination tables in its manifest.
+The manifest is the single import registry of the target dataset; its name is
+fixed (`evalbench_import_manifest`, `evalbench.MANIFEST_TABLE`) rather than a
+`materialize` argument, so every import into the dataset — whatever
+`events_table`/`scores_table` it writes — checks the same registry before
+deleting published rows. A second manifest cannot be used to re-publish
+changed source under an existing version around the first manifest row.
 An `unchanged` result always refers to the tables that were actually written;
 to publish the same version elsewhere, choose a new `import_version` (moving
 rows between tables is not supported, so `replace=True` cannot orphan them).

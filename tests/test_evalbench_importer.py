@@ -887,9 +887,7 @@ def test_materialize_rejects_unsafe_target_identifiers(
     _scored_run().materialize(**kwargs)
 
 
-@pytest.mark.parametrize(
-    "field", ["events_table", "scores_table", "manifest_table"]
-)
+@pytest.mark.parametrize("field", ["events_table", "scores_table"])
 @pytest.mark.parametrize("value", ["agent_events", "AGENT_EVENTS"])
 def test_materialize_rejects_reserved_agent_events_table(
     field: str, value: str
@@ -1039,6 +1037,209 @@ def test_unversioned_reader_identity_is_unchanged() -> None:
   }
   assert all(
       "evalbench_import_version" not in row["attributes"] for row in rows
+  )
+
+
+def test_materialize_rejects_caller_selected_manifest_table() -> None:
+  """The manifest registry is fixed per dataset and cannot be redirected."""
+  fake = _FakeWriteClient()
+  with pytest.raises(TypeError, match="manifest_table"):
+    _scored_run().materialize(
+        target_dataset="bqaa",
+        manifest_table="other_manifest",
+        bq_client=fake,
+    )
+  assert fake.created == []
+  assert fake.queries == []
+  assert fake.loads == []
+
+
+def test_materialize_consults_canonical_registry_for_custom_tables() -> None:
+  """Every import checks ``<target>.evalbench_import_manifest`` regardless of
+  which events/scores tables it writes."""
+  fake = _FakeWriteClient()
+  result = _scored_run().materialize(
+      target_project="analytics-project",
+      target_dataset="bqaa",
+      events_table="custom_events",
+      scores_table="custom_scores",
+      import_version="v1",
+      bq_client=fake,
+  )
+  registry = "analytics-project.bqaa.evalbench_import_manifest"
+  assert result.manifest_table == registry
+  assert evalbench.MANIFEST_TABLE == "evalbench_import_manifest"
+  pre_reads = [sql for sql, _ in fake.queries if "BEGIN TRANSACTION" not in sql]
+  assert pre_reads and all(f"`{registry}`" in sql for sql in pre_reads)
+  script = _transaction_queries(fake)[0]
+  assert f"FROM `{registry}`" in script
+  assert f"DELETE FROM `{registry}`" in script
+  assert f"INSERT INTO `{registry}`" in script
+  # The manifest staging table derives from the registry name as well.
+  assert any(f"{registry}_staging_" in dest for dest, _, _ in fake.loads)
+
+
+def test_changed_source_cannot_replace_shared_rows_via_second_manifest() -> (
+    None
+):
+  """Codex P1 regression: publish ``job/v1``, then publish *changed* source
+  for the same ``job/v1`` into the same events/scores tables. With one
+  canonical registry the second import cannot route around the first
+  manifest row, so the shared rows are never deleted or replaced."""
+  store = _FakeManifestStore()
+  first_client = _FakeWriteClient(store=store)
+  first = _scored_run().materialize(
+      target_dataset="bqaa",
+      events_table="shared_events",
+      scores_table="shared_scores",
+      import_version="v1",
+      bq_client=first_client,
+  )
+  assert first.status == "imported"
+  assert store.rows == [first.manifest]
+
+  changed = _scored_run(
+      extra_result={
+          "eval_id": "late-1",
+          "prompt": "Changed content under the same version",
+          "stdout": json.dumps({"response": "late"}),
+      }
+  )
+  # The pre-read sees the registry row and refuses before staging anything.
+  second_client = _FakeWriteClient(store=store)
+  with pytest.raises(ValueError, match="different source fingerprints"):
+    changed.materialize(
+        target_dataset="bqaa",
+        events_table="shared_events",
+        scores_table="shared_scores",
+        import_version="v1",
+        bq_client=second_client,
+    )
+  assert store.rows == [first.manifest]
+  assert second_client.loads == []
+  assert _transaction_queries(second_client) == []
+
+  # Even an importer whose pre-read is stale hits the same registry inside
+  # the transaction and is rolled back; nothing is deleted from the shared
+  # tables.
+  stale_client = _FakeWriteClient(store=store, stale_manifest_reads=True)
+  with pytest.raises(ValueError, match="published concurrently"):
+    changed.materialize(
+        target_dataset="bqaa",
+        events_table="shared_events",
+        scores_table="shared_scores",
+        import_version="v1",
+        bq_client=stale_client,
+    )
+  assert store.rows == [first.manifest]
+
+
+def _colliding_runs() -> (
+    tuple[tuple[EvalBenchRun, str], tuple[EvalBenchRun, str]]
+):
+  """Two ``(run, import_version)`` pairs whose naive ``:``-joined identity
+  would both read ``evalbench:job-123:release:1:case``."""
+
+  def run_for(scenario_id: str) -> EvalBenchRun:
+    return _scored_run(
+        extra_result={
+            "eval_id": scenario_id,
+            "prompt": "Prompt",
+            "stdout": json.dumps(
+                {
+                    "response": "done",
+                    "tool_calls": [
+                        {"tool_name": "search", "args": {}, "result": "x"}
+                    ],
+                }
+            ),
+            "run_time": _RUN_TIME,
+        },
+        scores=({"eval_id": scenario_id, "comparator": "goal", "score": 1},),
+    )
+
+  return (run_for("case"), "release:1"), (run_for("1:case"), "release")
+
+
+def test_session_identity_escapes_delimiters() -> None:
+  left = evalbench._session_identity(
+      "job-123", "case", import_version="release:1"
+  )
+  right = evalbench._session_identity(
+      "job-123", "1:case", import_version="release"
+  )
+  assert left != right
+  assert left == "evalbench:job-123:release\\:1:case"
+  assert right == "evalbench:job-123:release:1\\:case"
+  # Backslashes in a component are escaped too, so escaping is reversible.
+  assert (
+      evalbench._session_identity("job-123", "a\\:b", import_version=None)
+      == "evalbench:job-123:a\\\\\\:b"
+  )
+  # A plain read of scenario ``v1:case`` never aliases published ``v1``.
+  assert evalbench._session_identity(
+      "job-123", "v1:case", import_version=None
+  ) != evalbench._session_identity("job-123", "case", import_version="v1")
+  # Common case (no delimiters) keeps the documented readable form.
+  assert (
+      evalbench._session_identity("job-123", "ok-1", import_version="v1")
+      == "evalbench:job-123:v1:ok-1"
+  )
+
+
+@pytest.mark.parametrize(
+    "column", ["session_id", "trace_id", "invocation_id", "span_id"]
+)
+def test_versioned_event_identities_are_collision_safe(column: str) -> None:
+  (run_a, version_a), (run_b, version_b) = _colliding_runs()
+  rows_a = [
+      row
+      for row in run_a.to_agent_event_rows(import_version=version_a)
+      if row["attributes"]["evalbench_scenario_id"] == "case"
+  ]
+  rows_b = [
+      row
+      for row in run_b.to_agent_event_rows(import_version=version_b)
+      if row["attributes"]["evalbench_scenario_id"] == "1:case"
+  ]
+  assert rows_a and rows_b
+  # Same shape (user + tool start/end + completed) so the ids line up 1:1.
+  assert [row["event_type"] for row in rows_a] == [
+      row["event_type"] for row in rows_b
+  ]
+  ids_a = {row[column] for row in rows_a}
+  ids_b = {row[column] for row in rows_b}
+  assert ids_a.isdisjoint(ids_b), column
+  parents_a = {row["parent_span_id"] for row in rows_a} - {None}
+  parents_b = {row["parent_span_id"] for row in rows_b} - {None}
+  assert parents_a.isdisjoint(parents_b)
+
+
+def test_versioned_score_identities_are_collision_safe() -> None:
+  (run_a, version_a), (run_b, version_b) = _colliding_runs()
+  scores_a = {
+      row["session_id"] for row in run_a.to_score_rows(import_version=version_a)
+  }
+  scores_b = {
+      row["session_id"] for row in run_b.to_score_rows(import_version=version_b)
+  }
+  assert scores_a.isdisjoint(scores_b)
+  # Scores still join their own version's events (only the extra scenario
+  # is scored in ``_colliding_runs``).
+  events_a = {
+      row["session_id"]
+      for row in run_a.to_agent_event_rows(import_version=version_a)
+  }
+  assert scores_a == {"evalbench:job-123:release\\:1:case"}
+  assert scores_a <= events_a
+
+
+def test_stable_id_is_not_ambiguous_across_part_boundaries() -> None:
+  assert evalbench._stable_id("a\x1fb", "c", length=16) != evalbench._stable_id(
+      "a", "b\x1fc", length=16
+  )
+  assert evalbench._stable_id("ab", "c", length=16) != evalbench._stable_id(
+      "a", "bc", length=16
   )
 
 
