@@ -55,7 +55,9 @@ import re
 from typing import Any, Optional
 import uuid
 
+from google.api_core.exceptions import Conflict
 from google.api_core.exceptions import NotFound
+from google.api_core.exceptions import PreconditionFailed
 from google.cloud import bigquery
 
 from ._telemetry import make_bq_client
@@ -101,11 +103,20 @@ _IMPORT_LOCK_ID = "evalbench-import"
 # (``_LATEST_IMPORT_QUERY`` over the manifest). Its body is
 # ``failed_sessions_sql`` with ``@job_id``/``@import_version`` rendered as
 # string literals, so the view never scans another version. The pin is
-# recorded in a leading SQL comment (``_VIEW_PIN_MARKER``) that
-# ``materialize`` reads back before publishing: a view bound to another job,
-# or any object at that name the importer did not create, is never replaced.
+# recorded in a leading SQL comment (``_VIEW_PIN_MARKER``) that also carries
+# the rendered score policy and a hash of the canonical query below it, so
+# the marker alone never proves ownership: a view is the importer's only
+# when its body is byte-for-byte (modulo whitespace) what the importer
+# renders for that pin. Anything else at that name -- a table, a foreign
+# view, a view carrying a copied marker over other SQL, or a managed view
+# somebody edited -- is refused, never replaced. Writes go through the
+# tables API rather than ``CREATE OR REPLACE VIEW``: create-if-absent, and
+# ETag-conditional replace after re-reading the view and the latest
+# manifest, so two concurrent imports cannot overwrite each other's pin.
 DEFAULT_FAILED_SESSIONS_VIEW = "evalbench_failed_sessions"
 _VIEW_PIN_MARKER = "-- evalbench_failed_sessions pin: "
+# Bounded retries when the view changes underneath a conditional write.
+_VIEW_SYNC_ATTEMPTS = 3
 _VIEW_FEATURE = "evalbench-failed-sessions"
 # The ADK plugin's production table. EvalBench imports publish only to
 # BQAA-owned mirror tables, so this name is rejected before any BigQuery call.
@@ -206,10 +217,9 @@ ORDER BY imported_at DESC, import_version DESC
 LIMIT 1
 """
 
-_CREATE_VIEW_DDL = """\
-CREATE OR REPLACE VIEW `{view_ref}`
-OPTIONS (description = {description})
-AS
+# The managed view's query text (``Table.view_query``): the pin comment on
+# the first line, the pinned ``failed_sessions_sql`` below it.
+_VIEW_BODY = """\
 {pin_comment}
 {query}"""
 
@@ -820,12 +830,18 @@ class EvalBenchRun:
     successful import: ``failed_sessions_sql`` rendered with the
     ``(job_id, import_version)`` of the newest manifest row as literals, so
     SQL consumers never scan another version. The view is only rewritten
-    when that pin (or ``policy``) changes, so a no-op re-import leaves it
-    untouched, and it is created on the next call for corpora published
-    before views existed. A view at that name pinned to *another* job, or
-    any object there the importer did not create, raises ``ValueError``
-    before anything is written -- pass a different ``failed_sessions_view``
-    per job, or ``None`` to manage no view.
+    when its rendered definition would change (pinned version, ``policy``,
+    or the SQL itself), so a no-op re-import leaves it untouched, and it is
+    created on the next call for corpora published before views existed.
+    Ownership is proven by the definition, not by the pin comment alone: a
+    view at that name pinned to *another* job, or any object there whose
+    query is not what the importer rendered (a table, a foreign view, a
+    copied pin over other SQL, an edited managed view), raises
+    ``ValueError`` before anything is written -- pass a different
+    ``failed_sessions_view`` per job, or ``None`` to manage no view. The
+    view is written with create-if-absent and ETag-conditional replace
+    after re-reading it and the latest manifest, so concurrent imports of
+    one job cannot leave a stale pin behind.
 
     Args:
       target_dataset: BQAA-owned dataset that receives the mirror tables.
@@ -913,6 +929,15 @@ class EvalBenchRun:
     }
 
     client = bq_client or make_bq_client(target_project, location=self.location)
+
+    # The view binding is checked before any table is created or written so
+    # a name clash with another job's view (or a foreign object) aborts
+    # before the importer touches the dataset. ``_sync_failed_sessions_view``
+    # re-reads it right before writing; this early read is the fail-fast
+    # path, not the authority.
+    if view_ref is not None:
+      _check_view_binding(client, view_ref=view_ref, job_id=self.job_id)
+
     _ensure_import_tables(
         client,
         events_ref=events_ref,
@@ -920,19 +945,6 @@ class EvalBenchRun:
         manifest_ref=manifest_ref,
         lock_ref=lock_ref,
     )
-
-    # The view binding is checked before the manifest so a name clash with
-    # another job's view (or a foreign object) aborts before any write.
-    existing_pin: Optional[dict[str, str]] = None
-    if view_ref is not None:
-      existing_pin = _read_view_pin(client, view_ref=view_ref)
-      if existing_pin is not None and existing_pin["job_id"] != self.job_id:
-        raise ValueError(
-            f"failed_sessions view {view_ref!r} is pinned to EvalBench job "
-            f"{existing_pin['job_id']!r}, not {self.job_id!r}; pass a "
-            "different failed_sessions_view for this job, or None to skip"
-            " the view"
-        )
 
     def finish(result: "EvalBenchImportResult") -> "EvalBenchImportResult":
       if view_ref is None:
@@ -944,7 +956,6 @@ class EvalBenchRun:
               view_ref=view_ref,
               manifest_ref=manifest_ref,
               job_id=self.job_id,
-              existing_pin=existing_pin,
               policy=policy,
               location=self.location,
               status=result.status,
@@ -1379,18 +1390,61 @@ def _sql_string_literal(value: str) -> str:
 # --- Failed-session view and version-pinned consumer (#435 slice 2) ---
 
 
-def _view_pin(job_id: str, import_version: str) -> dict[str, str]:
-  return {"job_id": job_id, "import_version": import_version}
+def _policy_pin(policy: Optional[EvalScorePolicy]) -> Optional[dict[str, Any]]:
+  """The score gate a view renders, in canonical form (``None`` = no gate)."""
+  if policy is None or not policy.min_scores:
+    return None
+  return {
+      "min_scores": {
+          comparator: float(min_score)
+          for comparator, min_score in sorted(policy.min_scores.items())
+      },
+      "missing_score_fails": bool(policy.missing_score_fails),
+  }
 
 
-def _view_pin_comment(pin: Mapping[str, str]) -> str:
+def _normalize_sql(text: str) -> str:
+  # BigQuery stores a view's query text verbatim; collapsing whitespace only
+  # guards against incidental reformatting, never against changed SQL.
+  return " ".join(text.split())
+
+
+def _sql_digest(query: str) -> str:
+  return hashlib.sha256(_normalize_sql(query).encode("utf-8")).hexdigest()
+
+
+def _view_pin(
+    job_id: str,
+    import_version: str,
+    *,
+    policy: Optional[EvalScorePolicy],
+    query: str,
+) -> dict[str, Any]:
+  """The pin comment payload: what the view is bound to, and to what SQL."""
+  return {
+      "job_id": job_id,
+      "import_version": import_version,
+      "policy": _policy_pin(policy),
+      "query_sha256": _sql_digest(query),
+  }
+
+
+def _view_pin_comment(pin: Mapping[str, Any]) -> str:
   # ``ensure_ascii`` keeps the comment on one line whatever the job_id holds.
   return _VIEW_PIN_MARKER + json.dumps(pin, sort_keys=True, ensure_ascii=True)
 
 
-def _parse_view_pin(view_query: str) -> Optional[dict[str, str]]:
-  for line in view_query.splitlines():
-    line = line.strip()
+def _parse_view_pin(view_query: str) -> Optional[dict[str, Any]]:
+  """Return the pin a managed view carries, or ``None`` if it is not ours.
+
+  Ours means: the first nonblank line is a well-formed pin comment *and*
+  the query below it hashes to the ``query_sha256`` the pin records. A
+  copied marker over other SQL, or a managed view whose body was edited,
+  fails the second half and is treated as foreign.
+  """
+  lines = view_query.splitlines()
+  for index, raw in enumerate(lines):
+    line = raw.strip()
     if not line:
       continue
     if not line.startswith(_VIEW_PIN_MARKER):
@@ -1399,22 +1453,45 @@ def _parse_view_pin(view_query: str) -> Optional[dict[str, str]]:
       pin = json.loads(line[len(_VIEW_PIN_MARKER) :])
     except json.JSONDecodeError:
       return None
-    if (
+    if not (
         isinstance(pin, dict)
         and isinstance(pin.get("job_id"), str)
         and isinstance(pin.get("import_version"), str)
+        and isinstance(pin.get("query_sha256"), str)
     ):
-      return _view_pin(pin["job_id"], pin["import_version"])
-    return None
+      return None
+    query = "\n".join(lines[index + 1 :])
+    if not query.strip() or _sql_digest(query) != pin["query_sha256"]:
+      return None
+    return {
+        "job_id": pin["job_id"],
+        "import_version": pin["import_version"],
+        "policy": pin.get("policy"),
+        "query_sha256": pin["query_sha256"],
+    }
   return None
 
 
-def _read_view_pin(client: Any, *, view_ref: str) -> Optional[dict[str, str]]:
-  """Return the ``(job_id, import_version)`` a managed view is pinned to.
+@dataclasses.dataclass(frozen=True)
+class _ManagedView:
+  """A view at the managed name that the importer recognizes as its own."""
+
+  table: Any
+  pin: dict[str, Any]
+
+  @property
+  def view_query(self) -> str:
+    return str(self.table.view_query)
+
+
+def _read_managed_view(client: Any, *, view_ref: str) -> Optional[_ManagedView]:
+  """Return the managed view at ``view_ref`` with its pin and ETag.
 
   ``None`` means nothing exists at ``view_ref``. Anything else that is not a
-  view carrying the importer's pin comment (a table, or a view somebody else
-  wrote) raises: the importer only ever replaces views it created.
+  view carrying the importer's pin *over the query that pin hashes* (a
+  table, a view somebody else wrote, a copied marker, an edited body)
+  raises: the importer only ever replaces views whose definition it can
+  vouch for.
   """
   try:
     table = client.get_table(view_ref)
@@ -1425,38 +1502,53 @@ def _read_view_pin(client: Any, *, view_ref: str) -> Optional[dict[str, str]]:
   if pin is None:
     raise ValueError(
         f"{view_ref!r} exists but is not an evalbench failed_sessions view"
-        " created by materialize(); choose another failed_sessions_view"
-        " name (or None to skip the view) rather than replacing it"
+        " created by materialize() (or its definition was changed); choose"
+        " another failed_sessions_view name (or None to skip the view)"
+        " rather than replacing it"
     )
-  return pin
+  return _ManagedView(table=table, pin=pin)
 
 
-def _failed_sessions_view_ddl(
+def _check_view_binding(
+    client: Any, *, view_ref: str, job_id: str
+) -> Optional[_ManagedView]:
+  """Refuse a view the importer does not own or that belongs to another job."""
+  existing = _read_managed_view(client, view_ref=view_ref)
+  if existing is not None and existing.pin["job_id"] != job_id:
+    raise ValueError(
+        f"failed_sessions view {view_ref!r} is pinned to EvalBench job "
+        f"{existing.pin['job_id']!r}, not {job_id!r}; pass a "
+        "different failed_sessions_view for this job, or None to skip"
+        " the view"
+    )
+  return existing
+
+
+def _failed_sessions_view_body(
     *,
-    view_ref: str,
     manifest: Mapping[str, Any],
     policy: Optional[EvalScorePolicy],
 ) -> str:
-  """``CREATE OR REPLACE VIEW`` pinned to one manifest row's version."""
+  """The managed view's query text pinned to one manifest row's version."""
   job_id = str(manifest["job_id"])
   import_version = str(manifest["import_version"])
-  pin = _view_pin(job_id, import_version)
-  description = (
-      "EvalBench failed sessions (W0.4 contract) pinned to job_id "
-      f"{job_id!r} import_version {import_version!r}; maintained by"
-      " bigquery_agent_analytics.evalbench.EvalBenchRun.materialize"
+  query = _failed_sessions_sql_for_refs(
+      events_ref=str(manifest["events_table"]),
+      scores_ref=str(manifest["scores_table"]),
+      policy=policy,
+      job_id=job_id,
+      import_version=import_version,
   )
-  return _CREATE_VIEW_DDL.format(
-      view_ref=view_ref,
-      description=_sql_string_literal(description),
-      pin_comment=_view_pin_comment(pin),
-      query=_failed_sessions_sql_for_refs(
-          events_ref=str(manifest["events_table"]),
-          scores_ref=str(manifest["scores_table"]),
-          policy=policy,
-          job_id=job_id,
-          import_version=import_version,
-      ),
+  pin = _view_pin(job_id, import_version, policy=policy, query=query)
+  return _VIEW_BODY.format(pin_comment=_view_pin_comment(pin), query=query)
+
+
+def _failed_sessions_view_description(manifest: Mapping[str, Any]) -> str:
+  return (
+      "EvalBench failed sessions (W0.4 contract) pinned to job_id "
+      f"{str(manifest['job_id'])!r} import_version "
+      f"{str(manifest['import_version'])!r}; maintained by"
+      " bigquery_agent_analytics.evalbench.EvalBenchRun.materialize"
   )
 
 
@@ -1466,7 +1558,6 @@ def _sync_failed_sessions_view(
     view_ref: str,
     manifest_ref: str,
     job_id: str,
-    existing_pin: Optional[Mapping[str, str]],
     policy: Optional[EvalScorePolicy],
     location: Optional[str],
     status: str,
@@ -1477,32 +1568,20 @@ def _sync_failed_sessions_view(
   Runs after the publish decision. The latest manifest row (not the version
   just handled) is the pin, so an ``unchanged`` no-op on an old version does
   not move the view backwards, and a ``replace`` of an old version -- which
-  refreshes ``imported_at`` -- does. The DDL is skipped when the existing
-  pin already matches and no policy is requested, so a no-op re-import
-  never rewrites the view; a policy is re-rendered because it is not part
-  of the pin.
+  refreshes ``imported_at`` -- does. The write is skipped when the existing
+  view's query already is what would be rendered (same version, same policy,
+  same SQL), so a no-op re-import never rewrites the view, while adding,
+  changing, or dropping the policy does.
   """
-  latest = _read_latest_manifest(
-      client, manifest_ref=manifest_ref, job_id=job_id, location=location
-  )
-  if latest is None:
-    raise ValueError(
-        f"EvalBench job {job_id!r} has no manifest row in {manifest_ref!r}"
-        " after publishing; cannot pin the failed_sessions view"
-    )
-  pin = _view_pin(str(latest["job_id"]), str(latest["import_version"]))
-  policy_requested = policy is not None and bool(policy.min_scores)
-  if existing_pin == pin and not policy_requested:
-    return view_ref
-  ddl = _failed_sessions_view_ddl(
-      view_ref=view_ref, manifest=latest, policy=policy
-  )
-  job_config = with_sdk_labels(bigquery.QueryJobConfig(), feature=_VIEW_FEATURE)
-  query_args: dict[str, Any] = {"job_config": job_config}
-  if location is not None:
-    query_args["location"] = location
   try:
-    client.query(ddl, **query_args).result()
+    _reconcile_failed_sessions_view(
+        client,
+        view_ref=view_ref,
+        manifest_ref=manifest_ref,
+        job_id=job_id,
+        policy=policy,
+        location=location,
+    )
   except Exception as exc:  # noqa: BLE001
     raise ValueError(
         f"EvalBench job {job_id!r} import_version {import_version!r} is"
@@ -1512,6 +1591,69 @@ def _sync_failed_sessions_view(
         " 'unchanged'"
     ) from exc
   return view_ref
+
+
+def _reconcile_failed_sessions_view(
+    client: Any,
+    *,
+    view_ref: str,
+    manifest_ref: str,
+    job_id: str,
+    policy: Optional[EvalScorePolicy],
+    location: Optional[str],
+) -> None:
+  """Create or conditionally replace the managed view, never blindly.
+
+  Each attempt re-reads the view (ownership, job, ETag) and *then* the
+  latest manifest row, so a version committed by a concurrent import after
+  the view was read is still seen. A missing view is created with
+  create-if-absent (``Conflict`` if another import created it first); an
+  existing one is replaced only if its ETag still matches
+  (``PreconditionFailed`` otherwise). Either race re-reads and re-decides,
+  a bounded number of times, then fails closed -- a stale pin is never
+  written over a newer one, and success is never reported for a view that
+  was not verified.
+  """
+  for _ in range(_VIEW_SYNC_ATTEMPTS):
+    existing = _check_view_binding(client, view_ref=view_ref, job_id=job_id)
+    latest = _read_latest_manifest(
+        client, manifest_ref=manifest_ref, job_id=job_id, location=location
+    )
+    if latest is None:
+      raise ValueError(
+          f"EvalBench job {job_id!r} has no manifest row in {manifest_ref!r}"
+          " after publishing; cannot pin the failed_sessions view"
+      )
+    body = _failed_sessions_view_body(manifest=latest, policy=policy)
+    description = _failed_sessions_view_description(latest)
+    if existing is None:
+      table = bigquery.Table(view_ref)
+      table.view_query = body
+      table.description = description
+      try:
+        client.create_table(table, exists_ok=False)
+      except Conflict:
+        continue
+      return
+    if _normalize_sql(existing.view_query) == _normalize_sql(body):
+      return
+    table = existing.table
+    if not getattr(table, "etag", None):
+      raise ValueError(
+          f"failed_sessions view {view_ref!r} has no ETag; refusing an"
+          " unconditional replace"
+      )
+    table.view_query = body
+    table.description = description
+    try:
+      client.update_table(table, ["view_query", "description"])
+    except PreconditionFailed:
+      continue
+    return
+  raise ValueError(
+      f"failed_sessions view {view_ref!r} changed concurrently"
+      f" {_VIEW_SYNC_ATTEMPTS} times; re-run materialize() to retry"
+  )
 
 
 def _read_latest_manifest(

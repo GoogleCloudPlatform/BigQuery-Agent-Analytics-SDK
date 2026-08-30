@@ -15,16 +15,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import dataclasses
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+import hashlib
 import inspect
 import json
 import math
 import re
 
+from google.api_core.exceptions import Conflict
 from google.api_core.exceptions import NotFound
+from google.api_core.exceptions import PreconditionFailed
 import pytest
 
 from bigquery_agent_analytics import evalbench
@@ -503,8 +507,15 @@ class _FakeManifestStore:
     self.scores: list[dict] = []
     self.lock_rows = 0
     self.lock_claims = 0
-    # view ref -> view body (the DDL text after ``AS``), like ``view_query``.
+    # view ref -> query text (``Table.view_query``) and its current ETag.
     self.views: dict[str, str] = {}
+    self.view_etags: dict[str, str] = {}
+    self._etag_counter = 0
+
+  def write_view(self, view_ref: str, view_query: str) -> None:
+    self._etag_counter += 1
+    self.views[view_ref] = view_query
+    self.view_etags[view_ref] = f"etag-{self._etag_counter}"
 
   def snapshot(self) -> _FakeSnapshot:
     return _FakeSnapshot(
@@ -531,12 +542,18 @@ def _same_version(row: dict, params: dict) -> bool:
 
 
 class _FakeView:
-  """What ``client.get_table`` returns for a view: its query text."""
+  """What ``client.get_table`` returns for a view: query text and ETag."""
 
   table_type = "VIEW"
 
-  def __init__(self, view_query: str) -> None:
+  def __init__(
+      self, view_query: str, etag: str | None = "etag-foreign", ref: str = ""
+  ) -> None:
     self.view_query = view_query
+    self.etag = etag
+    self.description = None
+    parts = ref.split(".") if ref else ["", "", ""]
+    self.project, self.dataset_id, self.table_id = parts
 
 
 _POLICY_ROW = re.compile(
@@ -581,6 +598,7 @@ class _FakeWriteClient:
       delete_error: Exception | None = None,
       view_error: Exception | None = None,
       foreign_objects: dict[str, object] | None = None,
+      before_view_write: Callable[[], None] | None = None,
   ) -> None:
     self.store = store or _FakeManifestStore(manifest_rows)
     self.stale_manifest_reads = stale_manifest_reads
@@ -590,8 +608,14 @@ class _FakeWriteClient:
     self.transaction_error = transaction_error
     self.delete_error = delete_error
     self.view_error = view_error
+    # Runs once, inside this client's first view write, *after* the importer
+    # read the view and the latest manifest and decided what to write: a
+    # concurrent import that lands in that window.
+    self.before_view_write = before_view_write
     # Objects that exist at a ref but were not created by the importer.
     self.foreign_objects = dict(foreign_objects or {})
+    # (kind, view ref, number of queries issued so far) per view write.
+    self.view_writes: list[tuple[str, str, int]] = []
     self.loads: list[tuple[str, list[dict], object]] = []
     self.queries: list[tuple[str, dict]] = []
     self.created: list[str] = []
@@ -604,17 +628,54 @@ class _FakeWriteClient:
     return self.store.rows
 
   def create_table(self, table, exists_ok: bool = False):
-    assert exists_ok is True
-    self.created.append(f"{table.project}.{table.dataset_id}.{table.table_id}")
-    self.created_tables.append(table)
+    ref = f"{table.project}.{table.dataset_id}.{table.table_id}"
+    if getattr(table, "view_query", None) is None:
+      assert exists_ok is True
+      self.created.append(ref)
+      self.created_tables.append(table)
+      return table
+    # Views: create-if-absent through the tables API, never exists_ok.
+    assert exists_ok is False
+    assert isinstance(table.view_query, str) and table.description
+    self._run_before_view_write()
+    if self.view_error is not None:
+      raise self.view_error
+    if ref in self.foreign_objects or ref in self.store.views:
+      raise Conflict(f"409 Already Exists: Table {ref}")
+    self.store.write_view(ref, table.view_query)
+    self.view_writes.append(("create", ref, len(self.queries)))
     return table
+
+  def update_table(self, table, fields):
+    ref = f"{table.project}.{table.dataset_id}.{table.table_id}"
+    assert "view_query" in fields
+    self._run_before_view_write()
+    if self.view_error is not None:
+      raise self.view_error
+    if ref not in self.store.views:
+      raise NotFound(ref)
+    # ``If-Match``: the write only lands if the ETag read is still current.
+    if table.etag != self.store.view_etags[ref]:
+      raise PreconditionFailed(f"412 Precondition Failed: {ref}")
+    self.store.write_view(ref, table.view_query)
+    self.view_writes.append(("update", ref, len(self.queries)))
+    return table
+
+  def _run_before_view_write(self) -> None:
+    hook, self.before_view_write = self.before_view_write, None
+    if hook is not None:
+      hook()
 
   def get_table(self, table_ref: str):
     self.get_table_calls.append(table_ref)
     if table_ref in self.foreign_objects:
       return self.foreign_objects[table_ref]
     if table_ref in self.store.views:
-      return _FakeView(self.store.views[table_ref])
+      return _FakeView(
+          self.store.views[table_ref],
+          etag=self.store.view_etags[table_ref],
+          ref=table_ref,
+      )
     raise NotFound(table_ref)
 
   def query(self, query: str, **kwargs) -> _FakeJob:
@@ -626,14 +687,7 @@ class _FakeWriteClient:
         return _FakeJob(error=self.transaction_error)
       snapshot = self.transaction_snapshot or self.store.snapshot()
       return self._publish(query, params, snapshot)
-    if query.startswith("CREATE OR REPLACE VIEW"):
-      # Views cannot take query parameters.
-      assert params == {}
-      if self.view_error is not None:
-        return _FakeJob(error=self.view_error)
-      view_ref = re.match(r"CREATE OR REPLACE VIEW `([^`]+)`", query).group(1)
-      self.store.views[view_ref] = query.split("\nAS\n", 1)[1]
-      return _FakeJob()
+    assert not query.startswith("CREATE"), "views are written via the API"
     if query.startswith("WITH sessions AS"):
       return _FakeJob(self._failed_sessions(query, params))
     if (
@@ -1579,9 +1633,7 @@ def test_materialize_consults_canonical_registry_for_custom_tables() -> None:
   pre_reads = [
       sql
       for sql, _ in fake.queries
-      if "BEGIN TRANSACTION" not in sql
-      and sql not in _lock_seed_queries(fake)
-      and not sql.startswith("CREATE OR REPLACE VIEW")
+      if "BEGIN TRANSACTION" not in sql and sql not in _lock_seed_queries(fake)
   ]
   assert pre_reads and all(f"`{registry}`" in sql for sql in pre_reads)
   # The lock is the dataset's fixed lock table as well, never a custom one.
@@ -2203,16 +2255,19 @@ _WRONG_SCORES = (
 )
 
 
-def _view_ddls(fake: _FakeWriteClient) -> list[str]:
-  return [
-      sql for sql, _ in fake.queries if sql.startswith("CREATE OR REPLACE VIEW")
-  ]
+def _view_writes(fake: _FakeWriteClient) -> list[tuple[str, str, int]]:
+  return fake.view_writes
 
 
-def _view_pin(fake: _FakeWriteClient, view_ref: str = _VIEW_REF) -> dict:
+def _full_pin(fake: _FakeWriteClient, view_ref: str = _VIEW_REF) -> dict:
   first_line = fake.store.views[view_ref].splitlines()[0]
   assert first_line.startswith(_PIN_LINE)
   return json.loads(first_line[len(_PIN_LINE) :])
+
+
+def _view_pin(fake: _FakeWriteClient, view_ref: str = _VIEW_REF) -> dict:
+  pin = _full_pin(fake, view_ref)
+  return {"job_id": pin["job_id"], "import_version": pin["import_version"]}
 
 
 def _listing_query(fake: _FakeWriteClient) -> tuple[str, dict]:
@@ -2235,16 +2290,25 @@ def test_materialize_pins_failed_sessions_view_to_the_published_version() -> (
   )
 
   assert result.failed_sessions_view == _VIEW_REF
-  (ddl,) = _view_ddls(fake)
-  assert ddl.startswith(f"CREATE OR REPLACE VIEW `{_VIEW_REF}`")
-  assert "OPTIONS (description = " in ddl
-  # The view is created only after the publish transaction committed.
+  ((kind, ref, after_queries),) = _view_writes(fake)
+  assert (kind, ref) == ("create", _VIEW_REF)
+  # The view is created only after the publish transaction committed, and
+  # its pin was re-read (get_table) right before writing, not only up front.
   statements = [sql for sql, _ in fake.queries]
-  assert statements.index(ddl) > max(
+  assert after_queries > max(
       i for i, sql in enumerate(statements) if "BEGIN TRANSACTION" in sql
   )
+  assert fake.get_table_calls == [_VIEW_REF, _VIEW_REF]
   body = fake.store.views[_VIEW_REF]
   assert _view_pin(fake) == {"job_id": "job-123", "import_version": "v1"}
+  pin = _full_pin(fake)
+  assert pin["policy"] is None
+  assert (
+      pin["query_sha256"]
+      == hashlib.sha256(
+          " ".join(body.split("\n", 1)[1].split()).encode()
+      ).hexdigest()
+  )
   # The body is failed_sessions_sql pinned as literals: no parameters, and
   # no other version can be read.
   assert body.endswith(
@@ -2268,24 +2332,28 @@ def test_materialize_renders_policy_into_the_view() -> None:
   assert "STRUCT('goal_completion' AS comparator, 0.5 AS min_score)" in body
   assert "`analytics-project.bqaa.evalbench_scores_imported`" in body
   assert body.count('import_version = "v1"') == 2
+  assert _full_pin(fake)["policy"] == {
+      "min_scores": {"goal_completion": 0.5},
+      "missing_score_fails": True,
+  }
 
 
 def test_materialize_unchanged_reimport_leaves_view_untouched() -> None:
   fake = _FakeWriteClient()
   run = _scored_run()
   run.materialize(**_TARGET, import_version="v1", bq_client=fake)
-  assert len(_view_ddls(fake)) == 1
+  assert len(_view_writes(fake)) == 1
 
   result = run.materialize(**_TARGET, import_version="v1", bq_client=fake)
   assert result.status == "unchanged"
   assert result.failed_sessions_view == _VIEW_REF
-  assert len(_view_ddls(fake)) == 1
+  assert len(_view_writes(fake)) == 1
 
   # A corpus published before views existed gets its view on the next no-op.
   del fake.store.views[_VIEW_REF]
   result = run.materialize(**_TARGET, import_version="v1", bq_client=fake)
   assert result.status == "unchanged"
-  assert len(_view_ddls(fake)) == 2
+  assert len(_view_writes(fake)) == 2
   assert _view_pin(fake) == {"job_id": "job-123", "import_version": "v1"}
 
 
@@ -2312,7 +2380,7 @@ def test_materialize_view_tracks_the_latest_successful_import() -> None:
   )
   assert unchanged.status == "unchanged"
   assert _view_pin(fake)["import_version"] == "v2"
-  assert len(_view_ddls(fake)) == 2
+  assert len(_view_writes(fake)) == 2
 
   # Re-publishing the older version makes it the latest import again.
   replaced = run_v1.materialize(
@@ -2324,7 +2392,11 @@ def test_materialize_view_tracks_the_latest_successful_import() -> None:
   )
   assert replaced.status == "replaced"
   assert _view_pin(fake)["import_version"] == "v1"
-  assert len(_view_ddls(fake)) == 3
+  assert [kind for kind, _, _ in _view_writes(fake)] == [
+      "create",
+      "update",
+      "update",
+  ]
 
 
 def test_materialize_refuses_a_view_pinned_to_another_job() -> None:
@@ -2362,6 +2434,37 @@ def test_materialize_refuses_a_view_pinned_to_another_job() -> None:
         type("Table", (), {"table_type": "TABLE", "view_query": None})(),
         _FakeView("SELECT 1"),
         _FakeView("-- evalbench_failed_sessions pin: not json\nSELECT 1"),
+        # A syntactically valid pin (hash field and all) over foreign SQL.
+        _FakeView(
+            _PIN_LINE
+            + json.dumps(
+                {
+                    "import_version": "v1",
+                    "job_id": "job-123",
+                    "policy": None,
+                    "query_sha256": "0" * 64,
+                }
+            )
+            + "\nSELECT 1"
+        ),
+        # A pin without the query hash never proves ownership.
+        _FakeView(
+            _PIN_LINE
+            + json.dumps({"import_version": "v1", "job_id": "job-123"})
+            + "\nSELECT 1"
+        ),
+        # A pin comment and nothing else.
+        _FakeView(
+            _PIN_LINE
+            + json.dumps(
+                {
+                    "import_version": "v1",
+                    "job_id": "job-123",
+                    "policy": None,
+                    "query_sha256": hashlib.sha256(b"").hexdigest(),
+                }
+            )
+        ),
     ],
 )
 def test_materialize_never_replaces_objects_it_did_not_create(
@@ -2372,7 +2475,48 @@ def test_materialize_never_replaces_objects_it_did_not_create(
     _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
   assert fake.loads == []
   assert fake.transaction_attempted is False
-  assert _view_ddls(fake) == []
+  # Refused before the import tables were even created (or touched).
+  assert fake.created == []
+  assert fake.queries == []
+  assert _view_writes(fake) == []
+
+
+def test_materialize_refuses_a_forged_marker_copied_from_a_managed_view() -> (
+    None
+):
+  """The pin comment is not the authority; the definition it hashes is."""
+  fake = _FakeWriteClient()
+  _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  genuine = fake.store.views[_VIEW_REF]
+  pin_line, query = genuine.split("\n", 1)
+
+  # The exact pin line, copied verbatim onto a user-managed view with its
+  # own SQL: same job, same version, matching everything but the query.
+  forged = pin_line + "\nSELECT 'not the contract' AS session_id"
+  fake.store.write_view(_VIEW_REF, forged)
+  before = list(fake.view_writes)
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(**_TARGET, import_version="v2", bq_client=fake)
+  assert fake.store.views[_VIEW_REF] == forged
+  assert fake.view_writes == before
+  assert not any(row["import_version"] == "v2" for row in fake.manifest_rows)
+
+  # Likewise a managed view whose body drifted (someone edited the query):
+  # the pin still parses, the hash no longer matches, so it is not ours.
+  fake.store.write_view(
+      _VIEW_REF, pin_line + "\n" + query.replace("session_id", "sid")
+  )
+  with pytest.raises(ValueError, match="definition was changed"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert fake.view_writes == before
+
+  # Only whitespace differs: still the importer's definition.
+  fake.store.write_view(_VIEW_REF, pin_line + "\n  " + "  ".join(query.split()))
+  result = _scored_run().materialize(
+      **_TARGET, import_version="v1", bq_client=fake
+  )
+  assert result.status == "unchanged"
+  assert fake.view_writes == before
 
 
 @pytest.mark.parametrize(
@@ -2404,7 +2548,7 @@ def test_materialize_can_skip_the_view() -> None:
   assert result.status == "imported"
   assert result.failed_sessions_view is None
   assert fake.get_table_calls == []
-  assert _view_ddls(fake) == []
+  assert _view_writes(fake) == []
 
 
 def test_materialize_reports_a_view_failure_after_publishing() -> None:
@@ -2417,6 +2561,7 @@ def test_materialize_reports_a_view_failure_after_publishing() -> None:
     _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
   assert "403 no bigquery.tables.update" in str(exc.value)
   assert len(fake.manifest_rows) == 1
+  assert _VIEW_REF not in fake.store.views
   # The retry path: the import is a no-op and the view gets created.
   fake.view_error = None
   result = _scored_run().materialize(
@@ -2424,6 +2569,180 @@ def test_materialize_reports_a_view_failure_after_publishing() -> None:
   )
   assert result.status == "unchanged"
   assert _view_pin(fake) == {"job_id": "job-123", "import_version": "v1"}
+
+
+def test_materialize_policy_change_on_the_same_version_rerenders_the_view() -> (
+    None
+):
+  """The pin covers the policy: a later same-version call without a policy
+  must not leave the earlier score gate baked into the view."""
+  fake = _FakeWriteClient()
+  run = _scored_run()
+  gate = "STRUCT('goal_completion' AS comparator, 0.9 AS min_score)"
+
+  run.materialize(
+      **_TARGET,
+      import_version="v1",
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      bq_client=fake,
+  )
+  assert gate in fake.store.views[_VIEW_REF]
+  assert len(_view_writes(fake)) == 1
+
+  # Same policy, same version: nothing to do.
+  result = run.materialize(
+      **_TARGET,
+      import_version="v1",
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      bq_client=fake,
+  )
+  assert result.status == "unchanged"
+  assert len(_view_writes(fake)) == 1
+
+  # No policy: the gate must go, even though (job_id, import_version) and
+  # the import itself are unchanged.
+  result = run.materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert result.status == "unchanged"
+  assert len(_view_writes(fake)) == 2
+  body = fake.store.views[_VIEW_REF]
+  assert gate not in body and "policy AS" not in body
+  assert _full_pin(fake)["policy"] is None
+  assert body.endswith(
+      failed_sessions_sql(**_TARGET, job_id="job-123", import_version="v1")
+  )
+
+  # Changed threshold, then the missing-score rule: each re-renders once.
+  run.materialize(
+      **_TARGET,
+      import_version="v1",
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake,
+  )
+  assert len(_view_writes(fake)) == 3
+  assert "0.5 AS min_score" in fake.store.views[_VIEW_REF]
+  run.materialize(
+      **_TARGET,
+      import_version="v1",
+      policy=EvalScorePolicy(
+          {"goal_completion": 0.5}, missing_score_fails=False
+      ),
+      bq_client=fake,
+  )
+  assert len(_view_writes(fake)) == 4
+  assert _full_pin(fake)["policy"]["missing_score_fails"] is False
+
+
+def test_materialize_same_job_create_race_keeps_the_newer_pin() -> None:
+  """Two first imports of one job: the loser of the create race must not
+  overwrite the winner's newer pin, and both must report success."""
+  store = _FakeManifestStore()
+  fake_v2 = _FakeWriteClient(store=store)
+  run_v2 = _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES)
+
+  def v2_lands_first() -> None:
+    # v1 has read "no view" and "latest = v1" and is about to create.
+    result = run_v2.materialize(
+        **_TARGET,
+        import_version="v2",
+        imported_at=_T1 + timedelta(hours=1),
+        bq_client=fake_v2,
+    )
+    assert result.status == "imported"
+    assert _view_pin(fake_v2)["import_version"] == "v2"
+
+  fake_v1 = _FakeWriteClient(store=store, before_view_write=v2_lands_first)
+  result = _scored_run().materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake_v1
+  )
+
+  assert result.status == "imported"
+  assert result.failed_sessions_view == _VIEW_REF
+  # v1's stale create hit Conflict; the retry re-read the view (v2) and the
+  # latest manifest (v2), found them in agreement, and wrote nothing.
+  assert _view_pin(fake_v1)["import_version"] == "v2"
+  assert fake_v1.view_writes == []
+  assert [kind for kind, _, _ in fake_v2.view_writes] == ["create"]
+  assert fake_v1.get_table_calls.count(_VIEW_REF) == 3
+
+
+def test_materialize_same_job_update_race_is_etag_guarded() -> None:
+  """An existing view: the delayed writer's replace must fail its ETag
+  check rather than clobber the newer pin another import just wrote."""
+  store = _FakeManifestStore()
+  setup = _FakeWriteClient(store=store)
+  _scored_run().materialize(
+      **_TARGET, import_version="v0", imported_at=_T1, bq_client=setup
+  )
+  stale_etag = store.view_etags[_VIEW_REF]
+
+  fake_v2 = _FakeWriteClient(store=store)
+  run_v2 = _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES)
+
+  def v2_lands_first() -> None:
+    run_v2.materialize(
+        **_TARGET,
+        import_version="v2",
+        imported_at=_T1 + timedelta(hours=2),
+        bq_client=fake_v2,
+    )
+    assert _view_pin(fake_v2)["import_version"] == "v2"
+    assert store.view_etags[_VIEW_REF] != stale_etag
+
+  fake_v1 = _FakeWriteClient(store=store, before_view_write=v2_lands_first)
+  result = _scored_run(extra_result=_WRONG_RESULT).materialize(
+      **_TARGET,
+      import_version="v1",
+      imported_at=_T1 + timedelta(hours=1),
+      bq_client=fake_v1,
+  )
+
+  assert result.status == "imported"
+  assert _view_pin(fake_v1)["import_version"] == "v2"
+  assert 'import_version = "v1"' not in store.views[_VIEW_REF]
+  assert fake_v1.view_writes == []
+  assert [kind for kind, _, _ in fake_v2.view_writes] == ["update"]
+
+
+def test_materialize_cross_job_view_race_fails_closed() -> None:
+  """Two jobs pass the up-front check (no view yet); the one that loses the
+  create race must refuse to replace the other job's view and say so."""
+  store = _FakeManifestStore()
+  fake_other = _FakeWriteClient(store=store)
+  other = dataclasses.replace(_scored_run(), job_id="job-other")
+
+  def other_job_lands_first() -> None:
+    other.materialize(**_TARGET, import_version="v1", bq_client=fake_other)
+
+  fake = _FakeWriteClient(store=store, before_view_write=other_job_lands_first)
+  with pytest.raises(ValueError) as exc:
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+
+  message = str(exc.value)
+  assert "is published (status 'imported')" in message
+  assert "pinned to EvalBench job 'job-other'" in message
+  assert _view_pin(fake)["job_id"] == "job-other"
+  assert fake.view_writes == []
+  # job-123's import itself is committed; only the view was refused.
+  assert {row["job_id"] for row in store.rows} == {"job-123", "job-other"}
+
+
+def test_materialize_view_sync_gives_up_after_bounded_retries() -> None:
+  store = _FakeManifestStore()
+
+  class _AlwaysRacing(_FakeWriteClient):
+
+    def create_table(self, table, exists_ok: bool = False):
+      if getattr(table, "view_query", None) is None:
+        return super().create_table(table, exists_ok=exists_ok)
+      self.view_writes.append(("create", "", len(self.queries)))
+      raise Conflict("409 Already Exists")
+
+  fake = _AlwaysRacing(store=store)
+  with pytest.raises(ValueError, match="changed concurrently 3 times") as exc:
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert "is published (status 'imported')" in str(exc.value)
+  assert len(fake.view_writes) == 3
+  assert _VIEW_REF not in store.views
 
 
 def test_failed_sessions_sql_pins_literals_with_escaping() -> None:

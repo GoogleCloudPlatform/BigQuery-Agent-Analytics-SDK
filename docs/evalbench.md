@@ -363,19 +363,27 @@ overridable with `failed_sessions_view=` / `--failed-sessions-view`, or
 `None` / `--skip-failed-sessions-view` to manage no view — whose body is
 `failed_sessions_sql()` with `@job_id` and `@import_version` rendered as
 string literals. Views cannot take query parameters, so the pin lives in
-the definition itself, and the view can never scan another version:
+the definition itself, and the view can never scan another version. The
+view's query text (its description names the pinned version too) is:
 
 ```sql
-CREATE OR REPLACE VIEW `analytics-project.bqaa.evalbench_failed_sessions`
-OPTIONS (description = "EvalBench failed sessions (W0.4 contract) pinned to job_id 'abc123' import_version 'v2'; ...")
-AS
--- evalbench_failed_sessions pin: {"import_version": "v2", "job_id": "abc123"}
+-- evalbench_failed_sessions pin: {"import_version": "v2", "job_id": "abc123", "policy": {"min_scores": {"goal_completion": 0.9}, "missing_score_fails": true}, "query_sha256": "…"}
 WITH sessions AS (
   SELECT ...
   FROM `analytics-project.bqaa.evalbench_agent_events`
   WHERE job_id = "abc123" AND import_version = "v2"
   ...
 ```
+
+The pin records the job, the version, the score policy rendered into the
+view (`null` without one), and the SHA-256 of the query below it. The
+comment alone never proves ownership: the importer treats a view as its
+own only when the query hashes to what the pin says — a pin copied onto
+other SQL, or a managed view whose body somebody edited, is a foreign
+object and is refused. The importer never uses `CREATE OR REPLACE VIEW`;
+it creates the view with create-if-absent and replaces it with an
+ETag-conditional update, after re-reading both the view and the latest
+manifest row immediately before writing.
 
 Pinning rules:
 
@@ -385,18 +393,21 @@ Pinning rules:
 | New `import_version` of the same job | replaced, pinned to the new version (the job's latest `imported_at` in the manifest) |
 | No-op re-import (`unchanged`) | untouched; created only if it does not exist yet (corpora published before views existed) |
 | `replace=True` of an older version | re-pinned to it — the replace refreshed `imported_at`, so it *is* the latest successful import |
-| `policy=` / `--min-score` given | the score gate is rendered into the view (and re-rendered on every call, since the policy is not part of the pin); a later call *without* a policy leaves the rendered gate in place when the pin is unchanged |
+| `policy=` / `--min-score` given, changed, or dropped | the score gate is part of the pin: the view is re-rendered whenever the policy differs from the one it carries (including a later same-version call *without* a policy, which removes the gate), and left alone when version and policy both match |
 | View at that name pinned to **another job** | `ValueError` before anything is written; use one `failed_sessions_view` name per job |
-| A table, or a view the importer did not create, at that name | `ValueError` before anything is written; the importer never replaces objects it does not own |
+| A table, a view the importer did not create, a copied pin over other SQL, or a managed view whose query was edited, at that name | `ValueError` before anything is written (before the import tables are even created); the importer never replaces objects whose definition it cannot vouch for — drop the object or pick another name |
+| Two imports of one job race on the view | the loser of the create race (`409`) or ETag check (`412`) re-reads the view and the latest manifest and re-decides, up to three times, so a delayed writer never overwrites a newer pin; a race against **another job's** view fails closed with the import already published |
 
 "Latest successful import" is the manifest row with the newest
 `imported_at` (ties broken by `import_version`), which is also what the
 Python consumer below resolves when no version is pinned, so the two agree.
-The view is rewritten only when its pin or policy changes and is issued
-after the publish transaction committed; if the DDL fails (for example a
-missing `bigquery.tables.update` permission) `materialize()` raises a
-`ValueError` naming the published version, and simply re-running it retries
-the view (`status == "unchanged"`). A specific older version is queried
+The view is rewritten only when its rendered definition (pinned version,
+policy, or SQL) would change, and is written after the publish transaction
+committed; if the write fails (for example a missing
+`bigquery.tables.update` permission, or a view that kept changing
+underneath the conditional replace) `materialize()` raises a `ValueError`
+naming the published version, and simply re-running it retries the view
+(`status == "unchanged"`). A specific older version is queried
 with the parameterized `failed_sessions_sql()` shown above or with
 `failed_sessions(import_version=...)`.
 
