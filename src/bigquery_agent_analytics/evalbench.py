@@ -52,7 +52,7 @@ import json
 import logging
 import math
 import re
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 import uuid
 
 from google.api_core.exceptions import Conflict
@@ -62,6 +62,9 @@ from google.cloud import bigquery
 
 from ._telemetry import make_bq_client
 from ._telemetry import with_sdk_labels
+
+if TYPE_CHECKING:
+  from .trace import TraceFilter
 
 _SOURCE_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _MISSING_TEXT = frozenset({"", "<na>", "nan", "none", "null"})
@@ -140,6 +143,7 @@ _VIEW_FEATURE = "evalbench-failed-sessions"
 # BQAA-owned mirror tables, so this name is rejected before any BigQuery call.
 _RESERVED_DESTINATION_TABLES = frozenset({"agent_events"})
 _IMPORT_FEATURE = "evalbench-import"
+_SCORE_FEATURE = "evalbench-score"
 _STAGING_TABLE_TTL = timedelta(hours=6)
 _LOGGER = logging.getLogger(__name__)
 _IMPORT_VERSION_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
@@ -260,6 +264,19 @@ FROM `{manifest_table}`
 WHERE job_id = @job_id
 ORDER BY imported_at DESC, import_version DESC
 LIMIT 1
+"""
+
+# Session identities of one published import version, read from the events
+# table the manifest bound that version to. ``TraceFilter`` has no
+# import-version dimension, so ``Client.evaluate`` is pinned to a version
+# through these exact ``session_id`` values (plus the ``experiment_id`` job
+# pin); retained versions of one job never share a session id
+# (``_session_identity``), so the pin cannot admit another version's rows.
+_IMPORT_SESSIONS_QUERY = """\
+SELECT DISTINCT session_id
+FROM `{events_table}`
+WHERE job_id = @job_id AND import_version = @import_version
+ORDER BY session_id
 """
 
 # Commits another score gate for an already-published, identical version
@@ -2134,13 +2151,14 @@ def _read_latest_manifest(
     manifest_ref: str,
     job_id: str,
     location: Optional[str],
+    feature: str = _VIEW_FEATURE,
 ) -> Optional[dict[str, Any]]:
   job_config = bigquery.QueryJobConfig(
       query_parameters=[
           bigquery.ScalarQueryParameter("job_id", "STRING", job_id)
       ]
   )
-  job_config = with_sdk_labels(job_config, feature=_VIEW_FEATURE)
+  job_config = with_sdk_labels(job_config, feature=feature)
   query_args: dict[str, Any] = {"job_config": job_config}
   if location is not None:
     query_args["location"] = location
@@ -2312,6 +2330,164 @@ def failed_sessions(
       sessions=rows if include_passed else failed,
       session_count=len(rows),
       failed_count=len(failed),
+      manifest=dict(manifest),
+  )
+
+
+def _resolve_manifest(
+    client: Any,
+    *,
+    manifest_ref: str,
+    job_id: str,
+    import_version: Optional[str],
+    location: Optional[str],
+    feature: str,
+) -> tuple[str, dict[str, Any]]:
+  """Pin ``(job_id, import_version)`` to one committed manifest row.
+
+  An explicit ``import_version`` must have a manifest row; ``None`` resolves
+  the job's latest successful import (newest ``imported_at``, the same pin
+  the ``evalbench_failed_sessions`` view tracks). Raises ``ValueError``
+  before any event row is read when nothing is published.
+  """
+  if import_version is None:
+    manifest = _read_latest_manifest(
+        client,
+        manifest_ref=manifest_ref,
+        job_id=job_id,
+        location=location,
+        feature=feature,
+    )
+    if manifest is None:
+      raise ValueError(
+          f"EvalBench job {job_id!r} has no published import in"
+          f" {manifest_ref!r}; run materialize() first"
+      )
+    return str(manifest["import_version"]), manifest
+  _validate_import_version(import_version)
+  manifest = _read_manifest(
+      client,
+      manifest_ref=manifest_ref,
+      job_id=job_id,
+      import_version=import_version,
+      location=location,
+      feature=feature,
+  )
+  if manifest is None:
+    raise ValueError(
+        f"EvalBench job {job_id!r} import_version {import_version!r} is not"
+        f" published in {manifest_ref!r}"
+    )
+  return import_version, manifest
+
+
+@dataclasses.dataclass(frozen=True)
+class EvalBenchImportSessions:
+  """The sessions of exactly one published EvalBench import version.
+
+  Returned by ``import_sessions``. ``session_ids`` are the versioned
+  identities (``evalbench-import:{job_id}:{import_version}:{scenario_id}``)
+  the mirror ``events_table`` holds for this version, in ``session_id``
+  order; ``manifest`` is the committed manifest row the version was
+  resolved from. ``trace_filter()`` turns the listing into the
+  ``TraceFilter`` that scores this version -- and only this version -- with
+  ``Client.evaluate``.
+  """
+
+  job_id: str
+  import_version: str
+  events_table: str
+  scores_table: str
+  session_ids: tuple[str, ...]
+  manifest: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+  @property
+  def session_count(self) -> int:
+    return len(self.session_ids)
+
+  def trace_filter(self) -> "TraceFilter":
+    """``TraceFilter`` selecting exactly this version's sessions.
+
+    Pins ``experiment_id`` to the job and ``session_ids`` to the version's
+    identities, with ``limit`` raised to the session count so no session is
+    truncated. Refuses an empty session set: ``TraceFilter`` treats no
+    ``session_ids`` as "unfiltered", which would silently widen the
+    evaluation to every retained version of the job.
+    """
+    from .trace import TraceFilter  # local: keep evalbench import-light
+
+    if not self.session_ids:
+      raise ValueError(
+          f"EvalBench job {self.job_id!r} import_version"
+          f" {self.import_version!r} has no sessions in"
+          f" {self.events_table!r}; nothing to score"
+      )
+    return TraceFilter(
+        experiment_id=self.job_id,
+        session_ids=list(self.session_ids),
+        limit=len(self.session_ids),
+    )
+
+  def to_dict(self) -> dict[str, Any]:
+    return _json_safe(dataclasses.asdict(self))
+
+
+def import_sessions(
+    *,
+    target_project: str,
+    target_dataset: str,
+    job_id: str,
+    import_version: Optional[str] = None,
+    location: Optional[str] = None,
+    bq_client: Optional[Any] = None,
+) -> EvalBenchImportSessions:
+  """Resolve one published import version to its session identities.
+
+  The version is pinned from the manifest before any event row is read
+  (``failed_sessions`` semantics: an explicit ``import_version`` must be
+  published, ``None`` means the job's latest successful import), then the
+  version's distinct ``session_id`` values are read from the
+  ``events_table`` recorded in that manifest row, so a version stays bound
+  to the table it was published to. The result feeds ``Client.evaluate``
+  through ``EvalBenchImportSessions.trace_filter()`` -- the
+  ``bq-agent-sdk evalbench-score`` path (#97).
+  """
+  _validate_source_segment("target_project", target_project)
+  _validate_source_segment("target_dataset", target_dataset)
+  if not isinstance(job_id, str) or not job_id:
+    raise ValueError("job_id must be a non-empty string")
+  manifest_ref = f"{target_project}.{target_dataset}.{MANIFEST_TABLE}"
+  client = bq_client or make_bq_client(target_project, location=location)
+  import_version, manifest = _resolve_manifest(
+      client,
+      manifest_ref=manifest_ref,
+      job_id=job_id,
+      import_version=import_version,
+      location=location,
+      feature=_SCORE_FEATURE,
+  )
+  events_ref = str(manifest["events_table"])
+  job_config = bigquery.QueryJobConfig(
+      query_parameters=_import_parameters(job_id, import_version)
+  )
+  job_config = with_sdk_labels(job_config, feature=_SCORE_FEATURE)
+  query_args: dict[str, Any] = {"job_config": job_config}
+  if location is not None:
+    query_args["location"] = location
+  query = _IMPORT_SESSIONS_QUERY.format(events_table=events_ref)
+  session_ids = tuple(
+      str(row["session_id"])
+      for row in (
+          _plain_row(raw) for raw in client.query(query, **query_args).result()
+      )
+      if row.get("session_id") is not None
+  )
+  return EvalBenchImportSessions(
+      job_id=job_id,
+      import_version=import_version,
+      events_table=events_ref,
+      scores_table=str(manifest["scores_table"]),
+      session_ids=session_ids,
       manifest=dict(manifest),
   )
 

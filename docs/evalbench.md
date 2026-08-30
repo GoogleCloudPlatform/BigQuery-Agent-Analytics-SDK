@@ -494,6 +494,48 @@ selector is unambiguous for the identity-resolving reader. Extra
 `get_session_trace` keyword arguments (for example `event_types=`) pass
 through `session.get_trace(client, ...)`.
 
+## Score An Import With The LLM Judge (#97)
+
+`bq-agent-sdk evalbench-score` is a thin wrapper over the existing
+`Client.evaluate` + `LLMAsJudge` path: nothing new is computed, the judge
+is simply pointed at one published import version of the mirror table.
+
+```python
+from bigquery_agent_analytics import Client
+from bigquery_agent_analytics.evalbench import import_sessions
+from bigquery_agent_analytics.evaluators import LLMAsJudge
+
+pinned = import_sessions(
+    target_project="analytics-project",
+    target_dataset="bqaa",
+    job_id="abc123",
+    # import_version="v1",   # pin one version; default: latest successful import
+)
+client = Client(
+    project_id="analytics-project",
+    dataset_id="bqaa",
+    table_id="evalbench_agent_events",   # must equal pinned.events_table
+)
+report = client.evaluate(
+    evaluator=LLMAsJudge.correctness(threshold=0.7),
+    filters=pinned.trace_filter(),
+)
+print(pinned.import_version, report.pass_rate, report.total_sessions)
+```
+
+`import_sessions()` resolves the version from the manifest exactly as
+`failed_sessions()` does (an explicit `import_version` must be published;
+the default is the job's latest successful import) and then reads that
+version's distinct `session_id` values from the `events_table` recorded in
+the manifest row. `EvalBenchImportSessions.trace_filter()` returns
+`TraceFilter(experiment_id=job_id, session_ids=<those ids>, limit=<count>)`:
+`TraceFilter` has no import-version dimension, so the version pin reaches
+`Client.evaluate` through the exact versioned session identities, which
+retained versions of one job never share. `trace_filter()` refuses an
+empty session set because `TraceFilter` treats "no `session_ids`" as
+unfiltered, which would silently widen the evaluation to every retained
+version of the job. `Client.evaluate` itself is unchanged.
+
 ## CLI
 
 ```bash
@@ -529,8 +571,35 @@ Prints the `EvalBenchFailedSessions` listing (`--format table` prints one
 row per session) for exactly one published version — the job's latest
 successful import unless `--import-version` pins one — and exits `0` when
 the listing was produced (possibly empty) or `2` on invalid input, a job or
-version with no published import, or a BigQuery error. There is no
-`evalbench-score` command.
+version with no published import, or a BigQuery error.
+
+```bash
+bq-agent-sdk evalbench-score \
+  --project-id analytics-project --dataset-id bqaa --job-id abc123 \
+  [--table-id evalbench_agent_events] [--import-version v1] \
+  [--evaluator correctness|hallucination|sentiment] [--threshold 0.7] \
+  [--strict] [--exit-code] [--endpoint gemini-2.5-flash] [--connection-id ID] \
+  [--location US] [--format json|text|table]
+```
+
+Runs the chosen `LLMAsJudge` (default `correctness`, judge default
+threshold `0.5`) through `Client.evaluate` over the mirror `--table-id`,
+narrowed to one published version of `--job-id` (the latest successful
+import unless `--import-version` pins one). The output is the ordinary
+`EvaluationReport` (`--format text` prints its summary) with
+`details.evalbench` naming the scored `job_id`, `import_version`,
+`events_table`, and `pinned_sessions`, so a scorecard can always be traced
+back to the version it judged. `--strict`, `--endpoint`, and
+`--connection-id` behave as they do for `bq-agent-sdk evaluate`.
+
+Exit codes match `evaluate`: `0` when the scorecard was produced (failing
+sessions included), `1` with `--exit-code` when at least one session failed
+the threshold (the same `FAIL session=... metric=... feedback="..."` lines
+are printed to stderr first), and `2` on invalid input — an unknown
+`--evaluator`, the reserved `agent_events` table, a job or version with no
+published import, a `--table-id` the version was not published to, or a
+version with no sessions — or a BigQuery error. `examples/evalbench_score_gate.sh`
+shows the CI gate form.
 
 ## Why These Fields Matter
 
