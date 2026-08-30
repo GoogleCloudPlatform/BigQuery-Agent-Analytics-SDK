@@ -9,10 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **EvalBench MVP e2e demo tells one session's story (#435 slice 5, #97)**
+  — the `--fixture` walkthrough of `examples/evalbench_mvp_e2e.sh` now
+  follows `support_agent` session `7e352c34` ("How many widgets are in
+  stock?", never answered; trace stops after `AGENT_STARTING`) through
+  import → its one `failed_sessions` row → score, ending on the punchline
+  `goal_completion=0.0`, instead of touring CLI flags; fixture defaults are
+  job `mvp-e2e-real-traces` / 7 scenarios, matching the `--synth` run.
 - **AgentForensics MVP plan of record (#435)** — `docs/agentforensics_mvp_plan.md`
   lands the FINAL v4 execution plan: Week 0 pre-clock gate, the six-week MVP
   table with preregistered exit criteria, labeler ledger, staged Part II, and
   standing invariants. Docs only; Week-0 items stay human-gated.
+- **EvalBench MVP end-to-end demo (#435 slice 5, #97)** —
+  `examples/evalbench_mvp_e2e.sh` walks `bq-agent-sdk evalbench-import` →
+  `evalbench-failed-sessions` → `evalbench-score` in order on one
+  EvalBench job, printing a banner per step; `--fixture` (or
+  `EVALBENCH_FIXTURE=1`) prints annotated sample output for all three
+  steps without calling BigQuery so the demo is recordable and CI-safe,
+  and live mode calls the three CLIs from `BQ_AGENT_*` / `EVALBENCH_*`
+  environment variables. `--synth` (or `EVALBENCH_SYNTH=1`) is live mode
+  without an EvalBench run: step 0 runs the new
+  `examples/evalbench_synth_from_traces.py`, which folds a real BQAA
+  `agent_events` table into EvalBench-shaped `configs`/`results`/`scores`
+  tables (one scenario per trace, grouped on the full
+  `(session_id, user_id, root_agent_name)` identity taken as exact strings
+  — whitespace kept, `NULL` distinct from `""` — with percent-escaped,
+  collision-proof scenario ids when session ids are reused; prompts and
+  `LLM_RESPONSE` / `AGENT_COMPLETED` responses are the real trace text,
+  never invented; `goal_completion` = 1.0 when the trace reached
+  `AGENT_COMPLETED`, else 0.0; every source/target name is validated as a
+  plain identifier before any SQL is built), then steps 1–3 run on that job
+  with the demo's default dataset names. Walkthrough in
+  `examples/evalbench_mvp_e2e.md`; `tests/test_evalbench_mvp_e2e.py` runs
+  the fixture path and the offline `--synth` guards, and
+  `tests/test_evalbench_synth_from_traces.py` checks the synthesizer's
+  mapping in memory and round-trips its rows through
+  `EvalBenchRun.to_agent_event_rows` / `to_score_rows`. A source trace
+  that reached `AGENT_COMPLETED` with a non-tool `status=ERROR` /
+  `error_message` is written with the importer-recognized `results.error`
+  field (alongside `error_message` for provenance), so it imports as
+  `status=ERROR` and stays `process_failed` in `failed_sessions`;
+  `returncode` / `goal_completion` remain tied to completion only. No CLI
+  or Python library behavior changes; `examples/evalbench_score_gate.sh`
+  stays the CI gate.
 - **EvalBench LLM-judge scoring of one import version (#435 slice 3, #97)**
   — new `bq-agent-sdk evalbench-score` command: a thin wrapper over the
   existing `Client.evaluate` + `LLMAsJudge` (`correctness` |

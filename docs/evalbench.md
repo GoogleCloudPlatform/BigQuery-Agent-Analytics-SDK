@@ -602,6 +602,21 @@ published import, a `--table-id` the version was not published to, or a
 version with no sessions — or a BigQuery error. `examples/evalbench_score_gate.sh`
 shows the CI gate form.
 
+`examples/evalbench_mvp_e2e.sh` runs the three commands above in order on
+one job (import → failed-sessions → score), following one failed
+support-agent session ("How many widgets are in stock?", never answered)
+from its trace to its `goal_completion=0.0`; `--fixture` (or
+`EVALBENCH_FIXTURE=1`) tells that story with sample output for all three
+steps without touching BigQuery, so the walkthrough can be recorded or run
+in CI. `--synth` (or `EVALBENCH_SYNTH=1`) is the live path when no EvalBench
+run exists: step 0 runs `examples/evalbench_synth_from_traces.py`, which
+folds a real BQAA `agent_events` table into EvalBench-shaped
+`configs`/`results`/`scores` tables (one scenario per session, prompts and
+responses taken verbatim from the traces, `goal_completion` = 1.0 when the
+session reached `AGENT_COMPLETED`), and steps 1–3 then run on that job.
+`examples/evalbench_mvp_e2e.md` explains each step, the environment
+variables, and fixture versus synth versus live mode.
+
 ## Why These Fields Matter
 
 The mapping follows the SDK queries that consume the mirror table:
