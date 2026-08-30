@@ -23,6 +23,14 @@ three rounds of review; the issue body points here.
 Those slices build the Week 1–2 substrate; they do not start the clock and do
 not touch the partner job, the D4 boundary, taxonomy content, or live traces.
 
+A mechanical taxonomy *scaffold* also exists
+(`src/bigquery_agent_analytics/failure_taxonomy.py`): it maps the landed
+failed-session flags (`process_failed` / `missing_completion` /
+`score_failed`) to a versioned config (`0.0.0-scaffold`, `g1_frozen: false`)
+with an empty D2 dialects slot. It is **not** G1 — no category names are
+frozen, the six-week clock has still not started, and the partner job, D4
+boundary, and live-trace ingestion remain parked.
+
 ---
 
 ## Preface — what was verified before acceptance
