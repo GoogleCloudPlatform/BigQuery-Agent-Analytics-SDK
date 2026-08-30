@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Failed-session rows carry scaffold taxonomy categories (#435 slice 9)**
+  — `failed_sessions()` / `bq-agent-sdk evalbench-failed-sessions` now
+  attach `taxonomy_categories` to each session row: `EvalBenchSession`
+  exposes it as a property computed from the row's three mechanical flags
+  via `failure_taxonomy.categorize_failed_session`, and `to_dict()` (what
+  the CLI JSON/text output serializes) includes it as a list. All-flags-false
+  rows (`--include-passed`) emit `[]` — no invented `unknown` bucket. Pure
+  Python over the flags already returned; no extra BigQuery work, and still
+  NOT the G1 taxonomy (ids stay the unfrozen flag names).
 - **Mechanical failure-taxonomy scaffold (#435 slice 8)** — new
   `failure_taxonomy` module: a versioned scaffold config
   (`taxonomy_version: 0.0.0-scaffold`, `g1_frozen: false`) in the #431

@@ -27,7 +27,10 @@ A mechanical taxonomy *scaffold* also exists
 (`src/bigquery_agent_analytics/failure_taxonomy.py`): it maps the landed
 failed-session flags (`process_failed` / `missing_completion` /
 `score_failed`) to a versioned config (`0.0.0-scaffold`, `g1_frozen: false`)
-with an empty D2 dialects slot. It is **not** G1 — no category names are
+with an empty D2 dialects slot. The failed-session consumer now uses it:
+`failed_sessions` / `bq-agent-sdk evalbench-failed-sessions` attach the
+mechanical categories to each session row as `taxonomy_categories`, computed
+in Python from the row's flags. It is **not** G1 — no category names are
 frozen, the six-week clock has still not started, and the partner job, D4
 boundary, and live-trace ingestion remain parked.
 

@@ -12,12 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the mechanical failure-taxonomy scaffold (#435 slice 8)."""
+"""Tests for the mechanical failure-taxonomy scaffold (#435 slice 8).
 
+Slice 9 adds the consumer tests: ``EvalBenchSession`` (the row
+``failed_sessions`` returns and the CLI serializes) exposes
+``taxonomy_categories`` computed from its flags via
+``categorize_failed_session``.
+"""
+
+from datetime import datetime
+from datetime import timezone
 import itertools
 
 import pytest
 
+from bigquery_agent_analytics.evalbench import EvalBenchSession
 from bigquery_agent_analytics.evalbench import SessionVerdict
 from bigquery_agent_analytics.evaluation_rubrics import build_metrics
 from bigquery_agent_analytics.failure_taxonomy import categorize_failed_session
@@ -166,3 +175,45 @@ def test_config_returns_a_deep_copy():
   assert fresh["g1_frozen"] is False
   assert len(fresh["metrics"][0]["categories"]) == len(CORE_CATEGORY_IDS)
   assert fresh["dialects"] == []
+
+
+# --- EvalBenchSession consumer (slice 9) ----------------------------------
+
+
+def _session(**overrides):
+  # The same constructor shape the pre-slice-9 tests use: no taxonomy
+  # field exists, so existing callers keep working unchanged.
+  return EvalBenchSession(
+      job_id="job-123",
+      import_version="v1",
+      session_id="evalbench-import:job-123:v1:s1",
+      trace_id="evalbench-import:job-123:v1:s1",
+      scenario_id="s1",
+      started_at=datetime(2026, 8, 30, tzinfo=timezone.utc),
+      failed=any(overrides.values()),
+      **_row(**overrides),
+  )
+
+
+@pytest.mark.parametrize(
+    "tripped",
+    [
+        combo
+        for size in (1, 2, 3)
+        for combo in itertools.combinations(_FLAGS, size)
+    ],
+)
+def test_session_to_dict_carries_the_tripped_categories(tripped):
+  session = _session(**{flag: True for flag in tripped})
+  assert session.taxonomy_categories == categorize_failed_session(session)
+  assert session.to_dict()["taxonomy_categories"] == list(
+      categorize_failed_session(session)
+  )
+  assert session.to_dict()["taxonomy_categories"] == list(tripped)
+
+
+def test_session_with_all_flags_false_serializes_empty_categories():
+  # An include_passed row: empty list, never an invented "unknown" bucket.
+  session = _session()
+  assert session.taxonomy_categories == ()
+  assert session.to_dict()["taxonomy_categories"] == []

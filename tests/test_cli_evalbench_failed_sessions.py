@@ -103,6 +103,13 @@ def test_lists_latest_version_by_default(
   assert (
       payload["sessions"][0]["trace_id"] == payload["sessions"][0]["session_id"]
   )
+  # Slice 9: each session row carries the scaffold taxonomy categories
+  # computed from its mechanical flags (process_failed + missing_completion
+  # for this fixture) -- no extra field on the fixture, no BigQuery.
+  assert payload["sessions"][0]["taxonomy_categories"] == [
+      "process_failed",
+      "missing_completion",
+  ]
 
 
 def test_pins_version_and_policy_options(

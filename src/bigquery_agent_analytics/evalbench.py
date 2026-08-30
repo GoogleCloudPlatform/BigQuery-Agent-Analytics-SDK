@@ -62,6 +62,7 @@ from google.cloud import bigquery
 
 from ._telemetry import make_bq_client
 from ._telemetry import with_sdk_labels
+from .failure_taxonomy import categorize_failed_session
 
 if TYPE_CHECKING:
   from .trace import TraceFilter
@@ -2220,8 +2221,22 @@ class EvalBenchSession:
         failed=self.failed,
     )
 
+  @property
+  def taxonomy_categories(self) -> tuple[str, ...]:
+    """Scaffold taxonomy ids tripped by this session's mechanical flags.
+
+    Computed from the three flags via
+    ``failure_taxonomy.categorize_failed_session`` (a property, not a stored
+    field, so it can never drift from the flags). Scaffold vocabulary only:
+    the ids equal the flag names and are NOT the G1 taxonomy. All flags
+    false (an ``include_passed`` row) yields ``()``.
+    """
+    return categorize_failed_session(self)
+
   def to_dict(self) -> dict[str, Any]:
-    return _json_safe(dataclasses.asdict(self))
+    payload = _json_safe(dataclasses.asdict(self))
+    payload["taxonomy_categories"] = list(self.taxonomy_categories)
+    return payload
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2243,7 +2258,11 @@ class EvalBenchFailedSessions:
   manifest: dict[str, Any] = dataclasses.field(default_factory=dict)
 
   def to_dict(self) -> dict[str, Any]:
-    return _json_safe(dataclasses.asdict(self))
+    # Nested sessions go through EvalBenchSession.to_dict so each row also
+    # carries the computed taxonomy_categories (asdict only sees fields).
+    payload = _json_safe(dataclasses.asdict(self))
+    payload["sessions"] = [session.to_dict() for session in self.sessions]
+    return payload
 
 
 def failed_sessions(
