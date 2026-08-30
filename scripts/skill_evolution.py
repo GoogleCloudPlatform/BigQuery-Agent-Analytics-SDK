@@ -836,62 +836,165 @@ def _consolidate_once(
 # ---------------------------------------------------------------------------
 
 
-class _AnalystCall:
-  """One analyst invocation behind a quarantine-on-timeout boundary.
+class _FleetSlots:
+  """Concurrency accounting for the analyst fleet.
 
-  A ThreadPoolExecutor future that times out keeps occupying its pool
-  thread, so with ``max_workers=1`` a single hung analyst starves every
-  queued analyst behind it: they time out unstarted and a healthy fleet
-  reads as all-host-failures. Here each call runs on its own daemon
-  thread gated by a shared semaphore. ``wait`` returning False quarantines
-  the call: a RUNNING call hands its slot to the next queued analyst
-  (replacement capacity), and a still-QUEUED call is cancelled outright.
-  Quarantined threads are daemons -- they may run to completion in the
-  background but cannot delay process exit.
+  ``max_workers`` semaphore slots gate thread CREATION (the dispatcher
+  acquires a slot before starting a call's thread, so live threads track
+  ``max_workers``, not report size). A quarantined call -- timed out but
+  still executing, since Python threads cannot be killed -- may DONATE its
+  slot to the next queued analyst so one hung analyst does not starve the
+  fleet, but donations are budgeted at ``max_workers``: once that many
+  quarantined callables are running on donated slots, further timeouts keep
+  their slot until the callable actually returns. Total live analyst
+  callables therefore never exceed ``2 * max_workers``, regardless of how
+  many analysts time out.
   """
 
-  def __init__(self, fn, args, slots: threading.BoundedSemaphore):
+  def __init__(self, max_workers: int):
+    self._sem = threading.BoundedSemaphore(max_workers)
+    self._lock = threading.Lock()
+    self._donated = 0
+    self._max_donated = max_workers
+
+  def acquire(self):
+    self._sem.acquire()
+
+  def release(self):
+    self._sem.release()
+
+  def try_donate(self) -> bool:
+    """Hand a quarantined RUNNING call's slot to the next queued analyst.
+
+    Refused once ``max_workers`` quarantined callables already run on
+    donated slots; the caller then keeps its slot until the callable
+    returns, preserving the 2x ``max_workers`` live-callable ceiling.
+    """
+    with self._lock:
+      if self._donated >= self._max_donated:
+        return False
+      self._donated += 1
+    self._sem.release()
+    return True
+
+  def finish(self, donated: bool):
+    """A callable returned: free its slot (or retire its donation)."""
+    if donated:
+      with self._lock:
+        self._donated -= 1
+    else:
+      self._sem.release()
+
+
+class _AnalystCall:
+  """One lazily dispatched analyst invocation with quarantine-on-timeout.
+
+  A ThreadPoolExecutor was rejected twice over: a future that times out
+  keeps occupying its pool thread (with ``max_workers=1`` a single hung
+  analyst starves every queued analyst, and a healthy fleet reads as
+  all-host-failures), and its non-daemon threads block process exit on a
+  truly hung callable. Here the dispatcher starts each call on its own
+  daemon thread only AFTER acquiring a ``_FleetSlots`` slot. ``wait``
+  returning False abandons the call: a still-QUEUED call is cancelled
+  outright (the dispatcher returns its slot untouched), and a RUNNING call
+  is quarantined -- it hands its slot on only within the bounded donation
+  budget (see ``_FleetSlots``), so timeouts can never fan the fleet out
+  past ``2 * max_workers`` live callables. Quarantined threads are daemons:
+  they may run to completion in the background but cannot delay process
+  exit, and they free their slot or donation the moment they return.
+  """
+
+  def __init__(self, fn, args):
     self._fn = fn
     self._args = args
-    self._slots = slots
     self._lock = threading.Lock()
     self._done = threading.Event()
-    self._running = False
-    self._abandoned = False
+    self._state = "queued"  # queued -> running -> done | queued -> cancelled
+    self._donated = False
+    self.timeout_reason: Optional[str] = None
     self.result = None
     self.error: Optional[BaseException] = None
-    threading.Thread(target=self._run, daemon=True).start()
 
-  def _run(self):
-    self._slots.acquire()
+  def try_start(self, slots: _FleetSlots) -> bool:
+    """Dispatcher only: start the callable on a fresh daemon thread.
+
+    Returns False without starting when the call was cancelled while
+    queued; the dispatcher then returns the slot it acquired.
+    """
     with self._lock:
-      if self._abandoned:
-        # Timed out while still queued: never run; the slot goes straight
-        # back to the pool.
-        self._slots.release()
-        return
-      self._running = True
+      if self._state == "cancelled":
+        return False
+      self._state = "running"
+    threading.Thread(target=self._run, args=(slots,), daemon=True).start()
+    return True
+
+  def _run(self, slots: _FleetSlots):
     try:
       self.result = self._fn(*self._args)
     except BaseException as e:  # noqa: BLE001 - reported via self.error
       self.error = e
     with self._lock:
-      quarantined = self._abandoned  # waiter already released the slot
-      self._done.set()
-      if not quarantined:
-        self._slots.release()
+      self._state = "done"
+      donated = self._donated
+    self._done.set()
+    slots.finish(donated)
 
-  def wait(self, timeout: Optional[float]) -> bool:
-    """True when finished; on timeout, quarantine the call (see class doc)."""
+  def wait(self, timeout: Optional[float], slots: _FleetSlots) -> bool:
+    """True when finished; on timeout, cancel or quarantine (see class doc)."""
     if self._done.wait(timeout):
       return True
     with self._lock:
-      if self._done.is_set():
+      if self._state == "done":
         return True  # finished in the race window between wait and lock
-      self._abandoned = True
-      if self._running:
-        self._slots.release()
+      if self._state == "queued":
+        # Never started: every slot spent its window held by earlier
+        # (possibly quarantined) analysts. Cancel outright -- no thread is
+        # ever created for this call.
+        self._state = "cancelled"
+        self.timeout_reason = (
+            "cancelled unstarted; all worker slots stayed busy for the"
+            " full timeout window"
+        )
+        return False
+      self._donated = slots.try_donate()
+      self.timeout_reason = (
+          "quarantined; the slot was handed to the next queued analyst"
+          if self._donated
+          else "quarantined; donation budget exhausted, the slot stays"
+          " held until the callable returns"
+      )
     return False
+
+
+def _dispatch_analysts(calls: list["_AnalystCall"], slots: _FleetSlots):
+  """Dispatcher loop (own daemon thread): start calls as slots free up.
+
+  Threads are created only after a slot is acquired, so thread allocation
+  is bounded by ``max_workers`` (plus the bounded donation budget), never
+  by report size.
+  """
+  for call in calls:
+    slots.acquire()
+    if not call.try_start(slots):
+      slots.release()  # cancelled while queued; slot goes straight back
+
+
+def _validate_max_workers(max_workers) -> None:
+  """Reject unusable worker counts BEFORE any dispatch or model spend.
+
+  ``max_workers=0`` would otherwise deadlock the dispatcher in ``acquire()``
+  and hang ``collect_patches`` forever under the default ``wait(None)``.
+  """
+  if (
+      isinstance(max_workers, bool)
+      or not isinstance(max_workers, int)
+      or max_workers < 1
+  ):
+    raise ValueError(
+        f"max_workers must be a positive integer (got {max_workers!r}):"
+        " zero or negative workers would leave every analyst queued"
+        " forever."
+    )
 
 
 def collect_patches(
@@ -923,20 +1026,27 @@ def collect_patches(
       section -- the same shape ``ERROR_ANALYST_PROMPT`` instructs the
       built-in analyst to produce. ``None`` is the ONLY valid no-patch
       sentinel: any non-string return -- truthy or falsy (``False``, ``0``,
-      ``[]``, ``{}``) -- is dropped with a warning and counts as a host
-      failure. If EVERY host call fails, collect_patches raises
-      RuntimeError instead of degrading a broken host analyst into a
-      clean-looking zero-patch run (partial failures stay tolerated).
+      ``[]``, ``{}``) -- and any empty or whitespace-only string is dropped
+      with a warning and counts as a host failure. If EVERY host call
+      fails, collect_patches raises RuntimeError instead of degrading a
+      broken host analyst into a clean-looking zero-patch run (partial
+      failures stay tolerated).
     analyst_timeout_s: Optional per-analyst timeout in seconds. A call
       exceeding it is treated like any other analyst failure (warning,
       skipped) and QUARANTINED: its daemon thread may linger until the
-      callable returns, but it immediately loses its concurrency slot to
-      the next queued analyst, so one hung analyst cannot starve the rest
-      of the fleet even at ``max_workers=1``. The bound is PER ANALYST,
-      applied in submission order -- the worst-case total wait for a wholly
-      hung fleet is N x analyst_timeout_s, not analyst_timeout_s overall.
-      Default None (no timeout; see issue #397).
+      callable returns, but it hands its concurrency slot to the next
+      queued analyst so one hung analyst cannot starve the rest of the
+      fleet even at ``max_workers=1``. Slot hand-offs are BUDGETED (see
+      ``_FleetSlots``): threads are created lazily as slots free up, at
+      most ``max_workers`` quarantined callables may run on handed-off
+      slots at once, and further timeouts keep their slot until the
+      callable returns -- live analyst callables never exceed
+      ``2 * max_workers`` regardless of report size. The bound is PER
+      ANALYST, applied in submission order -- the worst-case total wait for
+      a wholly hung fleet is N x analyst_timeout_s, not analyst_timeout_s
+      overall. Default None (no timeout; see issue #397).
   """
+  _validate_max_workers(max_workers)
   if client is None and not (
       error_analyst_fn is not None and analyst_mode == "error-only"
   ):
@@ -957,31 +1067,35 @@ def collect_patches(
   successes = successes[:max_success_samples]
 
   patches = []
-  # Dispatch goes through _AnalystCall (one daemon thread per call, gated by
-  # a shared semaphore) rather than a ThreadPoolExecutor: a timed-out call
-  # is quarantined and its slot handed to the next queued analyst, so one
-  # hung analyst cannot starve the fleet or fake an all-host-failures run.
-  slots = threading.BoundedSemaphore(max_workers)
+  # Dispatch goes through _AnalystCall + a lazy dispatcher thread rather than
+  # a ThreadPoolExecutor: a timed-out call is quarantined and its slot handed
+  # to the next queued analyst (within the bounded donation budget), so one
+  # hung analyst cannot starve the fleet or fake an all-host-failures run,
+  # while live threads stay bounded by max_workers, not report size.
+  slots = _FleetSlots(max_workers)
   calls: list[tuple[_AnalystCall, str, str]] = []
   for s in failures:
     if error_analyst_fn is not None:
       call = _AnalystCall(
-          error_analyst_fn, (client, model, s, current_skill, tools), slots
+          error_analyst_fn, (client, model, s, current_skill, tools)
       )
     else:
       call = _AnalystCall(
           run_analyst,
           (client, model, ERROR_ANALYST_PROMPT, s, current_skill, tools),
-          slots,
       )
     calls.append((call, "error", (s.get("question", "") or "")[:60]))
   for s in successes:
     call = _AnalystCall(
         run_analyst,
         (client, model, SUCCESS_ANALYST_PROMPT, s, current_skill, tools),
-        slots,
     )
     calls.append((call, "success", (s.get("question", "") or "")[:60]))
+  threading.Thread(
+      target=_dispatch_analysts,
+      args=([c for c, _, _ in calls], slots),
+      daemon=True,
+  ).start()
 
   host_total = host_failed = 0
   first_host_error: Optional[BaseException] = None
@@ -993,10 +1107,9 @@ def collect_patches(
     if is_host:
       host_total += 1
     error: Optional[BaseException] = None
-    if not call.wait(analyst_timeout_s):
+    if not call.wait(analyst_timeout_s, slots):
       error = TimeoutError(
-          f"timed out after {analyst_timeout_s}s (quarantined; the slot was"
-          " handed to the next queued analyst)"
+          f"timed out after {analyst_timeout_s}s ({call.timeout_reason})"
       )
     elif call.error is not None:
       error = call.error
@@ -1031,8 +1144,26 @@ def collect_patches(
           type(result).__name__,
       )
       continue
-    if result:
-      patches.append(result)
+    if not result.strip():
+      # Empty/whitespace-only strings are contract violations too: None is
+      # the ONLY no-patch sentinel, and blank text is not gate-able patch
+      # text. Count them toward the all-host-failures guard so an all-blank
+      # host cannot masquerade as a healthy zero-patch run.
+      if is_host:
+        host_failed += 1
+        if first_host_error is None:
+          first_host_error = ValueError(
+              "error_analyst_fn returned an empty/whitespace-only string;"
+              " the only valid no-patch sentinel is None"
+          )
+        logger.warning(
+            "analyst [%s] %s returned an empty/whitespace-only string;"
+            " dropping (the no-patch sentinel is None, not '').",
+            kind,
+            question,
+        )
+      continue
+    patches.append(result)
 
   if error_analyst_fn is not None and host_total and host_failed == host_total:
     raise RuntimeError(
@@ -1241,9 +1372,11 @@ def evolve_skill(
     The evolved SKILL.md content, or the unchanged ``current_skill`` if no
     improvement was found.
   """
-  # Raise on an unusable baseline BEFORE any spend; the UNGATED warning is
-  # left to select_candidate so it logs exactly once per run.
+  # Raise on an unusable baseline or worker count BEFORE any spend; the
+  # UNGATED warning is left to select_candidate so it logs exactly once per
+  # run.
   _validate_incumbent_score(incumbent_score, score_fn, warn_ungated=False)
+  _validate_max_workers(max_workers)
   if isinstance(report, str):
     with open(report) as f:
       report = json.load(f)

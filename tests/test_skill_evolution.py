@@ -1091,6 +1091,192 @@ def test_all_none_host_results_stay_a_healthy_zero_patch_run():
   assert patches == []
 
 
+def test_quarantine_keeps_live_callables_bounded():
+  # Timeouts must not fan the fleet out: with max_workers=1 and a report of
+  # slow analysts, live callables are capped at 2 * max_workers (one running
+  # slot + one budgeted quarantine donation), NOT one per timed-out call.
+  import threading
+
+  import pytest
+
+  release = threading.Event()
+  lock = threading.Lock()
+  active = 0
+  peak = 0
+
+  def slow_host(client, model, session, current_skill, tools):
+    nonlocal active, peak
+    with lock:
+      active += 1
+      peak = max(peak, active)
+    try:
+      release.wait(10)  # slower than every timeout window in this test
+      return None
+    finally:
+      with lock:
+        active -= 1
+
+  report = {
+      "sessions": [_session("unhelpful", question=f"q{i}") for i in range(12)]
+  }
+  try:
+    # Every call times out or is cancelled unstarted -> all-host-failures.
+    with pytest.raises(RuntimeError, match="every host error_analyst_fn"):
+      collect_patches(
+          report,
+          "BASE",
+          client=None,
+          model="unused",
+          analyst_mode="error-only",
+          error_analyst_fn=slow_host,
+          analyst_timeout_s=0.05,
+          max_workers=1,
+      )
+  finally:
+    release.set()
+  assert peak <= 2, f"expected <= 2 concurrent callables, saw {peak}"
+
+
+def test_thread_allocation_bounded_by_workers_not_report_size():
+  # Threads are created lazily as slots free up: a large report must not
+  # allocate one thread per trajectory up front.
+  import threading
+
+  lock = threading.Lock()
+  baseline = threading.active_count()
+  peak = 0
+
+  def counting_host(client, model, session, current_skill, tools):
+    nonlocal peak
+    with lock:
+      peak = max(peak, threading.active_count())
+    return (
+        "## Root Cause\nTOOL_USAGE: skipped the tool despite having it"
+        " available.\n## Proposed Patch\nContent: call the tool first."
+    )
+
+  report = {
+      "sessions": [_session("unhelpful", question=f"q{i}") for i in range(60)]
+  }
+  patches = collect_patches(
+      report,
+      "BASE",
+      client=None,
+      model="unused",
+      analyst_mode="error-only",
+      error_analyst_fn=counting_host,
+      max_workers=2,
+  )
+  assert len(patches) == 60
+  # 2 workers + dispatcher + slack for unrelated/lingering daemons; the old
+  # dispatch allocated all 60 threads up front and busted any such bound.
+  assert peak - baseline <= 6, (
+      f"expected thread growth bounded by max_workers, saw"
+      f" {peak - baseline} extra threads"
+  )
+
+
+def test_non_positive_max_workers_rejected_before_dispatch():
+  # BoundedSemaphore(0) used to be accepted and every analyst blocked in
+  # acquire() forever under the default wait(None). Reject bad worker
+  # counts up front, before any analyst runs.
+  import pytest
+
+  calls = []
+
+  def host(client, model, session, current_skill, tools):
+    calls.append(session["question"])
+    return None
+
+  report = {"sessions": [_session("unhelpful", question="q1")]}
+  for bad in (0, -3, 2.5, True):
+    with pytest.raises(ValueError, match="max_workers must be a positive"):
+      collect_patches(
+          report,
+          "BASE",
+          client=None,
+          model="unused",
+          analyst_mode="error-only",
+          error_analyst_fn=host,
+          max_workers=bad,
+      )
+  assert calls == []
+
+
+def test_evolve_skill_rejects_bad_max_workers_before_any_spend(monkeypatch):
+  # The hoisted check must fire before client creation, so a bad worker
+  # count cannot burn the analyst fleet + consolidation first.
+  import pytest
+  import skill_evolution as _se
+
+  def boom(project, location):
+    raise AssertionError("client must not be created for bad max_workers")
+
+  monkeypatch.setattr(_se, "_make_client", boom)
+  report = {"sessions": [_session("unhelpful", question="q1")]}
+  with pytest.raises(ValueError, match="max_workers must be a positive"):
+    _se.evolve_skill(report, "BASE", max_workers=0)
+
+
+def test_all_blank_string_host_results_trip_the_guard():
+  # "" and whitespace-only strings are NOT the no-patch sentinel (None is):
+  # an all-blank host must raise like any all-failures host, not read as a
+  # healthy zero-patch run (or as mere quality-gate rejects).
+  import pytest
+
+  blank_by_question = {"q0": "", "q1": "   ", "q2": "\n\t", "q3": ""}
+
+  def blank_host(client, model, session, current_skill, tools):
+    return blank_by_question[session["question"]]
+
+  report = {
+      "sessions": [_session("unhelpful", question=f"q{i}") for i in range(4)]
+  }
+  with pytest.raises(RuntimeError, match="every host error_analyst_fn"):
+    collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="error-only",
+        error_analyst_fn=blank_host,
+    )
+
+
+def test_blank_host_result_is_partial_failure_not_fatal(caplog):
+  # One blank return + one valid patch: the blank is warned and dropped,
+  # the valid patch survives, and nothing raises.
+  import logging
+
+  def mixed_host(client, model, session, current_skill, tools):
+    if session["question"] == "blank":
+      return "   "
+    return (
+        "## Root Cause\nTOOL_USAGE: skipped the tool despite having it"
+        " available.\n## Proposed Patch\nContent: call the tool first."
+    )
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="blank"),
+          _session("unhelpful", question="ok"),
+      ]
+  }
+  with caplog.at_level(logging.WARNING):
+    patches = collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="error-only",
+        error_analyst_fn=mixed_host,
+    )
+  assert len(patches) == 1
+  assert any(
+      "empty/whitespace-only string" in r.message for r in caplog.records
+  )
+
+
 def test_select_candidate_rejects_non_finite_candidate_score():
   # An inf/NaN CANDIDATE score must not defeat the improvement gate that
   # already rejects non-finite incumbent scores (inf would always win
