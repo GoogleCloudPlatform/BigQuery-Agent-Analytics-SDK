@@ -19,16 +19,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `session_id`/`trace_id` (`EvalBenchSession.trace_selector()`) drills into
   `Client.get_session_trace` without mixing versions. `failed_sessions_sql()`
   accepts `job_id=`/`import_version=` to render the pin as literals. The
-  view's pin comment carries the manifest generation (`imported_at`) and
-  the rendered score policy, and ownership is proven by re-rendering the
-  definition from the committed manifest row and comparing byte-for-byte
-  (a copied pin over other SQL, or an edited or reformatted managed view,
-  is refused, never replaced); a same-version re-import that adds,
-  changes, or drops the policy re-renders the gate, only the import that
-  committed the latest generation decides it, and the view is written with
-  create-if-absent plus ETag-conditional replace after re-reading the view
-  and latest manifest, so concurrent imports cannot overwrite a newer pin
-  or attach an older caller's policy to a newer generation.
+  gate and generation are committed manifest state: every publish mints
+  an opaque `generation_id` (caller-supplied `imported_at` may repeat and
+  is not the generation) and records the score policy as `view_policy`,
+  a same-version `unchanged` re-import that adds, changes, or drops the
+  policy commits it to the row it found under a new generation, and the
+  view is always rendered from the latest manifest row. The view's pin
+  comment names the generation and the rendered policy, and ownership is
+  proven by re-rendering the definition from the committed manifest row
+  and comparing byte-for-byte (a copied pin over other SQL, an edited or
+  reformatted managed view, or a canonical rendering of the current
+  generation under a gate the manifest does not record, is refused, never
+  replaced). The view is written with create-if-absent plus
+  ETag-conditional replace after re-reading the view and latest manifest,
+  so concurrent imports cannot overwrite a newer pin or attach an older
+  caller's policy to a newer generation.
 
 ## [0.5.1] - 2026-08-29
 

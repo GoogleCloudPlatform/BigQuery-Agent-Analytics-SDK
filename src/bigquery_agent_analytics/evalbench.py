@@ -103,24 +103,29 @@ _IMPORT_LOCK_ID = "evalbench-import"
 # (``_LATEST_IMPORT_QUERY`` over the manifest). Its body is
 # ``failed_sessions_sql`` with ``@job_id``/``@import_version`` rendered as
 # string literals, so the view never scans another version. The pin is
-# recorded in a leading SQL comment (``_VIEW_PIN_MARKER``) that also carries
-# the manifest generation (``imported_at``) rendered and the rendered score
-# policy. Nothing the view says about itself proves ownership: a view is
-# the importer's only when the pin names a version this job committed to
-# the manifest and the body is byte-for-byte what the importer renders for
-# that manifest row, generation and policy (BigQuery returns a view's query
+# recorded in a leading SQL comment (``_VIEW_PIN_MARKER``) that also names
+# the manifest generation (``generation_id``) rendered and the rendered
+# score policy. Both are committed manifest state, never view state: every
+# publish (a ``replace`` of the same version label included) and every
+# committed policy change mints an opaque ``generation_id`` for the row,
+# and the row's ``view_policy`` is the gate the view renders. The view body
+# is a pure function of the latest manifest row. Nothing the view says
+# about itself proves ownership: a view is the importer's only when the
+# pin names a version this job committed to the manifest and the body is
+# byte-for-byte what the importer renders for that manifest row -- with
+# the row's own policy when the pin names the row's current generation, or
+# for a view left behind by a superseded generation, the pinned policy
+# over the row's tables, in which case it is only ever advanced to the
+# committed rendering, never preserved. (BigQuery returns a view's query
 # text verbatim, and whitespace inside a literal is significant, so no
-# normalization is applied). Anything else at that name -- a table, a
+# normalization is applied.) Anything else at that name -- a table, a
 # foreign view, a copied marker (however self-consistent) over other SQL, a
-# rendering for an unpublished version, or a managed view somebody edited
-# or reformatted -- is refused, never replaced. Writes go through the
-# tables API rather than ``CREATE OR REPLACE VIEW``: create-if-absent, and
-# ETag-conditional replace after re-reading the view and the latest
+# rendering for an unpublished version, a canonical rendering of the
+# current generation under another policy, or a managed view somebody
+# edited or reformatted -- is refused, never replaced. Writes go through
+# the tables API rather than ``CREATE OR REPLACE VIEW``: create-if-absent,
+# and ETag-conditional replace after re-reading the view and the latest
 # manifest, so two concurrent imports cannot overwrite each other's pin.
-# The policy rendered into the view is decided by the import that
-# committed the manifest generation the view pins -- a ``replace`` of the
-# same version label is a new generation -- and an import of any other
-# generation never rewrites a view already pinned to the latest one.
 DEFAULT_FAILED_SESSIONS_VIEW = "evalbench_failed_sessions"
 _VIEW_PIN_MARKER = "-- evalbench_failed_sessions pin: "
 # Bounded retries when the view changes underneath a conditional write.
@@ -184,6 +189,15 @@ _MANIFEST_SCHEMA_FIELDS = (
     ("event_row_count", "INT64", "REQUIRED"),
     ("score_row_count", "INT64", "REQUIRED"),
     ("imported_at", "TIMESTAMP", "REQUIRED"),
+    # Opaque id of this committed generation of the row: minted by every
+    # publish and by every committed change of ``view_policy``. Callers
+    # choose ``imported_at``, so two publishes may share it; nothing shares
+    # a ``generation_id``.
+    ("generation_id", "STRING", "REQUIRED"),
+    # The score gate the failed_sessions view renders for this version
+    # (canonical JSON of ``_policy_pin``, NULL for none). The view carries
+    # what this column says, never what the view itself claims.
+    ("view_policy", "STRING", "NULLABLE"),
 )
 _LOCK_SCHEMA_FIELDS = (
     ("lock_id", "STRING", "REQUIRED"),
@@ -223,6 +237,20 @@ FROM `{manifest_table}`
 WHERE job_id = @job_id
 ORDER BY imported_at DESC, import_version DESC
 LIMIT 1
+"""
+
+# Commits another score gate for an already-published, identical version
+# (an ``unchanged`` re-import that adds, changes, or drops the policy). The
+# change is conditional on the generation the caller found, so it can never
+# land on a row a concurrent ``replace`` has since re-published, and it
+# mints a new generation so the view pinned to the old one is recognized as
+# superseded and re-rendered from the row.
+_RECORD_VIEW_POLICY_QUERY = """\
+UPDATE `{manifest_table}`
+SET view_policy = @view_policy, generation_id = @generation_id
+WHERE job_id = @job_id
+  AND import_version = @import_version
+  AND generation_id = @expected_generation_id
 """
 
 # The managed view's query text (``Table.view_query``): the pin comment on
@@ -847,13 +875,17 @@ class EvalBenchRun:
     foreign view, a copied pin over other SQL, an edited or reformatted
     managed view), raises ``ValueError`` before anything is written -- pass
     a different ``failed_sessions_view`` per job, or ``None`` to manage no
-    view. The pin also records the manifest generation (``imported_at``)
-    the view renders, and only the import that committed the latest
-    generation decides the policy the view carries (a ``replace`` of the
-    same version is a new generation). The view is written with
-    create-if-absent and ETag-conditional replace after re-reading it and
-    the latest manifest, so concurrent imports of one job cannot leave a
-    stale pin or an older caller's policy behind.
+    view. The gate the view renders is committed manifest state, not view
+    state: every publish records ``policy`` in its manifest row
+    (``view_policy``) under a fresh opaque ``generation_id`` (a ``replace``
+    of the same version label is a new generation), an ``unchanged``
+    re-import with another policy commits it to the row it found -- only
+    if that row's generation is still the one it found -- under a new
+    generation, and the view is always rendered from the latest manifest
+    row. The view is written with create-if-absent and ETag-conditional
+    replace after re-reading it and the latest manifest, so concurrent
+    imports of one job cannot leave a stale pin or an older caller's
+    policy behind.
 
     Args:
       target_dataset: BQAA-owned dataset that receives the mirror tables.
@@ -902,6 +934,7 @@ class EvalBenchRun:
     if import_version is None:
       import_version = _derived_import_version(fingerprints)
     _validate_import_version(import_version)
+    generation_id = _new_generation_id()
 
     prefix = f"{target_project}.{target_dataset}"
     events_ref = f"{prefix}.{events_table}"
@@ -938,6 +971,8 @@ class EvalBenchRun:
         "event_row_count": len(event_rows),
         "score_row_count": len(score_rows),
         "imported_at": imported_at.isoformat(),
+        "generation_id": generation_id,
+        "view_policy": _policy_column(policy),
     }
 
     client = bq_client or make_bq_client(target_project, location=self.location)
@@ -978,9 +1013,9 @@ class EvalBenchRun:
               location=self.location,
               status=result.status,
               import_version=import_version,
-              # The generation this call handled: the row it committed, or
-              # for ``unchanged`` the committed row it found.
-              imported_at=result.manifest["imported_at"],
+              # The row this call handled: the one it committed, or for
+              # ``unchanged`` the committed row it found.
+              manifest=result.manifest,
           ),
       )
 
@@ -1474,43 +1509,71 @@ def _policy_from_pin(value: Any) -> Optional[EvalScorePolicy]:
   return policy
 
 
-def _pin_timestamp(value: Any) -> str:
-  """Canonical (UTC, microsecond) form of a manifest ``imported_at``.
+def _policy_column(policy: Optional[EvalScorePolicy]) -> Optional[str]:
+  """``view_policy`` manifest column: the canonical pin as JSON, or NULL."""
+  pin = _policy_pin(policy)
+  if pin is None:
+    return None
+  return json.dumps(pin, sort_keys=True)
 
-  The manifest row comes back from BigQuery as a datetime and is staged
-  as an ISO string; both must pin identically.
+
+def _policy_from_column(value: Any) -> Optional[EvalScorePolicy]:
+  """Parse a manifest row's ``view_policy`` strictly (it is trusted state)."""
+  if value is None:
+    return None
+  try:
+    if not isinstance(value, str):
+      raise ValueError("view_policy must be a string")
+    policy = _policy_from_pin(json.loads(value))
+  except (ValueError, TypeError) as exc:
+    raise ValueError(
+        f"manifest view_policy {value!r} is not a canonical score policy;"
+        " re-publish the version with replace=True"
+    ) from exc
+  if _policy_column(policy) != value:
+    raise ValueError(
+        f"manifest view_policy {value!r} is not canonical; re-publish the"
+        " version with replace=True"
+    )
+  return policy
+
+
+_GENERATION_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
+
+
+def _new_generation_id() -> str:
+  return uuid.uuid4().hex
+
+
+def _manifest_generation_id(manifest: Mapping[str, Any]) -> str:
+  """The opaque id of one committed generation of a manifest row.
+
+  A ``replace`` re-publishes the same version label as a new generation,
+  and so does a committed policy change; ``imported_at`` is caller-chosen
+  and may repeat, so it never identifies the generation. Only this does.
   """
-  parsed = _parse_timestamp(value)
-  if parsed is None:
-    raise ValueError(f"imported_at {value!r} is not a timestamp")
-  return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
-
-
-def _manifest_generation(manifest: Mapping[str, Any]) -> tuple[str, str]:
-  """``(import_version, imported_at)``: one committed publish of a job.
-
-  A ``replace`` re-publishes the same version label under a new
-  ``imported_at``, so the version alone does not identify what the
-  manifest currently holds; the generation does.
-  """
-  return (
-      str(manifest["import_version"]),
-      _pin_timestamp(manifest["imported_at"]),
-  )
+  value = manifest.get("generation_id")
+  if not isinstance(value, str) or not _GENERATION_ID_PATTERN.fullmatch(value):
+    raise ValueError(
+        f"manifest row for job {manifest.get('job_id')!r} import_version "
+        f"{manifest.get('import_version')!r} has no generation_id;"
+        " re-publish the version with replace=True"
+    )
+  return value
 
 
 def _view_pin(
     job_id: str,
     import_version: str,
     *,
-    imported_at: Any,
+    generation_id: str,
     policy: Optional[EvalScorePolicy],
 ) -> dict[str, Any]:
   """The pin comment payload: what the view is bound to."""
   return {
       "job_id": job_id,
       "import_version": import_version,
-      "imported_at": _pin_timestamp(imported_at),
+      "generation_id": generation_id,
       "policy": _policy_pin(policy),
   }
 
@@ -1543,22 +1606,21 @@ def _parse_view_pin(
         isinstance(pin, dict)
         and isinstance(pin.get("job_id"), str)
         and isinstance(pin.get("import_version"), str)
-        and isinstance(pin.get("imported_at"), str)
+        and isinstance(pin.get("generation_id"), str)
+        # The generation must be in the one form the importer mints, or
+        # the re-rendered body could never match anyway.
+        and _GENERATION_ID_PATTERN.fullmatch(pin["generation_id"])
     ):
       return None
     try:
       policy = _policy_from_pin(pin.get("policy"))
-      # The generation must be in the one form the importer writes, or the
-      # re-rendered body could never match anyway.
-      if _pin_timestamp(pin["imported_at"]) != pin["imported_at"]:
-        return None
     except ValueError:
       return None
     return (
         {
             "job_id": pin["job_id"],
             "import_version": pin["import_version"],
-            "imported_at": pin["imported_at"],
+            "generation_id": pin["generation_id"],
             "policy": pin.get("policy"),
         },
         policy,
@@ -1578,10 +1640,6 @@ class _ManagedView:
   def view_query(self) -> str:
     return str(self.table.view_query)
 
-  @property
-  def generation(self) -> tuple[str, str]:
-    return _manifest_generation(self.pin)
-
 
 def _read_managed_view(
     client: Any,
@@ -1595,17 +1653,22 @@ def _read_managed_view(
   ``None`` means nothing exists at ``view_ref``. The view is the importer's
   only if its pin names a version the pinned job committed to the manifest
   *and* its body is byte-for-byte what the importer renders for that
-  manifest row and the pinned generation and policy. The comparison is
-  exact: BigQuery returns a view's query text verbatim, and whitespace
-  inside a rendered literal (a ``job_id``) changes which rows the view
-  reads, so no normalization is safe. Nothing the view carries about itself
-  is trusted: a table, a view somebody else wrote, a copied or forged
-  marker over other SQL, a rendering for an unpublished version or over
-  other tables, or an edited or reformatted body all raise. The importer
-  only ever replaces views whose definition it can vouch for. The pinned
-  generation and policy are view state (a replaced generation leaves no
-  other record), so they are taken from the pin and vouched for only
-  through the body that renders them.
+  manifest row. When the pin names the row's *current* generation the
+  rendering uses the row's committed ``view_policy`` -- the pin's own
+  policy claim is never the reference, so a canonical rendering of the
+  current generation under any other gate is foreign. When the pin names a
+  superseded generation (the row was re-published or its policy
+  re-committed after the view was written, and nothing else records that
+  generation) the body must be the rendering of the pinned generation and
+  policy over the row's own tables; such a view is only ever advanced to
+  the committed rendering by ``_reconcile_failed_sessions_view``, so
+  whatever gate it carries is never preserved. The comparison is exact:
+  BigQuery returns a view's query text verbatim, and whitespace inside a
+  rendered literal (a ``job_id``) changes which rows the view reads, so no
+  normalization is safe. A table, a view somebody else wrote, a copied or
+  forged marker over other SQL, a rendering for an unpublished version or
+  over other tables, or an edited or reformatted body all raise. The
+  importer only ever replaces views whose definition it can vouch for.
   """
   try:
     table = client.get_table(view_ref)
@@ -1628,10 +1691,17 @@ def _read_managed_view(
       # No manifest table: nothing was ever published here, so the view
       # cannot be one the importer wrote.
       pinned = None
-    if pinned is not None and view_query == _failed_sessions_view_body(
-        manifest=pinned, policy=policy, imported_at=pin["imported_at"]
-    ):
-      return _ManagedView(table=table, pin=pin, policy=policy)
+    if pinned is not None:
+      if pin["generation_id"] == _manifest_generation_id(pinned):
+        expected = _committed_view_body(pinned)
+      else:
+        expected = _failed_sessions_view_body(
+            manifest=pinned,
+            policy=policy,
+            generation_id=pin["generation_id"],
+        )
+      if view_query == expected:
+        return _ManagedView(table=table, pin=pin, policy=policy)
   raise ValueError(
       f"{view_ref!r} exists but is not an evalbench failed_sessions view"
       " created by materialize() (or its definition was changed); choose"
@@ -1662,16 +1732,29 @@ def _check_view_binding(
   return existing
 
 
+def _committed_view_body(manifest: Mapping[str, Any]) -> str:
+  """The view the manifest row says the importer renders for it.
+
+  Generation and policy come from the row (``generation_id``,
+  ``view_policy``): this is the only rendering the importer ever writes.
+  """
+  return _failed_sessions_view_body(
+      manifest=manifest,
+      policy=_policy_from_column(manifest.get("view_policy")),
+      generation_id=_manifest_generation_id(manifest),
+  )
+
+
 def _failed_sessions_view_body(
     *,
     manifest: Mapping[str, Any],
     policy: Optional[EvalScorePolicy],
-    imported_at: Any = None,
+    generation_id: Optional[str] = None,
 ) -> str:
   """The managed view's query text pinned to one manifest row's version.
 
-  A pure function of the manifest row, the generation (``imported_at``,
-  the row's own unless a pin's claim is being re-rendered) and the
+  A pure function of the manifest row's version and tables, the generation
+  (the row's own unless a pin's claim is being re-rendered) and the
   canonical policy, which is what lets ``_read_managed_view`` re-render
   and compare.
   """
@@ -1688,8 +1771,10 @@ def _failed_sessions_view_body(
   pin = _view_pin(
       job_id,
       import_version,
-      imported_at=(
-          manifest["imported_at"] if imported_at is None else imported_at
+      generation_id=(
+          _manifest_generation_id(manifest)
+          if generation_id is None
+          else generation_id
       ),
       policy=policy,
   )
@@ -1715,29 +1800,39 @@ def _sync_failed_sessions_view(
     location: Optional[str],
     status: str,
     import_version: str,
-    imported_at: Any,
+    manifest: Mapping[str, Any],
 ) -> str:
   """Point ``view_ref`` at the job's latest successful import.
 
-  Runs after the publish decision. The latest manifest row (not the version
-  just handled) is the pin, so an ``unchanged`` no-op on an old version does
-  not move the view backwards, and a ``replace`` of an old version -- which
-  refreshes ``imported_at`` -- does. The write is skipped when the existing
-  view's query already is what would be rendered (same generation, same
-  policy, same SQL), so a no-op re-import never rewrites the view, while
-  adding, changing, or dropping the policy does -- when the generation
-  this call handled (``import_version`` committed at ``imported_at``) *is*
-  the latest import. Only that generation's import decides the policy the
-  view carries; see ``_reconcile_failed_sessions_view``.
+  Runs after the publish decision. ``manifest`` is the row this call
+  handled: the one it committed (which already records ``policy`` under
+  its fresh generation), or for ``unchanged`` the committed row it found.
+  In the latter case a policy that differs from the row's is committed to
+  that row first (``_record_view_policy``), conditional on the row still
+  being the generation this call found, so an ``unchanged`` re-import can
+  add, change, or drop the gate of the version it names -- and nothing
+  else. The view itself is then reconciled from the latest manifest row
+  (not the version just handled), so an ``unchanged`` no-op on an old
+  version does not move the view backwards, and a ``replace`` of an old
+  version -- which refreshes ``imported_at`` -- does; see
+  ``_reconcile_failed_sessions_view``.
   """
   try:
+    if status == "unchanged" and _policy_column(policy) != manifest.get(
+        "view_policy"
+    ):
+      _record_view_policy(
+          client,
+          manifest_ref=manifest_ref,
+          manifest=manifest,
+          policy=policy,
+          location=location,
+      )
     _reconcile_failed_sessions_view(
         client,
         view_ref=view_ref,
         manifest_ref=manifest_ref,
         job_id=job_id,
-        generation=(import_version, _pin_timestamp(imported_at)),
-        policy=policy,
         location=location,
     )
   except Exception as exc:  # noqa: BLE001
@@ -1751,42 +1846,77 @@ def _sync_failed_sessions_view(
   return view_ref
 
 
+def _record_view_policy(
+    client: Any,
+    *,
+    manifest_ref: str,
+    manifest: Mapping[str, Any],
+    policy: Optional[EvalScorePolicy],
+    location: Optional[str],
+) -> None:
+  """Commit ``policy`` to the manifest row this call found, if unchanged.
+
+  The UPDATE is keyed on the row's ``generation_id`` as read, so it lands
+  on nothing when a concurrent ``replace`` (or another policy change)
+  re-published the row since -- that generation's own caller decided its
+  gate. It mints a new generation either way, so a view still pinned to
+  the old one is recognized as superseded and re-rendered from the row.
+  """
+  job_config = bigquery.QueryJobConfig(
+      query_parameters=[
+          bigquery.ScalarQueryParameter(
+              "job_id", "STRING", str(manifest["job_id"])
+          ),
+          bigquery.ScalarQueryParameter(
+              "import_version", "STRING", str(manifest["import_version"])
+          ),
+          bigquery.ScalarQueryParameter(
+              "expected_generation_id",
+              "STRING",
+              _manifest_generation_id(manifest),
+          ),
+          bigquery.ScalarQueryParameter(
+              "generation_id", "STRING", _new_generation_id()
+          ),
+          bigquery.ScalarQueryParameter(
+              "view_policy", "STRING", _policy_column(policy)
+          ),
+      ]
+  )
+  job_config = with_sdk_labels(job_config, feature=_VIEW_FEATURE)
+  query_args: dict[str, Any] = {"job_config": job_config}
+  if location is not None:
+    query_args["location"] = location
+  query = _RECORD_VIEW_POLICY_QUERY.format(manifest_table=manifest_ref)
+  client.query(query, **query_args).result()
+
+
 def _reconcile_failed_sessions_view(
     client: Any,
     *,
     view_ref: str,
     manifest_ref: str,
     job_id: str,
-    generation: tuple[str, str],
-    policy: Optional[EvalScorePolicy],
     location: Optional[str],
 ) -> None:
   """Create or conditionally replace the managed view, never blindly.
 
   Each attempt re-reads the view (ownership, job, ETag) and *then* the
   latest manifest row, so a version committed by a concurrent import after
-  the view was read is still seen. A missing view is created with
+  the view was read is still seen. What gets written is always the
+  rendering of that row -- its version, tables, ``generation_id`` and
+  ``view_policy`` -- and nothing this caller asked for: the caller's
+  policy is already committed manifest state (or was refused there) by the
+  time the view is reconciled. A missing view is created with
   create-if-absent (``Conflict`` if another import created it first); an
   existing one is replaced only if its ETag still matches
   (``PreconditionFailed`` otherwise). Either race re-reads and re-decides,
   a bounded number of times, then fails closed -- a stale pin is never
   written over a newer one, and success is never reported for a view that
-  was not verified.
-
-  ``policy`` is authoritative only while ``generation`` -- the
-  ``(import_version, imported_at)`` this invocation handled -- is the
-  latest import. The version label alone is not enough: two ``replace``
-  calls of one version publish two generations, and only the one the
-  manifest holds decides the gate. When the (re-)read latest generation is
-  another one, its own import decided the policy: a view already pinned to
-  it is left exactly as it is (so a delayed retry cannot attach an older
-  caller's gate to a newer generation), and a view that is absent or still
-  behind is created or advanced carrying the gate it already had (none for
-  a new view), not this caller's. Because the generation is rendered into
-  the pin, every new generation changes the view text, so the writer of a
-  newer generation always bumps the ETag under a delayed older caller --
-  that caller's conditional replace fails and re-decides instead of landing
-  its stale policy unchallenged.
+  was not verified. Because every generation is rendered into the pin, the
+  writer of a newer generation always bumps the ETag under a delayed older
+  caller, whose conditional replace then fails and re-decides from the
+  committed row instead of landing its stale rendering unchallenged.
   """
   for _ in range(_VIEW_SYNC_ATTEMPTS):
     existing = _check_view_binding(
@@ -1804,16 +1934,7 @@ def _reconcile_failed_sessions_view(
           f"EvalBench job {job_id!r} has no manifest row in {manifest_ref!r}"
           " after publishing; cannot pin the failed_sessions view"
       )
-    latest_generation = _manifest_generation(latest)
-    if latest_generation == generation:
-      render_policy = policy
-    elif existing is None:
-      render_policy = None
-    elif existing.generation == latest_generation:
-      return
-    else:
-      render_policy = existing.policy
-    body = _failed_sessions_view_body(manifest=latest, policy=render_policy)
+    body = _committed_view_body(latest)
     description = _failed_sessions_view_description(latest)
     if existing is None:
       table = bigquery.Table(view_ref)

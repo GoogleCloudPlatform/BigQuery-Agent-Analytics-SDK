@@ -301,7 +301,9 @@ The manifest row binds every published version to its source:
 | `results_fingerprint`, `scores_fingerprint`, `configs_fingerprint` | SHA-256 content fingerprints |
 | `events_table`, `scores_table` | fully-qualified published tables |
 | `event_row_count`, `score_row_count` | rows published |
-| `imported_at` | publish timestamp (UTC) |
+| `imported_at` | publish timestamp (UTC; caller-supplied via `imported_at=`, so two publishes may share it) |
+| `generation_id` | opaque id of this committed generation of the row: minted by every publish (a `replace=True` of the same version label included) and by every committed change of `view_policy`; never shared |
+| `view_policy` | the score gate the failed-session view renders for this version (canonical JSON of the `EvalScorePolicy`, `NULL` for none) — committed manifest state, never taken from the view |
 
 `EvalBenchImportResult.manifest` returns the same row in memory.
 
@@ -367,7 +369,7 @@ the definition itself, and the view can never scan another version. The
 view's query text (its description names the pinned version too) is:
 
 ```sql
--- evalbench_failed_sessions pin: {"import_version": "v2", "imported_at": "2026-08-30T17:04:11.512034+00:00", "job_id": "abc123", "policy": {"min_scores": {"goal_completion": 0.9}, "missing_score_fails": true}}
+-- evalbench_failed_sessions pin: {"generation_id": "3f9c2c1e0b7a4d6e9a1b5c8d7e6f4a2b", "import_version": "v2", "job_id": "abc123", "policy": {"min_scores": {"goal_completion": 0.9}, "missing_score_fails": true}}
 WITH sessions AS (
   SELECT ...
   FROM `analytics-project.bqaa.evalbench_agent_events`
@@ -376,13 +378,22 @@ WITH sessions AS (
 ```
 
 The pin records the job, the version, the manifest generation it renders
-(`imported_at`, in UTC with microseconds — a `replace=True` of the same
-version label is a new generation), and the score policy rendered into
-the view (`null` without one). Nothing the view says about itself proves
-ownership: the importer treats a view as its own only when the pin names
-a version that job committed to the manifest *and* the body is
-byte-for-byte what the importer renders for that manifest row, generation
-and policy. The comparison is exact — BigQuery returns a view's query text
+(`generation_id`, the row's opaque id — a `replace=True` of the same
+version label is a new generation, and so is a committed policy change;
+`imported_at` is caller-chosen and may repeat, so it is not the
+generation), and the score policy rendered into the view (`null` without
+one). The view body is a pure function of the latest manifest row: the
+gate it renders is the row's committed `view_policy`, never something the
+view says about itself. Nothing in the pin proves ownership: the importer
+treats a view as its own only when the pin names a version that job
+committed to the manifest *and* the body is byte-for-byte what the
+importer renders for that manifest row — with the row's own `view_policy`
+when the pin names the row's current `generation_id`, so a canonical
+rendering of the current generation under any other gate is foreign; or,
+for a view a superseded generation left behind, the pinned generation and
+policy over the row's own tables, in which case the view is only ever
+advanced to the committed rendering, so whatever gate it carries is never
+preserved. The comparison is exact — BigQuery returns a view's query text
 verbatim, and whitespace inside a rendered literal (`job_id = "job  x"`
 versus `"job x"`) changes which rows the view reads, so no whitespace
 normalization is applied. A pin copied or forged onto other SQL (however
@@ -401,9 +412,10 @@ Pinning rules:
 | New `import_version` of the same job | replaced, pinned to the new version (the job's latest `imported_at` in the manifest) |
 | No-op re-import (`unchanged`) | untouched; created only if it does not exist yet (corpora published before views existed) |
 | `replace=True` of an older version | re-pinned to it — the replace refreshed `imported_at`, so it *is* the latest successful import |
-| `policy=` / `--min-score` given, changed, or dropped | the score gate is part of the pin: the view is re-rendered whenever the policy differs from the one it carries (including a later same-version call *without* a policy, which removes the gate), and left alone when version and policy both match |
-| `policy=` on a call whose version is **not** the latest import | the gate is decided by the import of the version the view pins: a view already pinned to the latest version is left exactly as it is, and a view that is absent or behind is created or advanced carrying the gate it already had (none for a new view), never this call's |
-| `policy=` on a call whose *generation* is not the one the manifest holds (a concurrent `replace=True` of the same version committed a newer `imported_at`) | as above: the version label does not decide, the generation does. Every generation is rendered into the pin, so the newer replacement always rewrites the view (bumping its ETag) even when version, gate and SQL are otherwise identical; a delayed older caller's conditional replace then fails, re-reads, and leaves the newer generation's gate in place |
+| `policy=` / `--min-score` given, changed, or dropped | the gate is committed to the manifest row (`view_policy`): a publish records it with the row, and an `unchanged` re-import that names another gate commits it to the row it found — under a new `generation_id`, and only if that row is still the generation it found — before the view is re-rendered from the row (including a later same-version call *without* a policy, which removes the gate); nothing is written when version and policy both match |
+| `policy=` on a call whose version is **not** the latest import | the gate is recorded on that version's own row; the view renders the latest version's row, so a view already pinned to the latest generation is left exactly as it is, and a view that is absent or behind is created or advanced carrying the latest row's committed gate (never this call's, and never the gate the stale view happened to carry) |
+| `policy=` on a call whose *generation* is not the one the manifest holds (a concurrent `replace=True` of the same version — even with the same `imported_at` — committed a newer `generation_id`) | as above: neither the version label nor the timestamp decides, the committed generation does. Every generation is rendered into the pin, so the newer replacement always rewrites the view (bumping its ETag) even when version, gate and SQL are otherwise identical; a delayed older caller's conditional replace then fails, re-reads, and renders the newer generation's committed gate |
+| A view at that name that *is* the importer's rendering of the current generation, but under a gate the manifest row does not record | `ValueError` before anything is written, from every later call (an older version's unchanged re-import included): the view cannot vouch for its own gate, only the manifest can |
 | View at that name pinned to **another job** | `ValueError` before anything is written; use one `failed_sessions_view` name per job |
 | A table, a view the importer did not create, a copied pin over other SQL, or a managed view whose query was edited, at that name | `ValueError` before anything is written (before the import tables are even created); the importer never replaces objects whose definition it cannot vouch for — drop the object or pick another name |
 | Two imports of one job race on the view | the loser of the create race (`409`) or ETag check (`412`) re-reads the view and the latest manifest and re-decides, up to three times, so a delayed writer never overwrites a newer pin — nor re-renders it with its own (older) policy; a race against **another job's** view fails closed with the import already published |
