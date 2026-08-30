@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **EvalBench CLI discoverability (#435)** — `bq-agent-sdk --help` lists
+  `evalbench-import`, `evalbench-failed-sessions`, and `evalbench-score`;
+  the installed `bq-agent-sdk` console script (`pyproject.toml`
+  `[project.scripts]`) is the surface after `pip install`. Tests pin the
+  help listing, the command registry, and the console-script mapping.
 - **EvalBench MVP e2e demo tells one session's story (#435 slice 5, #97)**
   — the `--fixture` walkthrough of `examples/evalbench_mvp_e2e.sh` now
   follows `support_agent` session `7e352c34` ("How many widgets are in
