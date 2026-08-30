@@ -92,6 +92,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ETag-conditional replace after re-reading the view and latest manifest,
   so concurrent imports cannot overwrite a newer pin or attach an older
   caller's policy to a newer generation.
+- **EvalBench versioned snapshots and failed-session contract (#435, slice 1; #97)**
+  — `EvalBenchRun.materialize()` publishes one immutable, versioned import
+  of an EvalBench job into BQAA-owned tables — `evalbench_agent_events`
+  (`agent_events` columns plus `job_id`, `import_version`),
+  `evalbench_scores_imported`, and `evalbench_import_manifest` — and never
+  writes the ADK plugin's production `agent_events` table (that name is
+  rejected before any BigQuery call). Rows are loaded into per-import
+  staging tables and published by a single multi-statement transaction
+  keyed on `(job_id, import_version)`, with the manifest re-checked inside
+  the transaction and a lock sentinel so two first-time imports of the same
+  version cannot both commit. The W0.4 failed-session contract lands with
+  it: `returncode == 0` means the scenario *completed*, not *passed*;
+  non-zero or non-numeric `returncode`, usable `stderr`, and `*_error`
+  columns surface as `status = 'ERROR'` plus `error_message` on the
+  terminal row, never as a clean `OK`. CLI: `bq-agent-sdk
+  evalbench-import`. Reference in `docs/evalbench.md`.
 
 ## [0.5.1] - 2026-08-29
 

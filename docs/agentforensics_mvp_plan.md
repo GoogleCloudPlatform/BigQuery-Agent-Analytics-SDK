@@ -13,12 +13,20 @@ three rounds of review; the issue body points here.
 **Code already landed (engineering slices, independent of Week 0):**
 
 - [PR #451](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/451)
-  — **merged** — `materialize()`: immutable, versioned EvalBench snapshots
-  plus the failed-session contract (W0.4). Reference: `docs/evalbench.md`.
+  — **merged** (`2459c0f`) — `materialize()`: immutable, versioned EvalBench
+  snapshots plus the failed-session contract (W0.4). Reference:
+  `docs/evalbench.md`.
 - [PR #452](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/452)
-  — open — `failed_sessions` view and the version-pinned consumer.
+  — **merged** (`2779b7e`) — `failed_sessions` view and the version-pinned
+  consumer.
 - [PR #453](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/453)
-  — open — `evalbench-score` CLI wrapping `Client.evaluate`.
+  — **merged** (`a18ee18`) — `evalbench-score` CLI wrapping `Client.evaluate`.
+- [PR #454](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/454)
+  — **merged** (`60c6dcf`) — this plan of record (v4); the issue body points
+  here.
+- [PR #455](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/455)
+  — open (head `a8c694c`) — recordable e2e demo of
+  import → failed-sessions → score. Not yet on `main`.
 
 Those slices build the Week 1–2 substrate; they do not start the clock and do
 not touch the partner job, the D4 boundary, taxonomy content, or live traces.
