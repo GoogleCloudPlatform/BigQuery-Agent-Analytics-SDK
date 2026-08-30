@@ -21,10 +21,12 @@ time into the mirror-table row contract tracked by issue #97.
 immutable, versioned snapshot into BQAA-owned tables -- never the ADK
 plugin's production ``agent_events`` table. Events, imported scores, and a
 manifest row are staged with load jobs and then published by one BigQuery
-multi-statement transaction that first claims a pre-existing lock row, so a
-failed re-import cannot leave a partial corpus behind and two first-time
-imports of one version cannot both commit. ``failed_sessions_sql`` reads one
-pinned ``import_version`` and implements the W0.4 contract:
+multi-statement transaction that first claims a pre-existing lock row and
+then decides, against its own snapshot, whether the version is *absent*
+(publish), *identical* (leave the first publish in place) or *conflicting*
+(raise), so a failed re-import cannot leave a partial corpus behind and two
+first-time imports of one version cannot both commit. ``failed_sessions_sql``
+reads one pinned ``import_version`` and implements the W0.4 contract:
 ``returncode == 0`` means *completed*, and only the per-benchmark score
 policy decides *passed*.
 """
@@ -157,6 +159,15 @@ _FINGERPRINT_KEYS = (
     "scores_fingerprint",
     "configs_fingerprint",
 )
+# Manifest columns that, together with the fingerprints and destination
+# refs, fully determine what a published version contains: the source
+# project/dataset land in the manifest and in every event row's
+# ``attributes.evalbench_source_project`` / ``evalbench_source_dataset``, so
+# equal source rows read from another source are a *different* version.
+# ``source_snapshot_at`` and ``imported_at`` are read-time bookkeeping that
+# do not change any published row, and the counts are derived from the
+# fingerprinted rows, so none of them takes part in the identity decision.
+_PROVENANCE_KEYS = ("source_project", "source_dataset")
 
 _READ_MANIFEST_QUERY = """\
 SELECT *
@@ -184,14 +195,31 @@ WHERE NOT EXISTS (
 # rows in the same table cannot run concurrently; conflicting transactions
 # are cancelled") at most one of two concurrent publishes survives, even when
 # both began from a snapshot that showed no manifest row. The manifest guard
-# then runs inside the same transaction as defence in depth: an importer
+# then runs inside the same transaction as defence in depth for an importer
 # whose *pre-publish* read was stale but whose transaction started after the
-# other commit sees the committed row and raises before deleting anything.
+# other commit. It classifies the committed manifest row for this
+# ``(job_id, import_version)`` as one of three cases:
+#
+# * absent      -- publish the staged rows;
+# * conflicting -- fingerprints, source provenance (without ``replace``) or
+#                  destination tables differ: RAISE, nothing is written;
+# * identical   -- without ``replace`` the first publish is left exactly as
+#                  it is: RAISE ``_PUBLISH_UNCHANGED_MESSAGE`` so the script
+#                  rolls back (including the lock claim) and the caller
+#                  reports ``unchanged`` instead of deleting and re-inserting
+#                  equal rows under a new ``imported_at``.
+#
 # DML inside BEGIN/COMMIT is all-or-nothing, so a failure anywhere leaves the
 # previously published version (or nothing) in place.
 _PUBLISH_CONFLICT_MESSAGE = (
     "evalbench import conflict: this import_version was already published"
-    " with different source fingerprints or destination tables"
+    " with different source fingerprints, source project/dataset, or"
+    " destination tables"
+)
+_PUBLISH_UNCHANGED_MESSAGE = (
+    "evalbench import unchanged: this import_version is already published"
+    " with identical source fingerprints, source project/dataset, and"
+    " destination tables"
 )
 _LOCK_MISSING_MESSAGE = (
     "evalbench import lock sentinel is missing; the publish transaction"
@@ -209,7 +237,21 @@ _FINGERPRINT_CONFLICT_PREDICATE = (
     " OR scores_fingerprint != @scores_fingerprint"
     " OR configs_fingerprint != @configs_fingerprint"
 )
+_PROVENANCE_CONFLICT_PREDICATE = (
+    "source_project != @source_project OR source_dataset != @source_dataset"
+)
+# Rendered into ``_PUBLISH_SCRIPT`` without ``replace``: an identical,
+# already-published version must not be rewritten.
+_IDENTICAL_GUARD = """\
+  IF existing_manifest_rows > 0 THEN
+    RAISE USING MESSAGE = '{unchanged_message}';
+  END IF;
+"""
+_REPLACE_IDENTICAL_NOTE = (
+    "  -- replace=True: an identical version is re-published in place.\n"
+)
 _PUBLISH_SCRIPT = """\
+DECLARE existing_manifest_rows INT64 DEFAULT 0;
 DECLARE conflicting_manifest_rows INT64 DEFAULT 0;
 BEGIN
   BEGIN TRANSACTION;
@@ -222,6 +264,12 @@ BEGIN
   IF @@row_count = 0 THEN
     RAISE USING MESSAGE = '{lock_missing_message}';
   END IF;
+  SET existing_manifest_rows = (
+    SELECT COUNT(*)
+    FROM `{manifest_table}`
+    WHERE job_id = @job_id
+      AND import_version = @import_version
+  );
   SET conflicting_manifest_rows = (
     SELECT COUNT(*)
     FROM `{manifest_table}`
@@ -232,6 +280,7 @@ BEGIN
   IF conflicting_manifest_rows > 0 THEN
     RAISE USING MESSAGE = '{conflict_message}';
   END IF;
+{identical_guard}\
   DELETE FROM `{events_table}`
   WHERE job_id = @job_id AND import_version = @import_version;
   DELETE FROM `{scores_table}`
@@ -705,14 +754,21 @@ class EvalBenchRun:
     Idempotency is driven by the manifest. ``import_version`` defaults to a
     content fingerprint of the source rows, so an unchanged source is a
     no-op (``status == "unchanged"``) and a changed source becomes a new
-    version. An explicit ``import_version`` whose stored fingerprints no
-    longer match the source raises ``ValueError`` unless ``replace=True``.
-    The publish transaction first claims the dataset lock by updating its
-    pre-existing sentinel row, so two importers racing on a first-time
-    version cannot both commit: BigQuery cancels the second transaction that
-    mutates the same row, and the cancelled importer raises ``ValueError``
-    with nothing written. The fingerprint check is repeated inside the same
-    transaction as well. A published version is bound to the ``events_table`` /
+    version. An explicit ``import_version`` whose stored fingerprints, or
+    whose stored source project/dataset, no longer match this run raises
+    ``ValueError`` unless ``replace=True``: equal rows read from another
+    EvalBench project or dataset publish different
+    ``attributes.evalbench_source_*`` values, so they are a different
+    version, not the same one. The publish transaction first claims the
+    dataset lock by updating its pre-existing sentinel row, so two importers
+    racing on a first-time version cannot both commit: BigQuery cancels the
+    second transaction that mutates the same row, and the cancelled importer
+    raises ``ValueError`` with nothing written. The same
+    absent/identical/conflicting decision is then repeated inside the
+    transaction against its own snapshot, so an importer whose pre-read was
+    stale still reports ``unchanged`` for an identical version (leaving the
+    first publish untouched) and raises for a conflicting one. A published
+    version is bound to the ``events_table`` /
     ``scores_table`` recorded in its manifest: re-importing it with other
     destination tables raises (even with ``replace=True``) instead of
     reporting a no-op against tables that were never written or orphaning
@@ -807,27 +863,22 @@ class EvalBenchRun:
           events_ref=events_ref,
           scores_ref=scores_ref,
       )
-      unchanged = all(
-          existing.get(key) == fingerprints[key] for key in _FINGERPRINT_KEYS
-      )
-      if not unchanged and not replace:
+      drift = _manifest_drift(existing, manifest)
+      if drift and not replace:
         raise ValueError(
             f"EvalBench job {self.job_id!r} import_version "
-            f"{import_version!r} already exists with different source "
-            "fingerprints; pass a new import_version (or omit it to derive "
-            "one from the source content), or replace=True to overwrite it"
+            f"{import_version!r} already exists with different "
+            f"{' and '.join(drift)}; pass a new import_version (or omit it "
+            "to derive one from the source content), or replace=True to "
+            "overwrite it"
         )
-      if unchanged and not replace:
-        return EvalBenchImportResult(
-            job_id=self.job_id,
+      if not drift and not replace:
+        return self._unchanged_result(
+            existing,
             import_version=import_version,
-            status="unchanged",
-            events_table=events_ref,
-            scores_table=scores_ref,
-            manifest_table=manifest_ref,
-            event_row_count=int(existing.get("event_row_count") or 0),
-            score_row_count=int(existing.get("score_row_count") or 0),
-            manifest=existing,
+            events_ref=events_ref,
+            scores_ref=scores_ref,
+            manifest_ref=manifest_ref,
         )
       status = "replaced"
 
@@ -864,6 +915,8 @@ class EvalBenchRun:
               job_id=self.job_id,
               import_version=import_version,
               fingerprints=fingerprints,
+              source_project=self.project_id,
+              source_dataset=self.evalbench_dataset,
               events_ref=events_ref,
               scores_ref=scores_ref,
           )
@@ -877,13 +930,34 @@ class EvalBenchRun:
       except ValueError:
         raise
       except Exception as exc:  # noqa: BLE001
+        if _PUBLISH_UNCHANGED_MESSAGE in str(exc):
+          # The transaction found an identical committed version that the
+          # stale pre-read missed and rolled itself back. Report the
+          # version that is actually published; the manifest row cannot
+          # have vanished since (nothing deletes manifest rows), so the
+          # local copy is only a defensive fallback.
+          committed = _read_manifest(
+              client,
+              manifest_ref=manifest_ref,
+              job_id=self.job_id,
+              import_version=import_version,
+              location=self.location,
+          )
+          return self._unchanged_result(
+              committed if committed is not None else manifest,
+              import_version=import_version,
+              events_ref=events_ref,
+              scores_ref=scores_ref,
+              manifest_ref=manifest_ref,
+          )
         if _PUBLISH_CONFLICT_MESSAGE in str(exc):
           raise ValueError(
               f"EvalBench job {self.job_id!r} import_version "
               f"{import_version!r} was published concurrently with different "
-              "source fingerprints or destination tables; nothing was "
-              "written. Re-run to get status 'unchanged', or pass a new "
-              "import_version (or omit it to derive one from the source)"
+              "source fingerprints, source project/dataset, or destination "
+              "tables; nothing was written. Re-run to get status "
+              "'unchanged', or pass a new import_version (or omit it to "
+              "derive one from the source)"
           ) from exc
         if _CONCURRENT_UPDATE_MARKER in str(exc).lower():
           raise ValueError(
@@ -913,6 +987,28 @@ class EvalBenchRun:
         event_row_count=len(event_rows),
         score_row_count=len(score_rows),
         manifest=manifest,
+    )
+
+  def _unchanged_result(
+      self,
+      existing: Mapping[str, Any],
+      *,
+      import_version: str,
+      events_ref: str,
+      scores_ref: str,
+      manifest_ref: str,
+  ) -> "EvalBenchImportResult":
+    """The ``unchanged`` outcome for an already-published identical version."""
+    return EvalBenchImportResult(
+        job_id=self.job_id,
+        import_version=import_version,
+        status="unchanged",
+        events_table=events_ref,
+        scores_table=scores_ref,
+        manifest_table=manifest_ref,
+        event_row_count=int(existing.get("event_row_count") or 0),
+        score_row_count=int(existing.get("score_row_count") or 0),
+        manifest=dict(existing),
     )
 
 
@@ -1138,6 +1234,8 @@ def _publish_parameters(
     job_id: str,
     import_version: str,
     fingerprints: Mapping[str, str],
+    source_project: str,
+    source_dataset: str,
     events_ref: str,
     scores_ref: str,
 ) -> list[bigquery.ScalarQueryParameter]:
@@ -1153,7 +1251,33 @@ def _publish_parameters(
   parameters.append(
       bigquery.ScalarQueryParameter("scores_table", "STRING", scores_ref)
   )
+  parameters.append(
+      bigquery.ScalarQueryParameter("source_project", "STRING", source_project)
+  )
+  parameters.append(
+      bigquery.ScalarQueryParameter("source_dataset", "STRING", source_dataset)
+  )
   return parameters
+
+
+def _manifest_drift(
+    existing: Mapping[str, Any], manifest: Mapping[str, Any]
+) -> list[str]:
+  """Describe how a stored manifest row differs from this import's manifest.
+
+  Compares exactly the inputs the publish transaction's guard compares
+  without ``replace`` (fingerprints and ``_PROVENANCE_KEYS``); destination
+  refs are checked separately by ``_check_destination_binding`` because they
+  are enforced even with ``replace``. Returns an empty list when the stored
+  version is identical.
+  """
+  drift: list[str] = []
+  if any(existing.get(key) != manifest[key] for key in _FINGERPRINT_KEYS):
+    drift.append("source fingerprints")
+  for key in _PROVENANCE_KEYS:
+    if existing.get(key) != manifest[key]:
+      drift.append(f"{key} ({existing.get(key)!r} vs {manifest[key]!r})")
+  return drift
 
 
 def _publish_script(
@@ -1172,18 +1296,26 @@ def _publish_script(
   The transaction always starts by UPDATE-ing the lock sentinel, which is
   the only statement guaranteed to mutate an existing row (the keyed DELETEs
   match nothing on a first import and INSERTs never conflict). Without
-  ``replace`` the guard rejects an existing manifest row whose fingerprints
-  *or* destination tables differ from this import; with ``replace``
-  fingerprints may drift but the destination binding still holds, so a
-  version can never be silently relocated.
+  ``replace`` the guard rejects an existing manifest row whose fingerprints,
+  source project/dataset, *or* destination tables differ from this import,
+  and leaves an identical row untouched (``_PUBLISH_UNCHANGED_MESSAGE``
+  rolls the transaction back); with ``replace`` fingerprints and provenance
+  may drift and an identical version is re-published, but the destination
+  binding still holds, so a version can never be silently relocated.
   """
   if replace:
     conflict_predicate = _DESTINATION_CONFLICT_PREDICATE
+    identical_guard = _REPLACE_IDENTICAL_NOTE
   else:
-    conflict_predicate = (
-        _FINGERPRINT_CONFLICT_PREDICATE
-        + " OR "
-        + _DESTINATION_CONFLICT_PREDICATE
+    conflict_predicate = " OR ".join(
+        (
+            _FINGERPRINT_CONFLICT_PREDICATE,
+            _PROVENANCE_CONFLICT_PREDICATE,
+            _DESTINATION_CONFLICT_PREDICATE,
+        )
+    )
+    identical_guard = _IDENTICAL_GUARD.format(
+        unchanged_message=_PUBLISH_UNCHANGED_MESSAGE
     )
   return _PUBLISH_SCRIPT.format(
       events_table=events_ref,
@@ -1197,6 +1329,7 @@ def _publish_script(
       manifest_staging=manifest_staging,
       conflict_predicate=conflict_predicate,
       conflict_message=_PUBLISH_CONFLICT_MESSAGE,
+      identical_guard=identical_guard,
       event_columns=", ".join(_EVENT_COLUMNS),
       score_columns=", ".join(name for name, _, _ in _SCORE_SCHEMA_FIELDS),
       manifest_columns=", ".join(

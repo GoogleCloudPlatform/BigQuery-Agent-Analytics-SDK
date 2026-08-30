@@ -508,6 +508,8 @@ class _FakeManifestStore:
 
 
 _RAISE_MESSAGE = re.compile(r"RAISE USING MESSAGE = '([^']*)'")
+# The RAISE message of one ``IF <guard> > 0 THEN`` block of the publish script.
+_GUARD_MESSAGE = r"IF {guard} > 0 THEN\s*RAISE USING MESSAGE = '([^']*)'"
 _CONCURRENT_UPDATE_ERROR = (
     "400 Transaction is aborted due to concurrent update against table"
     " {lock_table}. Transaction ID: fake"
@@ -538,11 +540,12 @@ class _FakeWriteClient:
     transaction with the "concurrent update" error, which is what the fake
     raises. Only one of two concurrent publishes can therefore commit.
 
-  ``stale_manifest_reads`` makes the pre-publish manifest read return
-  nothing; ``transaction_snapshot`` pins the snapshot the transaction itself
-  starts from (default: the committed state when ``BEGIN TRANSACTION`` runs).
-  Passing one snapshot to two clients models two transactions that both
-  began before either committed.
+  ``stale_manifest_reads`` makes every manifest read *before* this client's
+  first publish transaction return nothing (a stale pre-read); reads after
+  the transaction see committed state. ``transaction_snapshot`` pins the
+  snapshot the transaction itself starts from (default: the committed state
+  when ``BEGIN TRANSACTION`` runs). Passing one snapshot to two clients
+  models two transactions that both began before either committed.
   """
 
   def __init__(
@@ -558,6 +561,7 @@ class _FakeWriteClient:
   ) -> None:
     self.store = store or _FakeManifestStore(manifest_rows)
     self.stale_manifest_reads = stale_manifest_reads
+    self.transaction_attempted = False
     self.transaction_snapshot = transaction_snapshot
     self.load_error = load_error
     self.transaction_error = transaction_error
@@ -582,6 +586,7 @@ class _FakeWriteClient:
     self.queries.append((query, kwargs))
     params = {p.name: p.value for p in kwargs["job_config"].query_parameters}
     if "BEGIN TRANSACTION" in query:
+      self.transaction_attempted = True
       if self.transaction_error is not None:
         return _FakeJob(error=self.transaction_error)
       snapshot = self.transaction_snapshot or self.store.snapshot()
@@ -593,7 +598,7 @@ class _FakeWriteClient:
         self.store.lock_rows = 1
       return _FakeJob()
     if ".evalbench_import_manifest`" in query:
-      if self.stale_manifest_reads:
+      if self.stale_manifest_reads and not self.transaction_attempted:
         return _FakeJob([])
       return _FakeJob(
           [row for row in self.store.rows if _same_version(row, params)]
@@ -621,7 +626,9 @@ class _FakeWriteClient:
           )
       )
 
-    # 2. Manifest guard, evaluated against the transaction's snapshot.
+    # 2. Manifest guard, evaluated against the transaction's snapshot:
+    #    absent -> publish, conflicting -> RAISE, identical -> RAISE the
+    #    "unchanged" message (without replace) so nothing is rewritten.
     predicates = []
     if "results_fingerprint != @results_fingerprint" in script:
       predicates.append(
@@ -634,19 +641,30 @@ class _FakeWriteClient:
               )
           )
       )
+    if "source_project != @source_project" in script:
+      predicates.append(
+          lambda row: row["source_project"] != params["source_project"]
+          or row["source_dataset"] != params["source_dataset"]
+      )
     if "events_table != @events_table" in script:
       predicates.append(
           lambda row: row["events_table"] != params["events_table"]
           or row["scores_table"] != params["scores_table"]
       )
+    existing = [row for row in snapshot.rows if _same_version(row, params)]
     conflicts = [
-        row
-        for row in snapshot.rows
-        if _same_version(row, params) and any(pred(row) for pred in predicates)
+        row for row in existing if any(pred(row) for pred in predicates)
     ]
     if conflicts:
-      message = _RAISE_MESSAGE.findall(script)[-1]
-      return _FakeJob(error=RuntimeError(f"400 {message}"))
+      message = _GUARD_MESSAGE.format(guard="conflicting_manifest_rows")
+      return _FakeJob(
+          error=RuntimeError(f"400 {re.search(message, script).group(1)}")
+      )
+    identical_guard = re.search(
+        _GUARD_MESSAGE.format(guard="existing_manifest_rows"), script
+    )
+    if existing and identical_guard is not None:
+      return _FakeJob(error=RuntimeError(f"400 {identical_guard.group(1)}"))
 
     # 3. Commit: keyed DELETEs then INSERTs from staging, plus the claim.
     def staged(table: str) -> list[dict]:
@@ -1070,6 +1088,17 @@ def test_publish_script_guards_manifest_inside_the_transaction() -> None:
   assert "configs_fingerprint != @configs_fingerprint" in script
   assert "events_table != @events_table" in script
   assert "scores_table != @scores_table" in script
+  assert "source_project != @source_project" in script
+  assert "source_dataset != @source_dataset" in script
+  # Absent / identical / conflicting: an identical manifest row is left in
+  # place (RAISE -> ROLLBACK) rather than deleted and re-inserted.
+  assert evalbench._PUBLISH_CONFLICT_MESSAGE in script
+  assert evalbench._PUBLISH_UNCHANGED_MESSAGE in script
+  assert (
+      script.index("IF conflicting_manifest_rows > 0 THEN")
+      < script.index("IF existing_manifest_rows > 0 THEN")
+      < script.index("DELETE FROM")
+  )
   assert "EXCEPTION WHEN ERROR THEN" in script
   assert script.index("ROLLBACK TRANSACTION") > script.index(
       "COMMIT TRANSACTION"
@@ -1086,6 +1115,8 @@ def test_publish_script_guards_manifest_inside_the_transaction() -> None:
       "configs_fingerprint": result.manifest["configs_fingerprint"],
       "events_table": result.events_table,
       "scores_table": result.scores_table,
+      "source_project": "source-project",
+      "source_dataset": "evalbench",
   }
 
 
@@ -1096,6 +1127,9 @@ def test_publish_script_replace_skips_fingerprint_guard_only() -> None:
   )
   script = _transaction_queries(fake)[0]
   assert "results_fingerprint != @results_fingerprint" not in script
+  assert "source_project != @source_project" not in script
+  assert "IF existing_manifest_rows > 0 THEN" not in script
+  assert evalbench._PUBLISH_UNCHANGED_MESSAGE not in script
   assert "events_table != @events_table" in script
 
 
@@ -1144,6 +1178,114 @@ def test_materialize_stale_pre_read_is_caught_by_transaction_guard() -> None:
 
 def _published_rows(fake: _FakeWriteClient, table: str) -> list[dict]:
   return next(rows for dest, rows, _ in fake.loads if table in dest)
+
+
+def test_materialize_stale_pre_read_identical_publish_is_unchanged() -> None:
+  """Stale pre-read, identical content *and* provenance: the transaction
+  distinguishes an identical manifest from an absent one, preserves A's
+  rows and manifest, and reports ``unchanged`` instead of re-publishing."""
+  store = _FakeManifestStore()
+  importer_a = _FakeWriteClient(store=store, stale_manifest_reads=True)
+  first = _scored_run().materialize(
+      target_dataset="bqaa",
+      import_version="v1",
+      imported_at=datetime(2026, 5, 1, 8, 0, tzinfo=timezone.utc),
+      bq_client=importer_a,
+  )
+  assert first.status == "imported"
+  assert store.lock_claims == 1
+  published_events = _published_rows(importer_a, "evalbench_agent_events")
+
+  importer_b = _FakeWriteClient(store=store, stale_manifest_reads=True)
+  same = _scored_run().materialize(
+      target_dataset="bqaa",
+      import_version="v1",
+      imported_at=datetime(2026, 5, 2, 8, 0, tzinfo=timezone.utc),
+      bq_client=importer_b,
+  )
+  assert same.status == "unchanged"
+  assert same.manifest == first.manifest
+  assert same.event_row_count == first.event_row_count
+  assert same.score_row_count == first.score_row_count
+  # B reached the transaction (its pre-read saw nothing) but was rolled
+  # back: A's manifest (with A's imported_at), rows, and lock claim survive.
+  assert len(_transaction_queries(importer_b)) == 1
+  assert store.rows == [first.manifest]
+  assert store.events == published_events
+  assert store.lock_claims == 1
+  staged = {destination for destination, _, _ in importer_b.loads}
+  assert set(importer_b.deleted) == staged
+
+
+@pytest.mark.parametrize(
+    "field, other_value",
+    [("project_id", "other-project"), ("evalbench_dataset", "evalbench_copy")],
+)
+def test_materialize_stale_pre_read_provenance_drift_is_a_conflict(
+    field: str, other_value: str
+) -> None:
+  """Codex P1 on a8e8b5c: equal source rows read from another source
+  project/dataset produce equal fingerprints, but ``source_project`` /
+  ``source_dataset`` change the manifest and the published
+  ``attributes.evalbench_source_*`` values. A stale-pre-read importer whose
+  transaction starts after the first commit must treat that as a
+  conflicting version, not as absent, and must not rewrite it without
+  ``replace=True``."""
+  store = _FakeManifestStore()
+  importer_a = _FakeWriteClient(store=store, stale_manifest_reads=True)
+  first = _scored_run().materialize(
+      target_dataset="bqaa", import_version="v1", bq_client=importer_a
+  )
+  assert first.status == "imported"
+  published_events = _published_rows(importer_a, "evalbench_agent_events")
+
+  other_source = dataclasses.replace(_scored_run(), **{field: other_value})
+  assert other_source.fingerprints() == _scored_run().fingerprints()
+  # Same destination tables as A, so only provenance differs.
+  target = {"target_project": "source-project", "target_dataset": "bqaa"}
+
+  importer_b = _FakeWriteClient(store=store, stale_manifest_reads=True)
+  with pytest.raises(ValueError, match="published concurrently"):
+    other_source.materialize(
+        **target, import_version="v1", bq_client=importer_b
+    )
+  assert len(_transaction_queries(importer_b)) == 1
+  assert store.rows == [first.manifest]
+  assert store.events == published_events
+  assert store.lock_claims == 1
+  assert all(
+      row["attributes"]["evalbench_source_project"] == "source-project"
+      and row["attributes"]["evalbench_source_dataset"] == "evalbench"
+      for row in store.events
+  )
+  staged = {destination for destination, _, _ in importer_b.loads}
+  assert set(importer_b.deleted) == staged
+
+  # A fresh pre-read reports the same drift before staging anything.
+  fresh = _FakeWriteClient(store=store)
+  with pytest.raises(ValueError, match="already exists with different") as info:
+    other_source.materialize(**target, import_version="v1", bq_client=fresh)
+  assert other_value in str(info.value)
+  assert "new import_version" in str(info.value)
+  assert fresh.loads == []
+  assert _transaction_queries(fresh) == []
+  assert store.rows == [first.manifest]
+
+  # replace=True is the explicit override: the version is re-published from
+  # the new source and the manifest records the new provenance.
+  importer_c = _FakeWriteClient(store=store)
+  replaced = other_source.materialize(
+      **target, import_version="v1", replace=True, bq_client=importer_c
+  )
+  assert replaced.status == "replaced"
+  assert store.rows == [replaced.manifest]
+  manifest_key = "source_project" if field == "project_id" else "source_dataset"
+  assert replaced.manifest[manifest_key] == other_value
+  attribute_key = "evalbench_" + manifest_key
+  assert all(
+      row["attributes"][attribute_key] == other_value for row in store.events
+  )
+  assert store.lock_claims == 2
 
 
 def test_materialize_concurrent_first_imports_serialize_on_lock_sentinel() -> (
