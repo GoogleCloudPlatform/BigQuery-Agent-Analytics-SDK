@@ -2245,6 +2245,116 @@ bqaa_app.command(
 )(materialize_window)
 
 
+@app.command("evalbench-import")
+def evalbench_import(
+    project_id: str = typer.Option(
+        ...,
+        envvar="BQ_AGENT_PROJECT",
+        help="Project containing the EvalBench source tables.",
+    ),
+    evalbench_dataset: str = typer.Option(
+        ...,
+        "--evalbench-dataset",
+        help="Dataset containing EvalBench configs, results, and scores.",
+    ),
+    job_id: str = typer.Option(
+        ..., "--job-id", help="EvalBench job_id to import."
+    ),
+    target_dataset: str = typer.Option(
+        ...,
+        "--target-dataset",
+        help="BQAA-owned dataset that receives the mirror tables.",
+    ),
+    target_project: Optional[str] = typer.Option(
+        None,
+        "--target-project",
+        help="Target project (defaults to --project-id).",
+    ),
+    events_table: str = typer.Option(
+        "evalbench_agent_events",
+        "--events-table",
+        help="Mirror event table name in --target-dataset.",
+    ),
+    scores_table: str = typer.Option(
+        "evalbench_scores_imported",
+        "--scores-table",
+        help="Imported score table name in --target-dataset.",
+    ),
+    import_version: Optional[str] = typer.Option(
+        None,
+        "--import-version",
+        help=(
+            "Version label for this import. Defaults to a fingerprint of the"
+            " source rows so an unchanged source is a no-op."
+        ),
+    ),
+    replace: bool = typer.Option(
+        False,
+        "--replace",
+        help="Atomically overwrite an existing import version.",
+    ),
+    snapshot_at: Optional[str] = typer.Option(
+        None,
+        "--snapshot-at",
+        help=(
+            "ISO-8601 timestamp; read all three source tables FOR SYSTEM_TIME"
+            " AS OF this instant so a still-running job cannot mix versions."
+        ),
+    ),
+    location: Optional[str] = typer.Option(
+        None, "--location", help="BigQuery location."
+    ),
+    fmt: str = typer.Option(
+        "json", "--format", help="Output format: json|text|table."
+    ),
+) -> None:
+  """Snapshot one EvalBench job into BQAA-owned mirror tables.
+
+  Reads the job's configs/results/scores, maps them to synthetic agent
+  events, and publishes events, scores, and a manifest row as one immutable
+  import version via a single BigQuery transaction. The ADK plugin's
+  production ``agent_events`` table is never written.
+
+  Exit codes:
+      0 — imported, replaced, or unchanged (see ``status`` in the output).
+      2 — invalid input, a changed source under an explicit
+          --import-version, or a BigQuery error.
+  """
+  try:
+    from .evalbench import _parse_timestamp
+    from .evalbench import EvalBenchRun
+
+    parsed_snapshot = None
+    if snapshot_at is not None:
+      parsed_snapshot = _parse_timestamp(snapshot_at)
+      if parsed_snapshot is None:
+        raise ValueError(
+            f"--snapshot-at must be an ISO-8601 timestamp, got {snapshot_at!r}"
+        )
+
+    run = EvalBenchRun.from_bigquery(
+        project_id=project_id,
+        evalbench_dataset=evalbench_dataset,
+        job_id=job_id,
+        location=location,
+        snapshot_at=parsed_snapshot,
+    )
+    result = run.materialize(
+        target_project=target_project,
+        target_dataset=target_dataset,
+        events_table=events_table,
+        scores_table=scores_table,
+        import_version=import_version,
+        replace=replace,
+    )
+    typer.echo(format_output(result.to_dict(), fmt))
+  except typer.Exit:
+    raise
+  except Exception as exc:  # noqa: BLE001
+    typer.echo(f"Error: {exc}", err=True)
+    raise typer.Exit(code=2)
+
+
 @bqaa_app.command("seed-events")
 def seed_events(
     project_id: str = typer.Option(

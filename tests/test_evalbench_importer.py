@@ -11,17 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for the EvalBench BigQuery reader and event-row mapper (#97)."""
+"""Tests for the EvalBench reader/mapper (#97) and snapshot importer (#435)."""
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime
 from datetime import timezone
 import json
 
 import pytest
 
+from bigquery_agent_analytics.evalbench import classify_sessions
 from bigquery_agent_analytics.evalbench import EvalBenchRun
+from bigquery_agent_analytics.evalbench import EvalScorePolicy
+from bigquery_agent_analytics.evalbench import failed_sessions_sql
 
 _RUN_TIME = datetime(2026, 4, 29, 12, 30, tzinfo=timezone.utc)
 _EXPECTED_EVENT_COLUMNS = {
@@ -400,3 +404,483 @@ def test_duplicate_scenario_ids_are_rejected() -> None:
 
   with pytest.raises(ValueError, match="duplicate scenario id 'duplicate'"):
     run.to_agent_event_rows()
+
+
+# ---------------------------------------------------------------------------
+# materialize(): atomic, idempotent snapshot into BQAA-owned tables (#435)
+# ---------------------------------------------------------------------------
+
+
+class _FakeJob:
+
+  def __init__(self, rows=(), error: Exception | None = None) -> None:
+    self._rows = list(rows)
+    self._error = error
+
+  def result(self):
+    if self._error is not None:
+      raise self._error
+    return self._rows
+
+
+class _FakeWriteClient:
+  """Records loads, queries, and table DDL issued by ``materialize``."""
+
+  def __init__(
+      self,
+      *,
+      manifest_rows: list[dict] | None = None,
+      load_error: Exception | None = None,
+      transaction_error: Exception | None = None,
+  ) -> None:
+    self.manifest_rows = list(manifest_rows or [])
+    self.load_error = load_error
+    self.transaction_error = transaction_error
+    self.loads: list[tuple[str, list[dict], object]] = []
+    self.queries: list[tuple[str, dict]] = []
+    self.created: list[str] = []
+    self.deleted: list[str] = []
+
+  def create_table(self, table, exists_ok: bool = False):
+    assert exists_ok is True
+    self.created.append(f"{table.project}.{table.dataset_id}.{table.table_id}")
+    return table
+
+  def query(self, query: str, **kwargs) -> _FakeJob:
+    self.queries.append((query, kwargs))
+    if "BEGIN TRANSACTION" in query:
+      return _FakeJob(error=self.transaction_error)
+    if ".evalbench_import_manifest`" in query:
+      return _FakeJob(self.manifest_rows)
+    raise AssertionError(f"unexpected query: {query}")
+
+  def load_table_from_json(self, rows, destination, job_config=None):
+    self.loads.append((destination, list(rows), job_config))
+    return _FakeJob(error=self.load_error)
+
+  def delete_table(self, table_ref: str, not_found_ok: bool = False) -> None:
+    assert not_found_ok is True
+    self.deleted.append(table_ref)
+
+
+def _scored_run(*, extra_result: dict | None = None, scores=None):
+  results = [
+      {
+          "eval_id": "ok-1",
+          "prompt": "Passing scenario",
+          "stdout": json.dumps({"response": "done"}),
+          "returncode": 0,
+          "run_time": _RUN_TIME,
+      },
+      {
+          "eval_id": "crash-1",
+          "prompt": "Crashing scenario",
+          "stdout": "",
+          "stderr": "boom",
+          "returncode": 2,
+          "run_time": _RUN_TIME,
+      },
+  ]
+  if extra_result is not None:
+    results.append(extra_result)
+  if scores is None:
+    scores = (
+        {"eval_id": "ok-1", "comparator": "goal_completion", "score": 1},
+        {"eval_id": "crash-1", "comparator": "goal_completion", "score": 0},
+    )
+  return EvalBenchRun(
+      project_id="source-project",
+      evalbench_dataset="evalbench",
+      job_id="job-123",
+      location="US",
+      results=tuple(results),
+      scores=tuple(scores),
+      config_rows=(
+          {
+              "config": "experiment_config.orchestrator",
+              "value": "geminicli",
+              "run_time": _RUN_TIME,
+          },
+      ),
+  )
+
+
+def _transaction_queries(fake: _FakeWriteClient) -> list[str]:
+  return [sql for sql, _ in fake.queries if "BEGIN TRANSACTION" in sql]
+
+
+def test_materialize_publishes_events_scores_and_manifest_atomically() -> None:
+  fake = _FakeWriteClient()
+  run = _scored_run()
+
+  result = run.materialize(
+      target_project="analytics-project",
+      target_dataset="bqaa",
+      bq_client=fake,
+  )
+
+  assert result.status == "imported"
+  assert result.events_table == "analytics-project.bqaa.evalbench_agent_events"
+  assert result.scores_table == (
+      "analytics-project.bqaa.evalbench_scores_imported"
+  )
+  assert result.manifest_table == (
+      "analytics-project.bqaa.evalbench_import_manifest"
+  )
+  # Never the ADK plugin's production table, and never the source project.
+  for destination, _, _ in fake.loads:
+    assert destination.startswith("analytics-project.bqaa.evalbench_")
+    assert ".agent_events" not in destination
+  assert all(
+      ref.startswith("analytics-project.bqaa.evalbench_")
+      for ref in fake.created
+  )
+
+  # Every load targets a per-import staging table, not the published one.
+  staged = {destination for destination, _, _ in fake.loads}
+  assert len(staged) == 3
+  assert all("_staging_" in ref for ref in staged)
+  assert set(fake.deleted) == staged
+
+  # Exactly one transaction publishes all three tables; no delete-then-append.
+  transactions = _transaction_queries(fake)
+  assert len(transactions) == 1
+  script = transactions[0]
+  assert script.count("DELETE FROM") == 3
+  assert script.count("INSERT INTO") == 3
+  assert script.index("BEGIN TRANSACTION") < script.index("DELETE FROM")
+  assert script.index("INSERT INTO") < script.index("COMMIT TRANSACTION")
+  assert "job-123" not in script
+  _, kwargs = next(
+      (sql, kw) for sql, kw in fake.queries if "BEGIN TRANSACTION" in sql
+  )
+  params = {p.name: p.value for p in kwargs["job_config"].query_parameters}
+  assert params == {
+      "job_id": "job-123",
+      "import_version": result.import_version,
+  }
+  assert kwargs["job_config"].labels["sdk_feature"] == "evalbench-import"
+  assert kwargs["location"] == "US"
+
+  # Rows are bound to the import version and keep the mapper's contract.
+  event_rows = next(
+      rows for dest, rows, _ in fake.loads if "evalbench_agent_events" in dest
+  )
+  assert {row["import_version"] for row in event_rows} == {
+      result.import_version
+  }
+  assert {row["job_id"] for row in event_rows} == {"job-123"}
+  assert all(row["content"]["text_summary"] for row in event_rows)
+  assert all(
+      row["attributes"]["experiment_id"] == "job-123" for row in event_rows
+  )
+  score_rows = next(
+      rows
+      for dest, rows, _ in fake.loads
+      if "evalbench_scores_imported" in dest
+  )
+  assert {row["session_id"] for row in score_rows} == {
+      "evalbench:job-123:ok-1",
+      "evalbench:job-123:crash-1",
+  }
+  assert {row["comparator"] for row in score_rows} == {"goal_completion"}
+  manifest_rows = next(
+      rows
+      for dest, rows, _ in fake.loads
+      if "evalbench_import_manifest" in dest
+  )
+  assert len(manifest_rows) == 1
+  manifest = manifest_rows[0]
+  assert manifest["job_id"] == "job-123"
+  assert manifest["import_version"] == result.import_version
+  assert manifest["source_project"] == "source-project"
+  assert manifest["source_dataset"] == "evalbench"
+  assert manifest["results_count"] == 2
+  assert manifest["scores_count"] == 2
+  assert manifest["configs_count"] == 1
+  assert manifest["event_row_count"] == len(event_rows)
+  assert manifest["score_row_count"] == len(score_rows)
+  assert manifest["events_table"] == result.events_table
+  assert manifest["scores_table"] == result.scores_table
+  for key in (
+      "results_fingerprint",
+      "scores_fingerprint",
+      "configs_fingerprint",
+  ):
+    assert len(manifest[key]) == 64
+  assert manifest["imported_at"]
+  assert result.manifest == manifest
+
+
+def test_materialize_defaults_target_project_to_source_project() -> None:
+  fake = _FakeWriteClient()
+  result = _scored_run().materialize(target_dataset="bqaa", bq_client=fake)
+  assert result.events_table == "source-project.bqaa.evalbench_agent_events"
+
+
+def test_materialize_same_job_and_version_is_a_noop() -> None:
+  first = _FakeWriteClient()
+  run = _scored_run()
+  imported = run.materialize(target_dataset="bqaa", bq_client=first)
+
+  second = _FakeWriteClient(manifest_rows=[imported.manifest])
+  again = run.materialize(target_dataset="bqaa", bq_client=second)
+
+  assert again.status == "unchanged"
+  assert again.import_version == imported.import_version
+  assert second.loads == []
+  assert _transaction_queries(second) == []
+
+
+def test_materialize_replace_republishes_identical_version() -> None:
+  first = _FakeWriteClient()
+  run = _scored_run()
+  imported = run.materialize(target_dataset="bqaa", bq_client=first)
+
+  second = _FakeWriteClient(manifest_rows=[imported.manifest])
+  again = run.materialize(target_dataset="bqaa", bq_client=second, replace=True)
+
+  assert again.status == "replaced"
+  assert again.import_version == imported.import_version
+  assert len(_transaction_queries(second)) == 1
+
+
+def test_materialize_derived_version_changes_when_source_changes() -> None:
+  base = _scored_run().materialize(
+      target_dataset="bqaa", bq_client=_FakeWriteClient()
+  )
+  changed = _scored_run(
+      extra_result={
+          "eval_id": "late-1",
+          "prompt": "A scenario appended after the first import",
+          "stdout": json.dumps({"response": "late"}),
+          "returncode": 0,
+      }
+  ).materialize(target_dataset="bqaa", bq_client=_FakeWriteClient())
+
+  assert changed.import_version != base.import_version
+  assert changed.manifest["results_fingerprint"] != (
+      base.manifest["results_fingerprint"]
+  )
+  assert changed.manifest["scores_fingerprint"] == (
+      base.manifest["scores_fingerprint"]
+  )
+
+
+def test_materialize_fingerprint_ignores_source_row_order() -> None:
+  run = _scored_run()
+  reordered = dataclasses.replace(
+      run,
+      results=tuple(reversed(run.results)),
+      scores=tuple(reversed(run.scores)),
+  )
+  first = run.materialize(target_dataset="bqaa", bq_client=_FakeWriteClient())
+  second = reordered.materialize(
+      target_dataset="bqaa", bq_client=_FakeWriteClient()
+  )
+  assert first.import_version == second.import_version
+
+
+def test_materialize_explicit_version_rejects_changed_source() -> None:
+  first = _FakeWriteClient()
+  imported = _scored_run().materialize(
+      target_dataset="bqaa", import_version="v1", bq_client=first
+  )
+  assert imported.import_version == "v1"
+
+  changed = _scored_run(
+      extra_result={
+          "eval_id": "late-1",
+          "prompt": "Appended after v1 was imported",
+          "stdout": json.dumps({"response": "late"}),
+      }
+  )
+  second = _FakeWriteClient(manifest_rows=[imported.manifest])
+  with pytest.raises(ValueError, match="fingerprint"):
+    changed.materialize(
+        target_dataset="bqaa", import_version="v1", bq_client=second
+    )
+  assert second.loads == []
+  assert _transaction_queries(second) == []
+
+
+def test_materialize_staging_failure_leaves_target_untouched() -> None:
+  fake = _FakeWriteClient(load_error=RuntimeError("load failed"))
+  with pytest.raises(RuntimeError, match="load failed"):
+    _scored_run().materialize(target_dataset="bqaa", bq_client=fake)
+
+  assert _transaction_queries(fake) == []
+  # Staging tables are always cleaned up.
+  assert fake.deleted
+
+
+def test_materialize_transaction_failure_drops_staging_and_raises() -> None:
+  fake = _FakeWriteClient(transaction_error=RuntimeError("commit failed"))
+  with pytest.raises(RuntimeError, match="commit failed"):
+    _scored_run().materialize(target_dataset="bqaa", bq_client=fake)
+  staged = {destination for destination, _, _ in fake.loads}
+  assert set(fake.deleted) == staged
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("target_project", "bad.project"),
+        ("target_dataset", "bqaa`; DROP TABLE x; --"),
+        ("events_table", "agent events"),
+        ("scores_table", "scores;"),
+    ],
+)
+def test_materialize_rejects_unsafe_target_identifiers(
+    field: str, value: str
+) -> None:
+  kwargs = {"target_dataset": "bqaa", "bq_client": _FakeWriteClient()}
+  kwargs[field] = value
+  with pytest.raises(ValueError, match=field):
+    _scored_run().materialize(**kwargs)
+
+
+def test_from_bigquery_snapshot_reads_all_sources_as_of_one_timestamp() -> None:
+  fake = _FakeBigQueryClient({"results": [], "scores": [], "configs": []})
+  snapshot = datetime(2026, 5, 1, 8, 0, tzinfo=timezone.utc)
+
+  run = EvalBenchRun.from_bigquery(
+      project_id="source-project",
+      evalbench_dataset="evalbench",
+      job_id="job-123",
+      snapshot_at=snapshot,
+      bq_client=fake,
+  )
+
+  assert run.snapshot_at == snapshot
+  assert len(fake.calls) == 3
+  for query, kwargs in fake.calls:
+    assert "FOR SYSTEM_TIME AS OF @snapshot_at" in query
+    params = {p.name: p.value for p in kwargs["job_config"].query_parameters}
+    assert params["snapshot_at"] == snapshot
+
+
+def test_materialize_records_snapshot_timestamp_in_manifest() -> None:
+  snapshot = datetime(2026, 5, 1, 8, 0, tzinfo=timezone.utc)
+  run = dataclasses.replace(_scored_run(), snapshot_at=snapshot)
+  result = run.materialize(target_dataset="bqaa", bq_client=_FakeWriteClient())
+  assert result.manifest["source_snapshot_at"] == snapshot.isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Failed-session denominator (W0.4): returncode 0 means completed, not passed
+# ---------------------------------------------------------------------------
+
+
+def _verdicts(run: EvalBenchRun, policy: EvalScorePolicy):
+  return {
+      verdict.session_id: verdict
+      for verdict in classify_sessions(
+          run.to_agent_event_rows(),
+          run.to_score_rows(import_version="v1"),
+          policy,
+      )
+  }
+
+
+def test_classify_sessions_counts_low_scoring_completed_runs_as_failed() -> (
+    None
+):
+  run = _scored_run(
+      extra_result={
+          "eval_id": "wrong-1",
+          "prompt": "Completed but wrong answer",
+          "stdout": json.dumps({"response": "42"}),
+          "returncode": 0,
+      },
+      scores=(
+          {"eval_id": "ok-1", "comparator": "goal_completion", "score": 1},
+          {"eval_id": "crash-1", "comparator": "goal_completion", "score": 0},
+          {"eval_id": "wrong-1", "comparator": "goal_completion", "score": 0.2},
+      ),
+  )
+  verdicts = _verdicts(run, EvalScorePolicy({"goal_completion": 0.5}))
+
+  assert set(verdicts) == {
+      "evalbench:job-123:ok-1",
+      "evalbench:job-123:crash-1",
+      "evalbench:job-123:wrong-1",
+  }
+  passed = verdicts["evalbench:job-123:ok-1"]
+  assert passed.failed is False
+  assert passed.process_failed is False
+  assert passed.score_failed is False
+
+  crashed = verdicts["evalbench:job-123:crash-1"]
+  assert crashed.failed is True
+  assert crashed.process_failed is True
+  assert crashed.missing_completion is True
+
+  wrong = verdicts["evalbench:job-123:wrong-1"]
+  assert wrong.failed is True
+  assert wrong.process_failed is False
+  assert wrong.missing_completion is False
+  assert wrong.score_failed is True
+  assert wrong.failing_scores == {"goal_completion": 0.2}
+
+  failed = sorted(v.session_id for v in verdicts.values() if v.failed)
+  assert failed == ["evalbench:job-123:crash-1", "evalbench:job-123:wrong-1"]
+
+
+def test_classify_sessions_returncode_zero_without_scores_is_not_a_pass() -> (
+    None
+):
+  run = _scored_run(scores=())
+  verdicts = _verdicts(run, EvalScorePolicy({"goal_completion": 0.5}))
+  completed = verdicts["evalbench:job-123:ok-1"]
+  assert completed.process_failed is False
+  assert completed.score_failed is True
+  assert completed.failed is True
+  assert completed.failing_scores == {"goal_completion": None}
+
+  lenient = _verdicts(
+      run, EvalScorePolicy({"goal_completion": 0.5}, missing_score_fails=False)
+  )
+  assert lenient["evalbench:job-123:ok-1"].failed is False
+
+
+def test_classify_sessions_without_policy_only_uses_process_signals() -> None:
+  verdicts = _verdicts(_scored_run(), EvalScorePolicy())
+  assert verdicts["evalbench:job-123:ok-1"].failed is False
+  assert verdicts["evalbench:job-123:crash-1"].failed is True
+
+
+def test_failed_sessions_sql_pins_import_version_and_renders_policy() -> None:
+  sql = failed_sessions_sql(
+      target_project="analytics-project",
+      target_dataset="bqaa",
+      policy=EvalScorePolicy({"goal_completion": 0.5, "sql_correctness": 1.0}),
+  )
+
+  assert "`analytics-project.bqaa.evalbench_agent_events`" in sql
+  assert "`analytics-project.bqaa.evalbench_scores_imported`" in sql
+  assert sql.count("import_version = @import_version") >= 2
+  assert sql.count("job_id = @job_id") >= 2
+  assert "STRUCT('goal_completion' AS comparator, 0.5 AS min_score)" in sql
+  assert "STRUCT('sql_correctness' AS comparator, 1.0 AS min_score)" in sql
+  assert "status = 'ERROR'" in sql
+  assert "event_type = 'AGENT_COMPLETED'" in sql
+  # Completion is never inferred from the process exit code.
+  assert "returncode" not in sql
+
+
+def test_failed_sessions_sql_rejects_unsafe_comparator_names() -> None:
+  with pytest.raises(ValueError, match="comparator"):
+    failed_sessions_sql(
+        target_project="p",
+        target_dataset="d",
+        policy=EvalScorePolicy({"x' OR 1=1 --": 0.5}),
+    )
+
+
+def test_failed_sessions_sql_without_policy_still_counts_process_failures() -> (
+    None
+):
+  sql = failed_sessions_sql(target_project="p", target_dataset="d")
+  assert "status = 'ERROR'" in sql
+  assert "min_score" not in sql
