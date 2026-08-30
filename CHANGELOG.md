@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **AgentForensics MVP plan of record (#435)** — `docs/agentforensics_mvp_plan.md`
+  lands the FINAL v4 execution plan: Week 0 pre-clock gate, the six-week MVP
+  table with preregistered exit criteria, labeler ledger, staged Part II, and
+  standing invariants. Docs only; Week-0 items stay human-gated.
 - **EvalBench LLM-judge scoring of one import version (#435 slice 3, #97)**
   — new `bq-agent-sdk evalbench-score` command: a thin wrapper over the
   existing `Client.evaluate` + `LLMAsJudge` (`correctness` |
