@@ -602,6 +602,13 @@ published import, a `--table-id` the version was not published to, or a
 version with no sessions — or a BigQuery error. `examples/evalbench_score_gate.sh`
 shows the CI gate form.
 
+`examples/evalbench_mvp_e2e.sh` runs the three commands above in order on
+one job (import → failed-sessions → score); `--fixture` (or
+`EVALBENCH_FIXTURE=1`) prints annotated sample output for all three steps
+without touching BigQuery, so the walkthrough can be recorded or run in
+CI. `examples/evalbench_mvp_e2e.md` explains each step, the environment
+variables, and fixture versus live mode.
+
 ## Why These Fields Matter
 
 The mapping follows the SDK queries that consume the mirror table:

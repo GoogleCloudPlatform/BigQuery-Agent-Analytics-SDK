@@ -46,6 +46,8 @@ artifacts that demonstrate SDK capabilities.
 | [e2e_demo.py](e2e_demo.py) | Complete end-to-end workflow |
 | [cli_agent_tool.py](cli_agent_tool.py) | CLI agent tool example with structured ambiguous-session retry selectors |
 | [ci_eval_pipeline.sh](ci_eval_pipeline.sh) | CI evaluation pipeline |
+| [evalbench_mvp_e2e.sh](evalbench_mvp_e2e.sh) | EvalBench MVP end to end on one job: `evalbench-import` → `evalbench-failed-sessions` → `evalbench-score`; `--fixture` runs offline (walkthrough: [evalbench_mvp_e2e.md](evalbench_mvp_e2e.md)) |
+| [evalbench_score_gate.sh](evalbench_score_gate.sh) | CI gate on the LLM-judge score of one EvalBench import version |
 
 ## Demo Bundles
 

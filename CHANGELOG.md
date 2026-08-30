@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lands the FINAL v4 execution plan: Week 0 pre-clock gate, the six-week MVP
   table with preregistered exit criteria, labeler ledger, staged Part II, and
   standing invariants. Docs only; Week-0 items stay human-gated.
+- **EvalBench MVP end-to-end demo (#435 slice 5, #97)** —
+  `examples/evalbench_mvp_e2e.sh` walks `bq-agent-sdk evalbench-import` →
+  `evalbench-failed-sessions` → `evalbench-score` in order on one
+  EvalBench job, printing a banner per step; `--fixture` (or
+  `EVALBENCH_FIXTURE=1`) prints annotated sample output for all three
+  steps without calling BigQuery so the demo is recordable and CI-safe,
+  and live mode calls the three CLIs from `BQ_AGENT_*` / `EVALBENCH_*`
+  environment variables. Walkthrough in `examples/evalbench_mvp_e2e.md`;
+  `tests/test_evalbench_mvp_e2e.py` runs the fixture path. No CLI or
+  Python behavior changes; `examples/evalbench_score_gate.sh` stays the
+  CI gate.
 - **EvalBench LLM-judge scoring of one import version (#435 slice 3, #97)**
   — new `bq-agent-sdk evalbench-score` command: a thin wrapper over the
   existing `Client.evaluate` + `LLMAsJudge` (`correctness` |
