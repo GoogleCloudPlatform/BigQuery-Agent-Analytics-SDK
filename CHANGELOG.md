@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Span-level G1 taxonomy on `span_id` (#466, parent #435)** — new
+  `bigquery_agent_analytics.span_taxonomy` localizes the G1-frozen failure
+  categories of a *failed* session onto the span where the failure is
+  observable, as `(trace_id, span_id, failure_category, evidence,
+  confidence)` rows (`SpanFailureLabel.as_tuple()`).
+  `label_failed_session_spans` takes one session's native
+  `agent_events`-shaped rows plus the landed three-flag verdict;
+  `label_native_run` covers every failed session of a
+  `NativeAgentEventsRun` offline. Session-level `failed_sessions` + G1
+  stays the denominator (this layer never classifies, only localizes),
+  the taxonomy stays frozen at v0.1.0 (a non-frozen category name is
+  rejected at construction), and `eval_id` keeps the frozen
+  first-8-with-full-id-on-collision identity so span labels join the
+  session-level contract. No synthetic span identifiers: the silence case
+  targets the last existing span with `target_kind="gap_after_span"`
+  (the widget-stock session `7e352c34` localizes to its `AGENT_STARTING`
+  span with evidence that no `TOOL_STARTING` / `check_inventory` /
+  `AGENT_COMPLETED` followed), a raw `status=ERROR` row is targeted
+  directly, and rows without a `span_id` fail closed. The turn coordinate
+  reuses the #429 turn-tagging / `sub_trajectories` anchoring
+  (`USER_MESSAGE_RECEIVED` turns). Pure and deterministic — no BigQuery,
+  no LLM judge, offline fixture tests only, and **the six-week clock has
+  still NOT started**.
 - **Native `agent_events` snapshot writer — the EvalBench-adapter exit ramp
   (#463, parent #435)** — new
   `bigquery_agent_analytics.native_events.NativeAgentEventsRun` (and thin
