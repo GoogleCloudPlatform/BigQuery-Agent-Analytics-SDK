@@ -1307,6 +1307,12 @@ class EvalBenchImportResult:
   ``failed_sessions_view`` is the fully-qualified failed-session view the
   call left pinned to this job's latest successful import, or ``None`` when
   view maintenance was disabled.
+
+  ``span_labels_table`` / ``span_label_row_count`` report the span-level G1
+  publication of the native writer (#469): the fully-qualified table the
+  call synchronized and the number of rows it holds for this version. They
+  stay ``None`` / ``0`` on the adapter path and when span-label publication
+  was not requested.
   """
 
   job_id: str
@@ -1319,6 +1325,8 @@ class EvalBenchImportResult:
   score_row_count: int
   manifest: dict[str, Any] = dataclasses.field(default_factory=dict)
   failed_sessions_view: Optional[str] = None
+  span_labels_table: Optional[str] = None
+  span_label_row_count: int = 0
 
   def to_dict(self) -> dict[str, Any]:
     return _json_safe(dataclasses.asdict(self))

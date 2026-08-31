@@ -51,7 +51,10 @@ Contracts honored (all frozen by the Week 0 evidence, #455–#461):
   (``failure_taxonomy.py``) through the unchanged
   ``classify_sessions`` / ``failed_sessions`` consumers: the widget-stock
   silence session ``7e352c34`` trips all three mechanical flags and yields
-  ``task/planning``, ``finalization``, ``tool blockers``.
+  ``task/planning``, ``finalization``, ``tool blockers``. Opting in with
+  ``materialize(span_labels_table=...)`` additionally persists the #466
+  span-level localization of those categories as pinned rows (#469);
+  span rows localize the session-level verdict, never replace it.
 * **Clock.** Nothing here starts the six-week clock, seals the
   preregistration, or kicks a Week 1 snapshot job.
 
@@ -71,12 +74,16 @@ from google.cloud import bigquery
 from ._telemetry import make_bq_client
 from ._telemetry import with_sdk_labels
 from .evalbench import _as_mapping
+from .evalbench import _derived_import_version
 from .evalbench import _fingerprint_rows
+from .evalbench import _import_parameters
 from .evalbench import _json_safe
 from .evalbench import _parse_timestamp
 from .evalbench import _plain_row
+from .evalbench import _schema
 from .evalbench import _structured
 from .evalbench import _usable_text
+from .evalbench import _validate_destination_table
 from .evalbench import _validate_import_version
 from .evalbench import _validate_source_segment
 from .evalbench import DEFAULT_EVENTS_TABLE
@@ -87,6 +94,7 @@ from .evalbench import EvalBenchRun
 from .evalbench import EvalScorePolicy
 from .evalbench import LOCK_TABLE
 from .evalbench import MANIFEST_TABLE
+from .failure_taxonomy import TAXONOMY_VERSION
 
 # The one deterministic native comparator: completion, not correctness.
 NATIVE_COMPARATOR = "goal_completion"
@@ -106,6 +114,42 @@ _MISSING_COMPLETION_ERROR = (
     "native snapshot: session never logged AGENT_COMPLETED"
     " (slice-5 returncode=1 equivalent)"
 )
+
+# Span-level G1 publication (#469): the BQAA-owned table that persists the
+# #466 localization library's labels as pinned snapshot rows. Off by
+# default: ``materialize(span_labels_table=...)`` opts in, so the frozen
+# #464 publish stays byte-identical for callers that do not ask for span
+# labels (including corpora whose rows carry no span_id columns).
+DEFAULT_SPAN_LABELS_TABLE = "evalbench_span_labels"
+# One row per SpanFailureLabel: the RFC tuple (trace_id, span_id,
+# failure_category, evidence, confidence) plus the frozen join identity
+# (eval_id / session_id), the target_kind marker, the frozen taxonomy
+# version, and the (job_id, import_version) pin every sibling table carries.
+_SPAN_LABELS_SCHEMA_FIELDS = (
+    ("job_id", "STRING", "REQUIRED"),
+    ("import_version", "STRING", "REQUIRED"),
+    ("eval_id", "STRING", "REQUIRED"),
+    ("session_id", "STRING", "REQUIRED"),
+    ("trace_id", "STRING", "NULLABLE"),
+    ("span_id", "STRING", "REQUIRED"),
+    ("failure_category", "STRING", "REQUIRED"),
+    ("evidence", "STRING", "REQUIRED"),
+    ("confidence", "FLOAT64", "REQUIRED"),
+    ("target_kind", "STRING", "REQUIRED"),
+    ("taxonomy_version", "STRING", "REQUIRED"),
+)
+# Span rows are derived data (a pure function of the published version's
+# source rows), so the sync is keyed delete-then-load per pin — the same
+# convergence rule as the failed_sessions view, not a second manifest.
+_DELETE_SPAN_LABELS_QUERY = """\
+DELETE FROM `{span_labels_table}`
+WHERE job_id = @job_id AND import_version = @import_version
+"""
+# The frozen Week-0 gate span-label derivation falls back to when the
+# caller supplies no policy: localization must see the ``goal_completion``
+# score gate, or the ``task/planning`` category is silently dropped (the
+# #468 P1 finding). Never an empty policy.
+NATIVE_SPAN_LABEL_POLICY = EvalScorePolicy({NATIVE_COMPARATOR: 1.0})
 
 _READ_EVENTS_QUERY = """\
 SELECT *
@@ -209,6 +253,7 @@ class NativeAgentEventsRun(EvalBenchRun):
       imported_at: Optional[datetime] = None,
       failed_sessions_view: Optional[str] = DEFAULT_FAILED_SESSIONS_VIEW,
       policy: Optional[EvalScorePolicy] = None,
+      span_labels_table: Optional[str] = None,
       bq_client: Optional[Any] = None,
   ) -> EvalBenchImportResult:
     """Publish the native snapshot; the read-only source is never a target.
@@ -216,15 +261,57 @@ class NativeAgentEventsRun(EvalBenchRun):
     Defense in depth over ``_parse_source_table``'s agent_events-only rule
     and the inherited reserved-destination check: every fully-qualified
     destination this publish can write (events, scores, manifest, lock,
-    and the failed-sessions view) is compared against ``source_table``
-    BEFORE any BigQuery client is created, so a self-feeding publish is
-    rejected with zero queries and zero writes.
+    the failed-sessions view, and the span-labels table) is compared
+    against ``source_table`` BEFORE any BigQuery client is created, so a
+    self-feeding publish is rejected with zero queries and zero writes.
+
+    ``span_labels_table`` opts in to span-level G1 publication (#469): the
+    #466 localization library's labels for every failed session of this
+    snapshot are kept as rows of ``{target}.{span_labels_table}``, keyed by
+    the same ``(job_id, import_version)`` pin and joinable to
+    ``failed_sessions`` via the frozen ``eval_id`` rule. The rows are
+    derived BEFORE anything is written, so a failed session whose target
+    row carries no real ``span_id`` fails the whole publish closed with
+    zero writes (no synthetic span identifiers). Like the failed-sessions
+    view — and unlike the immutable events/scores snapshot — the span rows
+    are derived state and are re-synchronized (keyed delete-then-load) on
+    every successful call, ``unchanged`` included, so a version published
+    before span labels existed gains its rows on the next call. Span-level
+    rows only localize; the session-level ``failed_sessions`` + G1 contract
+    remains the denominator and is untouched by this option.
     """
     resolved_project = target_project or self.project_id
     prefix = f"{resolved_project}.{target_dataset}"
+    resolved_version = import_version
+    span_rows: Optional[list[dict[str, Any]]] = None
+    if span_labels_table is not None:
+      _validate_destination_table("span_labels_table", span_labels_table)
+      if span_labels_table in (
+          events_table,
+          scores_table,
+          MANIFEST_TABLE,
+          LOCK_TABLE,
+          failed_sessions_view,
+      ):
+        raise ValueError(
+            f"span_labels_table {span_labels_table!r} must not name an"
+            " import table or the failed-sessions view"
+        )
+      # The pin the rows carry must be the version the publish commits, so
+      # a missing explicit version resolves to the same content fingerprint
+      # the inherited materialize derives.
+      if resolved_version is None:
+        resolved_version = _derived_import_version(self.fingerprints())
+      # Derived before any BigQuery call: a label the localizer refuses
+      # (no real span_id) aborts the whole publish with zero writes.
+      span_rows = self.to_span_label_rows(
+          import_version=resolved_version, policy=policy
+      )
     destinations = [events_table, scores_table, MANIFEST_TABLE, LOCK_TABLE]
     if failed_sessions_view is not None:
       destinations.append(failed_sessions_view)
+    if span_labels_table is not None:
+      destinations.append(span_labels_table)
     for destination in destinations:
       destination_ref = f"{prefix}.{destination}"
       if destination_ref == self.source_table:
@@ -233,18 +320,124 @@ class NativeAgentEventsRun(EvalBenchRun):
             f" source table {self.source_table!r}; the native path never"
             " writes its source (#463 exit ramp)"
         )
-    return super().materialize(
+    client = bq_client
+    if span_labels_table is not None and client is None:
+      # One client serves the inherited publish and the span-label sync.
+      client = make_bq_client(resolved_project, location=self.location)
+    result = super().materialize(
         target_dataset=target_dataset,
         target_project=target_project,
         events_table=events_table,
         scores_table=scores_table,
-        import_version=import_version,
+        import_version=resolved_version,
         replace=replace,
         imported_at=imported_at,
         failed_sessions_view=failed_sessions_view,
         policy=policy,
-        bq_client=bq_client,
+        bq_client=client,
     )
+    if span_labels_table is None:
+      return result
+    assert span_rows is not None  # Derived above whenever the table is set.
+    span_labels_ref = f"{prefix}.{span_labels_table}"
+    self._publish_span_labels(
+        client,
+        span_labels_ref=span_labels_ref,
+        import_version=result.import_version,
+        rows=span_rows,
+    )
+    return dataclasses.replace(
+        result,
+        span_labels_table=span_labels_ref,
+        span_label_row_count=len(span_rows),
+    )
+
+  def to_span_label_rows(
+      self,
+      *,
+      import_version: str,
+      policy: Optional[EvalScorePolicy] = None,
+  ) -> list[dict[str, Any]]:
+    """Span-level G1 rows for this run's failed sessions, offline (#469).
+
+    A pure reuse of the landed #466 localizer: ``label_native_run`` emits
+    one ``SpanFailureLabel`` per tripped G1-frozen category of each failed
+    session, anchored to a real native ``span_id`` (a row whose target
+    carries none fails closed inside the localizer — no synthetic span
+    identifiers). Each label becomes one published row carrying the RFC
+    tuple, the frozen first-8 ``eval_id`` join identity, and the
+    ``(job_id, import_version)`` pin. When ``policy`` is ``None`` the
+    frozen Week-0 gate (``NATIVE_SPAN_LABEL_POLICY``,
+    ``goal_completion >= 1.0``) applies — never an empty policy, which
+    would silently drop ``task/planning`` (the #468 P1 finding).
+    """
+    # Imported here, not at module level: span_taxonomy imports this
+    # module's run class, so the localization layer stays downstream.
+    from .span_taxonomy import label_native_run
+
+    _validate_import_version(import_version)
+    labels = label_native_run(self, policy=policy or NATIVE_SPAN_LABEL_POLICY)
+    return [
+        {
+            "job_id": self.job_id,
+            "import_version": import_version,
+            "eval_id": label.eval_id,
+            "session_id": label.session_id,
+            "trace_id": label.trace_id,
+            "span_id": label.span_id,
+            "failure_category": label.failure_category,
+            "evidence": label.evidence,
+            "confidence": label.confidence,
+            "target_kind": label.target_kind,
+            "taxonomy_version": TAXONOMY_VERSION,
+        }
+        for label in labels
+    ]
+
+  def _publish_span_labels(
+      self,
+      client: Any,
+      *,
+      span_labels_ref: str,
+      import_version: str,
+      rows: list[dict[str, Any]],
+  ) -> None:
+    """Converge one pin's span-label rows: keyed delete, then load.
+
+    Runs only after the inherited publish succeeded, so the pin it keys on
+    is committed manifest state. The rows are a deterministic function of
+    the version's source content (fingerprint-identical sources derive
+    identical rows), so re-running is idempotent and an interrupted sync
+    heals on the next call.
+    """
+    table = bigquery.Table(
+        span_labels_ref, schema=_schema(_SPAN_LABELS_SCHEMA_FIELDS)
+    )
+    table.clustering_fields = ["job_id", "import_version", "session_id"]
+    client.create_table(table, exists_ok=True)
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=_import_parameters(self.job_id, import_version)
+    )
+    job_config = with_sdk_labels(job_config, feature=_NATIVE_FEATURE)
+    query_args: dict[str, Any] = {"job_config": job_config}
+    if self.location is not None:
+      query_args["location"] = self.location
+    client.query(
+        _DELETE_SPAN_LABELS_QUERY.format(span_labels_table=span_labels_ref),
+        **query_args,
+    ).result()
+    if not rows:
+      return
+    load_config = bigquery.LoadJobConfig(
+        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+        autodetect=False,
+        schema=_schema(_SPAN_LABELS_SCHEMA_FIELDS),
+    )
+    load_config = with_sdk_labels(load_config, feature=_NATIVE_FEATURE)
+    client.load_table_from_json(
+        rows, span_labels_ref, job_config=load_config
+    ).result()
 
   @classmethod
   def from_agent_events(

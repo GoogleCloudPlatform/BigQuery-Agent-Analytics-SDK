@@ -2502,6 +2502,18 @@ def evalbench_native_import(
         "--skip-failed-sessions-view",
         help="Do not create or update the failed-session view.",
     ),
+    span_labels_table: Optional[str] = typer.Option(
+        None,
+        "--span-labels-table",
+        help=(
+            "Optional span-labels table name in --target-dataset (e.g."
+            " evalbench_span_labels). When set, span-level G1 labels for"
+            " every failed session (frozen taxonomy v0.1.0, #466) are kept"
+            " as rows keyed by (job_id, import_version), joinable to the"
+            " failed-session view via eval_id. Rows without a real span_id"
+            " fail the publish closed; no synthetic span identifiers."
+        ),
+    ),
     min_score: Optional[list[str]] = typer.Option(
         None,
         "--min-score",
@@ -2530,6 +2542,11 @@ def evalbench_native_import(
   ``agent_events`` table is never written. ``evalbench-import`` (#97)
   stays as the optional adapter on-ramp.
 
+  With ``--span-labels-table``, span-level G1 labels (#466/#469) for every
+  failed session are additionally kept as rows of that table, keyed by the
+  same ``(job_id, import_version)`` pin. Session-level ``failed_sessions``
+  + G1 remains the denominator; span rows only localize it.
+
   Exit codes:
       0 — imported, replaced, or unchanged (see ``status`` in the output).
       2 — invalid input (including the reserved ``agent_events``
@@ -2548,6 +2565,8 @@ def evalbench_native_import(
     _validate_destination_table("scores_table", scores_table)
     if not skip_failed_sessions_view:
       _validate_destination_table("failed_sessions_view", failed_sessions_view)
+    if span_labels_table is not None:
+      _validate_destination_table("span_labels_table", span_labels_table)
     policy = _evalbench_score_policy(min_score, missing_score_passes)
 
     parsed_snapshot = None
@@ -2576,6 +2595,7 @@ def evalbench_native_import(
             None if skip_failed_sessions_view else failed_sessions_view
         ),
         policy=policy,
+        span_labels_table=span_labels_table,
     )
     typer.echo(format_output(result.to_dict(), fmt))
   except typer.Exit:
