@@ -30,7 +30,9 @@ from pathlib import Path
 import pytest
 
 from bigquery_agent_analytics import failure_taxonomy
+from bigquery_agent_analytics.client import Client
 from bigquery_agent_analytics.evalbench import classify_sessions
+from bigquery_agent_analytics.evalbench import EvalBenchImportSessions
 from bigquery_agent_analytics.evalbench import EvalScorePolicy
 from bigquery_agent_analytics.evalbench import failed_sessions
 from bigquery_agent_analytics.native_events import native_next_action
@@ -398,6 +400,62 @@ class _FakeReadClient:
     return _FakeQueryJob(self.rows)
 
 
+def test_evalbench_source_basenames_fail_closed_with_zero_queries() -> None:
+  # configs/results/scores are refused by name BEFORE any query is built
+  # or any client is touched, on both the read path and the offline path.
+  for basename in ("configs", "results", "scores"):
+    source = f"{_SOURCE_PROJECT}.bqaa_e2e_real.{basename}"
+    fake = _FakeWriteClient()
+    with pytest.raises(ValueError, match="names the EvalBench source table"):
+      NativeAgentEventsRun.from_bigquery(
+          source_table=source, job_id=_JOB_ID, bq_client=fake
+      )
+    with pytest.raises(ValueError, match="names the EvalBench source table"):
+      NativeAgentEventsRun.from_agent_events(
+          [], source_table=source, job_id=_JOB_ID
+      )
+    assert fake.queries == []
+    assert fake.loads == []
+    assert fake.created == []
+    assert fake.store.events == []
+    assert fake.store.scores == []
+    assert fake.store.rows == []
+
+
+def test_source_basename_must_be_agent_events_with_zero_queries() -> None:
+  # A non-reserved basename such as the default mirror table would resolve
+  # to the inherited default destination and self-feed; refused at parse.
+  source = f"{_SOURCE_PROJECT}.bqaa_e2e_real.evalbench_agent_events"
+  fake = _FakeWriteClient()
+  with pytest.raises(ValueError, match="must reference a production"):
+    NativeAgentEventsRun.from_bigquery(
+        source_table=source, job_id=_JOB_ID, bq_client=fake
+    )
+  with pytest.raises(ValueError, match="must reference a production"):
+    NativeAgentEventsRun.from_agent_events(
+        [], source_table=source, job_id=_JOB_ID
+    )
+  assert fake.queries == [] and fake.loads == []
+
+
+def test_destination_equal_to_source_fails_closed_with_zero_writes() -> None:
+  # Defense in depth: a destination that IS the read-only source table is
+  # rejected before any BigQuery call, ahead of the reserved-name check.
+  fake = _FakeWriteClient()
+  with pytest.raises(ValueError, match="read-only native source table"):
+    _acceptance_run().materialize(
+        target_dataset="bqaa_e2e_real",
+        events_table="agent_events",
+        bq_client=fake,
+    )
+  assert fake.queries == []
+  assert fake.loads == []
+  assert fake.created == []
+  assert fake.store.events == []
+  assert fake.store.scores == []
+  assert fake.store.rows == []
+
+
 def test_from_bigquery_reads_only_the_agent_events_table() -> None:
   fake = _FakeReadClient(_stuck_events() + _gold_events())
   run = NativeAgentEventsRun.from_bigquery(
@@ -453,6 +511,180 @@ def test_nothing_is_written_into_an_agent_events_table() -> None:
     assert _SOURCE_TABLE not in target
     for segment in target.replace("`", " ").replace("\n", " ").split():
       assert not segment.endswith(".agent_events")
+
+
+# --- retained versions stay isolated for trace consumers (#464) -----------
+
+
+def _mirror_event_row(import_version, *, span_id):
+  """One published mirror row: the REAL session id, versioned by column."""
+  return {
+      "event_type": "USER_MESSAGE_RECEIVED",
+      "agent": "support_agent",
+      "timestamp": _T0,
+      "session_id": _SESSION_STUCK,
+      "invocation_id": "inv-1",
+      "user_id": "real-user-0",
+      "trace_id": _SESSION_STUCK,
+      "span_id": span_id,
+      "parent_span_id": None,
+      "content": "{}",
+      "content_parts": [],
+      "attributes": json.dumps({"experiment_id": _JOB_ID}),
+      "latency_ms": None,
+      "status": "OK",
+      "error_message": None,
+      "is_truncated": False,
+      "import_version": import_version,
+  }
+
+
+class _VersionPredicateFake:
+  """Mirror-table fake honoring only the SQL predicates actually emitted.
+
+  Holds retained v1+v2 rows of ONE real session id. If a discovery or
+  fetch statement omits the ``import_version`` predicate, both versions'
+  rows come back — exactly the pre-#464 replay hole — so asserting on the
+  returned spans proves the pin is honored, not merely forwarded.
+  """
+
+  def __init__(self, rows) -> None:
+    self.rows = list(rows)
+    self.calls: list[tuple[str, dict]] = []
+
+  def query(self, sql, job_config=None, **kwargs):
+    params = {p.name: p.value for p in job_config.query_parameters}
+    self.calls.append((sql, params))
+    selected = [
+        row for row in self.rows if row["session_id"] == params["session_id"]
+    ]
+    if "@pin_import_version" in sql:
+      selected = [
+          row
+          for row in selected
+          if row["import_version"] == params["pin_import_version"]
+      ]
+    if "GROUP BY" in sql:  # candidate discovery over the selected rows
+      if not selected:
+        return _FakeQueryJob([])
+      return _FakeQueryJob(
+          [
+              {
+                  "session_id": _SESSION_STUCK,
+                  "user_id": "real-user-0",
+                  "root_agent_name": None,
+                  "experiment_id": json.dumps(_JOB_ID),
+                  "tag_payload": None,
+                  "attributes_valid": True,
+                  "scope_trace_id": None,
+                  "row_count": len(selected),
+              }
+          ]
+      )
+    return _FakeQueryJob(selected)
+
+
+def _publish_v1_and_v2():
+  """Publish the same real sessions as v1 then v2; v1 rows stay retained."""
+  fake = _FakeWriteClient()
+  _materialize(_acceptance_run(), fake)
+  changed = [
+      _event(_SESSION_STUCK, "AGENT_STARTING", "retry the plan", offset=3)
+  ]
+  _materialize(
+      _acceptance_run(changed),
+      fake,
+      import_version="v2",
+      imported_at=_IMPORTED_AT + timedelta(hours=1),
+  )
+  return fake
+
+
+def test_two_publications_v2_trace_selector_returns_no_v1_rows() -> None:
+  fake = _publish_v1_and_v2()
+  versions_by_session: dict[str, set] = {}
+  for row in fake.store.events:
+    versions_by_session.setdefault(row["session_id"], set()).add(
+        row["import_version"]
+    )
+  # The native hazard: retained versions share the real ADK session id
+  # (and the job-scoped experiment_id), so only import_version splits them.
+  assert versions_by_session[_SESSION_STUCK] == {"v1", "v2"}
+
+  listing = failed_sessions(
+      target_project=_SOURCE_PROJECT,
+      target_dataset="bqaa_native",
+      job_id=_JOB_ID,
+      policy=_POLICY,
+      bq_client=fake,
+  )
+  assert listing.import_version == "v2"
+  (session,) = listing.sessions
+  selector = session.trace_selector()
+  assert selector == {
+      "session_id": _SESSION_STUCK,
+      "experiment_id": _JOB_ID,
+      "import_version": "v2",
+  }
+
+  # The real reader honors the pin in SQL: with retained v1+v2 rows behind
+  # the mirror table, v2's selector materializes only the v2 span.
+  bq = _VersionPredicateFake(
+      [
+          _mirror_event_row("v1", span_id="v1-span"),
+          _mirror_event_row("v2", span_id="v2-span"),
+      ]
+  )
+  client = Client(
+      project_id=_SOURCE_PROJECT,
+      dataset_id="bqaa_native",
+      table_id="evalbench_agent_events",
+      verify_schema=False,
+      bq_client=bq,
+  )
+  trace = client.get_session_trace(**selector)
+  assert {span.span_id for span in trace.spans} == {"v2-span"}
+  resolve_sql, resolve_params = bq.calls[0]
+  fetch_sql, fetch_params = bq.calls[-1]
+  assert "import_version = @pin_import_version" in resolve_sql
+  assert "e.import_version = @pin_import_version" in fetch_sql
+  assert resolve_params["pin_import_version"] == "v2"
+  assert fetch_params["pin_import_version"] == "v2"
+
+
+def test_two_publications_v2_trace_filter_cannot_widen_to_v1() -> None:
+  fake = _publish_v1_and_v2()
+  listing = EvalBenchImportSessions(
+      job_id=_JOB_ID,
+      import_version="v2",
+      events_table=f"{_SOURCE_PROJECT}.bqaa_native.evalbench_agent_events",
+      scores_table=f"{_SOURCE_PROJECT}.bqaa_native.evalbench_scores_imported",
+      session_ids=(_SESSION_GOLD, _SESSION_STUCK),
+  )
+  trace_filter = listing.trace_filter()
+  assert trace_filter.import_version == "v2"
+  where, params = trace_filter.to_sql_conditions()
+  assert "import_version = @import_version" in where
+  (version_param,) = [p for p in params if p.name == "import_version"]
+  assert version_param.value == "v2"
+  # The row-scope fragment re-applies the pin, so the anchored row fetch
+  # cannot merge retained versions back into a listed trace.
+  assert "e.import_version = @import_version" in trace_filter.row_scope_where()
+
+  # session_ids alone (the pre-#464 predicate) match BOTH retained
+  # versions of the published rows; the version pin is what isolates v2.
+  in_listing = [
+      row
+      for row in fake.store.events
+      if row["session_id"] in trace_filter.session_ids
+  ]
+  assert {row["import_version"] for row in in_listing} == {"v1", "v2"}
+  pinned = [
+      row
+      for row in in_listing
+      if row["import_version"] == trace_filter.import_version
+  ]
+  assert pinned and {row["import_version"] for row in pinned} == {"v2"}
 
 
 # --- the six-week clock does not start ------------------------------------

@@ -465,6 +465,21 @@ def _validated_filter_pin(name: str, value: Any) -> Any:
   return value
 
 
+def _validated_import_version_pin(value: Any) -> Optional[str]:
+  """Validate the TraceFilter ``import_version`` pin (two-state).
+
+  Same boundary rule as ``_validated_filter_pin``: revalidated at the
+  SQL boundary because ``vars(filt)`` writes bypass ``__setattr__``.
+  Two-state (no SQL_NULL): the mirror column is REQUIRED, so "pinned
+  to NULL" selects nothing meaningful and stays unrepresentable.
+  """
+  if value is None:
+    return None
+  if not isinstance(value, str):
+    raise TypeError("TraceFilter.import_version must be a string or None.")
+  return _exact_str(value)
+
+
 def _is_unaddressable_label_key(key: str) -> bool:
   """True if BigQuery JSONPath cannot encode this member key.
 
@@ -536,6 +551,14 @@ class TraceFilter:
   dimension unfiltered (legacy behavior), the :data:`SQL_NULL`
   sentinel matches only rows where the dimension is SQL ``NULL``, and
   a string — including the empty string — matches by equality.
+
+  ``import_version`` pins the top-level ``import_version`` column that
+  EvalBench ``materialize`` stamps on every published mirror row
+  (#464): retained native versions share the real ADK ``session_id``
+  and the job-scoped ``experiment_id``, so only this column separates
+  them. Set it only against mirror tables — the production ADK
+  ``agent_events`` table has no such column, and the pinned query
+  fails there instead of silently widening.
   """
 
   start_time: Optional[datetime] = None
@@ -553,6 +576,7 @@ class TraceFilter:
   tool_origin: Optional[str] = None
   root_agent_name: _FilterPin = None
   limit: int = 100
+  import_version: Optional[str] = None
 
   def __setattr__(self, name: str, value: Any) -> None:
     # Validated on every write, not just construction: the filter is
@@ -582,6 +606,8 @@ class TraceFilter:
         value = _normalized_session_ids(value)
     if name == "event_types" and value is not None:
       value = _normalized_event_types(value)
+    if name == "import_version":
+      value = _validated_import_version_pin(value)
     object.__setattr__(self, name, value)
 
   @classmethod
@@ -831,6 +857,16 @@ class TraceFilter:
               root_agent_name,
           )
       )
+    import_version = _validated_import_version_pin(self.import_version)
+    if import_version is not None:
+      conditions.append("import_version = @import_version")
+      params.append(
+          bigquery.ScalarQueryParameter(
+              "import_version",
+              "STRING",
+              import_version,
+          )
+      )
 
     params.append(
         bigquery.ScalarQueryParameter(
@@ -965,6 +1001,12 @@ class TraceFilter:
             f" = @label_val_{i}"
             f" OR {untagged})"
         )
+    # A published mirror row carries the version pin in a REQUIRED
+    # top-level column, so unlike experiment/label predicates there is
+    # no shared-row escape hatch: rows of another retained version are
+    # never this version's rows (#464).
+    if _validated_import_version_pin(self.import_version) is not None:
+      conditions.append(f"{alias}.import_version = @import_version")
     return " AND ".join(conditions) if conditions else "TRUE"
 
 

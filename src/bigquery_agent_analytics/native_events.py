@@ -79,7 +79,14 @@ from .evalbench import _structured
 from .evalbench import _usable_text
 from .evalbench import _validate_import_version
 from .evalbench import _validate_source_segment
+from .evalbench import DEFAULT_EVENTS_TABLE
+from .evalbench import DEFAULT_FAILED_SESSIONS_VIEW
+from .evalbench import DEFAULT_SCORES_TABLE
+from .evalbench import EvalBenchImportResult
 from .evalbench import EvalBenchRun
+from .evalbench import EvalScorePolicy
+from .evalbench import LOCK_TABLE
+from .evalbench import MANIFEST_TABLE
 
 # The one deterministic native comparator: completion, not correctness.
 NATIVE_COMPARATOR = "goal_completion"
@@ -106,6 +113,17 @@ FROM `{source_table}`{snapshot_clause}{where_clause}
 ORDER BY session_id, timestamp
 """
 
+# The only table basename the native path may read. Everything else fails
+# closed BEFORE any BigQuery client is created or query is built: the exit
+# ramp reads production ``agent_events`` and nothing else, so an EvalBench
+# source table or a BQAA-owned mirror (e.g. ``evalbench_agent_events``,
+# which would resolve to the inherited default destination and self-feed)
+# is rejected at parse time.
+_SOURCE_TABLE_BASENAME = "agent_events"
+# Rejected explicitly (not just by the agent_events rule) so the frozen
+# no-EvalBench-tables contract has its own named guard and error.
+_EVALBENCH_SOURCE_BASENAMES = frozenset({"configs", "results", "scores"})
+
 
 def _parse_source_table(source_table: Any) -> tuple[str, str, str]:
   """Split and validate a ``project.dataset.table`` agent_events reference."""
@@ -118,6 +136,18 @@ def _parse_source_table(source_table: Any) -> tuple[str, str, str]:
   _validate_source_segment("source_table project", project)
   _validate_source_segment("source_table dataset", dataset)
   _validate_source_segment("source_table table", table)
+  if table in _EVALBENCH_SOURCE_BASENAMES:
+    raise ValueError(
+        f"source_table {source_table!r} names the EvalBench source table"
+        f" {table!r}; the native path reads no EvalBench tables"
+        " (#463 exit ramp)"
+    )
+  if table != _SOURCE_TABLE_BASENAME:
+    raise ValueError(
+        f"source_table {source_table!r} must reference a production"
+        f" {_SOURCE_TABLE_BASENAME!r} table; refusing basename {table!r}"
+        " before any query"
+    )
   return project, dataset, table
 
 
@@ -166,6 +196,55 @@ class NativeAgentEventsRun(EvalBenchRun):
   @property
   def source_dataset(self) -> str:
     return self.evalbench_dataset
+
+  def materialize(
+      self,
+      *,
+      target_dataset: str,
+      target_project: Optional[str] = None,
+      events_table: str = DEFAULT_EVENTS_TABLE,
+      scores_table: str = DEFAULT_SCORES_TABLE,
+      import_version: Optional[str] = None,
+      replace: bool = False,
+      imported_at: Optional[datetime] = None,
+      failed_sessions_view: Optional[str] = DEFAULT_FAILED_SESSIONS_VIEW,
+      policy: Optional[EvalScorePolicy] = None,
+      bq_client: Optional[Any] = None,
+  ) -> EvalBenchImportResult:
+    """Publish the native snapshot; the read-only source is never a target.
+
+    Defense in depth over ``_parse_source_table``'s agent_events-only rule
+    and the inherited reserved-destination check: every fully-qualified
+    destination this publish can write (events, scores, manifest, lock,
+    and the failed-sessions view) is compared against ``source_table``
+    BEFORE any BigQuery client is created, so a self-feeding publish is
+    rejected with zero queries and zero writes.
+    """
+    resolved_project = target_project or self.project_id
+    prefix = f"{resolved_project}.{target_dataset}"
+    destinations = [events_table, scores_table, MANIFEST_TABLE, LOCK_TABLE]
+    if failed_sessions_view is not None:
+      destinations.append(failed_sessions_view)
+    for destination in destinations:
+      destination_ref = f"{prefix}.{destination}"
+      if destination_ref == self.source_table:
+        raise ValueError(
+            f"destination {destination_ref!r} is the read-only native"
+            f" source table {self.source_table!r}; the native path never"
+            " writes its source (#463 exit ramp)"
+        )
+    return super().materialize(
+        target_dataset=target_dataset,
+        target_project=target_project,
+        events_table=events_table,
+        scores_table=scores_table,
+        import_version=import_version,
+        replace=replace,
+        imported_at=imported_at,
+        failed_sessions_view=failed_sessions_view,
+        policy=policy,
+        bq_client=bq_client,
+    )
 
   @classmethod
   def from_agent_events(

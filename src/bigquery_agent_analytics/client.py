@@ -440,6 +440,7 @@ WHERE e.session_id = @session_id
   AND COALESCE(JSON_TYPE(e.attributes), 'null') IN ('object', 'null')
   AND JSON_VALUE(e.attributes, '$.root_agent_name')
       IS NOT DISTINCT FROM @anchor_root_agent_name
+  AND {version_where}
 """
 
 # NOTE (PR #371 review round 6, P2-11): the persisted schema carries
@@ -983,6 +984,7 @@ class Client:
       scope_signature: Optional[str] = None,
       allow_mixed_scope: bool = False,
       event_types: Optional[list[str]] = None,
+      import_version: Optional[str] = None,
   ) -> Trace:
     """Fetches all spans for one resolved session identity.
 
@@ -1020,6 +1022,16 @@ class Client:
             matches no rows, the resolved identity/scope is returned
             as a zero-span :class:`Trace`; this does not raise the
             unfiltered not-found error.
+        import_version: Optional EvalBench mirror version pin (#464).
+            When set, every discovery and fetch statement of this
+            lookup additionally requires the top-level
+            ``import_version`` column that EvalBench ``materialize``
+            stamps on published rows, so retained versions sharing
+            the real session id and job-scoped experiment id cannot
+            mix. Only meaningful against a mirror ``table_id`` — the
+            production ADK ``agent_events`` table has no such column,
+            and the pinned query fails there instead of silently
+            widening.
 
     Returns:
         A Trace for the single resolved identity/scope, with
@@ -1043,6 +1055,7 @@ class Client:
         selector,
         allow_mixed_scope=allow_mixed_scope,
         event_types=event_types,
+        import_version=import_version,
     )
 
   def get_trace_by_selector(
@@ -1051,6 +1064,7 @@ class Client:
       *,
       allow_mixed_scope: bool = False,
       event_types: Optional[list[str]] = None,
+      import_version: Optional[str] = None,
   ) -> Trace:
     """Fetches the single trace pinned by a :class:`TraceSelector`.
 
@@ -1082,6 +1096,10 @@ class Client:
             When the restriction matches no rows, the resolved
             identity/scope is returned as a zero-span :class:`Trace`;
             this does not raise the unfiltered not-found error.
+        import_version: Optional EvalBench mirror version pin (#464);
+            see :meth:`get_session_trace`. Applied as an
+            ``import_version`` column predicate to every discovery
+            and fetch statement of this lookup.
 
     Raises:
         ValueError: If no events match the selector, if the
@@ -1091,9 +1109,13 @@ class Client:
         AmbiguousSessionError: If the selector still matches more
             than one resolved candidate.
     """
+    if import_version is not None and not isinstance(import_version, str):
+      raise TypeError("import_version must be a string or None.")
     if event_types is not None:
       event_types = list(TraceFilter(event_types=event_types).event_types or [])
-    pushdown, pin_params = self._selector_pushdown_pins(selector)
+    pushdown, pin_params = self._selector_pushdown_pins(
+        selector, import_version=import_version
+    )
     resolve_query = _RESOLVE_SESSION_CANDIDATES_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
@@ -1171,6 +1193,7 @@ class Client:
           resolved_scope=matching[0],
           scope_trace_id=_resolved_scope_trace_id(candidate_rows, matching[0]),
           event_types=event_types,
+          import_version=import_version,
       )
     if not truncated and allow_mixed_scope and len(matching) >= 2:
       # A complete candidate page already proves the full
@@ -1191,6 +1214,7 @@ class Client:
           selector,
           discovered=(matched_identities, False),
           event_types=event_types,
+          import_version=import_version,
       )
     if len(matching) == 1 and truncated:
       # Under truncation the singleton needs TWO proofs (rounds 7-10).
@@ -1204,7 +1228,9 @@ class Client:
       if selector.scope_signature is None:
         if allow_mixed_scope:
           return self._fetch_mixed_scope_trace(
-              selector, event_types=event_types
+              selector,
+              event_types=event_types,
+              import_version=import_version,
           )
       if (
           selector.scope_signature is not None
@@ -1218,10 +1244,13 @@ class Client:
                 candidate_rows, matching[0]
             ),
             event_types=event_types,
+            import_version=import_version,
         )
       discovered = None
       if selector.scope_signature is not None:
-        discovered = self._discover_session_identities(selector)
+        discovered = self._discover_session_identities(
+            selector, import_version=import_version
+        )
         identities, identity_page_truncated = discovered
         if (
             not identity_page_truncated
@@ -1235,6 +1264,7 @@ class Client:
                   candidate_rows, matching[0]
               ),
               event_types=event_types,
+              import_version=import_version,
           )
       if allow_mixed_scope:
         # Reuse the page just fetched — the mixed path would otherwise
@@ -1243,9 +1273,12 @@ class Client:
             selector,
             discovered=discovered,
             event_types=event_types,
+            import_version=import_version,
         )
     if allow_mixed_scope and truncated:
-      return self._fetch_mixed_scope_trace(selector, event_types=event_types)
+      return self._fetch_mixed_scope_trace(
+          selector, event_types=event_types, import_version=import_version
+      )
     if len(matching) >= 2:
       # The typed ambiguity surface: real, executable retries. The
       # truncation marker tells callers the set is a lower bound.
@@ -1267,7 +1300,9 @@ class Client:
     raise ValueError("No candidates match the requested session.")
 
   def _selector_pushdown_pins(
-      self, selector: TraceSelector
+      self,
+      selector: TraceSelector,
+      import_version: Optional[str] = None,
   ) -> tuple[str, list]:
     """SQL pushdown fragment + params for the selector's pins.
 
@@ -1276,10 +1311,18 @@ class Client:
     stay resolvable under the enumeration bound (PR #371 review
     round 4, P1-2). NULL pins use IS NULL; UNSET pins add no
     predicate; unaddressable label keys and scope_signature remain
-    Python-side.
+    Python-side. The caller-level ``import_version`` pin (#464) is a
+    plain top-level column predicate on the EvalBench mirror table.
     """
     fragment = ""
     params: list = []
+    if import_version is not None:
+      fragment += "\n  AND import_version = @pin_import_version"
+      params.append(
+          bigquery.ScalarQueryParameter(
+              "pin_import_version", "STRING", import_version
+          )
+      )
     if selector.user_id is not UNSET:
       if selector.user_id is None:
         fragment += "\n  AND user_id IS NULL"
@@ -1349,7 +1392,9 @@ class Client:
     return fragment, params
 
   def _discover_session_identities(
-      self, selector: TraceSelector
+      self,
+      selector: TraceSelector,
+      import_version: Optional[str] = None,
   ) -> tuple[list, bool]:
     """Bounded DISTINCT-identity page for the selector's pushdown.
 
@@ -1360,7 +1405,9 @@ class Client:
     single-match proof in ``get_trace_by_selector`` (PR #371 review
     round 9, P1-1).
     """
-    pushdown, pin_params = self._selector_pushdown_pins(selector)
+    pushdown, pin_params = self._selector_pushdown_pins(
+        selector, import_version=import_version
+    )
     query = _RESOLVE_SESSION_IDENTITIES_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
@@ -1406,6 +1453,7 @@ class Client:
       selector: TraceSelector,
       discovered: Optional[tuple] = None,
       event_types: Optional[list[str]] = None,
+      import_version: Optional[str] = None,
   ) -> Trace:
     """Conversation-complete object-or-null-attested read for one identity.
 
@@ -1426,7 +1474,9 @@ class Client:
     identities, identity_page_truncated = (
         discovered
         if discovered is not None
-        else self._discover_session_identities(selector)
+        else self._discover_session_identities(
+            selector, import_version=import_version
+        )
     )
     if len(identities) > 1:
       # Python-only pins are applied BEFORE deciding identity
@@ -1434,7 +1484,7 @@ class Client:
       # pins alone may keep several identities whose scopes the full
       # selector actually excludes.
       ambiguous, truncated = self._real_candidates_for_identities(
-          selector, identities
+          selector, identities, import_version=import_version
       )
       truncated = truncated or identity_page_truncated
       matched_identities = list(
@@ -1470,6 +1520,17 @@ class Client:
             identity.root_agent_name,
         ),
     ]
+    # The mirror version pin (#464) restricts every read of this
+    # lookup — metadata and row fetch alike — so retained versions
+    # sharing the identity cannot merge into the mixed trace.
+    version_where = "TRUE"
+    if import_version is not None:
+      version_where = "e.import_version = @pin_import_version"
+      params.append(
+          bigquery.ScalarQueryParameter(
+              "pin_import_version", "STRING", import_version
+          )
+      )
     scope_results = None
     event_where = "TRUE"
     if event_types is not None:
@@ -1480,6 +1541,7 @@ class Client:
           project=self.project_id,
           dataset=self.dataset_id,
           table=self.table_id,
+          version_where=version_where,
       )
       metadata_config = bigquery.QueryJobConfig(query_parameters=params)
       metadata_config = with_sdk_labels(metadata_config, feature="trace-read")
@@ -1504,7 +1566,7 @@ class Client:
         project=self.project_id,
         dataset=self.dataset_id,
         table=self.table_id,
-        row_where="TRUE",
+        row_where=version_where,
         event_where=event_where,
     )
     job_config = bigquery.QueryJobConfig(query_parameters=params)
@@ -1605,6 +1667,7 @@ class Client:
       self,
       selector: TraceSelector,
       identities: list,
+      import_version: Optional[str] = None,
   ) -> tuple[list, bool]:
     """Selector-constrained candidates covering EVERY ambiguous identity.
 
@@ -1619,7 +1682,9 @@ class Client:
     per_identity_limit = max(
         2, _MAX_SCOPE_CANDIDATES // max(1, len(identities))
     )
-    pushdown, pin_params = self._selector_pushdown_pins(selector)
+    pushdown, pin_params = self._selector_pushdown_pins(
+        selector, import_version=import_version
+    )
     disjunction_terms = []
     identity_params = []
     for index, identity in enumerate(identities):
@@ -1732,6 +1797,7 @@ class Client:
       resolved_scope: ResolvedTraceSelector,
       scope_trace_id: Optional[str] = None,
       event_types: Optional[list[str]] = None,
+      import_version: Optional[str] = None,
   ) -> Trace:
     """Anchored row fetch for one resolved identity and scope.
 
@@ -1756,6 +1822,16 @@ class Client:
     ]
     row_filter = resolved_scope.to_selector().to_trace_filter()
     row_where = row_filter.row_scope_where()
+    if import_version is not None:
+      # The mirror version pin (#464): retained versions share the
+      # resolved identity AND scope, so only the top-level column
+      # separates their rows.
+      row_where = f"({row_where})\n  AND e.import_version = @pin_import_version"
+      params.append(
+          bigquery.ScalarQueryParameter(
+              "pin_import_version", "STRING", import_version
+          )
+      )
     scope_param_names = {"experiment_id"}
     label_count = len(row_filter.custom_labels or {})
     for i in range(label_count):

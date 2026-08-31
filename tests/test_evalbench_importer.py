@@ -4071,9 +4071,13 @@ def test_session_trace_selector_pins_the_versioned_identity() -> None:
       failed=True,
   )
   selector = session.trace_selector()
+  # The version pin (#464) is redundant on the adapter path (the versioned
+  # session_id is unique per version) but load-bearing on the native path,
+  # where retained versions share the real ADK session_id.
   assert selector == {
       "session_id": "evalbench-import:job-123:v1:crash-1",
       "experiment_id": "job-123",
+      "import_version": "v1",
   }
   # Accepted verbatim by the existing reader (no new client surface).
   inspect.signature(Client.get_session_trace).bind(None, **selector)
