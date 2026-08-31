@@ -30,6 +30,7 @@ import pytest
 from bigquery_agent_analytics import failure_taxonomy
 from bigquery_agent_analytics import native_events
 from bigquery_agent_analytics import span_taxonomy
+from bigquery_agent_analytics.evalbench import _policy_column
 from bigquery_agent_analytics.evalbench import _policy_from_column
 from bigquery_agent_analytics.evalbench import EvalScorePolicy
 from bigquery_agent_analytics.evalbench import failed_sessions
@@ -39,6 +40,7 @@ from bigquery_agent_analytics.span_taxonomy import label_native_run
 from tests.test_evalbench_importer import _FakeJob
 from tests.test_evalbench_importer import _FakeManifestStore
 from tests.test_evalbench_importer import _FakeSnapshot
+from tests.test_evalbench_importer import _FakeTable
 from tests.test_evalbench_importer import _FakeWriteClient
 from tests.test_native_events_writer import _event
 from tests.test_native_events_writer import _gold_events
@@ -58,29 +60,66 @@ from tests.test_span_taxonomy import _with_spans
 _SPAN_TABLE = "evalbench_span_labels"
 _SPAN_REF = f"{_SOURCE_PROJECT}.bqaa_native.{_SPAN_TABLE}"
 _SPAN_VIEW_REF = f"{_SPAN_REF}_pinned"
+_BINDINGS_REF = (
+    f"{_SOURCE_PROJECT}.bqaa_native.{native_events.SPAN_BINDINGS_TABLE}"
+)
 _FAILED_VIEW_REF = f"{_SOURCE_PROJECT}.bqaa_native.evalbench_failed_sessions"
 _PIN = (_JOB_ID, "v1")
 _G1_CATEGORIES = ("task/planning", "finalization", "tool blockers")
 
 
 class _SpanLabelsFake(_FakeWriteClient):
-  """The importer fake plus a span-labels table honoring the staged sync.
+  """The importer fake plus span-labels and span-binding tables.
 
   The span-label publication stages rows into an expiring staging table
-  and then runs one lock-claiming, generation-checked transaction that
-  replaces the pin's slice (``_SPAN_SYNC_SCRIPT``). The fake emulates that
+  and then runs one lock-claiming transaction that checks the manifest
+  generation AND view_policy, replaces the pin's slice, and upserts the
+  job's binding row (``_SPAN_SYNC_SCRIPT``). The fake emulates that
   script with the same snapshot-isolation rules ``_FakeWriteClient`` uses
   for the publish transaction — pinned ``transaction_snapshot`` and the
   shared store included, so concurrent syncs can be modeled — and defers
   everything else (staging loads, view writes, the inherited publish) to
-  the base fake. ``span_store`` may be shared between fakes to model one
-  dataset touched by two importers.
+  the base fake. ``span_store`` / ``binding_store`` may be shared between
+  fakes to model one dataset touched by two importers.
+  ``span_load_error`` fails only the span staging load (the base publish
+  still commits — the P1 #2 skew). ``doctor_native_manifest_read`` runs
+  once, right before the span sync's own manifest re-read: a concurrent
+  writer landing between derive and sync.
   """
 
-  def __init__(self, *, span_store: list[dict] | None = None, **kwargs) -> None:
+  def __init__(
+      self,
+      *,
+      span_store: list[dict] | None = None,
+      binding_store: list[dict] | None = None,
+      span_load_error: Exception | None = None,
+      doctor_native_manifest_read=None,
+      **kwargs,
+  ) -> None:
     super().__init__(**kwargs)
     self.span_labels: list[dict] = span_store if span_store is not None else []
+    self.span_bindings: list[dict] = (
+        binding_store if binding_store is not None else []
+    )
     self.span_deletes: list[tuple[str, dict]] = []
+    self.span_load_error = span_load_error
+    self.doctor_native_manifest_read = doctor_native_manifest_read
+
+  def get_table(self, table_ref: str):
+    if table_ref.endswith("." + native_events.SPAN_BINDINGS_TABLE) and (
+        self.span_bindings or table_ref in self.created
+    ):
+      self.get_table_calls.append(table_ref)
+      return _FakeTable(table_ref, [], "bindings-etag")
+    return super().get_table(table_ref)
+
+  def load_table_from_json(self, rows, destination, job_config=None):
+    if self.span_load_error is not None and destination.startswith(
+        _SPAN_REF + "_staging_"
+    ):
+      self.loads.append((destination, list(rows), job_config))
+      return _FakeJob(error=self.span_load_error)
+    return super().load_table_from_json(rows, destination, job_config)
 
   def query(self, query: str, **kwargs) -> _FakeJob:
     if native_events._SPAN_STALE_PIN_MESSAGE in query:
@@ -88,6 +127,30 @@ class _SpanLabelsFake(_FakeWriteClient):
       params = {p.name: p.value for p in kwargs["job_config"].query_parameters}
       snapshot = self.transaction_snapshot or self.store.snapshot()
       return self._span_sync(query, params, snapshot)
+    if f".{native_events.SPAN_BINDINGS_TABLE}`" in query:
+      self.queries.append((query, kwargs))
+      params = {p.name: p.value for p in kwargs["job_config"].query_parameters}
+      assert query.startswith("SELECT")
+      return _FakeJob(
+          [
+              dict(row)
+              for row in self.span_bindings
+              if row["job_id"] == params["job_id"]
+          ]
+      )
+    if (
+        self.doctor_native_manifest_read is not None
+        and ".evalbench_import_manifest`" in query
+        and query.startswith("SELECT")
+        and "ORDER BY" not in query
+        and kwargs["job_config"].labels.get("sdk_feature")
+        == "evalbench-native-import"
+    ):
+      hook, self.doctor_native_manifest_read = (
+          self.doctor_native_manifest_read,
+          None,
+      )
+      hook()
     return super().query(query, **kwargs)
 
   def _span_sync(self, script: str, params: dict, snapshot) -> _FakeJob:
@@ -106,12 +169,15 @@ class _SpanLabelsFake(_FakeWriteClient):
         "job_id": params["job_id"],
         "import_version": params["import_version"],
     }
+    # The in-transaction guard: the manifest row must still carry the
+    # exact generation AND canonical view_policy the rows derived under.
     current = [
         row
         for row in snapshot.rows
         if (row["job_id"], row["import_version"])
         == (pin["job_id"], pin["import_version"])
         and row.get("generation_id") == params["expected_generation_id"]
+        and row.get("view_policy") == params["expected_view_policy"]
     ]
     if not current:
       return _FakeJob(
@@ -123,6 +189,7 @@ class _SpanLabelsFake(_FakeWriteClient):
         (rows for dest, rows, _ in reversed(self.loads) if dest == staging_ref),
         [],
     )
+    assert f"DELETE FROM `{_BINDINGS_REF}`" in script
     self.store.lock_claims += 1
     self.span_deletes.append((ref, pin))
     self.span_labels[:] = [
@@ -131,6 +198,17 @@ class _SpanLabelsFake(_FakeWriteClient):
         if (row["job_id"], row["import_version"])
         != (pin["job_id"], pin["import_version"])
     ] + [dict(row) for row in staged]
+    self.span_bindings[:] = [
+        row for row in self.span_bindings if row["job_id"] != params["job_id"]
+    ] + [
+        {
+            "job_id": params["job_id"],
+            "span_labels_table": params["span_labels_table_name"],
+            "view_policy": params["expected_view_policy"],
+            "import_version": params["import_version"],
+            "generation_id": params["expected_generation_id"],
+        }
+    ]
     return _FakeJob()
 
 
@@ -182,6 +260,7 @@ def test_published_rows_are_exactly_the_three_library_labels() -> None:
       {
           "job_id": _JOB_ID,
           "import_version": "v1",
+          "generation_id": result.manifest["generation_id"],
           "eval_id": label.eval_id,
           "session_id": label.session_id,
           "trace_id": label.trace_id,
@@ -562,7 +641,7 @@ def test_replaced_generation_between_derive_and_sync_fails_closed() -> None:
   late = _SpanLabelsFake(
       store=store, span_store=shared, transaction_snapshot=doctored
   )
-  with pytest.raises(ValueError, match="re-published concurrently"):
+  with pytest.raises(ValueError, match="no longer carries the generation"):
     _materialize(_acceptance_run(), late)
   assert shared == before
 
@@ -696,6 +775,303 @@ def test_to_span_label_rows_is_pure_and_carries_the_pin() -> None:
     _acceptance_run().to_span_label_rows(import_version="bad version!")
 
 
+# --- the durable binding: policy and rows survive later native calls -------
+
+
+def _dataset():
+  """One shared dataset (manifest + span + binding stores) for two fakes."""
+  return _FakeManifestStore(), [], []
+
+
+def _fake(store, shared, bindings, **kwargs) -> _SpanLabelsFake:
+  return _SpanLabelsFake(
+      store=store, span_store=shared, binding_store=bindings, **kwargs
+  )
+
+
+def _plain_materialize(run, fake, *, import_version, policy=None, **kwargs):
+  """A later ordinary native call: NO span_labels_table argument."""
+  return run.materialize(
+      target_dataset="bqaa_native",
+      import_version=import_version,
+      imported_at=_IMPORTED_AT,
+      policy=policy,
+      bq_client=fake,
+      **kwargs,
+  )
+
+
+def _changed_events():
+  return _with_spans(
+      [_event(_SESSION_STUCK, "AGENT_STARTING", "retry", offset=3)],
+      _TRACE_STUCK,
+      ["ffff0000ffff0000"],
+  )
+
+
+def _active_view_rows(fake) -> list[dict]:
+  """Emulate the pinned view's SQL: pin + the latest-generation guard.
+
+  The rendered guard only admits rows while the pinned generation is
+  still the job's latest manifest generation, so any base/span skew
+  yields an empty result instead of stale labels.
+  """
+  body = fake.store.views.get(_SPAN_VIEW_REF)
+  if body is None:
+    return []
+  first_line = body.splitlines()[0]
+  assert first_line.startswith(native_events._SPAN_VIEW_PIN_MARKER)
+  pin = json.loads(first_line[len(native_events._SPAN_VIEW_PIN_MARKER) :])
+  assert f'AND generation_id = "{pin["generation_id"]}"' in body
+  assert "ORDER BY imported_at DESC, import_version DESC" in body
+  latest = sorted(
+      (row for row in fake.store.rows if row["job_id"] == pin["job_id"]),
+      key=lambda row: (row["imported_at"], row["import_version"]),
+      reverse=True,
+  )
+  if not latest or latest[0]["generation_id"] != pin["generation_id"]:
+    return []
+  return [
+      row
+      for row in fake.span_labels
+      if row["job_id"] == pin["job_id"]
+      and row["import_version"] == pin["import_version"]
+      and row["generation_id"] == pin["generation_id"]
+  ]
+
+
+def test_ordinary_same_pin_call_keeps_the_gate_and_the_span_rows() -> None:
+  # P1 #469-r2-1: a span-enabled default publish followed by an ordinary
+  # same-pin call (no span table, no --min-score) must NOT rewrite the
+  # committed view_policy to NULL while the span rows stay behind.
+  store, shared, bindings = _dataset()
+  first = _materialize(
+      _acceptance_run(), _fake(store, shared, bindings), policy=None
+  )
+  assert _policy_from_column(first.manifest["view_policy"]) == (
+      NATIVE_SPAN_LABEL_POLICY
+  )
+  generation = first.manifest["generation_id"]
+
+  later = _fake(store, shared, bindings)
+  second = _plain_materialize(_acceptance_run(), later, import_version="v1")
+  assert second.status == "unchanged"
+  # The binding made the ordinary call maintain the span publication.
+  assert second.span_labels_table == _SPAN_REF
+  assert second.span_label_row_count == 3
+  # The committed gate remains the frozen goal-completion policy under
+  # the same generation (no NULL rewrite, no silent re-commit)...
+  (row,) = store.rows
+  assert _policy_from_column(row["view_policy"]) == NATIVE_SPAN_LABEL_POLICY
+  assert row["generation_id"] == generation
+  # ...the failed-sessions view still renders the gate...
+  assert "'goal_completion' AS comparator, 1.0 AS min_score" in (
+      store.views[_FAILED_VIEW_REF]
+  )
+  # ...and the span rows stay coherent behind the active join boundary.
+  rows = _active_view_rows(later)
+  assert [r["failure_category"] for r in rows] == list(_G1_CATEGORIES)
+  assert {r["generation_id"] for r in rows} == {generation}
+
+
+def test_bound_job_rejects_a_conflicting_gate_on_an_ordinary_call() -> None:
+  store, shared, bindings = _dataset()
+  _materialize(_acceptance_run(), _fake(store, shared, bindings), policy=None)
+  before = [dict(row) for row in store.rows]
+  with pytest.raises(ValueError, match="frozen gate"):
+    _plain_materialize(
+        _acceptance_run(),
+        _fake(store, shared, bindings),
+        import_version="v1",
+        policy=EvalScorePolicy({"goal_completion": 0.5}),
+    )
+  assert store.rows == before
+
+
+def test_bound_job_cannot_switch_span_tables() -> None:
+  store, shared, bindings = _dataset()
+  _materialize(_acceptance_run(), _fake(store, shared, bindings))
+  with pytest.raises(ValueError, match="is bound to span_labels_table"):
+    _materialize(
+        _acceptance_run(),
+        _fake(store, shared, bindings),
+        span_labels_table="other_span_labels",
+    )
+  assert {row["span_labels_table"] for row in bindings} == {_SPAN_TABLE}
+
+
+def test_gate_recommitted_between_derive_and_sync_fails_closed() -> None:
+  # P1 #469-r2-1 (overlapping writer): a delayed sync must not adopt a
+  # newer manifest generation whose committed view_policy is not the gate
+  # its rows were derived under.
+  store, shared, bindings = _dataset()
+  _materialize(_acceptance_run(), _fake(store, shared, bindings))
+  before = [dict(row) for row in shared]
+
+  def concurrent_gate_commit() -> None:
+    (row,) = [r for r in store.rows if r["import_version"] == "v1"]
+    row["view_policy"] = _policy_column(EvalScorePolicy({"accuracy": 0.9}))
+    row["generation_id"] = "f" * 32
+
+  late = _fake(
+      store,
+      shared,
+      bindings,
+      doctor_native_manifest_read=concurrent_gate_commit,
+  )
+  with pytest.raises(ValueError, match="view_policy"):
+    _materialize(_acceptance_run(), late)
+  assert shared == before
+
+
+def test_failed_span_sync_after_changed_source_replace_closes_the_view() -> (
+    None
+):
+  # P1 #469-r2-2: a changed-source same-pin replace whose span sync fails
+  # leaves the new base generation committed — the active view must then
+  # expose NO span rows rather than the previous generation's.
+  store, shared, bindings = _dataset()
+  first = _materialize(_acceptance_run(), _fake(store, shared, bindings))
+  old_generation = first.manifest["generation_id"]
+  assert len(_active_view_rows(_fake(store, shared, bindings))) == 3
+
+  broken = _fake(
+      store,
+      shared,
+      bindings,
+      span_load_error=RuntimeError("staging load lost"),
+  )
+  with pytest.raises(ValueError, match="could not be synchro"):
+    _materialize(_acceptance_run(_changed_events()), broken, replace=True)
+  # The base snapshot advanced to a new generation...
+  (row,) = store.rows
+  assert row["generation_id"] != old_generation
+  # ...the retained span rows still carry the superseded generation...
+  assert {r["generation_id"] for r in shared} == {old_generation}
+  assert {r["span_id"] for r in shared} == {_AGENT_STARTING_SPAN}
+  # ...and the active view exposes nothing (fail closed, not stale rows).
+  assert _active_view_rows(broken) == []
+
+  # Re-running heals: rows re-derive under the committed generation and
+  # the view reopens on the synchronized snapshot.
+  healed = _fake(store, shared, bindings)
+  result = _materialize(_acceptance_run(_changed_events()), healed)
+  assert result.status == "unchanged"
+  rows = _active_view_rows(healed)
+  assert {r["span_id"] for r in rows} == {"ffff0000ffff0000"}
+  assert {r["generation_id"] for r in rows} == {row["generation_id"]}
+
+
+def test_labelled_v1_then_unlabelled_v2_moves_the_boundary_together() -> None:
+  # P1 #469-r2-3 (a): a later import WITHOUT the span option must not
+  # advance failed_sessions while the span view stays pinned to v1.
+  store, shared, bindings = _dataset()
+  _materialize(_acceptance_run(), _fake(store, shared, bindings))
+
+  later = _fake(store, shared, bindings)
+  result = _plain_materialize(
+      _acceptance_run(_changed_events()),
+      later,
+      import_version="v2",
+      policy=_POLICY,
+  )
+  assert result.status == "imported"
+  assert result.span_labels_table == _SPAN_REF
+  # The active join boundary moved as one: view pinned to v2, rows v2.
+  pin = json.loads(
+      store.views[_SPAN_VIEW_REF].splitlines()[0][
+          len(native_events._SPAN_VIEW_PIN_MARKER) :
+      ]
+  )
+  assert (pin["job_id"], pin["import_version"]) == (_JOB_ID, "v2")
+  rows = _active_view_rows(later)
+  assert {r["import_version"] for r in rows} == {"v2"}
+  assert {r["span_id"] for r in rows} == {"ffff0000ffff0000"}
+
+
+def test_bound_job_with_unlabelable_corpus_fails_before_publishing() -> None:
+  # The maintain-or-fail-closed rule: a bound job whose new corpus has no
+  # real span ids must fail BEFORE the base snapshot or the denominator
+  # advances past the span rows.
+  store, shared, bindings = _dataset()
+  _materialize(_acceptance_run(), _fake(store, shared, bindings))
+  spanfree = NativeAgentEventsRun.from_agent_events(
+      _stuck_events() + _gold_events(),
+      source_table=_SOURCE_TABLE,
+      job_id=_JOB_ID,
+  )
+  later = _fake(store, shared, bindings)
+  with pytest.raises(ValueError, match="no span_id"):
+    _plain_materialize(spanfree, later, import_version="v2", policy=_POLICY)
+  assert {row["import_version"] for row in store.rows} == {"v1"}
+  assert len(_active_view_rows(later)) == 3
+
+
+def test_labelled_then_unlabelled_same_pin_replace_stays_coherent() -> None:
+  # P1 #469-r2-3 (b): a changed-source same-pin replace WITHOUT the span
+  # option must not keep the previous source's span rows visible.
+  store, shared, bindings = _dataset()
+  _materialize(_acceptance_run(), _fake(store, shared, bindings))
+
+  later = _fake(store, shared, bindings)
+  result = _plain_materialize(
+      _acceptance_run(_changed_events()),
+      later,
+      import_version="v1",
+      policy=_POLICY,
+      replace=True,
+  )
+  assert result.status == "replaced"
+  rows = _active_view_rows(later)
+  assert {r["span_id"] for r in rows} == {"ffff0000ffff0000"}
+  assert not any(r["span_id"] == _AGENT_STARTING_SPAN for r in shared)
+
+
+def test_resyncing_an_older_version_cannot_repin_the_view() -> None:
+  # P1 #469-r2-3: the view targets the exact generation whose rows were
+  # just synchronized — a caller handling an older retained version must
+  # not repin the view to a newer generation with no synchronized rows.
+  store, shared, bindings = _dataset()
+  first = _materialize(_acceptance_run(), _fake(store, shared, bindings))
+  v1_generation = first.manifest["generation_id"]
+
+  # v2 commits its base snapshot but its span sync fails: the latest
+  # generation has NO synchronized span rows and the view stays on v1.
+  broken = _fake(
+      store,
+      shared,
+      bindings,
+      span_load_error=RuntimeError("staging load lost"),
+  )
+  with pytest.raises(ValueError, match="could not be synchro"):
+    _materialize(
+        _acceptance_run(_changed_events()), broken, import_version="v2"
+    )
+  assert {r["import_version"] for r in shared} == {"v1"}
+
+  # Re-synchronizing v1 stands down instead of repinning the view to the
+  # rowless v2 generation; the guard keeps the stale v1 pin fail-closed.
+  older = _fake(store, shared, bindings)
+  result = _materialize(_acceptance_run(), older, import_version="v1")
+  assert result.status == "unchanged"
+  pin = json.loads(
+      store.views[_SPAN_VIEW_REF].splitlines()[0][
+          len(native_events._SPAN_VIEW_PIN_MARKER) :
+      ]
+  )
+  assert (pin["import_version"], pin["generation_id"]) == (
+      "v1",
+      v1_generation,
+  )
+  assert _active_view_rows(older) == []
+
+  # Re-running v2 (the version the boundary is waiting on) heals it.
+  healed = _fake(store, shared, bindings)
+  _materialize(_acceptance_run(_changed_events()), healed, import_version="v2")
+  rows = _active_view_rows(healed)
+  assert {r["import_version"] for r in rows} == {"v2"}
+
+
 # --- destination guards ---------------------------------------------------
 
 
@@ -713,6 +1089,7 @@ def test_span_table_must_not_shadow_an_import_table_or_the_view() -> None:
       "evalbench_scores_imported",
       "evalbench_import_manifest",
       "evalbench_import_lock",
+      "evalbench_span_bindings",
       "evalbench_failed_sessions",
   ):
     with pytest.raises(ValueError, match="must not name an import table"):
