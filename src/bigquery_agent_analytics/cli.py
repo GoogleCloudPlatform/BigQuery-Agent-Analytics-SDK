@@ -2509,9 +2509,14 @@ def evalbench_native_import(
             "Optional span-labels table name in --target-dataset (e.g."
             " evalbench_span_labels). When set, span-level G1 labels for"
             " every failed session (frozen taxonomy v0.1.0, #466) are kept"
-            " as rows keyed by (job_id, import_version), joinable to the"
-            " failed-session view via eval_id. Rows without a real span_id"
-            " fail the publish closed; no synthetic span identifiers."
+            " as rows keyed by (job_id, import_version), and a companion"
+            " view <name>_pinned is kept pinned to the job's latest"
+            " publication. The table retains every version's rows, so an"
+            " eval_id-only join against it fans out across retained"
+            " versions: join the failed-session view to the pinned view on"
+            " eval_id, or to the table on job_id + import_version +"
+            " eval_id. Rows without a real span_id fail the publish"
+            " closed; no synthetic span identifiers."
         ),
     ),
     min_score: Optional[list[str]] = typer.Option(
@@ -2544,7 +2549,15 @@ def evalbench_native_import(
 
   With ``--span-labels-table``, span-level G1 labels (#466/#469) for every
   failed session are additionally kept as rows of that table, keyed by the
-  same ``(job_id, import_version)`` pin. Session-level ``failed_sessions``
+  same ``(job_id, import_version)`` pin, derived under one effective score
+  policy shared with the failed-session view (the frozen
+  ``goal_completion=1.0`` gate is merged into ``--min-score``; a
+  conflicting ``goal_completion`` threshold is rejected). The table
+  retains rows for every published version, so an ``eval_id``-only join
+  fans out across retained versions: join through the companion
+  ``<span-labels-table>_pinned`` view — kept pinned to the same latest
+  publication as the failed-session view — or add ``job_id`` and
+  ``import_version`` to the join keys. Session-level ``failed_sessions``
   + G1 remains the denominator; span rows only localize it.
 
   Exit codes:

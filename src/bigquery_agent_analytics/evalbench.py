@@ -1308,10 +1308,12 @@ class EvalBenchImportResult:
   call left pinned to this job's latest successful import, or ``None`` when
   view maintenance was disabled.
 
-  ``span_labels_table`` / ``span_label_row_count`` report the span-level G1
-  publication of the native writer (#469): the fully-qualified table the
-  call synchronized and the number of rows it holds for this version. They
-  stay ``None`` / ``0`` on the adapter path and when span-label publication
+  ``span_labels_table`` / ``span_label_row_count`` / ``span_labels_view``
+  report the span-level G1 publication of the native writer (#469): the
+  fully-qualified table the call synchronized, the number of rows it holds
+  for this version, and the companion view the call left pinned to the
+  job's latest publication (the pin-aware join boundary). They stay
+  ``None`` / ``0`` on the adapter path and when span-label publication
   was not requested.
   """
 
@@ -1327,6 +1329,7 @@ class EvalBenchImportResult:
   failed_sessions_view: Optional[str] = None
   span_labels_table: Optional[str] = None
   span_label_row_count: int = 0
+  span_labels_view: Optional[str] = None
 
   def to_dict(self) -> dict[str, Any]:
     return _json_safe(dataclasses.asdict(self))

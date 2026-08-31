@@ -53,8 +53,12 @@ Contracts honored (all frozen by the Week 0 evidence, #455–#461):
   silence session ``7e352c34`` trips all three mechanical flags and yields
   ``task/planning``, ``finalization``, ``tool blockers``. Opting in with
   ``materialize(span_labels_table=...)`` additionally persists the #466
-  span-level localization of those categories as pinned rows (#469);
-  span rows localize the session-level verdict, never replace it.
+  span-level localization of those categories as pinned rows (#469) under
+  ONE effective score policy shared with the session denominator
+  (``resolve_span_label_policy``), and keeps a companion
+  ``{span_labels_table}_pinned`` view on the job's latest publication so
+  joins never fan out across retained versions; span rows localize the
+  session-level verdict, never replace it.
 * **Clock.** Nothing here starts the six-week clock, seals the
   preregistration, or kicks a Week 1 snapshot job.
 
@@ -67,25 +71,41 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 import dataclasses
 from datetime import datetime
+import json
 from typing import Any, Optional
+import uuid
 
+from google.api_core.exceptions import Conflict
+from google.api_core.exceptions import NotFound
+from google.api_core.exceptions import PreconditionFailed
 from google.cloud import bigquery
 
 from ._telemetry import make_bq_client
 from ._telemetry import with_sdk_labels
 from .evalbench import _as_mapping
+from .evalbench import _CONCURRENT_UPDATE_MARKER
 from .evalbench import _derived_import_version
+from .evalbench import _drop_staging_tables
 from .evalbench import _fingerprint_rows
+from .evalbench import _IMPORT_LOCK_ID
 from .evalbench import _import_parameters
 from .evalbench import _json_safe
+from .evalbench import _load_staging
+from .evalbench import _LOCK_MISSING_MESSAGE
+from .evalbench import _manifest_generation_id
 from .evalbench import _parse_timestamp
 from .evalbench import _plain_row
+from .evalbench import _read_latest_manifest
+from .evalbench import _read_manifest
 from .evalbench import _schema
+from .evalbench import _seed_import_lock
+from .evalbench import _sql_string_literal
 from .evalbench import _structured
 from .evalbench import _usable_text
 from .evalbench import _validate_destination_table
 from .evalbench import _validate_import_version
 from .evalbench import _validate_source_segment
+from .evalbench import _VIEW_SYNC_ATTEMPTS
 from .evalbench import DEFAULT_EVENTS_TABLE
 from .evalbench import DEFAULT_FAILED_SESSIONS_VIEW
 from .evalbench import DEFAULT_SCORES_TABLE
@@ -139,11 +159,81 @@ _SPAN_LABELS_SCHEMA_FIELDS = (
     ("taxonomy_version", "STRING", "REQUIRED"),
 )
 # Span rows are derived data (a pure function of the published version's
-# source rows), so the sync is keyed delete-then-load per pin — the same
-# convergence rule as the failed_sessions view, not a second manifest.
-_DELETE_SPAN_LABELS_QUERY = """\
-DELETE FROM `{span_labels_table}`
-WHERE job_id = @job_id AND import_version = @import_version
+# source rows), so the sync converges per pin — the same convergence rule
+# as the failed_sessions view, not a second manifest. Unlike a bare
+# delete-then-load, the replacement is staged first and then applied by one
+# multi-statement transaction that claims the dataset's publish lock (so
+# two concurrent syncs of one pin serialize instead of interleaving their
+# DELETEs and loads into duplicate rows) and re-checks that the manifest
+# row still carries the generation this sync derived its rows from (so a
+# concurrent ``replace`` cannot end up pinned to another generation's span
+# rows). A failure anywhere before COMMIT — including a staging load that
+# never ran — rolls back and leaves the previously published span rows in
+# place.
+_SPAN_STALE_PIN_MESSAGE = (
+    "evalbench span labels: the manifest row for this (job_id,"
+    " import_version) was re-published concurrently; the derived span rows"
+    " are stale and were not written"
+)
+_SPAN_SYNC_SCRIPT = """\
+DECLARE current_generation_rows INT64 DEFAULT 0;
+BEGIN
+  BEGIN TRANSACTION;
+  UPDATE `{lock_table}`
+  SET claim_count = claim_count + 1,
+      claimed_at = CURRENT_TIMESTAMP(),
+      claimed_job_id = @job_id,
+      claimed_import_version = @import_version
+  WHERE lock_id = '{lock_id}';
+  IF @@row_count = 0 THEN
+    RAISE USING MESSAGE = '{lock_missing_message}';
+  END IF;
+  SET current_generation_rows = (
+    SELECT COUNT(*)
+    FROM `{manifest_table}`
+    WHERE job_id = @job_id
+      AND import_version = @import_version
+      AND generation_id = @expected_generation_id
+  );
+  IF current_generation_rows = 0 THEN
+    RAISE USING MESSAGE = '{stale_pin_message}';
+  END IF;
+  DELETE FROM `{span_labels_table}`
+  WHERE job_id = @job_id AND import_version = @import_version;
+  INSERT INTO `{span_labels_table}` ({span_columns})
+  SELECT {span_columns} FROM `{span_labels_staging}`;
+  COMMIT TRANSACTION;
+EXCEPTION WHEN ERROR THEN
+  ROLLBACK TRANSACTION;
+  RAISE;
+END;
+"""
+# The pin-aware join boundary (#469): the retained span-labels table keeps
+# one row set per (job_id, import_version), so a bare eval_id join fans
+# out across retained versions. The companion view (the span table's name
+# plus this suffix) is kept pinned to the job's latest successful
+# publication — the same manifest row the failed_sessions view pins — so
+# SQL consumers join failed_sessions to the view on eval_id alone, or the
+# base table on job_id + import_version + eval_id.
+SPAN_LABELS_VIEW_SUFFIX = "_pinned"
+_SPAN_VIEW_PIN_MARKER = "-- evalbench_span_labels pin: "
+_SPAN_VIEW_BODY = """\
+{pin_comment}
+SELECT
+  job_id,
+  import_version,
+  eval_id,
+  session_id,
+  trace_id,
+  span_id,
+  failure_category,
+  evidence,
+  confidence,
+  target_kind,
+  taxonomy_version
+FROM `{span_labels_table}`
+WHERE job_id = {job_id_literal}
+  AND import_version = {import_version_literal}
 """
 # The frozen Week-0 gate span-label derivation falls back to when the
 # caller supplies no policy: localization must see the ``goal_completion``
@@ -193,6 +283,142 @@ def _parse_source_table(source_table: Any) -> tuple[str, str, str]:
         " before any query"
     )
   return project, dataset, table
+
+
+def resolve_span_label_policy(
+    policy: Optional[EvalScorePolicy],
+) -> EvalScorePolicy:
+  """The ONE effective policy of a span-labelled publish (#469).
+
+  Span-level labels are derived under the frozen ``goal_completion >= 1.0``
+  gate (``NATIVE_SPAN_LABEL_POLICY``), and the session-level denominator
+  the snapshot commits (manifest ``view_policy``, failed_sessions view)
+  must record the *same* gate — otherwise the view would say "no score
+  gate" while span rows publish ``task/planning`` from that very gate. So
+  a missing policy (the thin CLI default) resolves to the frozen gate, any
+  other policy — the explicitly-empty ``EvalScorePolicy({})`` included —
+  is merged with it (extra comparators keep their thresholds; they gate
+  the denominator exactly as without span labels), and a policy that sets
+  ``goal_completion`` to anything other than ``1.0`` is rejected: it asks
+  for a denominator the frozen span derivation cannot match.
+  """
+  if policy is None:
+    return NATIVE_SPAN_LABEL_POLICY
+  gate = policy.min_scores.get(NATIVE_COMPARATOR)
+  if gate is not None and gate != 1.0:
+    raise ValueError(
+        f"policy sets {NATIVE_COMPARATOR}={gate!r}, but span-label"
+        " publication requires the frozen gate"
+        f" {NATIVE_COMPARATOR}=1.0 (#469): the session denominator and"
+        " the span rows must share one policy. Drop the conflicting"
+        " threshold, or publish without span_labels_table"
+    )
+  if gate == 1.0:
+    return policy
+  return EvalScorePolicy(
+      {**policy.min_scores, NATIVE_COMPARATOR: 1.0},
+      missing_score_fails=policy.missing_score_fails,
+  )
+
+
+def _span_labels_view_body(
+    *, span_labels_ref: str, job_id: str, import_version: str
+) -> str:
+  """The pinned span-label view's query text: a pure function of its pin.
+
+  The pin comment carries exactly the values the WHERE clause renders, so
+  ownership can be decided by re-rendering the claimed pin and comparing
+  byte-for-byte — a view at the managed name whose body is anything else
+  was not written by this sync and is never replaced.
+  """
+  pin = {
+      "import_version": import_version,
+      "job_id": job_id,
+      "span_labels_table": span_labels_ref,
+  }
+  return _SPAN_VIEW_BODY.format(
+      pin_comment=(
+          _SPAN_VIEW_PIN_MARKER
+          + json.dumps(pin, sort_keys=True, ensure_ascii=True)
+      ),
+      span_labels_table=span_labels_ref,
+      job_id_literal=_sql_string_literal(job_id),
+      import_version_literal=_sql_string_literal(import_version),
+  )
+
+
+def _span_labels_view_description(*, job_id: str, import_version: str) -> str:
+  return (
+      "EvalBench span-level G1 labels (#469) pinned to job_id"
+      f" {job_id!r} import_version {import_version!r}; maintained by"
+      " bigquery_agent_analytics.native_events.NativeAgentEventsRun"
+      ".materialize"
+  )
+
+
+def _read_managed_span_view(client: Any, *, view_ref: str) -> Optional[Any]:
+  """The managed pinned span-label view at ``view_ref``, or ``None``.
+
+  ``None`` means nothing exists there. Anything that does exist must be a
+  view whose body is byte-for-byte the rendering of the pin its first line
+  claims (over the claimed span table); a table, a foreign view, or an
+  edited body raises so the sync never replaces an object it cannot vouch
+  for.
+  """
+  try:
+    table = client.get_table(view_ref)
+  except NotFound:
+    return None
+  view_query = getattr(table, "view_query", None)
+  if isinstance(view_query, str):
+    for raw in view_query.splitlines():
+      line = raw.strip()
+      if not line:
+        continue
+      if not line.startswith(_SPAN_VIEW_PIN_MARKER):
+        break
+      try:
+        pin = json.loads(line[len(_SPAN_VIEW_PIN_MARKER) :])
+      except json.JSONDecodeError:
+        break
+      if not (
+          isinstance(pin, dict)
+          and isinstance(pin.get("job_id"), str)
+          and isinstance(pin.get("import_version"), str)
+          and isinstance(pin.get("span_labels_table"), str)
+      ):
+        break
+      expected = _span_labels_view_body(
+          span_labels_ref=pin["span_labels_table"],
+          job_id=pin["job_id"],
+          import_version=pin["import_version"],
+      )
+      if view_query == expected:
+        return table
+      break
+  raise ValueError(
+      f"{view_ref!r} exists but is not a pinned span-labels view created"
+      " by materialize() (or its definition was changed); choose another"
+      " span_labels_table name rather than replacing it"
+  )
+
+
+def _check_span_view_binding(
+    client: Any, *, view_ref: str, job_id: str
+) -> Optional[Any]:
+  """Refuse a pinned span view owned by another job (fail-fast + authority)."""
+  existing = _read_managed_span_view(client, view_ref=view_ref)
+  if existing is not None:
+    pin = json.loads(
+        existing.view_query.splitlines()[0][len(_SPAN_VIEW_PIN_MARKER) :]
+    )
+    if pin["job_id"] != job_id:
+      raise ValueError(
+          f"pinned span-labels view {view_ref!r} is pinned to job"
+          f" {pin['job_id']!r}, not {job_id!r}; pass a different"
+          " span_labels_table for this job"
+      )
+  return existing
 
 
 @dataclasses.dataclass(frozen=True)
@@ -269,34 +495,66 @@ class NativeAgentEventsRun(EvalBenchRun):
     #466 localization library's labels for every failed session of this
     snapshot are kept as rows of ``{target}.{span_labels_table}``, keyed by
     the same ``(job_id, import_version)`` pin and joinable to
-    ``failed_sessions`` via the frozen ``eval_id`` rule. The rows are
-    derived BEFORE anything is written, so a failed session whose target
-    row carries no real ``span_id`` fails the whole publish closed with
-    zero writes (no synthetic span identifiers). Like the failed-sessions
-    view — and unlike the immutable events/scores snapshot — the span rows
-    are derived state and are re-synchronized (keyed delete-then-load) on
-    every successful call, ``unchanged`` included, so a version published
-    before span labels existed gains its rows on the next call. Span-level
-    rows only localize; the session-level ``failed_sessions`` + G1 contract
-    remains the denominator and is untouched by this option.
+    ``failed_sessions`` via the frozen ``eval_id`` rule. Opting in also
+    resolves ONE effective score policy for the whole publish
+    (``resolve_span_label_policy``): the frozen ``goal_completion >= 1.0``
+    gate span derivation runs under is merged into the caller's policy (or
+    rejected when the caller pins another ``goal_completion`` threshold)
+    and that same policy is what the manifest ``view_policy`` and the
+    failed-sessions view record — the session denominator and the span
+    rows can never disagree about the gate. The rows are derived BEFORE
+    anything is written, so a failed session whose target row carries no
+    real ``span_id`` fails the whole publish closed with zero writes (no
+    synthetic span identifiers). Like the failed-sessions view — and
+    unlike the immutable events/scores snapshot — the span rows are
+    derived state and are re-synchronized on every successful call,
+    ``unchanged`` included, so a version published before span labels
+    existed gains its rows on the next call. The sync stages the rows into
+    an expiring staging table and replaces the pin's slice in one
+    lock-serialized transaction keyed to the manifest generation it
+    derived from, so a failed or concurrent sync leaves the previously
+    published span rows in place (never a half-replaced or duplicated
+    slice); re-running heals it. A companion view named
+    ``{span_labels_table}_pinned`` (``SPAN_LABELS_VIEW_SUFFIX``) is kept
+    pinned to the job's latest successful publication — the same manifest
+    row the failed-sessions view pins — because the retained table keeps
+    every version's rows and a bare ``eval_id`` join would fan out across
+    them: join ``failed_sessions`` to the view on ``eval_id`` alone, or to
+    the base table on ``job_id + import_version + eval_id``. Span-level
+    rows only localize; the session-level ``failed_sessions`` + G1
+    contract remains the denominator and is untouched by this option.
     """
     resolved_project = target_project or self.project_id
     prefix = f"{resolved_project}.{target_dataset}"
     resolved_version = import_version
     span_rows: Optional[list[dict[str, Any]]] = None
+    span_labels_view: Optional[str] = None
     if span_labels_table is not None:
       _validate_destination_table("span_labels_table", span_labels_table)
-      if span_labels_table in (
+      span_labels_view = span_labels_table + SPAN_LABELS_VIEW_SUFFIX
+      _validate_destination_table("span_labels_view", span_labels_view)
+      reserved = (
           events_table,
           scores_table,
           MANIFEST_TABLE,
           LOCK_TABLE,
           failed_sessions_view,
-      ):
+      )
+      if span_labels_table in reserved:
         raise ValueError(
             f"span_labels_table {span_labels_table!r} must not name an"
             " import table or the failed-sessions view"
         )
+      if span_labels_view in reserved + (span_labels_table,):
+        raise ValueError(
+            f"the pinned span-labels view {span_labels_view!r} derived from"
+            f" span_labels_table {span_labels_table!r} would name an import"
+            " table, the failed-sessions view, or the span table itself;"
+            " choose another span_labels_table name"
+        )
+      # One effective policy for span rows AND the session denominator the
+      # inherited publish commits (manifest view_policy + view rendering).
+      policy = resolve_span_label_policy(policy)
       # The pin the rows carry must be the version the publish commits, so
       # a missing explicit version resolves to the same content fingerprint
       # the inherited materialize derives.
@@ -312,6 +570,7 @@ class NativeAgentEventsRun(EvalBenchRun):
       destinations.append(failed_sessions_view)
     if span_labels_table is not None:
       destinations.append(span_labels_table)
+      destinations.append(span_labels_view)
     for destination in destinations:
       destination_ref = f"{prefix}.{destination}"
       if destination_ref == self.source_table:
@@ -324,6 +583,14 @@ class NativeAgentEventsRun(EvalBenchRun):
     if span_labels_table is not None and client is None:
       # One client serves the inherited publish and the span-label sync.
       client = make_bq_client(resolved_project, location=self.location)
+    if span_labels_table is not None:
+      # Fail fast on a foreign object at the managed view name before the
+      # snapshot commits; the sync re-reads it as the authority.
+      _check_span_view_binding(
+          client,
+          view_ref=f"{prefix}.{span_labels_view}",
+          job_id=self.job_id,
+      )
     result = super().materialize(
         target_dataset=target_dataset,
         target_project=target_project,
@@ -340,16 +607,22 @@ class NativeAgentEventsRun(EvalBenchRun):
       return result
     assert span_rows is not None  # Derived above whenever the table is set.
     span_labels_ref = f"{prefix}.{span_labels_table}"
-    self._publish_span_labels(
+    span_view_ref = f"{prefix}.{span_labels_view}"
+    self._sync_span_labels(
         client,
         span_labels_ref=span_labels_ref,
+        span_view_ref=span_view_ref,
+        manifest_ref=f"{prefix}.{MANIFEST_TABLE}",
+        lock_ref=f"{prefix}.{LOCK_TABLE}",
         import_version=result.import_version,
         rows=span_rows,
+        status=result.status,
     )
     return dataclasses.replace(
         result,
         span_labels_table=span_labels_ref,
         span_label_row_count=len(span_rows),
+        span_labels_view=span_view_ref,
     )
 
   def to_span_label_rows(
@@ -366,17 +639,19 @@ class NativeAgentEventsRun(EvalBenchRun):
     carries none fails closed inside the localizer — no synthetic span
     identifiers). Each label becomes one published row carrying the RFC
     tuple, the frozen first-8 ``eval_id`` join identity, and the
-    ``(job_id, import_version)`` pin. When ``policy`` is ``None`` the
-    frozen Week-0 gate (``NATIVE_SPAN_LABEL_POLICY``,
-    ``goal_completion >= 1.0``) applies — never an empty policy, which
-    would silently drop ``task/planning`` (the #468 P1 finding).
+    ``(job_id, import_version)`` pin. ``policy`` goes through
+    ``resolve_span_label_policy``: ``None`` resolves to the frozen Week-0
+    gate (``NATIVE_SPAN_LABEL_POLICY``, ``goal_completion >= 1.0``), any
+    other policy — the truthy-but-empty ``EvalScorePolicy({})`` included —
+    is merged with that gate, never allowed to drop it, which would
+    silently lose ``task/planning`` (the #468 P1 finding).
     """
     # Imported here, not at module level: span_taxonomy imports this
     # module's run class, so the localization layer stays downstream.
     from .span_taxonomy import label_native_run
 
     _validate_import_version(import_version)
-    labels = label_native_run(self, policy=policy or NATIVE_SPAN_LABEL_POLICY)
+    labels = label_native_run(self, policy=resolve_span_label_policy(policy))
     return [
         {
             "job_id": self.job_id,
@@ -394,50 +669,219 @@ class NativeAgentEventsRun(EvalBenchRun):
         for label in labels
     ]
 
-  def _publish_span_labels(
+  def _sync_span_labels(
       self,
       client: Any,
       *,
       span_labels_ref: str,
+      span_view_ref: str,
+      manifest_ref: str,
+      lock_ref: str,
       import_version: str,
       rows: list[dict[str, Any]],
+      status: str,
   ) -> None:
-    """Converge one pin's span-label rows: keyed delete, then load.
+    """Converge one pin's span rows and the pinned view, or change nothing.
 
     Runs only after the inherited publish succeeded, so the pin it keys on
     is committed manifest state. The rows are a deterministic function of
     the version's source content (fingerprint-identical sources derive
     identical rows), so re-running is idempotent and an interrupted sync
-    heals on the next call.
+    heals on the next call — which is exactly what the error asks for.
+    """
+    try:
+      self._publish_span_labels(
+          client,
+          span_labels_ref=span_labels_ref,
+          manifest_ref=manifest_ref,
+          lock_ref=lock_ref,
+          import_version=import_version,
+          rows=rows,
+      )
+      self._sync_span_labels_view(
+          client,
+          span_view_ref=span_view_ref,
+          span_labels_ref=span_labels_ref,
+          manifest_ref=manifest_ref,
+      )
+    except Exception as exc:  # noqa: BLE001
+      raise ValueError(
+          f"native job {self.job_id!r} import_version {import_version!r} is"
+          f" published (status {status!r}) but its span labels could not be"
+          f" synchronized: {exc}. Previously published span rows for this"
+          " pin are unchanged; re-run materialize() to retry the sync (the"
+          " import itself then reports 'unchanged')"
+      ) from exc
+
+  def _publish_span_labels(
+      self,
+      client: Any,
+      *,
+      span_labels_ref: str,
+      manifest_ref: str,
+      lock_ref: str,
+      import_version: str,
+      rows: list[dict[str, Any]],
+  ) -> None:
+    """Replace one pin's span-label slice atomically, serialized by the lock.
+
+    The rows are loaded into an expiring staging table first, then one
+    multi-statement transaction claims the dataset's import lock (two
+    concurrent syncs of one pin serialize; BigQuery cancels the second),
+    re-checks that the manifest row still carries the generation this sync
+    derived from (a concurrent ``replace`` since would make these rows
+    stale), and only then deletes and re-inserts the keyed slice. A
+    failure anywhere rolls back, so the previously published span rows are
+    preserved; staging is always cleaned up (and expires regardless).
     """
     table = bigquery.Table(
         span_labels_ref, schema=_schema(_SPAN_LABELS_SCHEMA_FIELDS)
     )
     table.clustering_fields = ["job_id", "import_version", "session_id"]
     client.create_table(table, exists_ok=True)
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=_import_parameters(self.job_id, import_version)
+    manifest = _read_manifest(
+        client,
+        manifest_ref=manifest_ref,
+        job_id=self.job_id,
+        import_version=import_version,
+        location=self.location,
+        feature=_NATIVE_FEATURE,
     )
-    job_config = with_sdk_labels(job_config, feature=_NATIVE_FEATURE)
-    query_args: dict[str, Any] = {"job_config": job_config}
-    if self.location is not None:
-      query_args["location"] = self.location
-    client.query(
-        _DELETE_SPAN_LABELS_QUERY.format(span_labels_table=span_labels_ref),
-        **query_args,
-    ).result()
-    if not rows:
+    if manifest is None:
+      raise ValueError(
+          f"manifest row for job {self.job_id!r} import_version"
+          f" {import_version!r} disappeared from {manifest_ref!r} after"
+          " publishing"
+      )
+    fingerprints = self.fingerprints()
+    if any(manifest.get(key) != value for key, value in fingerprints.items()):
+      raise ValueError(
+          f"import_version {import_version!r} was re-published concurrently"
+          " with different source fingerprints; the derived span rows are"
+          " stale and were not written"
+      )
+    staging_ref = f"{span_labels_ref}_staging_{uuid.uuid4().hex[:8]}"
+    try:
+      _load_staging(
+          client, staging_ref, rows, _schema(_SPAN_LABELS_SCHEMA_FIELDS)
+      )
+      # The sentinel must exist before the transaction starts (the
+      # ``unchanged`` fast path never ran the inherited publish, which
+      # otherwise seeds it); seeding is INSERT-only and idempotent.
+      _seed_import_lock(client, lock_ref=lock_ref, location=self.location)
+      span_columns = ", ".join(
+          name for name, _, _ in _SPAN_LABELS_SCHEMA_FIELDS
+      )
+      script = _SPAN_SYNC_SCRIPT.format(
+          lock_table=lock_ref,
+          lock_id=_IMPORT_LOCK_ID,
+          lock_missing_message=_LOCK_MISSING_MESSAGE,
+          manifest_table=manifest_ref,
+          stale_pin_message=_SPAN_STALE_PIN_MESSAGE,
+          span_labels_table=span_labels_ref,
+          span_columns=span_columns,
+          span_labels_staging=staging_ref,
+      )
+      parameters = _import_parameters(self.job_id, import_version)
+      parameters.append(
+          bigquery.ScalarQueryParameter(
+              "expected_generation_id",
+              "STRING",
+              _manifest_generation_id(manifest),
+          )
+      )
+      job_config = bigquery.QueryJobConfig(query_parameters=parameters)
+      job_config = with_sdk_labels(job_config, feature=_NATIVE_FEATURE)
+      query_args: dict[str, Any] = {"job_config": job_config}
+      if self.location is not None:
+        query_args["location"] = self.location
+      try:
+        client.query(script, **query_args).result()
+      except ValueError:
+        raise
+      except Exception as exc:  # noqa: BLE001
+        if _SPAN_STALE_PIN_MESSAGE in str(exc):
+          raise ValueError(_SPAN_STALE_PIN_MESSAGE) from exc
+        if _CONCURRENT_UPDATE_MARKER in str(exc).lower():
+          raise ValueError(
+              "BigQuery cancelled this span-label sync because a concurrent"
+              f" import into {lock_ref.rsplit('.', 1)[0]!r} claimed the"
+              f" import lock ({lock_ref!r}) first; span rows were not"
+              " changed"
+          ) from exc
+        raise
+    finally:
+      _drop_staging_tables(client, (staging_ref,))
+
+  def _sync_span_labels_view(
+      self,
+      client: Any,
+      *,
+      span_view_ref: str,
+      span_labels_ref: str,
+      manifest_ref: str,
+  ) -> None:
+    """Keep the pinned span-label view on the job's latest publication.
+
+    The same reconcile shape as the failed-sessions view: each attempt
+    re-reads the view (ownership by byte-for-byte re-rendering, ETag) and
+    then the latest manifest row of this job — the row the failed-sessions
+    view pins — and writes only the rendering of that row. Create is
+    create-if-absent, replace is ETag-conditional, and either race
+    re-decides a bounded number of times before failing closed.
+    """
+    for _ in range(_VIEW_SYNC_ATTEMPTS):
+      existing = _check_span_view_binding(
+          client, view_ref=span_view_ref, job_id=self.job_id
+      )
+      latest = _read_latest_manifest(
+          client,
+          manifest_ref=manifest_ref,
+          job_id=self.job_id,
+          location=self.location,
+      )
+      if latest is None:
+        raise ValueError(
+            f"native job {self.job_id!r} has no manifest row in"
+            f" {manifest_ref!r} after publishing; cannot pin the"
+            " span-labels view"
+        )
+      body = _span_labels_view_body(
+          span_labels_ref=span_labels_ref,
+          job_id=str(latest["job_id"]),
+          import_version=str(latest["import_version"]),
+      )
+      description = _span_labels_view_description(
+          job_id=str(latest["job_id"]),
+          import_version=str(latest["import_version"]),
+      )
+      if existing is None:
+        table = bigquery.Table(span_view_ref)
+        table.view_query = body
+        table.description = description
+        try:
+          client.create_table(table, exists_ok=False)
+        except Conflict:
+          continue
+        return
+      if existing.view_query == body:
+        return
+      if not getattr(existing, "etag", None):
+        raise ValueError(
+            f"pinned span-labels view {span_view_ref!r} has no ETag;"
+            " refusing an unconditional replace"
+        )
+      existing.view_query = body
+      existing.description = description
+      try:
+        client.update_table(existing, ["view_query", "description"])
+      except PreconditionFailed:
+        continue
       return
-    load_config = bigquery.LoadJobConfig(
-        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-        autodetect=False,
-        schema=_schema(_SPAN_LABELS_SCHEMA_FIELDS),
+    raise ValueError(
+        f"pinned span-labels view {span_view_ref!r} changed concurrently"
+        f" {_VIEW_SYNC_ATTEMPTS} times; re-run materialize() to retry"
     )
-    load_config = with_sdk_labels(load_config, feature=_NATIVE_FEATURE)
-    client.load_table_from_json(
-        rows, span_labels_ref, job_config=load_config
-    ).result()
 
   @classmethod
   def from_agent_events(

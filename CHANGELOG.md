@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Span-level G1 labels persisted on the native snapshot (#469, parent
+  #435)** — the existing `bq-agent-sdk evalbench-native-import` command
+  gains a thin `--span-labels-table` flag (no new command family): when
+  set, the #466 localization layer's labels for every failed session are
+  published as BQAA-owned rows via
+  `NativeAgentEventsRun.to_span_label_rows` / `_publish_span_labels`,
+  reusing `label_native_run` under the frozen
+  `EvalScorePolicy({"goal_completion": 1.0})` gate — resolved as the ONE
+  effective policy the manifest `view_policy` and the failed-sessions
+  view also record, so the session denominator and the span rows can
+  never disagree. Rows are keyed by the `(job_id, import_version)` pin
+  and a companion `<span-labels-table>_pinned` view tracks the job's
+  latest publication for fan-out-free joins. The widget-stock anchor
+  holds: `eval_id` `7e352c34` / `span_id` `b7ad6b7169203331` /
+  `target_kind` `gap_after_span` with the three frozen G1 names
+  (`task/planning`, `finalization`, `tool blockers`); session-level
+  `failed_sessions` + G1 stays the denominator. Publication fails closed
+  without a real `span_id` (no synthetic span identifiers), identity
+  stays the frozen first-8 `eval_id` with the full session id on
+  collision, **the six-week clock has still NOT started**, tests are
+  offline fixture tests only, and the `evalbench-import` adapter (#97)
+  stays.
 - **Span-level G1 taxonomy on `span_id` (#466, parent #435)** — new
   `bigquery_agent_analytics.span_taxonomy` localizes the G1-frozen failure
   categories of a *failed* session onto the span where the failure is
