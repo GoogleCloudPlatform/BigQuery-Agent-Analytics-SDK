@@ -48,42 +48,22 @@
 
 set -euo pipefail
 
-usage() {
-  cat <<'USAGE'
-Usage: bash examples/evalbench_native_e2e.sh --fixture
-
-Team demo of the Week 0 freeze e2e on the native path (#463): a live
-walkthrough of the widget-stock failed session 7e352c34 -- the customer
-asked, the agent went silent, evalbench-native-import snapshots the
-production agent_events trace with no EvalBench source tables, and the
-frozen G1 taxonomy v0.1.0 names the failure. The --fixture argument is
-the only mode: no BigQuery, no --synth, no live CLI. The six-week clock
-has not started.
-
-Speaker notes: examples/evalbench_native_e2e.md
-USAGE
-}
-
-# The --fixture argument is the only way to run this demo; the
-# EVALBENCH_FIXTURE environment variable is deliberately not read.
-FIXTURE=0
-for arg in "$@"; do
-  case "${arg}" in
-    --fixture) FIXTURE=1 ;;
-    -h|--help) usage; exit 0 ;;
-    *)
-      echo "evalbench_native_e2e.sh: unknown argument '${arg}'." \
-        "This demo is --fixture only -- no BigQuery, no --synth, no live" \
-        "mode; the six-week clock has not started. Run:" \
-        "bash examples/evalbench_native_e2e.sh --fixture" >&2
-      exit 2
-      ;;
-  esac
-done
-if [[ "${FIXTURE}" != "1" ]]; then
-  echo "evalbench_native_e2e.sh: this demo is --fixture only" \
-    "(no BigQuery, no live mode; the clock has not started). Run:" \
+# The frozen argv contract: exactly one argument, equal to --fixture.
+# Everything else -- no arguments, -h/--help, --synth, repeated flags --
+# is rejected with one line on stderr and exit 2; the EVALBENCH_FIXTURE
+# environment variable is deliberately not read.
+if [[ $# -eq 1 && "$1" == "--fixture" ]]; then
+  : # the only successful invocation
+elif [[ $# -eq 1 ]]; then
+  echo "evalbench_native_e2e.sh: unknown argument '$1'." \
+    "This demo is --fixture only -- no BigQuery, no --synth, no live" \
+    "mode; the six-week clock has not started. Run:" \
     "bash examples/evalbench_native_e2e.sh --fixture" >&2
+  exit 2
+else
+  echo "evalbench_native_e2e.sh: this demo is --fixture only, taking" \
+    "exactly that one argument (no BigQuery, no live mode; the clock has" \
+    "not started). Run: bash examples/evalbench_native_e2e.sh --fixture" >&2
   exit 2
 fi
 

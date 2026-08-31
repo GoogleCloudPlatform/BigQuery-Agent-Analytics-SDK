@@ -254,11 +254,36 @@ def test_unknown_argument_is_rejected() -> None:
   assert result.stdout == ""
 
 
-def test_help_prints_usage_without_running() -> None:
+def test_help_flag_is_rejected_without_running() -> None:
+  # The frozen argv contract: the only successful invocation is exactly
+  # one argument equal to --fixture. --help is not part of the demo and
+  # must not exit 0 or print the transcript.
   result = _run("--help")
-  assert result.returncode == 0
-  assert "--fixture" in result.stdout
-  assert "=== The customer asked" not in result.stdout
+  assert result.returncode == 2
+  assert result.stdout == ""
+  assert "--fixture only" in result.stderr
+
+
+def test_short_help_flag_is_rejected() -> None:
+  result = _run("-h")
+  assert result.returncode == 2
+  assert result.stdout == ""
+  assert "--fixture only" in result.stderr
+
+
+def test_repeated_fixture_flag_is_rejected() -> None:
+  result = _run("--fixture", "--fixture")
+  assert result.returncode == 2
+  assert result.stdout == ""
+  assert "--fixture only" in result.stderr
+
+
+def test_fixture_combined_with_help_is_rejected() -> None:
+  for argv in (("--fixture", "--help"), ("--help", "--fixture")):
+    result = _run(*argv)
+    assert result.returncode == 2, argv
+    assert result.stdout == "", argv
+    assert "--fixture only" in result.stderr, argv
 
 
 def test_script_never_invokes_live_tools() -> None:
