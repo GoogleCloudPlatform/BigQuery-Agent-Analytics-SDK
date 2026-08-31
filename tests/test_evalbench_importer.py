@@ -868,6 +868,9 @@ class _FakeWriteClient:
               _CONCURRENT_UPDATE_ERROR.format(lock_table=lock_table)
           )
       )
+    guarded = self._span_binding_guard_result(script, params)
+    if guarded is not None:
+      return guarded
 
     # 2. Manifest guard, evaluated against the transaction's snapshot:
     #    absent -> publish, conflicting -> RAISE, identical -> RAISE the
@@ -967,6 +970,12 @@ class _FakeWriteClient:
         row for row in store.rows if not _same_version(row, params)
     ] + manifest_rows
     return _FakeJob()
+
+  def _span_binding_guard_result(self, script: str, params: dict):
+    """Hook: the native span-binding registry guard, evaluated after the
+    lock claim as the rendered script does (see ``_SpanLabelsFake``)."""
+    del script, params  # The adapter fake has no registry to check.
+    return None
 
   def _failed_sessions(self, query: str, params: dict) -> list[dict]:
     """Emulate ``failed_sessions_sql`` with the reference implementation.

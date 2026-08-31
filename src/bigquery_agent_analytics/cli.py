@@ -2591,6 +2591,17 @@ def evalbench_native_import(
       _validate_destination_table("failed_sessions_view", failed_sessions_view)
     if span_labels_table is not None:
       _validate_destination_table("span_labels_table", span_labels_table)
+      if skip_failed_sessions_view:
+        # Rejected before any BigQuery read: span rows localize the
+        # failed-sessions denominator, so skipping its view would let the
+        # pinned join boundaries diverge. materialize() enforces the same
+        # rule for jobs the span-binding registry keeps bound without the
+        # flag.
+        raise ValueError(
+            "--span-labels-table cannot be combined with"
+            " --skip-failed-sessions-view: span labels require the"
+            " failed-sessions view they localize"
+        )
     policy = _evalbench_score_policy(min_score, missing_score_passes)
 
     parsed_snapshot = None

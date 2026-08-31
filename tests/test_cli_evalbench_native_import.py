@@ -211,6 +211,34 @@ def test_native_import_span_labels_default_off(
   assert materialize["span_labels_table"] is None
 
 
+def test_native_import_rejects_span_labels_with_skipped_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  # P1 #469-r3-2: active span publication requires the failed-session
+  # view it localizes; the conflicting flags are rejected before any
+  # BigQuery read. A job kept bound by the span-binding registry hits the
+  # same rule inside materialize() even without --span-labels-table.
+  calls = _patch_from_bigquery(monkeypatch)
+  result = runner.invoke(
+      app,
+      [
+          "evalbench-native-import",
+          "--source-table",
+          _SOURCE_TABLE,
+          "--job-id",
+          "mvp-e2e-real-traces",
+          "--target-dataset",
+          "bqaa",
+          "--span-labels-table",
+          "evalbench_span_labels",
+          "--skip-failed-sessions-view",
+      ],
+  )
+  assert result.exit_code == 2
+  assert "--skip-failed-sessions-view" in result.output
+  assert calls == []
+
+
 def test_native_import_rejects_reserved_span_labels_table(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

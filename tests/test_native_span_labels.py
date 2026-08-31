@@ -32,6 +32,7 @@ from bigquery_agent_analytics import native_events
 from bigquery_agent_analytics import span_taxonomy
 from bigquery_agent_analytics.evalbench import _policy_column
 from bigquery_agent_analytics.evalbench import _policy_from_column
+from bigquery_agent_analytics.evalbench import _PUBLISH_BINDING_GUARD_MESSAGE
 from bigquery_agent_analytics.evalbench import EvalScorePolicy
 from bigquery_agent_analytics.evalbench import failed_sessions
 from bigquery_agent_analytics.native_events import NATIVE_SPAN_LABEL_POLICY
@@ -84,7 +85,11 @@ class _SpanLabelsFake(_FakeWriteClient):
   ``span_load_error`` fails only the span staging load (the base publish
   still commits — the P1 #2 skew). ``doctor_native_manifest_read`` runs
   once, right before the span sync's own manifest re-read: a concurrent
-  writer landing between derive and sync.
+  writer landing between derive and sync. ``stale_binding_reads`` makes
+  every registry pre-read return nothing (a writer racing the first
+  opt-in), and ``doctor_binding_read`` runs once right after a pre-read
+  captured its rows: a concurrent binding landing in that window. Both
+  model the r3 P1 races the in-boundary guards must fail closed.
   """
 
   def __init__(
@@ -94,6 +99,8 @@ class _SpanLabelsFake(_FakeWriteClient):
       binding_store: list[dict] | None = None,
       span_load_error: Exception | None = None,
       doctor_native_manifest_read=None,
+      stale_binding_reads: bool = False,
+      doctor_binding_read=None,
       **kwargs,
   ) -> None:
     super().__init__(**kwargs)
@@ -104,6 +111,8 @@ class _SpanLabelsFake(_FakeWriteClient):
     self.span_deletes: list[tuple[str, dict]] = []
     self.span_load_error = span_load_error
     self.doctor_native_manifest_read = doctor_native_manifest_read
+    self.stale_binding_reads = stale_binding_reads
+    self.doctor_binding_read = doctor_binding_read
 
   def get_table(self, table_ref: str):
     if table_ref.endswith("." + native_events.SPAN_BINDINGS_TABLE) and (
@@ -127,17 +136,34 @@ class _SpanLabelsFake(_FakeWriteClient):
       params = {p.name: p.value for p in kwargs["job_config"].query_parameters}
       snapshot = self.transaction_snapshot or self.store.snapshot()
       return self._span_sync(query, params, snapshot)
-    if f".{native_events.SPAN_BINDINGS_TABLE}`" in query:
+    marker = f".{native_events.SPAN_BINDINGS_TABLE}`"
+    if marker in query and query.startswith("SELECT"):
       self.queries.append((query, kwargs))
       params = {p.name: p.value for p in kwargs["job_config"].query_parameters}
-      assert query.startswith("SELECT")
-      return _FakeJob(
-          [
+      rows = (
+          []
+          if self.stale_binding_reads
+          else [
               dict(row)
               for row in self.span_bindings
               if row["job_id"] == params["job_id"]
           ]
       )
+      hook, self.doctor_binding_read = self.doctor_binding_read, None
+      if hook is not None:
+        hook()
+      return _FakeJob(rows)
+    if marker in query and query.startswith("UPDATE"):
+      # ``_RECORD_VIEW_POLICY_QUERY`` with the appended registry guard:
+      # the recommit lands on nothing when the committed binding state is
+      # no longer what this caller pre-read.
+      params = {p.name: p.value for p in kwargs["job_config"].query_parameters}
+      predicate = re.search(r"AND NOT \((.+)\)\s*$", query, re.S)
+      assert predicate is not None
+      if self._binding_guard_trips(predicate.group(1), params["job_id"]):
+        self.queries.append((query, kwargs))
+        return _FakeJob()
+      return super().query(query, **kwargs)
     if (
         self.doctor_native_manifest_read is not None
         and ".evalbench_import_manifest`" in query
@@ -183,6 +209,22 @@ class _SpanLabelsFake(_FakeWriteClient):
       return _FakeJob(
           error=RuntimeError(f"400 {native_events._SPAN_STALE_PIN_MESSAGE}")
       )
+    # The in-transaction one-binding-per-job guard: a committed binding to
+    # another span table fails this sync closed before any DML.
+    assert "span_labels_table != @span_labels_table_name" in script
+    assert script.index("@span_labels_table_name") < script.index(
+        "DELETE FROM `"
+    )
+    if any(
+        row["job_id"] == params["job_id"]
+        and row["span_labels_table"] != params["span_labels_table_name"]
+        for row in self.span_bindings
+    ):
+      return _FakeJob(
+          error=RuntimeError(
+              f"400 {native_events._SPAN_BINDING_CONFLICT_MESSAGE}"
+          )
+      )
     ref = re.search(r"DELETE FROM `([^`]+)`", script).group(1)
     (staging_ref,) = re.findall(r"FROM `([^`]+_staging_[0-9a-f]+)`", script)
     staged = next(
@@ -210,6 +252,45 @@ class _SpanLabelsFake(_FakeWriteClient):
         }
     ]
     return _FakeJob()
+
+  def _binding_guard_trips(self, predicate: str, job_id: str) -> bool:
+    """Evaluate the rendered registry predicate against committed state.
+
+    The two shapes ``_span_binding_guard`` renders: pre-read-none (EXISTS
+    any row for the job) and pre-read-bound (NOT EXISTS the exact
+    table+policy row). Literals are ``_sql_string_literal`` output, so
+    ``json.loads`` round-trips them.
+    """
+    rows = [r for r in self.span_bindings if r["job_id"] == job_id]
+    bound = re.search(
+        r'span_labels_table = ("(?:[^"\\]|\\.)*")'
+        r' AND view_policy = ("(?:[^"\\]|\\.)*")',
+        predicate,
+    )
+    if bound is None:
+      assert predicate.lstrip().startswith("EXISTS")
+      return bool(rows)
+    assert predicate.lstrip().startswith("NOT EXISTS")
+    expected = (json.loads(bound.group(1)), json.loads(bound.group(2)))
+    return not any(
+        (r["span_labels_table"], r["view_policy"]) == expected for r in rows
+    )
+
+  def _span_binding_guard_result(self, script: str, params: dict):
+    """The base publish transaction's in-boundary registry re-validation."""
+    match = re.search(
+        r"IF ((?:NOT )?EXISTS .+?) THEN\s*RAISE USING MESSAGE = '"
+        + re.escape(_PUBLISH_BINDING_GUARD_MESSAGE),
+        script,
+        re.S,
+    )
+    if match is None:
+      return None
+    if self._binding_guard_trips(match.group(1), params["job_id"]):
+      return _FakeJob(
+          error=RuntimeError(f"400 {_PUBLISH_BINDING_GUARD_MESSAGE}")
+      )
+    return None
 
 
 def _acceptance_run(extra_events=()):
@@ -1070,6 +1151,213 @@ def test_resyncing_an_older_version_cannot_repin_the_view() -> None:
   _materialize(_acceptance_run(_changed_events()), healed, import_version="v2")
   rows = _active_view_rows(healed)
   assert {r["import_version"] for r in rows} == {"v2"}
+
+
+# --- r3 P1 regressions: the registry is authoritative under the lock -------
+
+
+def test_bound_call_without_policy_keeps_the_stored_richer_gate() -> None:
+  # P1 #469-r3-1: the binding stores the ONE canonical policy; a later
+  # bound call that omits the policy must apply it, not replace it with
+  # the fallback-only goal_completion gate and a reset
+  # missing_score_fails.
+  store, shared, bindings = _dataset()
+  rich = EvalScorePolicy({"accuracy": 0.9}, missing_score_fails=False)
+  first = _materialize(
+      _acceptance_run(), _fake(store, shared, bindings), policy=rich
+  )
+  merged = native_events.resolve_span_label_policy(rich)
+  assert merged.min_scores == {"accuracy": 0.9, "goal_completion": 1.0}
+  assert merged.missing_score_fails is False
+  assert _policy_from_column(first.manifest["view_policy"]) == merged
+  generation = first.manifest["generation_id"]
+
+  later = _fake(store, shared, bindings)
+  second = _plain_materialize(_acceptance_run(), later, import_version="v1")
+  assert second.status == "unchanged"
+  assert second.span_labels_table == _SPAN_REF
+  # Manifest, binding, and generation are untouched (no silent re-commit
+  # of the fallback-only gate)...
+  (row,) = store.rows
+  assert _policy_from_column(row["view_policy"]) == merged
+  assert row["generation_id"] == generation
+  (binding,) = bindings
+  assert binding["view_policy"] == row["view_policy"]
+  assert binding["generation_id"] == generation
+  # ...the failed-session view still renders the merged gate (extra
+  # comparator kept, missing scores still passing)...
+  view = store.views[_FAILED_VIEW_REF]
+  assert "'accuracy' AS comparator, 0.9 AS min_score" in view
+  assert "'goal_completion' AS comparator, 1.0 AS min_score" in view
+  assert "sc.score IS NULL OR" not in view
+  # ...and the span rows stay coherent behind the active join boundary.
+  rows = _active_view_rows(later)
+  assert [r["failure_category"] for r in rows] == list(_G1_CATEGORIES)
+  assert {r["generation_id"] for r in rows} == {generation}
+
+
+def test_bound_call_with_explicit_policy_is_a_deliberate_change() -> None:
+  # An explicitly supplied compatible policy on a bound job is a policy
+  # change: manifest, binding, and span rows move to it in lockstep under
+  # a fresh generation.
+  store, shared, bindings = _dataset()
+  _materialize(_acceptance_run(), _fake(store, shared, bindings), policy=None)
+  rich = EvalScorePolicy({"accuracy": 0.9}, missing_score_fails=False)
+  later = _fake(store, shared, bindings)
+  result = _plain_materialize(
+      _acceptance_run(), later, import_version="v1", policy=rich
+  )
+  assert result.status == "unchanged"
+  merged = native_events.resolve_span_label_policy(rich)
+  (row,) = store.rows
+  assert _policy_from_column(row["view_policy"]) == merged
+  (binding,) = bindings
+  assert binding["view_policy"] == row["view_policy"]
+  assert binding["generation_id"] == row["generation_id"]
+  rows = _active_view_rows(later)
+  assert {r["generation_id"] for r in rows} == {row["generation_id"]}
+
+
+def test_first_opt_in_requires_the_failed_sessions_view() -> None:
+  # P1 #469-r3-2: active span publication with a skipped denominator view
+  # would let the pinned join boundaries diverge; refused with nothing
+  # written.
+  fake = _SpanLabelsFake()
+  with pytest.raises(ValueError, match="failed_sessions_view"):
+    _materialize(_acceptance_run(), fake, failed_sessions_view=None)
+  assert fake.queries == [] and fake.loads == []
+  assert fake.created == []
+  assert fake.store.rows == [] and fake.span_labels == []
+
+
+def test_bound_call_cannot_skip_the_failed_sessions_view() -> None:
+  # P1 #469-r3-2 (bound): a later call with --skip-failed-sessions-view
+  # must not leave the failed-session view pinned to v1 while the span
+  # boundary advances to v2 — rejected before any boundary moves.
+  store, shared, bindings = _dataset()
+  _materialize(_acceptance_run(), _fake(store, shared, bindings))
+  before_rows = [dict(row) for row in store.rows]
+  before_spans = [dict(row) for row in shared]
+
+  later = _fake(store, shared, bindings)
+  with pytest.raises(ValueError, match="failed_sessions_view"):
+    _plain_materialize(
+        _acceptance_run(_changed_events()),
+        later,
+        import_version="v2",
+        policy=_POLICY,
+        failed_sessions_view=None,
+    )
+  assert store.rows == before_rows
+  assert shared == before_spans
+  assert later.loads == [] and later.created == []
+
+
+def test_racing_first_opt_ins_bind_only_one_span_table() -> None:
+  # P1 #469-r3-3: two first opt-ins can both pre-read "no binding" and
+  # pick different tables; the loser must fail closed inside the span
+  # sync transaction instead of silently re-binding the job.
+  store, shared, bindings = _dataset()
+
+  def winner_lands() -> None:
+    _materialize(_acceptance_run(), _fake(store, shared, bindings))
+
+  loser = _fake(
+      store, shared, bindings, doctor_native_manifest_read=winner_lands
+  )
+  with pytest.raises(ValueError, match="bound to a different"):
+    _materialize(
+        _acceptance_run(), loser, span_labels_table="other_span_labels"
+    )
+  # One binding wins, and no second live pinned view exists for the job.
+  (binding,) = bindings
+  assert binding["span_labels_table"] == _SPAN_TABLE
+  other_view = f"{_SOURCE_PROJECT}.bqaa_native.other_span_labels_pinned"
+  assert other_view not in store.views
+  assert _SPAN_VIEW_REF in store.views
+  assert {row["import_version"] for row in shared} == {"v1"}
+  assert len(shared) == 3
+
+
+def test_stale_no_binding_pre_read_cannot_publish_past_the_registry() -> None:
+  # P1 #469-r3-4 (publish boundary): a delayed writer that pre-read "no
+  # binding" must not commit a new base snapshot after the binding landed
+  # — the publish transaction re-validates the registry under the lock.
+  store, shared, bindings = _dataset()
+  _materialize(_acceptance_run(), _fake(store, shared, bindings))
+  before_rows = [dict(row) for row in store.rows]
+  before_bindings = [dict(row) for row in bindings]
+
+  stale = _fake(store, shared, bindings, stale_binding_reads=True)
+  with pytest.raises(ValueError, match="span-binding registry"):
+    _plain_materialize(
+        _acceptance_run(_changed_events()),
+        stale,
+        import_version="v2",
+        policy=_POLICY,
+    )
+  assert store.rows == before_rows
+  assert bindings == before_bindings
+  assert {row["import_version"] for row in shared} == {"v1"}
+  # Nothing survives but the dropped staging loads.
+  assert all("_staging_" in ref for ref in stale.deleted)
+
+
+def test_recommit_after_binding_lands_cannot_null_the_gate() -> None:
+  # P1 #469-r3-4 (policy boundary): the unchanged-path policy recommit of
+  # a writer whose registry pre-read went stale lands on nothing instead
+  # of rewriting the committed gate to NULL.
+  store, shared, bindings = _dataset()
+  bound = _materialize(
+      _acceptance_run(), _fake(store, shared, bindings), policy=None
+  )
+  generation = bound.manifest["generation_id"]
+
+  stale = _fake(store, shared, bindings, stale_binding_reads=True)
+  result = _plain_materialize(
+      _acceptance_run(), stale, import_version="v1", policy=None
+  )
+  assert result.status == "unchanged"
+  (row,) = store.rows
+  assert _policy_from_column(row["view_policy"]) == NATIVE_SPAN_LABEL_POLICY
+  assert row["generation_id"] == generation
+  # The denominator view still renders the gate and the span boundary is
+  # still open on the synchronized generation.
+  assert "'goal_completion' AS comparator, 1.0 AS min_score" in (
+      store.views[_FAILED_VIEW_REF]
+  )
+  rows = _active_view_rows(stale)
+  assert {r["generation_id"] for r in rows} == {generation}
+
+
+def test_bound_pre_read_must_match_the_committed_binding() -> None:
+  # P1 #469-r3-4 (consistency): a delayed writer that pre-read a binding
+  # must see the same table AND policy at commit time; a concurrent
+  # deliberate policy change fails it closed.
+  store, shared, bindings = _dataset()
+  _materialize(_acceptance_run(), _fake(store, shared, bindings), policy=None)
+
+  def concurrent_policy_change() -> None:
+    _materialize(
+        _acceptance_run(),
+        _fake(store, shared, bindings),
+        policy=EvalScorePolicy({"accuracy": 0.9}, missing_score_fails=False),
+    )
+
+  late = _fake(
+      store, shared, bindings, doctor_binding_read=concurrent_policy_change
+  )
+  with pytest.raises(ValueError, match="span-binding registry"):
+    _plain_materialize(
+        _acceptance_run(_changed_events()), late, import_version="v2"
+    )
+  # The deliberate change won; nothing of the stale v2 publish landed.
+  (binding,) = bindings
+  assert _policy_from_column(binding["view_policy"]).min_scores == {
+      "accuracy": 0.9,
+      "goal_completion": 1.0,
+  }
+  assert {row["import_version"] for row in store.rows} == {"v1"}
 
 
 # --- destination guards ---------------------------------------------------

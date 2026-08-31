@@ -368,6 +368,16 @@ _LOCK_MISSING_MESSAGE = (
     "evalbench import lock sentinel is missing; the publish transaction"
     " cannot serialize against concurrent imports"
 )
+# Raised inside the lock-serialized boundaries when the caller-supplied
+# ``binding_guard`` predicate (the native writer's span-binding registry
+# check, see ``native_events``) finds the committed registry state is no
+# longer what the caller pre-read: the decision this publish or policy
+# recommit was derived from is stale, so it must not be committed around
+# the registry.
+_PUBLISH_BINDING_GUARD_MESSAGE = (
+    "evalbench import: the span-binding registry state for this job changed"
+    " after it was read; nothing was written"
+)
 # Substring of the error BigQuery raises for the transaction it cancels when
 # two transactions mutate the same rows ("Transaction is aborted due to
 # concurrent update against table ...").
@@ -393,6 +403,16 @@ _IDENTICAL_GUARD = """\
 _REPLACE_IDENTICAL_NOTE = (
     "  -- replace=True: an identical version is re-published in place.\n"
 )
+# Rendered into ``_PUBLISH_SCRIPT`` right after the lock claim when the
+# caller supplied a ``binding_guard`` predicate, so the registry state is
+# re-validated inside the serialized transaction — a stale pre-read can
+# never commit a base snapshot (or its ``view_policy``) around a binding
+# that landed meanwhile.
+_BINDING_GUARD = """\
+  IF {predicate} THEN
+    RAISE USING MESSAGE = '{message}';
+  END IF;
+"""
 _PUBLISH_SCRIPT = """\
 DECLARE existing_manifest_rows INT64 DEFAULT 0;
 DECLARE conflicting_manifest_rows INT64 DEFAULT 0;
@@ -408,6 +428,7 @@ BEGIN
   IF @@row_count = 0 THEN
     RAISE USING MESSAGE = '{lock_missing_message}';
   END IF;
+{binding_guard}\
   SET existing_manifest_rows = (
     SELECT COUNT(*)
     FROM `{manifest_table}`
@@ -884,6 +905,7 @@ class EvalBenchRun:
       failed_sessions_view: Optional[str] = DEFAULT_FAILED_SESSIONS_VIEW,
       policy: Optional["EvalScorePolicy"] = None,
       bq_client: Optional[Any] = None,
+      binding_guard: Optional[str] = None,
   ) -> "EvalBenchImportResult":
     """Publish this run as one immutable import version in BQAA-owned tables.
 
@@ -974,6 +996,13 @@ class EvalBenchRun:
         score failures count alongside process failures.
       bq_client: Optional test-compatible or caller-configured BigQuery
         client for the target project.
+      binding_guard: Optional boolean SQL predicate (rendered by the native
+        writer over its span-binding registry and ``@job_id``) re-checked
+        inside the lock-serialized publish transaction — TRUE fails the
+        publish closed — and appended to the unchanged-path policy
+        recommit's WHERE clause so a stale registry pre-read can neither
+        commit a new snapshot nor rewrite a committed ``view_policy``
+        around registry state that landed meanwhile.
 
     Returns:
       An ``EvalBenchImportResult`` with the published version and manifest.
@@ -1097,6 +1126,7 @@ class EvalBenchRun:
               # The row this call handled: the one it committed, or for
               # ``unchanged`` the committed row it found.
               manifest=result.manifest,
+              binding_guard=binding_guard,
           ),
       )
 
@@ -1177,6 +1207,7 @@ class EvalBenchRun:
           scores_staging=scores_staging,
           manifest_staging=manifest_staging,
           replace=replace,
+          binding_guard=binding_guard,
       )
       job_config = bigquery.QueryJobConfig(
           query_parameters=_publish_parameters(
@@ -1220,6 +1251,14 @@ class EvalBenchRun:
                   manifest_ref=manifest_ref,
               )
           )
+        if _PUBLISH_BINDING_GUARD_MESSAGE in str(exc):
+          raise ValueError(
+              f"EvalBench job {self.job_id!r} import_version "
+              f"{import_version!r}: the span-binding registry state for "
+              "this job changed after it was read (a concurrent call bound "
+              "or re-bound the job); nothing was written. Re-run "
+              "materialize() to decide from the committed binding"
+          ) from exc
         if _PUBLISH_CONFLICT_MESSAGE in str(exc):
           raise ValueError(
               f"EvalBench job {self.job_id!r} import_version "
@@ -1985,6 +2024,7 @@ def _sync_failed_sessions_view(
     status: str,
     import_version: str,
     manifest: Mapping[str, Any],
+    binding_guard: Optional[str] = None,
 ) -> str:
   """Point ``view_ref`` at the job's latest successful import.
 
@@ -2011,6 +2051,7 @@ def _sync_failed_sessions_view(
           manifest=manifest,
           policy=policy,
           location=location,
+          binding_guard=binding_guard,
       )
     _reconcile_failed_sessions_view(
         client,
@@ -2037,6 +2078,7 @@ def _record_view_policy(
     manifest: Mapping[str, Any],
     policy: Optional[EvalScorePolicy],
     location: Optional[str],
+    binding_guard: Optional[str] = None,
 ) -> None:
   """Commit ``policy`` to the manifest row this call found, if unchanged.
 
@@ -2045,6 +2087,10 @@ def _record_view_policy(
   re-published the row since -- that generation's own caller decided its
   gate. It mints a new generation either way, so a view still pinned to
   the old one is recognized as superseded and re-rendered from the row.
+  ``binding_guard`` (see ``materialize``) joins the WHERE clause negated,
+  so a caller whose registry pre-read went stale also lands on nothing --
+  the binding that committed meanwhile decided the gate, and the view is
+  still reconciled from the committed row.
   """
   job_config = bigquery.QueryJobConfig(
       query_parameters=[
@@ -2072,6 +2118,8 @@ def _record_view_policy(
   if location is not None:
     query_args["location"] = location
   query = _RECORD_VIEW_POLICY_QUERY.format(manifest_table=manifest_ref)
+  if binding_guard is not None:
+    query += f"  AND NOT ({binding_guard})\n"
   client.query(query, **query_args).result()
 
 
@@ -2686,6 +2734,7 @@ def _publish_script(
     scores_staging: str,
     manifest_staging: str,
     replace: bool,
+    binding_guard: Optional[str] = None,
 ) -> str:
   """Render the publish transaction: lock claim, manifest guard, DML.
 
@@ -2698,6 +2747,10 @@ def _publish_script(
   rolls the transaction back); with ``replace`` fingerprints and provenance
   may drift and an identical version is re-published, but the destination
   binding still holds, so a version can never be silently relocated.
+  ``binding_guard`` (a boolean SQL predicate over the caller's registry
+  table and ``@job_id``) is re-checked right after the lock claim: TRUE
+  raises ``_PUBLISH_BINDING_GUARD_MESSAGE`` so a stale registry pre-read
+  fails closed inside the serialized transaction.
   """
   if replace:
     conflict_predicate = _DESTINATION_CONFLICT_PREDICATE
@@ -2720,6 +2773,14 @@ def _publish_script(
       lock_table=lock_ref,
       lock_id=_IMPORT_LOCK_ID,
       lock_missing_message=_LOCK_MISSING_MESSAGE,
+      binding_guard=(
+          ""
+          if binding_guard is None
+          else _BINDING_GUARD.format(
+              predicate=binding_guard,
+              message=_PUBLISH_BINDING_GUARD_MESSAGE,
+          )
+      ),
       events_staging=events_staging,
       scores_staging=scores_staging,
       manifest_staging=manifest_staging,

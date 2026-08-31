@@ -224,6 +224,17 @@ _SPAN_STALE_PIN_MESSAGE = (
     " span rows were derived under; the derived span rows are stale and"
     " were not written"
 )
+# Raised inside the span sync transaction when the job's committed binding
+# row names ANOTHER span table: two racing first opt-ins can both pre-read
+# "no binding" and pick different tables, and without this in-transaction
+# check the loser would silently replace the winner's binding, leaving two
+# table-specific pinned views live for one job. One binding per job is
+# enforced where it is committed — the second caller fails closed with the
+# registry (and the winner's view) untouched.
+_SPAN_BINDING_CONFLICT_MESSAGE = (
+    "evalbench span labels: this job is already bound to a different"
+    " span_labels_table; refusing to re-bind inside the sync transaction"
+)
 _SPAN_SYNC_SCRIPT = """\
 DECLARE current_generation_rows INT64 DEFAULT 0;
 BEGIN
@@ -247,6 +258,14 @@ BEGIN
   );
   IF current_generation_rows = 0 THEN
     RAISE USING MESSAGE = '{stale_pin_message}';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM `{bindings_table}`
+    WHERE job_id = @job_id
+      AND span_labels_table != @span_labels_table_name
+  ) THEN
+    RAISE USING MESSAGE = '{binding_conflict_message}';
   END IF;
   DELETE FROM `{span_labels_table}`
   WHERE job_id = @job_id AND import_version = @import_version;
@@ -565,6 +584,33 @@ def _read_span_binding(
   return binding
 
 
+def _span_binding_guard(
+    *, bindings_ref: str, binding: Optional[Mapping[str, Any]]
+) -> str:
+  """The registry predicate the inherited publish re-checks under the lock.
+
+  ``binding`` is what this call's pre-read saw; the predicate is TRUE when
+  the committed registry no longer agrees. Rendered into the base publish
+  transaction (RAISE, so a delayed writer that pre-read "no binding"
+  cannot commit a snapshot or a NULL ``view_policy`` around a binding that
+  landed meanwhile) and negated into the unchanged-path policy recommit's
+  WHERE clause (the recommit lands on nothing). A pre-read binding must
+  still match on BOTH the span table and the canonical policy: a
+  concurrent re-bind or deliberate policy change fails this caller closed,
+  and the re-run decides from the committed binding.
+  """
+  if binding is None:
+    return f"EXISTS (SELECT 1 FROM `{bindings_ref}` WHERE job_id = @job_id)"
+  table_literal = _sql_string_literal(str(binding["span_labels_table"]))
+  policy_literal = _sql_string_literal(str(binding["view_policy"]))
+  return (
+      f"NOT EXISTS (SELECT 1 FROM `{bindings_ref}`"
+      " WHERE job_id = @job_id"
+      f" AND span_labels_table = {table_literal}"
+      f" AND view_policy = {policy_literal})"
+  )
+
+
 @dataclasses.dataclass(frozen=True)
 class NativeAgentEventsRun(EvalBenchRun):
   """One production ``agent_events`` corpus loaded for native publication.
@@ -662,7 +708,20 @@ class NativeAgentEventsRun(EvalBenchRun):
     bound job whose new corpus cannot be span-labelled (no real
     ``span_id``) fails the whole publish closed BEFORE the base snapshot
     or the denominator moves; a bound job cannot switch span tables (one
-    binding per job).
+    binding per job, enforced again INSIDE the span sync transaction so
+    two racing first opt-ins can never both bind). The registry is
+    authoritative under the import lock: the pre-read is only a decision
+    input, and both the base publish transaction and the unchanged-path
+    policy recommit re-validate the binding state inside the serialized
+    boundary, failing a stale pre-read closed instead of committing a
+    snapshot or a ``view_policy`` around a binding that landed meanwhile
+    (the registry table itself is created — idempotently — by every
+    native publish so that check always has an authority to read). A
+    span-labelled job always keeps its failed-sessions view:
+    ``failed_sessions_view=None`` is refused whenever span publication is
+    active — explicitly requested or registry-restored — before anything
+    is written, so the denominator view and the span boundary can never
+    advance apart.
 
     The rows are derived BEFORE anything is written, so a failed session
     whose target row carries no real ``span_id`` fails the whole publish
@@ -693,6 +752,11 @@ class NativeAgentEventsRun(EvalBenchRun):
     denominator and is untouched by this option.
     """
     resolved_project = target_project or self.project_id
+    # The inherited publish re-validates these; validating the segments
+    # first keeps every failure below this point write-free AND ref-safe
+    # (the span-binding registry ref is built from them).
+    _validate_source_segment("target_project", resolved_project)
+    _validate_source_segment("target_dataset", target_dataset)
     prefix = f"{resolved_project}.{target_dataset}"
     bindings_ref = f"{prefix}.{SPAN_BINDINGS_TABLE}"
     resolved_version = import_version
@@ -726,6 +790,22 @@ class NativeAgentEventsRun(EvalBenchRun):
             f" refusing {span_labels_table!r}. One span table per job —"
             " publish under a new job_id to use a different table"
         )
+      if policy is None:
+        # A bound caller that omits the policy keeps the committed ONE
+        # policy (extra comparators and missing_score_fails included) —
+        # re-resolving None would replace it with the fallback-only gate.
+        # An explicitly supplied policy is a deliberate policy change and
+        # still goes through resolve_span_label_policy below.
+        policy = _policy_from_column(binding["view_policy"])
+    if span_labels_table is not None and failed_sessions_view is None:
+      raise ValueError(
+          f"native job {self.job_id!r} publishes span labels"
+          f" ({span_labels_table!r}), so failed_sessions_view=None is"
+          " refused: span rows localize the failed-sessions denominator,"
+          " and skipping its view would let the pinned join boundaries"
+          " diverge. Keep the view, or use a job that never opted in to"
+          " span labels"
+      )
     if span_labels_table is not None:
       _validate_destination_table("span_labels_table", span_labels_table)
       span_labels_view = span_labels_table + SPAN_LABELS_VIEW_SUFFIX
@@ -789,6 +869,27 @@ class NativeAgentEventsRun(EvalBenchRun):
           view_ref=f"{prefix}.{span_labels_view}",
           job_id=self.job_id,
       )
+    # The inherited publish re-validates these too; running them here
+    # keeps the registry creation below strictly behind every fail-closed
+    # rejection (self-feed included, which stays first).
+    _validate_destination_table("events_table", events_table)
+    _validate_destination_table("scores_table", scores_table)
+    if failed_sessions_view is not None:
+      _validate_destination_table("failed_sessions_view", failed_sessions_view)
+    # The binding pre-read above is only a decision input; the registry is
+    # authoritative under the import lock. Creating the registry here
+    # (idempotent, after every fail-closed validation) lets the inherited
+    # publish transaction — and the unchanged-path policy recommit — carry
+    # a guard that re-validates the binding state INSIDE the serialized
+    # boundary, so a delayed writer whose pre-read went stale (no binding
+    # seen, or a binding that was since re-bound or re-gated) fails closed
+    # instead of committing a snapshot or a view_policy around it.
+    client.create_table(
+        bigquery.Table(
+            bindings_ref, schema=_schema(_SPAN_BINDINGS_SCHEMA_FIELDS)
+        ),
+        exists_ok=True,
+    )
     result = super().materialize(
         target_dataset=target_dataset,
         target_project=target_project,
@@ -800,6 +901,9 @@ class NativeAgentEventsRun(EvalBenchRun):
         failed_sessions_view=failed_sessions_view,
         policy=policy,
         bq_client=client,
+        binding_guard=_span_binding_guard(
+            bindings_ref=bindings_ref, binding=binding
+        ),
     )
     if span_labels_table is None:
       return result
@@ -1013,6 +1117,7 @@ class NativeAgentEventsRun(EvalBenchRun):
           lock_missing_message=_LOCK_MISSING_MESSAGE,
           manifest_table=manifest_ref,
           stale_pin_message=_SPAN_STALE_PIN_MESSAGE,
+          binding_conflict_message=_SPAN_BINDING_CONFLICT_MESSAGE,
           span_labels_table=span_labels_ref,
           span_columns=span_columns,
           span_labels_staging=staging_ref,
@@ -1048,6 +1153,14 @@ class NativeAgentEventsRun(EvalBenchRun):
       except Exception as exc:  # noqa: BLE001
         if _SPAN_STALE_PIN_MESSAGE in str(exc):
           raise ValueError(_SPAN_STALE_PIN_MESSAGE) from exc
+        if _SPAN_BINDING_CONFLICT_MESSAGE in str(exc):
+          raise ValueError(
+              f"native job {self.job_id!r} was bound to a different"
+              " span_labels_table by a concurrent first opt-in; nothing"
+              " was written. One span table per job — re-run"
+              " materialize() without span_labels_table to maintain the"
+              " committed binding, or publish under a new job_id"
+          ) from exc
         if _CONCURRENT_UPDATE_MARKER in str(exc).lower():
           raise ValueError(
               "BigQuery cancelled this span-label sync because a concurrent"
