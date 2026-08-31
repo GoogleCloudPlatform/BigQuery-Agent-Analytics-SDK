@@ -9,6 +9,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Native `agent_events` snapshot writer — the EvalBench-adapter exit ramp
+  (#463, parent #435)** — new
+  `bigquery_agent_analytics.native_events.NativeAgentEventsRun` (and thin
+  CLI `bq-agent-sdk evalbench-native-import`) starts from production ADK
+  `agent_events` rows and publishes the same BQAA-owned contract
+  `EvalBenchRun.materialize` produces — an immutable
+  `(job_id, import_version)` snapshot (events + deterministic
+  `goal_completion` scores + manifest with the `view_policy` pin) plus the
+  `failed_sessions` view pinned to the latest successful publication —
+  with **no EvalBench `configs`/`results`/`scores` tables anywhere in the
+  path**. Identity stays joinable (scenario id = first eight characters of
+  the ADK session id, full id on collision; event/score rows keep the real
+  `session_id`), scores are derived from the session alone (1.0 iff
+  `AGENT_COMPLETED` — *completed*, not *passed*; only the
+  `EvalScorePolicy` gate decides passed), and failed sessions carry the
+  frozen G1 v0.1.0 names — the widget-stock silence session `7e352c34`
+  yields `task/planning`, `finalization`, `tool blockers`. The
+  `evalbench-import` adapter (#97) stays as an optional on-ramp, the
+  production `agent_events` table is never written (reserved-name guard),
+  and **the six-week clock has still NOT started**. Offline fixture tests
+  only; no live BigQuery.
+- **REAL Week 0 freeze: partner, D4 boundary, G1 taxonomy v0.1 (#435)** —
+  the Week 0 gates are frozen for real, distinct from the EXAMPLE pack
+  below (which stays illustrative). `docs/week0_partner.md` records the
+  real pilot partner — Google Cloud BigQuery Agent Analytics (this SDK),
+  piloting the ADK `support_agent` traces as EvalBench job
+  `mvp-e2e-real-traces`; SANA-adjacent, not a SANA fork and not a named
+  collaboration with SANA authors, not duplicating LakeQA/KramaBench.
+  `docs/week0_d4_memo.md` lands the fail-closed D4 boundary for exactly
+  this pilot's datasets with one named report consumer (Hai-Yuan Cao) and
+  a text-only grants policy (no IAM API calls); fixtures/synthetic runs
+  validate ingestion, taxonomy mechanics, and stability ONLY and never
+  produce a Part II funding recommendation. `docs/week0_g1_taxonomy.md`
+  documents the G1 freeze (below) and `docs/week0_preregistration.md`
+  copies the v4 floors as the freeze-candidate. Machine-readable copies in
+  `examples/fixtures/week0_real_*.json` (`example: false`,
+  `clock_started: false`), guarded by `tests/test_week0_real_freeze.py`.
+  **The six-week clock has NOT started**: it starts only when the first
+  Week 1 snapshot job is kicked, not at merge of this freeze.
+- **EXAMPLE Week 0 scenario pack (#435 slice 10)** — new
+  `examples/evalbench_week0_full_idea.md` / `.sh --fixture` walk all five
+  Week 0 human gates of `docs/agentforensics_mvp_plan.md` (partner + SANA
+  relationship, runtime + route, pilot-benchmark rubric, D4 boundary memo,
+  preregistration) as one concrete story on the widget-stock failed session,
+  ending in the mechanical `taxonomy_categories` row and an EXAMPLE mapping
+  onto SANA-seeded names in `examples/fixtures/week0_example_*.json`.
+  Offline only (no BigQuery, no network) and entirely illustrative: not a
+  freeze, `g1_frozen` stays false, the six-week clock has not started, no
+  real partner is named, and `src/` is untouched — Week 0 remains
+  human-gated.
+- **Failed-session rows carry scaffold taxonomy categories (#435 slice 9)**
+  — `failed_sessions()` / `bq-agent-sdk evalbench-failed-sessions` now
+  attach `taxonomy_categories` to each session row: `EvalBenchSession`
+  exposes it as a property computed from the row's three mechanical flags
+  via `failure_taxonomy.categorize_failed_session`, and `to_dict()` (what
+  the CLI JSON/text output serializes) includes it as a list. All-flags-false
+  rows (`--include-passed`) emit `[]` — no invented `unknown` bucket. Pure
+  Python over the flags already returned; no extra BigQuery work, and still
+  NOT the G1 taxonomy (ids stay the unfrozen flag names).
+- **Mechanical failure-taxonomy scaffold (#435 slice 8)** — new
+  `failure_taxonomy` module: a versioned scaffold config
+  (`taxonomy_version: 0.0.0-scaffold`, `g1_frozen: false`) in the #431
+  `{"metrics": [...]}` schema shape whose one core metric carries the three
+  mechanical categories of the landed failed-session contract
+  (`process_failed` / `missing_completion` / `score_failed`), an empty D2
+  `dialects` slot (per-benchmark extension categories on the same core), and
+  a pure `categorize_failed_session()` that maps one failed-session row
+  (dict or `SessionVerdict`) to the tripped categories — no BigQuery, no
+  LLM, no network. NOT the G1 taxonomy: names are unfrozen and the six-week
+  clock has not started.
 - **EvalBench MVP e2e demo tells one session's story (#435 slice 5, #97)**
   — the `--fixture` walkthrough of `examples/evalbench_mvp_e2e.sh` now
   follows `support_agent` session `7e352c34` ("How many widgets are in
@@ -92,6 +162,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ETag-conditional replace after re-reading the view and latest manifest,
   so concurrent imports cannot overwrite a newer pin or attach an older
   caller's policy to a newer generation.
+
+### Changed
+
+- **`failure_taxonomy` frozen at G1 v0.1.0 (#435)** — the scaffold era
+  ends: `taxonomy_version` is `0.1.0` and `g1_frozen` is `true`. The
+  frozen vocabulary (`FROZEN_CATEGORY_NAMES`, also exported as
+  `CORE_CATEGORY_IDS`) is the SANA-neighborhood seven plus `unknown` —
+  `task/planning`, `wrong source`, `execution/computation`,
+  `incomplete evidence`, `turn-waste`, `finalization`, `tool blockers`,
+  `unknown` — replacing the three flag ids, which live on as the mapper's
+  input contract `MECHANICAL_FLAGS`. `categorize_failed_session` now
+  returns frozen names in frozen order (`missing_completion` →
+  `finalization`, `process_failed` → `tool blockers`, `score_failed` →
+  `task/planning`; all flags false still returns `()`, never `unknown`),
+  so `EvalBenchSession.taxonomy_categories` and the
+  `evalbench-failed-sessions` CLI output carry frozen names. The config
+  accessor is renamed `taxonomy_config()`; `scaffold_taxonomy_config()`
+  remains as a compatibility wrapper returning the same frozen config.
+  Assignment stays mechanical until the labeler study; the six-week clock
+  has not started.
 
 ## [0.5.1] - 2026-08-29
 

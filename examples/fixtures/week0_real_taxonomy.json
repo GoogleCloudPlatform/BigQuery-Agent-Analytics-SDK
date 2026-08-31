@@ -1,0 +1,31 @@
+{
+  "example": false,
+  "frozen_by": "#435 Week 0 G1 freeze",
+  "clock_started": false,
+  "g1_frozen": true,
+  "taxonomy_version": "0.1.0",
+  "frozen_category_names": [
+    "task/planning",
+    "wrong source",
+    "execution/computation",
+    "incomplete evidence",
+    "turn-waste",
+    "finalization",
+    "tool blockers",
+    "unknown"
+  ],
+  "mechanical_flags": ["process_failed", "missing_completion", "score_failed"],
+  "flag_to_category": {
+    "missing_completion": "finalization",
+    "process_failed": "tool blockers",
+    "score_failed": "task/planning"
+  },
+  "unknown_is_residual_only": "unknown is in the frozen vocabulary as the residual bucket for the labeler study; the mechanical three-flag mapper never emits it (all flags false returns an empty list).",
+  "widget_session": {
+    "session_id": "7e352c34-4c1c-4395-acd5-fb3c8f215346",
+    "eval_id": "7e352c34",
+    "tripped_flags": ["process_failed", "missing_completion", "score_failed"],
+    "taxonomy_categories": ["task/planning", "finalization", "tool blockers"]
+  },
+  "dialects": []
+}

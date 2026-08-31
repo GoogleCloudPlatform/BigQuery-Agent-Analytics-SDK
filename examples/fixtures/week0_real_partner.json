@@ -1,0 +1,22 @@
+{
+  "example": false,
+  "frozen_by": "#435 Week 0 partner freeze",
+  "clock_started": false,
+  "partner_name": "Google Cloud BigQuery Agent Analytics (this SDK / BQAA)",
+  "pilot": {
+    "agent": "ADK support_agent",
+    "events_table": "test-project-0728-467323.bqaa_e2e_real.agent_events",
+    "evalbench_job_id": "mvp-e2e-real-traces"
+  },
+  "relationship_to_sana": "AgentForensics is SANA-adjacent published work, NOT a SANA fork and NOT a named collaboration with SANA authors. SANA is LakeQA + KramaBench on the Strands runtime with a seven-category failure taxonomy (task/planning, wrong source, execution/computation, incomplete evidence, turn-waste, finalization, tool blockers); this pilot is ADK+EvalBench on widget-stock support — a different benchmark and runtime.",
+  "not_a_sana_fork": true,
+  "not_a_named_sana_collaboration": true,
+  "sana_runtime": "Strands",
+  "this_pilot_runtime": "ADK+EvalBench",
+  "not_duplicating_lakeqa_kramabench": "This pilot is not duplicating LakeQA/KramaBench: it studies a different benchmark (widget-stock support) on a different runtime (ADK+EvalBench, not Strands).",
+  "route": {
+    "path": "ADK plugin -> BQAA agent_events -> EvalBench-hosted",
+    "evalbench_only_mvp_route_correct": true,
+    "d1_needs_redecision": false
+  }
+}
