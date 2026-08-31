@@ -24,10 +24,10 @@ Week 1 snapshot job is kicked, not at the freeze and not at this demo.
 bash examples/evalbench_week0_freeze_e2e.sh --fixture
 ```
 
-`--fixture` (or `EVALBENCH_FIXTURE=1`) is the only mode: offline, no
-BigQuery, no live judge, exit `0`. Any other invocation prints one line
-saying so and exits `2` without running anything (there is no `--synth`
-here).
+`--fixture` is the only mode: offline, no BigQuery, no live judge, exit
+`0`. Any other invocation prints one line saying so and exits `2`
+without running anything (there is no `--synth` here, and the
+`EVALBENCH_FIXTURE` environment variable is not read).
 
 ## The protagonist (same session as the MVP e2e demo)
 

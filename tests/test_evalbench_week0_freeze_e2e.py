@@ -184,10 +184,14 @@ def test_fixture_flag_replays_the_freeze_and_exits_zero() -> None:
   _assert_freeze_walkthrough(result.stdout)
 
 
-def test_fixture_env_var_is_honored() -> None:
+def test_fixture_env_var_alone_is_rejected() -> None:
+  # Regression: the demo is --fixture argv only. An inherited
+  # EVALBENCH_FIXTURE=1 with no arguments must not run the transcript.
   result = _run(env={"EVALBENCH_FIXTURE": "1"})
-  assert result.returncode == 0, result.stderr
-  _assert_freeze_walkthrough(result.stdout)
+  assert result.returncode == 2
+  assert "--fixture only" in result.stderr
+  assert "=== Partner" not in result.stdout
+  assert result.stdout == ""
 
 
 def test_without_fixture_flag_exits_two_and_runs_nothing() -> None:

@@ -46,15 +46,17 @@ Usage: bash examples/evalbench_week0_freeze_e2e.sh --fixture
 Post-freeze Week 0 e2e demo (#435): walks the REAL frozen partner
 (Google Cloud BQAA), the fail-closed D4 memo, and the G1 taxonomy v0.1.0
 freeze on the widget-stock failed session 7e352c34, then the three
-EvalBench CLI steps as sample output. --fixture (or EVALBENCH_FIXTURE=1)
-is the only mode: no BigQuery, no --synth, no live CLI. The six-week
-clock has not started.
+EvalBench CLI steps as sample output. The --fixture argument is the only
+mode: no BigQuery, no --synth, no live CLI. The six-week clock has not
+started.
 
 Narrative companion: examples/evalbench_week0_freeze_e2e.md
 USAGE
 }
 
-FIXTURE="${EVALBENCH_FIXTURE:-0}"
+# The --fixture argument is the only way to run this demo; the
+# EVALBENCH_FIXTURE environment variable is deliberately not read.
+FIXTURE=0
 for arg in "$@"; do
   case "${arg}" in
     --fixture) FIXTURE=1 ;;
