@@ -250,6 +250,24 @@ _SPAN_TABLE_OWNED_MESSAGE = (
     "evalbench span labels: this span_labels_table is already bound to"
     " another job; one job per span table"
 )
+# The same-table guard above only rejects a binding to ANOTHER table, so a
+# delayed old-version resync — whose retained manifest row still carries
+# the policy and generation it derived under — could replace a binding a
+# newer richer-policy sync committed meanwhile with its own stale values,
+# and the next no-policy call would then recommit the newer manifest back
+# to the old gate (the r9 P1 race). This guard revalidates the binding
+# state the CALL pre-read (the decision input its policy resolution used)
+# inside the transaction, before any DML: a pre-read row must still be
+# committed byte-for-byte (table, policy, import version, generation), and
+# a pre-read of "no binding" requires the job to still be unbound. The
+# observed values travel as their own parameters, separate from the
+# policy/generation being installed, so a deliberate explicit policy
+# change replaces exactly the state it observed and nothing newer.
+_SPAN_BINDING_REGRESSED_MESSAGE = (
+    "evalbench span labels: the job's committed span binding no longer"
+    " matches the binding this call pre-read; a concurrent call re-bound"
+    " or re-gated the job, so this delayed sync was not applied"
+)
 _SPAN_SYNC_SCRIPT = """\
 DECLARE current_generation_rows INT64 DEFAULT 0;
 BEGIN
@@ -289,6 +307,25 @@ BEGIN
       AND job_id != @job_id
   ) THEN
     RAISE USING MESSAGE = '{table_owned_message}';
+  END IF;
+  IF @observed_binding_bound THEN
+    IF NOT EXISTS (
+      SELECT 1
+      FROM `{bindings_table}`
+      WHERE job_id = @job_id
+        AND span_labels_table = @observed_span_labels_table
+        AND view_policy = @observed_view_policy
+        AND import_version = @observed_import_version
+        AND generation_id = @observed_generation_id
+    ) THEN
+      RAISE USING MESSAGE = '{binding_regressed_message}';
+    END IF;
+  ELSEIF EXISTS (
+    SELECT 1
+    FROM `{bindings_table}`
+    WHERE job_id = @job_id
+  ) THEN
+    RAISE USING MESSAGE = '{binding_regressed_message}';
   END IF;
   DELETE FROM `{span_labels_table}`
   WHERE job_id = @job_id AND import_version = @import_version;
@@ -997,6 +1034,7 @@ class NativeAgentEventsRun(EvalBenchRun):
         import_version=result.import_version,
         rows=span_rows,
         policy=policy,
+        observed_binding=binding,
         status=result.status,
     )
     return dataclasses.replace(
@@ -1062,6 +1100,7 @@ class NativeAgentEventsRun(EvalBenchRun):
       import_version: str,
       rows: list[dict[str, Any]],
       policy: EvalScorePolicy,
+      observed_binding: Optional[Mapping[str, Any]],
       status: str,
   ) -> None:
     """Converge one pin's span rows, binding, and view — or change nothing.
@@ -1085,6 +1124,7 @@ class NativeAgentEventsRun(EvalBenchRun):
           import_version=import_version,
           rows=rows,
           policy=policy,
+          observed_binding=observed_binding,
       )
       self._sync_span_labels_view(
           client,
@@ -1115,6 +1155,7 @@ class NativeAgentEventsRun(EvalBenchRun):
       import_version: str,
       rows: list[dict[str, Any]],
       policy: EvalScorePolicy,
+      observed_binding: Optional[Mapping[str, Any]],
   ) -> str:
     """Replace one pin's span slice + binding atomically, under the lock.
 
@@ -1132,6 +1173,14 @@ class NativeAgentEventsRun(EvalBenchRun):
     failure anywhere rolls back, so the previously published span rows
     and binding are preserved; staging is always cleaned up (and expires
     regardless).
+
+    ``observed_binding`` is the registry row this call's pre-read saw (or
+    ``None``) — the decision input its span table and policy resolution
+    used. The transaction revalidates it before any DML: a retained old
+    version's manifest guard cannot notice that a NEWER version re-bound
+    or re-gated the job meanwhile, so without this check a delayed
+    resync would regress the committed binding to its stale pre-read
+    values (the r9 P1 race).
     """
     table = bigquery.Table(
         span_labels_ref, schema=_schema(_SPAN_LABELS_SCHEMA_FIELDS)
@@ -1196,6 +1245,7 @@ class NativeAgentEventsRun(EvalBenchRun):
           stale_pin_message=_SPAN_STALE_PIN_MESSAGE,
           binding_conflict_message=_SPAN_BINDING_CONFLICT_MESSAGE,
           table_owned_message=_SPAN_TABLE_OWNED_MESSAGE,
+          binding_regressed_message=_SPAN_BINDING_REGRESSED_MESSAGE,
           span_labels_table=span_labels_ref,
           span_columns=span_columns,
           span_labels_staging=staging_ref,
@@ -1219,6 +1269,22 @@ class NativeAgentEventsRun(EvalBenchRun):
               span_labels_ref.rsplit(".", 1)[1],
           )
       )
+      # The pre-read binding state, kept separate from the new
+      # policy/generation being installed: the guard replaces exactly the
+      # committed state this call observed, never something newer.
+      parameters.append(
+          bigquery.ScalarQueryParameter(
+              "observed_binding_bound", "BOOL", observed_binding is not None
+          )
+      )
+      for name, key in (
+          ("observed_span_labels_table", "span_labels_table"),
+          ("observed_view_policy", "view_policy"),
+          ("observed_import_version", "import_version"),
+          ("observed_generation_id", "generation_id"),
+      ):
+        value = None if observed_binding is None else str(observed_binding[key])
+        parameters.append(bigquery.ScalarQueryParameter(name, "STRING", value))
       job_config = bigquery.QueryJobConfig(query_parameters=parameters)
       job_config = with_sdk_labels(job_config, feature=_NATIVE_FEATURE)
       query_args: dict[str, Any] = {"job_config": job_config}
@@ -1245,6 +1311,14 @@ class NativeAgentEventsRun(EvalBenchRun):
               f" another job; nothing was written and job {self.job_id!r}"
               " remains unbound. One job per span table — re-run"
               " materialize() with a different span_labels_table"
+          ) from exc
+        if _SPAN_BINDING_REGRESSED_MESSAGE in str(exc):
+          raise ValueError(
+              f"native job {self.job_id!r}'s committed span binding"
+              " changed between this call's registry pre-read and its"
+              " span sync; nothing was written and the committed binding"
+              " (and its policy) stands. Re-run materialize() to decide"
+              " from the current binding"
           ) from exc
         if _CONCURRENT_UPDATE_MARKER in str(exc).lower():
           raise ValueError(

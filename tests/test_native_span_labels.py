@@ -236,6 +236,42 @@ class _SpanLabelsFake(_FakeWriteClient):
       return _FakeJob(
           error=RuntimeError(f"400 {native_events._SPAN_TABLE_OWNED_MESSAGE}")
       )
+    # The r9 P1 guard: the binding state this call pre-read must still be
+    # committed byte-for-byte (or the job must still be unbound) BEFORE
+    # any DML — the observed values travel as their own parameters, never
+    # as the new policy/generation being installed.
+    assert "@observed_binding_bound" in script
+    assert script.index("@observed_generation_id") < script.index(
+        "DELETE FROM `"
+    )
+    committed = [
+        row for row in self.span_bindings if row["job_id"] == params["job_id"]
+    ]
+    if params["observed_binding_bound"]:
+      observed = (
+          params["observed_span_labels_table"],
+          params["observed_view_policy"],
+          params["observed_import_version"],
+          params["observed_generation_id"],
+      )
+      regressed = not any(
+          (
+              row["span_labels_table"],
+              row["view_policy"],
+              row["import_version"],
+              row["generation_id"],
+          )
+          == observed
+          for row in committed
+      )
+    else:
+      regressed = bool(committed)
+    if regressed:
+      return _FakeJob(
+          error=RuntimeError(
+              f"400 {native_events._SPAN_BINDING_REGRESSED_MESSAGE}"
+          )
+      )
     ref = re.search(r"DELETE FROM `([^`]+)`", script).group(1)
     (staging_ref,) = re.findall(r"FROM `([^`]+_staging_[0-9a-f]+)`", script)
     staged = next(
@@ -1444,6 +1480,47 @@ def test_bound_pre_read_must_match_the_committed_binding() -> None:
       "goal_completion": 1.0,
   }
   assert {row["import_version"] for row in store.rows} == {"v1"}
+
+
+def test_delayed_old_version_resync_cannot_regress_the_binding() -> None:
+  # P1 #469-r9-1: a delayed maintenance call for a retained older version
+  # passes the manifest guard (its own v1 row still carries its policy and
+  # generation) and the same-table guard, but must NOT replace the binding
+  # a richer-policy v2 sync committed meanwhile — the sync revalidates the
+  # binding this call pre-read inside the transaction, before any DML.
+  store, shared, bindings = _dataset()
+  _materialize(_acceptance_run(), _fake(store, shared, bindings), policy=None)
+  rich = EvalScorePolicy({"accuracy": 0.9}, missing_score_fails=False)
+  merged = native_events.resolve_span_label_policy(rich)
+
+  def richer_v2_lands() -> None:
+    _materialize(
+        _acceptance_run(_changed_events()),
+        _fake(store, shared, bindings),
+        import_version="v2",
+        policy=rich,
+    )
+
+  # The v1 call pauses after its base publish, right before its span
+  # sync's manifest re-read; the richer v2 publish + sync land there.
+  delayed = _fake(
+      store, shared, bindings, doctor_native_manifest_read=richer_v2_lands
+  )
+  with pytest.raises(ValueError, match="could not be synchronized"):
+    _plain_materialize(_acceptance_run(), delayed, import_version="v1")
+  # The richer v2 binding stands (no goal-only/v1 regression)...
+  (binding,) = bindings
+  assert binding["import_version"] == "v2"
+  assert _policy_from_column(binding["view_policy"]) == merged
+  # ...and a later ordinary no-policy v2 call restores the richer gate
+  # from the binding instead of recommitting the old goal-only gate.
+  later = _fake(store, shared, bindings)
+  result = _plain_materialize(
+      _acceptance_run(_changed_events()), later, import_version="v2"
+  )
+  assert result.status == "unchanged"
+  (v2_row,) = [r for r in store.rows if r["import_version"] == "v2"]
+  assert _policy_from_column(v2_row["view_policy"]) == merged
 
 
 # --- r4 P0: the registry guard is structured state, never caller SQL --------
