@@ -107,6 +107,7 @@ from .evalbench import _read_latest_manifest
 from .evalbench import _read_manifest
 from .evalbench import _schema
 from .evalbench import _seed_import_lock
+from .evalbench import _SpanBindingState
 from .evalbench import _sql_string_literal
 from .evalbench import _structured
 from .evalbench import _usable_text
@@ -235,6 +236,18 @@ _SPAN_BINDING_CONFLICT_MESSAGE = (
     "evalbench span labels: this job is already bound to a different"
     " span_labels_table; refusing to re-bind inside the sync transaction"
 )
+# The mirror direction, also enforced before any DML: the requested span
+# table is already bound to ANOTHER job. The table-derived pinned view
+# (``{span_labels_table}_pinned``) admits exactly one job owner, so two
+# jobs that both committed rows and bindings into one table would leave
+# the loser failing view reconciliation forever — its durable binding
+# blocking both a retry of that table and a switch to another one. The
+# in-transaction check rejects the loser BEFORE its rows or binding
+# commit, so it stays unbound and can simply retry with its own table.
+_SPAN_TABLE_OWNED_MESSAGE = (
+    "evalbench span labels: this span_labels_table is already bound to"
+    " another job; one job per span table"
+)
 _SPAN_SYNC_SCRIPT = """\
 DECLARE current_generation_rows INT64 DEFAULT 0;
 BEGIN
@@ -266,6 +279,14 @@ BEGIN
       AND span_labels_table != @span_labels_table_name
   ) THEN
     RAISE USING MESSAGE = '{binding_conflict_message}';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM `{bindings_table}`
+    WHERE span_labels_table = @span_labels_table_name
+      AND job_id != @job_id
+  ) THEN
+    RAISE USING MESSAGE = '{table_owned_message}';
   END IF;
   DELETE FROM `{span_labels_table}`
   WHERE job_id = @job_id AND import_version = @import_version;
@@ -584,30 +605,29 @@ def _read_span_binding(
   return binding
 
 
-def _span_binding_guard(
+def _span_binding_state(
     *, bindings_ref: str, binding: Optional[Mapping[str, Any]]
-) -> str:
-  """The registry predicate the inherited publish re-checks under the lock.
+) -> _SpanBindingState:
+  """The structured registry state the inherited publish re-checks.
 
-  ``binding`` is what this call's pre-read saw; the predicate is TRUE when
-  the committed registry no longer agrees. Rendered into the base publish
-  transaction (RAISE, so a delayed writer that pre-read "no binding"
-  cannot commit a snapshot or a NULL ``view_policy`` around a binding that
-  landed meanwhile) and negated into the unchanged-path policy recommit's
-  WHERE clause (the recommit lands on nothing). A pre-read binding must
-  still match on BOTH the span table and the canonical policy: a
-  concurrent re-bind or deliberate policy change fails this caller closed,
-  and the re-run decides from the committed binding.
+  ``binding`` is what this call's pre-read saw. The state renders — inside
+  ``evalbench``, from fixed templates with the expected values as query
+  parameters, never as caller-shaped SQL — a predicate that is TRUE when
+  the committed registry no longer agrees: raised inside the base publish
+  transaction (so a delayed writer that pre-read "no binding" cannot
+  commit a snapshot or a NULL ``view_policy`` around a binding that
+  landed meanwhile) and joined negated into the lock-serialized policy
+  recommit's WHERE clause (the recommit lands on nothing). A pre-read
+  binding must still match on BOTH the span table and the canonical
+  policy: a concurrent re-bind or deliberate policy change fails this
+  caller closed, and the re-run decides from the committed binding.
   """
   if binding is None:
-    return f"EXISTS (SELECT 1 FROM `{bindings_ref}` WHERE job_id = @job_id)"
-  table_literal = _sql_string_literal(str(binding["span_labels_table"]))
-  policy_literal = _sql_string_literal(str(binding["view_policy"]))
-  return (
-      f"NOT EXISTS (SELECT 1 FROM `{bindings_ref}`"
-      " WHERE job_id = @job_id"
-      f" AND span_labels_table = {table_literal}"
-      f" AND view_policy = {policy_literal})"
+    return _SpanBindingState(bindings_ref=bindings_ref)
+  return _SpanBindingState(
+      bindings_ref=bindings_ref,
+      expected_table=str(binding["span_labels_table"]),
+      expected_policy=str(binding["view_policy"]),
   )
 
 
@@ -709,7 +729,11 @@ class NativeAgentEventsRun(EvalBenchRun):
     ``span_id``) fails the whole publish closed BEFORE the base snapshot
     or the denominator moves; a bound job cannot switch span tables (one
     binding per job, enforced again INSIDE the span sync transaction so
-    two racing first opt-ins can never both bind). The registry is
+    two racing first opt-ins can never both bind), and a span table
+    cannot be shared by two jobs (one job per span table, enforced in the
+    same transaction BEFORE any row or binding DML, so the losing job
+    stays unbound and simply retries with its own table instead of
+    bricking on the shared table's single-owner pinned view). The registry is
     authoritative under the import lock: the pre-read is only a decision
     input, and both the base publish transaction and the unchanged-path
     policy recommit re-validate the binding state inside the serialized
@@ -901,7 +925,7 @@ class NativeAgentEventsRun(EvalBenchRun):
         failed_sessions_view=failed_sessions_view,
         policy=policy,
         bq_client=client,
-        binding_guard=_span_binding_guard(
+        span_binding=_span_binding_state(
             bindings_ref=bindings_ref, binding=binding
         ),
     )
@@ -1118,6 +1142,7 @@ class NativeAgentEventsRun(EvalBenchRun):
           manifest_table=manifest_ref,
           stale_pin_message=_SPAN_STALE_PIN_MESSAGE,
           binding_conflict_message=_SPAN_BINDING_CONFLICT_MESSAGE,
+          table_owned_message=_SPAN_TABLE_OWNED_MESSAGE,
           span_labels_table=span_labels_ref,
           span_columns=span_columns,
           span_labels_staging=staging_ref,
@@ -1160,6 +1185,13 @@ class NativeAgentEventsRun(EvalBenchRun):
               " was written. One span table per job — re-run"
               " materialize() without span_labels_table to maintain the"
               " committed binding, or publish under a new job_id"
+          ) from exc
+        if _SPAN_TABLE_OWNED_MESSAGE in str(exc):
+          raise ValueError(
+              f"span_labels_table {span_labels_ref!r} is already bound to"
+              f" another job; nothing was written and job {self.job_id!r}"
+              " remains unbound. One job per span table — re-run"
+              " materialize() with a different span_labels_table"
           ) from exc
         if _CONCURRENT_UPDATE_MARKER in str(exc).lower():
           raise ValueError(

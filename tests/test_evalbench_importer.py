@@ -773,6 +773,8 @@ class _FakeWriteClient:
       if self.transaction_error is not None:
         return _FakeJob(error=self.transaction_error)
       snapshot = self.transaction_snapshot or self.store.snapshot()
+      if "SET view_policy = @view_policy" in query:
+        return self._record_policy(query, params, snapshot)
       return self._publish(query, params, snapshot)
     assert not query.startswith("CREATE"), "views are written via the API"
     if query.startswith("WITH sessions AS"):
@@ -789,41 +791,16 @@ class _FakeWriteClient:
       )
       return _FakeJob([dict(row) for row in latest[:1]])
     if ".evalbench_import_manifest`" in query and query.startswith("UPDATE"):
-      columns = self.store.manifest_columns()
-      if "WHERE generation_id IS NULL" in query:
-        # ``_BACKFILL_GENERATION_QUERY``: derived, so idempotent.
-        assert params == {}
-        assert "generation_id" in columns
-        assert "TO_HEX(MD5(" in query
-        for row in self.store.rows:
-          if row.get("generation_id") is None:
-            row["generation_id"] = _legacy_generation(row)
-        return _FakeJob()
-      # ``_RECORD_VIEW_POLICY_QUERY``: keyed on the generation the caller
-      # read, so it lands on nothing once the row was re-published; the
-      # generation it supersedes joins the row's committed history.
-      assert set(params) == {
-          "job_id",
-          "import_version",
-          "expected_generation_id",
-          "generation_id",
-          "view_policy",
-      }
-      assert "generation_id = @expected_generation_id" in query
-      assert {"view_policy", "generation_id", "superseded_generations"} <= (
-          columns
-      )
-      assert "ARRAY_CONCAT(" in query and "TO_JSON_STRING(STRUCT(" in query
+      # ``_BACKFILL_GENERATION_QUERY`` is the only remaining standalone
+      # manifest UPDATE: the policy recommit runs as a lock-claiming
+      # transaction (``_record_policy``).
+      assert "WHERE generation_id IS NULL" in query
+      assert params == {}
+      assert "generation_id" in self.store.manifest_columns()
+      assert "TO_HEX(MD5(" in query
       for row in self.store.rows:
-        if (
-            _same_version(row, params)
-            and row.get("generation_id") == params["expected_generation_id"]
-        ):
-          row["superseded_generations"] = list(
-              row.get("superseded_generations") or []
-          ) + [_history_entry(row)]
-          row["view_policy"] = params["view_policy"]
-          row["generation_id"] = params["generation_id"]
+        if row.get("generation_id") is None:
+          row["generation_id"] = _legacy_generation(row)
       return _FakeJob()
     if ".evalbench_import_lock`" in query and query.startswith("INSERT INTO"):
       # Seeding is INSERT-only, so it never conflicts and may run twice.
@@ -970,6 +947,68 @@ class _FakeWriteClient:
         row for row in store.rows if not _same_version(row, params)
     ] + manifest_rows
     return _FakeJob()
+
+  def _record_policy(
+      self, script: str, params: dict, snapshot: _FakeSnapshot
+  ) -> _FakeJob:
+    """``_RECORD_VIEW_POLICY_SCRIPT``: the unchanged-path policy recommit.
+
+    A lock-claiming transaction, not a standalone UPDATE (P1 #469-r4-2):
+    the claim mutates the same sentinel row as the publish and span-sync
+    transactions, so BigQuery cancels whichever of two mutually stale
+    overlapping transactions commits second — the fake applies exactly
+    the ``lock_claims`` rule ``_publish`` applies. The manifest UPDATE
+    stays keyed on the generation the caller read (it lands on nothing
+    once the row was re-published; the generation it supersedes joins
+    the row's committed history), and the optional registry guard joins
+    the WHERE clause negated (``_recommit_binding_guard_trips``).
+    """
+    lock_table = re.search(r"UPDATE `([^`]+)`", script).group(1)
+    assert lock_table.endswith(".evalbench_import_lock")
+    assert script.index("UPDATE `") < script.index("SET view_policy")
+    assert "ROLLBACK TRANSACTION" in script
+    if snapshot.lock_rows == 0:
+      message = _RAISE_MESSAGE.findall(script)[0]
+      return _FakeJob(error=RuntimeError(f"400 {message}"))
+    if snapshot.lock_claims != self.store.lock_claims:
+      return _FakeJob(
+          error=RuntimeError(
+              _CONCURRENT_UPDATE_ERROR.format(lock_table=lock_table)
+          )
+      )
+    assert {
+        "job_id",
+        "import_version",
+        "expected_generation_id",
+        "generation_id",
+        "view_policy",
+    } <= set(params)
+    assert "generation_id = @expected_generation_id" in script
+    assert {"view_policy", "generation_id", "superseded_generations"} <= (
+        self.store.manifest_columns()
+    )
+    assert "ARRAY_CONCAT(" in script and "TO_JSON_STRING(STRUCT(" in script
+    # The transaction commits either way (the claim UPDATE mutated the
+    # sentinel); a tripped guard just makes the keyed UPDATE land on
+    # nothing.
+    self.store.lock_claims += 1
+    if not self._recommit_binding_guard_trips(script, params):
+      for row in self.store.rows:
+        if (
+            _same_version(row, params)
+            and row.get("generation_id") == params["expected_generation_id"]
+        ):
+          row["superseded_generations"] = list(
+              row.get("superseded_generations") or []
+          ) + [_history_entry(row)]
+          row["view_policy"] = params["view_policy"]
+          row["generation_id"] = params["generation_id"]
+    return _FakeJob()
+
+  def _recommit_binding_guard_trips(self, script: str, params: dict) -> bool:
+    """Hook: the recommit's negated registry guard (see ``_SpanLabelsFake``)."""
+    del script, params  # The adapter fake has no registry to check.
+    return False
 
   def _span_binding_guard_result(self, script: str, params: dict):
     """Hook: the native span-binding registry guard, evaluated after the

@@ -33,6 +33,7 @@ from bigquery_agent_analytics import span_taxonomy
 from bigquery_agent_analytics.evalbench import _policy_column
 from bigquery_agent_analytics.evalbench import _policy_from_column
 from bigquery_agent_analytics.evalbench import _PUBLISH_BINDING_GUARD_MESSAGE
+from bigquery_agent_analytics.evalbench import _SpanBindingState
 from bigquery_agent_analytics.evalbench import EvalScorePolicy
 from bigquery_agent_analytics.evalbench import failed_sessions
 from bigquery_agent_analytics.native_events import NATIVE_SPAN_LABEL_POLICY
@@ -43,6 +44,7 @@ from tests.test_evalbench_importer import _FakeManifestStore
 from tests.test_evalbench_importer import _FakeSnapshot
 from tests.test_evalbench_importer import _FakeTable
 from tests.test_evalbench_importer import _FakeWriteClient
+from tests.test_evalbench_importer import _scored_run
 from tests.test_native_events_writer import _event
 from tests.test_native_events_writer import _gold_events
 from tests.test_native_events_writer import _IMPORTED_AT
@@ -90,6 +92,11 @@ class _SpanLabelsFake(_FakeWriteClient):
   opt-in), and ``doctor_binding_read`` runs once right after a pre-read
   captured its rows: a concurrent binding landing in that window. Both
   model the r3 P1 races the in-boundary guards must fail closed.
+  ``binding_transaction_snapshot`` pins the committed binding rows the
+  in-transaction registry guards read (default: current committed
+  state) — passing the rows captured before a concurrent commit models
+  the r4 mutually-stale-snapshot overlap, where only the lock claim can
+  serialize the policy recommit against the span-binding transaction.
   """
 
   def __init__(
@@ -101,6 +108,7 @@ class _SpanLabelsFake(_FakeWriteClient):
       doctor_native_manifest_read=None,
       stale_binding_reads: bool = False,
       doctor_binding_read=None,
+      binding_transaction_snapshot: list[dict] | None = None,
       **kwargs,
   ) -> None:
     super().__init__(**kwargs)
@@ -113,6 +121,7 @@ class _SpanLabelsFake(_FakeWriteClient):
     self.doctor_native_manifest_read = doctor_native_manifest_read
     self.stale_binding_reads = stale_binding_reads
     self.doctor_binding_read = doctor_binding_read
+    self.binding_transaction_snapshot = binding_transaction_snapshot
 
   def get_table(self, table_ref: str):
     if table_ref.endswith("." + native_events.SPAN_BINDINGS_TABLE) and (
@@ -153,17 +162,6 @@ class _SpanLabelsFake(_FakeWriteClient):
       if hook is not None:
         hook()
       return _FakeJob(rows)
-    if marker in query and query.startswith("UPDATE"):
-      # ``_RECORD_VIEW_POLICY_QUERY`` with the appended registry guard:
-      # the recommit lands on nothing when the committed binding state is
-      # no longer what this caller pre-read.
-      params = {p.name: p.value for p in kwargs["job_config"].query_parameters}
-      predicate = re.search(r"AND NOT \((.+)\)\s*$", query, re.S)
-      assert predicate is not None
-      if self._binding_guard_trips(predicate.group(1), params["job_id"]):
-        self.queries.append((query, kwargs))
-        return _FakeJob()
-      return super().query(query, **kwargs)
     if (
         self.doctor_native_manifest_read is not None
         and ".evalbench_import_manifest`" in query
@@ -225,6 +223,19 @@ class _SpanLabelsFake(_FakeWriteClient):
               f"400 {native_events._SPAN_BINDING_CONFLICT_MESSAGE}"
           )
       )
+    # The mirror in-transaction guard (P1 #469-r4-3): the requested span
+    # table already belongs to ANOTHER job — rejected before any DML, so
+    # the loser's rows and binding never commit.
+    assert "job_id != @job_id" in script
+    assert script.index("job_id != @job_id") < script.index("DELETE FROM `")
+    if any(
+        row["span_labels_table"] == params["span_labels_table_name"]
+        and row["job_id"] != params["job_id"]
+        for row in self.span_bindings
+    ):
+      return _FakeJob(
+          error=RuntimeError(f"400 {native_events._SPAN_TABLE_OWNED_MESSAGE}")
+      )
     ref = re.search(r"DELETE FROM `([^`]+)`", script).group(1)
     (staging_ref,) = re.findall(r"FROM `([^`]+_staging_[0-9a-f]+)`", script)
     staged = next(
@@ -253,28 +264,36 @@ class _SpanLabelsFake(_FakeWriteClient):
     ]
     return _FakeJob()
 
-  def _binding_guard_trips(self, predicate: str, job_id: str) -> bool:
-    """Evaluate the rendered registry predicate against committed state.
+  def _binding_guard_trips(self, predicate: str, params: dict) -> bool:
+    """Evaluate a rendered registry predicate inside a transaction.
 
-    The two shapes ``_span_binding_guard`` renders: pre-read-none (EXISTS
-    any row for the job) and pre-read-bound (NOT EXISTS the exact
-    table+policy row). Literals are ``_sql_string_literal`` output, so
-    ``json.loads`` round-trips them.
+    The two fixed shapes ``_SpanBindingState.predicate`` renders:
+    pre-read-none (EXISTS any row for the job) and pre-read-bound
+    (NOT EXISTS the exact table+policy row). The expected values travel
+    ONLY as query parameters — the P0 r4-1 contract — so the fake reads
+    them from ``params`` and asserts no string literal ever reaches the
+    predicate text. Reads see ``binding_transaction_snapshot`` when one
+    is pinned, else the committed registry.
     """
-    rows = [r for r in self.span_bindings if r["job_id"] == job_id]
-    bound = re.search(
-        r'span_labels_table = ("(?:[^"\\]|\\.)*")'
-        r' AND view_policy = ("(?:[^"\\]|\\.)*")',
-        predicate,
+    assert "'" not in predicate and '"' not in predicate
+    bindings = (
+        self.binding_transaction_snapshot
+        if self.binding_transaction_snapshot is not None
+        else self.span_bindings
     )
-    if bound is None:
-      assert predicate.lstrip().startswith("EXISTS")
-      return bool(rows)
-    assert predicate.lstrip().startswith("NOT EXISTS")
-    expected = (json.loads(bound.group(1)), json.loads(bound.group(2)))
-    return not any(
-        (r["span_labels_table"], r["view_policy"]) == expected for r in rows
-    )
+    rows = [r for r in bindings if r["job_id"] == params["job_id"]]
+    if "@expected_span_labels_table" in predicate:
+      assert predicate.lstrip().startswith("NOT EXISTS")
+      assert "@expected_span_view_policy" in predicate
+      expected = (
+          params["expected_span_labels_table"],
+          params["expected_span_view_policy"],
+      )
+      return not any(
+          (r["span_labels_table"], r["view_policy"]) == expected for r in rows
+      )
+    assert predicate.lstrip().startswith("EXISTS")
+    return bool(rows)
 
   def _span_binding_guard_result(self, script: str, params: dict):
     """The base publish transaction's in-boundary registry re-validation."""
@@ -286,11 +305,20 @@ class _SpanLabelsFake(_FakeWriteClient):
     )
     if match is None:
       return None
-    if self._binding_guard_trips(match.group(1), params["job_id"]):
+    if self._binding_guard_trips(match.group(1), params):
       return _FakeJob(
           error=RuntimeError(f"400 {_PUBLISH_BINDING_GUARD_MESSAGE}")
       )
     return None
+
+  def _recommit_binding_guard_trips(self, script: str, params: dict) -> bool:
+    """The recommit's negated registry guard, inside its transaction."""
+    predicate = re.search(
+        r"AND NOT \((.+?)\);\s*COMMIT TRANSACTION", script, re.S
+    )
+    if predicate is None:
+      return False
+    return self._binding_guard_trips(predicate.group(1), params)
 
 
 def _acceptance_run(extra_events=()):
@@ -1358,6 +1386,206 @@ def test_bound_pre_read_must_match_the_committed_binding() -> None:
       "goal_completion": 1.0,
   }
   assert {row["import_version"] for row in store.rows} == {"v1"}
+
+
+# --- r4 P0: the registry guard is structured state, never caller SQL --------
+
+
+def test_materialize_rejects_caller_shaped_sql_binding_arguments() -> None:
+  # P0 #469-r4-1: the raw-SQL ``binding_guard`` hook is gone, and its
+  # structured replacement refuses anything that is not the private state
+  # type — a statement-boundary payload can never reach ``client.query``.
+  fake = _FakeWriteClient()
+  payload = "TRUE); DROP TABLE `prod.telemetry.agent_events`; --"
+  with pytest.raises(TypeError, match="binding_guard"):
+    _scored_run().materialize(
+        target_dataset="bqaa",
+        import_version="v1",
+        bq_client=fake,
+        binding_guard=payload,
+    )
+  with pytest.raises(TypeError, match="_SpanBindingState"):
+    _scored_run().materialize(
+        target_dataset="bqaa",
+        import_version="v1",
+        bq_client=fake,
+        span_binding=payload,
+    )
+  assert fake.queries == [] and fake.loads == [] and fake.created == []
+
+
+def test_span_binding_state_validates_every_rendered_identifier() -> None:
+  # The ONLY identifier the fixed predicates interpolate is the registry
+  # reference, and every segment is validated before rendering.
+  for evil in (
+      "p.d.t`; DROP TABLE `prod.telemetry.agent_events`; --",
+      "p.d.evalbench`bindings",
+      "p.dataset",
+      "p.d.agent_events",
+  ):
+    with pytest.raises(ValueError):
+      _SpanBindingState(bindings_ref=evil)
+  with pytest.raises(ValueError, match="expected_table"):
+    _SpanBindingState(
+        bindings_ref=_BINDINGS_REF,
+        expected_table="t`; DROP TABLE x; --",
+        expected_policy="{}",
+    )
+  with pytest.raises(ValueError, match="together"):
+    _SpanBindingState(bindings_ref=_BINDINGS_REF, expected_table="t")
+
+
+def test_binding_guard_renders_fixed_predicates_with_parameters() -> None:
+  # End to end: the bound-shape guard the base publish carries is exactly
+  # the fixed template, and the expected binding — whose canonical policy
+  # JSON legitimately contains quote characters — travels only as query
+  # parameters, never in the SQL text.
+  store, shared, bindings = _dataset()
+  _materialize(_acceptance_run(), _fake(store, shared, bindings), policy=None)
+  (binding,) = bindings
+  assert '"' in binding["view_policy"]  # would break out of any literal
+
+  later = _fake(store, shared, bindings)
+  _plain_materialize(
+      _acceptance_run(_changed_events()), later, import_version="v2"
+  )
+  (script, kwargs) = next(
+      (sql, kw)
+      for sql, kw in later.queries
+      if _PUBLISH_BINDING_GUARD_MESSAGE in sql
+  )
+  guard = re.search(r"IF (NOT EXISTS .+?) THEN", script, re.S).group(1)
+  assert guard == (
+      f"NOT EXISTS (SELECT 1 FROM `{_BINDINGS_REF}`"
+      " WHERE job_id = @job_id"
+      " AND span_labels_table = @expected_span_labels_table"
+      " AND view_policy = @expected_span_view_policy)"
+  )
+  assert binding["view_policy"] not in script
+  params = {p.name: p.value for p in kwargs["job_config"].query_parameters}
+  assert params["expected_span_labels_table"] == _SPAN_TABLE
+  assert params["expected_span_view_policy"] == binding["view_policy"]
+
+
+# --- r4 P1: the policy recommit is lock-serialized --------------------------
+
+
+def test_policy_recommit_serializes_with_the_span_binding_transaction() -> None:
+  # P1 #469-r4-2: the recommit's snapshot and the span-binding
+  # transaction's snapshot are BOTH taken before either commits. A
+  # standalone manifest UPDATE mutates a table disjoint from the
+  # span/binding tables, so snapshot isolation would let both commit —
+  # manifest gate NULL under a new generation, binding gate frozen under
+  # the old one, committed span rows, no live pinned view. Claiming the
+  # import lock makes the two transactions conflict on the sentinel row,
+  # so the recommit whose snapshot went stale is cancelled instead.
+  store, shared, bindings = _dataset()
+  overlap: dict = {}
+
+  def capture_overlap() -> None:
+    # Runs after the opt-in's base publish committed and before its span
+    # sync claims the lock: the window the stale recommit overlaps.
+    overlap["snapshot"] = store.snapshot()
+    overlap["bindings"] = [dict(row) for row in bindings]
+
+  first = _materialize(
+      _acceptance_run(),
+      _fake(
+          store, shared, bindings, doctor_native_manifest_read=capture_overlap
+      ),
+      policy=None,
+  )
+  generation = first.manifest["generation_id"]
+  assert overlap["bindings"] == []  # captured before the binding committed
+
+  stale = _fake(
+      store,
+      shared,
+      bindings,
+      stale_binding_reads=True,
+      transaction_snapshot=overlap["snapshot"],
+      binding_transaction_snapshot=overlap["bindings"],
+  )
+  with pytest.raises(ValueError, match="could not be created or updated"):
+    _plain_materialize(_acceptance_run(), stale, import_version="v1")
+  # Neither half of the anomaly committed: the manifest still records the
+  # frozen gate under the synchronized generation...
+  (row,) = store.rows
+  assert _policy_from_column(row["view_policy"]) == NATIVE_SPAN_LABEL_POLICY
+  assert row["generation_id"] == generation
+  # ...the binding agrees with it...
+  (binding,) = bindings
+  assert binding["generation_id"] == generation
+  assert binding["view_policy"] == row["view_policy"]
+  # ...and the pinned span view is live on that generation.
+  rows = _active_view_rows(stale)
+  assert [r["failure_category"] for r in rows] == list(_G1_CATEGORIES)
+  assert {r["generation_id"] for r in rows} == {generation}
+
+  # Re-running from committed state heals: the binding restores the ONE
+  # policy, nothing needs recommitting, and the boundary stays coherent.
+  healed = _fake(store, shared, bindings)
+  result = _plain_materialize(_acceptance_run(), healed, import_version="v1")
+  assert result.status == "unchanged"
+  (row,) = store.rows
+  assert row["generation_id"] == generation
+
+
+# --- r4 P1: one job per span table, enforced before any DML -----------------
+
+
+def test_concurrent_jobs_cannot_bind_one_span_table() -> None:
+  # P1 #469-r4-3: two jobs with distinct failed-sessions views race into
+  # the SAME span table. The table-derived pinned view admits one job
+  # owner, so if both committed rows and bindings the loser would fail
+  # view reconciliation forever — its durable binding blocking a retry of
+  # either table. The in-transaction ownership check rejects the loser
+  # BEFORE its rows or binding commit.
+  store, shared, bindings = _dataset()
+
+  def winner_lands() -> None:
+    _materialize(_acceptance_run(), _fake(store, shared, bindings))
+
+  run_b = NativeAgentEventsRun.from_agent_events(
+      _stuck_events_with_spans() + _gold_events_with_spans(),
+      source_table=_SOURCE_TABLE,
+      job_id="job-b",
+  )
+  loser = _fake(
+      store, shared, bindings, doctor_native_manifest_read=winner_lands
+  )
+  with pytest.raises(ValueError, match="already bound to another job"):
+    _materialize(run_b, loser, failed_sessions_view="failed_b")
+  # The loser stays unbound, its rows never landed, and the winner's
+  # binding and single live pinned view are untouched.
+  (binding,) = bindings
+  assert binding["job_id"] == _JOB_ID
+  assert {row["job_id"] for row in shared} == {_JOB_ID}
+  pin = json.loads(
+      store.views[_SPAN_VIEW_REF].splitlines()[0][
+          len(native_events._SPAN_VIEW_PIN_MARKER) :
+      ]
+  )
+  assert pin["job_id"] == _JOB_ID
+
+  # Unbound means recoverable: the loser retries with its own span table
+  # and binds it, leaving the winner's publication untouched.
+  retry = _fake(store, shared, bindings)
+  result = _materialize(
+      run_b,
+      retry,
+      span_labels_table="span_labels_b",
+      failed_sessions_view="failed_b",
+  )
+  assert result.span_labels_table == (
+      f"{_SOURCE_PROJECT}.bqaa_native.span_labels_b"
+  )
+  assert result.span_label_row_count == 3
+  assert {(b["job_id"], b["span_labels_table"]) for b in bindings} == {
+      (_JOB_ID, _SPAN_TABLE),
+      ("job-b", "span_labels_b"),
+  }
+  assert {row["job_id"] for row in shared} == {_JOB_ID, "job-b"}
 
 
 # --- destination guards ---------------------------------------------------

@@ -43,7 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stays the frozen first-8 `eval_id` with the full session id on
   collision, **the six-week clock has still NOT started**, tests are
   offline fixture tests only, and the `evalbench-import` adapter (#97)
-  stays.
+  stays. The registry boundary is hardened end to end: the publish-side
+  re-validation is driven by private structured binding state rendered
+  into two fixed, parameterized predicates — `materialize` exposes no
+  SQL-string hook, and any non-structured argument is rejected before
+  anything runs — the unchanged-path policy recommit runs as its own
+  import-lock-claiming transaction so it serializes against the
+  span-binding transaction instead of racing it from a mutually stale
+  snapshot, and the span sync rejects, before any row or binding DML, a
+  span table already bound to another job, so a losing concurrent job
+  stays unbound and simply retries with its own table.
 - **Span-level G1 taxonomy on `span_id` (#466, parent #435)** — new
   `bigquery_agent_analytics.span_taxonomy` localizes the G1-frozen failure
   categories of a *failed* session onto the span where the failure is

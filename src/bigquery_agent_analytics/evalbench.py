@@ -214,7 +214,7 @@ _MANIFEST_SCHEMA_FIELDS = (
     # Committed history of the generations this row has had, oldest first:
     # one ``TO_JSON_STRING(STRUCT(generation_id, view_policy))`` per
     # superseded generation, appended by the publish transaction (a
-    # ``replace``) and by ``_RECORD_VIEW_POLICY_QUERY``. It is what lets a
+    # ``replace``) and by ``_RECORD_VIEW_POLICY_SCRIPT``. It is what lets a
     # view a superseded generation left behind be authenticated from
     # committed metadata rather than from its own pin.
     ("superseded_generations", "STRING", "REPEATED"),
@@ -285,18 +285,46 @@ ORDER BY session_id
 # change is conditional on the generation the caller found, so it can never
 # land on a row a concurrent ``replace`` has since re-published, and it
 # mints a new generation so the view pinned to the old one is recognized as
-# superseded and re-rendered from the row.
-_RECORD_VIEW_POLICY_QUERY = """\
-UPDATE `{manifest_table}`
-SET view_policy = @view_policy,
-    generation_id = @generation_id,
-    superseded_generations = ARRAY_CONCAT(
-        IFNULL(superseded_generations, []),
-        [TO_JSON_STRING(STRUCT(
-            generation_id AS generation_id, view_policy AS view_policy))])
-WHERE job_id = @job_id
-  AND import_version = @import_version
-  AND generation_id = @expected_generation_id
+# superseded and re-rendered from the row. The recommit runs as its own
+# multi-statement transaction that FIRST claims the dataset's import lock:
+# a standalone UPDATE would mutate only the manifest while the native span
+# sync transaction mutates only the span/binding tables, so under BigQuery
+# snapshot isolation two mutually stale snapshots could both commit — a
+# NULL/new-generation manifest policy around a binding that pinned the old
+# generation's gate. Claiming the same lock sentinel makes the two
+# transactions conflict on a shared row mutation, so BigQuery cancels one
+# and the survivor decides from committed state. The span-binding guard
+# (when the native writer passed its ``_SpanBindingState``) joins the
+# UPDATE's WHERE clause negated, evaluated inside that serialized
+# boundary: a stale registry pre-read lands on nothing instead of
+# rewriting the committed gate.
+_RECORD_VIEW_POLICY_SCRIPT = """\
+BEGIN
+  BEGIN TRANSACTION;
+  UPDATE `{lock_table}`
+  SET claim_count = claim_count + 1,
+      claimed_at = CURRENT_TIMESTAMP(),
+      claimed_job_id = @job_id,
+      claimed_import_version = @import_version
+  WHERE lock_id = '{lock_id}';
+  IF @@row_count = 0 THEN
+    RAISE USING MESSAGE = '{lock_missing_message}';
+  END IF;
+  UPDATE `{manifest_table}`
+  SET view_policy = @view_policy,
+      generation_id = @generation_id,
+      superseded_generations = ARRAY_CONCAT(
+          IFNULL(superseded_generations, []),
+          [TO_JSON_STRING(STRUCT(
+              generation_id AS generation_id, view_policy AS view_policy))])
+  WHERE job_id = @job_id
+    AND import_version = @import_version
+    AND generation_id = @expected_generation_id{binding_guard};
+  COMMIT TRANSACTION;
+EXCEPTION WHEN ERROR THEN
+  ROLLBACK TRANSACTION;
+  RAISE;
+END;
 """
 
 # Gives every manifest row published before generations existed (slice 1)
@@ -368,12 +396,12 @@ _LOCK_MISSING_MESSAGE = (
     "evalbench import lock sentinel is missing; the publish transaction"
     " cannot serialize against concurrent imports"
 )
-# Raised inside the lock-serialized boundaries when the caller-supplied
-# ``binding_guard`` predicate (the native writer's span-binding registry
-# check, see ``native_events``) finds the committed registry state is no
-# longer what the caller pre-read: the decision this publish or policy
-# recommit was derived from is stale, so it must not be committed around
-# the registry.
+# Raised inside the lock-serialized boundaries when the span-binding
+# registry guard (rendered from the native writer's structured
+# ``_SpanBindingState``, see ``native_events``) finds the committed
+# registry state is no longer what the caller pre-read: the decision this
+# publish or policy recommit was derived from is stale, so it must not be
+# committed around the registry.
 _PUBLISH_BINDING_GUARD_MESSAGE = (
     "evalbench import: the span-binding registry state for this job changed"
     " after it was read; nothing was written"
@@ -404,15 +432,105 @@ _REPLACE_IDENTICAL_NOTE = (
     "  -- replace=True: an identical version is re-published in place.\n"
 )
 # Rendered into ``_PUBLISH_SCRIPT`` right after the lock claim when the
-# caller supplied a ``binding_guard`` predicate, so the registry state is
-# re-validated inside the serialized transaction — a stale pre-read can
-# never commit a base snapshot (or its ``view_policy``) around a binding
-# that landed meanwhile.
+# native writer supplied its structured ``_SpanBindingState``, so the
+# registry state is re-validated inside the serialized transaction — a
+# stale pre-read can never commit a base snapshot (or its ``view_policy``)
+# around a binding that landed meanwhile.
 _BINDING_GUARD = """\
   IF {predicate} THEN
     RAISE USING MESSAGE = '{message}';
   END IF;
 """
+# The two fixed span-binding guard predicates (#469): the ONLY SQL the
+# registry re-validation can render. The registry identifier comes from a
+# segment-validated ``_SpanBindingState`` and the expected binding values
+# are bound as query parameters, so no public ``materialize`` argument can
+# extend the guard into another statement.
+_SPAN_BINDING_ABSENT_PREDICATE = (
+    "EXISTS (SELECT 1 FROM `{bindings_table}` WHERE job_id = @job_id)"
+)
+_SPAN_BINDING_BOUND_PREDICATE = (
+    "NOT EXISTS (SELECT 1 FROM `{bindings_table}`"
+    " WHERE job_id = @job_id"
+    " AND span_labels_table = @expected_span_labels_table"
+    " AND view_policy = @expected_span_view_policy)"
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class _SpanBindingState:
+  """Structured span-binding pre-read the native writer passes down (#469).
+
+  Replaces the raw-SQL ``binding_guard`` hook: ``materialize`` accepts
+  ONLY this type (never a string), the registry reference is re-validated
+  segment by segment before it is rendered as an identifier, and the
+  expected table/policy travel as query parameters. The rendered guard is
+  therefore always one of the two fixed predicates above; no field can
+  introduce an executable statement boundary.
+
+  ``expected_table`` / ``expected_policy`` record the committed binding
+  row the caller pre-read (both set), or are both ``None`` when the
+  pre-read found no binding for the job.
+  """
+
+  bindings_ref: str
+  expected_table: Optional[str] = None
+  expected_policy: Optional[str] = None
+
+  def __post_init__(self) -> None:
+    segments = (
+        self.bindings_ref.split(".")
+        if isinstance(self.bindings_ref, str)
+        else []
+    )
+    if len(segments) != 3:
+      raise ValueError(
+          "span-binding registry reference must be a fully-qualified"
+          f" project.dataset.table, got {self.bindings_ref!r}"
+      )
+    project, dataset, table = segments
+    _validate_source_segment("span-binding registry project", project)
+    _validate_source_segment("span-binding registry dataset", dataset)
+    _validate_destination_table("span-binding registry table", table)
+    if (self.expected_table is None) != (self.expected_policy is None):
+      raise ValueError(
+          "span-binding state must set expected_table and expected_policy"
+          " together (a pre-read binding row) or neither (no binding"
+          " pre-read)"
+      )
+    if self.expected_table is not None:
+      _validate_destination_table(
+          "span-binding expected_table", self.expected_table
+      )
+      if not isinstance(self.expected_policy, str):
+        raise ValueError(
+            "span-binding expected_policy must be the canonical policy"
+            f" JSON string, got {self.expected_policy!r}"
+        )
+
+  def predicate(self) -> str:
+    """One of the two fixed guard predicates — never caller-shaped SQL."""
+    template = (
+        _SPAN_BINDING_ABSENT_PREDICATE
+        if self.expected_table is None
+        else _SPAN_BINDING_BOUND_PREDICATE
+    )
+    return template.format(bindings_table=self.bindings_ref)
+
+  def parameters(self) -> list["bigquery.ScalarQueryParameter"]:
+    """The expected-binding values, always bound as query parameters."""
+    if self.expected_table is None:
+      return []
+    return [
+        bigquery.ScalarQueryParameter(
+            "expected_span_labels_table", "STRING", self.expected_table
+        ),
+        bigquery.ScalarQueryParameter(
+            "expected_span_view_policy", "STRING", self.expected_policy
+        ),
+    ]
+
+
 _PUBLISH_SCRIPT = """\
 DECLARE existing_manifest_rows INT64 DEFAULT 0;
 DECLARE conflicting_manifest_rows INT64 DEFAULT 0;
@@ -905,7 +1023,7 @@ class EvalBenchRun:
       failed_sessions_view: Optional[str] = DEFAULT_FAILED_SESSIONS_VIEW,
       policy: Optional["EvalScorePolicy"] = None,
       bq_client: Optional[Any] = None,
-      binding_guard: Optional[str] = None,
+      span_binding: Optional["_SpanBindingState"] = None,
   ) -> "EvalBenchImportResult":
     """Publish this run as one immutable import version in BQAA-owned tables.
 
@@ -996,17 +1114,28 @@ class EvalBenchRun:
         score failures count alongside process failures.
       bq_client: Optional test-compatible or caller-configured BigQuery
         client for the target project.
-      binding_guard: Optional boolean SQL predicate (rendered by the native
-        writer over its span-binding registry and ``@job_id``) re-checked
-        inside the lock-serialized publish transaction — TRUE fails the
-        publish closed — and appended to the unchanged-path policy
-        recommit's WHERE clause so a stale registry pre-read can neither
-        commit a new snapshot nor rewrite a committed ``view_policy``
-        around registry state that landed meanwhile.
+      span_binding: Optional ``_SpanBindingState`` (built by the native
+        writer from its span-binding registry pre-read; never SQL — any
+        other type is rejected before anything runs). Rendered HERE into
+        one of two fixed predicates with the expected binding bound as
+        query parameters: re-checked inside the lock-serialized publish
+        transaction — TRUE fails the publish closed — and joined negated
+        into the unchanged-path policy recommit's WHERE clause, so a
+        stale registry pre-read can neither commit a new snapshot nor
+        rewrite a committed ``view_policy`` around registry state that
+        landed meanwhile.
 
     Returns:
       An ``EvalBenchImportResult`` with the published version and manifest.
     """
+    if span_binding is not None and not isinstance(
+        span_binding, _SpanBindingState
+    ):
+      raise TypeError(
+          "span_binding must be the structured _SpanBindingState the native"
+          f" writer builds, got {type(span_binding).__name__}: caller-shaped"
+          " SQL is never rendered into the publish boundary (#469)"
+      )
     target_project = target_project or self.project_id
     _validate_source_segment("target_project", target_project)
     _validate_source_segment("target_dataset", target_dataset)
@@ -1126,7 +1255,8 @@ class EvalBenchRun:
               # The row this call handled: the one it committed, or for
               # ``unchanged`` the committed row it found.
               manifest=result.manifest,
-              binding_guard=binding_guard,
+              lock_ref=lock_ref,
+              span_binding=span_binding,
           ),
       )
 
@@ -1207,7 +1337,7 @@ class EvalBenchRun:
           scores_staging=scores_staging,
           manifest_staging=manifest_staging,
           replace=replace,
-          binding_guard=binding_guard,
+          span_binding=span_binding,
       )
       job_config = bigquery.QueryJobConfig(
           query_parameters=_publish_parameters(
@@ -1219,6 +1349,7 @@ class EvalBenchRun:
               events_ref=events_ref,
               scores_ref=scores_ref,
           )
+          + (span_binding.parameters() if span_binding is not None else [])
       )
       job_config = with_sdk_labels(job_config, feature=_IMPORT_FEATURE)
       query_args: dict[str, Any] = {"job_config": job_config}
@@ -2024,7 +2155,8 @@ def _sync_failed_sessions_view(
     status: str,
     import_version: str,
     manifest: Mapping[str, Any],
-    binding_guard: Optional[str] = None,
+    lock_ref: str,
+    span_binding: Optional[_SpanBindingState] = None,
 ) -> str:
   """Point ``view_ref`` at the job's latest successful import.
 
@@ -2048,10 +2180,11 @@ def _sync_failed_sessions_view(
       _record_view_policy(
           client,
           manifest_ref=manifest_ref,
+          lock_ref=lock_ref,
           manifest=manifest,
           policy=policy,
           location=location,
-          binding_guard=binding_guard,
+          span_binding=span_binding,
       )
     _reconcile_failed_sessions_view(
         client,
@@ -2075,52 +2208,71 @@ def _record_view_policy(
     client: Any,
     *,
     manifest_ref: str,
+    lock_ref: str,
     manifest: Mapping[str, Any],
     policy: Optional[EvalScorePolicy],
     location: Optional[str],
-    binding_guard: Optional[str] = None,
+    span_binding: Optional[_SpanBindingState] = None,
 ) -> None:
   """Commit ``policy`` to the manifest row this call found, if unchanged.
 
-  The UPDATE is keyed on the row's ``generation_id`` as read, so it lands
-  on nothing when a concurrent ``replace`` (or another policy change)
-  re-published the row since -- that generation's own caller decided its
-  gate. It mints a new generation either way, so a view still pinned to
-  the old one is recognized as superseded and re-rendered from the row.
-  ``binding_guard`` (see ``materialize``) joins the WHERE clause negated,
-  so a caller whose registry pre-read went stale also lands on nothing --
-  the binding that committed meanwhile decided the gate, and the view is
-  still reconciled from the committed row.
+  Runs as a multi-statement transaction that claims the dataset's import
+  lock before anything else (``_RECORD_VIEW_POLICY_SCRIPT``), so it
+  serializes against the publish and span-sync transactions instead of
+  committing a manifest-only mutation around them from a mutually stale
+  snapshot. The UPDATE is keyed on the row's ``generation_id`` as read,
+  so it lands on nothing when a concurrent ``replace`` (or another policy
+  change) re-published the row since -- that generation's own caller
+  decided its gate. It mints a new generation when it lands, so a view
+  still pinned to the old one is recognized as superseded and re-rendered
+  from the row. ``span_binding`` (see ``materialize``) renders its fixed
+  registry predicate negated into the WHERE clause, evaluated inside the
+  serialized boundary: a caller whose registry pre-read went stale also
+  lands on nothing -- the binding that committed meanwhile decided the
+  gate, and the view is still reconciled from the committed row.
   """
-  job_config = bigquery.QueryJobConfig(
-      query_parameters=[
-          bigquery.ScalarQueryParameter(
-              "job_id", "STRING", str(manifest["job_id"])
-          ),
-          bigquery.ScalarQueryParameter(
-              "import_version", "STRING", str(manifest["import_version"])
-          ),
-          bigquery.ScalarQueryParameter(
-              "expected_generation_id",
-              "STRING",
-              _manifest_generation_id(manifest),
-          ),
-          bigquery.ScalarQueryParameter(
-              "generation_id", "STRING", _new_generation_id()
-          ),
-          bigquery.ScalarQueryParameter(
-              "view_policy", "STRING", _policy_column(policy)
-          ),
-      ]
-  )
+  parameters = [
+      bigquery.ScalarQueryParameter(
+          "job_id", "STRING", str(manifest["job_id"])
+      ),
+      bigquery.ScalarQueryParameter(
+          "import_version", "STRING", str(manifest["import_version"])
+      ),
+      bigquery.ScalarQueryParameter(
+          "expected_generation_id",
+          "STRING",
+          _manifest_generation_id(manifest),
+      ),
+      bigquery.ScalarQueryParameter(
+          "generation_id", "STRING", _new_generation_id()
+      ),
+      bigquery.ScalarQueryParameter(
+          "view_policy", "STRING", _policy_column(policy)
+      ),
+  ]
+  if span_binding is not None:
+    parameters.extend(span_binding.parameters())
+  job_config = bigquery.QueryJobConfig(query_parameters=parameters)
   job_config = with_sdk_labels(job_config, feature=_VIEW_FEATURE)
   query_args: dict[str, Any] = {"job_config": job_config}
   if location is not None:
     query_args["location"] = location
-  query = _RECORD_VIEW_POLICY_QUERY.format(manifest_table=manifest_ref)
-  if binding_guard is not None:
-    query += f"  AND NOT ({binding_guard})\n"
-  client.query(query, **query_args).result()
+  # The unchanged fast path never ran the publish transaction, so the lock
+  # sentinel this transaction claims may not exist yet; seeding is
+  # INSERT-only and idempotent.
+  _seed_import_lock(client, lock_ref=lock_ref, location=location)
+  script = _RECORD_VIEW_POLICY_SCRIPT.format(
+      manifest_table=manifest_ref,
+      lock_table=lock_ref,
+      lock_id=_IMPORT_LOCK_ID,
+      lock_missing_message=_LOCK_MISSING_MESSAGE,
+      binding_guard=(
+          ""
+          if span_binding is None
+          else f"\n    AND NOT ({span_binding.predicate()})"
+      ),
+  )
+  client.query(script, **query_args).result()
 
 
 def _reconcile_failed_sessions_view(
@@ -2734,7 +2886,7 @@ def _publish_script(
     scores_staging: str,
     manifest_staging: str,
     replace: bool,
-    binding_guard: Optional[str] = None,
+    span_binding: Optional[_SpanBindingState] = None,
 ) -> str:
   """Render the publish transaction: lock claim, manifest guard, DML.
 
@@ -2747,10 +2899,10 @@ def _publish_script(
   rolls the transaction back); with ``replace`` fingerprints and provenance
   may drift and an identical version is re-published, but the destination
   binding still holds, so a version can never be silently relocated.
-  ``binding_guard`` (a boolean SQL predicate over the caller's registry
-  table and ``@job_id``) is re-checked right after the lock claim: TRUE
-  raises ``_PUBLISH_BINDING_GUARD_MESSAGE`` so a stale registry pre-read
-  fails closed inside the serialized transaction.
+  ``span_binding`` renders its fixed registry predicate (parameterized,
+  never caller-shaped SQL) right after the lock claim: TRUE raises
+  ``_PUBLISH_BINDING_GUARD_MESSAGE`` so a stale registry pre-read fails
+  closed inside the serialized transaction.
   """
   if replace:
     conflict_predicate = _DESTINATION_CONFLICT_PREDICATE
@@ -2775,9 +2927,9 @@ def _publish_script(
       lock_missing_message=_LOCK_MISSING_MESSAGE,
       binding_guard=(
           ""
-          if binding_guard is None
+          if span_binding is None
           else _BINDING_GUARD.format(
-              predicate=binding_guard,
+              predicate=span_binding.predicate(),
               message=_PUBLISH_BINDING_GUARD_MESSAGE,
           )
       ),
