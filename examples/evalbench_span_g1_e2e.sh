@@ -164,10 +164,15 @@ note "task/planning, finalization, tool blockers."
 # ---- Act 4: span localization ---------------------------------------------- #
 banner "Span-level G1 localizes it -- which span died (PR #467)"
 note "New in PR #467: bigquery_agent_analytics.span_taxonomy. A pure"
-note "library, deliberately NO new CLI -- you call it from Python:"
+note "library, deliberately NO new CLI -- you call it from Python. Pass"
+note "the frozen goal_completion >= 1.0 score gate explicitly: the"
+note "default EvalScorePolicy() has no min_scores, so score_failed stays"
+note "false and the task/planning row below would vanish:"
 echo
+echo "  >>> from bigquery_agent_analytics.evalbench import EvalScorePolicy"
 echo "  >>> from bigquery_agent_analytics.span_taxonomy import label_native_run"
-echo "  >>> labels = label_native_run(run)   # run: the PR #464 NativeAgentEventsRun"
+echo "  >>> policy = EvalScorePolicy({\"goal_completion\": 1.0})"
+echo "  >>> labels = label_native_run(run, policy=policy)   # run: the PR #464 NativeAgentEventsRun"
 echo "  >>> # or per session: label_failed_session_spans(events, verdict, ...)"
 echo
 note "Sample output for this session (three SpanFailureLabel rows, one per"

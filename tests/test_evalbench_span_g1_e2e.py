@@ -35,6 +35,7 @@ import pytest
 
 from bigquery_agent_analytics import failure_taxonomy
 from bigquery_agent_analytics import span_taxonomy
+from bigquery_agent_analytics.evalbench import EvalScorePolicy
 from bigquery_agent_analytics.span_taxonomy import label_native_run
 from tests.test_native_events_writer import _POLICY
 from tests.test_native_events_writer import _SESSION_STUCK
@@ -81,6 +82,14 @@ _FROZEN_CATEGORIES_LINE = (
 )
 
 _RFC_TUPLE_LINE = "(trace_id, span_id, failure_category, evidence, confidence)"
+
+# The exact runnable call act 4 teaches. It must carry the frozen
+# goal_completion >= 1.0 score gate: the default EvalScorePolicy() has an
+# empty min_scores, so the bare label_native_run(run) would leave
+# score_failed false and emit only two of the three printed rows. The
+# fidelity test below re-runs this same policy-bearing invocation.
+_TAUGHT_POLICY_LINE = '>>> policy = EvalScorePolicy({"goal_completion": 1.0})'
+_TAUGHT_CALL_LINE = ">>> labels = label_native_run(run, policy=policy)"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("bash") is None, reason="bash not available"
@@ -152,6 +161,12 @@ def _assert_span_walkthrough(stdout: str) -> None:
   assert "span_taxonomy" in span_level
   assert "label_native_run" in span_level
   assert "label_failed_session_spans" in span_level
+  # The taught call carries the frozen score policy; the bare call (which
+  # could not produce the three printed rows) is never demonstrated.
+  assert "EvalScorePolicy" in span_level
+  assert _TAUGHT_POLICY_LINE in span_level
+  assert _TAUGHT_CALL_LINE in span_level
+  assert "label_native_run(run)" not in stdout
   assert "SpanFailureLabel" in span_level
   assert '"failure_category": "task/planning"' in span_level
   assert '"failure_category": "finalization"' in span_level
@@ -209,7 +224,14 @@ def test_printed_labels_match_the_library_localization() -> None:
   # categories, target kinds, and evidence strings.
   result = _run("--fixture")
   assert result.returncode == 0, result.stderr
-  labels = label_native_run(_acceptance_run(), policy=_POLICY)
+  # Run the invocation exactly as act 4 teaches it: build the taught
+  # policy line's policy, confirm it IS the frozen writer-test gate, and
+  # pass it the way the printed call does.
+  assert _TAUGHT_POLICY_LINE in result.stdout
+  assert _TAUGHT_CALL_LINE in result.stdout
+  policy = EvalScorePolicy({"goal_completion": 1.0})
+  assert policy == _POLICY
+  labels = label_native_run(_acceptance_run(), policy=policy)
   assert len(labels) == 3
   assert [label.failure_category for label in labels] == [
       "task/planning",
@@ -313,6 +335,9 @@ def test_speaker_notes_cover_the_span_path() -> None:
   assert "span_taxonomy" in notes
   assert "label_failed_session_spans" in notes
   assert "label_native_run" in notes
+  # The notes mirror the transcript's policy-bearing call verbatim.
+  assert 'policy = EvalScorePolicy({"goal_completion": 1.0})' in notes
+  assert "labels = label_native_run(run, policy=policy)" in notes
   assert "span_id" in notes
   assert _AGENT_STARTING_SPAN in notes
   assert "gap_after_span" in notes
