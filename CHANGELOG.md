@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Native `agent_events` snapshot writer — the EvalBench-adapter exit ramp
+  (#463, parent #435)** — new
+  `bigquery_agent_analytics.native_events.NativeAgentEventsRun` (and thin
+  CLI `bq-agent-sdk evalbench-native-import`) starts from production ADK
+  `agent_events` rows and publishes the same BQAA-owned contract
+  `EvalBenchRun.materialize` produces — an immutable
+  `(job_id, import_version)` snapshot (events + deterministic
+  `goal_completion` scores + manifest with the `view_policy` pin) plus the
+  `failed_sessions` view pinned to the latest successful publication —
+  with **no EvalBench `configs`/`results`/`scores` tables anywhere in the
+  path**. Identity stays joinable (scenario id = first eight characters of
+  the ADK session id, full id on collision; event/score rows keep the real
+  `session_id`), scores are derived from the session alone (1.0 iff
+  `AGENT_COMPLETED` — *completed*, not *passed*; only the
+  `EvalScorePolicy` gate decides passed), and failed sessions carry the
+  frozen G1 v0.1.0 names — the widget-stock silence session `7e352c34`
+  yields `task/planning`, `finalization`, `tool blockers`. The
+  `evalbench-import` adapter (#97) stays as an optional on-ramp, the
+  production `agent_events` table is never written (reserved-name guard),
+  and **the six-week clock has still NOT started**. Offline fixture tests
+  only; no live BigQuery.
 - **REAL Week 0 freeze: partner, D4 boundary, G1 taxonomy v0.1 (#435)** —
   the Week 0 gates are frozen for real, distinct from the EXAMPLE pack
   below (which stays illustrative). `docs/week0_partner.md` records the

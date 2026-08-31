@@ -23,6 +23,15 @@ three rounds of review; the issue body points here.
 Those slices build the Week 1–2 substrate; they do not start the clock and do
 not touch the partner job, the D4 boundary, taxonomy content, or live traces.
 
+A **native writer** also exists as the EvalBench-adapter exit ramp
+([#463](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/463):
+`native_events.NativeAgentEventsRun` / `bq-agent-sdk
+evalbench-native-import`): it produces the same pinned snapshot +
+`failed_sessions` view + G1 labels directly from production ADK
+`agent_events` rows, with no EvalBench source tables in the path. The
+`evalbench-import` adapter (#97) stays as an optional on-ramp, and the
+native writer does not start the clock either.
+
 **G1 is frozen at v0.1.0 in `failure_taxonomy.py`**
 (`src/bigquery_agent_analytics/failure_taxonomy.py`, `g1_frozen: true`): the
 frozen vocabulary is the SANA-neighborhood seven plus `unknown`
