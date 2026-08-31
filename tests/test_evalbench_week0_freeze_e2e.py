@@ -111,9 +111,7 @@ def _assert_freeze_walkthrough(stdout: str) -> None:
   assert "How many widgets are in stock?" in customer
   assert _SESSION_ID in customer
   assert f"eval_id:       {_EVAL_ID}" in customer
-  assert (
-      "test-project-0728-467323.bqaa_e2e_real.agent_events" in customer
-  )
+  assert "test-project-0728-467323.bqaa_e2e_real.agent_events" in customer
   # Act 2: the trace stops after AGENT_STARTING; the silence is obvious.
   assert "USER_MESSAGE_RECEIVED" in trace
   assert "INVOCATION_STARTING" in trace
