@@ -853,6 +853,64 @@ def test_pinned_view_of_another_job_is_refused() -> None:
   assert {row["job_id"] for row in shared} == {_JOB_ID}
 
 
+@pytest.mark.parametrize(
+    "span_ref, manifest_table, import_version, generation_id",
+    [
+        # A same-job copy that is byte-canonical for foreign references, an
+        # unpublished version, and a generation no manifest row committed:
+        # perfectly self-consistent, vouched for by nothing.
+        (
+            "other_project.other_dataset.other_labels",
+            "other_project.other_dataset.other_manifest",
+            "v9",
+            "9" * 32,
+        ),
+        # The trusted references and a published version, but a generation
+        # the manifest never committed for that row.
+        (_SPAN_REF, None, "v1", "9" * 32),
+        # The trusted references and a committed shape, but a version the
+        # job never published to the manifest.
+        (_SPAN_REF, None, "v9", "9" * 32),
+    ],
+)
+def test_copied_self_consistent_pinned_view_is_refused_and_unchanged(
+    span_ref, manifest_table, import_version, generation_id
+) -> None:
+  """A pin the view renders about itself is not proof of ownership.
+
+  The r6 P1: a same-job view whose body is byte-for-byte the rendering of
+  its own claimed pin used to pass ownership without any committed
+  manifest state vouching for the claimed tables or generation, so a
+  copied view at the managed name could be overwritten as managed.
+  Ownership is now decided against the trusted references this call
+  derived and the generations the manifest committed; the copy is refused
+  before anything publishes and its body is left byte-identical.
+  """
+  fake = _SpanLabelsFake()
+  _materialize(_acceptance_run(), fake)
+  forged = native_events._span_labels_view_body(
+      span_labels_ref=span_ref,
+      manifest_ref=(
+          f"{_SOURCE_PROJECT}.bqaa_native.{native_events.MANIFEST_TABLE}"
+          if manifest_table is None
+          else manifest_table
+      ),
+      job_id=_JOB_ID,
+      import_version=import_version,
+      generation_id=generation_id,
+  )
+  fake.store.write_view(_SPAN_VIEW_REF, forged)
+  before = list(fake.view_writes)
+  with pytest.raises(ValueError, match="not a pinned span-labels view"):
+    _materialize(_acceptance_run(), fake, import_version="v2")
+  # Refused fail-fast and fail-closed: the foreign body was neither
+  # updated nor replaced, and no v2 snapshot or span rows landed.
+  assert fake.store.views[_SPAN_VIEW_REF] == forged
+  assert fake.view_writes == before
+  assert not any(row["import_version"] == "v2" for row in fake.span_labels)
+  assert not any(row["import_version"] == "v2" for row in fake.manifest_rows)
+
+
 def test_derived_pinned_view_name_must_not_shadow_the_failed_view() -> None:
   fake = _SpanLabelsFake()
   with pytest.raises(ValueError, match="would name an import table"):

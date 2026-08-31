@@ -110,10 +110,12 @@ from .evalbench import _seed_import_lock
 from .evalbench import _SpanBindingState
 from .evalbench import _sql_string_literal
 from .evalbench import _structured
+from .evalbench import _superseded_generations
 from .evalbench import _usable_text
 from .evalbench import _validate_destination_table
 from .evalbench import _validate_import_version
 from .evalbench import _validate_source_segment
+from .evalbench import _VIEW_FEATURE
 from .evalbench import _VIEW_SYNC_ATTEMPTS
 from .evalbench import DEFAULT_EVENTS_TABLE
 from .evalbench import DEFAULT_FAILED_SESSIONS_VIEW
@@ -478,14 +480,29 @@ def _span_labels_view_description(*, job_id: str, import_version: str) -> str:
   )
 
 
-def _read_managed_span_view(client: Any, *, view_ref: str) -> Optional[Any]:
+def _read_managed_span_view(
+    client: Any,
+    *,
+    view_ref: str,
+    span_labels_ref: str,
+    manifest_ref: str,
+    location: Optional[str],
+) -> Optional[Any]:
   """The managed pinned span-label view at ``view_ref``, or ``None``.
 
   ``None`` means nothing exists there. Anything that does exist must be a
   view whose body is byte-for-byte the rendering of the pin its first line
-  claims (over the claimed span table); a table, a foreign view, or an
-  edited body raises so the sync never replaces an object it cannot vouch
-  for.
+  claims — and the pin itself must be one committed state vouches for.
+  Its span-label and manifest references must be exactly the trusted
+  ``span_labels_ref`` / ``manifest_ref`` this call derived (the view's own
+  claim is never the reference: a self-consistent rendering over other
+  tables is a copy, not ours), and its generation must be one the pinned
+  ``(job_id, import_version)`` manifest row committed — the row's current
+  ``generation_id``, or one its ``superseded_generations`` history records
+  (mirroring ``evalbench._read_managed_view``). A table, a foreign view,
+  an edited body, or a canonical rendering under references or a
+  generation the manifest never committed all raise, so the sync never
+  replaces an object it cannot vouch for.
   """
   try:
     table = client.get_table(view_ref)
@@ -509,18 +526,39 @@ def _read_managed_span_view(client: Any, *, view_ref: str) -> Optional[Any]:
           and isinstance(pin.get("import_version"), str)
           and isinstance(pin.get("generation_id"), str)
           and _GENERATION_ID_PATTERN.fullmatch(pin["generation_id"])
-          and isinstance(pin.get("manifest_table"), str)
-          and isinstance(pin.get("span_labels_table"), str)
+          and pin.get("manifest_table") == manifest_ref
+          and pin.get("span_labels_table") == span_labels_ref
       ):
         break
       expected = _span_labels_view_body(
-          span_labels_ref=pin["span_labels_table"],
-          manifest_ref=pin["manifest_table"],
+          span_labels_ref=span_labels_ref,
+          manifest_ref=manifest_ref,
           job_id=pin["job_id"],
           import_version=pin["import_version"],
           generation_id=pin["generation_id"],
       )
-      if view_query == expected:
+      if view_query != expected:
+        break
+      try:
+        pinned = _read_manifest(
+            client,
+            manifest_ref=manifest_ref,
+            job_id=pin["job_id"],
+            import_version=pin["import_version"],
+            location=location,
+            # A view-maintenance read, labeled like the sync's own
+            # latest-manifest read — not part of the import derive path.
+            feature=_VIEW_FEATURE,
+        )
+      except NotFound:
+        # No manifest table: nothing was ever published here, so the view
+        # cannot be one this sync wrote.
+        pinned = None
+      if pinned is None:
+        break
+      if pin["generation_id"] == pinned.get("generation_id") or pin[
+          "generation_id"
+      ] in _superseded_generations(pinned):
         return table
       break
   raise ValueError(
@@ -531,10 +569,22 @@ def _read_managed_span_view(client: Any, *, view_ref: str) -> Optional[Any]:
 
 
 def _check_span_view_binding(
-    client: Any, *, view_ref: str, job_id: str
+    client: Any,
+    *,
+    view_ref: str,
+    span_labels_ref: str,
+    manifest_ref: str,
+    job_id: str,
+    location: Optional[str],
 ) -> Optional[Any]:
   """Refuse a pinned span view owned by another job (fail-fast + authority)."""
-  existing = _read_managed_span_view(client, view_ref=view_ref)
+  existing = _read_managed_span_view(
+      client,
+      view_ref=view_ref,
+      span_labels_ref=span_labels_ref,
+      manifest_ref=manifest_ref,
+      location=location,
+  )
   if existing is not None:
     pin = json.loads(
         existing.view_query.splitlines()[0][len(_SPAN_VIEW_PIN_MARKER) :]
@@ -891,7 +941,10 @@ class NativeAgentEventsRun(EvalBenchRun):
       _check_span_view_binding(
           client,
           view_ref=f"{prefix}.{span_labels_view}",
+          span_labels_ref=f"{prefix}.{span_labels_table}",
+          manifest_ref=f"{prefix}.{MANIFEST_TABLE}",
           job_id=self.job_id,
+          location=self.location,
       )
     # The inherited publish re-validates these too; running them here
     # keeps the registry creation below strictly behind every fail-closed
@@ -1234,7 +1287,12 @@ class NativeAgentEventsRun(EvalBenchRun):
     """
     for _ in range(_VIEW_SYNC_ATTEMPTS):
       existing = _check_span_view_binding(
-          client, view_ref=span_view_ref, job_id=self.job_id
+          client,
+          view_ref=span_view_ref,
+          span_labels_ref=span_labels_ref,
+          manifest_ref=manifest_ref,
+          job_id=self.job_id,
+          location=self.location,
       )
       latest = _read_latest_manifest(
           client,
