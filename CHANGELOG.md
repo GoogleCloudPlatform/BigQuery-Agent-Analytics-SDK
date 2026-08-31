@@ -10,14 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Week 0 freeze e2e demo (#435)** — new recordable
-  `examples/evalbench_week0_freeze_e2e.sh --fixture` walks the REAL
-  partner (Google Cloud BQAA), fail-closed D4 memo, and G1 taxonomy
-  v0.1.0 freeze on the widget-stock failed session `7e352c34`, printing
-  frozen `taxonomy_categories` (`task/planning`, `finalization`,
-  `tool blockers`) and the never-answered + G1 punchline. Offline only
-  (no BigQuery). Distinct from the merged 455 MVP e2e and from the 460
-  EXAMPLE Acme pack, which stays illustrative. The six-week clock has
-  NOT started.
+  `examples/evalbench_week0_freeze_e2e.sh --fixture`, a presenter-facing
+  team demo on the widget-stock failed session `7e352c34`: the customer
+  asked and the agent went silent, `failed_sessions` finds the session
+  and the frozen G1 taxonomy names it (`task/planning`, `finalization`,
+  `tool blockers`), ending in a punchline with the next debugging
+  action. Offline only (no BigQuery). Distinct from the merged 455 MVP
+  e2e and from the 460 EXAMPLE Acme pack, which stays illustrative. The
+  six-week clock has NOT started.
 - **REAL Week 0 freeze: partner, D4 boundary, G1 taxonomy v0.1 (#435)** —
   the Week 0 gates are frozen for real, distinct from the EXAMPLE pack
   below (which stays illustrative). `docs/week0_partner.md` records the

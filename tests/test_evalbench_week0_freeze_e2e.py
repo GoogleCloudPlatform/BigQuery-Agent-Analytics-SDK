@@ -13,10 +13,12 @@
 # limitations under the License.
 """Tests for ``examples/evalbench_week0_freeze_e2e.sh`` (#435).
 
-The post-freeze Week 0 e2e is ``--fixture`` only: nothing here reaches
-BigQuery. It replays the REAL Week 0 freeze (partner + D4 + G1, landed by
-the Week 0 freeze PR) on the same widget-stock failed session as the
-merged MVP e2e demo. It is distinct from the EXAMPLE Acme pack
+The post-freeze Week 0 e2e is a presenter-facing team demo, ``--fixture``
+only: nothing here reaches BigQuery. It tells the widget-stock failed
+session as a six-act story -- the customer asked, the agent went silent,
+evalbench-import + failed_sessions find it, the frozen G1 taxonomy names
+it, and a punchline states the next debugging action. Same real session
+as the merged MVP e2e demo; distinct from the EXAMPLE Acme pack
 (``examples/evalbench_week0_full_idea.sh``), which stays illustrative.
 The six-week clock has NOT started.
 """
@@ -41,27 +43,26 @@ _FIXTURE_DIR = _REPO_ROOT / "examples" / "fixtures"
 _SESSION_ID = "7e352c34-4c1c-4395-acd5-fb3c8f215346"
 _EVAL_ID = "7e352c34"
 
-# The frozen record first (partner, D4, G1), then the widget-session
-# through-line from the merged MVP e2e demo, in order.
+# The six-act story a presenter reads aloud, in order: customer, trace,
+# import, failed_sessions, judge, punchline.
 _BANNERS = (
-    "=== Partner: Google Cloud BQAA (this SDK) ===",
-    "=== D4: fail-closed memo for this pilot ===",
-    "=== G1 freeze: taxonomy v0.1.0 ===",
-    "=== This agent was asked to check widget stock. Here is the session. ===",
-    "=== What happened ===",
-    "=== Import those traces into EvalBench so we can query this failure ===",
+    "=== The customer asked. The agent went silent. ===",
+    "=== What the trace shows ===",
+    "=== Import the real job so we can query that failure ===",
     "=== Step 1: evalbench-import ===",
-    "=== This session in failed_sessions with frozen G1 labels ===",
+    "=== failed_sessions finds the one that never answered ===",
     "=== Step 2: evalbench-failed-sessions ===",
-    "=== Score this session ===",
+    "=== A live judge would miss this ===",
     "=== Step 3: evalbench-score ===",
     "=== Punchline ===",
 )
 
 _PUNCHLINE = (
-    "This widget-stock session failed because the agent never answered;"
-    " goal_completion=0.0. G1 frozen labels are task/planning, finalization,"
-    " tool blockers."
+    "This widget-stock session failed because the agent never answered "
+    "(goal_completion=0.0). G1 names it task/planning, tool blockers, and "
+    "finalization — it never planned the lookup, never called "
+    "check_inventory, never finished. Next debugging action: inspect why "
+    "the trace died after AGENT_STARTING before the inventory tool."
 )
 
 _FROZEN_CATEGORIES_LINE = (
@@ -93,55 +94,38 @@ def _run(*args: str, env: dict[str, str] | None = None):
 def _assert_freeze_walkthrough(stdout: str) -> None:
   for banner in _BANNERS:
     assert banner in stdout
-  # The frozen record and the through-line appear in narrative order.
+  # The six acts appear in story order.
   positions = [stdout.index(b) for b in _BANNERS]
   assert positions == sorted(positions)
-  partner = stdout[positions[0] : positions[1]]
-  d4 = stdout[positions[1] : positions[2]]
-  g1 = stdout[positions[2] : positions[3]]
-  session = stdout[positions[3] : positions[4]]
-  happened = stdout[positions[4] : positions[5]]
-  imported = stdout[positions[5] : positions[7]]
-  failed = stdout[positions[7] : positions[9]]
-  scored = stdout[positions[9] : positions[11]]
-  punchline = stdout[positions[11] :]
-  # 1. Partner: the REAL frozen partner, not the Acme example.
-  assert "Google Cloud BigQuery Agent Analytics" in partner
-  assert "mvp-e2e-real-traces" in partner
-  assert "SANA-adjacent" in partner
-  assert "not a SANA fork" in partner
-  assert "not duplicating" in partner
-  assert "docs/week0_partner.md" in partner
-  assert "Acme" not in stdout
-  # 2. D4: fail-closed, one named real consumer, no example people.
-  assert "fail-closed" in d4
-  assert "Hai-Yuan Cao" in d4
-  assert "test-project-0728-467323" in d4
-  assert "Part II funding recommendation" in d4
-  assert "docs/week0_d4_memo.md" in d4
-  assert "Alex Rivera" not in stdout
-  assert "Jordan Lee" not in stdout
-  # 3. G1: the frozen version, the mechanical mapping, no clock start.
-  assert "taxonomy_version: 0.1.0" in g1
-  assert "g1_frozen: true" in g1
-  assert "clock_started: false" in g1
-  assert "missing_completion -> finalization" in g1
-  assert "process_failed     -> tool blockers" in g1
-  assert "score_failed       -> task/planning" in g1
-  assert "frozen order" in g1
-  assert "docs/week0_g1_taxonomy.md" in g1
-  # 4. The session: the same protagonist as the merged MVP e2e demo.
-  assert "support_agent" in session
-  assert "real-user-0" in session
-  assert _SESSION_ID in session
-  assert f"scenario_id:   {_EVAL_ID}" in session
-  # 5. What happened: the verbatim prompt and no answer.
-  assert "How many widgets are in stock?" in happened
-  assert "(no response)" in happened
-  assert "AGENT_STARTING" in happened
-  assert "no AGENT_COMPLETED" in happened
-  assert "ab7535a5" in happened
-  # 6. Import result, shaped like the 455 fixture.
+  customer = stdout[positions[0] : positions[1]]
+  trace = stdout[positions[1] : positions[2]]
+  imported = stdout[positions[2] : positions[4]]
+  failed = stdout[positions[4] : positions[6]]
+  judged = stdout[positions[6] : positions[8]]
+  punchline = stdout[positions[8] :]
+  # Act 1: the customer and the session, no jargon.
+  assert "support_agent" in customer
+  assert "terse support agent" in customer
+  assert "inventory or tickets" in customer
+  assert "real-user-0" in customer
+  assert "How many widgets are in stock?" in customer
+  assert _SESSION_ID in customer
+  assert f"eval_id:       {_EVAL_ID}" in customer
+  assert (
+      "test-project-0728-467323.bqaa_e2e_real.agent_events" in customer
+  )
+  # Act 2: the trace stops after AGENT_STARTING; the silence is obvious.
+  assert "USER_MESSAGE_RECEIVED" in trace
+  assert "INVOCATION_STARTING" in trace
+  assert "AGENT_STARTING" in trace
+  assert "silence" in trace
+  assert "no check_inventory" in trace
+  assert "no LLM_RESPONSE" in trace
+  assert "no AGENT_COMPLETED" in trace
+  assert "ab7535a5" in trace
+  assert "There are 0 widgets in stock." in trace
+  assert "no answer" in trace
+  # Act 3: import result, shaped like the 455 fixture.
   assert '"status": "imported"' in imported
   assert '"event_row_count": 27' in imported
   assert '"score_row_count": 7' in imported
@@ -149,8 +133,8 @@ def _assert_freeze_walkthrough(stdout: str) -> None:
       '"failed_sessions_view": "analytics-project.bqaa.evalbench_failed_sessions"'
       in imported
   )
-  # 7. failed_sessions as JSON: mechanical flags still true, plus the
-  # FROZEN taxonomy_categories in frozen order.
+  # Act 4: failed_sessions as JSON -- mechanical flags, the FROZEN
+  # taxonomy_categories line, plain-English glosses, one trust note.
   assert "--format json" in failed
   assert "evalbench-import:mvp-e2e-real-traces:v1:7e352c34" in failed
   assert '"process_failed": true' in failed
@@ -160,22 +144,37 @@ def _assert_freeze_walkthrough(stdout: str) -> None:
   assert _FROZEN_CATEGORIES_LINE in failed
   assert '"session_count": 7' in failed
   assert '"failed_count": 1' in failed
-  assert "1 of 7 sessions failed" in failed
-  assert "W0.4 denominator" in failed
-  # 8. Score: the judge is not the denominator.
-  assert '"pass_rate": 1.0' in scored
-  assert '"llm_feedback": null' in scored
-  assert '"pinned_sessions": 7' in scored
-  assert "goal_completion is 0.0" in scored
-  assert "W0.4 denominator" in scored
-  # 9. Punchline: exactly one sentence, then nothing else.
+  assert "1 of 7" in failed
+  assert "never decided to look up stock" in failed
+  assert "never called check_inventory" in failed
+  assert "never produced an answer" in failed
+  assert "not SANA/Strands" in failed
+  assert "Fail-closed D4" in failed
+  assert "Hai-Yuan Cao" in failed
+  assert "funding rec" in failed
+  assert "Clock not started" in failed
+  # The demo is a story, not a G1 mapping lecture: no arrow table.
+  assert "missing_completion ->" not in stdout
+  assert "process_failed     ->" not in stdout
+  assert "score_failed       ->" not in stdout
+  # Act 5: the judge misses it; failed_sessions is the denominator.
+  assert '"pass_rate": 1.0' in judged
+  assert '"llm_feedback": null' in judged
+  assert '"pinned_sessions": 7' in judged
+  assert "failed_sessions, not the judge," in judged
+  assert "denominator" in judged
+  # Act 6: punchline is exactly one paragraph, then nothing else.
   assert punchline.strip().splitlines()[1:] == [_PUNCHLINE]
-  # Nowhere does the demo start the clock.
+  # Nowhere does the demo invent people, the example partner, or a
+  # started clock.
+  assert "Acme" not in stdout
+  assert "Alex Rivera" not in stdout
+  assert "Jordan Lee" not in stdout
   assert "clock has started" not in stdout
-  assert "clock has not started" in stdout or "Clock has not started" in stdout
+  assert "clock has not started" in stdout or "Clock not started" in stdout
 
 
-def test_fixture_flag_replays_the_freeze_and_exits_zero() -> None:
+def test_fixture_flag_tells_the_story_and_exits_zero() -> None:
   result = _run("--fixture")
   assert result.returncode == 0, result.stderr
   assert result.stderr == ""
@@ -190,7 +189,7 @@ def test_fixture_env_var_alone_is_rejected() -> None:
   result = _run(env={"EVALBENCH_FIXTURE": "1"})
   assert result.returncode == 2
   assert "--fixture only" in result.stderr
-  assert "=== Partner" not in result.stdout
+  assert "=== The customer asked" not in result.stdout
   assert result.stdout == ""
 
 
@@ -198,7 +197,7 @@ def test_without_fixture_flag_exits_two_and_runs_nothing() -> None:
   result = _run()
   assert result.returncode == 2
   assert "--fixture only" in result.stderr
-  assert "=== Partner" not in result.stdout
+  assert "=== The customer asked" not in result.stdout
   assert result.stdout == ""
 
 
@@ -207,7 +206,7 @@ def test_synth_flag_is_rejected_without_running() -> None:
   result = _run("--synth")
   assert result.returncode == 2
   assert "--fixture only" in result.stderr
-  assert "=== Partner" not in result.stdout
+  assert "=== The customer asked" not in result.stdout
   assert result.stdout == ""
 
 
@@ -222,7 +221,7 @@ def test_help_prints_usage_without_running() -> None:
   result = _run("--help")
   assert result.returncode == 0
   assert "--fixture" in result.stdout
-  assert "=== Partner" not in result.stdout
+  assert "=== The customer asked" not in result.stdout
 
 
 def test_example_acme_pack_is_not_the_freeze() -> None:
@@ -252,7 +251,7 @@ def test_production_taxonomy_is_frozen_at_v010() -> None:
   config = failure_taxonomy.taxonomy_config()
   assert config["g1_frozen"] is True
   assert config["taxonomy_version"] == "0.1.0"
-  # The demo's mapping lines match the frozen FLAG_TO_CATEGORY.
+  # The frozen mechanical mapping the demo's labels come from.
   assert dict(failure_taxonomy.FLAG_TO_CATEGORY) == {
       "missing_completion": "finalization",
       "process_failed": "tool blockers",

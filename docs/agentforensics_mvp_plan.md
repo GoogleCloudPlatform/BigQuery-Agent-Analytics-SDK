@@ -57,11 +57,12 @@ partner is the fictional "Acme Retail Support". The pack **remains
 illustrative** now that the real freeze landed; the real artifacts are the
 `week0_*.md` docs and `week0_real_*.json` fixtures above.
 
-There is also a **post-freeze recordable e2e**
+There is also a **presenter-facing team demo**
 (`examples/evalbench_week0_freeze_e2e.md`, run with
-`bash examples/evalbench_week0_freeze_e2e.sh --fixture`) that walks the
-frozen partner + D4 + G1 record on the widget-stock failed session. The
-six-week clock has still not started.
+`bash examples/evalbench_week0_freeze_e2e.sh --fixture`): a live
+walkthrough of the widget-stock failed session — customer silence,
+`failed_sessions` plus the frozen G1 names, then a punchline with the
+next debugging action. The six-week clock has still not started.
 
 ---
 

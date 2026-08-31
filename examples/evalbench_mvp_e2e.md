@@ -187,7 +187,7 @@ the rows instead of writing.
 - [`examples/evalbench_score_gate.sh`](evalbench_score_gate.sh) — CI gate
   on step 3.
 - [`examples/evalbench_week0_freeze_e2e.md`](evalbench_week0_freeze_e2e.md)
-  — the post-freeze Week 0 e2e (partner + D4 + G1) on this same session.
+  — the presenter-facing team demo on this same session (post-freeze).
 - Issues
   [#435](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/435)
   (EvalBench import bridge) and
