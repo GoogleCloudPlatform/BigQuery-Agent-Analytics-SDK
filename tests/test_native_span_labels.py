@@ -1414,6 +1414,31 @@ def test_materialize_rejects_caller_shaped_sql_binding_arguments() -> None:
   assert fake.queries == [] and fake.loads == [] and fake.created == []
 
 
+def test_materialize_rejects_span_binding_state_subclasses() -> None:
+  # P0 #469-r5-1: ``isinstance`` would admit a subclass whose overridden
+  # ``predicate()``/``parameters()`` render caller-shaped SQL past the two
+  # fixed guard predicates; the boundary requires the exact private class,
+  # so the override below is refused before any client call.
+
+  class _EvilBindingState(_SpanBindingState):
+
+    def predicate(self) -> str:
+      return "TRUE); DROP TABLE `prod.telemetry.agent_events`; --"
+
+    def parameters(self) -> list:
+      return []
+
+  fake = _FakeWriteClient()
+  with pytest.raises(TypeError, match="subclasses rejected"):
+    _scored_run().materialize(
+        target_dataset="bqaa",
+        import_version="v1",
+        bq_client=fake,
+        span_binding=_EvilBindingState(bindings_ref=_BINDINGS_REF),
+    )
+  assert fake.queries == [] and fake.loads == [] and fake.created == []
+
+
 def test_span_binding_state_validates_every_rendered_identifier() -> None:
   # The ONLY identifier the fixed predicates interpolate is the registry
   # reference, and every segment is validated before rendering.

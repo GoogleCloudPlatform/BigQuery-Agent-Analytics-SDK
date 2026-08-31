@@ -1128,13 +1128,15 @@ class EvalBenchRun:
     Returns:
       An ``EvalBenchImportResult`` with the published version and manifest.
     """
-    if span_binding is not None and not isinstance(
-        span_binding, _SpanBindingState
-    ):
+    # Exact class, not isinstance: a subclass could override predicate()/
+    # parameters() and smuggle caller-shaped SQL past the two fixed
+    # predicates this boundary guarantees.
+    if span_binding is not None and type(span_binding) is not _SpanBindingState:
       raise TypeError(
-          "span_binding must be the structured _SpanBindingState the native"
-          f" writer builds, got {type(span_binding).__name__}: caller-shaped"
-          " SQL is never rendered into the publish boundary (#469)"
+          "span_binding must be exactly the structured _SpanBindingState the"
+          f" native writer builds (subclasses rejected), got"
+          f" {type(span_binding).__name__}: caller-shaped SQL is never"
+          " rendered into the publish boundary (#469)"
       )
     target_project = target_project or self.project_id
     _validate_source_segment("target_project", target_project)
