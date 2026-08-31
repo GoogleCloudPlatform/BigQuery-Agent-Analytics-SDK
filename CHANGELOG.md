@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Span-G1 e2e team demo (#466, parent #435)** — new
+  `examples/evalbench_span_g1_e2e.sh --fixture` (speaker notes
+  `examples/evalbench_span_g1_e2e.md`, offline tests
+  `tests/test_evalbench_span_g1_e2e.py`) narrates the `span_taxonomy`
+  library below on the widget-stock silence session `7e352c34` as a
+  six-act presenter story: session-level `failed_sessions` + G1 stays
+  the denominator, and span-level G1 localizes all three tripped frozen
+  categories onto the real native `AGENT_STARTING` span
+  `b7ad6b7169203331` (`target_kind="gap_after_span"`), shown as
+  `label_native_run` / `label_failed_session_spans` sample JSON — no new
+  CLI, no EvalBench source tables, no live BigQuery, `--fixture` argv
+  only (anything else exits 2), and **the six-week clock has still NOT
+  started**.
 - **Span-level G1 taxonomy on `span_id` (#466, parent #435)** — new
   `bigquery_agent_analytics.span_taxonomy` localizes the G1-frozen failure
   categories of a *failed* session onto the span where the failure is
