@@ -98,7 +98,7 @@ writes; the contract is that emitted span ids are always drawn **from**
 4. **Span-level G1 localizes it — which span died (PR #467).** The new
    act. `span_taxonomy` is a pure library, no CLI. Teach exactly the
    policy-bearing call — the default `EvalScorePolicy()` has no
-   `min_scores`, so the bare `label_native_run(run)` would leave
+   `min_scores`, so calling without `policy=` would leave
    `score_failed` false and drop the task/planning row:
 
    ```python

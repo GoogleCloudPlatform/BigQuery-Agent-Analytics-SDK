@@ -85,7 +85,7 @@ _RFC_TUPLE_LINE = "(trace_id, span_id, failure_category, evidence, confidence)"
 
 # The exact runnable call act 4 teaches. It must carry the frozen
 # goal_completion >= 1.0 score gate: the default EvalScorePolicy() has an
-# empty min_scores, so the bare label_native_run(run) would leave
+# empty min_scores, so a call without policy= would leave
 # score_failed false and emit only two of the three printed rows. The
 # fidelity test below re-runs this same policy-bearing invocation.
 _TAUGHT_POLICY_LINE = '>>> policy = EvalScorePolicy({"goal_completion": 1.0})'
@@ -161,12 +161,15 @@ def _assert_span_walkthrough(stdout: str) -> None:
   assert "span_taxonomy" in span_level
   assert "label_native_run" in span_level
   assert "label_failed_session_spans" in span_level
-  # The taught call carries the frozen score policy; the bare call (which
-  # could not produce the three printed rows) is never demonstrated.
+  # The taught call carries the frozen score policy; a no-policy call
+  # (which could not produce the three printed rows) is never
+  # demonstrated: every call site printed to stdout carries policy=.
   assert "EvalScorePolicy" in span_level
   assert _TAUGHT_POLICY_LINE in span_level
   assert _TAUGHT_CALL_LINE in span_level
-  assert "label_native_run(run)" not in stdout
+  for line in stdout.splitlines():
+    if "label_native_run(" in line:
+      assert "policy=" in line, line
   assert "SpanFailureLabel" in span_level
   assert '"failure_category": "task/planning"' in span_level
   assert '"failure_category": "finalization"' in span_level
