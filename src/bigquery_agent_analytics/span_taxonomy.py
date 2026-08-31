@@ -29,9 +29,13 @@ Contracts honored:
   that verdict already tripped. A session no flag tripped gets no span
   labels.
 * **Taxonomy.** Frozen names only (``failure_taxonomy.py``, taxonomy
-  v0.1.0, ``g1_frozen: True``). ``SpanFailureLabel`` rejects any category
-  outside ``FROZEN_CATEGORY_NAMES`` at construction — no fourth string
-  can be emitted here.
+  v0.1.0, ``g1_frozen: True``) — and of the eight frozen names, only the
+  three the mechanical three-flag mapper can emit
+  (``SPAN_CATEGORY_NAMES``: ``task/planning``, ``finalization``, ``tool
+  blockers``). ``SpanFailureLabel`` rejects everything else at
+  construction, including the other five *in-vocabulary* frozen names,
+  which are reserved for the labeler/judge study — no fourth string can
+  be emitted here.
 * **No synthetic span identifiers.** Every emitted ``span_id`` is the
   real native ``span_id`` of an input ``agent_events`` row. The silence
   case is a *gap marker anchored to a real span*: the label targets the
@@ -43,11 +47,14 @@ Contracts honored:
   scenario id (``native_events._native_scenario_ids``), so span labels
   join the same ``failed_sessions`` / G1 rows the session-level contract
   publishes.
-* **#429 reuse.** The turn coordinate is the #429 turn-tagging /
-  ``sub_trajectories`` one: turns are anchored at ``USER_MESSAGE_RECEIVED``
-  events, and ``turn_index`` addresses the same windows the
-  ``start_turn`` / ``end_turn`` fields of ``sub_trajectories`` address.
-  No parallel span model is introduced: the inputs are the same
+* **No forked #429 coordinate.** Span labels carry *no* turn index. The
+  #429 ``turn_index`` / ``sub_trajectories`` coordinate indexes the full
+  reconstructed conversation (user *and* agent messages) and lives in the
+  LLM-driven ``scripts/quality_report.py``, which exposes no importable
+  package mapping; publishing a mechanically derived user-message ordinal
+  under the same name would fork the coordinate. Until that mapping is a
+  library symbol, the coordinate is omitted rather than approximated. No
+  parallel span model is introduced either: the inputs are the same
   ``agent_events`` rows ``trace.Span.from_bigquery_row`` reads.
 * **Mechanical, offline.** Everything is pure and deterministic: no
   BigQuery, no LLM/judge, no network, and nothing starts the six-week
@@ -68,10 +75,11 @@ from .evalbench import _usable_text
 from .evalbench import classify_sessions
 from .evalbench import EvalScorePolicy
 from .failure_taxonomy import categorize_failed_session
+from .failure_taxonomy import FLAG_TO_CATEGORY
 from .failure_taxonomy import FROZEN_CATEGORY_NAMES
 from .native_events import _COMPLETION_EVENT
 from .native_events import _native_scenario_ids
-from .native_events import _PROMPT_EVENT
+from .native_events import _prompt_text
 from .native_events import _tool_names
 from .native_events import _TOOL_START_EVENT
 from .native_events import NativeAgentEventsRun
@@ -80,6 +88,17 @@ from .native_events import NativeAgentEventsRun
 # fact of the event stream (an ERROR status, an absent event), not a judged
 # probability. Sub-1.0 values are reserved for the labeler/judge study.
 MECHANICAL_CONFIDENCE = 1.0
+
+# The only frozen names this layer can attach to a span: the ones the
+# mechanical three-flag mapper emits (``FLAG_TO_CATEGORY`` values), in
+# frozen order. The other five frozen names are valid G1 vocabulary but
+# have no mechanical assignment rule, so a label carrying one here could
+# only be fabricated — ``SpanFailureLabel`` rejects them at construction.
+SPAN_CATEGORY_NAMES = tuple(
+    name
+    for name in FROZEN_CATEGORY_NAMES
+    if name in set(FLAG_TO_CATEGORY.values())
+)
 
 # The label targets the span itself (the row carries the failure marker,
 # e.g. status=ERROR) ...
@@ -97,8 +116,9 @@ class SpanFailureLabel:
   ``as_tuple()`` is the RFC #435 Phase 2 shape ``(trace_id, span_id,
   failure_category, evidence, confidence)``; the remaining fields keep the
   label joinable (``session_id`` / ``eval_id`` per the frozen first-8
-  identity rule) and inspectable (``target_kind``, the #429 turn
-  coordinate ``turn_index``).
+  identity rule) and inspectable (``target_kind``). There is deliberately
+  no ``turn_index``: the #429 conversation coordinate has no importable
+  package mapping yet, and a lookalike ordinal would fork it.
   """
 
   session_id: str
@@ -109,14 +129,15 @@ class SpanFailureLabel:
   evidence: str
   confidence: float
   target_kind: str
-  turn_index: int
 
   def __post_init__(self) -> None:
-    if self.failure_category not in FROZEN_CATEGORY_NAMES:
+    if self.failure_category not in SPAN_CATEGORY_NAMES:
       raise ValueError(
-          f"failure_category {self.failure_category!r} is not in the"
-          " G1-frozen taxonomy v0.1.0; the freeze is unconditional"
-          " (defer new names to a versioned taxonomy revision)"
+          f"failure_category {self.failure_category!r} is not one of the"
+          f" mechanically emittable names {SPAN_CATEGORY_NAMES!r} of the"
+          " G1-frozen taxonomy v0.1.0; the freeze is unconditional, and"
+          " the remaining frozen names are reserved for the labeler/judge"
+          " study (defer new names to a versioned taxonomy revision)"
       )
     if self.target_kind not in (TARGET_SPAN, TARGET_GAP_AFTER_SPAN):
       raise ValueError(
@@ -159,13 +180,20 @@ def label_failed_session_spans(
   ``missing_completion`` / ``score_failed``); its categories come from the
   unchanged ``failure_taxonomy.categorize_failed_session``, so the
   session-level denominator is read, never recomputed. ``gold_events``
-  optionally holds a completed sibling's rows for missing-tool evidence
-  (same role as ``native_events.native_next_action``).
+  optionally holds a completed *same-scenario* sibling's rows for
+  missing-tool evidence (same role as
+  ``native_events.native_next_action``; ``label_native_run`` scopes the
+  sibling by prompt).
 
-  Target selection is mechanical: the first raw ``status == "ERROR"`` row
-  when one exists (``target_kind="span"``), otherwise the last existing
-  span as the silence boundary (``target_kind="gap_after_span"``). Every
-  tripped category yields one label on that target, in frozen order.
+  Target selection is mechanical and per category, so every evidence
+  string stays a true statement about its own anchor span. ``tool
+  blockers`` targets the first raw ``status == "ERROR"`` row when one
+  exists (``target_kind="span"``) and the last existing span otherwise.
+  ``finalization`` and ``task/planning`` describe end-of-trace absences,
+  so they always anchor to the last existing span — the only span after
+  which "no subsequent row exists" is true — with
+  ``target_kind="gap_after_span"``. Every tripped category yields one
+  label, in frozen order.
 
   Raises:
     ValueError: rows span several sessions, the verdict tripped a category
@@ -200,42 +228,44 @@ def label_failed_session_spans(
       ),
       None,
   )
-  if error_index is not None:
-    target_index, target_kind = error_index, TARGET_SPAN
-  else:
-    target_index, target_kind = len(ordered) - 1, TARGET_GAP_AFTER_SPAN
-  target = ordered[target_index]
-  span_id = _usable_text(target.get("span_id"))
-  if span_id is None:
-    raise ValueError(
-        f"the target {target.get('event_type')!r} row of session"
-        f" {session_id!r} has no span_id; refusing to invent a synthetic"
-        " span identifier (#466)"
-    )
-  trace_id = _usable_text(target.get("trace_id"))
-  turn_index = _turn_index(ordered, target_index)
+  last_index = len(ordered) - 1
 
-  evidence_by_category = _evidence(
-      ordered,
-      target_index=target_index,
-      target_kind=target_kind,
-      gold_events=gold_events,
-      verdict=verdict,
-  )
-  return tuple(
-      SpanFailureLabel(
-          session_id=session_id,
-          eval_id=resolved_eval_id,
-          trace_id=trace_id,
-          span_id=span_id,
-          failure_category=category,
-          evidence=evidence_by_category[category],
-          confidence=MECHANICAL_CONFIDENCE,
-          target_kind=target_kind,
-          turn_index=turn_index,
+  labels = []
+  for category in categories:
+    if category == "tool blockers" and error_index is not None:
+      target_index, target_kind = error_index, TARGET_SPAN
+    else:
+      # End-of-trace absences (and silence-shaped tool blockers) anchor to
+      # the last existing span: the only span the silence claim is true of.
+      target_index, target_kind = last_index, TARGET_GAP_AFTER_SPAN
+    target = ordered[target_index]
+    span_id = _usable_text(target.get("span_id"))
+    if span_id is None:
+      raise ValueError(
+          f"the target {target.get('event_type')!r} row of session"
+          f" {session_id!r} has no span_id; refusing to invent a synthetic"
+          " span identifier (#466)"
       )
-      for category in categories
-  )
+    labels.append(
+        SpanFailureLabel(
+            session_id=session_id,
+            eval_id=resolved_eval_id,
+            trace_id=_usable_text(target.get("trace_id")),
+            span_id=span_id,
+            failure_category=category,
+            evidence=_category_evidence(
+                category,
+                ordered,
+                target_index=target_index,
+                target_kind=target_kind,
+                gold_events=gold_events,
+                verdict=verdict,
+            ),
+            confidence=MECHANICAL_CONFIDENCE,
+            target_kind=target_kind,
+        )
+    )
+  return tuple(labels)
 
 
 def label_native_run(
@@ -248,9 +278,16 @@ def label_native_run(
   The session-level denominator is computed exactly as the landed contract
   does — ``classify_sessions`` over the run's mapped event rows and its
   deterministic ``goal_completion`` score facts — and each failed verdict
-  is localized onto that session's *raw* source rows. Completed sibling
-  sessions of the same run supply the missing-tool evidence pool. Pure and
-  deterministic: no BigQuery client, no writes, and the clock stays off.
+  is localized onto that session's *raw* source rows.
+
+  Missing-tool evidence is scoped per scenario, never pooled across the
+  run: a failed session's ``gold_events`` are the rows of the *one*
+  completed sibling that asked the same prompt (the only same-scenario
+  key these rows carry). When no completed sibling matches — or more than
+  one does, making "the completed sibling" ambiguous — the missing-tool
+  claim is omitted rather than borrowed from an unrelated scenario. Pure
+  and deterministic: no BigQuery client, no writes, and the clock stays
+  off.
   """
   kept, _ = run._kept_and_skipped()  # pylint: disable=protected-access
   if not kept:
@@ -263,63 +300,86 @@ def label_native_run(
   verdicts = classify_sessions(
       run.to_agent_event_rows(), score_rows, policy or EvalScorePolicy()
   )
-  gold_pool: list[dict[str, Any]] = []
+  # prompt -> the unique completed sibling's rows; None marks an ambiguous
+  # prompt (several completed sessions asked it), which supplies no gold.
+  gold_by_prompt: dict[str, Optional[list[dict[str, Any]]]] = {}
   for session_id in sorted(kept):
     events = kept[session_id]
-    if any(e.get("event_type") == _COMPLETION_EVENT for e in events):
-      gold_pool.extend(events)
+    if not any(e.get("event_type") == _COMPLETION_EVENT for e in events):
+      continue
+    prompt = _prompt_text(events)
+    if prompt is None:
+      continue
+    gold_by_prompt[prompt] = None if prompt in gold_by_prompt else events
   labels: list[SpanFailureLabel] = []
   for verdict in verdicts:
     if not verdict.failed:
       continue
+    prompt = _prompt_text(kept[verdict.session_id])
+    sibling = gold_by_prompt.get(prompt) if prompt is not None else None
     labels.extend(
         label_failed_session_spans(
             kept[verdict.session_id],
             verdict,
             eval_id=scenario_ids[verdict.session_id],
-            gold_events=gold_pool,
+            gold_events=sibling or (),
         )
     )
   return tuple(labels)
 
 
-def _evidence(
+def _category_evidence(
+    category: str,
     ordered: list[Mapping[str, Any]],
     *,
     target_index: int,
     target_kind: str,
     gold_events: Sequence[Mapping[str, Any]],
     verdict: Any,
-) -> dict[str, str]:
-  """Per-category evidence: checkable facts of the event stream."""
+) -> str:
+  """One category's evidence: a checkable fact about its own anchor span."""
   target = ordered[target_index]
   descriptor = (
       f"{target.get('event_type')} span {_usable_text(target.get('span_id'))}"
       f" at {_timestamp_text(target)}"
   )
-  called = _tool_names(ordered)
-  missing_tools = sorted(_tool_names(gold_events) - called)
+  # Only ever said of the last existing span (the caller anchors every
+  # gap_after_span label there), where it is true by construction.
   silence = (
       f" the trace goes silent after {descriptor}: no subsequent"
       " agent_events row exists"
   )
 
-  if target_kind == TARGET_SPAN:
-    error_message = _usable_text(target.get("error_message"))
-    error_suffix = f": {error_message}" if error_message else ""
-    tool_blockers = (
-        f"process_failed: {descriptor} logged status ERROR{error_suffix}"
-    )
-  else:
-    never_called = (
-        f" and {', '.join(missing_tools)} was never called (the completed"
-        " sibling called it)"
-        if missing_tools
-        else " and no tool was ever started"
-    )
-    tool_blockers = (
+  if category == "tool blockers":
+    if target_kind == TARGET_SPAN:
+      error_message = _usable_text(target.get("error_message"))
+      error_suffix = f": {error_message}" if error_message else ""
+      return f"process_failed: {descriptor} logged status ERROR{error_suffix}"
+    called = _tool_names(ordered)
+    missing_tools = sorted(_tool_names(gold_events) - called)
+    if missing_tools:
+      gap = (
+          f" and {', '.join(missing_tools)} was never called (the completed"
+          " sibling called it)"
+      )
+    elif called:
+      # The session DID start tools before going silent; say which, rather
+      # than falsely claiming none was ever started.
+      gap = (
+          f" though {', '.join(sorted(called))} was started earlier in the"
+          " session"
+      )
+    else:
+      gap = " and no tool was ever started"
+    return (
         f"process_failed: no {_TOOL_START_EVENT} event follows"
-        f" {descriptor}{never_called};{silence}"
+        f" {descriptor}{gap};{silence}"
+    )
+
+  if category == "finalization":
+    return (
+        f"missing_completion: no {_COMPLETION_EVENT} event follows"
+        f" {descriptor};{silence}"
     )
 
   failing_scores = _verdict_field(verdict, "failing_scores")
@@ -331,17 +391,10 @@ def _evidence(
     gate_text = f" ({gate})"
   else:
     gate_text = ""
-  return {
-      "finalization": (
-          f"missing_completion: no {_COMPLETION_EVENT} event follows"
-          f" {descriptor};{silence}"
-      ),
-      "tool blockers": tool_blockers,
-      "task/planning": (
-          f"score_failed: the session's score gate failed{gate_text}; no"
-          f" further plan step follows {descriptor}"
-      ),
-  }
+  return (
+      f"score_failed: the session's score gate failed{gate_text}; no"
+      f" further plan step follows {descriptor}"
+  )
 
 
 def _ordered_single_session(
@@ -366,21 +419,6 @@ def _ordered_single_session(
       return rows  # Preserve caller order when timestamps are unusable.
     keyed.append((timestamp, index, row))
   return [row for _, _, row in sorted(keyed, key=lambda item: item[:2])]
-
-
-def _turn_index(ordered: list[Mapping[str, Any]], target_index: int) -> int:
-  """The #429 turn coordinate: USER_MESSAGE_RECEIVED-anchored turn number.
-
-  The turn containing the target span, counted the way ``start_turn`` /
-  ``end_turn`` of the #429 ``sub_trajectories`` count user turns. A span
-  before any user message belongs to turn 0.
-  """
-  prompts = sum(
-      1
-      for event in ordered[: target_index + 1]
-      if event.get("event_type") == _PROMPT_EVENT
-  )
-  return max(0, prompts - 1)
 
 
 def _timestamp_text(row: Mapping[str, Any]) -> str:
