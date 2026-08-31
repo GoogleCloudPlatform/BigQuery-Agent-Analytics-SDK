@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Span-level G1 taxonomy on `span_id` (#466, parent #435)** — new
+  `bigquery_agent_analytics.span_taxonomy` localizes the G1-frozen failure
+  categories of a *failed* session onto the span where the failure is
+  observable, as `(trace_id, span_id, failure_category, evidence,
+  confidence)` rows (`SpanFailureLabel.as_tuple()`).
+  `label_failed_session_spans` takes one session's native
+  `agent_events`-shaped rows plus the landed three-flag verdict;
+  `label_native_run` covers every failed session of a
+  `NativeAgentEventsRun` offline. Session-level `failed_sessions` + G1
+  stays the denominator (this layer never classifies, only localizes),
+  the taxonomy stays frozen at v0.1.0 — only the three mechanically
+  emittable frozen names (`task/planning`, `finalization`, `tool
+  blockers`) are accepted at construction; the other five frozen names
+  and any non-frozen string are rejected — and `eval_id` keeps the frozen
+  first-8-with-full-id-on-collision identity so span labels join the
+  session-level contract. No synthetic span identifiers: the silence case
+  targets the last existing span with `target_kind="gap_after_span"`
+  (the widget-stock session `7e352c34` localizes to its `AGENT_STARTING`
+  span with evidence that no `TOOL_STARTING` / `check_inventory` /
+  `AGENT_COMPLETED` followed), a raw `status=ERROR` row is targeted
+  directly by `tool blockers` (end-of-trace claims stay anchored to the
+  last real span, so mid-stream errors never yield false silence
+  evidence), and rows without a `span_id` fail closed. Missing-tool
+  evidence comes only from the completed sibling that asked the same
+  prompt, never from a run-wide pool, and labels carry no turn index (the
+  #429 conversation coordinate has no importable package mapping yet, and
+  a lookalike ordinal would fork it). Pure and deterministic — no
+  BigQuery, no LLM judge, offline fixture tests only, and **the six-week
+  clock has still NOT started**.
 - **Native `agent_events` snapshot writer — the EvalBench-adapter exit ramp
   (#463, parent #435)** — new
   `bigquery_agent_analytics.native_events.NativeAgentEventsRun` (and thin
