@@ -30,7 +30,10 @@ evalbench-native-import`): it produces the same pinned snapshot +
 `failed_sessions` view + G1 labels directly from production ADK
 `agent_events` rows, with no EvalBench source tables in the path. The
 `evalbench-import` adapter (#97) stays as an optional on-ramp, and the
-native writer does not start the clock either.
+native writer does not start the clock either. A fixture-only team demo
+of that native path exists (`examples/evalbench_native_e2e.md`, run with
+`bash examples/evalbench_native_e2e.sh --fixture`) and does not start
+the clock either.
 
 **G1 is frozen at v0.1.0 in `failure_taxonomy.py`**
 (`src/bigquery_agent_analytics/failure_taxonomy.py`, `g1_frozen: true`): the

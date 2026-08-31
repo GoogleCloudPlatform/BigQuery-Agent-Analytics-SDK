@@ -30,6 +30,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   production `agent_events` table is never written (reserved-name guard),
   and **the six-week clock has still NOT started**. Offline fixture tests
   only; no live BigQuery.
+- **Native freeze e2e team demo (#463, parent #435)** —
+  `examples/evalbench_native_e2e.md` + `bash
+  examples/evalbench_native_e2e.sh --fixture` retell the widget-stock
+  silent session `7e352c34` as the six-act presenter walkthrough on the
+  native path: `bq-agent-sdk evalbench-native-import` snapshots
+  production `agent_events` directly (no EvalBench
+  `configs`/`results`/`scores` tables anywhere in the path),
+  `failed_sessions` names the failure with the frozen G1 v0.1.0 labels,
+  and the live-judge trap is shown. `--fixture` is the only mode
+  (offline, exit 0; any other invocation exits 2); the adapter (#97)
+  stays as an optional on-ramp, and the six-week clock has still NOT
+  started.
 - **REAL Week 0 freeze: partner, D4 boundary, G1 taxonomy v0.1 (#435)** —
   the Week 0 gates are frozen for real, distinct from the EXAMPLE pack
   below (which stays illustrative). `docs/week0_partner.md` records the
