@@ -1,0 +1,18 @@
+{
+  "repo_root": ".",
+  "default_app_name": "my_agent_app",
+  "agents": {
+    "supervisor": {
+      "skill_dir": "agents/supervisor/skill",
+      "label": "Supervisor",
+      "order": 0
+    },
+    "policy_agent": {
+      "skill_dir": "agents/policy_agent/skill",
+      "label": "Policy Agent",
+      "order": 1,
+      "app_name": "policy_agent_app",
+      "skill_id": "policy-qa"
+    }
+  }
+}
