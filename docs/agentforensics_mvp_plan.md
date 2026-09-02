@@ -50,11 +50,12 @@ Analytics — this SDK — piloting the ADK `support_agent` traces via EvalBench
 job `mvp-e2e-real-traces`), `docs/week0_d4_memo.md` (fail-closed, named
 consumer Hai-Yuan Cao only), and `docs/week0_g1_taxonomy.md`, with
 machine-readable copies in `examples/fixtures/week0_real_*.json`
-(`example: false`). The remaining Week 0 item is **preregistration
-execution**; `docs/week0_preregistration.md` carries the v4 floors as the
-freeze-candidate. **The six-week clock has still not started**: it starts
-only when the first Week 1 snapshot job is kicked, not at merge of the
-freeze.
+(`example: false`). **Preregistration is sealed** (2026-09-02, `docs/week0_preregistration.md`
+and `examples/fixtures/week0_real_preregistration.json`: `sealed: true`,
+`clock_started: false`). **The six-week clock has still not started**: it
+starts only when the first Week 1 snapshot job is kicked, not at this seal.
+D4 still forbids new BigQuery jobs and new live judge calls, so the clock
+does not start in this commit.
 
 An **example scenario pack** also exists
 (`examples/evalbench_week0_full_idea.md`, run with
