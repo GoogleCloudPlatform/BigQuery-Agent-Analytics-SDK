@@ -3,7 +3,7 @@
 **Banner:** sealed 2026-09-02 2:05 PM PT by Hai-Yuan Cao (`caohy1988` /
 `haiyuan-eng-google`). These numbers are the plan of record (FINAL v4,
 `docs/agentforensics_mvp_plan.md`) plus the three Week-0 numbers the
-freeze-candidate still left as placeholders. **The six-week clock has **not** started** — this is not a clock start and not Week 1 execution; the clock
+freeze-candidate still left as placeholders. The six-week clock has **not** started — this is not a clock start and not Week 1 execution; the clock
 starts only when the first Week 1 snapshot job is kicked. Machine-readable
 copy: `examples/fixtures/week0_real_preregistration.json` (`example: false`,
 `sealed: true`, `clock_started: false`).

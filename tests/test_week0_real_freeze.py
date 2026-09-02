@@ -210,6 +210,11 @@ def test_real_preregistration_copies_the_v4_floors_without_a_clock() -> None:
   assert floors["localization_coverage_pct"] == 70
   assert floors["hit_at_1_ci_lower_gt_0"] is True
   assert floors["hit_at_1_point_uplift_pp"] == 10
+  assert floors["value_gate_pct"] == 50
+  # No separate absolute hit@1 floor was sealed: the hit@1 gates are the
+  # paired CI lower bound >0 and the +10pp point uplift.
+  assert "absolute_hit_at_1_floor" in floors
+  assert floors["absolute_hit_at_1_floor"] is None
   for rule in (
       "reserved_revision_week",
       "value_gate",
@@ -238,6 +243,22 @@ def test_example_pack_shell_and_md_are_still_present() -> None:
 
 
 # --- docs -----------------------------------------------------------------
+
+
+def test_plan_gates_agree_with_the_sealed_preregistration() -> None:
+  """The plan of record must state the sealed values, not placeholders."""
+  text = (_DOCS / "agentforensics_mvp_plan.md").read_text()
+  # Stale freeze-candidate wording (PR #473 review).
+  assert "preregistered fraction" not in text
+  assert "preregistered floor" not in text
+  assert "absolute hit@1 ≥" not in text
+  # Sealed values: 50% value gate on completed investigations, no separate
+  # absolute hit@1 floor, and the CI-spans-zero rule fails the gate.
+  assert "≥50%" in text
+  assert "completed" in text
+  assert "no separate absolute hit@1 floor" in text
+  assert "**fails**" in text
+  assert "docs/week0_preregistration.md" in text
 
 
 @pytest.mark.parametrize("name", _FREEZE_DOCS)
