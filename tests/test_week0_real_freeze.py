@@ -132,7 +132,10 @@ def test_preregistration_is_sealed_and_does_not_start_the_clock() -> None:
   assert data["floors"]["replicate_agreement_pct"] == 80
   assert data["floors"]["kappa_point"] == 0.6
   assert data["floors"]["kappa_ci_lower"] == 0.45
-  assert "FAILS" in data["decision_rules"]["noisy_small_n_localization"] or "fails" in data["decision_rules"]["noisy_small_n_localization"].lower()
+  assert (
+      "FAILS" in data["decision_rules"]["noisy_small_n_localization"]
+      or "fails" in data["decision_rules"]["noisy_small_n_localization"].lower()
+  )
   text = (_DOCS / "week0_preregistration.md").read_text()
   assert "sealed" in text.lower()
   assert ("not started" in text.lower()) or ("has **not** started" in text)
