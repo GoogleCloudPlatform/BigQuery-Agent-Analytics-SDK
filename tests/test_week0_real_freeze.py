@@ -15,7 +15,7 @@
 """Tests for the REAL Week 0 freeze artifacts (#435).
 
 The freeze PR lands the real partner record, the fail-closed D4 memo, the
-G1 taxonomy v0.1.0 freeze, and the preregistration freeze-candidate —
+G1 taxonomy v0.1.0 freeze, and the sealed preregistration —
 distinct from the slice-10 EXAMPLE pack, which stays illustrative
 (``example: true`` / ``g1_frozen: false``). Freezing is not a clock start:
 every real fixture says ``clock_started: false``.
@@ -123,6 +123,24 @@ def test_real_taxonomy_fixture_matches_the_production_freeze() -> None:
   )
 
 
+def test_preregistration_is_sealed_and_does_not_start_the_clock() -> None:
+  data = _real("week0_real_preregistration.json")
+  assert data["sealed"] is True
+  assert data["freeze_candidate"] is False
+  assert data["clock_started"] is False
+  assert data["floors"]["value_gate_pct"] == 50
+  assert data["floors"]["replicate_agreement_pct"] == 80
+  assert data["floors"]["kappa_point"] == 0.6
+  assert data["floors"]["kappa_ci_lower"] == 0.45
+  assert (
+      "FAILS" in data["decision_rules"]["noisy_small_n_localization"]
+      or "fails" in data["decision_rules"]["noisy_small_n_localization"].lower()
+  )
+  text = (_DOCS / "week0_preregistration.md").read_text()
+  assert "sealed" in text.lower()
+  assert ("not started" in text.lower()) or ("has **not** started" in text)
+
+
 def test_real_partner_is_bqaa_not_acme_and_not_a_sana_fork() -> None:
   data = _real("week0_real_partner.json")
   assert "Google Cloud BigQuery Agent Analytics" in data["partner_name"]
@@ -181,7 +199,8 @@ def test_real_d4_memo_is_fail_closed_with_one_named_consumer() -> None:
 
 def test_real_preregistration_copies_the_v4_floors_without_a_clock() -> None:
   data = _real("week0_real_preregistration.json")
-  assert data["freeze_candidate"] is True
+  assert data["freeze_candidate"] is False
+  assert data["sealed"] is True
   assert data["not_week_1_execution"] is True
   floors = data["floors"]
   assert floors["replicate_agreement_pct"] == 80
@@ -191,6 +210,11 @@ def test_real_preregistration_copies_the_v4_floors_without_a_clock() -> None:
   assert floors["localization_coverage_pct"] == 70
   assert floors["hit_at_1_ci_lower_gt_0"] is True
   assert floors["hit_at_1_point_uplift_pp"] == 10
+  assert floors["value_gate_pct"] == 50
+  # No separate absolute hit@1 floor was sealed: the hit@1 gates are the
+  # paired CI lower bound >0 and the +10pp point uplift.
+  assert "absolute_hit_at_1_floor" in floors
+  assert floors["absolute_hit_at_1_floor"] is None
   for rule in (
       "reserved_revision_week",
       "value_gate",
@@ -219,6 +243,22 @@ def test_example_pack_shell_and_md_are_still_present() -> None:
 
 
 # --- docs -----------------------------------------------------------------
+
+
+def test_plan_gates_agree_with_the_sealed_preregistration() -> None:
+  """The plan of record must state the sealed values, not placeholders."""
+  text = (_DOCS / "agentforensics_mvp_plan.md").read_text()
+  # Stale freeze-candidate wording (PR #473 review).
+  assert "preregistered fraction" not in text
+  assert "preregistered floor" not in text
+  assert "absolute hit@1 ≥" not in text
+  # Sealed values: 50% value gate on completed investigations, no separate
+  # absolute hit@1 floor, and the CI-spans-zero rule fails the gate.
+  assert "≥50%" in text
+  assert "completed" in text
+  assert "no separate absolute hit@1 floor" in text
+  assert "**fails**" in text
+  assert "docs/week0_preregistration.md" in text
 
 
 @pytest.mark.parametrize("name", _FREEZE_DOCS)
