@@ -1,0 +1,27 @@
+{
+  "canonicalization_manifest_version": "okf-context:canon:v1",
+  "text_normalization": {
+    "encoding": "UTF-8",
+    "unicode_form": "NFC",
+    "newline": "LF",
+    "strip_trailing_whitespace_per_line": true,
+    "final_newline": "exactly-one"
+  },
+  "structured_encoding": {
+    "format": "CBOR",
+    "profile": "RFC 8949 section 4.2.1 core deterministic encoding",
+    "allowed_types": ["text-string", "byte-string", "unsigned-integer", "array", "map", "false", "true", "null"],
+    "map_key_type": "text-string",
+    "lengths": "definite"
+  },
+  "hash": {
+    "algorithm": "SHA-256",
+    "rendering": "sha256:<lowercase-hex>",
+    "domain_separation": "ASCII domain string, then one 0x00 byte, then the canonical CBOR payload"
+  },
+  "path_rules": {
+    "separator": "/",
+    "relative_to": "bundle-root",
+    "unicode_form": "NFC"
+  }
+}
