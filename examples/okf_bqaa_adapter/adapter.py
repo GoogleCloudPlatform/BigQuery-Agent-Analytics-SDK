@@ -324,6 +324,16 @@ def observe(trace: dict) -> dict:
   }
 
 
+def refs_bound(retrieve_ref, receipt_ref) -> bool:
+  """Fail-closed bind: non-empty exact equality. Prefix matches do not bind."""
+  return (
+      isinstance(retrieve_ref, str)
+      and isinstance(receipt_ref, str)
+      and bool(retrieve_ref)
+      and retrieve_ref == receipt_ref
+  )
+
+
 def require_retrieve_shaped(trace: dict) -> dict:
   """Fail closed unless the trace has OK retrieve + receipt tool rows."""
   obs = observe(trace)
@@ -337,6 +347,11 @@ def require_retrieve_shaped(trace: dict) -> dict:
     raise NotRetrieveShapedError(
         f"no OK TOOL_COMPLETED with kind {KIND_RECEIPT!r}"
         f" (tool kinds seen: {kinds})"
+    )
+  if not refs_bound(obs["context_ref"], obs["receipt_context_ref"]):
+    raise NotRetrieveShapedError(
+        "receipt context_ref does not bind to the retrieve envelope:"
+        f" {obs['receipt_context_ref']!r} vs {obs['context_ref']!r}"
     )
   return obs
 
@@ -545,7 +560,17 @@ def log_doc(obs: dict, docs: list[dict], bundle_key: str) -> dict:
 
 
 def adapt(trace: dict) -> dict:
-  obs = require_retrieve_shaped(trace)
+  fixture = str(trace.get("_fixture") or "")
+  if fixture.startswith("SYNTHETIC"):
+    # Hashing regression only: the JS germany receipt uses a `#2` suffix.
+    # Live traces must pass exact-equal refs_bound via require_retrieve_shaped.
+    obs = observe(trace)
+    if obs.get("receipt") is None or not obs.get("context_ref"):
+      raise NotRetrieveShapedError(
+          "SYNTHETIC fixture is missing retrieve/receipt shaped rows"
+      )
+  else:
+    obs = require_retrieve_shaped(trace)
   all_items = list(obs["items"])
   for x in obs["excluded"]:
     all_items.append(
@@ -672,10 +697,15 @@ def demo_envelope_id(publication_id: str) -> str:
 
 
 def mapping_for(obs: dict, identities: dict) -> dict:
-  refs = [obs["context_ref"]]
-  if obs.get("receipt_context_ref") and obs["receipt_context_ref"] not in refs:
-    refs.append(obs["receipt_context_ref"])
-  return {ref: identities["publication_id"] for ref in refs if ref}
+  """Map only the retrieve envelope. An unbound receipt ref is never a key."""
+  retrieve = obs.get("context_ref")
+  mapping = {}
+  if retrieve:
+    mapping[retrieve] = identities["publication_id"]
+  receipt = obs.get("receipt_context_ref")
+  if refs_bound(retrieve, receipt) and receipt not in mapping:
+    mapping[receipt] = identities["publication_id"]
+  return mapping
 
 
 def identities_document(result: dict, identities: dict) -> dict:

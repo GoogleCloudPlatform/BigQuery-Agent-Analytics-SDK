@@ -222,7 +222,7 @@ def okf_run_attested_computation(context_ref: str) -> dict:
   Args:
     context_ref: the context_ref returned by okf_retrieve_context.
   """
-  bound = isinstance(context_ref, str) and context_ref.startswith(ENVELOPE_REF)
+  bound = adapter.refs_bound(ENVELOPE_REF, context_ref)
   receipt = {
       "kind": adapter.KIND_RECEIPT,
       "context_ref": context_ref,
@@ -468,7 +468,7 @@ def export_session(
   )
   obs = adapter.require_retrieve_shaped(trace)  # raises if not retrieve-shaped
   receipt = obs["receipt"]
-  if not str(obs["receipt_context_ref"]).startswith(obs["context_ref"]):
+  if not adapter.refs_bound(obs["context_ref"], obs["receipt_context_ref"]):
     raise SystemExit(
         "receipt context_ref does not bind to the retrieve envelope:"
         f" {obs['receipt_context_ref']!r} vs {obs['context_ref']!r}"

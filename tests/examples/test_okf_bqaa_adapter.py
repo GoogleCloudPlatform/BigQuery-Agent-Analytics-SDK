@@ -139,7 +139,8 @@ def test_live_export_tool_payloads_never_emit(live_trace):
 def test_observe_live(live_trace):
   obs = adapter.observe(live_trace)
   assert obs["context_ref"].startswith("okf:env-observe#")
-  assert obs["receipt_context_ref"].startswith(obs["context_ref"])
+  assert obs["receipt_context_ref"] == obs["context_ref"]
+  assert obs["context_ref"]
   assert obs["mode"] == "current"
   assert [i["rank"] for i in obs["items"]] == [1, 2, 3, 4, 5, 6]
   assert obs["items"][0]["title"] == "Active-customer revenue"
@@ -309,6 +310,56 @@ def test_require_retrieve_shaped_needs_receipt(live_trace):
       adapter.NotRetrieveShapedError, match="attested-computation"
   ):
     adapter.require_retrieve_shaped(trace)
+
+
+def _set_receipt_ref(live_trace: dict, ref) -> dict:
+  """Rewrite every receipt tool row's context_ref (live plugin shape)."""
+  trace = copy.deepcopy(live_trace)
+  for e in trace["events"]:
+    if adapter.tool_kind(e) != adapter.KIND_RECEIPT:
+      continue
+    result = (e.get("content") or {}).get("result")
+    if isinstance(result, dict):
+      result["context_ref"] = ref
+    attrs = e.get("attributes") or {}
+    if isinstance(attrs, dict) and "context_ref" in attrs:
+      attrs["context_ref"] = ref
+  return trace
+
+
+def test_refs_bound_is_exact_and_nonempty():
+  pin = "okf:env-observe#674153c572f6"
+  assert adapter.refs_bound(pin, pin)
+  assert not adapter.refs_bound(pin, pin + "/extra")
+  assert not adapter.refs_bound(pin, "okf:env-other#deadbeef")
+  assert not adapter.refs_bound("", "")
+  assert not adapter.refs_bound(None, None)
+  assert not adapter.refs_bound(pin, "")
+  assert not adapter.refs_bound(pin, None)
+
+
+def test_require_retrieve_shaped_rejects_unbound_receipt_ref(live_trace):
+  obs = adapter.observe(live_trace)
+  suffix = obs["context_ref"] + "/extra"
+  with pytest.raises(adapter.NotRetrieveShapedError, match="does not bind"):
+    adapter.require_retrieve_shaped(_set_receipt_ref(live_trace, suffix))
+  with pytest.raises(adapter.NotRetrieveShapedError, match="does not bind"):
+    adapter.require_retrieve_shaped(
+        _set_receipt_ref(live_trace, "okf:env-other#deadbeef")
+    )
+  with pytest.raises(adapter.NotRetrieveShapedError, match="does not bind"):
+    adapter.require_retrieve_shaped(_set_receipt_ref(live_trace, ""))
+
+
+def test_mapping_for_does_not_index_unbound_receipt(
+    live_trace, live_identities
+):
+  obs = dict(adapter.observe(live_trace))
+  unbound = obs["context_ref"] + "/extra"
+  obs["receipt_context_ref"] = unbound
+  mapping = adapter.mapping_for(obs, live_identities)
+  assert unbound not in mapping
+  assert obs["context_ref"] in mapping
 
 
 def test_run_cli_default_path(tmp_path, capsys):

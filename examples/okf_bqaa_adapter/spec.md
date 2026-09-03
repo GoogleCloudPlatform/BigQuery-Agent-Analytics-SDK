@@ -47,9 +47,9 @@ authored publication.
  DATE, quarter_end DATE], receipt_fields: [verdict, verdict_reason,
  receipt_id]}, label: "derived/demo, observer-only, not attested"}
 ```
-If `context_ref` does not bind to the envelope issued by the retrieve tool,
-the receipt is refused (`verdict: REFUSED`, no receipt_id) instead of
-fabricated.
+If `context_ref` is not a **non-empty exact equal** of the envelope issued
+by the retrieve tool (prefix / suffix matches do not bind), the receipt is
+refused (`verdict: REFUSED`, no receipt_id) instead of fabricated.
 
 Never on tool payloads: `concept_version_id`, `bundle_path`, `source_path`,
 `principal`, `user_id`, `query_text`, `sql`, `parameter_values`,
@@ -100,7 +100,8 @@ The run prints `PROJECT DATASET MODEL SESSION TRACE` at the end.
   `USER_MESSAGE_RECEIVED.content.text_summary`, or the first user entry of
   `LLM_REQUEST.content.prompt`.
 - `require_retrieve_shaped(trace)` — raises `NotRetrieveShapedError` unless
-  both kinds are present with status OK.
+  both kinds are present with status OK **and** retrieve/receipt
+  `context_ref`s are non-empty exact equals (`refs_bound`).
 - `adapt(trace) -> {observation, constants, files, docs, bundle_key}` — port
   of `stubDoc` / `logDoc`. Constants: `bundle_key=bqaa-derived-cymbal-demo`,
   `source_uri=bqaa://<table>?session_id=<sid>`,
@@ -158,7 +159,9 @@ No GCP, no `google.adk` / `google.cloud` imports on the default path.
 5. `never_emit_violations(lookup result) == []`.
 6. `require_retrieve_shaped` rejects a consume-shaped (stub echo) trace.
 7. Optional, labelled SYNTHETIC: germany fixture identities equal the pinned
-   JS triple.
+   JS triple. The JS germany receipt uses a `#2` suffix; that is hashing-only
+   and is NOT the live bind rule. Live traces require exact-equal
+   `context_ref`s (`refs_bound`).
 
 ## 7. Out of scope
 
