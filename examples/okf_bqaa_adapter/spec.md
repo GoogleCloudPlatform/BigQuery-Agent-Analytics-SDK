@@ -15,7 +15,7 @@ Adapter version: `okf-bqaa-adapter:v0` (port of the github.io `adapter.js`).
 | Project | `GOOGLE_CLOUD_PROJECT`, default `test-project-0728-467323` |
 | Dataset | `OKF_DEMO_DATASET`, default `okf_rfc_demo` (created if missing, location US) |
 | Runner | `InMemoryRunner`; `create_session` before `run_async`; `runner.close()` then plugin shutdown |
-| Prompt | "What was active-customer revenue in Germany last quarter — and can I trust the number?" |
+| Prompt | Multi-turn: 10–12 related questions (Germany / France / UK / prior quarter / trust / excluded metric / policy / backing tables / active-customer definition / region roll-up / what would make it attested / excluded items). First question stays the Germany line. Same `session_id` for every turn. Keep going until a BQ query for that session returns **>= 100** rows. |
 
 Fail closed before constructing the agent: if the model id contains `2.5`,
 `3.5`, or `flash-latest`, raise `SystemExit` with a clear message.
@@ -84,7 +84,9 @@ Export gate (nonzero exit, no files written on failure): parsed rows must
 contain an OK `TOOL_COMPLETED` with `content.result.kind ==
 "okf-context:retrieve"` and one with `"okf-context:attested-computation"`
 whose `context_ref` binds to the retrieve envelope, plus an `LLM_REQUEST`
-whose `attributes.model` is the run model.
+whose `attributes.model` is the run model, **and `len(events) >= 100`**.
+A 15-row smoke is rejected. Do not fake, duplicate, or pad events.
+germany JSON remains synthetic hashing-only.
 
 The run prints `PROJECT DATASET MODEL SESSION TRACE` at the end.
 
@@ -147,8 +149,8 @@ Google imports happen only on the `--live` / `--session` paths.
 ## 6. Tests (`tests/examples/test_okf_bqaa_adapter.py`, hermetic)
 
 No GCP, no `google.adk` / `google.cloud` imports on the default path.
-1. Committed live export has both kinds, model `gemini-3.8-flash`, a
-   session_id.
+1. Committed live export has **>= 100** events, both kinds, model
+   `gemini-3.8-flash`, a session_id.
 2. `adapt` + `compute_identities` on the live export yield `sha256:` ids and
    match `fixtures/live_identities.json`.
 3. `lookup(known ref)` from the live observation works.

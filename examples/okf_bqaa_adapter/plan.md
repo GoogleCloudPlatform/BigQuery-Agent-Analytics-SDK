@@ -12,19 +12,22 @@ Branch `feat/okf-bqaa-adapter` off `upstream/main @ 3a560f7`. PR head is the
 
 ## Step 2 — observe agent, live run, committed export
 
-- `observe_agent.py`: model fail-closed check, in-process observed catalog,
-  `okf_retrieve_context` / `okf_run_attested_computation` returning
-  OKF-enveloped dicts, `BigQueryAgentAnalyticsPlugin` wiring, dataset
-  ensure, `run_observe_agent()`, `fetch_session_rows()`, `export_session()`
-  with the export gate.
-- Run once with `GOOGLE_CLOUD_LOCATION=global`,
-  `DEMO_MODEL_ID=gemini-3.8-flash`, dataset `okf_rfc_demo`, using the
-  `.venv` python that has `google.adk`.
-- Verify the export contains `okf-context:retrieve`,
-  `okf-context:attested-computation`, `gemini-3.8-flash`, and a session_id.
-  If the run fails (auth, 404), retry with location `global`; do not fall
+c0806b5's 15-row single-question export is superseded and is not the demo.
+
+- `observe_agent.py`: multi-turn (10–12 related questions, more if needed)
+  under **one session_id**. Each turn calls retrieve then
+  attested-computation. `create_session` once before the first `run_async`.
+  `fetch_session_rows` waits for a **stable** row count (do not stop on the
+  first `INVOCATION_COMPLETED`). Export gate requires **>= 100** real rows,
+  both OKF kinds, and `gemini-3.8-flash`.
+- Run with `GOOGLE_CLOUD_LOCATION=global`, `DEMO_MODEL_ID=gemini-3.8-flash`,
+  dataset `okf_rfc_demo`, using the `.venv` python that has `google.adk`.
+- If count < 100: add turns in the same session, re-export; do not PR / do
+  not treat the 15-row smoke as done. Do not fake, duplicate, or pad.
+- If the run fails (auth, 404), retry with location `global`; do not fall
   back to germany.
-- Commit `fixtures/live_observe_agent_events.json`, `fixtures/live.json`.
+- Overwrite `fixtures/live_observe_agent_events.json`, `fixtures/live.json`,
+  `fixtures/live_identities.json`.
 
 ## Step 3 — adapter, hashing, lookup, CLI
 

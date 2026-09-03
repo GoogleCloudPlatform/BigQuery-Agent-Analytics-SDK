@@ -5,9 +5,12 @@
 ## Why this example exists
 
 A real ADK agent (`okf_rfc_observe_agent`, `gemini-3.8-flash`, Vertex
-location `global`) answers one finance question while the
+location `global`) runs a **multi-turn** finance session under **one
+session_id** (10–12 related questions; more if needed) while the
 `BigQueryAgentAnalyticsPlugin` streams its events into
-`test-project-0728-467323.okf_rfc_demo.agent_events`. The agent's tools
+`test-project-0728-467323.okf_rfc_demo.agent_events`. The committed live
+export MUST contain **>= 100** real `agent_events` rows from that session.
+A 15-row single-question smoke is not the demo. The agent's tools
 return retrieve-shaped and receipt-shaped payloads (`okf-context:retrieve`,
 `okf-context:attested-computation`). Those `agent_events` rows are the
 **only** input to the adapter in this directory, which projects them into a
@@ -28,7 +31,9 @@ sees the principal, query text, parameter values, bundle paths, or
   project, Vertex location, ran_at.
 
 These two files are the demo proof and the adapter's default input.
-Reviewers can re-query the session in BigQuery and compare.
+`live.json` records `event_count`; it must be **>= 100**. Reviewers can
+re-query the session in BigQuery and compare. Do not fake, duplicate, or
+pad events.
 
 `fixtures/synthetic/bqaa-germany.json` (if present) is a **SYNTHETIC**
 hashing regression against the pinned JS identities from the github.io
