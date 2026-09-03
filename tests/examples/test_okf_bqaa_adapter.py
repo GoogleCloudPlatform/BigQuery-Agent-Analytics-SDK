@@ -102,7 +102,12 @@ def test_live_export_is_live_shaped(live_trace):
   assert live_trace["_fixture"].startswith("LIVE BQAA export")
   events = live_trace["events"]
   assert len(events) == meta["event_count"]
+  assert len(events) >= 100
+  assert meta["event_count"] >= 100
   assert {e["session_id"] for e in events} == {meta["session_id"]}
+  assert (
+      sum(1 for e in events if e["event_type"] == "USER_MESSAGE_RECEIVED") >= 10
+  )
   kinds = {adapter.tool_kind(e) for e in events} - {None}
   assert kinds == {adapter.KIND_RETRIEVE, adapter.KIND_RECEIPT}
   # kind lives on the live plugin shape: content.result.kind (not attributes)
@@ -307,8 +312,11 @@ def test_require_retrieve_shaped_needs_receipt(live_trace):
 
 
 def test_run_cli_default_path(tmp_path, capsys):
+  """Default CLI path must not newly import google.adk (it may already
+  be in sys.modules from other tests in the full suite)."""
   import run
 
+  before = set(sys.modules)
   assert run.main(["--out", str(tmp_path / "out")]) == 0
   out = capsys.readouterr().out
   assert "PUBLICATION_ID sha256:" in out
@@ -317,7 +325,18 @@ def test_run_cli_default_path(tmp_path, capsys):
       run.main(["--out", str(tmp_path / "out"), "--lookup", "okf:env-nope#0"])
       == 2
   )
-  assert "google.adk" not in sys.modules
+  newly = set(sys.modules) - before
+  assert not any(
+      m == "google.adk" or m.startswith("google.adk.") for m in newly
+  ), sorted(newly)
+  assert not any(
+      m == "google.cloud" or m.startswith("google.cloud.") for m in newly
+  ), sorted(newly)
+  src = (EXAMPLE_DIR / "run.py").read_text("utf-8")
+  assert "def _load_observe_agent" in src
+  assert src.index("def _load_observe_agent") < src.index(
+      "import observe_agent"
+  )
 
 
 # ---- 6. SYNTHETIC germany hashing regression (labelled synthetic) -------------

@@ -15,8 +15,10 @@
 """Live ADK observe agent: the producer side of the OKF adapter demo.
 
 ``okf_rfc_observe_agent`` (``gemini-3.8-flash`` on Vertex, location
-``global``) answers one finance question with two observer-only tools whose
+``global``) runs a multi-turn finance session (10–12 related questions, more
+if needed) under one ``session_id`` with two observer-only tools whose
 return values carry the OKF envelope (``kind``, ``context_ref``, ``okf``).
+The committed export must contain >= 100 real ``agent_events`` rows.
 ``BigQueryAgentAnalyticsPlugin`` streams every event into
 ``<project>.<dataset>.agent_events``; after shutdown this module reads the
 session back and writes the committed fixtures that ``adapter.py`` consumes.
@@ -70,10 +72,32 @@ FORBIDDEN_MODEL_MARKERS = ("2.5", "3.5", "flash-latest")
 APP_NAME = "okf_rfc_demo"
 AGENT_NAME = "okf_rfc_observe_agent"
 USER_ID = "okf-observe-demo"  # demo pseudo-user, not a real principal
-QUESTION = (
-    "What was active-customer revenue in Germany last quarter — and can I"
-    " trust the number?"
-)
+MIN_EVENTS = 100
+QUESTIONS = [
+    (
+        "What was active-customer revenue in Germany last quarter — and can I"
+        " trust the number?"
+    ),
+    "Same question for France last quarter — what does the receipt say?",
+    "Same for the United Kingdom last quarter.",
+    "How did Germany compare to the prior quarter?",
+    "What does the trust / receipt verdict actually mean for this number?",
+    "Why is the legacy customer-revenue metric excluded from current reporting?",
+    "What policy governs active-customer revenue recognition?",
+    "Which BigQuery tables back this metric?",
+    "What is the observed definition of an active customer?",
+    ("Can I get a region roll-up for Germany, France, and the UK together?"),
+    "If the number is unproven, what would make the receipt attested?",
+    "Which excluded items must I not use for last-quarter reporting?",
+]
+EXTRA_QUESTIONS = [
+    "How does the governed_by link constrain last-quarter Germany revenue?",
+    "Walk the ranks of the observed catalog and say what each title is for.",
+    "Is customer revenue (legacy) ever acceptable for this quarter?",
+    "Restate the receipt runtime and parameter schema without inventing values.",
+    "Compare the France receipt to the Germany receipt — same context_ref?",
+    "What would a reviewer still not know after seeing this observer envelope?",
+]
 LABEL = "derived/demo, observer-only, nothing attested"
 WRITER = {
     "plugin": "google.adk.plugins.bigquery_agent_analytics_plugin",
@@ -272,6 +296,19 @@ def ensure_dataset(client: bigquery.Client) -> None:
   client.create_dataset(ds, exists_ok=True)
 
 
+async def _ask(runner, session_id: str, question: str) -> None:
+  content = types.Content(role="user", parts=[types.Part(text=question)])
+  async for event in runner.run_async(
+      user_id=USER_ID, session_id=session_id, new_message=content
+  ):
+    if getattr(event, "content", None) and event.content.parts:
+      for part in event.content.parts:
+        if getattr(part, "function_call", None):
+          print("TOOL_CALL", part.function_call.name)
+        elif getattr(part, "text", None):
+          print("EVENT_TEXT", part.text[:500])
+
+
 async def _run(model: str) -> str:
   plugin = build_plugin()
   runner = InMemoryRunner(
@@ -281,23 +318,36 @@ async def _run(model: str) -> str:
       app_name=runner.app_name, user_id=USER_ID
   )
   print("SESSION", session.id)
-  content = types.Content(role="user", parts=[types.Part(text=QUESTION)])
-  async for event in runner.run_async(
-      user_id=USER_ID, session_id=session.id, new_message=content
-  ):
-    if getattr(event, "content", None) and event.content.parts:
-      for part in event.content.parts:
-        if getattr(part, "function_call", None):
-          print("TOOL_CALL", part.function_call.name)
-        elif getattr(part, "text", None):
-          print("EVENT_TEXT", part.text[:500])
+  queue = list(QUESTIONS)
+  extra_i = 0
+  turn = 0
+  while queue:
+    question = queue.pop(0)
+    turn += 1
+    print("TURN", turn, question[:120])
+    await _ask(runner, session.id, question)
+    if queue:
+      continue
+    # Peek BQ; keep going in THIS session_id until >= MIN_EVENTS.
+    peek = fetch_session_rows(session.id, wait_s=25.0, require_stable=False)
+    print("EVENT_COUNT_SO_FAR", len(peek))
+    if len(peek) >= MIN_EVENTS:
+      break
+    if extra_i >= len(EXTRA_QUESTIONS):
+      print(
+          "WARNING still below MIN_EVENTS after extras;"
+          " will export-gate after shutdown"
+      )
+      break
+    queue.append(EXTRA_QUESTIONS[extra_i])
+    extra_i += 1
   await runner.close()
   await plugin.shutdown()  # idempotent; drains the write queue (<= 20s)
   return session.id
 
 
 def run_observe_agent(model: str = MODEL) -> str:
-  """Run the live observe agent once; return the BQAA session_id."""
+  """Run the live multi-turn observe agent; return the BQAA session_id."""
   check_model(model)
   print("PROJECT", PROJECT)
   print("DATASET", f"{PROJECT}.{DATASET}.{TABLE}")
@@ -350,9 +400,14 @@ def fetch_session_rows(
     project: str = PROJECT,
     dataset: str = DATASET,
     table: str = TABLE,
-    wait_s: float = 60.0,
+    wait_s: float = 180.0,
+    require_stable: bool = True,
 ) -> list[dict]:
-  """Read one session back from agent_events (polls until it settles)."""
+  """Read one session back from agent_events (polls until it settles).
+
+  Multi-turn sessions emit many INVOCATION_COMPLETED rows; do not treat the
+  first one as done. Wait until the row count is stable (or wait_s elapses).
+  """
   client = bigquery.Client(project=project, location=BQ_LOCATION)
   sql = (
       f"SELECT {', '.join(_COLUMNS)} FROM `{project}.{dataset}.{table}`"
@@ -365,11 +420,16 @@ def fetch_session_rows(
   )
   deadline = time.monotonic() + wait_s
   previous = -1
+  stable = 0
+  rows: list[dict] = []
   while True:
     rows = [_row_to_dict(r) for r in client.query(sql, job_config=cfg).result()]
-    done = any(r["event_type"] == "INVOCATION_COMPLETED" for r in rows)
-    if rows and (done or len(rows) == previous):
-      return rows
+    if rows and len(rows) == previous:
+      stable += 1
+      if (not require_stable) or stable >= 2:
+        return rows
+    else:
+      stable = 0
     previous = len(rows)
     if time.monotonic() >= deadline:
       return rows
@@ -385,9 +445,14 @@ def export_session(
     identities_path: Path = IDENTITIES_PATH,
 ) -> dict:
   """Export a session to the committed fixtures; fail closed on bad shape."""
-  rows = fetch_session_rows(session_id)
+  rows = fetch_session_rows(session_id, wait_s=180.0, require_stable=True)
   if not rows:
     raise SystemExit(f"no agent_events rows for session {session_id}")
+  if len(rows) < MIN_EVENTS:
+    raise SystemExit(
+        f"event_count {len(rows)} < {MIN_EVENTS} for session {session_id}."
+        " 15-row smokes are not the demo; add turns and re-export."
+    )
   table = f"{PROJECT}.{DATASET}.{TABLE}"
   trace = adapter.build_trace(
       rows,
@@ -463,6 +528,7 @@ def main() -> int:
   print("MODEL", MODEL)
   print("SESSION", session_id)
   print("TRACE", trace["trace_id"])
+  print("EVENT_COUNT", len(trace["events"]))
   return 0
 
 
