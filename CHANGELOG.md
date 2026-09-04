@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Span-level G1 labels persisted on the native snapshot (#469, parent
+  #435)** — the existing `bq-agent-sdk evalbench-native-import` command
+  gains a thin `--span-labels-table` flag (no new command family): when
+  set, the #466 localization layer's labels for every failed session are
+  published as BQAA-owned rows via
+  `NativeAgentEventsRun.to_span_label_rows` / `_publish_span_labels`,
+  reusing `label_native_run` under the frozen
+  `EvalScorePolicy({"goal_completion": 1.0})` gate — resolved as the ONE
+  effective policy the manifest `view_policy` and the failed-sessions
+  view also record, so the session denominator and the span rows can
+  never disagree. Opting in is durable: the dataset's
+  `evalbench_span_bindings` registry (fixed name, one row per job)
+  records the span table, the resolved policy, and the synchronized
+  manifest `generation_id`, and every later native publish of a bound
+  job re-resolves the same policy and re-synchronizes the span rows — or
+  fails closed before the denominator advances — so an ordinary call can
+  neither drop the committed gate nor leave stale span rows behind. Rows
+  are keyed by the `(job_id, import_version)` pin plus the exact
+  manifest `generation_id` they were synchronized under (checked, with
+  the canonical `view_policy`, inside the lock-serialized replace
+  transaction that also upserts the binding), and a companion
+  `<span-labels-table>_pinned` view is pinned to that exact generation
+  with a rendered latest-generation guard, so any base/span skew (for
+  example a span sync that fails after a changed-source `replace`
+  committed) yields an empty view instead of stale labels joined onto
+  the new session snapshot. The widget-stock anchor
+  holds: `eval_id` `7e352c34` / `span_id` `b7ad6b7169203331` /
+  `target_kind` `gap_after_span` with the three frozen G1 names
+  (`task/planning`, `finalization`, `tool blockers`); session-level
+  `failed_sessions` + G1 stays the denominator. Publication fails closed
+  without a real `span_id` (no synthetic span identifiers), identity
+  stays the frozen first-8 `eval_id` with the full session id on
+  collision, **the six-week clock has still NOT started**, tests are
+  offline fixture tests only, and the `evalbench-import` adapter (#97)
+  stays. The registry boundary is hardened end to end: the publish-side
+  re-validation is driven by private structured binding state rendered
+  into two fixed, parameterized predicates — `materialize` exposes no
+  SQL-string hook, and any non-structured argument is rejected before
+  anything runs — the unchanged-path policy recommit runs as its own
+  import-lock-claiming transaction so it serializes against the
+  span-binding transaction instead of racing it from a mutually stale
+  snapshot, and the span sync rejects, before any row or binding DML, a
+  span table already bound to another job, so a losing concurrent job
+  stays unbound and simply retries with its own table.
 - **Span-G1 e2e team demo (#466, parent #435)** — new
   `examples/evalbench_span_g1_e2e.sh --fixture` (speaker notes
   `examples/evalbench_span_g1_e2e.md`, offline tests

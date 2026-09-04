@@ -2507,6 +2507,29 @@ def evalbench_native_import(
         "--skip-failed-sessions-view",
         help="Do not create or update the failed-session view.",
     ),
+    span_labels_table: Optional[str] = typer.Option(
+        None,
+        "--span-labels-table",
+        help=(
+            "Optional span-labels table name in --target-dataset (e.g."
+            " evalbench_span_labels). When set, span-level G1 labels for"
+            " every failed session (frozen taxonomy v0.1.0, #466) are kept"
+            " as rows keyed by (job_id, import_version) plus the manifest"
+            " generation they were synchronized under, and a companion"
+            " view <name>_pinned is kept pinned to that exact generation"
+            " (it exposes rows only while that generation is the job's"
+            " latest publication, so a failed sync can never join stale"
+            " labels onto a newer snapshot). The opt-in is durable per"
+            " job: later native imports maintain the span snapshot even"
+            " without this flag, or fail closed. The table retains every"
+            " version's rows, so an eval_id-only join against it fans out"
+            " across retained versions: join the failed-session view to"
+            " the pinned view on eval_id, or to the table on job_id +"
+            " import_version + generation_id + eval_id. Rows without a"
+            " real span_id fail the publish closed; no synthetic span"
+            " identifiers."
+        ),
+    ),
     min_score: Optional[list[str]] = typer.Option(
         None,
         "--min-score",
@@ -2535,6 +2558,24 @@ def evalbench_native_import(
   ``agent_events`` table is never written. ``evalbench-import`` (#97)
   stays as the optional adapter on-ramp.
 
+  With ``--span-labels-table``, span-level G1 labels (#466/#469) for every
+  failed session are additionally kept as rows of that table, keyed by the
+  same ``(job_id, import_version)`` pin, derived under one effective score
+  policy shared with the failed-session view (the frozen
+  ``goal_completion=1.0`` gate is merged into ``--min-score``; a
+  conflicting ``goal_completion`` threshold is rejected). The opt-in is
+  durable: the dataset's ``evalbench_span_bindings`` registry records the
+  binding, and every later native import of a bound job maintains the
+  span snapshot under the same resolved policy — with or without this
+  flag — or fails closed before the failed-session view advances. The
+  table retains rows for every published version, so an ``eval_id``-only
+  join fans out across retained versions: join through the companion
+  ``<span-labels-table>_pinned`` view — pinned to the exact synchronized
+  generation and empty whenever that generation is no longer the job's
+  latest publication — or add ``job_id``, ``import_version``, and
+  ``generation_id`` to the join keys. Session-level ``failed_sessions``
+  + G1 remains the denominator; span rows only localize it.
+
   Exit codes:
       0 — imported, replaced, or unchanged (see ``status`` in the output).
       2 — invalid input (including the reserved ``agent_events``
@@ -2553,6 +2594,19 @@ def evalbench_native_import(
     _validate_destination_table("scores_table", scores_table)
     if not skip_failed_sessions_view:
       _validate_destination_table("failed_sessions_view", failed_sessions_view)
+    if span_labels_table is not None:
+      _validate_destination_table("span_labels_table", span_labels_table)
+      if skip_failed_sessions_view:
+        # Rejected before any BigQuery read: span rows localize the
+        # failed-sessions denominator, so skipping its view would let the
+        # pinned join boundaries diverge. materialize() enforces the same
+        # rule for jobs the span-binding registry keeps bound without the
+        # flag.
+        raise ValueError(
+            "--span-labels-table cannot be combined with"
+            " --skip-failed-sessions-view: span labels require the"
+            " failed-sessions view they localize"
+        )
     policy = _evalbench_score_policy(min_score, missing_score_passes)
 
     parsed_snapshot = None
@@ -2581,6 +2635,7 @@ def evalbench_native_import(
             None if skip_failed_sessions_view else failed_sessions_view
         ),
         policy=policy,
+        span_labels_table=span_labels_table,
     )
     typer.echo(format_output(result.to_dict(), fmt))
   except typer.Exit:
