@@ -1,0 +1,38 @@
+{
+  "example": true,
+  "illustrative": true,
+  "not_a_freeze": true,
+  "not_g1": true,
+  "g1_frozen": false,
+  "clock_started": false,
+  "taxonomy_version": "0.1.0-example",
+  "sana_categories": [
+    "task/planning",
+    "wrong source",
+    "execution/computation",
+    "incomplete evidence",
+    "turn-waste",
+    "finalization",
+    "tool blockers"
+  ],
+  "mechanical_flags": ["process_failed", "missing_completion", "score_failed"],
+  "widget_session": {
+    "session_id": "7e352c34-4c1c-4395-acd5-fb3c8f215346",
+    "eval_id": "7e352c34",
+    "taxonomy_categories": [
+      "process_failed",
+      "missing_completion",
+      "score_failed"
+    ]
+  },
+  "example_mapping": {
+    "missing_completion": "finalization",
+    "process_failed": "tool blockers",
+    "score_failed": "task/planning"
+  },
+  "example_mapping_notes": {
+    "missing_completion": "No AGENT_COMPLETED event and no final answer -> SANA's finalization seed.",
+    "process_failed": "The agent never called check_inventory before going silent -> SANA's tool blockers seed.",
+    "score_failed": "goal_completion 0.0 against threshold 1; the plan to answer never formed -> the overlapping task/planning seed."
+  }
+}

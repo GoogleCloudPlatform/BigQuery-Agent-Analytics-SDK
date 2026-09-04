@@ -1,0 +1,19 @@
+{
+  "example": false,
+  "frozen_by": "#435 Week 0 rubric freeze",
+  "clock_started": false,
+  "selected_benchmark": "widget-stock support",
+  "session_id": "7e352c34-4c1c-4395-acd5-fb3c8f215346",
+  "eval_id": "7e352c34",
+  "job_id": "mvp-e2e-real-traces",
+  "gold": {
+    "sibling_session": "ab7535a5",
+    "gold_answer": "There are 0 widgets in stock."
+  },
+  "score": {
+    "metric": "goal_completion",
+    "failed_session_score": 0,
+    "gold_session_score": 1,
+    "threshold": 1
+  }
+}
