@@ -16,6 +16,7 @@
 
 from datetime import datetime
 from datetime import timezone
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -329,6 +330,56 @@ class TestClientEvaluate:
 
     with pytest.raises(TypeError, match="Unsupported"):
       client.evaluate(evaluator="not_an_evaluator")
+
+  @patch("google.genai.Client")
+  def test_evaluate_legacy_llm_judge(self, mock_genai):
+    mock_bq = _mock_bq_client()
+
+    # Mock trace events query results
+    event_rows = [_make_mock_row(r) for r in _make_event_rows(3, "sess-1")]
+    mock_job = MagicMock()
+    mock_job.result.return_value = event_rows
+    mock_bq.query.return_value = mock_job
+    mock_bq.query.side_effect = [
+        RuntimeError("AI.GENERATE unavailable"),
+        RuntimeError("BQML unavailable"),
+        mock_job,
+    ]
+
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+
+    # Mock LLM response
+    mock_response = MagicMock()
+    mock_response.text = '{"correctness": 8, "justification": "Good"}'
+    mock_client_instance = MagicMock()
+    mock_client_instance.aio.models.generate_content = AsyncMock(
+        return_value=mock_response
+    )
+    mock_genai.return_value = mock_client_instance
+
+    from bigquery_agent_analytics.evaluators import LLMAsJudge
+
+    evaluator = LLMAsJudge.correctness(threshold=0.7)
+
+    report = client.evaluate(evaluator=evaluator)
+
+    assert isinstance(report, EvaluationReport)
+    assert report.total_sessions == 1
+    assert report.passed_sessions == 1
+    assert report.evaluator_name == "correctness_judge"
+
+    # The legacy route retains BQ tiers before fetching traces for the API.
+    assert mock_bq.query.call_count == 3
+    sql = mock_bq.query.call_args[0][0]
+    assert "FROM `proj.ds.agent_events`" in sql
+    assert report.details["execution_mode"] == "api_fallback"
+    assert "AI.GENERATE unavailable" in report.details["fallback_reason"]
+    assert "BQML unavailable" in report.details["fallback_reason"]
 
 
 class TestClientEndpointInit:
@@ -987,56 +1038,49 @@ class TestApiJudgeUsesTableParams:
 
 
 class TestStrictMode:
-  """Tests for strict evaluation mode (Feature #3)."""
+  """Strict mode is exercised through the public API evaluator dispatch."""
 
   def test_strict_mode_marks_empty_as_failed(self):
-    mock_bq = _mock_bq_client()
-    # One good score, one empty score
-    mock_rows = [
-        _make_mock_row(
-            {
-                "session_id": "s1",
-                "trace_text": "USER: hi",
-                "final_response": "hello",
-                "score": 8,
-                "justification": "Good",
-            }
-        ),
-        _make_mock_row(
-            {
-                "session_id": "s2",
-                "trace_text": "USER: bye",
-                "final_response": "goodbye",
-                "score": None,
-                "justification": "",
-            }
-        ),
-    ]
-    mock_job = MagicMock()
-    mock_job.result.return_value = mock_rows
-    mock_bq.query.return_value = mock_job
+    from bigquery_agent_analytics.evaluators import LLMAsJudge
+    from bigquery_agent_analytics.system_evaluator import SessionScore
 
+    mock_bq = _mock_bq_client()
+    mock_bq.query.return_value.result.return_value = [
+        _make_mock_row(row)
+        for sid in ("s1", "s2")
+        for row in _make_event_rows(session_id=sid)
+    ]
+    mock_bq.query.side_effect = [
+        RuntimeError("AI.GENERATE unavailable"),
+        RuntimeError("BQML unavailable"),
+        mock_bq.query.return_value,
+    ]
     client = Client(
         project_id="proj",
         dataset_id="ds",
         verify_schema=False,
         bq_client=mock_bq,
     )
-
-    from bigquery_agent_analytics.evaluators import LLMAsJudge
-
     evaluator = LLMAsJudge.correctness(threshold=0.5)
-    report = client.evaluate(
-        evaluator=evaluator,
-        strict=True,
-    )
-    # s1 should pass, s2 should fail (empty scores)
+    scores = [
+        SessionScore(session_id="s1", scores={"correctness": 0.8}, passed=True),
+        SessionScore(session_id="s2", scores={}, passed=True),
+    ]
+    with patch.object(
+        evaluator, "evaluate_session", new=AsyncMock(side_effect=scores)
+    ):
+      report = client.evaluate(evaluator=evaluator, strict=True)
+
     assert report.passed_sessions == 1
     assert report.failed_sessions == 1
-    # s2 should have parse_error detail
-    s2 = [s for s in report.session_scores if s.session_id == "s2"]
-    assert s2[0].passed is False
-    assert s2[0].details.get("parse_error") is True
+    failed = next(
+        score for score in report.session_scores if score.session_id == "s2"
+    )
+    assert failed.passed is False
+    assert failed.details["parse_error"] is True
+    assert report.details["parse_errors"] == 1
+    assert report.details["parse_error_rate"] == 0.5
+    assert report.aggregate_scores == {"correctness": 0.8}
 
 
 class TestAutoDetectTable:
@@ -2540,3 +2584,58 @@ class TestCreateCategoricalViews:
       call_kwargs = mock_cls.call_args[1]
       assert call_kwargs["results_table"] == "my_results"
       assert call_kwargs["view_prefix"] == "adk_"
+
+
+# ------------------------------------------------------------------ #
+# PerformanceEvaluator Integration                                     #
+# ------------------------------------------------------------------ #
+
+
+class TestPerformanceEvaluatorClient:
+  """Integration tests for Client evaluate with PerformanceEvaluator."""
+
+  @patch(
+      "bigquery_agent_analytics.performance_evaluator.PerformanceEvaluator.evaluate_session"
+  )
+  def test_evaluate_with_performance_evaluator(self, mock_eval):
+    from bigquery_agent_analytics.performance_evaluator import EvalStatus
+    from bigquery_agent_analytics.performance_evaluator import EvaluationResult
+    from bigquery_agent_analytics.performance_evaluator import PerformanceEvaluator
+
+    mock_bq = _mock_bq_client()
+    # Evaluation receives the scoped event population, not bare session IDs.
+    mock_rows = [
+        _make_mock_row(row)
+        for sid in ("sess-1", "sess-2")
+        for row in _make_event_rows(session_id=sid)
+    ]
+    mock_job = MagicMock()
+    mock_job.result.return_value = mock_rows
+    mock_bq.query.return_value = mock_job
+
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+
+    mock_eval.return_value = EvaluationResult(
+        session_id="sess-1",
+        eval_status=EvalStatus.PASSED,
+        scores={"trajectory_exact_match": 1.0},
+        llm_judge_feedback="Perfect",
+    )
+
+    evaluator = PerformanceEvaluator(project_id="proj", dataset_id="ds")
+    report = client.evaluate(evaluator=evaluator)
+
+    assert report.total_sessions == 2
+    assert report.passed_sessions == 2
+    assert report.details["execution_mode"] == "performance_evaluator"
+    assert report.aggregate_scores == {"trajectory_exact_match": 1.0}
+    assert mock_eval.await_count == 2
+    assert all(
+        isinstance(call.kwargs["trace"], Trace)
+        for call in mock_eval.await_args_list
+    )

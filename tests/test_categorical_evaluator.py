@@ -442,63 +442,63 @@ class TestStripMarkdownFences:
   """Tests for the shared strip_markdown_fences helper."""
 
   def test_json_fence(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences('```json\n{"a": 1}\n```') == '{"a": 1}'
 
   def test_plain_fence(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences("```\n[1, 2]\n```") == "[1, 2]"
 
   def test_no_fence(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences('{"a": 1}') == '{"a": 1}'
 
   def test_empty(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences("") == ""
 
   def test_none(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences(None) is None
 
   def test_no_newline_after_fence(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences('```json{"a": 1}```') == '{"a": 1}'
 
   def test_whitespace_around(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     result = strip_markdown_fences('  ```json\n  {"a": 1}  \n```  ')
     assert '"a": 1' in result
 
   def test_sql_fence(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences("```sql\nSELECT 1\n```") == "SELECT 1"
 
   def test_uppercase_language_tag(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences('```JSON\n{"a": 1}\n```') == '{"a": 1}'
 
   def test_unknown_language_tag(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences("```python\nprint('hi')\n```") == "print('hi')"
 
   def test_truncated_fence_no_closing(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences('```json\n{"a": 1}') == '{"a": 1}'
 
   def test_trailing_content_after_fence(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     result = strip_markdown_fences(
         '```json\n{"score": 1}\n```\nHere\'s my analysis...'
@@ -506,7 +506,7 @@ class TestStripMarkdownFences:
     assert result == '{"score": 1}'
 
   def test_language_tag_with_digits(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences("```json5\n{}\n```") == "{}"
 

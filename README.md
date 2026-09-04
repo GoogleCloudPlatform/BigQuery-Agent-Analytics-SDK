@@ -25,10 +25,9 @@ regressions — all through BigQuery SQL or Python.
 - Observability dashboards (Looker Studio, SQL, and BigFrames)
 
 **Evaluation**
-- Code-based metrics (latency, turn count, error rate, token efficiency, cost)
-- LLM-as-Judge scoring (correctness, hallucination, sentiment)
-- Trajectory matching (exact, in-order, any-order)
-- Multi-trial evaluation with pass@k / pass^k
+- System metrics (latency, turn count, tool call error rate, token efficiency, time to first token, cost)
+- Performance Metrics (correctness, hallucination, sentiment, efficiency, etc)
+- Multi-trial system and performance metrics
 - Grader composition (weighted, binary, majority strategies)
 - Eval suite lifecycle management with graduation and saturation detection
 - Static quality validation (ambiguous tasks, class imbalance, suspicious thresholds)
@@ -276,10 +275,10 @@ src/bigquery_agent_analytics/
 │   └── formatter.py               # Output formatting (json/text/table)
 │
 ├── Evaluation
-│   ├── evaluators.py              # SystemEvaluator + LLMAsJudge
-│   ├── trace_evaluator.py         # Trajectory matching & replay
-│   ├── multi_trial.py             # Multi-trial runner + pass@k
-│   ├── grader_pipeline.py         # Grader composition pipeline
+│   ├── system_evaluator.py        # SystemEvaluator
+│   ├── performance_evaluator.py   # PerformanceEvaluator
+│   ├── multi_trial_performance_evaluator.py # MultiTrialPerformanceEvaluator
+│   └── aggregate_grader.py        # AggregateGrader
 │   ├── eval_suite.py              # Eval suite lifecycle management
 │   └── eval_validator.py          # Static validation checks
 │

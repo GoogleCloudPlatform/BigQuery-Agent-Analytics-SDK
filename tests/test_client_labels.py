@@ -170,6 +170,30 @@ class TestQuerySiteLabels:
     labels = _captured_labels_for(mock_bq)
     assert labels.get("sdk_feature") == "trace-read"
 
+  def test_performance_evaluator_labels(self):
+    from bigquery_agent_analytics.evaluators import PerformanceEvaluator
+
+    mock_bq = MagicMock()
+    mock_job = MagicMock()
+    # Empty result is fine — we only care that the query ran with the
+    # expected labels.
+    mock_job.result.return_value = iter([])
+    mock_bq.query.return_value = mock_job
+
+    client = _make_client(bq_client=mock_bq, connection_id="proj.us.conn")
+    evaluator = PerformanceEvaluator(project_id="proj", dataset_id="ds")
+    client.evaluate(evaluator=evaluator)
+
+    # The selected trace reads carry the performance evaluation label.
+    judge_calls = [
+        c
+        for c in mock_bq.query.call_args_list
+        if c.kwargs.get("job_config")
+        and dict(c.kwargs["job_config"].labels or {}).get("sdk_feature")
+        == "eval-performance"
+    ]
+    assert judge_calls, "no query labeled with sdk_feature=eval-performance"
+
   def test_ai_generate_judge_labels_with_ai_generate(self):
     from bigquery_agent_analytics.evaluators import LLMAsJudge
 

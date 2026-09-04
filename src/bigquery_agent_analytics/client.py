@@ -82,17 +82,13 @@ from .categorical_evaluator import DEFAULT_RESULTS_TABLE
 from .categorical_evaluator import flatten_results_to_rows
 from .categorical_evaluator import parse_categorical_row
 from .categorical_evaluator import parse_classify_row
+from .evaluators import _AI_GENERATE_JUDGE_BATCH_QUERY_TEMPLATE as AI_GENERATE_JUDGE_BATCH_QUERY
+from .evaluators import _LEGACY_LLM_JUDGE_BATCH_QUERY as LLM_JUDGE_BATCH_QUERY
 from .evaluators import _parse_json_from_text
-from .evaluators import AI_GENERATE_JUDGE_BATCH_QUERY
+from .evaluators import _render_ai_generate_judge_query as render_ai_generate_judge_query
+from .evaluators import _split_judge_prompt_template as split_judge_prompt_template
 from .evaluators import DEFAULT_ENDPOINT
-from .evaluators import EvaluationReport
-from .evaluators import LLM_JUDGE_BATCH_QUERY
 from .evaluators import LLMAsJudge
-from .evaluators import render_ai_generate_judge_query
-from .evaluators import SESSION_SUMMARY_QUERY
-from .evaluators import SessionScore
-from .evaluators import split_judge_prompt_template
-from .evaluators import SystemEvaluator
 from .feedback import AnalysisConfig
 from .feedback import compute_drift
 from .feedback import compute_question_distribution
@@ -115,6 +111,12 @@ from .insights import parse_facet_response
 from .insights import run_analysis_prompt
 from .insights import SessionFacet
 from .insights import SessionMetadata
+from .performance_evaluator import EvalStatus
+from .performance_evaluator import PerformanceEvaluator
+from .system_evaluator import EvaluationReport
+from .system_evaluator import SESSION_SUMMARY_QUERY
+from .system_evaluator import SessionScore
+from .system_evaluator import SystemEvaluator
 from .trace import _is_unaddressable_label_key
 from .trace import _jsonpath_member_segment
 from .trace import AmbiguousSessionError
@@ -2076,20 +2078,22 @@ class Client:
 
   def evaluate(
       self,
-      evaluator: SystemEvaluator | LLMAsJudge,
+      evaluator: SystemEvaluator | PerformanceEvaluator | LLMAsJudge,
       filters: Optional[TraceFilter] = None,
       dataset: Optional[str] = None,
       strict: bool = False,
+      max_concurrency: int = 5,
   ) -> EvaluationReport:
     """Runs batch evaluation over traces.
 
     Uses BigQuery native execution for scalable assessment.
-    ``SystemEvaluator`` metrics are computed from session
-    aggregates. ``LLMAsJudge`` metrics use BQML's
-    ``ML.GENERATE_TEXT`` for zero-ETL evaluation.
+    ``SystemEvaluator`` metrics are computed from session aggregates.
+    ``LLMAsJudge`` retains BigQuery AI.GENERATE, then ML.GENERATE_TEXT,
+    then Gemini API fallback. ``PerformanceEvaluator`` uses the Gemini
+    API on the selected, identity-bound trace population.
 
     Args:
-        evaluator: A SystemEvaluator or LLMAsJudge instance.
+        evaluator: A SystemEvaluator, PerformanceEvaluator, or LLMAsJudge.
         filters: Optional trace filters.
         dataset: Optional table name override.
         strict: When ``True``, sessions with unparseable or
@@ -2099,6 +2103,9 @@ class Client:
             and report-level ``details`` includes
             ``parse_errors`` (int) and ``parse_error_rate``
             (float) — separate from ``aggregate_scores``.
+        max_concurrency: Maximum simultaneous API evaluations (default 5).
+            A failed session is retained as a failed score while other
+            sessions continue.
 
     Returns:
         EvaluationReport with per-session and aggregate scores. When
@@ -2109,6 +2116,12 @@ class Client:
         and strict mode preserves them while adding
         ``parse_error=True``.
     """
+    if (
+        isinstance(max_concurrency, bool)
+        or not isinstance(max_concurrency, int)
+        or max_concurrency < 1
+    ):
+      raise ValueError("max_concurrency must be a positive integer")
     table = dataset or self.table_id
     # One detached snapshot for the whole evaluation: candidate
     # predicates, the fallback row predicate, and the limit all come
@@ -2123,6 +2136,15 @@ class Client:
           where,
           params,
       )
+    elif isinstance(evaluator, PerformanceEvaluator):
+      report = self._evaluate_performance(
+          evaluator,
+          table,
+          where,
+          params,
+          filt,
+          max_concurrency=max_concurrency,
+      )
     elif isinstance(evaluator, LLMAsJudge):
       report = self._evaluate_llm_judge(
           evaluator,
@@ -2130,12 +2152,61 @@ class Client:
           where,
           params,
           filt,
+          max_concurrency=max_concurrency,
       )
-      if strict:
-        report = _apply_strict_mode(report)
-      return report
     else:
       raise TypeError(f"Unsupported evaluator type: {type(evaluator)}")
+    if strict:
+      report = _apply_strict_mode(report)
+    return report
+
+  def _evaluate_performance(
+      self,
+      evaluator: PerformanceEvaluator,
+      table: str,
+      where: str,
+      params: list,
+      trace_filter: TraceFilter,
+      *,
+      max_concurrency: int = 5,
+  ) -> EvaluationReport:
+    """Evaluate exactly the scoped traces fetched through this client."""
+    traces = self._fetch_filtered_traces(
+        table=table,
+        where=where,
+        row_where=trace_filter.row_scope_where(),
+        params=params,
+        limit=trace_filter.limit,
+        scope_predicate=_filter_scope_predicate(trace_filter),
+        feature="eval-performance",
+    )
+
+    async def evaluate_trace(trace):
+      result = await evaluator.evaluate_session(
+          session_id=trace.session_id,
+          trace=trace,
+          use_llm_judge=True,
+      )
+      return SessionScore(
+          session_id=trace.session_id,
+          scores=result.scores,
+          passed=result.eval_status == EvalStatus.PASSED,
+          details=result.details,
+          llm_feedback=result.llm_judge_feedback,
+      )
+
+    scores = _run_sync(
+        self._run_trace_evaluations(
+            traces, evaluate_trace, max_concurrency=max_concurrency
+        )
+    )
+    report = _build_report(
+        evaluator_name=evaluator.name,
+        dataset=f"{self.project_id}.{self.dataset_id}.{table} WHERE {where}",
+        session_scores=scores,
+    )
+    report.details["execution_mode"] = "performance_evaluator"
+    return report
 
   def _evaluate_code(
       self,
@@ -2186,6 +2257,8 @@ class Client:
       where: str,
       params: list,
       trace_filter: Optional[TraceFilter] = None,
+      *,
+      max_concurrency: int = 5,
   ) -> EvaluationReport:
     """Runs LLM-as-judge evaluation over ALL criteria.
 
@@ -2203,11 +2276,14 @@ class Client:
     categorical evaluator's ``execution_mode`` value space for
     consistency.)
     """
+    report_dataset = (
+        f"{self.project_id}.{self.dataset_id}.{table} WHERE {where}"
+    )
     criteria = evaluator._criteria
     if not criteria:
       report = _build_report(
           evaluator_name=evaluator.name,
-          dataset=f"{self._table_ref} WHERE {where}",
+          dataset=report_dataset,
           session_scores=[],
       )
       report.details["execution_mode"] = "no_op"
@@ -2239,7 +2315,7 @@ class Client:
           criterion_reports.append((criterion, report))
         merged = _merge_criterion_reports(
             evaluator.name,
-            f"{self._table_ref} WHERE {where}",
+            report_dataset,
             criteria,
             criterion_reports,
         )
@@ -2273,7 +2349,7 @@ class Client:
         criterion_reports.append((criterion, report))
       merged = _merge_criterion_reports(
           evaluator.name,
-          f"{self._table_ref} WHERE {where}",
+          report_dataset,
           criteria,
           criterion_reports,
       )
@@ -2297,6 +2373,7 @@ class Client:
         row_where=row_where,
         limit=trace_filter.limit if trace_filter is not None else None,
         trace_filter=trace_filter,
+        max_concurrency=max_concurrency,
     )
     api_report.details["execution_mode"] = "api_fallback"
     if fallback_reasons:
@@ -2452,6 +2529,7 @@ class Client:
       row_where: str = "TRUE",
       limit: Optional[int] = None,
       trace_filter: Optional[TraceFilter] = None,
+      max_concurrency: int = 5,
   ) -> EvaluationReport:
     """Evaluates using the Gemini API (fallback).
 
@@ -2482,11 +2560,13 @@ class Client:
         feature="eval-llm-judge",
     )
 
-    session_scores = _run_sync(self._run_api_judge(evaluator, traces))
+    session_scores = _run_sync(
+        self._run_api_judge(evaluator, traces, max_concurrency=max_concurrency)
+    )
 
     return _build_report(
         evaluator_name=evaluator.name,
-        dataset=f"{self._table_ref} WHERE {where}",
+        dataset=f"{self.project_id}.{self.dataset_id}.{table} WHERE {where}",
         session_scores=session_scores,
     )
 
@@ -2494,20 +2574,52 @@ class Client:
       self,
       evaluator: LLMAsJudge,
       traces: list[Trace],
+      max_concurrency: int = 5,
   ) -> list[SessionScore]:
-    """Runs LLM judge via API for each trace."""
-    scores = []
-    for trace in traces:
+    """Runs LLM judge via API for each trace with bounded concurrency."""
+
+    async def evaluate_trace(trace):
       trace_lines = []
       for span in trace.spans:
         trace_lines.append(f"{span.event_type}: {span.summary}")
       trace_text = "\n".join(trace_lines)
       final = trace.final_response or ""
 
-      score = await evaluator.evaluate_session(
+      return await evaluator.evaluate_session(
           trace_text,
           final,
       )
+
+    return await self._run_trace_evaluations(
+        traces, evaluate_trace, max_concurrency=max_concurrency
+    )
+
+  async def _run_trace_evaluations(
+      self,
+      traces: list[Trace],
+      evaluate_trace,
+      *,
+      max_concurrency: int = 5,
+  ) -> list[SessionScore]:
+    """Retain one attributed outcome per trace, including failed calls."""
+    semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def evaluate_one(trace):
+      async with semaphore:
+        try:
+          score = copy.deepcopy(await evaluate_trace(trace))
+          if not isinstance(score, SessionScore):
+            raise TypeError("Evaluator must return a SessionScore")
+        except Exception as exc:
+          logger.warning(
+              "Evaluation failed for session %s: %s", trace.session_id, exc
+          )
+          score = SessionScore(
+              session_id=trace.session_id,
+              scores={},
+              passed=False,
+              details={"evaluation_error": str(exc)},
+          )
       score.session_id = trace.session_id
       # Per-scope expansion attribution (PR #371 review round 8,
       # P2-7): a session id reused across identities or evaluation
@@ -2528,9 +2640,9 @@ class Client:
       score.details["scope_signature"] = (
           trace.scope.scope_signature if trace.scope is not None else None
       )
-      scores.append(score)
+      return score
 
-    return scores
+    return await asyncio.gather(*(evaluate_one(trace) for trace in traces))
 
   # -------------------------------------------------------------- #
   # Categorical Evaluation                                            #

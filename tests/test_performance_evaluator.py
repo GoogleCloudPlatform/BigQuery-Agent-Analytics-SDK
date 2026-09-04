@@ -25,6 +25,7 @@ from unittest.mock import patch
 import pytest
 
 from bigquery_agent_analytics.client import Client
+from bigquery_agent_analytics.performance_evaluator import PerformanceEvaluator
 from bigquery_agent_analytics.trace import AmbiguousSessionError
 from bigquery_agent_analytics.trace import ResolvedTraceSelector
 from bigquery_agent_analytics.trace import Span
@@ -924,3 +925,75 @@ class TestTraceReplayRunner:
         call(selector_2),
     ]
     mock_evaluator.get_session_trace.assert_not_awaited()
+
+
+class TestPerformanceEvaluatorAdditions:
+
+  @pytest.fixture
+  def mock_client(self):
+    return MagicMock()
+
+  @pytest.fixture
+  def evaluator(self, mock_client):
+    """Create evaluator with mock client."""
+    return PerformanceEvaluator(
+        project_id="test-project",
+        dataset_id="test-dataset",
+        table_id="test-table",
+        client=mock_client,
+    )
+
+  def test_evaluate_deterministic_trajectory(self, evaluator):
+    """Test evaluate_deterministic_trajectory directly."""
+    actual = [
+        ToolCall(tool_name="search", args={"q": "weather"}),
+    ]
+    trace = SessionTrace(
+        session_id="sess-123",
+        user_id=None,
+        events=[],
+        tool_calls=actual,
+    )
+    golden = [{"tool_name": "search", "args": {"q": "weather"}}]
+    scores = evaluator.evaluate_deterministic_trajectory(
+        trace=trace,
+        golden_trajectory=golden,
+        match_type=MatchType.EXACT,
+    )
+
+    assert scores["trajectory_exact_match"] == 1.0
+    assert scores["step_efficiency"] == 1.0
+
+  @pytest.mark.asyncio
+  async def test_llm_judge_evaluate_one_sided(self, evaluator):
+    """Test llm_judge_evaluate directly for one-sided evaluation."""
+    trace = SessionTrace(
+        session_id="sess-123",
+        user_id=None,
+        events=[],
+        tool_calls=[],
+        final_response="Hello Seattle!",
+    )
+
+    # Mock genai.Client and generate_content
+    mock_response = MagicMock()
+    mock_response.text = (
+        '{"sentiment": 8, "hallucination": 10, "justification": "Sunny tone"}'
+    )
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.aio.models.generate_content = AsyncMock(
+        return_value=mock_response
+    )
+
+    with patch("google.genai.Client", return_value=mock_client_instance):
+      scores, feedback = await evaluator.llm_judge_evaluate(
+          trace=trace,
+          task_description="Support weather greeting.",
+          expected_trajectory=None,
+          golden_response=None,
+      )
+
+      assert scores["llm_judge_sentiment"] == 0.8
+      assert scores["llm_judge_hallucination"] == 1.0
+      assert "Sunny tone" in feedback

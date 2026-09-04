@@ -73,13 +73,13 @@ from pydantic import BaseModel
 from pydantic import Field
 from pydantic import model_validator
 
-from bigquery_agent_analytics.evaluators import strip_markdown_fences
 from bigquery_agent_analytics.trace import AmbiguousSessionError
 from bigquery_agent_analytics.trace import ResolvedTraceSelector
 from bigquery_agent_analytics.trace import Span
 from bigquery_agent_analytics.trace import Trace
 from bigquery_agent_analytics.trace import TraceIdentity
 from bigquery_agent_analytics.trace import TraceScope
+from bigquery_agent_analytics.utils import strip_markdown_fences
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
