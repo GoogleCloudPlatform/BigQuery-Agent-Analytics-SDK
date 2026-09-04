@@ -2435,6 +2435,161 @@ def evalbench_import(
     raise typer.Exit(code=2)
 
 
+@app.command("evalbench-native-import")
+def evalbench_native_import(
+    source_table: str = typer.Option(
+        ...,
+        "--source-table",
+        help=(
+            "Fully-qualified project.dataset.table reference of the"
+            " production ADK agent_events table to read (read-only)."
+        ),
+    ),
+    job_id: str = typer.Option(
+        ..., "--job-id", help="Native snapshot job_id (the pin's first half)."
+    ),
+    target_dataset: str = typer.Option(
+        ...,
+        "--target-dataset",
+        help="BQAA-owned dataset that receives the snapshot tables.",
+    ),
+    target_project: Optional[str] = typer.Option(
+        None,
+        "--target-project",
+        help="Target project (defaults to the source table's project).",
+    ),
+    events_table: str = typer.Option(
+        "evalbench_agent_events",
+        "--events-table",
+        help="Snapshot event table name in --target-dataset.",
+    ),
+    scores_table: str = typer.Option(
+        "evalbench_scores_imported",
+        "--scores-table",
+        help="Native score table name in --target-dataset.",
+    ),
+    session_id: Optional[list[str]] = typer.Option(
+        None,
+        "--session-id",
+        help="Optional session id filter for the source read (repeatable).",
+    ),
+    import_version: Optional[str] = typer.Option(
+        None,
+        "--import-version",
+        help=(
+            "Version label for this snapshot. Defaults to a fingerprint of"
+            " the source rows so an unchanged source is a no-op."
+        ),
+    ),
+    replace: bool = typer.Option(
+        False,
+        "--replace",
+        help="Atomically overwrite an existing import version.",
+    ),
+    snapshot_at: Optional[str] = typer.Option(
+        None,
+        "--snapshot-at",
+        help=(
+            "ISO-8601 timestamp; read agent_events FOR SYSTEM_TIME AS OF"
+            " this instant so a live table cannot mix versions."
+        ),
+    ),
+    failed_sessions_view: str = typer.Option(
+        "evalbench_failed_sessions",
+        "--failed-sessions-view",
+        help=(
+            "Failed-session view name in --target-dataset, kept pinned to"
+            " this job's latest successful publication."
+        ),
+    ),
+    skip_failed_sessions_view: bool = typer.Option(
+        False,
+        "--skip-failed-sessions-view",
+        help="Do not create or update the failed-session view.",
+    ),
+    min_score: Optional[list[str]] = typer.Option(
+        None,
+        "--min-score",
+        help=_MIN_SCORE_HELP + " Rendered into the failed-session view.",
+    ),
+    missing_score_passes: bool = typer.Option(
+        False, "--missing-score-passes", help=_MISSING_SCORE_PASSES_HELP
+    ),
+    location: Optional[str] = typer.Option(
+        None, "--location", help="BigQuery location."
+    ),
+    fmt: str = typer.Option(
+        "json", "--format", help="Output format: json|text|table."
+    ),
+) -> None:
+  """Snapshot production agent_events natively (no EvalBench tables, #463).
+
+  The EvalBench-adapter exit ramp: reads production ADK ``agent_events``
+  rows (read-only), derives one deterministic ``goal_completion`` score per
+  session (1.0 iff the session logged AGENT_COMPLETED — completed, not
+  passed), and publishes events, scores, and a manifest row as one
+  immutable ``(job_id, import_version)`` snapshot exactly as
+  ``evalbench-import`` does, keeping the ``--failed-sessions-view`` pinned
+  to the job's latest successful publication. No EvalBench ``configs`` /
+  ``results`` / ``scores`` tables are read, and the production
+  ``agent_events`` table is never written. ``evalbench-import`` (#97)
+  stays as the optional adapter on-ramp.
+
+  Exit codes:
+      0 — imported, replaced, or unchanged (see ``status`` in the output).
+      2 — invalid input (including the reserved ``agent_events``
+          destination name), a changed source under an explicit
+          --import-version, a version already bound to other destination
+          tables, a failed-session view at that name that belongs to
+          another job, or a BigQuery error.
+  """
+  try:
+    from .evalbench import _parse_timestamp
+    from .evalbench import _validate_destination_table
+    from .native_events import NativeAgentEventsRun
+
+    # Reject the reserved ADK plugin table before any BigQuery read or write.
+    _validate_destination_table("events_table", events_table)
+    _validate_destination_table("scores_table", scores_table)
+    if not skip_failed_sessions_view:
+      _validate_destination_table("failed_sessions_view", failed_sessions_view)
+    policy = _evalbench_score_policy(min_score, missing_score_passes)
+
+    parsed_snapshot = None
+    if snapshot_at is not None:
+      parsed_snapshot = _parse_timestamp(snapshot_at)
+      if parsed_snapshot is None:
+        raise ValueError(
+            f"--snapshot-at must be an ISO-8601 timestamp, got {snapshot_at!r}"
+        )
+
+    run = NativeAgentEventsRun.from_bigquery(
+        source_table=source_table,
+        job_id=job_id,
+        session_ids=session_id,
+        location=location,
+        snapshot_at=parsed_snapshot,
+    )
+    result = run.materialize(
+        target_project=target_project,
+        target_dataset=target_dataset,
+        events_table=events_table,
+        scores_table=scores_table,
+        import_version=import_version,
+        replace=replace,
+        failed_sessions_view=(
+            None if skip_failed_sessions_view else failed_sessions_view
+        ),
+        policy=policy,
+    )
+    typer.echo(format_output(result.to_dict(), fmt))
+  except typer.Exit:
+    raise
+  except Exception as exc:  # noqa: BLE001
+    typer.echo(f"Error: {exc}", err=True)
+    raise typer.Exit(code=2)
+
+
 @app.command("evalbench-failed-sessions")
 def evalbench_failed_sessions(
     project_id: str = typer.Option(

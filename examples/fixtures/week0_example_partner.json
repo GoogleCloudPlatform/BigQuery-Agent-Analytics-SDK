@@ -1,0 +1,21 @@
+{
+  "example": true,
+  "illustrative": true,
+  "not_a_freeze": true,
+  "g1_frozen": false,
+  "clock_started": false,
+  "partner_name": "Acme Retail Support",
+  "relationship_to_sana": "SANA-adjacent, not a SANA fork: SANA is LakeQA + KramaBench on the Strands runtime with a seven-category failure taxonomy; this example pilot is ADK+EvalBench on widget-stock support, and taxonomy v0.1 EXAMPLE seeds from SANA's seven categories because the failure modes overlap.",
+  "sana_runtime": "Strands",
+  "this_pilot_runtime": "ADK+EvalBench",
+  "sana_categories": [
+    "task/planning",
+    "wrong source",
+    "execution/computation",
+    "incomplete evidence",
+    "turn-waste",
+    "finalization",
+    "tool blockers"
+  ],
+  "not_duplicating_lakeqa_kramabench": "This example pilot is not duplicating LakeQA/KramaBench: it studies a different benchmark (widget-stock support) on a different runtime (ADK+EvalBench, not Strands), reusing SANA's seven category names only as unfrozen seeds."
+}
