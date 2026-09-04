@@ -13,12 +13,20 @@ three rounds of review; the issue body points here.
 **Code already landed (engineering slices, independent of Week 0):**
 
 - [PR #451](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/451)
-  — **merged** — `materialize()`: immutable, versioned EvalBench snapshots
-  plus the failed-session contract (W0.4). Reference: `docs/evalbench.md`.
+  — **merged** (`2459c0f`) — `materialize()`: immutable, versioned EvalBench
+  snapshots plus the failed-session contract (W0.4). Reference:
+  `docs/evalbench.md`.
 - [PR #452](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/452)
-  — open — `failed_sessions` view and the version-pinned consumer.
+  — **merged** (`2779b7e`) — `failed_sessions` view and the version-pinned
+  consumer.
 - [PR #453](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/453)
-  — open — `evalbench-score` CLI wrapping `Client.evaluate`.
+  — **merged** (`a18ee18`) — `evalbench-score` CLI wrapping `Client.evaluate`.
+- [PR #454](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/454)
+  — **merged** (`60c6dcf`) — this plan of record (v4); the issue body points
+  here.
+- [PR #455](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/455)
+  — **merged** (`47cc62e`) — recordable e2e demo of
+  import → failed-sessions → score.
 
 Those slices build the Week 1–2 substrate; they do not start the clock and do
 not touch the partner job, the D4 boundary, taxonomy content, or live traces.
@@ -66,6 +74,14 @@ freeze — its fixtures keep `example: true` / `g1_frozen: false` and its
 partner is the fictional "Acme Retail Support". The pack **remains
 illustrative** now that the real freeze landed; the real artifacts are the
 `week0_*.md` docs and `week0_real_*.json` fixtures above.
+
+A **span-G1 e2e team demo** also exists
+(`examples/evalbench_span_g1_e2e.md`, run with
+`bash examples/evalbench_span_g1_e2e.sh --fixture`): it consumes the #467
+`span_taxonomy` library to show the widget-stock session's frozen G1
+categories localized onto the real native `AGENT_STARTING` span, offline
+and fixture-only, with session-level `failed_sessions` + G1 unchanged as
+the denominator — it does not start the six-week clock.
 
 ---
 

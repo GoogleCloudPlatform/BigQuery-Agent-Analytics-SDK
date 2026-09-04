@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Span-G1 e2e team demo (#466, parent #435)** — new
+  `examples/evalbench_span_g1_e2e.sh --fixture` (speaker notes
+  `examples/evalbench_span_g1_e2e.md`, offline tests
+  `tests/test_evalbench_span_g1_e2e.py`) narrates the `span_taxonomy`
+  library below on the widget-stock silence session `7e352c34` as a
+  six-act presenter story: session-level `failed_sessions` + G1 stays
+  the denominator, and span-level G1 localizes all three tripped frozen
+  categories onto the real native `AGENT_STARTING` span
+  `b7ad6b7169203331` (`target_kind="gap_after_span"`), shown as
+  `label_native_run` / `label_failed_session_spans` sample JSON — no new
+  CLI, no EvalBench source tables, no live BigQuery, `--fixture` argv
+  only (anything else exits 2), and **the six-week clock has still NOT
+  started**. Consolidates the native-import setup from #465 into these
+  speaker notes and the frozen-category JSON from #462 into the existing
+  `evalbench_mvp_e2e` walkthrough.
+- **EvalBench CLI discoverability (#435)** — `bq-agent-sdk --help` lists
+  `evalbench-import`, `evalbench-failed-sessions`, and `evalbench-score`;
+  the installed `bq-agent-sdk` console script (`pyproject.toml`
+  `[project.scripts]`) is the surface after `pip install`. Tests pin the
+  help listing, the command registry, and the console-script mapping.
 - **Week 0 preregistration sealed (#435, PR #473)** — adopts the v4
   freeze-candidate as the sealed plan of record
   (`docs/week0_preregistration.md` and
@@ -208,6 +228,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ETag-conditional replace after re-reading the view and latest manifest,
   so concurrent imports cannot overwrite a newer pin or attach an older
   caller's policy to a newer generation.
+- **EvalBench versioned snapshots and failed-session contract (#435, slice 1; #97)**
+  — `EvalBenchRun.materialize()` publishes one immutable, versioned import
+  of an EvalBench job into BQAA-owned tables — `evalbench_agent_events`
+  (`agent_events` columns plus `job_id`, `import_version`),
+  `evalbench_scores_imported`, and `evalbench_import_manifest` — and never
+  writes the ADK plugin's production `agent_events` table (that name is
+  rejected before any BigQuery call). Rows are loaded into per-import
+  staging tables and published by a single multi-statement transaction
+  keyed on `(job_id, import_version)`, with the manifest re-checked inside
+  the transaction and a lock sentinel so two first-time imports of the same
+  version cannot both commit. The W0.4 failed-session contract lands with
+  it: `returncode == 0` means the scenario *completed*, not *passed*;
+  non-zero or non-numeric `returncode`, usable `stderr`, and `*_error`
+  columns surface as `status = 'ERROR'` plus `error_message` on the
+  terminal row, never as a clean `OK`. CLI: `bq-agent-sdk
+  evalbench-import`. Reference in `docs/evalbench.md`.
 
 ### Changed
 

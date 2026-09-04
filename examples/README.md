@@ -64,7 +64,7 @@ artifacts that demonstrate SDK capabilities.
 ### Skill Evolution Lab — a self-improving agent
 
 [`skill_evolution_lab/`](skill_evolution_lab/) is the runnable companion to the
-blog post *"Your Agent Can Learn From Its Own Conversations."* One company-policy Q&A agent
+blog post [*"Your Agent Can Learn From Its Own Conversations"*](https://medium.com/google-cloud/your-agent-can-learn-from-its-own-conversations-26f7d46ac325). One company-policy Q&A agent
 reads its own conversation traces — successes and failures — and extracts a
 structured, versioned `SKILL.md`. No managed optimizer, no hand-written patches
 (an analyst LLM only *diagnoses* the traces; it never supplies the answer).

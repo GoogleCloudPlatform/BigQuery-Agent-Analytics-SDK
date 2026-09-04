@@ -28,6 +28,11 @@ Usage::
     bq-agent-sdk categorical-views --project-id=P --dataset-id=D
     bq-agent-sdk views create-all --project-id=P --dataset-id=D
     bq-agent-sdk views create --project-id=P --dataset-id=D EVENT_TYPE
+    bq-agent-sdk evalbench-import --project-id=P --evalbench-dataset=E \
+        --target-dataset=D --job-id=J
+    bq-agent-sdk evalbench-failed-sessions --project-id=P --target-dataset=D \
+        --job-id=J
+    bq-agent-sdk evalbench-score --project-id=P --dataset-id=D --job-id=J
 """
 
 from __future__ import annotations
