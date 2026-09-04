@@ -770,9 +770,7 @@ class TestPureSkosImport:
 
   def test_narrower_normalized_to_broader(self):
     """skos:narrower on WealthManagement → InvestmentBanking should
-
-    produce a skos_broader from InvestmentBanking to WealthManagement.
-    """
+    produce a skos_broader from InvestmentBanking to WealthManagement."""
     yaml_text, _ = import_owl(
         [_SKOS_TTL],
         include_namespaces=["http://example.com/taxonomy#"],
@@ -991,9 +989,7 @@ class TestAbstractOntologyValidation:
 
   def test_concrete_relationship_abstract_endpoint_fails(self):
     """A concrete relationship cannot have an abstract endpoint —
-
-    there is nothing to bind.
-    """
+    there is nothing to bind."""
     from bigquery_ontology import load_ontology_from_string
 
     yaml_str = textwrap.dedent(
@@ -1220,9 +1216,7 @@ class TestAbstractScaffold:
 
 class TestOwlRefToSkosConcept:
   """An OWL ObjectProperty whose rdfs:range is a pure SKOS concept
-
-  must resolve to the correct ``skos_`` prefixed entity name.
-  """
+  must resolve to the correct ``skos_`` prefixed entity name."""
 
   def test_owl_objectproperty_range_on_skos_concept(self, tmp_path):
     ttl = tmp_path / "ref.ttl"
@@ -1281,9 +1275,7 @@ class TestOwlRefToSkosConcept:
 
   def test_owl_subclassof_skos_concept_extends_resolves(self, tmp_path):
     """An OWL class whose rdfs:subClassOf target is a pure SKOS concept
-
-    must emit ``extends: skos_<name>`` so the YAML loads.
-    """
+    must emit ``extends: skos_<name>`` so the YAML loads."""
     ttl = tmp_path / "subclass.ttl"
     ttl.write_text(
         textwrap.dedent(
@@ -1322,9 +1314,7 @@ class TestOwlRefToSkosConcept:
 
 class TestAbstractKeyShapeValidation:
   """Abstract entities/relationships with declared keys must still
-
-  satisfy shape rules.
-  """
+  satisfy shape rules."""
 
   def test_abstract_entity_key_column_must_exist(self):
     from bigquery_ontology import load_ontology_from_string
@@ -1428,9 +1418,7 @@ class TestRoundTrip:
 
   def test_concrete_entity_no_abstract_key_emitted(self, tmp_path):
     """Concrete entities must not emit ``abstract: false`` (default is
-
-    False; emitting the default bloats every real-world ontology file).
-    """
+    False; emitting the default bloats every real-world ontology file)."""
     ttl = tmp_path / "simple.ttl"
     ttl.write_text(
         textwrap.dedent(
@@ -1453,9 +1441,7 @@ class TestRoundTrip:
 
   def test_omitted_abstract_key_loads_as_false(self):
     """YAML that omits ``abstract`` must parse back to ``abstract=False``,
-
-    so the emitter's suppression of the default is safe.
-    """
+    so the emitter's suppression of the default is safe."""
     from bigquery_ontology import load_ontology_from_string
 
     ont = load_ontology_from_string(
@@ -1533,9 +1519,7 @@ class TestSkosSchemeAnnotationPreservation:
 
 class TestMultiLabelNonSelectedLanguage:
   """Multiple labels in the same non-selected (predicate, language)
-
-  must be preserved — not silently overwritten.
-  """
+  must be preserved — not silently overwritten."""
 
   def test_two_french_alt_labels_both_preserved(self, tmp_path):
     ttl = tmp_path / "multi.ttl"
@@ -1566,9 +1550,7 @@ class TestMultiLabelNonSelectedLanguage:
 
 class TestGenericAnnotationNamespacePrefix:
   """Generic literal-annotation keys must retain their namespace prefix
-
-  so vocabularies with colliding local names don't merge.
-  """
+  so vocabularies with colliding local names don't merge."""
 
   def test_dc_and_dcterms_title_do_not_collide(self, tmp_path):
     ttl = tmp_path / "dc.ttl"

@@ -177,11 +177,9 @@ class TestSpan:
 
   def test_tool_name_does_not_leak_for_non_tool_event_with_tool_key(self):
     """Non-tool events carrying an incidental content['tool'] key must
-
     NOT surface it as tool_name. The attribute means "this span invoked
     a tool" — arbitrary payloads that happen to use the same key name
-    should return None.
-    """
+    should return None."""
     span = Span(
         event_type="AGENT_THOUGHT",
         agent="agent",
@@ -511,11 +509,9 @@ class TestTrace:
 
   def test_render_handles_unicode_tool_names(self):
     """Non-ASCII tool names must not crash render() and must preserve
-
     the tree-connector structure on each line. Display-width alignment
     in monospace fonts is a known limitation (tracked separately) —
-    this test pins the minimum: no exceptions, connectors emitted.
-    """
+    this test pins the minimum: no exceptions, connectors emitted."""
     ts = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
     spans = [
         Span(
@@ -913,8 +909,10 @@ class TestEventTypeEnum:
     assert EventType.HITL_CONFIRMATION_REQUEST.value == (
         "HITL_CONFIRMATION_REQUEST"
     )
-    assert EventType.HITL_CREDENTIAL_REQUEST.value == "HITL_CREDENTIAL_REQUEST"
-    assert EventType.HITL_INPUT_REQUEST.value == "HITL_INPUT_REQUEST"
+    assert EventType.HITL_CREDENTIAL_REQUEST.value == (
+        "HITL_CREDENTIAL_REQUEST"
+    )
+    assert EventType.HITL_INPUT_REQUEST.value == ("HITL_INPUT_REQUEST")
 
 
 class TestSpanNewFields:

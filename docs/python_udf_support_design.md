@@ -97,8 +97,8 @@ These constraints drive several design decisions:
 2. Full `Client` reuse is not the right goal.
    Reason: `Client` is built around issuing BigQuery jobs, loading trace rows,
    and assembling rich Python objects such as `Trace`,
-    [`EvaluationReport`](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/system_evaluator.py),
-    and [`InsightsReport`](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/insights.py).
+   [`EvaluationReport`](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/system_evaluator.py),
+   and [`InsightsReport`](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/insights.py).
 
 3. Python UDF support should be built around **small analytical kernels**,
    not around a UDF that internally reimplements the whole SDK client.

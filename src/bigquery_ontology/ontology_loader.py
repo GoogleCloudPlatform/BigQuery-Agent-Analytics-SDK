@@ -139,7 +139,8 @@ def _validate_ontology(ont: Ontology) -> None:
     # their keys — if declared — must still follow shape rules.
     if rel.extends is not None:
       raise ValueError(
-          f"Relationship {rel.name!r} is abstract and must not use 'extends'."
+          f"Relationship {rel.name!r} is abstract and must not use "
+          f"'extends'."
       )
     if rel.keys is not None:
       _check_relationship_key_shape(rel, rel.keys)
@@ -174,7 +175,7 @@ def _check_unique_abstract_relationships(
     key = (r.name, r.from_, r.to)
     if key in seen:
       raise ValueError(
-          "Duplicate abstract relationship: "
+          f"Duplicate abstract relationship: "
           f"({r.name!r}, from={r.from_!r}, to={r.to!r})"
       )
     seen.add(key)
@@ -341,9 +342,7 @@ def _check_alternate_keys(keys: Keys, owner: str) -> None:
 
 def _check_entity_keys(entity: Entity, entity_map: dict[str, Entity]) -> None:
   """Validate entity keys: primary required, additional forbidden,
-
-  columns and alternate-key shape.
-  """
+  columns and alternate-key shape."""
   keys = _effective_keys(entity, entity_map)
   if keys is None or not keys.primary:
     raise ValueError(f"Entity {entity.name!r}: keys.primary is required.")
@@ -354,7 +353,6 @@ def _check_entity_key_shape(
     entity: Entity, keys: Keys, entity_map: dict[str, Entity]
 ) -> None:
   """Shape-only entity key checks: forbid ``additional``, verify that
-
   key columns reference declared properties, and validate alternate
   keys. These apply whether or not the entity is abstract; only the
   ``primary is required`` rule is relaxed for abstract entities.
@@ -370,9 +368,7 @@ def _check_relationship_keys(
     rel: Relationship, rel_map: dict[str, Relationship]
 ) -> None:
   """Validate relationship keys: primary XOR additional; columns
-
-  and alternate-key shape.
-  """
+  and alternate-key shape."""
   keys = _effective_keys(rel, rel_map)
   if keys is None:
     return  # no uniqueness constraint; multi-edges permitted.
@@ -386,7 +382,7 @@ def _check_relationship_key_mode(rel: Relationship, keys: Keys) -> None:
   if keys.primary and keys.additional:
     raise ValueError(
         f"Relationship {rel.name!r}: primary and additional are "
-        "mutually exclusive."
+        f"mutually exclusive."
     )
   if keys.additional is not None and keys.alternate:
     raise ValueError(
@@ -419,7 +415,7 @@ def _check_relationship_endpoints(
   if rel.from_ not in entity_map:
     raise ValueError(
         f"Relationship {rel.name!r}: from {rel.from_!r} is not a "
-        "declared entity."
+        f"declared entity."
     )
   if rel.to not in entity_map:
     raise ValueError(
@@ -430,13 +426,13 @@ def _check_relationship_endpoints(
       raise ValueError(
           f"Relationship {rel.name!r} is concrete but its 'from' "
           f"endpoint {rel.from_!r} is abstract. A concrete "
-          "relationship cannot have an abstract endpoint."
+          f"relationship cannot have an abstract endpoint."
       )
     if entity_map[rel.to].abstract:
       raise ValueError(
           f"Relationship {rel.name!r} is concrete but its 'to' "
           f"endpoint {rel.to!r} is abstract. A concrete "
-          "relationship cannot have an abstract endpoint."
+          f"relationship cannot have an abstract endpoint."
       )
 
 
@@ -480,6 +476,6 @@ def _check_covariant_narrowing(
   if rel.cardinality is not None and rel.cardinality != parent.cardinality:
     raise ValueError(
         f"Relationship {rel.name!r}: cardinality {rel.cardinality.value!r} "
-        "differs from inherited parent cardinality "
+        f"differs from inherited parent cardinality "
         f"{parent.cardinality.value if parent.cardinality else None!r}."
     )

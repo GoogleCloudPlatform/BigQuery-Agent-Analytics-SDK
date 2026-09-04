@@ -13,7 +13,6 @@
 # limitations under the License.
 
 """Golden tests for V5 Context Graph: TTL import, structured extraction,
-
 lineage detection, DDL session columns, materializer ownership, and
 lineage GQL generation.
 """
@@ -860,9 +859,7 @@ class TestFetchRawEventsQuery:
 
   def test_fetch_query_includes_event_type_and_content(self):
     """The structured-extraction query must return event_type and
-
-    content_json (full content) so extractors can match and parse.
-    """
+    content_json (full content) so extractors can match and parse."""
     from bigquery_agent_analytics.ontology_graph import _FETCH_RAW_EVENTS_QUERY
 
     assert "event_type" in _FETCH_RAW_EVENTS_QUERY
@@ -872,19 +869,15 @@ class TestFetchRawEventsQuery:
 
   def test_fetch_query_no_event_type_filter(self):
     """The raw events query must not filter on event_type, so that
-
-    BKA_DECISION and other custom types reach the extractors.
-    """
+    BKA_DECISION and other custom types reach the extractors."""
     from bigquery_agent_analytics.ontology_graph import _FETCH_RAW_EVENTS_QUERY
 
     assert "event_type IN" not in _FETCH_RAW_EVENTS_QUERY
 
   def test_ai_transcript_includes_partial_span_ids(self):
     """The AI transcript CTE must include an OR clause for
-
     @partial_span_ids so that partially-handled custom event types
-    (like BKA_DECISION) are eligible for transcript inclusion.
-    """
+    (like BKA_DECISION) are eligible for transcript inclusion."""
     from bigquery_agent_analytics.ontology_graph import _EXTRACT_ONTOLOGY_AI_QUERY
 
     assert "partial_span_ids" in _EXTRACT_ONTOLOGY_AI_QUERY
@@ -899,9 +892,7 @@ class TestPartialHintBuilt:
 
   def test_partial_hint_passed_to_ai(self):
     """When extractors produce partially_handled spans, the AI prompt
-
-    should include a hint about already-extracted entities.
-    """
+    should include a hint about already-extracted entities."""
     from unittest.mock import MagicMock
     from unittest.mock import patch
 
@@ -972,9 +963,7 @@ class TestDDLSessionColumnsInProperties:
 
   def test_lineage_session_cols_in_properties(self):
     """from_session_id and to_session_id must appear in PROPERTIES
-
-    even though they are in the edge KEY, so GQL can query them.
-    """
+    even though they are in the edge KEY, so GQL can query them."""
     from bigquery_agent_analytics.ontology_property_graph import compile_edge_table_clause
 
     spec = _resolved_lineage_spec()

@@ -71,8 +71,9 @@ class StructuredExtractionResult:
   Attributes:
     nodes: Extracted node instances.
     edges: Extracted edge instances.
-    fully_handled_span_ids: Span IDs whose content is completely captured by the
-      extracted nodes/edges and should be excluded from the AI transcript.
+    fully_handled_span_ids: Span IDs whose content is completely captured
+        by the extracted nodes/edges and should be excluded from the AI
+        transcript.
     partially_handled_span_ids: Span IDs whose content is only partially
         captured (e.g. free-text fields remain) and should be included in
         the AI transcript with an extraction hint.
@@ -175,9 +176,10 @@ def extract_bka_decision_event(
 
   Args:
     event: Raw telemetry event dict.  Expected keys: ``span_id``,
-      ``session_id``, ``content`` (a nested dict with at least ``decision_id``).
-    spec: The active graph spec (unused by this extractor but required by the
-      ``StructuredExtractor`` signature).
+        ``session_id``, ``content`` (a nested dict with at least
+        ``decision_id``).
+    spec: The active graph spec (unused by this extractor but
+        required by the ``StructuredExtractor`` signature).
 
   Returns:
     A ``StructuredExtractionResult`` — empty if the event does not
@@ -248,8 +250,8 @@ def run_structured_extractors(
   merged via :func:`merge_extraction_results`.
 
   Args:
-    events: Raw telemetry event dicts.  Each must have an ``event_type`` key to
-      match against the extractor registry.
+    events: Raw telemetry event dicts.  Each must have an
+        ``event_type`` key to match against the extractor registry.
     extractors: Mapping of ``event_type`` string to extractor callable.
     spec: The active graph spec forwarded to each extractor.
     capture_extractor_exceptions: When ``False`` (the default and the

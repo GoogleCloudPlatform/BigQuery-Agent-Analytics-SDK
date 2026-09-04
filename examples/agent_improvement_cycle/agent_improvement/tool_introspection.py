@@ -35,7 +35,9 @@ def extract_tool_signatures(tools: list[Callable]) -> list[dict]:
     sig = inspect.signature(tool)
     # Filter out ToolContext params (injected by ADK, not user-facing)
     params = {k: v for k, v in sig.parameters.items() if k != "tool_context"}
-    sig_str = f"{tool.__name__}({', '.join(str(v) for v in params.values())})"
+    sig_str = (
+        f"{tool.__name__}" f"({', '.join(str(v) for v in params.values())})"
+    )
     doc = inspect.getdoc(tool) or ""
     signatures.append(
         {

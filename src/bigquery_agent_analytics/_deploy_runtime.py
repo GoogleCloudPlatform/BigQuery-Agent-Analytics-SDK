@@ -34,13 +34,13 @@ def resolve_client_options(
   """Resolve ``Client`` constructor kwargs from request context + env vars.
 
   Args:
-    user_defined_context: Optional request-context dict forwarded by the caller
-      (e.g. BigQuery Remote Function ``userDefinedContext``).
-    sdk_surface: Value stamped on the ``sdk_surface`` telemetry label. Defaults
-      to ``"remote-function"`` because both shipped entry points (BQ Remote
-      Function dispatch, streaming-eval worker) are remote runtimes. Callers
-      that want a different surface (e.g. a future ``"continuous-query"``) pass
-      it explicitly.
+    user_defined_context: Optional request-context dict forwarded by the
+      caller (e.g. BigQuery Remote Function ``userDefinedContext``).
+    sdk_surface: Value stamped on the ``sdk_surface`` telemetry label.
+      Defaults to ``"remote-function"`` because both shipped entry
+      points (BQ Remote Function dispatch, streaming-eval worker) are
+      remote runtimes. Callers that want a different surface (e.g. a
+      future ``"continuous-query"``) pass it explicitly.
   """
   udc = user_defined_context or {}
   project_id = udc.get("project_id", os.environ.get("BQ_AGENT_PROJECT"))

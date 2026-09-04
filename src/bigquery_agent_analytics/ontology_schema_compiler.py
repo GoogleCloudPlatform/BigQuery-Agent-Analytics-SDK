@@ -157,8 +157,8 @@ def compile_output_schema(
 
   Args:
       spec: A validated ``ResolvedGraph``.
-      entity_names: Optional subset of entity names to include. If ``None``, all
-        entities and relationships are included.
+      entity_names: Optional subset of entity names to include.
+          If ``None``, all entities and relationships are included.
 
   Returns:
       A compact JSON string suitable for ``output_schema =>``.
@@ -311,10 +311,8 @@ def compile_extraction_prompt(
     relationships = list(spec.relationships)
 
   lines = [
-      (
-          "Extract nodes and edges from the agent telemetry below "
-          "according to the provided ontology."
-      ),
+      "Extract nodes and edges from the agent telemetry below "
+      "according to the provided ontology.",
       "",
       "Entity types:",
   ]
@@ -341,10 +339,8 @@ def compile_extraction_prompt(
           "Rules:",
           "- Only emit entity and relationship types declared above.",
           "- Populate all typed properties when present in the data.",
-          (
-              "- Set from_keys / to_keys to objects mapping each primary key "
-              "column name to its value for the connected nodes."
-          ),
+          "- Set from_keys / to_keys to objects mapping each primary key "
+          "column name to its value for the connected nodes.",
           "- Do not invent unknown entity types.",
           "",
           "Payload:",

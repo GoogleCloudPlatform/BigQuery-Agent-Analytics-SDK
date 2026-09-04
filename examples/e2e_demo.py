@@ -65,7 +65,6 @@ from bigquery_agent_analytics import TraceFilter
 from bigquery_agent_analytics.performance_evaluator import MatchType
 
 # ---------------------------------------------------------------------------
-
 # Configuration
 # ---------------------------------------------------------------------------
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "test-project-0728-467323")
@@ -623,8 +622,8 @@ async def main() -> None:
       {
           "label": "(Multi-turn)",
           "messages": [
-              "What's the weather like in Paris on 2025-04-20?",
-              "Find me flights from Chicago to Paris on 2025-04-20.",
+              ("What's the weather like in Paris on 2025-04-20?"),
+              ("Find me flights from Chicago to Paris on" " 2025-04-20."),
               (
                   "Now find hotels in Paris checking in 2025-04-20"
                   " and checking out 2025-04-25."

@@ -280,7 +280,6 @@ class TestEvaluateRecentSessionsLabels:
 
 class TestAsyncDispatchOrdering:
   """Proves that labels are attached to the QueryJobConfig in the
-
   caller's thread, before the lambda crosses the executor boundary.
 
   The mock's `query` lambda is invoked inside the worker thread, but

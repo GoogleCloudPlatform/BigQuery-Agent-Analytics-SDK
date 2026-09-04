@@ -109,7 +109,6 @@ def _in_namespace(iri: URIRef, namespaces: list[str]) -> bool:
 
 def _qname_or_iri(g: "Graph", iri: URIRef) -> str:
   """Return ``prefix:local`` for a predicate whose namespace has a
-
   bound prefix; otherwise return the full IRI.
 
   Bare local names collide across vocabularies (``dc:title`` and
@@ -439,7 +438,6 @@ def _collect_drop_annotations(
 
 def _precompute_iri_to_name(g: Graph, namespaces: list[str]) -> dict[str, str]:
   """Build an IRI→future-entity-name map for every in-namespace OWL class
-
   and SKOS concept.
 
   Pre-computed *before* extraction so passes that resolve references
@@ -605,9 +603,7 @@ def _extract_relationships(
 
   def _resolve_endpoint(iri: URIRef) -> str:
     """Resolve an IRI to an entity name, using iri_to_name when
-
-    available (handles SKOS concepts with ``skos_`` name prefixes).
-    """
+    available (handles SKOS concepts with ``skos_`` name prefixes)."""
     if iri_to_name is not None and str(iri) in iri_to_name:
       return iri_to_name[str(iri)]
     return _local_name(iri)
@@ -878,7 +874,7 @@ def _extract_skos_concepts(
     if name in entities:
       raise ValueError(
           f"Name collision: SKOS concept {name!r} collides with an "
-          "existing entity. Narrow the namespace filter to resolve."
+          f"existing entity. Narrow the namespace filter to resolve."
       )
 
     # rdfs:label and rdfs:comment still populate description if
@@ -1285,31 +1281,32 @@ def _format_drop_summary(
       lines.append(f"  {kind}: {count}")
   if drops.skos_concepts_imported:
     lines.append(
-        "SKOS concepts imported as abstract entities: "
+        f"SKOS concepts imported as abstract entities: "
         f"{drops.skos_concepts_imported}"
     )
   if drops.skos_relationships_imported:
     lines.append(
-        "SKOS relationships imported as abstract: "
+        f"SKOS relationships imported as abstract: "
         f"{drops.skos_relationships_imported}"
     )
   if drops.skos_annotations:
     lines.append(
-        f"SKOS predicates mapped to annotations: {drops.skos_annotations}"
+        f"SKOS predicates mapped to annotations: " f"{drops.skos_annotations}"
     )
   if drops.skos_labels_discarded_by_language:
     lines.append(
-        "Labels in non-selected languages (preserved as "
+        f"Labels in non-selected languages (preserved as "
         f"annotations): {drops.skos_labels_discarded_by_language}"
     )
   if drops.skos_external_matches:
     lines.append(
-        "SKOS match targets outside imported namespaces "
+        f"SKOS match targets outside imported namespaces "
         f"(preserved as annotations): {drops.skos_external_matches}"
     )
   if drops.generic_annotations:
     lines.append(
-        f"Generic literal annotations preserved: {drops.generic_annotations}"
+        f"Generic literal annotations preserved: "
+        f"{drops.generic_annotations}"
     )
   # Hint for all-abstract ontologies.
   if entities and all(e.abstract for e in entities.values()):
@@ -1340,12 +1337,12 @@ def import_owl(
       sources: Paths to OWL source files (Turtle or RDF/XML).
       include_namespaces: IRI prefixes to include. At least one required.
       ontology_name: Name for the output ontology. Defaults to the first
-        namespace's last path segment.
-      format: Parser format override (``"turtle"`` or ``"xml"``). If ``None``,
-        inferred from file extension.
+          namespace's last path segment.
+      format: Parser format override (``"turtle"`` or ``"xml"``). If
+          ``None``, inferred from file extension.
       language: BCP-47 language tag for label selection (default ``"en"``).
-        Labels in the selected language are used for names and synonyms; labels
-        in other languages become language-suffixed annotations.
+          Labels in the selected language are used for names and synonyms;
+          labels in other languages become language-suffixed annotations.
 
   Returns:
       A ``(yaml_text, drop_summary)`` tuple. The YAML text is a valid

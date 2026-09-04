@@ -216,10 +216,8 @@ class TestListUdfs:
 
 class TestBodyParity:
   """Verify that the inlined UDF bodies produce the same results
-
   as the shared udf_kernels functions by exec'ing the body and
-  calling the function.
-  """
+  calling the function."""
 
   def _exec_udf(self, name):
     """Extract and exec the UDF body, return the callable."""

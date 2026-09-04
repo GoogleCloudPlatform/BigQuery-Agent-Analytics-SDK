@@ -472,7 +472,7 @@ def _reject_unresolved_names(
     raise ValueError(
         f"Derived property {self_name!r} on {owner} references "
         f"unknown name(s): {names}. Every name in a derived "
-        "expression must be a property on the same element."
+        f"expression must be a property on the same element."
     )
 
 
@@ -817,16 +817,18 @@ def compile_concept_index(
 
   Args:
       ontology: Validated upstream ``Ontology``.
-      binding: Validated upstream ``Binding`` referencing this ontology. Used to
-        determine which concrete entities are in scope (per A2's "abstract
-        always, concrete iff bound" rule) and to populate ``target_project`` /
-        ``target_dataset`` on the meta row.
+      binding: Validated upstream ``Binding`` referencing this
+          ontology. Used to determine which concrete entities are in
+          scope (per A2's "abstract always, concrete iff bound" rule)
+          and to populate ``target_project`` / ``target_dataset`` on
+          the meta row.
       output_table: Fully-qualified destination for the main table —
-        ``project.dataset.table_name``. The ``__meta`` sibling is emitted at
-        ``output_table + "__meta"``. Backticks are added by the emitter; do not
-        pre-quote.
+          ``project.dataset.table_name``. The ``__meta`` sibling is
+          emitted at ``output_table + "__meta"``. Backticks are added
+          by the emitter; do not pre-quote.
       compiler_version: Caller-supplied version string flowed into the
-        ``compile_fingerprint`` so semver bumps invalidate stale meta rows.
+          ``compile_fingerprint`` so semver bumps invalidate stale
+          meta rows.
 
   Returns:
       A single string containing both ``CREATE OR REPLACE TABLE``
@@ -844,10 +846,10 @@ def compile_concept_index(
   if not rows:
     raise ValueError(
         f"Cannot compile concept index for {output_table!r}: ontology + "
-        "binding produce no concrete or abstract entities. The emitter "
-        "refuses to write a typeless empty array. Ensure the binding "
-        "references at least one concrete entity from the ontology, or "
-        "that the ontology declares at least one abstract entity."
+        f"binding produce no concrete or abstract entities. The emitter "
+        f"refuses to write a typeless empty array. Ensure the binding "
+        f"references at least one concrete entity from the ontology, or "
+        f"that the ontology declares at least one abstract entity."
     )
 
   ont_fp = fingerprint_model(ontology)
@@ -881,7 +883,6 @@ def compile_concept_index(
 
 def _main_row_values(row: ConceptIndexRow) -> tuple:
   """Project a ``ConceptIndexRow`` to the tuple shape expected by
-
   :data:`_MAIN_COLUMNS` (positional alignment is part of the
   byte-deterministic contract).
   """
@@ -905,7 +906,6 @@ def _emit_table(
     rows: list[tuple],
 ) -> str:
   """Render one ``CREATE OR REPLACE TABLE T AS SELECT * FROM
-
   UNNEST(ARRAY<STRUCT<...>>[<rows>])`` statement.
 
   Explicit ``ARRAY<STRUCT<...>>`` typing keeps the schema stable for
@@ -1030,7 +1030,7 @@ def _validate_output_table(output_table: str) -> None:
   """
   if "`" in output_table:
     raise ValueError(
-        "output_table must not contain backticks; the emitter adds "
+        f"output_table must not contain backticks; the emitter adds "
         f"them. Got {output_table!r}."
     )
   parts = output_table.split(".")

@@ -107,7 +107,7 @@ def main() -> int:
     sessions = _fetch_sessions(client)
   except Exception as exc:  # pylint: disable=broad-except
     print(
-        "ERROR: could not list sessions in "
+        f"ERROR: could not list sessions in "
         f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}: {exc}",
         file=sys.stderr,
     )
@@ -196,7 +196,7 @@ def main() -> int:
         f"WARNING: AI.GENERATE returned {decisions} decision points "
         f"across {len(session_ids)} sessions (target ~"
         f"{expected_decisions}). Graph will look thin; consider "
-        "re-running build_graph.py.",
+        f"re-running build_graph.py.",
         file=sys.stderr,
     )
   elif decisions < expected_decisions:
@@ -205,8 +205,8 @@ def main() -> int:
         f"NOTE: AI.GENERATE extracted {decisions} decision points "
         f"across {len(session_ids)} sessions (target ~"
         f"{expected_decisions}, 5 per agent run). This is normal "
-        "model variance; the demo narration is written to be "
-        "count-agnostic.",
+        f"model variance; the demo narration is written to be "
+        f"count-agnostic.",
         file=sys.stderr,
     )
 

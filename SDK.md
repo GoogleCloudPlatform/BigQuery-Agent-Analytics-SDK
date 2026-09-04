@@ -521,7 +521,7 @@ scores, feedback = await evaluator.llm_judge_evaluate(
     expected_trajectory=None,  # set to golden for side-by-side correctness
     golden_response=None,      # set to golden answer for side-by-side reasoning
 )
-print(scores)  # {'sentiment': 8.0, 'hallucination': 10.0}
+print(scores)  # {'llm_judge_sentiment': 0.8, 'llm_judge_hallucination': 1.0}
 ```
 
 ### Deterministic Replay

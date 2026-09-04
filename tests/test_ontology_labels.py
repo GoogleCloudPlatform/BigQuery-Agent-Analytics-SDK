@@ -154,9 +154,7 @@ class TestOntologyMaterializerLabels:
 
   def test_load_table_from_json_labeled(self):
     """Load jobs support labels via LoadJobConfig — assert the
-
-    batch-load path stamps feature=ontology-build on the LoadJobConfig.
-    """
+    batch-load path stamps feature=ontology-build on the LoadJobConfig."""
     mock_bq = _mock_bq_client()
     mat = OntologyMaterializer(
         project_id="p",
@@ -178,10 +176,8 @@ class TestOntologyMaterializerLabels:
     assert labels.get("sdk_feature") == "ontology-build"
 
   def test_insert_from_staging_labeled(self):
-    """The INSERT INTO ...
-
-    SELECT that follows the staging load also gets a labeled QueryJobConfig.
-    """
+    """The INSERT INTO ... SELECT that follows the staging load also
+    gets a labeled QueryJobConfig."""
     mock_bq = _mock_bq_client()
     mat = OntologyMaterializer(
         project_id="p",

@@ -21,7 +21,12 @@ from unittest.mock import patch
 import pytest
 
 from bigquery_agent_analytics.evaluators import _parse_json_from_text
+from bigquery_agent_analytics.evaluators import AI_GENERATE_JUDGE_BATCH_QUERY
+from bigquery_agent_analytics.evaluators import DEFAULT_ENDPOINT
 from bigquery_agent_analytics.evaluators import EvaluationReport
+from bigquery_agent_analytics.evaluators import LLM_JUDGE_BATCH_QUERY
+from bigquery_agent_analytics.evaluators import LLMAsJudge
+from bigquery_agent_analytics.evaluators import SESSION_SUMMARY_QUERY
 from bigquery_agent_analytics.evaluators import SessionScore
 from bigquery_agent_analytics.system_evaluator import CodeEvaluator
 from bigquery_agent_analytics.system_evaluator import SystemEvaluator
@@ -98,13 +103,6 @@ class TestSystemEvaluator:
     score = evaluator.evaluate_session({"session_id": "s1"})
     assert "a" in score.scores
     assert "b" in score.scores
-
-  def test_code_evaluator_alias(self):
-    # Option (a): CodeEvaluator is a pure alias, so it emits "system_evaluator"
-    # as its name by default, and factories are unaffected.
-    assert CodeEvaluator is SystemEvaluator
-    assert CodeEvaluator().name == "system_evaluator"
-    assert CodeEvaluator.latency().name == "latency_evaluator"
 
 
 class TestSystemEvaluatorPrebuilt:
@@ -202,7 +200,7 @@ class TestPrebuiltRawBudgetBoundaries:
 
   Prior implementation used normalized scores with a 0.5 pass cutoff,
   which caused every gate to effectively fire at ``budget / 2`` (e.g.
-  ``CodeEvaluator.latency(threshold_ms=5000)`` failed at observed >
+  ``SystemEvaluator.latency(threshold_ms=5000)`` failed at observed >
   2500 ms). These tests lock in the new raw-budget semantics and
   guard against regressions.
   """
@@ -341,6 +339,46 @@ class TestPrebuiltRawBudgetBoundaries:
     assert detail["passed"] is False
 
 
+class TestLLMAsJudgePrebuilt:
+  """Tests for pre-built LLMAsJudge factories."""
+
+  def test_correctness_factory(self):
+    judge = LLMAsJudge.correctness(threshold=0.7)
+    assert judge.name == "correctness_judge"
+    assert len(judge._criteria) == 1
+    assert judge._criteria[0].name == "correctness"
+    assert judge._criteria[0].threshold == 0.7
+
+  def test_hallucination_factory(self):
+    judge = LLMAsJudge.hallucination()
+    assert judge.name == "hallucination_judge"
+    assert judge._criteria[0].name == "faithfulness"
+
+  def test_sentiment_factory(self):
+    judge = LLMAsJudge.sentiment()
+    assert judge.name == "sentiment_judge"
+    assert judge._criteria[0].name == "sentiment"
+
+  def test_custom_criterion(self):
+    judge = LLMAsJudge(name="custom")
+    judge.add_criterion(
+        name="helpfulness",
+        prompt_template="Rate helpfulness: {trace_text} {final_response}",
+        score_key="helpfulness",
+        threshold=0.6,
+    )
+    assert len(judge._criteria) == 1
+    assert judge._criteria[0].name == "helpfulness"
+
+  def test_chaining(self):
+    judge = (
+        LLMAsJudge(name="multi")
+        .add_criterion("a", "p1 {trace_text} {final_response}", "a")
+        .add_criterion("b", "p2 {trace_text} {final_response}", "b")
+    )
+    assert len(judge._criteria) == 2
+
+
 class TestEvaluationReport:
   """Tests for EvaluationReport class."""
 
@@ -405,6 +443,57 @@ class TestParseJson:
     assert _parse_json_from_text("no json here") is None
 
 
+class TestDefaultEndpoint:
+  """Tests for DEFAULT_ENDPOINT constant."""
+
+  def test_default_endpoint_value(self):
+    assert DEFAULT_ENDPOINT == "gemini-2.5-flash"
+
+
+class TestAIGenerateJudgeBatchQuery:
+  """Tests for the AI.GENERATE judge batch query template."""
+
+  def test_contains_ai_generate(self):
+    assert "AI.GENERATE" in AI_GENERATE_JUDGE_BATCH_QUERY
+
+  def test_contains_output_schema(self):
+    assert "output_schema" in AI_GENERATE_JUDGE_BATCH_QUERY
+
+  def test_contains_endpoint_placeholder(self):
+    assert "{endpoint}" in AI_GENERATE_JUDGE_BATCH_QUERY
+
+  def test_contains_score_and_justification(self):
+    assert "score INT64" in AI_GENERATE_JUDGE_BATCH_QUERY
+    assert "justification STRING" in AI_GENERATE_JUDGE_BATCH_QUERY
+
+  def test_does_not_contain_ml_generate_text(self):
+    assert "ML.GENERATE_TEXT" not in AI_GENERATE_JUDGE_BATCH_QUERY
+
+  def test_legacy_template_uses_ml_generate_text(self):
+    assert "ML.GENERATE_TEXT" in LLM_JUDGE_BATCH_QUERY
+    assert "ml_generate_text_result" in LLM_JUDGE_BATCH_QUERY
+
+
+class TestSessionSummaryQuery:
+  """Tests for SESSION_SUMMARY_QUERY token fields."""
+
+  def test_contains_input_tokens(self):
+    assert "input_tokens" in SESSION_SUMMARY_QUERY
+
+  def test_contains_output_tokens(self):
+    assert "output_tokens" in SESSION_SUMMARY_QUERY
+
+  def test_contains_total_tokens(self):
+    assert "total_tokens" in SESSION_SUMMARY_QUERY
+
+  def test_contains_cached_tokens(self):
+    assert "cached_tokens" in SESSION_SUMMARY_QUERY
+    assert "cached_content_token_count" in SESSION_SUMMARY_QUERY
+
+  def test_contains_cache_telemetry_events(self):
+    assert "cache_telemetry_events" in SESSION_SUMMARY_QUERY
+
+
 class TestTokenEfficiencyPrebuilt:
   """Tests for SystemEvaluator.token_efficiency() preset."""
 
@@ -453,6 +542,205 @@ class TestTokenEfficiencyPrebuilt:
     # Boundary is inclusive (observed <= budget).
     assert score.scores["token_efficiency"] == 1.0
     assert score.passed is True
+
+
+class TestContextCacheHitRatePrebuilt:
+  """Tests for SystemEvaluator.context_cache_hit_rate() preset."""
+
+  def test_warm_cache_passes(self):
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    score = evaluator.evaluate_session(
+        {
+            "session_id": "s1",
+            "input_tokens": 1000,
+            "cached_tokens": 950,
+            "cache_telemetry_events": 2,
+        }
+    )
+    assert score.scores["context_cache_hit_rate"] == pytest.approx(0.95)
+    assert score.passed is True
+    detail = score.details["metric_context_cache_hit_rate"]
+    assert detail["observed"] == pytest.approx(0.95)
+    assert detail["budget"] == pytest.approx(0.5)
+    assert detail["cached_tokens"] == 950
+    assert detail["input_tokens"] == 1000
+    assert detail["cache_telemetry_events"] == 2
+    assert detail["cache_state"] == "warm"
+
+  def test_cold_cache_fails(self):
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    score = evaluator.evaluate_session(
+        {
+            "session_id": "s1",
+            "input_tokens": 1000,
+            "cached_tokens": 50,
+            "cache_telemetry_events": 1,
+        }
+    )
+    assert score.scores["context_cache_hit_rate"] == pytest.approx(0.05)
+    assert score.passed is False
+    detail = score.details["metric_context_cache_hit_rate"]
+    assert detail["observed"] == pytest.approx(0.05)
+    assert detail["cache_state"] == "cold_start"
+
+  def test_partial_cache_at_threshold_passes(self):
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    score = evaluator.evaluate_session(
+        {
+            "session_id": "s1",
+            "input_tokens": 1000,
+            "cached_tokens": 500,
+            "cache_telemetry_events": 1,
+        }
+    )
+    assert score.scores["context_cache_hit_rate"] == pytest.approx(0.5)
+    assert score.passed is True
+    detail = score.details["metric_context_cache_hit_rate"]
+    assert detail["cache_state"] == "partial"
+
+  def test_missing_cache_telemetry_passes_by_default(self):
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    score = evaluator.evaluate_session(
+        {
+            "session_id": "s1",
+            "input_tokens": 1000,
+            "cached_tokens": 0,
+            "cache_telemetry_events": 0,
+        }
+    )
+    assert score.scores["context_cache_hit_rate"] == 1.0
+    assert score.passed is True
+    detail = score.details["metric_context_cache_hit_rate"]
+    assert detail["observed"] is None
+    assert detail["cache_state"] == "no_cache_telemetry"
+
+  def test_missing_cache_telemetry_can_fail(self):
+    evaluator = SystemEvaluator.context_cache_hit_rate(
+        min_hit_rate=0.5,
+        fail_on_missing_telemetry=True,
+    )
+    score = evaluator.evaluate_session(
+        {
+            "session_id": "s1",
+            "input_tokens": 1000,
+            "cached_tokens": 0,
+            "cache_telemetry_events": 0,
+        }
+    )
+    assert score.scores["context_cache_hit_rate"] == 0.0
+    assert score.passed is False
+    detail = score.details["metric_context_cache_hit_rate"]
+    assert detail["observed"] is None
+    assert detail["cache_state"] == "no_cache_telemetry"
+
+  def test_true_zero_cached_tokens_is_cold_start(self):
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    score = evaluator.evaluate_session(
+        {
+            "session_id": "s1",
+            "input_tokens": 1000,
+            "cached_tokens": 0,
+            "cache_telemetry_events": 1,
+        }
+    )
+    assert score.scores["context_cache_hit_rate"] == 0.0
+    assert score.passed is False
+    detail = score.details["metric_context_cache_hit_rate"]
+    assert detail["observed"] == 0.0
+    assert detail["cache_state"] == "cold_start"
+
+  def test_no_llm_input_passes(self):
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    score = evaluator.evaluate_session(
+        {
+            "session_id": "s1",
+            "input_tokens": 0,
+            "cached_tokens": 0,
+            "cache_telemetry_events": 0,
+        }
+    )
+    assert score.scores["context_cache_hit_rate"] == 1.0
+    assert score.passed is True
+    detail = score.details["metric_context_cache_hit_rate"]
+    assert detail["observed"] == 1.0
+    assert detail["cache_state"] == "no_llm_input"
+
+  def test_cached_tokens_clamps_above_input_tokens(self):
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    score = evaluator.evaluate_session(
+        {
+            "session_id": "s1",
+            "input_tokens": 1000,
+            "cached_tokens": 1200,
+            "cache_telemetry_events": 1,
+        }
+    )
+    assert score.scores["context_cache_hit_rate"] == 1.0
+    assert score.passed is True
+    detail = score.details["metric_context_cache_hit_rate"]
+    assert detail["observed"] == 1.0
+    assert detail["cache_state"] == "warm"
+
+  def test_non_numeric_cached_tokens_fall_back_to_zero(self):
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    score = evaluator.evaluate_session(
+        {
+            "session_id": "s1",
+            "input_tokens": 1000,
+            "cached_tokens": {"bad": "shape"},
+            "cache_telemetry_events": 1,
+        }
+    )
+    assert score.scores["context_cache_hit_rate"] == 0.0
+    assert score.passed is False
+    detail = score.details["metric_context_cache_hit_rate"]
+    assert detail["observed"] == 0.0
+    assert detail["cache_state"] == "cold_start"
+
+  def test_legacy_cached_tokens_without_telemetry_count_is_observed(self):
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    score = evaluator.evaluate_session(
+        {
+            "session_id": "s1",
+            "input_tokens": 1000,
+            "cached_tokens": 600,
+        }
+    )
+    assert score.scores["context_cache_hit_rate"] == pytest.approx(0.6)
+    assert score.passed is True
+    detail = score.details["metric_context_cache_hit_rate"]
+    assert detail["observed"] == pytest.approx(0.6)
+    assert detail["cache_telemetry_events"] == 0
+
+  def test_invalid_cache_state_thresholds_raise(self):
+    with pytest.raises(ValueError, match="cold_start_rate"):
+      SystemEvaluator.context_cache_hit_rate(
+          cold_start_rate=0.9,
+          warm_rate=0.1,
+      )
+
+  def test_invalid_min_hit_rate_negative_raises(self):
+    with pytest.raises(ValueError, match="min_hit_rate"):
+      SystemEvaluator.context_cache_hit_rate(min_hit_rate=-0.1)
+
+  def test_invalid_min_hit_rate_above_one_raises(self):
+    with pytest.raises(ValueError, match="min_hit_rate"):
+      SystemEvaluator.context_cache_hit_rate(min_hit_rate=1.1)
+
+  def test_string_min_hit_rate_is_coerced(self):
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate="0.5")
+    score = evaluator.evaluate_session(
+        {
+            "session_id": "s1",
+            "input_tokens": 1000,
+            "cached_tokens": 950,
+            "cache_telemetry_events": 1,
+        }
+    )
+    assert score.passed is True
+    detail = score.details["metric_context_cache_hit_rate"]
+    assert detail["budget"] == pytest.approx(0.5)
+    assert detail["threshold"] == pytest.approx(0.5)
 
 
 class TestCostPerSessionPrebuilt:
@@ -563,3 +851,31 @@ class TestTTFTPrebuilt:
   def test_evaluator_name(self):
     evaluator = SystemEvaluator.ttft()
     assert evaluator.name == "ttft_evaluator"
+
+
+class TestSessionSummaryQueryTTFT:
+  """Tests for avg_ttft_ms and hitl_events in SESSION_SUMMARY_QUERY."""
+
+  def test_contains_avg_ttft_ms(self):
+    assert "avg_ttft_ms" in SESSION_SUMMARY_QUERY
+
+  def test_contains_hitl_events(self):
+    assert "hitl_events" in SESSION_SUMMARY_QUERY
+
+  def test_contains_time_to_first_token(self):
+    assert "time_to_first_token_ms" in SESSION_SUMMARY_QUERY
+
+
+class TestCodeEvaluatorAlias:
+  """Regression tests for CodeEvaluator alias behavior."""
+
+  def test_alias_identity(self):
+    assert CodeEvaluator is SystemEvaluator
+
+  def test_default_name(self):
+    assert CodeEvaluator().name == "system_evaluator"
+    assert SystemEvaluator().name == "system_evaluator"
+
+  def test_prebuilt_isinstance(self):
+    evaluator = CodeEvaluator.latency()
+    assert isinstance(evaluator, CodeEvaluator)

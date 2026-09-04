@@ -48,7 +48,7 @@ def serialize(obj: Any) -> Any:
 
   Args:
       obj: An SDK return value -- ``Trace``, ``EvaluationReport``,
-        ``InsightsReport``, ``DriftReport``, plain ``dict``, etc.
+          ``InsightsReport``, ``DriftReport``, plain ``dict``, etc.
 
   Returns:
       A JSON-safe Python object (dict, list, str, int, float, bool,

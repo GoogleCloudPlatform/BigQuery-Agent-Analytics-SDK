@@ -42,8 +42,8 @@ class PromptAdapter(ABC):
 
     Args:
         text: The full prompt text.
-        version: The current version number (the new version will be ``version +
-          1``).
+        version: The current version number (the new version will be
+            ``version + 1``).
         summary: A short description of what changed.
 
     Returns:

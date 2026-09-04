@@ -93,9 +93,10 @@ class BizNode:
   Attributes:
       span_id: The span from which this entity was extracted.
       session_id: Session that produced this entity.
-      node_type: Entity category (e.g. "Product", "Targeting", "Campaign",
-        "Budget").
-      node_value: Entity value (e.g. "Yahoo Homepage", "Millennials", "$8,000").
+      node_type: Entity category (e.g. "Product", "Targeting",
+          "Campaign", "Budget").
+      node_value: Entity value (e.g. "Yahoo Homepage",
+          "Millennials", "$8,000").
       confidence: Extraction confidence score (0.0-1.0).
       metadata: Additional extraction metadata.
   """
@@ -122,7 +123,7 @@ class DecisionPoint:
       session_id: Session that contains this decision.
       span_id: The span where the decision was made.
       decision_type: Category of decision (e.g. "audience_selection",
-        "placement_selection", "budget_allocation").
+          "placement_selection", "budget_allocation").
       description: Human-readable description of the decision.
       timestamp: When the decision was made.
       metadata: Additional decision metadata.
@@ -148,8 +149,8 @@ class Candidate:
       name: Candidate name/label.
       score: Evaluation score (0.0-1.0).
       status: "SELECTED" or "DROPPED".
-      rejection_rationale: Why the candidate was dropped (required for DROPPED
-        candidates, supports EU audit compliance).
+      rejection_rationale: Why the candidate was dropped (required for
+          DROPPED candidates, supports EU audit compliance).
       properties: Additional candidate properties (e.g. reach, cost).
   """
 
@@ -170,8 +171,8 @@ class WorldChangeAlert(BaseModel):
       biz_node: The business entity that changed.
       original_state: State at the time the agent evaluated it.
       current_state: Current state.
-      drift_type: Type of drift (e.g. "unavailable", "price_changed",
-        "inventory_depleted").
+      drift_type: Type of drift (e.g. "unavailable",
+          "price_changed", "inventory_depleted").
       severity: Drift severity (0.0-1.0).
       recommendation: Suggested action.
   """
@@ -1037,11 +1038,11 @@ class ContextGraphManager:
     if ep.count(".") >= 2:
       raise ValueError(
           f"Legacy BQ ML model reference '{ep}' is not supported "
-          "for AI.GENERATE. Use a Vertex AI model name "
-          "(e.g. 'gemini-2.5-flash') or a full endpoint URL."
+          f"for AI.GENERATE. Use a Vertex AI model name "
+          f"(e.g. 'gemini-2.5-flash') or a full endpoint URL."
       )
     return (
-        "https://aiplatform.googleapis.com/v1/projects/"
+        f"https://aiplatform.googleapis.com/v1/projects/"
         f"{self.project_id}/locations/global/publishers/google/"
         f"models/{ep}"
     )
@@ -1064,8 +1065,8 @@ class ContextGraphManager:
 
     Args:
         session_ids: Sessions to extract entities from.
-        use_ai_generate: Whether to use BigQuery AI.GENERATE (server-side) for
-          extraction.
+        use_ai_generate: Whether to use BigQuery AI.GENERATE
+            (server-side) for extraction.
 
     Returns:
         List of extracted BizNode objects.
@@ -1324,7 +1325,7 @@ class ContextGraphManager:
     self._delete_biz_nodes_for_sessions(session_ids)
 
     table_ref = (
-        f"{self.project_id}.{self.dataset_id}.{self.config.biz_nodes_table}"
+        f"{self.project_id}.{self.dataset_id}" f".{self.config.biz_nodes_table}"
     )
 
     return self._append_rows_via_load_job(
@@ -1435,8 +1436,8 @@ class ContextGraphManager:
 
     Args:
         graph_name: Override the default graph name.
-        include_decisions: If True, uses the extended DDL with DecisionPoint and
-          CandidateNode tables.
+        include_decisions: If True, uses the extended DDL with
+            DecisionPoint and CandidateNode tables.
 
     Returns:
         True if successful.
@@ -1526,14 +1527,14 @@ class ContextGraphManager:
     BizNode reasoning-chain query.
 
     Args:
-        decision_event_type: The terminal decision event type (used only in
-          BizNode fallback path).
-        biz_entity: Optional specific entity to explain (used only in BizNode
-          fallback path).
-        session_id: Session to query decision data for. When provided, uses the
-          EU audit GQL path.
-        decision_type: Optional filter for decision type (e.g.
-          "audience_selection").
+        decision_event_type: The terminal decision event type
+            (used only in BizNode fallback path).
+        biz_entity: Optional specific entity to explain
+            (used only in BizNode fallback path).
+        session_id: Session to query decision data for.
+            When provided, uses the EU audit GQL path.
+        decision_type: Optional filter for decision type
+            (e.g. "audience_selection").
         include_dropped: Include dropped candidates in results.
         graph_name: Override graph name.
         max_hops: Override max causal hops.
@@ -1917,10 +1918,11 @@ class ContextGraphManager:
 
     Args:
         session_id: The session to check.
-        current_state_fn: A callable that takes a BizNode and returns a dict
-          with keys ``available`` (bool), ``current_value`` (str), and
-          optionally ``drift_type`` (str).  If None, no drift checks are
-          performed and a safe report is returned with the entity count.
+        current_state_fn: A callable that takes a BizNode and returns
+            a dict with keys ``available`` (bool), ``current_value``
+            (str), and optionally ``drift_type`` (str).  If None,
+            no drift checks are performed and a safe report is
+            returned with the entity count.
 
     Returns:
         WorldChangeReport with alerts for any detected drift.
@@ -1998,7 +2000,7 @@ class ContextGraphManager:
         "dataset": self.dataset_id,
         "decision_points_table": self.config.decision_points_table,
         "candidates_table": self.config.candidates_table,
-        "made_decision_edges_table": self.config.made_decision_edges_table,
+        "made_decision_edges_table": (self.config.made_decision_edges_table),
         "candidate_edges_table": self.config.candidate_edges_table,
     }
     for ddl_template in (
@@ -2248,7 +2250,8 @@ class ContextGraphManager:
       # The CandidateNode KEY is candidate_id; dedupe before the load.
       cand_rows = _dedupe_rows_by_key(cand_rows, "candidate_id")
       cand_table = (
-          f"{self.project_id}.{self.dataset_id}.{self.config.candidates_table}"
+          f"{self.project_id}.{self.dataset_id}"
+          f".{self.config.candidates_table}"
       )
       if not self._append_rows_via_load_job(
           cand_table, cand_rows, feature_label="candidates"
@@ -2279,7 +2282,7 @@ class ContextGraphManager:
         "dataset": self.dataset_id,
         "decision_points_table": self.config.decision_points_table,
         "candidates_table": self.config.candidates_table,
-        "made_decision_edges_table": self.config.made_decision_edges_table,
+        "made_decision_edges_table": (self.config.made_decision_edges_table),
         "candidate_edges_table": self.config.candidate_edges_table,
     }
     for tmpl in (
@@ -2331,7 +2334,7 @@ class ContextGraphManager:
         "dataset": self.dataset_id,
         "decision_points_table": self.config.decision_points_table,
         "candidates_table": self.config.candidates_table,
-        "made_decision_edges_table": self.config.made_decision_edges_table,
+        "made_decision_edges_table": (self.config.made_decision_edges_table),
         "candidate_edges_table": self.config.candidate_edges_table,
     }
 
@@ -2566,8 +2569,8 @@ class ContextGraphManager:
     Args:
         session_id: Session to export.
         include_dropped: If False, only returns selected candidates.
-        format: Output format — ``"dict"`` (default) returns a list of dicts,
-          ``"json"`` returns a JSON string.
+        format: Output format — ``"dict"`` (default) returns a list
+            of dicts, ``"json"`` returns a JSON string.
 
     Returns:
         List of dicts (or JSON string if format="json") with
@@ -2629,8 +2632,8 @@ class ContextGraphManager:
         session_ids: Sessions to include.
         graph_name: Override graph name.
         use_ai_generate: Use AI.GENERATE for extraction.
-        include_decisions: Also extract and store decision semantics
-          (DecisionPoints, Candidates, edges).
+        include_decisions: Also extract and store decision
+            semantics (DecisionPoints, Candidates, edges).
 
     Returns:
         Dict with results of each step.

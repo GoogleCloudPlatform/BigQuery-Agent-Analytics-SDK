@@ -64,7 +64,8 @@ class EvalValidator:
 
     Args:
         suite: The eval suite to validate.
-        pass_history: Optional pass/fail history for saturation detection.
+        pass_history: Optional pass/fail history for
+            saturation detection.
 
     Returns:
         List of ValidationWarning instances.

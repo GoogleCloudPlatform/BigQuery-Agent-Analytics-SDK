@@ -30,6 +30,8 @@ import logging
 import os
 from typing import Any
 
+from google.cloud import bigquery
+
 from bigquery_agent_analytics import TraceFilter
 from bigquery_agent_analytics._deploy_runtime import build_client_from_context
 from bigquery_agent_analytics._deploy_runtime import resolve_client_options
@@ -43,7 +45,6 @@ from bigquery_agent_analytics._streaming_evaluation import STREAMING_PROCESSOR_N
 from bigquery_agent_analytics._streaming_evaluation import STREAMING_RESULTS_TABLE
 from bigquery_agent_analytics._streaming_evaluation import STREAMING_RUNS_TABLE
 from bigquery_agent_analytics._streaming_evaluation import STREAMING_STATE_TABLE
-from google.cloud import bigquery
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 

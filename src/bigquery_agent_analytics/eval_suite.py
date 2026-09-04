@@ -206,8 +206,8 @@ class EvalSuite:
     """Computes health metrics for the suite.
 
     Args:
-        pass_history: Optional mapping of task_id to list of recent pass/fail
-          booleans for saturation detection.
+        pass_history: Optional mapping of task_id to list of
+            recent pass/fail booleans for saturation detection.
 
     Returns:
         SuiteHealth with metrics and warnings.

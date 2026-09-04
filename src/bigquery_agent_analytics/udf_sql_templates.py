@@ -289,7 +289,7 @@ _EVAL_SUMMARY_JSON = _UdfSpec(
         " output_cost_per_1k FLOAT64"
     ),
     return_type="STRING",
-    description="Compute all six scores and return a JSON STRING summary.",
+    description=("Compute all six scores and return a JSON STRING summary."),
     body=textwrap.dedent(
         """\
         import json

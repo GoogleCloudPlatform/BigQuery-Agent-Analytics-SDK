@@ -672,9 +672,7 @@ class TestCategoricalAIGenerateQuery:
 
   def test_scalar_function_shape(self):
     """AI.GENERATE is a scalar function — prompt is a positional arg,
-
-    result is accessed via .classifications on the returned STRUCT.
-    """
+    result is accessed via .classifications on the returned STRUCT."""
     assert ")).classifications" in CATEGORICAL_AI_GENERATE_QUERY
 
   def test_generation_config_format(self):
@@ -683,10 +681,8 @@ class TestCategoricalAIGenerateQuery:
     assert "maxOutputTokens" in CATEGORICAL_AI_GENERATE_QUERY
 
   def test_not_table_valued(self):
-    """Must NOT use the table-valued FROM ...
-
-    AI.GENERATE(...) AS result syntax — that form does not exist in BigQuery.
-    """
+    """Must NOT use the table-valued FROM ... AI.GENERATE(...) AS result
+    syntax — that form does not exist in BigQuery."""
     assert "FROM session_transcripts," not in CATEGORICAL_AI_GENERATE_QUERY
     assert ") AS result" not in CATEGORICAL_AI_GENERATE_QUERY
 
@@ -917,9 +913,7 @@ class TestClassifySessionsViaApi:
 
   def test_api_exception_per_session(self):
     """API failure for one session should produce parse errors for that
-
-    session but not crash the whole run.
-    """
+    session but not crash the whole run."""
     config = _make_config()
     transcripts = {"s1": "transcript1", "s2": "transcript2"}
 
@@ -946,9 +940,7 @@ class TestClassifySessionsViaApi:
 
   def test_import_error_propagates(self):
     """When google-genai is not installed, ImportError should propagate
-
-    so the caller can set the correct execution mode.
-    """
+    so the caller can set the correct execution mode."""
     config = _make_config()
     transcripts = {"s1": "transcript1"}
 
@@ -2055,9 +2047,7 @@ class TestMaxOutputTokens:
 
   def test_api_uses_config_value(self):
     """classify_sessions_via_api should pass config.max_output_tokens
-
-    to the Gemini API GenerateContentConfig.
-    """
+    to the Gemini API GenerateContentConfig."""
     import sys
 
     config = _make_config()
@@ -2105,9 +2095,7 @@ class TestFinishReasonLogging:
 
   def test_parse_error_logs_finish_reason(self):
     """When the API returns unparseable text, finish_reason should
-
-    be logged as a warning.
-    """
+    be logged as a warning."""
     config = _make_config()
     transcripts = {"s1": "USER: Hello"}
 
@@ -2414,9 +2402,7 @@ class TestRetryFailedSessions:
 
   def test_retry_partial_success(self):
     """When some sessions succeed and some fail, only the successful
-
-    ones should be returned.
-    """
+    ones should be returned."""
     client = self._make_client()
     config = _make_config()
     transcripts = {"s1": "text1", "s2": "text2"}
@@ -2469,9 +2455,7 @@ class TestRetryFailedSessions:
 
   def test_ai_generate_detects_null_classifications(self):
     """_categorical_ai_generate should detect NULL classifications
-
-    and trigger retry.
-    """
+    and trigger retry."""
     client = self._make_client()
     config = _make_config()
 

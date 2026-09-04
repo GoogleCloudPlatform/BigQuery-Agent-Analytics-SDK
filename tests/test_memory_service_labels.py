@@ -171,14 +171,12 @@ class TestVanillaClientWarnOnce:
 
 class TestBigQueryMemoryServiceWarnOnceAcrossChildren:
   """PR #27 review: `BigQueryMemoryService` copies the same vanilla
-
   bigquery.Client into three child objects plus self, and public
   methods dispatch through the children — each with its own
   `_warned_unlabeled_client` latch. Without coordination, the service
   can emit up to four separate warnings over its lifetime for a single
   vanilla-client injection. The service must emit exactly one warning
-  across all code paths for a given client.
-  """
+  across all code paths for a given client."""
 
   def _build_service_with_vanilla_client(self):
     vanilla = bigquery.Client(project="p", credentials=AnonymousCredentials())

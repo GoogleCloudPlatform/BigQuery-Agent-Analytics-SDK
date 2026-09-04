@@ -22,10 +22,8 @@ Pydantic model that fuses both.
 
 This module provides two converter functions:
 
-* ``graph_spec_from_ontology_binding`` -- forward: Ontology + Binding ->
-GraphSpec
-* ``graph_spec_to_ontology_binding`` -- reverse: GraphSpec -> (Ontology,
-Binding)
+* ``graph_spec_from_ontology_binding`` -- forward: Ontology + Binding -> GraphSpec
+* ``graph_spec_to_ontology_binding`` -- reverse: GraphSpec -> (Ontology, Binding)
 
 Usage::
 
@@ -165,8 +163,8 @@ def _build_property_specs(
       raise ValueError(
           f'Property {prop.name!r} has a derived expression '
           f'(expr={prop.expr!r}). The SDK runtime does not support '
-          'derived properties; they would be treated as stored '
-          'columns. Remove the expr or handle it before conversion.'
+          f'derived properties; they would be treated as stored '
+          f'columns. Remove the expr or handle it before conversion.'
       )
     sdk_type = _PROPERTY_TYPE_TO_SDK.get(prop.type, 'string')
     # Use the binding column name if available; fall back to ontology name.
@@ -225,8 +223,8 @@ def graph_spec_from_ontology_binding(
       ontology: Validated upstream Ontology.
       binding: Validated upstream Binding (must reference this ontology).
       lineage_config: Optional dict mapping relationship names to
-        LineageEdgeConfig for cross-session lineage edges (SDK-specific
-        extension not present in upstream binding model).
+          LineageEdgeConfig for cross-session lineage edges (SDK-specific
+          extension not present in upstream binding model).
 
   Returns:
       A GraphSpec that can be passed to OntologyGraphManager,
@@ -249,12 +247,12 @@ def graph_spec_from_ontology_binding(
     abstract_count = len(ontology.entities)
     raise ValueError(
         f'Ontology {ontology.ontology!r} has {abstract_count} abstract '
-        'entities but no concrete entities. The SDK runtime requires '
-        'at least one concrete (bindable) entity. Abstract entities '
-        'typically come from SKOS-only concepts or ontologies that '
-        'declare structure without physical realization; drop '
-        '``abstract: true`` and give at least one entity keys + a '
-        'binding to use the SDK.'
+        f'entities but no concrete entities. The SDK runtime requires '
+        f'at least one concrete (bindable) entity. Abstract entities '
+        f'typically come from SKOS-only concepts or ontologies that '
+        f'declare structure without physical realization; drop '
+        f'``abstract: true`` and give at least one entity keys + a '
+        f'binding to use the SDK.'
     )
 
   # Index ontology elements by name for O(1) lookup.
@@ -425,11 +423,11 @@ def graph_spec_to_ontology_binding(
       spec: The SDK GraphSpec to convert.
       ontology_name: Name for the generated Ontology document.
       binding_name: Name for the generated Binding document.
-      project_id: BigQuery project for the binding target. If empty, the project
-        is inferred from the first entity binding source (first dot-separated
-        segment of a fully-qualified reference).
-      dataset_id: BigQuery dataset for the binding target. If empty, the dataset
-        is inferred similarly.
+      project_id: BigQuery project for the binding target. If empty,
+          the project is inferred from the first entity binding source
+          (first dot-separated segment of a fully-qualified reference).
+      dataset_id: BigQuery dataset for the binding target. If empty,
+          the dataset is inferred similarly.
 
   Returns:
       A ``(Ontology, Binding, lineage_config)`` tuple. The

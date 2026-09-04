@@ -73,7 +73,7 @@ class TestSerializeTrace:
     assert isinstance(result, dict)
     assert result["trace_id"] == "t1"
     assert result["start_time"] == "2026-03-12T10:00:00+00:00"
-    assert result["spans"][0]["timestamp"] == "2026-03-12T10:00:00+00:00"
+    assert result["spans"][0]["timestamp"] == ("2026-03-12T10:00:00+00:00")
     # Must be json-safe
     json.dumps(result)
 

@@ -154,7 +154,6 @@ class TestGraphSpecAbstractFilter:
 
   def test_duplicate_endpoint_abstract_relationships_defense_in_depth(self):
     """Two abstract rels with the same name but different endpoints must
-
     not collapse under ``{r.name: r}`` last-write-wins.
 
     This scenario is only reachable by programmatic construction that
@@ -194,7 +193,6 @@ class TestGraphSpecAbstractFilter:
 
   def test_programmatic_binding_targeting_abstract_entity_rejected(self):
     """Programmatic Binding that targets an abstract entity must be
-
     rejected by the adapter with the same ``not defined`` error used
     when the name doesn't exist at all.
 
@@ -229,7 +227,6 @@ class TestGraphSpecAbstractFilter:
 
   def test_programmatic_binding_targeting_abstract_relationship_rejected(self):
     """Symmetric test: a programmatic Binding targeting an abstract
-
     relationship must be rejected by the adapter, not silently
     succeed by reading a collapsed name-map entry.
     """
@@ -332,10 +329,9 @@ class TestResolveAbstractFilter:
     assert "no concrete entities" in msg.lower()
 
   def test_duplicate_endpoint_abstract_relationships_defense_in_depth(self):
-    """Symmetric defense-in-depth test for resolve().
-
-    See the twin test above for context — abstract rels with duplicate names
-    across endpoints must not collapse in the name-index map.
+    """Symmetric defense-in-depth test for resolve(). See the twin test
+    above for context — abstract rels with duplicate names across
+    endpoints must not collapse in the name-index map.
     """
     ontology = Ontology(
         ontology="test",
@@ -366,7 +362,6 @@ class TestResolveAbstractFilter:
 
   def test_programmatic_binding_targeting_abstract_entity_rejected(self):
     """Symmetric: programmatic Binding targeting an abstract entity
-
     must raise the ``not defined`` error in ``resolve()`` too.
     """
     ontology = Ontology(
@@ -396,7 +391,6 @@ class TestResolveAbstractFilter:
 
   def test_programmatic_binding_targeting_abstract_relationship_rejected(self):
     """Symmetric: programmatic Binding targeting an abstract
-
     relationship must raise the ``not defined`` error in ``resolve()``
     too.
     """
@@ -436,7 +430,6 @@ class TestResolveAbstractFilter:
 
   def test_concrete_child_extends_abstract_parent_inherits_keys(self):
     """A concrete entity may extend an abstract parent and inherit its
-
     keys and properties. Upstream validation allows this shape; the
     adapter must preserve it.
 

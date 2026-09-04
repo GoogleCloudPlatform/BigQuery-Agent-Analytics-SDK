@@ -37,11 +37,11 @@ class EvalRunner:
   """Runs eval cases against an agent and scores with an LLM judge.
 
   Args:
-      agent_factory: Callable that takes a prompt string and returns an ADK
-        Agent.
+      agent_factory: Callable that takes a prompt string and returns
+          an ADK Agent.
       model_id: Gemini model for the LLM judge.
-      judge_prompt: Template for the judge prompt. Must contain ``{question}``
-        and ``{response}`` placeholders.
+      judge_prompt: Template for the judge prompt. Must contain
+          ``{question}`` and ``{response}`` placeholders.
   """
 
   def __init__(
@@ -135,9 +135,9 @@ class EvalRunner:
             f"Tools called: {', '.join(tools_called) or 'none'}"
         )
         tool_fail_rule = (
-            "\nA response FAILS if the expected tool "
+            f"\nA response FAILS if the expected tool "
             f"'{expected_tool}' was not called, as the answer "
-            "may be hallucinated without tool grounding."
+            f"may be hallucinated without tool grounding."
         )
     else:
       tool_check = ""

@@ -19,6 +19,7 @@ from __future__ import annotations
 from flask import Flask
 from flask import jsonify
 from flask import request
+
 from worker import handle_scheduled_run
 
 app = Flask(__name__)

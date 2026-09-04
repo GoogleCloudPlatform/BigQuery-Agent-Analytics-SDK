@@ -209,17 +209,19 @@ class BigQueryAIClient:
         project_id: Google Cloud project ID.
         dataset_id: BigQuery dataset ID.
         client: Optional BigQuery client.
-        text_model: Deprecated alias for *endpoint*. Kept for backward
-          compatibility.
+        text_model: Deprecated alias for *endpoint*. Kept for
+            backward compatibility.
         embedding_model: Legacy BQ ML model reference for
-          ``ML.GENERATE_EMBEDDING``.  When set to a fully-qualified model
-          reference (``project.dataset.model``), the legacy path is used.
-          Otherwise ``AI.EMBED`` with *embedding_endpoint* is preferred.
+            ``ML.GENERATE_EMBEDDING``.  When set to a fully-qualified
+            model reference (``project.dataset.model``), the legacy
+            path is used.  Otherwise ``AI.EMBED`` with
+            *embedding_endpoint* is preferred.
         location: BigQuery location.
-        endpoint: AI.GENERATE endpoint (default ``gemini-2.5-flash``).
+        endpoint: AI.GENERATE endpoint (default
+            ``gemini-2.5-flash``).
         connection_id: Optional BigQuery connection resource ID.
-        embedding_endpoint: Vertex AI endpoint for ``AI.EMBED`` (default
-          ``text-embedding-005``).
+        embedding_endpoint: Vertex AI endpoint for ``AI.EMBED``
+            (default ``text-embedding-005``).
     """
     self.project_id = project_id
     self.dataset_id = dataset_id
@@ -271,7 +273,8 @@ class BigQueryAIClient:
         temperature: Sampling temperature.
         max_tokens: Maximum output tokens.
         endpoint: Override the default endpoint for this call.
-        connection_id: Override the default connection for this call.
+        connection_id: Override the default connection for this
+            call.
 
     Returns:
         Generated text.
@@ -522,10 +525,10 @@ class EmbeddingSearchClient:
         source_table: Source events table.
         client: Optional BigQuery client.
         embedding_model: Legacy BQ ML model reference for
-          ``ML.GENERATE_EMBEDDING``.  When set, the legacy path is used.  Pass
-          ``None`` (default) to use ``AI.EMBED``.
-        embedding_endpoint: Vertex AI endpoint for ``AI.EMBED`` (default
-          ``text-embedding-005``).
+            ``ML.GENERATE_EMBEDDING``.  When set, the legacy path
+            is used.  Pass ``None`` (default) to use ``AI.EMBED``.
+        embedding_endpoint: Vertex AI endpoint for ``AI.EMBED``
+            (default ``text-embedding-005``).
     """
     self.project_id = project_id
     self.dataset_id = dataset_id
@@ -880,9 +883,9 @@ class AnomalyDetector:
         table_id: BigQuery table ID.
         client: Optional BigQuery client.
         use_legacy_anomaly_model: If True, uses the legacy
-          ``ML.DETECT_ANOMALIES`` path with a pre-trained ARIMA_PLUS model for
-          latency detection.  Defaults to False (uses ``AI.DETECT_ANOMALIES``
-          with built-in TimesFM).
+            ``ML.DETECT_ANOMALIES`` path with a pre-trained ARIMA_PLUS
+            model for latency detection.  Defaults to False (uses
+            ``AI.DETECT_ANOMALIES`` with built-in TimesFM).
     """
     self.project_id = project_id
     self.dataset_id = dataset_id
@@ -978,8 +981,8 @@ class AnomalyDetector:
 
     Args:
         since_hours: Hours of recent data to evaluate for anomalies.
-        training_days: Days of historical data for baseline (used by
-          ``AI.DETECT_ANOMALIES`` as the historical window).
+        training_days: Days of historical data for baseline (used
+            by ``AI.DETECT_ANOMALIES`` as the historical window).
 
     Returns:
         List of detected anomalies.
@@ -1372,9 +1375,10 @@ class BatchEvaluator:
         dataset_id: BigQuery dataset ID.
         table_id: BigQuery table ID.
         client: Optional BigQuery client.
-        eval_model: Deprecated alias for *endpoint*. Kept for backward
-          compatibility.
-        endpoint: AI.GENERATE endpoint (default ``gemini-2.5-flash``).
+        eval_model: Deprecated alias for *endpoint*. Kept for
+            backward compatibility.
+        endpoint: AI.GENERATE endpoint (default
+            ``gemini-2.5-flash``).
     """
     self.project_id = project_id
     self.dataset_id = dataset_id

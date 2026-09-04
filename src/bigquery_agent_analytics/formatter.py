@@ -52,7 +52,7 @@ def format_output(obj: Any, fmt: str = "json") -> str:
   if fmt == "table":
     return _format_table(obj)
   raise ValueError(
-      f"Unknown format: {fmt!r}. Expected 'json', 'text', or 'table'."
+      f"Unknown format: {fmt!r}. " f"Expected 'json', 'text', or 'table'."
   )
 
 

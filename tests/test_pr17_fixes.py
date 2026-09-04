@@ -83,7 +83,7 @@ class _MockRow(dict):
 def _make_mock_bq_client(rows=None):
   mock_client = MagicMock()
   mock_result = MagicMock()
-  mock_result.result.return_value = [_MockRow(r) for r in rows or []]
+  mock_result.result.return_value = [_MockRow(r) for r in (rows or [])]
   mock_client.query.return_value = mock_result
   return mock_client
 
@@ -193,7 +193,7 @@ class TestSemanticGroupingRouting:
         text_model="gemini-2.5-flash",
     )
 
-    assert result.details.get("grouping_mode") == "frequently_asked_fallback"
+    assert result.details.get("grouping_mode") == ("frequently_asked_fallback")
 
   def test_client_deep_analysis_passes_endpoint(self):
     """Client.deep_analysis passes self.endpoint to grouping."""

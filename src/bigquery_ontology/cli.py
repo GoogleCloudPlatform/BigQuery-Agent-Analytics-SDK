@@ -665,7 +665,9 @@ def scaffold_command(
                 "col": 0,
                 "rule": "cli-output-error",
                 "severity": "error",
-                "message": f"Output path exists and is not a directory: {out_path}",
+                "message": (
+                    f"Output path exists and is not a directory: {out_path}"
+                ),
             }
         ],
         as_json=json_output,

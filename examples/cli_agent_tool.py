@@ -164,5 +164,6 @@ if __name__ == "__main__":
   print("Example usage:")
   print("  result = check_health()")
   print(
-      '  result = evaluate_recent_sessions(evaluator="error_rate", last="24h")'
+      '  result = evaluate_recent_sessions(evaluator="error_rate",'
+      ' last="24h")'
   )

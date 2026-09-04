@@ -102,10 +102,10 @@ def compile_showcase_gql(
       project_id: GCP project ID.
       dataset_id: BigQuery dataset ID.
       graph_name: Override graph name (defaults to ``spec.name``).
-      relationship_name: Which relationship to traverse.  Defaults to the first
-        relationship in the spec.
-      session_filter: If True, adds a ``WHERE`` clause filtering by
-        ``@session_id`` parameter.
+      relationship_name: Which relationship to traverse.  Defaults
+          to the first relationship in the spec.
+      session_filter: If True, adds a ``WHERE`` clause filtering
+          by ``@session_id`` parameter.
 
   Returns:
       A GQL query string.
@@ -200,8 +200,8 @@ def compile_lineage_gql(
       dataset_id: BigQuery dataset ID.
       relationship_name: The lineage relationship to traverse.
       graph_name: Override graph name (defaults to ``spec.name``).
-      session_filter: If True, adds a ``WHERE`` clause filtering the current
-        (destination) node by ``@session_id``.
+      session_filter: If True, adds a ``WHERE`` clause filtering
+          the current (destination) node by ``@session_id``.
 
   Returns:
       A GQL query string.
@@ -221,7 +221,7 @@ def compile_lineage_gql(
     raise ValueError(
         f"Relationship {relationship_name!r} is not a self-edge "
         f"(from={rel.from_entity!r}, to={rel.to_entity!r}). "
-        "Lineage GQL requires from_entity == to_entity."
+        f"Lineage GQL requires from_entity == to_entity."
     )
 
   entity_map = {e.name: e for e in spec.entities}
@@ -315,21 +315,25 @@ def build_ontology_graph(
       session_ids: Sessions to extract from.
       project_id: GCP project ID.
       dataset_id: BigQuery dataset ID.
-      spec_path: [Deprecated] Path to the YAML graph spec. Use ``spec`` instead.
-      spec: A pre-loaded ``ResolvedGraph``. Preferred over ``spec_path``.
+      spec_path: [Deprecated] Path to the YAML graph spec. Use
+          ``spec`` instead.
+      spec: A pre-loaded ``ResolvedGraph``. Preferred over
+          ``spec_path``.
       env: Value for ``{{ env }}`` placeholder substitution.
       graph_name: Override the property graph name.
       table_id: Source telemetry table name.
       endpoint: AI.GENERATE model endpoint.
       use_ai_generate: If True, uses server-side AI extraction.
       location: BigQuery location.
-      skip_property_graph: When True, skip phase 5 (do not run ``CREATE OR
-        REPLACE PROPERTY GRAPH``). Use this when the caller owns their own
-        property-graph DDL and only wants the SDK to populate base tables. The
-        result dict reports ``property_graph_created=False`` with
-        ``skipped_reason="user_requested"`` and
-        ``property_graph_status="skipped:user_requested"``, which callers (and
-        the CLI) use to distinguish a deliberate skip from a creation failure.
+      skip_property_graph: When True, skip phase 5 (do not run
+          ``CREATE OR REPLACE PROPERTY GRAPH``). Use this when the
+          caller owns their own property-graph DDL and only wants
+          the SDK to populate base tables. The result dict reports
+          ``property_graph_created=False`` with
+          ``skipped_reason="user_requested"`` and
+          ``property_graph_status="skipped:user_requested"``, which
+          callers (and the CLI) use to distinguish a deliberate
+          skip from a creation failure.
 
   Returns:
       A dict with keys: ``spec``, ``graph``, ``tables_created``,

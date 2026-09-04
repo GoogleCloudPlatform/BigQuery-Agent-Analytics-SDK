@@ -201,7 +201,8 @@ def _hydrate_graph(
 
   Args:
       spec: The ``ResolvedGraph`` used for extraction.
-      raw_rows: List of dicts with ``session_id`` and ``graph_json`` keys.
+      raw_rows: List of dicts with ``session_id`` and
+          ``graph_json`` keys.
 
   Returns:
       A merged ``ExtractedGraph`` with all nodes and edges.
@@ -597,11 +598,11 @@ class OntologyGraphManager:
     if ep.count(".") >= 2:
       raise ValueError(
           f"Legacy BQ ML model reference '{ep}' is not supported "
-          "for AI.GENERATE. Use a Vertex AI model name "
-          "(e.g. 'gemini-2.5-flash') or a full endpoint URL."
+          f"for AI.GENERATE. Use a Vertex AI model name "
+          f"(e.g. 'gemini-2.5-flash') or a full endpoint URL."
       )
     return (
-        "https://aiplatform.googleapis.com/v1/projects/"
+        f"https://aiplatform.googleapis.com/v1/projects/"
         f"{self.project_id}/locations/global/publishers/google/"
         f"models/{ep}"
     )
@@ -613,8 +614,8 @@ class OntologyGraphManager:
     """Return the AI.GENERATE extraction SQL (for inspection).
 
     Args:
-        session_ids: Ignored (the SQL uses a query parameter). Included for API
-          symmetry.
+        session_ids: Ignored (the SQL uses a query parameter).
+            Included for API symmetry.
 
     Returns:
         The formatted SQL string.
@@ -1011,9 +1012,7 @@ class OntologyGraphManager:
     for idx, row in enumerate(rows):
       nodes.append(
           ExtractedNode(
-              node_id=(
-                  f"{row.get('session_id', '')}:{row.get('span_id', '')}:payload:{idx}"
-              ),
+              node_id=f"{row.get('session_id', '')}:{row.get('span_id', '')}:payload:{idx}",
               entity_name="raw_payload",
               labels=["raw_payload"],
               properties=[
@@ -1060,7 +1059,8 @@ def detect_lineage_edges(
   Args:
       current_graph: Graph extracted from the current session.
       current_session_id: The current session ID.
-      prior_graphs: Dict of ``{session_id: ExtractedGraph}`` for prior sessions.
+      prior_graphs: Dict of ``{session_id: ExtractedGraph}`` for
+          prior sessions.
       lineage_entity_types: Entity names to check for evolution.
       spec: ResolvedGraph for entity key lookups.
 
@@ -1122,7 +1122,7 @@ def detect_lineage_edges(
 
         rel_name = f"{entity_name}EvolvedFrom"
         edge_id = (
-            f"{current_session_id}:{rel_name}:{prior_session_id}:{key_str}"
+            f"{current_session_id}:{rel_name}:" f"{prior_session_id}:{key_str}"
         )
 
         lineage_edges.append(

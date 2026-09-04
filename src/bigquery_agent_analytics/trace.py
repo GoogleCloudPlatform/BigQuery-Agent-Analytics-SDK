@@ -433,8 +433,8 @@ def _parse_time_window(window: str) -> datetime:
   if not match:
     raise ValueError(
         f"Invalid time window: {window!r}. "
-        "Expected format: Xm, Xh, or Xd "
-        "(e.g. '30m', '1h', '7d')."
+        f"Expected format: Xm, Xh, or Xd "
+        f"(e.g. '30m', '1h', '7d')."
     )
   value = int(match.group(1))
   unit = match.group(2)
@@ -785,7 +785,7 @@ class TraceFilter:
       conditions.append("JSON_VALUE(attributes, '$.experiment_id') IS NULL")
     elif experiment_id is not None:
       conditions.append(
-          "JSON_VALUE(attributes, '$.experiment_id') = @experiment_id"
+          "JSON_VALUE(attributes, '$.experiment_id')" " = @experiment_id"
       )
       params.append(
           bigquery.ScalarQueryParameter(
@@ -807,7 +807,7 @@ class TraceFilter:
         param_key = f"label_key_{i}"
         param_val = f"label_val_{i}"
         conditions.append(
-            "JSON_VALUE(attributes,"
+            f"JSON_VALUE(attributes,"
             f" CONCAT('$.custom_tags.', @{param_key}))"
             f" = @{param_val}"
         )
@@ -848,7 +848,7 @@ class TraceFilter:
       conditions.append("JSON_VALUE(attributes, '$.root_agent_name') IS NULL")
     elif root_agent_name is not None:
       conditions.append(
-          "JSON_VALUE(attributes, '$.root_agent_name') = @root_agent_name"
+          "JSON_VALUE(attributes, '$.root_agent_name')" " = @root_agent_name"
       )
       params.append(
           bigquery.ScalarQueryParameter(
@@ -2734,11 +2734,12 @@ class Trace(_WeakrefableSlotted):
 
     Args:
         format: Render format. Currently supports "tree".
-        color: When ``True``, wrap error markers and warning markers in ANSI
-          color codes (red and yellow respectively). Default ``False`` emits
-          plain text suitable for any output target. Enable this in TTY contexts
-          (terminal sessions) for faster visual scanning of failures in large
-          traces.
+        color: When ``True``, wrap error markers and warning
+            markers in ANSI color codes (red and yellow
+            respectively). Default ``False`` emits plain text
+            suitable for any output target. Enable this in TTY
+            contexts (terminal sessions) for faster visual
+            scanning of failures in large traces.
 
     Returns:
         A string containing the rendered trace. Also printed

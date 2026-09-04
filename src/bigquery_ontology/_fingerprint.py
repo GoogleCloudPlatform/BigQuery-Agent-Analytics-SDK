@@ -48,8 +48,7 @@ out of sync.
 
 Serialization contract (pinned):
 
-- Input: ``BaseModel.model_dump(mode="json", by_alias=False,
-exclude_none=False)``.
+- Input: ``BaseModel.model_dump(mode="json", by_alias=False, exclude_none=False)``.
   ``mode="json"`` normalizes enums, datetimes, and Pydantic types to
   JSON-safe primitives so the hash is stable across Python versions.
   ``exclude_none=False`` keeps optional-but-declared fields in the
@@ -134,9 +133,10 @@ def compile_fingerprint(
   Args:
       ontology_fingerprint: ``fingerprint_model(ontology)`` output.
       binding_fingerprint: ``fingerprint_model(binding)`` output.
-      compiler_version: Version string of the compiler that produced the index
-        (e.g. ``"bigquery_ontology 0.2.1"``). Semver bumps with behavior changes
-        must flow through this field so the fingerprint invalidates old meta.
+      compiler_version: Version string of the compiler that produced
+          the index (e.g. ``"bigquery_ontology 0.2.1"``). Semver bumps
+          with behavior changes must flow through this field so the
+          fingerprint invalidates old meta.
 
   Returns:
       64 lowercase hex characters (256 bits).
@@ -167,7 +167,8 @@ def compile_id(
   Args:
       ontology_fingerprint: ``fingerprint_model(ontology)`` output.
       binding_fingerprint: ``fingerprint_model(binding)`` output.
-      compiler_version: Version string of the compiler that produced the index.
+      compiler_version: Version string of the compiler that produced
+          the index.
 
   Returns:
       12 lowercase hex characters — the first 12 chars of

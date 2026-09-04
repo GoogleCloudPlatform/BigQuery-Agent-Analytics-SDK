@@ -120,7 +120,7 @@ class TestClientBqClientFactory:
     assert returned.default_query_job_config.maximum_bytes_billed == (
         1_000_000_000
     )
-    assert returned.default_query_job_config.use_legacy_sql == False
+    assert returned.default_query_job_config.use_legacy_sql is False
     assert returned.default_query_job_config.labels == {"team": "search"}
 
   def test_mock_client_is_not_wrapped(self):
@@ -184,8 +184,7 @@ class TestQuerySiteLabels:
     evaluator = PerformanceEvaluator(project_id="proj", dataset_id="ds")
     client.evaluate(evaluator=evaluator)
 
-    # Multiple queries may fire (session summary + judge). At least one
-    # should be the judge query with eval-llm-judge + ai-generate.
+    # The selected trace reads carry the performance evaluation label.
     judge_calls = [
         c
         for c in mock_bq.query.call_args_list
