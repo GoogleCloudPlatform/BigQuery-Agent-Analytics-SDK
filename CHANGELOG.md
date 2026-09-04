@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **EvalBench CLI discoverability (#435)** — `bq-agent-sdk --help` lists
+  `evalbench-import`, `evalbench-failed-sessions`, and `evalbench-score`;
+  the installed `bq-agent-sdk` console script (`pyproject.toml`
+  `[project.scripts]`) is the surface after `pip install`. Tests pin the
+  help listing, the command registry, and the console-script mapping.
 - **Week 0 preregistration sealed (#435, PR #473)** — adopts the v4
   freeze-candidate as the sealed plan of record
   (`docs/week0_preregistration.md` and
