@@ -53,6 +53,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot, and the span sync rejects, before any row or binding DML, a
   span table already bound to another job, so a losing concurrent job
   stays unbound and simply retries with its own table.
+- **EvalBench CLI discoverability (#435)** — `bq-agent-sdk --help` lists
+  `evalbench-import`, `evalbench-failed-sessions`, and `evalbench-score`;
+  the installed `bq-agent-sdk` console script (`pyproject.toml`
+  `[project.scripts]`) is the surface after `pip install`. Tests pin the
+  help listing, the command registry, and the console-script mapping.
+- **Week 0 preregistration sealed (#435, PR #473)** — adopts the v4
+  freeze-candidate as the sealed plan of record
+  (`docs/week0_preregistration.md` and
+  `examples/fixtures/week0_real_preregistration.json`, `sealed: true`,
+  `freeze_candidate: false`, `clock_started: false`, sealed 2026-09-02 by
+  the D4 consumer). Fills the three numbers the freeze-candidate still
+  left as placeholders: the value gate is **≥50%** of completed,
+  non-investigator-adjudicated counterfactual investigations (applied to
+  completed investigations only if volume slips); the noisy-small-n
+  localization rule **fails** the gate when the point estimate clears but
+  the 95% CI spans zero (no localization, no uplift claim, week-6 judgment
+  may not override); and there is **no separate absolute hit@1 floor**
+  (the paired CI lower bound >0 and +10pp point uplift stay the hit@1
+  gates). Every other floor is unchanged from v4, partner / D4 / G1 stay
+  frozen, `tests/test_week0_real_freeze.py` pins the sealed values, and
+  **the six-week clock has still NOT started** — it starts only when the
+  first Week 1 snapshot job is kicked.
 - **Span-level G1 taxonomy on `span_id` (#466, parent #435)** — new
   `bigquery_agent_analytics.span_taxonomy` localizes the G1-frozen failure
   categories of a *failed* session onto the span where the failure is
@@ -235,6 +257,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ETag-conditional replace after re-reading the view and latest manifest,
   so concurrent imports cannot overwrite a newer pin or attach an older
   caller's policy to a newer generation.
+- **EvalBench versioned snapshots and failed-session contract (#435, slice 1; #97)**
+  — `EvalBenchRun.materialize()` publishes one immutable, versioned import
+  of an EvalBench job into BQAA-owned tables — `evalbench_agent_events`
+  (`agent_events` columns plus `job_id`, `import_version`),
+  `evalbench_scores_imported`, and `evalbench_import_manifest` — and never
+  writes the ADK plugin's production `agent_events` table (that name is
+  rejected before any BigQuery call). Rows are loaded into per-import
+  staging tables and published by a single multi-statement transaction
+  keyed on `(job_id, import_version)`, with the manifest re-checked inside
+  the transaction and a lock sentinel so two first-time imports of the same
+  version cannot both commit. The W0.4 failed-session contract lands with
+  it: `returncode == 0` means the scenario *completed*, not *passed*;
+  non-zero or non-numeric `returncode`, usable `stderr`, and `*_error`
+  columns surface as `status = 'ERROR'` plus `error_message` on the
+  terminal row, never as a clean `OK`. CLI: `bq-agent-sdk
+  evalbench-import`. Reference in `docs/evalbench.md`.
 
 ### Changed
 

@@ -13,12 +13,20 @@ three rounds of review; the issue body points here.
 **Code already landed (engineering slices, independent of Week 0):**
 
 - [PR #451](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/451)
-  — **merged** — `materialize()`: immutable, versioned EvalBench snapshots
-  plus the failed-session contract (W0.4). Reference: `docs/evalbench.md`.
+  — **merged** (`2459c0f`) — `materialize()`: immutable, versioned EvalBench
+  snapshots plus the failed-session contract (W0.4). Reference:
+  `docs/evalbench.md`.
 - [PR #452](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/452)
-  — open — `failed_sessions` view and the version-pinned consumer.
+  — **merged** (`2779b7e`) — `failed_sessions` view and the version-pinned
+  consumer.
 - [PR #453](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/453)
-  — open — `evalbench-score` CLI wrapping `Client.evaluate`.
+  — **merged** (`a18ee18`) — `evalbench-score` CLI wrapping `Client.evaluate`.
+- [PR #454](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/454)
+  — **merged** (`60c6dcf`) — this plan of record (v4); the issue body points
+  here.
+- [PR #455](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/455)
+  — **merged** (`47cc62e`) — recordable e2e demo of
+  import → failed-sessions → score.
 
 Those slices build the Week 1–2 substrate; they do not start the clock and do
 not touch the partner job, the D4 boundary, taxonomy content, or live traces.
@@ -50,11 +58,12 @@ Analytics — this SDK — piloting the ADK `support_agent` traces via EvalBench
 job `mvp-e2e-real-traces`), `docs/week0_d4_memo.md` (fail-closed, named
 consumer Hai-Yuan Cao only), and `docs/week0_g1_taxonomy.md`, with
 machine-readable copies in `examples/fixtures/week0_real_*.json`
-(`example: false`). The remaining Week 0 item is **preregistration
-execution**; `docs/week0_preregistration.md` carries the v4 floors as the
-freeze-candidate. **The six-week clock has still not started**: it starts
-only when the first Week 1 snapshot job is kicked, not at merge of the
-freeze.
+(`example: false`). **Preregistration is sealed** (2026-09-02, `docs/week0_preregistration.md`
+and `examples/fixtures/week0_real_preregistration.json`: `sealed: true`,
+`clock_started: false`). **The six-week clock has still not started**: it
+starts only when the first Week 1 snapshot job is kicked, not at this seal.
+D4 still forbids new BigQuery jobs and new live judge calls, so the clock
+does not start in this commit.
 
 An **example scenario pack** also exists
 (`examples/evalbench_week0_full_idea.md`, run with
@@ -126,10 +135,10 @@ they measurably need it, event-boundary evidence.
 |---|---|---|
 | 1–2 | **Source-consistent immutable snapshot**: require a completed/immutable source-job signal or one BigQuery snapshot timestamp across the `results`/`scores`/`configs` reads; record row counts and content fingerprints in the manifest — a changed fingerprint mints a new version, never a silent `v1` reproduction. `failed_sessions` view per the W0.4 contract. | **≥100 reproducible failed sessions**, pre-partitioned and disjoint: `P-tax` (40–60, taxonomy study), `P-dev` (localization headroom/development), `P-blind` (sealed final evaluation — frozen now, untouched until week 6), `P-ex` (notebook exemplars). |
 | 2–3 | Taxonomy v0.1 (seeded per week-0 item 1) + `unknown`; **two stability replicates** — named honestly: same judge model, so they measure consistency, not validity; validity comes from the labeler study. Results land in **`categorical_results`** with an added immutable **`evaluation_run_id`** binding source-snapshot version, taxonomy/prompt hashes, judge endpoint/model/execution mode, redaction-policy version, and D4 approval — no parallel four-column side table. A run is complete only when every expected row is validated. Session-level notebook ships. | Replicate agreement ≥80%; non-`unknown` coverage ≥80%. A miss invokes the **reserved revision week** (one revision, fresh labels, re-gate); a second miss **ends the MVP** with the analysis as the deliverable. |
-| 3–4 | Blinded two-labeler study on a **random** `P-tax` sample. **Counterfactual value study**: investigations **randomly assigned** from the failed set (not self-selected); each collaborator records the intended next action *before* opening the report and the action *after*; a **non-investigator adjudicates** whether the report changed, materially narrowed, or accelerated the action. | Human-human κ and classifier-vs-adjudicated κ: **point ≥0.6 and 95% CI lower bound ≥0.45** (decision rule, not reporting). Value gate: ≥ the preregistered fraction of investigations where the report *changed or narrowed* the action, adjudicated — a stated preference or unverified "acceptance" counts for nothing. |
+| 3–4 | Blinded two-labeler study on a **random** `P-tax` sample. **Counterfactual value study**: investigations **randomly assigned** from the failed set (not self-selected); each collaborator records the intended next action *before* opening the report and the action *after*; a **non-investigator adjudicates** whether the report changed, materially narrowed, or accelerated the action. | Human-human κ and classifier-vs-adjudicated κ: **point ≥0.6 and 95% CI lower bound ≥0.45** (decision rule, not reporting). Value gate (sealed, `docs/week0_preregistration.md`): ≥50% of completed, adjudicated counterfactual investigations where the report *changed or materially narrowed* the action — a stated preference or unverified "acceptance" counts for nothing. If investigation volume slips, the 50% applies to completed investigations only; it does not silently pass. |
 | 4 | **Localization go/no-go.** Need must be measurable: a majority of participating collaborators, backed by recorded investigations where the category report could not select a next action and boundary evidence would have. Headroom: the **total** first-error baseline (an output for every failed session) measured on `P-dev` against the preregistered margin. | Build only if classification passed, need is evidenced, and headroom exists. **New explicit branch:** classification passes but the value gate fails → no localization, no Part II productization funding; keep the analysis and investigate why the report didn't change actions. |
 | 4–5 | Internal boundary prototype: chronological, coverage-preserving overlapping windows; `boundary_id` + `target_kind: imported_event`; all tuning on `P-dev` only. **Judge-integrity hardening ships here**: trace text delimited as untrusted data in the prompt, schema-validated labels, evidence bound to rendered-window substrings, escaped notebook rendering, and instruction-bearing/malicious-markup traces in the MVP test set (the shipped evaluator concatenates raw trace after the prompt — two replicates repeat the same injection failure, so this is not optional). | Every failed session in scope gets `localized`, `unlocalized`, or `missing_step`; window-selection misses are outcomes; no metric conditions on successful localizations only. |
-| 6 | Score **once** on `P-blind`; write the stop/go memo (quality with CIs, counterfactual value results, cost/latency vs the week-0 budget, error analysis, funding recommendation). | Preregistered decision rules: coverage = `localized / all P-blind failed sessions` ≥70%; paired hit@1 uplift over the total baseline with **CI lower bound >0**; point uplift ≥ +10pp; absolute hit@1 ≥ the preregistered floor. Point-clears-but-CI-spans-zero resolves per the week-0 rule, not week-6 judgment. |
+| 6 | Score **once** on `P-blind`; write the stop/go memo (quality with CIs, counterfactual value results, cost/latency vs the week-0 budget, error analysis, funding recommendation). | Sealed decision rules (`docs/week0_preregistration.md`): coverage = `localized / all P-blind failed sessions` ≥70%; paired hit@1 uplift over the total baseline with **CI lower bound >0** *and* point uplift ≥ +10pp — these two are the hit@1 gates; there is **no separate absolute hit@1 floor**. Point-clears-but-CI-spans-zero **fails** the gate: no localization, no uplift claim — the week-0 rule, not week-6 judgment. |
 | 7 | *(Reserved)* taxonomy revision slot only — used or returned. | — |
 
 **Labeler ledger (complete, inside the D4 approval):** `P-tax` 40–60 × 2 +
@@ -137,8 +146,8 @@ adjudication; **30–50 sealed boundary labels** (the most expensive per-item
 task in the plan — previously missing from the ledger) + calibration;
 counterfactual-study adjudication. ≈2 labeler-weeks in the MVP. Collaborator
 availability is a named critical-path dependency: if investigation volume
-slips, the value gate re-scopes to completed investigations with the
-threshold applied proportionally — it does not silently pass.
+slips, the value gate re-scopes to completed investigations with the sealed
+50% threshold applied to those alone — it does not silently pass.
 
 ## Part II — staged funding, no aggregate estimate
 

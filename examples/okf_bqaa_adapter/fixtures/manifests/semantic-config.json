@@ -1,0 +1,16 @@
+{
+  "semantic_config_version": "okf-context:semantic-config:v1",
+  "untyped_link_predicate": "context:untyped_link",
+  "predicate_namespace_default": "producer",
+  "confidence_to_assertion_mode": {
+    "extracted": "explicit",
+    "inferred": "inferred",
+    "ambiguous": "inferred"
+  },
+  "current_mode": {
+    "exclude_status": ["deprecated"],
+    "exclude_out_of_force_by_affirmed_supersession": true,
+    "stale_after": "downrank-and-warn",
+    "draft": "application-policy"
+  }
+}
