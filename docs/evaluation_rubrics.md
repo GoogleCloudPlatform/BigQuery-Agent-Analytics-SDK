@@ -157,6 +157,39 @@ config = CategoricalEvaluationConfig(metrics=metrics, endpoint="gemini-2.5-flash
 report = Client(project_id=..., dataset_id=...).evaluate_categorical(config)
 ```
 
+### Primary factories and the opt-in three-pillar scorecard
+
+`response_usefulness_metric()` and `task_grounding_metric()` return fresh
+copies of the same canonical metrics used by `build_metrics()` and the
+quality-report script. Both accept `scope_context` and `has_scope` with the
+same semantics. `has_scope=True` adds `declined` to usefulness; grounding
+keeps its `grounded`, `ungrounded`, and `no_tool_needed` categories.
+
+```python
+from bigquery_agent_analytics import CategoricalEvaluationConfig
+from bigquery_agent_analytics import three_pillar_scorecard_metrics
+
+metrics = three_pillar_scorecard_metrics(
+    scope_context=" The agent answers employee HR policy questions only.",
+    has_scope=True,
+)
+config = CategoricalEvaluationConfig(metrics=metrics, endpoint="gemini-2.5-flash")
+# Stable order: response_usefulness, task_grounding, policy_compliance.
+```
+
+The third factory, `policy_compliance_metric()`, is an optional model-judged
+checklist with `compliant` and `violation` categories. It checks observable
+confidentiality, data minimization, and requested redaction or masking,
+including international identifiers such as national identity numbers,
+financial account numbers/IBANs, and health identifiers. Supply the relevant
+authorization and redaction requirements in the evaluation context. This
+rubric does not enforce policy or provide legal certification.
+
+Request this bundle explicitly when those three dimensions are useful.
+`build_metrics()` and `scripts/quality_report.py` retain their canonical
+eight-metric default, and custom JSON configurations still use the existing
+interpreter.
+
 ### CLI (`scripts/quality_report.py`)
 
 ```bash
