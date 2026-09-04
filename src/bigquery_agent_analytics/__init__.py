@@ -400,11 +400,19 @@ except ImportError as e:
 try:
   from .evaluation_rubrics import build_metrics
   from .evaluation_rubrics import builtin_metric_config
+  from .evaluation_rubrics import policy_compliance_metric
+  from .evaluation_rubrics import response_usefulness_metric
+  from .evaluation_rubrics import task_grounding_metric
+  from .evaluation_rubrics import three_pillar_scorecard_metrics
 
   __all__.extend(
       [
           "build_metrics",
           "builtin_metric_config",
+          "policy_compliance_metric",
+          "response_usefulness_metric",
+          "task_grounding_metric",
+          "three_pillar_scorecard_metrics",
       ]
   )
 except ImportError as e:
