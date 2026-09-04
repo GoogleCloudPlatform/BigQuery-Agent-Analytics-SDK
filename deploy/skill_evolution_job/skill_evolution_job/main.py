@@ -557,10 +557,14 @@ Examples:
 
   # Agent-name mode choices need the registry; it may live inside the
   # host-repo clone, so failure here only narrows --mode choices.
+  registry_problem = ""
   try:
     agent_names = list(registry.get_registry().agents)
-  except Exception:  # noqa: BLE001 - registry resolved again at run time
+  except Exception as exc:  # noqa: BLE001 - registry resolved again at run time
+    # Keep the reason: an agent-name --mode is then rejected as an
+    # "invalid choice", which is opaque without it.
     agent_names = []
+    registry_problem = f" (registry not loaded: {exc})"
 
   parser.add_argument(
       "--agent-registry",
@@ -599,7 +603,7 @@ Examples:
           + (
               f" Available agents: {', '.join(agent_names)}"
               if agent_names
-              else ""
+              else registry_problem
           )
       ),
   )

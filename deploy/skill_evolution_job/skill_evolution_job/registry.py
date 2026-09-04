@@ -228,3 +228,21 @@ def get_registry(force_reload: bool = False) -> Registry:
   if _registry is None or force_reload:
     _registry = load_registry()
   return _registry
+
+
+def agents_summary() -> dict:
+  """Agent name -> ``{label, skill_dir}`` from the agent registry.
+
+  Lazy by design: the registry file lives inside the host-repo workdir
+  and must not be read at import time. Ordered by the registry's
+  evolution order so the first entry is the routing agent — the default
+  the classifier falls back to.
+  """
+  reg = get_registry()
+  return {
+      name: {
+          "label": reg.agents[name].label,
+          "skill_dir": reg.agents[name].skill_dir,
+      }
+      for name in reg.ordered_names()
+  }

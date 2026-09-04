@@ -27,6 +27,7 @@ if _JOB_DIR not in sys.path:
   sys.path.insert(0, _JOB_DIR)
 
 from skill_evolution_job import engine
+from skill_evolution_job import evolve
 
 # evolve_skill as on upstream main today (no error_analyst_fn /
 # incumbent_score / analyst_timeout_s).
@@ -186,3 +187,30 @@ def test_load_engine_caches(tmp_path, monkeypatch):
   first = engine.load_engine()
   assert engine.load_engine() is first
   assert engine.load_engine(force_reload=True) is not first
+
+
+# ---------------------------------------------------------------------------
+# evolve.bound_candidates / evolve.resolve_candidates
+# ---------------------------------------------------------------------------
+
+
+def test_bound_candidates_reads_env(monkeypatch):
+  monkeypatch.delenv("EVOLUTION_CANDIDATES", raising=False)
+  assert evolve.bound_candidates() is None
+  monkeypatch.setenv("EVOLUTION_CANDIDATES", "2")
+  assert evolve.bound_candidates() == 2
+
+
+def test_resolve_candidates_env_is_binding(monkeypatch):
+  monkeypatch.setenv("EVOLUTION_CANDIDATES", "2")
+  assert evolve.resolve_candidates(3, {"meaningful_rate": 50}) == 2
+
+
+def test_resolve_candidates_uses_caller_value_without_env(monkeypatch):
+  monkeypatch.delenv("EVOLUTION_CANDIDATES", raising=False)
+  assert evolve.resolve_candidates(3, {"meaningful_rate": 50}) == 3
+
+
+def test_resolve_candidates_auto_selects_one_at_high_rate(monkeypatch):
+  monkeypatch.delenv("EVOLUTION_CANDIDATES", raising=False)
+  assert evolve.resolve_candidates(None, {"meaningful_rate": 95}) == 1

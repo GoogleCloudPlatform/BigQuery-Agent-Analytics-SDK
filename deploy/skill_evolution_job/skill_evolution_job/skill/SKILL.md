@@ -56,7 +56,13 @@ complete multi-round evolution pipeline.
       - `read_skill` — review evolved skill (check size, sections)
       - `snapshot_skills("vR", run_dir)` — save evolved version
       - `run_quality_report` on the evolved version to measure the
-        delta, when the host's traffic can exercise the new skill
+        delta, ONLY when the host's traffic can exercise the new skill
+        (the evolved skill ships via the PR, so a deployed stack keeps
+        serving the old one). If the result carries `stale: true`, the
+        window returned the same sessions: it is not a measurement of
+        the new version — do not report it as a delta and do not start
+        another round on it. The winner's measured score is in
+        `evolved_score.json` (shown by `compare_versions`).
       - Report delta from previous version
    c. If failures < MIN_FAILURES: stop iterating — no further
       rounds will produce meaningful improvements. Do NOT snapshot
@@ -105,9 +111,11 @@ failures are the model/knowledge ceiling, not something more skill rounds
 can fix. Also stop earlier under the gate (below) or stop-on-no-improvement
 (step 2d).
 
-The round cap is also enforced outside your control: `run_coevolution`
-refuses to run past EVOLUTION_MAX_ROUNDS. If it returns
-`status: refused`, treat that as final — publish the best result so far.
+The round cap is also enforced outside your control: `run_evolution`
+(per agent) and `run_coevolution` refuse to run past EVOLUTION_MAX_ROUNDS,
+and `run_evolution` uses EVOLUTION_CANDIDATES over any `candidates` value
+you pass. If a tool returns `status: refused`, treat that as final —
+publish the best result so far.
 
 ## Evolution Gate
 

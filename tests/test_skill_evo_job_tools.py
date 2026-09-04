@@ -79,6 +79,7 @@ def _write_report(
     total_sessions=50,
     meaningful=None,
     excluded_error_shaped=None,
+    unhelpful_rate=None,
 ):
   summary = {
       "meaningful_rate": meaningful_rate,
@@ -91,6 +92,8 @@ def _write_report(
   }
   if excluded_error_shaped is not None:
     summary["excluded_error_shaped"] = {"count": excluded_error_shaped}
+  if unhelpful_rate is not None:
+    summary["unhelpful_rate"] = unhelpful_rate
   with open(path, "w") as f:
     json.dump({"summary": summary, "sessions": []}, f)
 
@@ -381,3 +384,210 @@ def test_score_candidate_skipped_when_no_hook_configured(tmp_path):
   )
   assert "skipped" in result
   assert "SCORE_CMD" in result["skipped"]
+
+
+# ---------------------------------------------------------------------------
+# _round_guard (EVOLUTION_MAX_ROUNDS)
+# ---------------------------------------------------------------------------
+
+
+def test_round_guard_refuses_second_round_per_key(monkeypatch):
+  monkeypatch.setenv("EVOLUTION_MAX_ROUNDS", "1")
+  monkeypatch.setattr(tools, "_rounds_run", {})
+
+  assert tools._round_guard("run_evolution[/a]") is None
+  refused = tools._round_guard("run_evolution[/a]")
+  assert refused["status"] == "refused"
+  assert "EVOLUTION_MAX_ROUNDS=1" in refused["reason"]
+  # Counted per agent: another skill dir still gets its own round.
+  assert tools._round_guard("run_evolution[/b]") is None
+
+
+def test_round_guard_never_refuses_without_env(monkeypatch):
+  monkeypatch.delenv("EVOLUTION_MAX_ROUNDS", raising=False)
+  monkeypatch.setattr(tools, "_rounds_run", {})
+
+  for _ in range(5):
+    assert tools._round_guard("run_evolution[/a]") is None
+
+
+def test_run_evolution_refuses_past_max_rounds(tmp_path, monkeypatch):
+  skill_dir = tmp_path / "skill"
+  skill_dir.mkdir()
+  (skill_dir / "SKILL.md").write_text("# Skill\n")
+  report_path = tmp_path / "quality_report.json"
+  _write_report(report_path, meaningful_rate=50.0)
+
+  monkeypatch.setenv("EVOLUTION_MAX_ROUNDS", "1")
+  # No AGENT_REGISTRY (the autouse fixture clears it), so
+  # _resolve_skill_dir passes this absolute path straight through and the
+  # guard key is the path as given.
+  monkeypatch.setattr(tools, "_rounds_run", {f"run_evolution[{skill_dir}]": 1})
+
+  result = tools.run_evolution(
+      str(report_path), str(skill_dir), run_dir=str(tmp_path)
+  )
+  assert result["status"] == "refused"
+  assert "EVOLUTION_MAX_ROUNDS=1" in result["reason"]
+
+
+# ---------------------------------------------------------------------------
+# _collect_quality_metrics
+# ---------------------------------------------------------------------------
+
+
+def _metrics_run_dir(tmp_path, candidate=True, evolved_score=None):
+  """Run dir with initial/v1 reports and (optionally) a candidate report."""
+  run_dir = tmp_path / "run"
+  (run_dir / "candidates").mkdir(parents=True)
+  _write_report(
+      run_dir / "initial_quality_report.json",
+      meaningful_rate=23.1,
+      total_sessions=26,
+      meaningful=6,
+      unhelpful_rate=50.0,
+  )
+  _write_report(
+      run_dir / "v1_quality_report.json",
+      meaningful_rate=26.9,
+      total_sessions=26,
+      meaningful=7,
+      unhelpful_rate=40.0,
+  )
+  if candidate:
+    _write_report(
+        run_dir / "candidates" / "candidate_1_report.json",
+        meaningful_rate=100.0,
+        total_sessions=26,
+        meaningful=26,
+        unhelpful_rate=0.0,
+    )
+  if evolved_score is not None:
+    (run_dir / "evolved_score.json").write_text(json.dumps(evolved_score))
+  return run_dir
+
+
+def test_collect_quality_metrics_prefers_matching_candidate_report(tmp_path):
+  run_dir = _metrics_run_dir(
+      tmp_path,
+      evolved_score={"version": "evolved", "meaningful_rate": 100.0},
+  )
+  metrics = tools._collect_quality_metrics(str(run_dir), "v1")
+  assert metrics["evolved_meaningful"] == "100.0"
+  assert metrics["evolved_unhelpful"] == "0.0"
+  assert metrics["evolved_source"] == "evolved_score.json"
+  assert metrics["baseline_meaningful"] == "23.1"
+  assert metrics["baseline_label"] == "initial"
+
+
+def test_collect_quality_metrics_evolved_score_without_report(tmp_path):
+  run_dir = _metrics_run_dir(
+      tmp_path,
+      candidate=False,
+      evolved_score={"version": "evolved", "meaningful_rate": 100.0},
+  )
+  metrics = tools._collect_quality_metrics(str(run_dir), "v1")
+  assert metrics["evolved_meaningful"] == "100.0"
+  # No candidate report to read the split from.
+  assert metrics["evolved_unhelpful"] == "?"
+  assert metrics["evolved_source"] == "evolved_score.json"
+
+
+def test_collect_quality_metrics_falls_back_to_version_report(tmp_path):
+  run_dir = _metrics_run_dir(tmp_path)
+  metrics = tools._collect_quality_metrics(str(run_dir), "v1")
+  assert metrics["evolved_meaningful"] == "26.9"
+  assert metrics["evolved_unhelpful"] == "40.0"
+  assert metrics["evolved_source"] == "report"
+
+
+def test_collect_quality_metrics_ignores_unmeasurable_evolved_score(tmp_path):
+  run_dir = _metrics_run_dir(
+      tmp_path,
+      evolved_score={
+          "version": "evolved",
+          "meaningful_rate": 100.0,
+          "unmeasurable": True,
+      },
+  )
+  metrics = tools._collect_quality_metrics(str(run_dir), "v1")
+  assert metrics["evolved_meaningful"] == "26.9"
+  assert metrics["evolved_source"] == "report"
+
+
+# ---------------------------------------------------------------------------
+# _identical_prior_report (run_quality_report stale detection)
+# ---------------------------------------------------------------------------
+
+
+def _write_summary_report(path, summary, mtime):
+  path.write_text(json.dumps({"summary": dict(summary)}))
+  os.utime(path, (mtime, mtime))
+
+
+def test_identical_prior_report_finds_older_twin(tmp_path):
+  summary = {"total_sessions": 26, "meaningful": 7}
+  older = tmp_path / "a_quality_report.json"
+  output = tmp_path / "b_quality_report.json"
+  _write_summary_report(older, summary, 1000)
+  _write_summary_report(output, summary, 2000)
+
+  assert tools._identical_prior_report(str(output), summary) == str(older)
+  # A different meaningful count is a genuinely new measurement.
+  assert (
+      tools._identical_prior_report(
+          str(output), {"total_sessions": 26, "meaningful": 8}
+      )
+      is None
+  )
+
+
+def test_identical_prior_report_ignores_newer_files(tmp_path):
+  summary = {"total_sessions": 26, "meaningful": 7}
+  output = tmp_path / "b_quality_report.json"
+  newer = tmp_path / "c_quality_report.json"
+  _write_summary_report(output, summary, 1000)
+  _write_summary_report(newer, summary, 2000)
+
+  assert tools._identical_prior_report(str(output), summary) is None
+
+
+# ---------------------------------------------------------------------------
+# create_evolution_pr: git commit failure
+# ---------------------------------------------------------------------------
+
+
+def test_create_evolution_pr_reports_commit_failure(tmp_path, monkeypatch):
+  workdir = tmp_path / "clone"
+  (workdir / ".git").mkdir(parents=True)
+  registry_path = _write_registry(
+      tmp_path,
+      {
+          "repo_root": str(workdir),
+          "agents": {"a": {"skill_dir": "agents/a/skill"}},
+      },
+  )
+  monkeypatch.setenv("AGENT_REGISTRY", registry_path)
+  monkeypatch.setenv("EVOLUTION_WORKDIR", str(workdir))
+  monkeypatch.setenv("EVOLUTION_PUBLISH", "true")
+  monkeypatch.setenv("GATE_POLICY", "skip")
+
+  run_dir = tmp_path / "run"
+  run_dir.mkdir()
+  (run_dir / "v1_a_skill.md").write_text("# Evolved\n")
+
+  def _fake_run(cmd, *args, **kwargs):
+    failed = list(cmd[:2]) == ["git", "commit"]
+    return subprocess.CompletedProcess(
+        cmd,
+        1 if failed else 0,
+        stdout="nothing to commit, working tree clean" if failed else "",
+        stderr="",
+    )
+
+  monkeypatch.setattr(subprocess, "run", _fake_run)
+
+  result = tools.create_evolution_pr(str(run_dir), version="v1")
+  assert result["status"] == "error"
+  assert "git commit failed" in result["error"]
+  assert "nothing to commit" in result["error"]

@@ -101,24 +101,6 @@ Output format (JSON):
 """
 
 
-def _registry_agents() -> dict:
-  """Agent name -> ``{label, skill_dir}`` from the agent registry.
-
-  Lazy by design: the registry file lives inside the host-repo workdir
-  and must not be read at import time. Ordered by the registry's
-  evolution order so the first entry is the routing agent — the default
-  the classifier falls back to.
-  """
-  reg = registry.get_registry()
-  return {
-      name: {
-          "label": reg.agents[name].label,
-          "skill_dir": reg.agents[name].skill_dir,
-      }
-      for name in reg.ordered_names()
-  }
-
-
 def _build_classifier_prompt(agents: dict) -> str:
   agent_lines = []
   for name, config in agents.items():
@@ -162,7 +144,7 @@ def classify_failure(
 ) -> dict:
   """Classify a single failure by source agent."""
   if classifier_prompt is None:
-    classifier_prompt = _build_classifier_prompt(_registry_agents())
+    classifier_prompt = _build_classifier_prompt(registry.agents_summary())
 
   conversation = evolve._format_conversation(session.get("conversation", []))
   question = session.get("question", "")
@@ -267,7 +249,7 @@ def detect_bottleneck(
       BottleneckResult with classification and recommendation.
   """
   if agents is None:
-    agents = _registry_agents()
+    agents = registry.agents_summary()
 
   classifier_prompt = _build_classifier_prompt(agents)
   agent_names = list(agents.keys())

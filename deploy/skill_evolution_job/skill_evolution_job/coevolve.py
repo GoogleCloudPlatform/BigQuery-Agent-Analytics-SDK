@@ -31,7 +31,6 @@ import os
 import time
 from types import SimpleNamespace
 
-from . import bottleneck as bottleneck_module
 from . import evolve as evolve_module
 from . import hooks
 from . import registry
@@ -50,7 +49,7 @@ def _default_agent_configs() -> dict:
   evolves nothing) rather than failing at import time.
   """
   try:
-    return bottleneck_module._registry_agents()
+    return registry.agents_summary()
   except Exception as e:  # noqa: BLE001
     logger.warning("Could not load the agent registry: %s", e)
     return {}

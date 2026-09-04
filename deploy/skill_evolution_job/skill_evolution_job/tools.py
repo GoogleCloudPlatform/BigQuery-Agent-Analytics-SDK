@@ -143,7 +143,8 @@ def run_evolution(
       max_workers: Max parallel analyst threads.
       agentic: Use agentic error analysts with tool access.
       candidates: Number of consolidation candidates (best-of-N).
-          None = auto-decide based on meaningful_rate.
+          None = auto-decide based on meaningful_rate. EVOLUTION_CANDIDATES
+          (from --candidates) overrides whatever is passed here.
       max_chars: Max character count for evolved skill (default: 25000).
           Triggers compaction if exceeded to prevent skill bloat.
 
@@ -162,6 +163,27 @@ def run_evolution(
   skill_path = os.path.join(skill_dir, "SKILL.md")
   if not os.path.isfile(skill_path):
     return {"error": f"SKILL.md not found in {skill_dir}"}
+
+  # EVOLUTION_MAX_ROUNDS (set by main.py from --rounds) is BINDING here
+  # too, per agent: the orchestrator cannot re-run evolution on the same
+  # skill beyond the cap (a post-round quality report that re-measures
+  # the pre-evolution sessions used to trigger a spurious second round).
+  refused = _round_guard(f"run_evolution[{skill_dir}]")
+  if refused:
+    return refused
+
+  # EVOLUTION_CANDIDATES is BINDING over the caller's value; evolve()
+  # applies the same rule, this keeps the candidates_dir decision aligned.
+  bound = evolve_mod.bound_candidates()
+  if bound is not None and candidates != bound:
+    if candidates is not None:
+      logger.warning(
+          "run_evolution asked for candidates=%d; EVOLUTION_CANDIDATES=%d"
+          " is binding and wins",
+          candidates,
+          bound,
+      )
+    candidates = bound
 
   candidates_dir = None
   if candidates is not None and candidates > 1:
@@ -394,7 +416,40 @@ def detect_bottleneck_tool(quality_report_path: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-_coevolution_rounds_run = 0  # EVOLUTION_MAX_ROUNDS guard (per process)
+_rounds_run: dict[str, int] = {}  # EVOLUTION_MAX_ROUNDS guard (per process)
+
+
+def _round_guard(key: str) -> dict | None:
+  """Enforce EVOLUTION_MAX_ROUNDS (set by main.py from --rounds).
+
+  The cap is BINDING: the orchestrating agent cannot add evolution
+  rounds beyond it. Counted per ``key`` so one round over several agents
+  is still one round each (``run_evolution[<skill_dir>]``,
+  ``run_coevolution``). Returns the refusal dict for the tool to hand
+  back, or None (and counts the round) when the call may proceed.
+  """
+  max_rounds = os.getenv("EVOLUTION_MAX_ROUNDS")
+  done = _rounds_run.get(key, 0)
+  if max_rounds and done >= int(max_rounds):
+    logger.warning(
+        "%s refused: EVOLUTION_MAX_ROUNDS=%s reached (%d round(s) already"
+        " run)",
+        key,
+        max_rounds,
+        done,
+    )
+    return {
+        "status": "refused",
+        "reason": (
+            f"EVOLUTION_MAX_ROUNDS={max_rounds} reached"
+            f" ({done} round(s) already run). Do NOT evolve further —"
+            " publish the best result so far and open the PR."
+        ),
+    }
+  _rounds_run[key] = done + 1
+  return None
+
+
 _bottleneck_cache: dict = {}  # report path -> classification (once per report)
 
 
@@ -425,27 +480,9 @@ def run_coevolution(
 
   model_id = model_id or config.get_config().evolution_model_id
 
-  # EVOLUTION_MAX_ROUNDS (set by main.py from --rounds) is BINDING: the
-  # orchestrating agent cannot add extra evolution rounds beyond it.
-  global _coevolution_rounds_run
-  max_rounds = os.getenv("EVOLUTION_MAX_ROUNDS")
-  if max_rounds and _coevolution_rounds_run >= int(max_rounds):
-    logger.warning(
-        "run_coevolution refused: EVOLUTION_MAX_ROUNDS=%s reached (%d"
-        " round(s) already run)",
-        max_rounds,
-        _coevolution_rounds_run,
-    )
-    return {
-        "status": "refused",
-        "reason": (
-            f"EVOLUTION_MAX_ROUNDS={max_rounds} reached"
-            f" ({_coevolution_rounds_run} round(s) already run). Do NOT"
-            " evolve further — publish the best result so far and open"
-            " the PR."
-        ),
-    }
-  _coevolution_rounds_run += 1
+  refused = _round_guard("run_coevolution")
+  if refused:
+    return refused
 
   if not os.path.isfile(quality_report_path):
     return {"error": f"Quality report not found: {quality_report_path}"}
@@ -621,7 +658,49 @@ def run_quality_report(
   result["total_sessions"] = summary.get("total_sessions")
   if summary.get("meaningful_rate") is not None:
     result["meaningful_rate"] = summary.get("meaningful_rate")
+  twin = _identical_prior_report(output_path, summary)
+  if twin:
+    # Same session count and same meaningful count as an earlier report
+    # in this run: the window returned the same sessions again. That
+    # happens whenever the evolved skill is not yet deployed (it ships
+    # via the PR), so this is not a measurement of the new version.
+    result["warning"] = (
+        f"Summary is identical to {os.path.basename(twin)} (same"
+        " total_sessions and meaningful count): the time window returned"
+        " the same sessions, so this report does NOT measure the evolved"
+        " skill. Do not start another round on it; the winner's score is"
+        " in evolved_score.json / compare_versions."
+    )
+    result["stale"] = True
   return result
+
+
+def _identical_prior_report(output_path: str, summary: dict) -> str | None:
+  """Earlier report in the same directory with an identical summary."""
+  total = summary.get("total_sessions")
+  meaningful = summary.get("meaningful")
+  if total is None or meaningful is None:
+    return None
+  for path in sorted(
+      glob.glob(
+          os.path.join(os.path.dirname(output_path), "*quality_report.json")
+      )
+  ):
+    if os.path.abspath(path) == os.path.abspath(output_path):
+      continue
+    if os.path.getmtime(path) > os.path.getmtime(output_path):
+      continue
+    try:
+      with open(path) as f:
+        prior = json.load(f).get("summary") or {}
+    except (OSError, ValueError):
+      continue
+    if (
+        prior.get("total_sessions") == total
+        and prior.get("meaningful") == meaningful
+    ):
+      return path
+  return None
 
 
 # ---------------------------------------------------------------------------
@@ -856,19 +935,72 @@ def _resolve_repo_skill_path(agent: str) -> str | None:
   )
 
 
-def _collect_quality_metrics(run_dir: str, version: str) -> dict:
-  """Collect baseline and evolved quality metrics from report files."""
-  evolved_report = None
-  for name in [
-      f"{version}_quality_report.json",
-      f"best_{version}_quality_report.json",
-  ]:
-    path = os.path.join(run_dir, name)
-    if os.path.isfile(path):
-      evolved_report = path
-      break
+def _authoritative_evolved_score(run_dir: str) -> float | None:
+  """The deployed winner's selection score from ``evolved_score.json``.
 
-  if evolved_report is None:
+  Written by ``evolve()`` on the same eval set the incumbent was
+  measured on. None when the file is absent, marked unmeasurable, or
+  carries no rate.
+  """
+  path = os.path.join(run_dir, "evolved_score.json")
+  if not os.path.isfile(path):
+    return None
+  try:
+    with open(path) as f:
+      payload = json.load(f)
+  except (OSError, ValueError):
+    return None
+  if payload.get("unmeasurable") or payload.get("meaningful_rate") is None:
+    return None
+  return float(payload["meaningful_rate"])
+
+
+def _collect_quality_metrics(run_dir: str, version: str) -> dict:
+  """Collect baseline and evolved quality metrics from report files.
+
+  The evolved figure comes, in order of preference, from: the winner's
+  own scored report (the candidate report whose rate matches
+  ``evolved_score.json``); ``evolved_score.json`` alone; a
+  ``{version}_quality_report.json`` / ``best_{version}_...`` re-report;
+  the best candidate report. A post-round ``run_quality_report`` is
+  ranked below the selection score on purpose: until the PR merges the
+  evolved skill is not deployed, so that re-report usually re-measures
+  the pre-evolution sessions (in the lab this produced a PR titled
+  "23.1% -> 26.9%" for a winner that scored 100 on the eval set).
+  """
+  evolved_report = None
+  evolved_source = "report"
+  authoritative = _authoritative_evolved_score(run_dir)
+  if authoritative is not None:
+    evolved_source = "evolved_score.json"
+    for pattern in (
+        "candidate_*_report.json",
+        "_score_candidate_*_report.json",
+    ):
+      for path in sorted(
+          glob.glob(os.path.join(run_dir, "**", pattern), recursive=True)
+      ):
+        try:
+          rate = float(_extract_rate(path, "meaningful_rate"))
+        except ValueError:
+          continue
+        if abs(rate - authoritative) < 0.05 and not _excluded_count(path):
+          evolved_report = path
+          break
+      if evolved_report:
+        break
+
+  if evolved_report is None and authoritative is None:
+    for name in [
+        f"{version}_quality_report.json",
+        f"best_{version}_quality_report.json",
+    ]:
+      path = os.path.join(run_dir, name)
+      if os.path.isfile(path):
+        evolved_report = path
+        break
+
+  if evolved_report is None and authoritative is None:
     # Co-evolution runs score best-of-N candidates without writing a
     # {version}_quality_report.json — fall back to the best candidate
     # report so PR titles carry the real evolved rate instead of "?%".
@@ -922,9 +1054,22 @@ def _collect_quality_metrics(run_dir: str, version: str) -> dict:
   baseline_excl = _excluded_count(baseline_report) if baseline_report else 0
   evolved_excl = _excluded_count(evolved_report) if evolved_report else 0
 
+  if evolved_report is not None:
+    evolved_meaningful = _extract_rate(evolved_report, "meaningful_rate")
+    evolved_unhelpful = _extract_rate(evolved_report, "unhelpful_rate")
+  elif authoritative is not None:
+    # Selection score without a matching report file (e.g. the score
+    # hook keeps its reports elsewhere): rate is authoritative, the
+    # unhelpful split is unknown.
+    evolved_meaningful = f"{authoritative:.1f}"
+    evolved_unhelpful = "?"
+  else:
+    evolved_meaningful = evolved_unhelpful = "?"
+
   return {
-      "evolved_meaningful": _extract_rate(evolved_report, "meaningful_rate"),
-      "evolved_unhelpful": _extract_rate(evolved_report, "unhelpful_rate"),
+      "evolved_meaningful": evolved_meaningful,
+      "evolved_unhelpful": evolved_unhelpful,
+      "evolved_source": evolved_source,
       "baseline_meaningful": _extract_rate(baseline_report, "meaningful_rate"),
       "baseline_unhelpful": _extract_rate(baseline_report, "unhelpful_rate"),
       "baseline_label": baseline_label,
@@ -1649,12 +1794,21 @@ def create_evolution_pr(
       commit_msg += " [denominators differ]"
     commit_msg += f"\nRun: {os.path.basename(run_dir)}"
 
-    subprocess.run(
-        ["git", "add", repo_skill_path], cwd=git_root, capture_output=True
-    )
-    subprocess.run(
-        ["git", "commit", "-m", commit_msg], cwd=git_root, capture_output=True
-    )
+    for step, cmd in (
+        ("git add", ["git", "add", repo_skill_path]),
+        ("git commit", ["git", "commit", "-m", commit_msg]),
+    ):
+      r = subprocess.run(cmd, cwd=git_root, capture_output=True, text=True)
+      if r.returncode != 0:
+        # An unchecked failure here pushed an unchanged branch and opened
+        # an empty PR.
+        return {
+            "status": "error",
+            "error": (
+                f"{step} failed (exit {r.returncode}):"
+                f" {_mask_tokens(r.stderr or r.stdout)}"
+            ),
+        }
 
     # --- Push ---
     r = subprocess.run(

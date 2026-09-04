@@ -29,6 +29,7 @@ if _JOB_DIR not in sys.path:
 
 from skill_evolution_job import config
 from skill_evolution_job import hooks
+from skill_evolution_job import registry
 
 _ENV_VARS = (
     "EVOLUTION_HOOKS",
@@ -355,3 +356,32 @@ def test_workdir_uses_existing_checkout(tmp_path, monkeypatch):
   # Cached for the process.
   monkeypatch.delenv("EVOLUTION_WORKDIR")
   assert config.workdir() == str(tmp_path)
+
+
+def test_workdir_accepts_git_worktree_file(tmp_path, monkeypatch):
+  # In a git worktree ``.git`` is a FILE pointing at the real gitdir,
+  # not a directory; it is still a checkout the job can commit in.
+  (tmp_path / ".git").write_text("gitdir: /repo/.git/worktrees/wt\n")
+  assert os.path.isfile(tmp_path / ".git")
+  monkeypatch.setenv("EVOLUTION_WORKDIR", str(tmp_path))
+  assert config.workdir() == str(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# main() argument parser
+# ---------------------------------------------------------------------------
+
+
+def test_mode_help_explains_unloadable_registry(monkeypatch, capsys):
+  monkeypatch.delenv("AGENT_REGISTRY", raising=False)
+  registry.reset_cache()
+  monkeypatch.setattr(sys, "argv", ["skill-evolution-job", "--help"])
+
+  with pytest.raises(SystemExit) as excinfo:
+    job_main.main()
+  assert excinfo.value.code == 0
+
+  # Collapse argparse's wrapping so the assertion is width-independent.
+  help_text = " ".join(capsys.readouterr().out.split())
+  assert "--mode" in help_text
+  assert "registry not loaded" in help_text

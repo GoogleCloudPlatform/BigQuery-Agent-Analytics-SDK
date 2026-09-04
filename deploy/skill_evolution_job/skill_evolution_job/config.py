@@ -233,7 +233,9 @@ def workdir_or_none() -> str | None:
   cfg = get_config()
   if cfg.evolution_workdir:
     path = os.path.abspath(cfg.evolution_workdir)
-    if not os.path.isdir(os.path.join(path, ".git")):
+    # ``.git`` is a directory in a clone and a FILE in a git worktree;
+    # both are checkouts the job can commit in.
+    if not os.path.exists(os.path.join(path, ".git")):
       raise RuntimeError(
           f"EVOLUTION_WORKDIR={cfg.evolution_workdir!r} is not a git"
           " checkout. Point it at a clone of the host agent repo, or unset"

@@ -28,6 +28,16 @@ It imports the same `scripts/skill_evolution.py` and `scripts/quality_report.py`
 that ship in this repo (staged into the image by `deploy.sh`), so engine
 improvements land in the job by rebuilding the image.
 
+The job feature-detects the engine it was given: `error_analyst` /
+`toolbox` hooks (agentic analysts) and the incumbent-guarded candidate
+selection need an engine whose `evolve_skill` accepts `error_analyst_fn`,
+`tools` and `incumbent_score`. On an engine without them the job logs
+which keyword it dropped and falls back to single-pass analysts and
+engine-side (size-based) selection. To bake a different engine than this
+checkout's, point `deploy.sh --scripts-dir` at another SDK checkout's
+`scripts/` directory; the image is then reproducible from the flag rather
+than from files copied over by hand.
+
 ## Quick start (PR mode — recommended)
 
 Prerequisites: `gcloud` + `python3` locally; a BigQuery dataset where the
@@ -135,7 +145,7 @@ define any subset of:
 | `score` | `score(candidate_path, skill_dir, run_dir) -> dict` | Score one candidate `SKILL.md` with your own agent + eval set; must return `{"meaningful_rate": <0-100>, ...}` |
 | `gate` | `gate(run_dir, version, agent) -> (bool \| None, str)` | Pre-publish acceptance check (e.g. run your test suite against the evolved skill); only an explicit `False` blocks the PR — `None` means inconclusive and proceeds |
 | `toolbox` | `toolbox(agent) -> str` | Text description of the agent's tools, injected into analyst prompts |
-| `error_analyst` | `error_analyst(client, model, session, skill, tools)` | Custom per-failure analyst (only used when the engine supports `error_analyst_fn`) |
+| `error_analyst` | `error_analyst(client, model, session, skill, tools)` | Custom per-failure analyst (only used when the engine supports `error_analyst_fn`; see `--scripts-dir` above) |
 | `publish` | `publish(skill_dir, run_dir)` | Push the accepted skill to a registry/deployment target after the PR |
 
 `traffic`, `score` and `gate` also accept a **shell-command fallback** via
@@ -205,7 +215,7 @@ Tuning (all optional):
 | `EVOLUTION_MODEL_ID` / `EVAL_MODEL_ID` | `gemini-2.5-pro` / — | Orchestrating agent / judge models |
 | `EVOLUTION_MODE` | `evolve` | Default mode for scheduled fires |
 | `EVOLUTION_TARGET_AGENTS` / `EVOLUTION_ORDER` | — | Restrict / reorder co-evolution |
-| `EVOLUTION_CANDIDATES` / `EVOLUTION_MAX_ROUNDS` | auto | Candidate count / round cap |
+| `EVOLUTION_CANDIDATES` / `EVOLUTION_MAX_ROUNDS` | auto | Candidate count / round cap. Both are binding: `run_evolution` and `run_coevolution` refuse rounds past the cap (per agent) and use the bound candidate count over whatever the orchestrating agent asks for |
 | `EVOLUTION_TOOLBOX` | — | Toolbox text (literal or `@/path/to/file`) |
 | `GATE_POLICY` | `skip` | `require` = missing/failing gate blocks the PR |
 | `EVOLUTION_PUBLISH` | `false` | Gates **real** PR/issue creation. `false` = local previews only (`pr_preview.md` / issue file in the run dir), even with `GITHUB_REPO` set. `deploy.sh` sets it to `true` when both `--github-repo` and `--gh-secret` are wired |

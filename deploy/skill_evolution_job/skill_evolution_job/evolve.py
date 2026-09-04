@@ -266,17 +266,35 @@ def _stride_sample_failures(report: dict) -> dict:
   return trimmed
 
 
-def _auto_candidates(summary: dict) -> int:
-  """Candidate count when the caller passed None.
+def bound_candidates() -> int | None:
+  """EVOLUTION_CANDIDATES (set by main.py from --candidates), or None."""
+  raw = os.getenv("EVOLUTION_CANDIDATES")
+  return int(raw) if raw else None
 
-  EVOLUTION_CANDIDATES (set by main.py from --candidates) is BINDING: it
-  wins over the rate-based auto-selection so bounded runs stay bounded.
-  Otherwise: meaningful_rate >=90% → 1, >=80% → 3, <80% → 5.
+
+def resolve_candidates(requested: int | None, summary: dict) -> int:
+  """Candidate count for this round.
+
+  EVOLUTION_CANDIDATES is BINDING: it wins over the caller's value (the
+  orchestrating agent picks its own when it calls run_evolution) and
+  over the rate-based auto-selection, so bounded runs stay bounded.
+  Otherwise the caller's value; otherwise meaningful_rate >=90% → 1,
+  >=80% → 3, <80% → 5.
   """
-  if os.getenv("EVOLUTION_CANDIDATES"):
-    candidates = int(os.environ["EVOLUTION_CANDIDATES"])
-    logger.info("Candidates bound by EVOLUTION_CANDIDATES=%d", candidates)
-    return candidates
+  bound = bound_candidates()
+  if bound is not None:
+    if requested is not None and requested != bound:
+      logger.warning(
+          "Caller asked for candidates=%d; EVOLUTION_CANDIDATES=%d is"
+          " binding and wins",
+          requested,
+          bound,
+      )
+    else:
+      logger.info("Candidates bound by EVOLUTION_CANDIDATES=%d", bound)
+    return bound
+  if requested is not None:
+    return requested
   rate = summary.get("meaningful_rate", 0)
   candidates = 1 if rate >= 90 else 3 if rate >= 80 else 5
   logger.info(
@@ -371,8 +389,8 @@ def evolve(
       max_workers: Maximum parallel analyst threads.
       max_success_samples: Max success trajectories to analyze.
       candidates: Number of consolidation candidates (best-of-N).
-          None = EVOLUTION_CANDIDATES env if set, else auto by
-          meaningful_rate (>=90% → 1, >=80% → 3, <80% → 5).
+          EVOLUTION_CANDIDATES, when set, overrides this value; None =
+          auto by meaningful_rate (>=90% → 1, >=80% → 3, <80% → 5).
       candidates_dir: Directory to save candidate skills; also anchors
           evolved_score.json one level up (the run dir).
       max_chars: Cap on evolved skill size; exceeding it triggers the
@@ -404,8 +422,7 @@ def evolve(
   summary = report.get("summary", {})
 
   report = _stride_sample_failures(report)
-  if candidates is None:
-    candidates = _auto_candidates(summary)
+  candidates = resolve_candidates(candidates, summary)
 
   client = _vertex_client()
 

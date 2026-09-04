@@ -181,6 +181,27 @@ def test_lazy_load_no_env(monkeypatch):
     registry.get_registry()
 
 
+def test_agents_summary_keyed_by_name_in_registry_order(tmp_path, monkeypatch):
+  path = _write_registry(
+      tmp_path,
+      {
+          "repo_root": str(tmp_path),
+          "agents": {
+              "a": {"skill_dir": "a/skill", "label": "A agent", "order": 1},
+              "b": {"skill_dir": "b/skill", "label": "B agent", "order": 0},
+          },
+      },
+  )
+  monkeypatch.setenv("AGENT_REGISTRY", path)
+  summary = registry.agents_summary()
+  # Ordered by the registry's evolution order, not declaration order.
+  assert list(summary) == ["b", "a"]
+  assert summary == {
+      "b": {"label": "B agent", "skill_dir": str(tmp_path / "b" / "skill")},
+      "a": {"label": "A agent", "skill_dir": str(tmp_path / "a" / "skill")},
+  }
+
+
 def test_get_registry_caches(tmp_path, monkeypatch):
   path = _write_registry(tmp_path, {"agents": {"a": {"skill_dir": "s"}}})
   monkeypatch.setenv("AGENT_REGISTRY", path)
