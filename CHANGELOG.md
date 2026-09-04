@@ -14,9 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deterministic metrics and shared report models live in `system_evaluator`;
   trial aggregation lives in `multi_trial_performance_evaluator` and
   `aggregate_grader`. Existing evaluator names remain compatibility aliases.
-- `LLMAsJudge` remains a standalone legacy adapter with its factories and custom
-  criteria API. `Client.evaluate(LLMAsJudge)` uses bounded per-session Gemini API
-  calls. New code can use `SystemEvaluator` or `PerformanceEvaluator`.
+- `LLMAsJudge` keeps its factories, custom criteria API, and existing
+  `Client.evaluate` execution order: BigQuery `AI.GENERATE`, then BQML
+  `ML.GENERATE_TEXT`, then Gemini API fallback. Configured BigQuery endpoints,
+  connections, and execution/fallback metadata remain supported. The API
+  fallback uses bounded concurrency and preserves per-session failures.
+- `PerformanceEvaluator` provides opt-in API-only judging with bounded
+  concurrency. Existing `LLMAsJudge` callers retain their BigQuery path.
 - The deprecated BigQuery `AI.GENERATE` and `ML.GENERATE_TEXT` SQL helpers remain
   in `evaluators` for compatibility. `PerformanceEvaluator` uses the Gemini API;
   it does not execute those SQL templates.

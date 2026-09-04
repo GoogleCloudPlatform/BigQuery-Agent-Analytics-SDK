@@ -349,10 +349,34 @@ report = client.evaluate(
 print(report.summary())
 ```
 
+### Existing BigQuery judges and opt-in API evaluation
+
+`Client.evaluate(LLMAsJudge(...))` retains its existing execution order:
+BigQuery `AI.GENERATE`, then BQML `ML.GENERATE_TEXT`, then Gemini API fallback.
+The client's `endpoint` and `connection_id` continue to configure BigQuery
+execution. `report.details["execution_mode"]` identifies the successful path;
+`fallback_reason` records why an earlier path failed.
+
+```python
+from bigquery_agent_analytics import LLMAsJudge
+
+report = client.evaluate(
+    evaluator=LLMAsJudge.correctness(threshold=0.7),
+    filters=TraceFilter(agent_id="support_bot"),
+    strict=True,
+)
+```
+
+Use `PerformanceEvaluator` to opt into direct Gemini API judging. Its
+`llm_judge_model` controls the Gemini model; the client fetches the selected
+traces and passes them directly to the evaluator. `max_concurrency=5` is the
+default for this API path and for the legacy judge's API fallback. Direct
+`LLMAsJudge.evaluate_session(...)` calls also continue to use the Gemini API.
+
 ### Strict Mode
 
-`strict=True` inspects the final report from every evaluator dispatch,
-including `PerformanceEvaluator` and the legacy `LLMAsJudge` API path.
+`strict=True` inspects the final judge report from `PerformanceEvaluator`
+or `LLMAsJudge`, including BigQuery execution and API fallback.
 It marks sessions with no produced scores as failed and adds:
 
 - `SessionScore.details["parse_error"] = True` for empty score dictionaries.

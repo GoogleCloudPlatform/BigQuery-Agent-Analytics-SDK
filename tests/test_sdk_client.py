@@ -340,6 +340,11 @@ class TestClientEvaluate:
     mock_job = MagicMock()
     mock_job.result.return_value = event_rows
     mock_bq.query.return_value = mock_job
+    mock_bq.query.side_effect = [
+        RuntimeError("AI.GENERATE unavailable"),
+        RuntimeError("BQML unavailable"),
+        mock_job,
+    ]
 
     client = Client(
         project_id="proj",
@@ -368,10 +373,13 @@ class TestClientEvaluate:
     assert report.passed_sessions == 1
     assert report.evaluator_name == "correctness_judge"
 
-    # Verify BQ query was called with _LIST_TRACES_QUERY
-    mock_bq.query.assert_called_once()
+    # The legacy route retains BQ tiers before fetching traces for the API.
+    assert mock_bq.query.call_count == 3
     sql = mock_bq.query.call_args[0][0]
     assert "FROM `proj.ds.agent_events`" in sql
+    assert report.details["execution_mode"] == "api_fallback"
+    assert "AI.GENERATE unavailable" in report.details["fallback_reason"]
+    assert "BQML unavailable" in report.details["fallback_reason"]
 
 
 class TestClientEndpointInit:
@@ -1041,6 +1049,11 @@ class TestStrictMode:
         _make_mock_row(row)
         for sid in ("s1", "s2")
         for row in _make_event_rows(session_id=sid)
+    ]
+    mock_bq.query.side_effect = [
+        RuntimeError("AI.GENERATE unavailable"),
+        RuntimeError("BQML unavailable"),
+        mock_bq.query.return_value,
     ]
     client = Client(
         project_id="proj",

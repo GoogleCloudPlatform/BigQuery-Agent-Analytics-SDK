@@ -120,8 +120,11 @@ class _JudgeCriterion:
 class LLMAsJudge:
   """Legacy criterion-based evaluator using the Gemini API per session.
 
-  This standalone adapter preserves the existing factories and custom
-  criteria API. New one-sided and side-by-side evaluations can use
+  Direct ``evaluate_session`` calls use the Gemini API. Through
+  ``Client.evaluate``, existing BigQuery AI.GENERATE/BQML execution and
+  Gemini API fallback remain supported, including the client's endpoint
+  and connection settings. This adapter preserves the existing factories
+  and custom criteria API. New one-sided and side-by-side evaluations use
   :class:`PerformanceEvaluator`.
   """
 
@@ -409,18 +412,40 @@ def render_ai_generate_judge_query(
   """Render the AI.GENERATE judge batch query for a given config.
 
   .. deprecated:: 0.3.0
-      Use :class:`PerformanceEvaluator` instead.
+      Use ``Client.evaluate(LLMAsJudge(...))`` for BigQuery judging or
+      :class:`PerformanceEvaluator` for direct Gemini API judging.
 
   ``AI.GENERATE`` is BigQuery's scalar generative function.
   """
   warnings.warn(
       (
           "render_ai_generate_judge_query is deprecated and will be removed in"
-          " a future version. Use PerformanceEvaluator instead."
+          " a future version. Use Client.evaluate(LLMAsJudge(...)) for"
+          " BigQuery judging or PerformanceEvaluator for Gemini API judging."
       ),
       DeprecationWarning,
       stacklevel=2,
   )
+  return _render_ai_generate_judge_query(
+      project=project,
+      dataset=dataset,
+      table=table,
+      where=where,
+      endpoint=endpoint,
+      connection_id=connection_id,
+  )
+
+
+def _render_ai_generate_judge_query(
+    *,
+    project: str,
+    dataset: str,
+    table: str,
+    where: str,
+    endpoint: str,
+    connection_id: Optional[str] = None,
+) -> str:
+  """Internal implementation used by the supported BigQuery judge path."""
   if connection_id:
     connection_arg = f"\n      connection_id => '{connection_id}',"
   else:
@@ -528,6 +553,11 @@ def split_judge_prompt_template(prompt_template: str) -> tuple[str, str, str]:
       DeprecationWarning,
       stacklevel=2,
   )
+  return _split_judge_prompt_template(prompt_template)
+
+
+def _split_judge_prompt_template(prompt_template: str) -> tuple[str, str, str]:
+  """Internal implementation used by the supported BigQuery judge path."""
   has_trace = "{trace_text}" in prompt_template
   has_response = "{final_response}" in prompt_template
 
@@ -586,7 +616,8 @@ def __getattr__(name: str) -> Any:
     warnings.warn(
         (
             f"{name} is deprecated and will be removed in a future version. "
-            "Use PerformanceEvaluator instead."
+            "Use Client.evaluate(LLMAsJudge(...)) for BigQuery judging or "
+            "PerformanceEvaluator for Gemini API judging."
         ),
         DeprecationWarning,
         stacklevel=2,

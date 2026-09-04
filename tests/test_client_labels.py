@@ -193,3 +193,30 @@ class TestQuerySiteLabels:
         == "eval-performance"
     ]
     assert judge_calls, "no query labeled with sdk_feature=eval-performance"
+
+  def test_ai_generate_judge_labels_with_ai_generate(self):
+    from bigquery_agent_analytics.evaluators import LLMAsJudge
+
+    mock_bq = MagicMock()
+    mock_job = MagicMock()
+    # Empty result is fine — we only care that the query ran with the
+    # expected labels.
+    mock_job.result.return_value = iter([])
+    mock_bq.query.return_value = mock_job
+
+    client = _make_client(bq_client=mock_bq, connection_id="proj.us.conn")
+    judge = LLMAsJudge.correctness(threshold=0.7)
+    client.evaluate(evaluator=judge)
+
+    # Multiple queries may fire (session summary + judge). At least one
+    # should be the judge query with eval-llm-judge + ai-generate.
+    judge_calls = [
+        c
+        for c in mock_bq.query.call_args_list
+        if c.kwargs.get("job_config")
+        and dict(c.kwargs["job_config"].labels or {}).get("sdk_feature")
+        == "eval-llm-judge"
+    ]
+    assert judge_calls, "no query labeled with sdk_feature=eval-llm-judge"
+    judge_labels = dict(judge_calls[0].kwargs["job_config"].labels or {})
+    assert judge_labels.get("sdk_ai_function") == "ai-generate"

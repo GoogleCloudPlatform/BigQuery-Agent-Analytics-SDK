@@ -85,10 +85,10 @@ from .categorical_evaluator import parse_classify_row
 from .evaluators import _AI_GENERATE_JUDGE_BATCH_QUERY_TEMPLATE as AI_GENERATE_JUDGE_BATCH_QUERY
 from .evaluators import _LEGACY_LLM_JUDGE_BATCH_QUERY as LLM_JUDGE_BATCH_QUERY
 from .evaluators import _parse_json_from_text
+from .evaluators import _render_ai_generate_judge_query as render_ai_generate_judge_query
+from .evaluators import _split_judge_prompt_template as split_judge_prompt_template
 from .evaluators import DEFAULT_ENDPOINT
 from .evaluators import LLMAsJudge
-from .evaluators import render_ai_generate_judge_query
-from .evaluators import split_judge_prompt_template
 from .feedback import AnalysisConfig
 from .feedback import compute_drift
 from .feedback import compute_question_distribution
@@ -2088,8 +2088,9 @@ class Client:
 
     Uses BigQuery native execution for scalable assessment.
     ``SystemEvaluator`` metrics are computed from session aggregates.
-    ``PerformanceEvaluator`` and legacy ``LLMAsJudge`` metrics use the
-    Gemini API on the selected, identity-bound trace population.
+    ``LLMAsJudge`` retains BigQuery AI.GENERATE, then ML.GENERATE_TEXT,
+    then Gemini API fallback. ``PerformanceEvaluator`` uses the Gemini
+    API on the selected, identity-bound trace population.
 
     Args:
         evaluator: A SystemEvaluator, PerformanceEvaluator, or LLMAsJudge.
@@ -2145,7 +2146,7 @@ class Client:
           max_concurrency=max_concurrency,
       )
     elif isinstance(evaluator, LLMAsJudge):
-      report = self._evaluate_legacy_judge(
+      report = self._evaluate_llm_judge(
           evaluator,
           table,
           where,
@@ -2207,30 +2208,6 @@ class Client:
     report.details["execution_mode"] = "performance_evaluator"
     return report
 
-  def _evaluate_legacy_judge(
-      self,
-      evaluator: LLMAsJudge,
-      table: str,
-      where: str,
-      params: list,
-      trace_filter: TraceFilter,
-      *,
-      max_concurrency: int = 5,
-  ) -> EvaluationReport:
-    """Route the legacy evaluator through the scoped Gemini API path."""
-    report = self._api_judge(
-        evaluator,
-        table,
-        where,
-        params,
-        row_where=trace_filter.row_scope_where(),
-        limit=trace_filter.limit,
-        trace_filter=trace_filter,
-        max_concurrency=max_concurrency,
-    )
-    report.details["execution_mode"] = "legacy_llm_judge"
-    return report
-
   def _evaluate_code(
       self,
       evaluator: SystemEvaluator,
@@ -2280,6 +2257,8 @@ class Client:
       where: str,
       params: list,
       trace_filter: Optional[TraceFilter] = None,
+      *,
+      max_concurrency: int = 5,
   ) -> EvaluationReport:
     """Runs LLM-as-judge evaluation over ALL criteria.
 
@@ -2297,11 +2276,14 @@ class Client:
     categorical evaluator's ``execution_mode`` value space for
     consistency.)
     """
+    report_dataset = (
+        f"{self.project_id}.{self.dataset_id}.{table} WHERE {where}"
+    )
     criteria = evaluator._criteria
     if not criteria:
       report = _build_report(
           evaluator_name=evaluator.name,
-          dataset=f"{self._table_ref} WHERE {where}",
+          dataset=report_dataset,
           session_scores=[],
       )
       report.details["execution_mode"] = "no_op"
@@ -2333,7 +2315,7 @@ class Client:
           criterion_reports.append((criterion, report))
         merged = _merge_criterion_reports(
             evaluator.name,
-            f"{self._table_ref} WHERE {where}",
+            report_dataset,
             criteria,
             criterion_reports,
         )
@@ -2367,7 +2349,7 @@ class Client:
         criterion_reports.append((criterion, report))
       merged = _merge_criterion_reports(
           evaluator.name,
-          f"{self._table_ref} WHERE {where}",
+          report_dataset,
           criteria,
           criterion_reports,
       )
@@ -2391,6 +2373,7 @@ class Client:
         row_where=row_where,
         limit=trace_filter.limit if trace_filter is not None else None,
         trace_filter=trace_filter,
+        max_concurrency=max_concurrency,
     )
     api_report.details["execution_mode"] = "api_fallback"
     if fallback_reasons:

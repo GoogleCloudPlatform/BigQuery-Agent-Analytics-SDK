@@ -20,6 +20,7 @@ from datetime import timezone
 import json
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+import warnings
 
 import pytest
 
@@ -35,13 +36,14 @@ from bigquery_agent_analytics.trace import TraceIdentity
 from bigquery_agent_analytics.trace import TraceScope
 
 
-def _client(bq_client=None):
+def _client(bq_client=None, **kwargs):
   return Client(
       project_id="caller-project",
       dataset_id="caller_dataset",
       table_id="default_events",
       verify_schema=False,
       bq_client=bq_client if bq_client is not None else MagicMock(),
+      **kwargs,
   )
 
 
@@ -62,6 +64,19 @@ def _performance():
   )
 
 
+def _force_legacy_api(client, monkeypatch):
+  monkeypatch.setattr(
+      client,
+      "_ai_generate_judge",
+      MagicMock(side_effect=RuntimeError("AI unavailable")),
+  )
+  monkeypatch.setattr(
+      client,
+      "_bqml_judge",
+      MagicMock(side_effect=RuntimeError("BQML unavailable")),
+  )
+
+
 @pytest.mark.parametrize("kind", ["performance", "legacy"])
 def test_strict_mode_is_applied_through_public_dispatch(monkeypatch, kind):
   client = _client()
@@ -78,6 +93,7 @@ def test_strict_mode_is_applied_through_public_dispatch(monkeypatch, kind):
         details={"user_id": "spoofed"},
     )
   else:
+    _force_legacy_api(client, monkeypatch)
     evaluator = LLMAsJudge.correctness()
     result = SessionScore(
         session_id="incorrect-evaluator-id",
@@ -115,6 +131,8 @@ def test_per_session_errors_do_not_abort_bounded_evaluation(monkeypatch, kind):
   evaluator = (
       _performance() if kind == "performance" else LLMAsJudge.correctness()
   )
+  if kind == "legacy":
+    _force_legacy_api(client, monkeypatch)
   active = 0
   peak = 0
   completed = 0
@@ -157,6 +175,10 @@ def test_per_session_errors_do_not_abort_bounded_evaluation(monkeypatch, kind):
   assert "unavailable" in failed.details["evaluation_error"]
   assert failed.details["parse_error"] is True
   assert failed.details["user_id"] == "user-a"
+  if kind == "legacy":
+    assert report.details["execution_mode"] == "api_fallback"
+    assert "AI unavailable" in report.details["fallback_reason"]
+    assert "BQML unavailable" in report.details["fallback_reason"]
 
 
 def test_performance_aggregates_keep_colliding_identities_and_scopes(
@@ -290,3 +312,219 @@ def test_filter_snapshot_survives_mutation_during_fetch(monkeypatch):
   assert observed["limit"] == 1
   assert "selected" in [param.value for param in observed["params"]]
   assert "mutated" not in [param.value for param in observed["params"]]
+
+
+def test_legacy_public_dispatch_uses_configured_bigquery_endpoint(monkeypatch):
+  bq = MagicMock()
+  bq.query.return_value.result.return_value = [
+      {"session_id": "session-a", "score": 8, "justification": "measured"},
+      {"session_id": "session-b", "score": None, "justification": "empty"},
+  ]
+  client = _client(
+      bq,
+      endpoint="gemini-2.5-pro",
+      connection_id="caller-project.us.judge_connection",
+  )
+  judge = LLMAsJudge.correctness(threshold=0.7)
+  api = AsyncMock(
+      side_effect=AssertionError("BigQuery success must not use API")
+  )
+  monkeypatch.setattr(judge, "evaluate_session", api)
+
+  with warnings.catch_warnings():
+    warnings.simplefilter("error", DeprecationWarning)
+    report = client.evaluate(
+        judge,
+        dataset="selected_events",
+        filters=TraceFilter(user_id="selected-user", limit=2),
+        strict=True,
+    )
+
+  assert bq.query.call_count == 1
+  sql = bq.query.call_args.args[0]
+  assert "AI.GENERATE(" in sql
+  assert "endpoint => 'gemini-2.5-pro'" in sql
+  assert "connection_id => 'caller-project.us.judge_connection'" in sql
+  assert "`caller-project.caller_dataset.selected_events`" in sql
+  params = bq.query.call_args.kwargs["job_config"].query_parameters
+  assert any(
+      param.name == "user_id" and param.value == "selected-user"
+      for param in params
+  )
+  assert report.dataset.startswith(
+      "caller-project.caller_dataset.selected_events"
+  )
+  assert report.details["execution_mode"] == "ai_generate"
+  assert "fallback_reason" not in report.details
+  assert report.details["parse_errors"] == 1
+  assert report.passed_sessions == 1
+  assert report.failed_sessions == 1
+  assert report.aggregate_scores == {"correctness": 0.8}
+  api.assert_not_awaited()
+
+
+@pytest.mark.parametrize("legacy_model", [False, True])
+def test_legacy_public_dispatch_keeps_bqml_success(monkeypatch, legacy_model):
+  bq = MagicMock()
+  job = MagicMock()
+  job.result.return_value = [
+      {
+          "session_id": "session-a",
+          "evaluation": '{"correctness": 9, "justification": "BQML"}',
+      }
+  ]
+  if legacy_model:
+    endpoint = "models-project.models.explicit_model"
+    bq.query.return_value = job
+  else:
+    endpoint = "gemini-2.5-flash"
+    bq.query.side_effect = [RuntimeError("AI tier unavailable"), job]
+  client = _client(bq, endpoint=endpoint)
+  judge = LLMAsJudge.correctness()
+  api = AsyncMock(side_effect=AssertionError("BQML success must not use API"))
+  monkeypatch.setattr(judge, "evaluate_session", api)
+
+  report = client.evaluate(judge, dataset="selected_events")
+
+  assert bq.query.call_count == (1 if legacy_model else 2)
+  sql = bq.query.call_args.args[0]
+  assert "ML.GENERATE_TEXT" in sql
+  model = (
+      endpoint
+      if legacy_model
+      else "caller-project.caller_dataset.gemini_text_model"
+  )
+  assert f"MODEL `{model}`" in sql
+  assert "`caller-project.caller_dataset.selected_events`" in sql
+  labels = bq.query.call_args.kwargs["job_config"].labels
+  assert labels["sdk_ai_function"] == "ml-generate-text"
+  assert report.details["execution_mode"] == "ml_generate_text"
+  assert report.dataset.startswith(
+      "caller-project.caller_dataset.selected_events"
+  )
+  assert report.aggregate_scores == {"correctness": 0.9}
+  if legacy_model:
+    assert "fallback_reason" not in report.details
+  else:
+    assert (
+        "ai_generate: AI tier unavailable" == report.details["fallback_reason"]
+    )
+  api.assert_not_awaited()
+
+
+def test_legacy_empty_criteria_keeps_selected_table_without_queries():
+  bq = MagicMock()
+  client = _client(bq)
+
+  report = client.evaluate(LLMAsJudge(name="empty"), dataset="selected_events")
+
+  assert (
+      report.dataset
+      == "caller-project.caller_dataset.selected_events WHERE TRUE"
+  )
+  assert report.details["execution_mode"] == "no_op"
+  assert report.total_sessions == 0
+  bq.query.assert_not_called()
+
+
+def test_legacy_api_fallback_keeps_scope_and_concurrency_override(monkeypatch):
+  bq = MagicMock()
+  bq.query.side_effect = [
+      RuntimeError("AI disabled"),
+      RuntimeError("BQML disabled"),
+  ]
+  client = _client(bq)
+  filters = TraceFilter(
+      experiment_id="selected-run", custom_labels={"cohort": "chosen"}, limit=3
+  )
+  scope = TraceScope("selected-run", {"cohort": "chosen"})
+  traces = [
+      Trace(
+          trace_id=f"trace-{user}",
+          session_id="shared-id",
+          identity=TraceIdentity("shared-id", user, "support"),
+          scope=scope,
+      )
+      for user in ("user-a", "user-b", "user-c")
+  ]
+  fetched = {}
+
+  def fetch(**kwargs):
+    filters.limit = 999
+    filters.experiment_id = "mutated"
+    fetched.update(kwargs)
+    return traces
+
+  monkeypatch.setattr(client, "_fetch_filtered_traces", fetch)
+  evaluator = LLMAsJudge.correctness()
+  active = 0
+  peak = 0
+
+  async def evaluate(*args):
+    nonlocal active, peak
+    active += 1
+    peak = max(peak, active)
+    try:
+      await asyncio.sleep(0.005)
+      return SessionScore(session_id="ignored", scores={"correctness": 1.0})
+    finally:
+      active -= 1
+
+  monkeypatch.setattr(evaluator, "evaluate_session", evaluate)
+  report = client.evaluate(
+      evaluator, filters=filters, dataset="selected_events", max_concurrency=1
+  )
+
+  assert peak == 1
+  assert fetched["table"] == "selected_events"
+  assert fetched["limit"] == 3
+  assert "$.custom_tags." in fetched["row_where"]
+  values = [param.value for param in fetched["params"]]
+  assert "selected-run" in values
+  assert "mutated" not in values
+  assert all(fetched["scope_predicate"](trace.scope) for trace in traces)
+  assert {score.details["user_id"] for score in report.session_scores} == {
+      "user-a",
+      "user-b",
+      "user-c",
+  }
+  assert all(
+      score.details["scope_signature"] == scope.scope_signature
+      for score in report.session_scores
+  )
+  assert report.details["execution_mode"] == "api_fallback"
+  assert (
+      report.details["fallback_reason"]
+      == "ai_generate: AI disabled; ml_generate_text: BQML disabled"
+  )
+  assert report.aggregate_scores == {"correctness": 1.0}
+
+
+def test_performance_does_not_enter_legacy_bigquery_tiers(monkeypatch):
+  client = _client(endpoint="models-project.models.explicit_model")
+  monkeypatch.setattr(
+      client, "_fetch_filtered_traces", lambda **kwargs: [_trace()]
+  )
+  ai = MagicMock(side_effect=AssertionError("legacy AI tier must not run"))
+  bqml = MagicMock(side_effect=AssertionError("legacy BQML tier must not run"))
+  monkeypatch.setattr(client, "_ai_generate_judge", ai)
+  monkeypatch.setattr(client, "_bqml_judge", bqml)
+  evaluator = _performance()
+  monkeypatch.setattr(
+      evaluator,
+      "evaluate_session",
+      AsyncMock(
+          return_value=EvaluationResult(
+              session_id="shared-session",
+              eval_status=EvalStatus.PASSED,
+              scores={"quality": 1.0},
+          )
+      ),
+  )
+
+  report = client.evaluate(evaluator)
+
+  assert report.details["execution_mode"] == "performance_evaluator"
+  assert report.passed_sessions == 1
+  ai.assert_not_called()
+  bqml.assert_not_called()

@@ -1364,7 +1364,9 @@ All evaluation scores in the SDK are normalized to `[0.0, 1.0]`:
 |------|-----------|----------------------|
 | Single session (sync) | `SystemEvaluator.evaluate_session()` | Python |
 | Single session (async) | `PerformanceEvaluator.evaluate_session()` | Python, Gemini API |
-| Batch via Client | `Client.evaluate()` | BigQuery reads and deterministic SQL aggregation; bounded Gemini API calls for judge evaluators |
+| Batch system metrics | `Client.evaluate(SystemEvaluator)` | BigQuery SQL aggregation + Python metrics |
+| Batch legacy judge | `Client.evaluate(LLMAsJudge)` | BigQuery AI.GENERATE → BQML → bounded Gemini API fallback |
+| Batch performance judge | `Client.evaluate(PerformanceEvaluator)` | BigQuery trace reads + bounded Gemini API judging |
 | Trajectory matching | `PerformanceEvaluator.evaluate_session()` | BigQuery (fetch) + Python (matching) |
 | Multi-trial | `MultiTrialPerformanceEvaluator.run_trials()` | BigQuery (fetch) + Python (N iterations) |
 | Pipeline | `AggregateGrader.evaluate()` | Mixed (code=Python, LLM=API/BQ) |
