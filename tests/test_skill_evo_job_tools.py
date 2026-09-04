@@ -421,8 +421,12 @@ def test_run_evolution_refuses_past_max_rounds(tmp_path, monkeypatch):
   monkeypatch.setenv("EVOLUTION_MAX_ROUNDS", "1")
   # No AGENT_REGISTRY (the autouse fixture clears it), so
   # _resolve_skill_dir passes this absolute path straight through and the
-  # guard key is the path as given.
-  monkeypatch.setattr(tools, "_rounds_run", {f"run_evolution[{skill_dir}]": 1})
+  # guard key is its real path.
+  monkeypatch.setattr(
+      tools,
+      "_rounds_run",
+      {f"run_evolution[{os.path.realpath(skill_dir)}]": 1},
+  )
 
   result = tools.run_evolution(
       str(report_path), str(skill_dir), run_dir=str(tmp_path)
@@ -515,6 +519,43 @@ def test_collect_quality_metrics_ignores_unmeasurable_evolved_score(tmp_path):
   assert metrics["evolved_source"] == "report"
 
 
+def test_collect_quality_metrics_denominators(tmp_path):
+  # Same session count on both sides: a real delta.
+  run_dir = _metrics_run_dir(
+      tmp_path,
+      evolved_score={"version": "evolved", "meaningful_rate": 100.0},
+  )
+  metrics = tools._collect_quality_metrics(str(run_dir), "v1")
+  assert metrics["baseline_sessions"] == 26
+  assert metrics["evolved_sessions"] == 26
+  assert metrics["denominators_differ"] is False
+
+  # Baseline over a 26-session traffic window, winner scored on a
+  # 13-question eval set: flagged, with the counts in the note.
+  _write_report(
+      run_dir / "candidates" / "candidate_1_report.json",
+      meaningful_rate=100.0,
+      total_sessions=13,
+      meaningful=13,
+      unhelpful_rate=0.0,
+  )
+  metrics = tools._collect_quality_metrics(str(run_dir), "v1")
+  assert metrics["evolved_sessions"] == 13
+  assert metrics["denominators_differ"] is True
+  assert "26 session(s)" in metrics["denominators_note"]
+  assert "13" in metrics["denominators_note"]
+
+  # Selection score with no scored report at all: flagged too.
+  bare = _metrics_run_dir(
+      tmp_path / "bare",
+      candidate=False,
+      evolved_score={"version": "evolved", "meaningful_rate": 100.0},
+  )
+  metrics = tools._collect_quality_metrics(str(bare), "v1")
+  assert metrics["denominators_differ"] is True
+  assert "evolved_score.json" in metrics["denominators_note"]
+
+
 # ---------------------------------------------------------------------------
 # _identical_prior_report (run_quality_report stale detection)
 # ---------------------------------------------------------------------------
@@ -532,11 +573,13 @@ def test_identical_prior_report_finds_older_twin(tmp_path):
   _write_summary_report(older, summary, 1000)
   _write_summary_report(output, summary, 2000)
 
-  assert tools._identical_prior_report(str(output), summary) == str(older)
+  assert tools._identical_prior_report(
+      str(output), {"summary": summary}
+  ) == str(older)
   # A different meaningful count is a genuinely new measurement.
   assert (
       tools._identical_prior_report(
-          str(output), {"total_sessions": 26, "meaningful": 8}
+          str(output), {"summary": {"total_sessions": 26, "meaningful": 8}}
       )
       is None
   )
@@ -549,7 +592,65 @@ def test_identical_prior_report_ignores_newer_files(tmp_path):
   _write_summary_report(output, summary, 1000)
   _write_summary_report(newer, summary, 2000)
 
-  assert tools._identical_prior_report(str(output), summary) is None
+  assert (
+      tools._identical_prior_report(str(output), {"summary": summary}) is None
+  )
+
+
+def _write_session_report(path, session_ids, mtime):
+  payload = {
+      "summary": {"total_sessions": len(session_ids), "meaningful": 2},
+      "sessions": [{"session_id": sid} for sid in session_ids],
+  }
+  path.write_text(json.dumps(payload))
+  os.utime(path, (mtime, mtime))
+  return payload
+
+
+def test_identical_prior_report_compares_session_ids(tmp_path):
+  older = tmp_path / "a_quality_report.json"
+  output = tmp_path / "b_quality_report.json"
+  _write_session_report(older, ["s1", "s2", "s3"], 1000)
+  # Same counts, different sessions: a fresh window, not a stale re-read.
+  fresh = _write_session_report(output, ["s4", "s5", "s6"], 2000)
+  assert tools._identical_prior_report(str(output), fresh) is None
+  # Same sessions again: stale.
+  same = _write_session_report(output, ["s3", "s1", "s2"], 2000)
+  assert tools._identical_prior_report(str(output), same) == str(older)
+
+
+def test_round_guard_key_is_realpath_and_released_on_error(
+    tmp_path, monkeypatch
+):
+  skill_dir = tmp_path / "skill"
+  skill_dir.mkdir()
+  (skill_dir / "SKILL.md").write_text("# Skill\n")
+  report_path = tmp_path / "quality_report.json"
+  _write_report(report_path, meaningful_rate=50.0)
+  monkeypatch.setenv("EVOLUTION_MAX_ROUNDS", "1")
+  monkeypatch.setattr(tools, "_rounds_run", {})
+
+  def boom(*_args, **_kwargs):
+    raise RuntimeError("vertex unavailable")
+
+  from skill_evolution_job import evolve as evolve_mod
+
+  monkeypatch.setattr(evolve_mod, "evolve", boom)
+
+  first = tools.run_evolution(
+      str(report_path), str(skill_dir), run_dir=str(tmp_path)
+  )
+  assert first["status"] == "error"
+  # The failed attempt did not consume the round ...
+  key = f"run_evolution[{os.path.realpath(skill_dir)}]"
+  assert tools._rounds_run.get(key, 0) == 0
+  # ... and a trailing slash shares the key with the plain path.
+  tools._rounds_run[key] = 1
+  refused = tools.run_evolution(
+      str(report_path), str(skill_dir) + "/", run_dir=str(tmp_path)
+  )
+  assert refused["status"] == "refused"
+  assert list(tools._rounds_run) == [key]
 
 
 # ---------------------------------------------------------------------------

@@ -308,7 +308,11 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # reproducible from flags instead of from files copied over by hand.
 SCRIPTS_SRC="${SCRIPTS_DIR:-${REPO_ROOT}/scripts}"
 SCRIPTS_SRC="$(cd "$SCRIPTS_SRC" 2>/dev/null && pwd)" || {
-  echo "Error: --scripts-dir is not a directory: ${SCRIPTS_DIR}" >&2
+  if [[ -n "$SCRIPTS_DIR" ]]; then
+    echo "Error: --scripts-dir is not a directory: ${SCRIPTS_DIR}" >&2
+  else
+    echo "Error: ${REPO_ROOT}/scripts not found — run this script from a full SDK checkout, or point --scripts-dir at one." >&2
+  fi
   exit 1
 }
 for staged in skill_evolution.py quality_report.py eval/eval_config.json; do

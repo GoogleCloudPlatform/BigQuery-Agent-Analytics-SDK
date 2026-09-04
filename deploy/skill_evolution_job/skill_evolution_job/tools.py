@@ -168,7 +168,10 @@ def run_evolution(
   # too, per agent: the orchestrator cannot re-run evolution on the same
   # skill beyond the cap (a post-round quality report that re-measures
   # the pre-evolution sessions used to trigger a spurious second round).
-  refused = _round_guard(f"run_evolution[{skill_dir}]")
+  # Keyed on the real path so "dir" and "dir/" (or a symlink to it) cannot
+  # buy a second round.
+  guard_key = f"run_evolution[{os.path.realpath(skill_dir)}]"
+  refused = _round_guard(guard_key)
   if refused:
     return refused
 
@@ -332,6 +335,7 @@ def run_evolution(
 
   except Exception as e:
     logger.error("Evolution failed: %s", e, exc_info=True)
+    _round_release(guard_key)
     return {"status": "error", "error": str(e)}
 
 
@@ -450,6 +454,16 @@ def _round_guard(key: str) -> dict | None:
   return None
 
 
+def _round_release(key: str) -> None:
+  """Give a counted round back when the tool failed before doing the work.
+
+  Without this a transient error at the cap leaves the agent refused with
+  nothing to publish.
+  """
+  if _rounds_run.get(key, 0) > 0:
+    _rounds_run[key] -= 1
+
+
 _bottleneck_cache: dict = {}  # report path -> classification (once per report)
 
 
@@ -530,6 +544,7 @@ def run_coevolution(
     }
   except Exception as e:
     logger.error("Co-evolution failed: %s", e, exc_info=True)
+    _round_release("run_coevolution")
     return {"status": "error", "error": str(e)}
 
 
@@ -651,35 +666,53 @@ def run_quality_report(
   }
   try:
     with open(output_path) as f:
-      summary = json.load(f).get("summary") or {}
-  except (OSError, ValueError) as exc:
+      report = json.load(f)
+    summary = report.get("summary") or {}
+  except (OSError, ValueError, AttributeError) as exc:
     result["warning"] = f"Report is not readable JSON: {exc}"
     return result
   result["total_sessions"] = summary.get("total_sessions")
   if summary.get("meaningful_rate") is not None:
     result["meaningful_rate"] = summary.get("meaningful_rate")
-  twin = _identical_prior_report(output_path, summary)
+  twin = _identical_prior_report(output_path, report)
   if twin:
-    # Same session count and same meaningful count as an earlier report
-    # in this run: the window returned the same sessions again. That
-    # happens whenever the evolved skill is not yet deployed (it ships
-    # via the PR), so this is not a measurement of the new version.
+    # The same sessions as an earlier report in this run: the window
+    # returned them again. That happens whenever the evolved skill is not
+    # yet deployed (it ships via the PR), so this is not a measurement of
+    # the new version.
     result["warning"] = (
-        f"Summary is identical to {os.path.basename(twin)} (same"
-        " total_sessions and meaningful count): the time window returned"
-        " the same sessions, so this report does NOT measure the evolved"
-        " skill. Do not start another round on it; the winner's score is"
-        " in evolved_score.json / compare_versions."
+        f"This report covers the same sessions as {os.path.basename(twin)}"
+        " (same session ids, or the same total_sessions and meaningful"
+        " count when the report lists no sessions), so it does NOT"
+        " measure the evolved skill. Do not start another round on it;"
+        " the winner's score is in evolved_score.json / compare_versions."
     )
     result["stale"] = True
   return result
 
 
-def _identical_prior_report(output_path: str, summary: dict) -> str | None:
-  """Earlier report in the same directory with an identical summary."""
+def _report_session_ids(report: dict) -> frozenset | None:
+  """Session ids a quality report lists, or None when it carries none."""
+  ids = {
+      s.get("session_id")
+      for s in report.get("sessions") or []
+      if isinstance(s, dict) and s.get("session_id")
+  }
+  return frozenset(ids) if ids else None
+
+
+def _identical_prior_report(output_path: str, report: dict) -> str | None:
+  """Earlier report in the same directory that measured the same sessions.
+
+  Compared by session ids when both reports list them. Reports without a
+  ``sessions`` list fall back to the ``total_sessions`` / ``meaningful``
+  pair, which a fresh window can match by coincidence.
+  """
+  summary = report.get("summary") or {}
   total = summary.get("total_sessions")
   meaningful = summary.get("meaningful")
-  if total is None or meaningful is None:
+  ids = _report_session_ids(report)
+  if ids is None and (total is None or meaningful is None):
     return None
   for path in sorted(
       glob.glob(
@@ -692,12 +725,20 @@ def _identical_prior_report(output_path: str, summary: dict) -> str | None:
       continue
     try:
       with open(path) as f:
-        prior = json.load(f).get("summary") or {}
+        prior = json.load(f)
     except (OSError, ValueError):
       continue
+    if not isinstance(prior, dict):
+      continue
+    prior_ids = _report_session_ids(prior)
+    if ids is not None and prior_ids is not None:
+      if prior_ids == ids:
+        return path
+      continue
+    prior_summary = prior.get("summary") or {}
     if (
-        prior.get("total_sessions") == total
-        and prior.get("meaningful") == meaningful
+        prior_summary.get("total_sessions") == total
+        and prior_summary.get("meaningful") == meaningful
     ):
       return path
   return None
@@ -841,14 +882,15 @@ def _default_pr_body(
       f"| {m['evolved_unhelpful']}% |\n"
       f"| Excluded error-shaped (infra) | {baseline_excl} |"
       f" {evolved_excl} |\n"
+      f"| Sessions | {m.get('baseline_sessions') or '?'} |"
+      f" {m.get('evolved_sessions') or '?'} |\n"
+      f"| Evolved figure source | | {m.get('evolved_source', 'report')} |\n"
       f"| Skill size | | {evolved_size} chars |\n\n"
   )
-  if baseline_excl > 0 or evolved_excl > 0:
+  if _denominators_differ(m):
     body += (
-        f"**DENOMINATORS DIFFER**: the preflight excluded {baseline_excl}"
-        f" baseline vs {evolved_excl} evolved error-shaped record(s), so"
-        " the two rates cover different question subsets. Deltas"
-        " suppressed.\n\n"
+        f"**DENOMINATORS DIFFER**: {_denominators_note(m)}, so the"
+        " two rates cover different question sets. Deltas suppressed.\n\n"
     )
   selector_path = os.path.join(run_dir, "trace_selector.json")
   if os.path.isfile(selector_path):
@@ -903,6 +945,42 @@ def _excluded_count(report_path: str) -> int:
     return int((summary.get("excluded_error_shaped") or {}).get("count", 0))
   except Exception:  # noqa: BLE001
     return 0
+
+
+def _session_count(report_path: str | None) -> int | None:
+  """``summary.total_sessions`` of a report, None when unknown."""
+  if not report_path:
+    return None
+  try:
+    with open(report_path) as f:
+      summary = json.load(f).get("summary") or {}
+    total = summary.get("total_sessions")
+    return int(total) if total is not None else None
+  except Exception:  # noqa: BLE001
+    return None
+
+
+def _denominators_differ(metrics: dict) -> bool:
+  """True when the baseline and evolved rates do not share a denominator.
+
+  Reads the flag ``_collect_quality_metrics`` sets, and falls back to the
+  exclusion counts for metrics dicts built elsewhere.
+  """
+  return bool(
+      metrics.get("denominators_differ")
+      or metrics.get("baseline_excl", 0) > 0
+      or metrics.get("evolved_excl", 0) > 0
+  )
+
+
+def _denominators_note(metrics: dict) -> str:
+  note = metrics.get("denominators_note")
+  if note:
+    return note
+  return (
+      f"the preflight excluded {metrics.get('baseline_excl', 0)} baseline vs"
+      f" {metrics.get('evolved_excl', 0)} evolved error-shaped record(s)"
+  )
 
 
 def _find_evolved_skill(run_dir: str, version: str, agent: str) -> str | None:
@@ -1053,6 +1131,34 @@ def _collect_quality_metrics(run_dir: str, version: str) -> dict:
 
   baseline_excl = _excluded_count(baseline_report) if baseline_report else 0
   evolved_excl = _excluded_count(evolved_report) if evolved_report else 0
+  baseline_sessions = _session_count(baseline_report)
+  evolved_sessions = _session_count(evolved_report)
+
+  # The two rates are only a delta when they cover the same sessions.
+  # The baseline is whatever window the host's quality report covered
+  # (in the lab's deployed runs 26 BigQuery sessions); the evolved figure
+  # is the winner's selection score on the eval set (13 questions there).
+  denominator_reasons = []
+  if baseline_excl > 0 or evolved_excl > 0:
+    denominator_reasons.append(
+        f"the preflight excluded {baseline_excl} baseline vs"
+        f" {evolved_excl} evolved error-shaped record(s)"
+    )
+  if evolved_report is None and authoritative is not None:
+    denominator_reasons.append(
+        "the evolved figure is the winner's eval-set selection score"
+        " (evolved_score.json) with no scored report to compare session"
+        " counts against"
+    )
+  elif (
+      baseline_sessions is not None
+      and evolved_sessions is not None
+      and baseline_sessions != evolved_sessions
+  ):
+    denominator_reasons.append(
+        f"the baseline covers {baseline_sessions} session(s) and the"
+        f" evolved figure {evolved_sessions}"
+    )
 
   if evolved_report is not None:
     evolved_meaningful = _extract_rate(evolved_report, "meaningful_rate")
@@ -1075,6 +1181,10 @@ def _collect_quality_metrics(run_dir: str, version: str) -> dict:
       "baseline_label": baseline_label,
       "baseline_excl": baseline_excl,
       "evolved_excl": evolved_excl,
+      "baseline_sessions": baseline_sessions,
+      "evolved_sessions": evolved_sessions,
+      "denominators_differ": bool(denominator_reasons),
+      "denominators_note": "; ".join(denominator_reasons),
   }
 
 
@@ -1402,7 +1512,7 @@ def create_evolution_issue(
   baseline_excl = metrics.get("baseline_excl", 0)
   evolved_excl = metrics.get("evolved_excl", 0)
 
-  if baseline_excl > 0 or evolved_excl > 0:
+  if _denominators_differ(metrics):
     title = (
         f"[Evolution] {agent} skill {version} — "
         f"meaningful {baseline}% → {meaningful}% [denominators differ]"
@@ -1429,11 +1539,10 @@ def create_evolution_issue(
       f"| Skill size | {evolved_size} chars |\n"
       f"| Run | `{os.path.basename(run_dir)}` |\n\n"
   )
-  if baseline_excl > 0 or evolved_excl > 0:
+  if _denominators_differ(metrics):
     issue_body += (
-        f"**DENOMINATORS DIFFER**: the preflight excluded {baseline_excl}"
-        f" baseline vs {evolved_excl} evolved error-shaped record(s), so"
-        " the two rates cover different question subsets. Deltas"
+        f"**DENOMINATORS DIFFER**: {_denominators_note(metrics)}, so"
+        " the two rates cover different question sets. Deltas"
         " suppressed.\n\n"
     )
   issue_body += f"## Run Context\n\n{run_context}\n"
@@ -1674,10 +1783,7 @@ def create_evolution_pr(
   timestamp = time.strftime("%Y%m%d-%H%M%S")
   branch_name = f"skill-evolution/{agent}-{version}-{timestamp}"
 
-  baseline_excl = metrics.get("baseline_excl", 0)
-  evolved_excl = metrics.get("evolved_excl", 0)
-
-  if baseline_excl > 0 or evolved_excl > 0:
+  if _denominators_differ(metrics):
     title = (
         f"Evolve {agent} skill to {version} "
         f"({metrics['baseline_meaningful']}% "
@@ -1790,7 +1896,7 @@ def create_evolution_pr(
         f"Meaningful rate: {metrics['baseline_meaningful']}% "
         f"-> {metrics['evolved_meaningful']}%"
     )
-    if baseline_excl > 0 or evolved_excl > 0:
+    if _denominators_differ(metrics):
       commit_msg += " [denominators differ]"
     commit_msg += f"\nRun: {os.path.basename(run_dir)}"
 
