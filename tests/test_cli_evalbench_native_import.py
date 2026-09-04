@@ -165,3 +165,98 @@ def test_native_import_rejects_bad_snapshot_timestamp(
   assert result.exit_code == 2
   assert "--snapshot-at" in result.output
   assert calls == []
+
+
+def test_native_import_forwards_the_span_labels_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  calls = _patch_from_bigquery(monkeypatch)
+  result = runner.invoke(
+      app,
+      [
+          "evalbench-native-import",
+          "--source-table",
+          _SOURCE_TABLE,
+          "--job-id",
+          "mvp-e2e-real-traces",
+          "--target-dataset",
+          "bqaa",
+          "--span-labels-table",
+          "evalbench_span_labels",
+      ],
+  )
+  assert result.exit_code == 0, result.output
+  materialize = calls[1]["materialize"]
+  assert materialize["span_labels_table"] == "evalbench_span_labels"
+
+
+def test_native_import_span_labels_default_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  calls = _patch_from_bigquery(monkeypatch)
+  result = runner.invoke(
+      app,
+      [
+          "evalbench-native-import",
+          "--source-table",
+          _SOURCE_TABLE,
+          "--job-id",
+          "mvp-e2e-real-traces",
+          "--target-dataset",
+          "bqaa",
+      ],
+  )
+  assert result.exit_code == 0, result.output
+  materialize = calls[1]["materialize"]
+  assert materialize["span_labels_table"] is None
+
+
+def test_native_import_rejects_span_labels_with_skipped_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  # P1 #469-r3-2: active span publication requires the failed-session
+  # view it localizes; the conflicting flags are rejected before any
+  # BigQuery read. A job kept bound by the span-binding registry hits the
+  # same rule inside materialize() even without --span-labels-table.
+  calls = _patch_from_bigquery(monkeypatch)
+  result = runner.invoke(
+      app,
+      [
+          "evalbench-native-import",
+          "--source-table",
+          _SOURCE_TABLE,
+          "--job-id",
+          "mvp-e2e-real-traces",
+          "--target-dataset",
+          "bqaa",
+          "--span-labels-table",
+          "evalbench_span_labels",
+          "--skip-failed-sessions-view",
+      ],
+  )
+  assert result.exit_code == 2
+  assert "--skip-failed-sessions-view" in result.output
+  assert calls == []
+
+
+def test_native_import_rejects_reserved_span_labels_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  calls = _patch_from_bigquery(monkeypatch)
+  result = runner.invoke(
+      app,
+      [
+          "evalbench-native-import",
+          "--source-table",
+          _SOURCE_TABLE,
+          "--job-id",
+          "mvp-e2e-real-traces",
+          "--target-dataset",
+          "bqaa",
+          "--span-labels-table",
+          "agent_events",
+      ],
+  )
+  assert result.exit_code == 2
+  assert "reserved ADK plugin table" in result.output
+  assert calls == []
