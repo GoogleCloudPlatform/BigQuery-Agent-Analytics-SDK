@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="Create a private Looker Studio dashboard from your BigQuery Agent Analytics installation."
+    >
+    <meta name="theme-color" content="#1967d2">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Configure BigQuery Agent Analytics">
+    <meta
+      property="og:description"
+      content="Create a private Looker Studio dashboard from your BQAA event table."
+    >
+    <meta
+      property="og:url"
+      content="https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/"
+    >
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="Configure BigQuery Agent Analytics">
+    <meta
+      name="twitter:description"
+      content="Create a private Looker Studio dashboard from your BQAA event table."
+    >
+    <title>Configure BigQuery Agent Analytics</title>
+    <link
+      rel="canonical"
+      href="https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/"
+    >
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <div>
+          <div class="eyebrow">BigQuery Agent Analytics</div>
+          <h1>Your telemetry. Your dashboard.</h1>
+          <p class="lede">
+            Enter your fully qualified BQAA table ID. We’ll prepare a private
+            copy of the published Looker Studio dashboard, connected with
+            your Google credentials.
+          </p>
+          <ul class="facts" aria-label="Dashboard facts">
+            <li>37 parity charts</li>
+            <li>8 report pages</li>
+            <li>No data leaves Google</li>
+          </ul>
+        </div>
+
+        <form class="card" id="configurator" novalidate>
+          <h2>Connect your BQAA data</h2>
+          <p class="card-intro">
+            Only the BQAA event table is required. Generated views are not
+            used.
+          </p>
+
+          <label for="table-id">Fully qualified BQAA table ID</label>
+          <input
+            id="table-id"
+            name="tableId"
+            autocomplete="off"
+            placeholder="my-project.my_dataset.agent_events"
+            aria-describedby="table-id-hint table-id-error"
+            required
+          >
+          <span class="field-hint" id="table-id-hint">
+            <code>project.dataset.table</code> — one ID names all three.
+            The plugin’s standard table is <code>agent_events</code>. Paste
+            a fully qualified table ID or a BigQuery Console table link;
+            backticks, a legacy colon after the project, and a trailing
+            <code>;</code> or <code>,</code> are cleaned up automatically.
+            Charts read this table directly and extract reporting fields
+            from its JSON columns.
+          </span>
+          <span class="field-error" id="table-id-error" aria-live="polite"></span>
+
+          <details id="advanced-settings">
+            <summary>Advanced settings</summary>
+            <label for="billing-project">Billing project ID</label>
+            <input
+              id="billing-project"
+              name="billingProject"
+              autocomplete="off"
+              placeholder="Defaults to the source project"
+              aria-describedby="billing-project-hint billing-project-error"
+            >
+            <span class="field-hint" id="billing-project-hint">
+              Optional. Leave blank to run queries in the source project.
+            </span>
+            <span
+              class="field-error"
+              id="billing-project-error"
+              aria-live="polite"
+            ></span>
+          </details>
+
+          <p id="form-status" role="status" aria-live="polite"></p>
+          <div class="actions">
+            <a
+              class="button button-primary"
+              id="create-dashboard"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-disabled="true"
+              aria-describedby="create-wait-note"
+            >Create my dashboard</a>
+            <button class="button button-secondary" id="copy-link" type="button">
+              Copy setup link
+            </button>
+          </div>
+          <p class="create-note" id="create-wait-note">
+            Opens <code>lookerstudio.google.com</code> in a new tab. Building
+            your private copy can take up to ~10 seconds, and the tab may
+            briefly show an error page while Google provisions the report —
+            don’t close it. One dialog is different: if the tab says
+            <strong>“This report isn’t shared with you”</strong>, waiting will
+            not fix it — see
+            <a href="#report-not-shared">the note below</a>.
+          </p>
+          <p class="privacy">
+            This page has no backend. It sends no identifiers or credentials
+            to the template owner; it only creates a Google Looker Studio URL.
+            <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/dashboard/looker_studio/docs">
+              Verify in this page’s source.
+            </a>
+          </p>
+        </form>
+      </section>
+
+      <section class="how" aria-label="How setup works">
+        <article class="step">
+          <span class="step-number">01</span>
+          <h3>Enter your table ID</h3>
+          <p>
+            Paste or type the fully qualified ID of the base table configured
+            for the ADK BigQuery Agent Analytics plugin —
+            <code>project.dataset.table</code>, one value naming all three.
+          </p>
+        </article>
+        <article class="step">
+          <span class="step-number">02</span>
+          <h3>Review in Google</h3>
+          <p>
+            The new tab may briefly show a loading or “not found” page while
+            Google provisions your copy — don’t close it. (A dialog quoting
+            <em>“This report isn’t shared with you”</em> is not that flicker;
+            see <a href="#report-not-shared">below</a>.) Looker Studio then
+            shows an acknowledgement dialog. It appears because you’re about
+            to create a data source that runs a SQL query this page supplied —
+            <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/dashboard/looker_studio/sql/events_v1.template.sql">
+              read the exact query</a>. The dialog lists that query, your
+            billing project, and that the new data source initially uses
+            Owner’s Credentials; nothing is created until you acknowledge it.
+            The query reads only your table, using the opener’s credentials,
+            in your billing project.
+          </p>
+        </article>
+        <article class="step">
+          <span class="step-number">03</span>
+          <h3>Save, then secure sharing</h3>
+          <p>
+            Choose “Edit and share” to save it. Before sharing, set the new
+            data source’s credentials to <strong>Viewer’s Credentials</strong>
+            so every viewer must have their own BigQuery access.
+          </p>
+        </article>
+      </section>
+
+      <aside class="notice notice-warning" id="report-not-shared">
+        <strong>“This report isn’t shared with you” is not a setup error.</strong>
+        That dialog is terminal — it offers <em>Reload</em> / <em>Return to
+        report list</em> / <em>Go to report template</em> and does not resolve
+        by waiting. It means the shared dashboard template is unavailable to
+        the Google account signed in to that tab; nothing is wrong with your
+        project, dataset, table, IAM setup, or the identifiers you entered.
+        First confirm the tab is using the account you intend (Looker Studio
+        uses the browser’s default Google account). If you are signed in
+        with an organization-managed account, your own organization’s
+        sharing policy can also block receiving Looker Studio assets from
+        external domains — try a personal account if you can. If the dialog
+        still persists, the template’s copy path is blocked —
+        <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/445">
+          report it on issue #445</a> — say only whether the signed-in
+        account is personal or part of an organization; do not post the
+        account’s email address. The repository’s CLI preflight can still
+        validate your table, but it copies the same template, so it is not
+        a workaround;
+        while the template is blocked, use the
+        <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/grafana">
+          Grafana dashboard</a>.
+      </aside>
+
+      <aside class="notice notice-warning">
+        <strong>Keep the new report private until the credential check.</strong>
+        The Linking API creates a data source owned by the person opening the
+        link and its review dialog can show Owner’s Credentials. In the saved
+        report, open <em>Resource → Manage added data sources → Edit</em> and
+        verify <em>Data credentials: Viewer</em> before sharing.
+        <a href="https://docs.cloud.google.com/data-studio/data-credentials">
+          Learn about Looker Studio data credentials.
+        </a>
+      </aside>
+
+      <section class="post-create" aria-labelledby="post-create-title">
+        <div>
+          <div class="eyebrow">Required security check</div>
+          <h2 id="post-create-title">Before you share the new report</h2>
+          <p>
+            The Linking API creates a new data source owned by the person who
+            opens the link. Keep the report private until these checks pass.
+          </p>
+        </div>
+        <ol id="security-checklist">
+          <li>Select <strong>Edit and share</strong> to save your copy.</li>
+          <li>Keep the report private while configuring its data source.</li>
+          <li>
+            Open <strong>Resource → Manage added data sources → Edit</strong>.
+          </li>
+          <li>
+            Set <strong>Data credentials</strong> to
+            <strong>Viewer’s Credentials</strong>.
+          </li>
+          <li>Test the report with an account that has only viewer access.</li>
+        </ol>
+        <button
+          class="button button-secondary checklist-copy"
+          id="copy-checklist"
+          type="button"
+        >
+          Copy security checklist
+        </button>
+      </section>
+
+      <aside class="notice">
+        <strong>No generated views required.</strong>
+        The dashboard reads the configured BQAA event table directly. A
+        separate billing project is available under Advanced settings. For a
+        location override or verified preflight, use the repository’s CLI
+        helper.
+      </aside>
+
+      <aside class="notice" aria-labelledby="viewing-support-title">
+        <strong id="viewing-support-title">Desktop viewing.</strong>
+        Designed for desktop screens at least 1280 px wide. On a cold load or
+        after changing pages, native charts may paint after the surrounding
+        report controls; allow up to 90 seconds before treating a chart as
+        failed. A responsive mobile template is not part of v1.
+      </aside>
+
+      <footer>
+        <span>Open-source dashboard · Apache 2.0</span>
+        <span>
+          <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK">
+            GoogleCloudPlatform source and verified CLI
+          </a>
+          ·
+          <a href="https://lookerstudio.google.com/reporting/5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40">
+            View template
+          </a>
+        </span>
+      </footer>
+    </main>
+    <script type="module" src="./app.mjs"></script>
+  </body>
+</html>

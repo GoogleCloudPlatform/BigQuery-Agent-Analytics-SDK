@@ -41,22 +41,10 @@ import time
 from typing import Any
 import uuid
 
-from bigquery_agent_analytics import Client
-from bigquery_agent_analytics import InsightsConfig
-
-# ---------------------------------------------------------------------------
-# BigQuery Agent Analytics SDK (consumer side)
-# ---------------------------------------------------------------------------
-from bigquery_agent_analytics import PerformanceEvaluator
-from bigquery_agent_analytics import SystemEvaluator
-from bigquery_agent_analytics import TraceFilter
-from bigquery_agent_analytics.performance_evaluator import MatchType
-
 # ---------------------------------------------------------------------------
 # ADK imports
 # ---------------------------------------------------------------------------
 from google.adk.agents import LlmAgent
-
 # ---------------------------------------------------------------------------
 # BigQuery Analytics Plugin (producer side)
 # ---------------------------------------------------------------------------
@@ -65,6 +53,16 @@ from google.adk.plugins.bigquery_agent_analytics_plugin import BigQueryLoggerCon
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+
+# ---------------------------------------------------------------------------
+# BigQuery Agent Analytics SDK (consumer side)
+# ---------------------------------------------------------------------------
+from bigquery_agent_analytics import Client
+from bigquery_agent_analytics import InsightsConfig
+from bigquery_agent_analytics import PerformanceEvaluator
+from bigquery_agent_analytics import SystemEvaluator
+from bigquery_agent_analytics import TraceFilter
+from bigquery_agent_analytics.performance_evaluator import MatchType
 
 # ---------------------------------------------------------------------------
 
@@ -132,21 +130,23 @@ async def search_flights(
   for i in range(min(max_results, 5)):
     dep_hour = rng.randint(6, 20)
     duration_h = rng.randint(2, 14)
-    flights.append({
-        "flight_id": f"FL-{seed + i:06d}",
-        "airline": rng.choice(airlines),
-        "origin": origin,
-        "destination": destination,
-        "date": date,
-        "departure_time": f"{dep_hour:02d}:{rng.choice(['00','15','30','45'])}",
-        "arrival_time": (
-            f"{(dep_hour + duration_h) % 24:02d}:{rng.choice(['00','15','30','45'])}"
-        ),
-        "duration_hours": duration_h,
-        "price_usd": round(rng.uniform(150, 1200), 2),
-        "class": rng.choice(["Economy", "Premium Economy", "Business"]),
-        "stops": rng.choice([0, 0, 0, 1, 1, 2]),
-    })
+    flights.append(
+        {
+            "flight_id": f"FL-{seed + i:06d}",
+            "airline": rng.choice(airlines),
+            "origin": origin,
+            "destination": destination,
+            "date": date,
+            "departure_time": f"{dep_hour:02d}:{rng.choice(['00','15','30','45'])}",
+            "arrival_time": (
+                f"{(dep_hour + duration_h) % 24:02d}:{rng.choice(['00','15','30','45'])}"
+            ),
+            "duration_hours": duration_h,
+            "price_usd": round(rng.uniform(150, 1200), 2),
+            "class": rng.choice(["Economy", "Premium Economy", "Business"]),
+            "stops": rng.choice([0, 0, 0, 1, 1, 2]),
+        }
+    )
   return {
       "query": {
           "origin": origin,
@@ -189,31 +189,33 @@ async def search_hotels(
   hotels = []
   for i in range(min(max_results, 5)):
     rating = round(rng.uniform(3.5, 5.0), 1)
-    hotels.append({
-        "hotel_id": f"HT-{seed + i:06d}",
-        "name": hotel_names[i % len(hotel_names)],
-        "city": city,
-        "check_in": check_in,
-        "check_out": check_out,
-        "rating": rating,
-        "price_per_night_usd": round(rng.uniform(80, 500), 2),
-        "amenities": rng.sample(
-            [
-                "WiFi",
-                "Pool",
-                "Gym",
-                "Spa",
-                "Restaurant",
-                "Bar",
-                "Room Service",
-                "Parking",
-                "Airport Shuttle",
-                "Business Center",
-            ],
-            k=rng.randint(3, 7),
-        ),
-        "distance_to_center_km": round(rng.uniform(0.2, 8.0), 1),
-    })
+    hotels.append(
+        {
+            "hotel_id": f"HT-{seed + i:06d}",
+            "name": hotel_names[i % len(hotel_names)],
+            "city": city,
+            "check_in": check_in,
+            "check_out": check_out,
+            "rating": rating,
+            "price_per_night_usd": round(rng.uniform(80, 500), 2),
+            "amenities": rng.sample(
+                [
+                    "WiFi",
+                    "Pool",
+                    "Gym",
+                    "Spa",
+                    "Restaurant",
+                    "Bar",
+                    "Room Service",
+                    "Parking",
+                    "Airport Shuttle",
+                    "Business Center",
+                ],
+                k=rng.randint(3, 7),
+            ),
+            "distance_to_center_km": round(rng.uniform(0.2, 8.0), 1),
+        }
+    )
   return {
       "query": {"city": city, "check_in": check_in, "check_out": check_out},
       "results_count": len(hotels),

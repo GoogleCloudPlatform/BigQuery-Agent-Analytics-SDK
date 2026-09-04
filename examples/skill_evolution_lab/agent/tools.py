@@ -14,58 +14,22 @@
 
 """Tools for the skill-evolution lab's company-policy agent.
 
-A single ``lookup_company_policy`` tool returns the authoritative figures for
-every HR topic (PTO, sick leave, remote work, expenses, benefits, holidays,
-bereavement, jury duty, EAP, flex time, tuition reimbursement, short-term
-disability). ``get_current_date`` returns today's date.
+Two meaningful tools the agent must CHOOSE between:
+- ``lookup_company_policy(topic)`` returns the authoritative figures for every HR
+  topic (PTO, sick leave, remote work, expenses, benefits, holidays, bereavement,
+  jury duty, EAP, flex time, tuition reimbursement, short-term disability).
+- ``calculate_disability_pay(annual_salary, weeks_out)`` *computes* a personalized
+  short-term-disability payout the lookup can't produce.
+Plus ``get_current_date``.
 
-The point of the demo is that the *tool already has the right answers* -- the
-deliberately flawed V0 skill just tells the model not to call it. Evolution
-rewrites the skill to be tool-first, and the same tool then produces correct,
-grounded answers.
+The point of the demo is that the *tools already have the right answers* -- the
+deliberately flawed V0 skill just tells the model not to call them. Evolution
+rewrites the skill to be tool-first and to route to the right tool, and the same
+tools then produce correct, grounded answers.
 """
 
 import datetime
 from zoneinfo import ZoneInfo
-
-# Synonyms callers use, mapped to canonical COMPANY_POLICIES keys.
-_TOPIC_ALIASES = {
-    "vacation": "pto",
-    "annual_leave": "pto",
-    "telecommuting": "remote_work",
-    "work_from_home": "remote_work",
-    "wfh": "remote_work",
-    "reimbursement": "expenses",
-    "meals": "expenses",
-    "per_diem": "expenses",
-    "health_insurance": "benefits",
-    "insurance": "benefits",
-    "medical": "benefits",
-    "dental": "benefits",
-    "vision": "benefits",
-    "hsa": "benefits",
-    "orthodontia": "benefits",
-    "401k": "benefits",
-    "retirement": "benefits",
-    "pension": "benefits",
-    "parental_leave": "benefits",
-    "maternity_leave": "benefits",
-    "paternity_leave": "benefits",
-    "adoption_leave": "benefits",
-    "enrollment": "benefits",
-    "open_enrollment": "benefits",
-    "employee_assistance_program": "eap",
-    "counseling": "eap",
-    "therapy": "eap",
-    "jury": "jury_duty",
-    "flextime": "flex_time",
-    "flexible_schedule": "flex_time",
-    "compressed_week": "flex_time",
-    "tuition": "tuition_reimbursement",
-    "education": "tuition_reimbursement",
-    "disability": "short_term_disability",
-    "std": "short_term_disability",
-}
 
 COMPANY_POLICIES = {
     "pto": {
@@ -192,50 +156,90 @@ COMPANY_POLICIES = {
         "details": (
             "Short-term disability covers 60% of salary for up to 12 weeks"
             " after a 7-day waiting period, for a qualifying medical condition."
-            " A physician's certification is required."
+            " The waiting period is unpaid time before benefits begin; it does"
+            " NOT reduce the 12 payable weeks. A physician's certification is"
+            " required."
         ),
     },
 }
 
 
-def _resolve_topic(topic: str):
-  """Resolve a free-text topic to a canonical (key, value) pair.
-
-  Applies the synonym alias map, then an exact match, then a fuzzy substring
-  match. Returns ``(None, None)`` if nothing matches.
-  """
-  topic_key = topic.lower().strip().replace(" ", "_").replace("-", "_")
-  topic_key = _TOPIC_ALIASES.get(topic_key, topic_key)
-  if topic_key in COMPANY_POLICIES:
-    return topic_key, COMPANY_POLICIES[topic_key]
-  for key, value in COMPANY_POLICIES.items():
-    if topic_key in key or key in topic_key:
-      return key, value
-  return None, None
-
-
 def lookup_company_policy(topic: str) -> dict:
-  """Look up the authoritative figures for a company HR policy or benefit.
+  """Look up one company HR policy or benefit by topic.
+
+  There is no hand-maintained synonym table: you choose the closest topic from
+  the list below and map the user's everyday wording to it yourself (the model
+  is good at this). The tool matches the topic key exactly (after normalizing
+  case/spaces) or by substring, and otherwise returns the valid topics so you
+  can retry.
 
   Args:
-    topic: The HR topic to look up. One of: pto, sick_leave, remote_work,
+    topic: The policy topic to retrieve, one of: pto, sick_leave, remote_work,
       expenses, benefits, holidays, bereavement, jury_duty, eap, flex_time,
-      tuition_reimbursement, short_term_disability. Common synonyms (vacation,
-      wfh, 401k, insurance, parental_leave, tuition, jury, ...) are accepted.
+      tuition_reimbursement, short_term_disability.
 
   Returns:
-    A dict with the policy details, or an ``error`` field listing the valid
-    topics if nothing matched.
+    The policy details for that topic, or an ``error`` field listing the valid
+    topics when nothing matches.
   """
-  topic_key, result = _resolve_topic(topic)
-  if result is None:
-    return {
-        "error": (
-            f"'{topic}' did not match a known policy. Valid topics: "
-            + ", ".join(sorted(COMPANY_POLICIES))
-        )
-    }
-  return result
+  key = topic.lower().strip().replace(" ", "_").replace("-", "_")
+  if key in COMPANY_POLICIES:
+    return COMPANY_POLICIES[key]
+  for candidate_key, value in COMPANY_POLICIES.items():
+    if key in candidate_key or candidate_key in key:
+      return value
+  return {
+      "error": (
+          f"'{topic}' is not a known topic. Choose one of: "
+          + ", ".join(sorted(COMPANY_POLICIES))
+      )
+  }
+
+
+# Short-term-disability policy parameters (used by the calculator below).
+_STD_INCOME_REPLACEMENT = 0.60  # STD replaces 60% of salary
+_STD_MAX_WEEKS = 12
+_STD_WAITING_DAYS = 7
+
+
+def calculate_disability_pay(annual_salary: float, weeks_out: int) -> dict:
+  """Compute short-term-disability (STD) pay for a given salary and leave length.
+
+  This is a CALCULATION, not a lookup: STD replaces 60% of salary for up to 12
+  weeks after a 7-day waiting period, so the dollar payout depends on the
+  employee's salary and how many weeks they are out. The 7-day waiting period
+  is unpaid time before benefits begin -- it does NOT reduce the number of
+  payable weeks, so ``weeks_out`` counts benefit weeks and every covered week
+  is paid. Use this whenever the user asks "how much would short-term
+  disability pay me" with a specific salary and/or duration --
+  ``lookup_company_policy`` only returns the 60%/12-week policy, never the
+  dollar amount.
+
+  Args:
+    annual_salary: The employee's gross annual salary in dollars.
+    weeks_out: Number of benefit weeks the employee expects to be on
+      disability (after the unpaid 7-day waiting period).
+
+  Returns:
+    A dict with the weekly and total STD benefit, the covered weeks (capped at
+    the 12-week maximum), and the policy parameters used.
+  """
+  covered_weeks = min(weeks_out, _STD_MAX_WEEKS)
+  weekly_benefit = (annual_salary / 52.0) * _STD_INCOME_REPLACEMENT
+  return {
+      "annual_salary": annual_salary,
+      "weeks_requested": weeks_out,
+      "covered_weeks": covered_weeks,
+      "capped_at_max": weeks_out > _STD_MAX_WEEKS,
+      "weekly_benefit": round(weekly_benefit, 2),
+      "total_benefit": round(weekly_benefit * covered_weeks, 2),
+      "income_replacement": _STD_INCOME_REPLACEMENT,
+      "waiting_period_days": _STD_WAITING_DAYS,
+      "waiting_period_note": (
+          f"The {_STD_WAITING_DAYS}-day waiting period is unpaid time before"
+          " benefits begin; it does not reduce the payable weeks above."
+      ),
+  }
 
 
 def get_current_date() -> str:
@@ -248,5 +252,11 @@ def get_current_date() -> str:
   return f"Today is {now.strftime('%A, %B %d, %Y')} (Pacific Time)"
 
 
-# Single tool list, reused by the agent factory and any callers.
-AGENT_TOOLS = [lookup_company_policy, get_current_date]
+# Single tool list, reused by the agent factory and any callers. Two tools the
+# agent must CHOOSE between: lookup_company_policy (facts) vs
+# calculate_disability_pay (a computed, personalized figure).
+AGENT_TOOLS = [
+    lookup_company_policy,
+    calculate_disability_pay,
+    get_current_date,
+]

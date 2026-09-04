@@ -7,24 +7,571 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Evaluator API unification
+
+- `PerformanceEvaluator` now supports one-sided judging and side-by-side
+  comparisons, including deterministic trajectory and response checks.
+- Deterministic metrics and shared report models live in `system_evaluator`;
+  trial aggregation lives in `multi_trial_performance_evaluator` and
+  `aggregate_grader`. Existing evaluator names remain compatibility aliases.
+- `LLMAsJudge` remains a standalone legacy adapter with its factories and custom
+  criteria API. `Client.evaluate(LLMAsJudge)` uses bounded per-session Gemini API
+  calls. New code can use `SystemEvaluator` or `PerformanceEvaluator`.
+- The deprecated BigQuery `AI.GENERATE` and `ML.GENERATE_TEXT` SQL helpers remain
+  in `evaluators` for compatibility. `PerformanceEvaluator` uses the Gemini API;
+  it does not execute those SQL templates.
+
+
 ### Added
 
-- Added `SystemEvaluator` as the preferred name for deterministic/code-defined metrics.
-- Kept `CodeEvaluator` as a backward-compatible alias. Note that calling `CodeEvaluator()` now emits `evaluator_name="system_evaluator"`.
+- **Span-level G1 labels persisted on the native snapshot (#469, parent
+  #435)** — the existing `bq-agent-sdk evalbench-native-import` command
+  gains a thin `--span-labels-table` flag (no new command family): when
+  set, the #466 localization layer's labels for every failed session are
+  published as BQAA-owned rows via
+  `NativeAgentEventsRun.to_span_label_rows` / `_publish_span_labels`,
+  reusing `label_native_run` under the frozen
+  `EvalScorePolicy({"goal_completion": 1.0})` gate — resolved as the ONE
+  effective policy the manifest `view_policy` and the failed-sessions
+  view also record, so the session denominator and the span rows can
+  never disagree. Opting in is durable: the dataset's
+  `evalbench_span_bindings` registry (fixed name, one row per job)
+  records the span table, the resolved policy, and the synchronized
+  manifest `generation_id`, and every later native publish of a bound
+  job re-resolves the same policy and re-synchronizes the span rows — or
+  fails closed before the denominator advances — so an ordinary call can
+  neither drop the committed gate nor leave stale span rows behind. Rows
+  are keyed by the `(job_id, import_version)` pin plus the exact
+  manifest `generation_id` they were synchronized under (checked, with
+  the canonical `view_policy`, inside the lock-serialized replace
+  transaction that also upserts the binding), and a companion
+  `<span-labels-table>_pinned` view is pinned to that exact generation
+  with a rendered latest-generation guard, so any base/span skew (for
+  example a span sync that fails after a changed-source `replace`
+  committed) yields an empty view instead of stale labels joined onto
+  the new session snapshot. The widget-stock anchor
+  holds: `eval_id` `7e352c34` / `span_id` `b7ad6b7169203331` /
+  `target_kind` `gap_after_span` with the three frozen G1 names
+  (`task/planning`, `finalization`, `tool blockers`); session-level
+  `failed_sessions` + G1 stays the denominator. Publication fails closed
+  without a real `span_id` (no synthetic span identifiers), identity
+  stays the frozen first-8 `eval_id` with the full session id on
+  collision, **the six-week clock has still NOT started**, tests are
+  offline fixture tests only, and the `evalbench-import` adapter (#97)
+  stays. The registry boundary is hardened end to end: the publish-side
+  re-validation is driven by private structured binding state rendered
+  into two fixed, parameterized predicates — `materialize` exposes no
+  SQL-string hook, and any non-structured argument is rejected before
+  anything runs — the unchanged-path policy recommit runs as its own
+  import-lock-claiming transaction so it serializes against the
+  span-binding transaction instead of racing it from a mutually stale
+  snapshot, and the span sync rejects, before any row or binding DML, a
+  span table already bound to another job, so a losing concurrent job
+  stays unbound and simply retries with its own table.
+- **Span-G1 e2e team demo (#466, parent #435)** — new
+  `examples/evalbench_span_g1_e2e.sh --fixture` (speaker notes
+  `examples/evalbench_span_g1_e2e.md`, offline tests
+  `tests/test_evalbench_span_g1_e2e.py`) narrates the `span_taxonomy`
+  library below on the widget-stock silence session `7e352c34` as a
+  six-act presenter story: session-level `failed_sessions` + G1 stays
+  the denominator, and span-level G1 localizes all three tripped frozen
+  categories onto the real native `AGENT_STARTING` span
+  `b7ad6b7169203331` (`target_kind="gap_after_span"`), shown as
+  `label_native_run` / `label_failed_session_spans` sample JSON — no new
+  CLI, no EvalBench source tables, no live BigQuery, `--fixture` argv
+  only (anything else exits 2), and **the six-week clock has still NOT
+  started**. Consolidates the native-import setup from #465 into these
+  speaker notes and the frozen-category JSON from #462 into the existing
+  `evalbench_mvp_e2e` walkthrough.
+- **EvalBench CLI discoverability (#435)** — `bq-agent-sdk --help` lists
+  `evalbench-import`, `evalbench-failed-sessions`, and `evalbench-score`;
+  the installed `bq-agent-sdk` console script (`pyproject.toml`
+  `[project.scripts]`) is the surface after `pip install`. Tests pin the
+  help listing, the command registry, and the console-script mapping.
+- **Week 0 preregistration sealed (#435, PR #473)** — adopts the v4
+  freeze-candidate as the sealed plan of record
+  (`docs/week0_preregistration.md` and
+  `examples/fixtures/week0_real_preregistration.json`, `sealed: true`,
+  `freeze_candidate: false`, `clock_started: false`, sealed 2026-09-02 by
+  the D4 consumer). Fills the three numbers the freeze-candidate still
+  left as placeholders: the value gate is **≥50%** of completed,
+  non-investigator-adjudicated counterfactual investigations (applied to
+  completed investigations only if volume slips); the noisy-small-n
+  localization rule **fails** the gate when the point estimate clears but
+  the 95% CI spans zero (no localization, no uplift claim, week-6 judgment
+  may not override); and there is **no separate absolute hit@1 floor**
+  (the paired CI lower bound >0 and +10pp point uplift stay the hit@1
+  gates). Every other floor is unchanged from v4, partner / D4 / G1 stay
+  frozen, `tests/test_week0_real_freeze.py` pins the sealed values, and
+  **the six-week clock has still NOT started** — it starts only when the
+  first Week 1 snapshot job is kicked.
+- **Span-level G1 taxonomy on `span_id` (#466, parent #435)** — new
+  `bigquery_agent_analytics.span_taxonomy` localizes the G1-frozen failure
+  categories of a *failed* session onto the span where the failure is
+  observable, as `(trace_id, span_id, failure_category, evidence,
+  confidence)` rows (`SpanFailureLabel.as_tuple()`).
+  `label_failed_session_spans` takes one session's native
+  `agent_events`-shaped rows plus the landed three-flag verdict;
+  `label_native_run` covers every failed session of a
+  `NativeAgentEventsRun` offline. Session-level `failed_sessions` + G1
+  stays the denominator (this layer never classifies, only localizes),
+  the taxonomy stays frozen at v0.1.0 — only the three mechanically
+  emittable frozen names (`task/planning`, `finalization`, `tool
+  blockers`) are accepted at construction; the other five frozen names
+  and any non-frozen string are rejected — and `eval_id` keeps the frozen
+  first-8-with-full-id-on-collision identity so span labels join the
+  session-level contract. No synthetic span identifiers: the silence case
+  targets the last existing span with `target_kind="gap_after_span"`
+  (the widget-stock session `7e352c34` localizes to its `AGENT_STARTING`
+  span with evidence that no `TOOL_STARTING` / `check_inventory` /
+  `AGENT_COMPLETED` followed), a raw `status=ERROR` row is targeted
+  directly by `tool blockers` (end-of-trace claims stay anchored to the
+  last real span, so mid-stream errors never yield false silence
+  evidence), and rows without a `span_id` fail closed. Missing-tool
+  evidence comes only from the completed sibling that asked the same
+  prompt, never from a run-wide pool, and labels carry no turn index (the
+  #429 conversation coordinate has no importable package mapping yet, and
+  a lookalike ordinal would fork it). Pure and deterministic — no
+  BigQuery, no LLM judge, offline fixture tests only, and **the six-week
+  clock has still NOT started**.
+- **Native `agent_events` snapshot writer — the EvalBench-adapter exit ramp
+  (#463, parent #435)** — new
+  `bigquery_agent_analytics.native_events.NativeAgentEventsRun` (and thin
+  CLI `bq-agent-sdk evalbench-native-import`) starts from production ADK
+  `agent_events` rows and publishes the same BQAA-owned contract
+  `EvalBenchRun.materialize` produces — an immutable
+  `(job_id, import_version)` snapshot (events + deterministic
+  `goal_completion` scores + manifest with the `view_policy` pin) plus the
+  `failed_sessions` view pinned to the latest successful publication —
+  with **no EvalBench `configs`/`results`/`scores` tables anywhere in the
+  path**. Identity stays joinable (scenario id = first eight characters of
+  the ADK session id, full id on collision; event/score rows keep the real
+  `session_id`), scores are derived from the session alone (1.0 iff
+  `AGENT_COMPLETED` — *completed*, not *passed*; only the
+  `EvalScorePolicy` gate decides passed), and failed sessions carry the
+  frozen G1 v0.1.0 names — the widget-stock silence session `7e352c34`
+  yields `task/planning`, `finalization`, `tool blockers`. The
+  `evalbench-import` adapter (#97) stays as an optional on-ramp, the
+  production `agent_events` table is never written (reserved-name guard),
+  and **the six-week clock has still NOT started**. Offline fixture tests
+  only; no live BigQuery.
+- **REAL Week 0 freeze: partner, D4 boundary, G1 taxonomy v0.1 (#435)** —
+  the Week 0 gates are frozen for real, distinct from the EXAMPLE pack
+  below (which stays illustrative). `docs/week0_partner.md` records the
+  real pilot partner — Google Cloud BigQuery Agent Analytics (this SDK),
+  piloting the ADK `support_agent` traces as EvalBench job
+  `mvp-e2e-real-traces`; SANA-adjacent, not a SANA fork and not a named
+  collaboration with SANA authors, not duplicating LakeQA/KramaBench.
+  `docs/week0_d4_memo.md` lands the fail-closed D4 boundary for exactly
+  this pilot's datasets with one named report consumer (Hai-Yuan Cao) and
+  a text-only grants policy (no IAM API calls); fixtures/synthetic runs
+  validate ingestion, taxonomy mechanics, and stability ONLY and never
+  produce a Part II funding recommendation. `docs/week0_g1_taxonomy.md`
+  documents the G1 freeze (below) and `docs/week0_preregistration.md`
+  copies the v4 floors as the freeze-candidate. Machine-readable copies in
+  `examples/fixtures/week0_real_*.json` (`example: false`,
+  `clock_started: false`), guarded by `tests/test_week0_real_freeze.py`.
+  **The six-week clock has NOT started**: it starts only when the first
+  Week 1 snapshot job is kicked, not at merge of this freeze.
+- **EXAMPLE Week 0 scenario pack (#435 slice 10)** — new
+  `examples/evalbench_week0_full_idea.md` / `.sh --fixture` walk all five
+  Week 0 human gates of `docs/agentforensics_mvp_plan.md` (partner + SANA
+  relationship, runtime + route, pilot-benchmark rubric, D4 boundary memo,
+  preregistration) as one concrete story on the widget-stock failed session,
+  ending in the mechanical `taxonomy_categories` row and an EXAMPLE mapping
+  onto SANA-seeded names in `examples/fixtures/week0_example_*.json`.
+  Offline only (no BigQuery, no network) and entirely illustrative: not a
+  freeze, `g1_frozen` stays false, the six-week clock has not started, no
+  real partner is named, and `src/` is untouched — Week 0 remains
+  human-gated.
+- **Failed-session rows carry scaffold taxonomy categories (#435 slice 9)**
+  — `failed_sessions()` / `bq-agent-sdk evalbench-failed-sessions` now
+  attach `taxonomy_categories` to each session row: `EvalBenchSession`
+  exposes it as a property computed from the row's three mechanical flags
+  via `failure_taxonomy.categorize_failed_session`, and `to_dict()` (what
+  the CLI JSON/text output serializes) includes it as a list. All-flags-false
+  rows (`--include-passed`) emit `[]` — no invented `unknown` bucket. Pure
+  Python over the flags already returned; no extra BigQuery work, and still
+  NOT the G1 taxonomy (ids stay the unfrozen flag names).
+- **Mechanical failure-taxonomy scaffold (#435 slice 8)** — new
+  `failure_taxonomy` module: a versioned scaffold config
+  (`taxonomy_version: 0.0.0-scaffold`, `g1_frozen: false`) in the #431
+  `{"metrics": [...]}` schema shape whose one core metric carries the three
+  mechanical categories of the landed failed-session contract
+  (`process_failed` / `missing_completion` / `score_failed`), an empty D2
+  `dialects` slot (per-benchmark extension categories on the same core), and
+  a pure `categorize_failed_session()` that maps one failed-session row
+  (dict or `SessionVerdict`) to the tripped categories — no BigQuery, no
+  LLM, no network. NOT the G1 taxonomy: names are unfrozen and the six-week
+  clock has not started.
+- **EvalBench MVP e2e demo tells one session's story (#435 slice 5, #97)**
+  — the `--fixture` walkthrough of `examples/evalbench_mvp_e2e.sh` now
+  follows `support_agent` session `7e352c34` ("How many widgets are in
+  stock?", never answered; trace stops after `AGENT_STARTING`) through
+  import → its one `failed_sessions` row → score, ending on the punchline
+  `goal_completion=0.0`, instead of touring CLI flags; fixture defaults are
+  job `mvp-e2e-real-traces` / 7 scenarios, matching the `--synth` run.
+- **AgentForensics MVP plan of record (#435)** — `docs/agentforensics_mvp_plan.md`
+  lands the FINAL v4 execution plan: Week 0 pre-clock gate, the six-week MVP
+  table with preregistered exit criteria, labeler ledger, staged Part II, and
+  standing invariants. Docs only; Week-0 items stay human-gated.
+- **EvalBench MVP end-to-end demo (#435 slice 5, #97)** —
+  `examples/evalbench_mvp_e2e.sh` walks `bq-agent-sdk evalbench-import` →
+  `evalbench-failed-sessions` → `evalbench-score` in order on one
+  EvalBench job, printing a banner per step; `--fixture` (or
+  `EVALBENCH_FIXTURE=1`) prints annotated sample output for all three
+  steps without calling BigQuery so the demo is recordable and CI-safe,
+  and live mode calls the three CLIs from `BQ_AGENT_*` / `EVALBENCH_*`
+  environment variables. `--synth` (or `EVALBENCH_SYNTH=1`) is live mode
+  without an EvalBench run: step 0 runs the new
+  `examples/evalbench_synth_from_traces.py`, which folds a real BQAA
+  `agent_events` table into EvalBench-shaped `configs`/`results`/`scores`
+  tables (one scenario per trace, grouped on the full
+  `(session_id, user_id, root_agent_name)` identity taken as exact strings
+  — whitespace kept, `NULL` distinct from `""` — with percent-escaped,
+  collision-proof scenario ids when session ids are reused; prompts and
+  `LLM_RESPONSE` / `AGENT_COMPLETED` responses are the real trace text,
+  never invented; `goal_completion` = 1.0 when the trace reached
+  `AGENT_COMPLETED`, else 0.0; every source/target name is validated as a
+  plain identifier before any SQL is built), then steps 1–3 run on that job
+  with the demo's default dataset names. Walkthrough in
+  `examples/evalbench_mvp_e2e.md`; `tests/test_evalbench_mvp_e2e.py` runs
+  the fixture path and the offline `--synth` guards, and
+  `tests/test_evalbench_synth_from_traces.py` checks the synthesizer's
+  mapping in memory and round-trips its rows through
+  `EvalBenchRun.to_agent_event_rows` / `to_score_rows`. A source trace
+  that reached `AGENT_COMPLETED` with a non-tool `status=ERROR` /
+  `error_message` is written with the importer-recognized `results.error`
+  field (alongside `error_message` for provenance), so it imports as
+  `status=ERROR` and stays `process_failed` in `failed_sessions`;
+  `returncode` / `goal_completion` remain tied to completion only. No CLI
+  or Python library behavior changes; `examples/evalbench_score_gate.sh`
+  stays the CI gate.
+- **EvalBench LLM-judge scoring of one import version (#435 slice 3, #97)**
+  — new `bq-agent-sdk evalbench-score` command: a thin wrapper over the
+  existing `Client.evaluate` + `LLMAsJudge` (`correctness` |
+  `hallucination` | `sentiment`, `--threshold`, `--strict`, `--exit-code`
+  with the same exit codes and `FAIL` lines as `evaluate`) that points the
+  client at the mirror events table and scores exactly one published
+  version of `--job-id` — the latest successful import unless
+  `--import-version` pins one. `evalbench.import_sessions()` resolves the
+  version from the manifest and lists its session identities;
+  `EvalBenchImportSessions.trace_filter()` renders them as
+  `TraceFilter(experiment_id=job_id, session_ids=..., limit=...)`, so the
+  version pin reaches `Client.evaluate` without changing it. The report's
+  `details.evalbench` names the scored job, version, table, and pinned
+  session count. Reference in `docs/evalbench.md`; CI gate example in
+  `examples/evalbench_score_gate.sh`.
+- **EvalBench failed-session view and version-pinned consumer (#435, slice 2)**
+  — `EvalBenchRun.materialize()` now keeps an `evalbench_failed_sessions`
+  view in the target dataset pinned (as literals) to the job's latest
+  successful import, so SQL consumers never scan another `import_version`;
+  `failed_sessions()` / `bq-agent-sdk evalbench-failed-sessions` list the
+  failed sessions of exactly one published version, resolving the version
+  from the manifest before reading events, and each row's versioned
+  `session_id`/`trace_id` (`EvalBenchSession.trace_selector()`) drills into
+  `Client.get_session_trace` without mixing versions. `failed_sessions_sql()`
+  accepts `job_id=`/`import_version=` to render the pin as literals. The
+  gate and generation are committed manifest state: every publish mints
+  an opaque `generation_id` (caller-supplied `imported_at` may repeat and
+  is not the generation) and records the score policy as `view_policy`,
+  a same-version `unchanged` re-import that adds, changes, or drops the
+  policy commits it to the row it found under a new generation, and the
+  view is always rendered from the latest manifest row. The view's pin
+  comment names the generation and the rendered policy, and ownership is
+  proven by re-rendering the definition from the committed manifest row
+  and comparing byte-for-byte (a copied pin over other SQL, an edited or
+  reformatted managed view, or a canonical rendering of the current
+  generation under a gate the manifest does not record, is refused, never
+  replaced). The view is written with create-if-absent plus
+  ETag-conditional replace after re-reading the view and latest manifest,
+  so concurrent imports cannot overwrite a newer pin or attach an older
+  caller's policy to a newer generation.
+- **EvalBench versioned snapshots and failed-session contract (#435, slice 1; #97)**
+  — `EvalBenchRun.materialize()` publishes one immutable, versioned import
+  of an EvalBench job into BQAA-owned tables — `evalbench_agent_events`
+  (`agent_events` columns plus `job_id`, `import_version`),
+  `evalbench_scores_imported`, and `evalbench_import_manifest` — and never
+  writes the ADK plugin's production `agent_events` table (that name is
+  rejected before any BigQuery call). Rows are loaded into per-import
+  staging tables and published by a single multi-statement transaction
+  keyed on `(job_id, import_version)`, with the manifest re-checked inside
+  the transaction and a lock sentinel so two first-time imports of the same
+  version cannot both commit. The W0.4 failed-session contract lands with
+  it: `returncode == 0` means the scenario *completed*, not *passed*;
+  non-zero or non-numeric `returncode`, usable `stderr`, and `*_error`
+  columns surface as `status = 'ERROR'` plus `error_message` on the
+  terminal row, never as a clean `OK`. CLI: `bq-agent-sdk
+  evalbench-import`. Reference in `docs/evalbench.md`.
 
 ### Changed
 
-- **Unified One-Sided & Side-by-Side Performance Metrics** in the `PerformanceEvaluator`:
-  - Purged legacy one-sided/side-by-side evaluator distinction.
-  - Decoupled code-defined metrics (now in `SystemEvaluator`) from LLM-judge metrics (now in `PerformanceEvaluator`).
-  - Overrode the backwards-compatible `LLMAsJudge` subclass to route legacy evaluations.
-    - Removed `_JudgeCriterion` from public access.
+- **`failure_taxonomy` frozen at G1 v0.1.0 (#435)** — the scaffold era
+  ends: `taxonomy_version` is `0.1.0` and `g1_frozen` is `true`. The
+  frozen vocabulary (`FROZEN_CATEGORY_NAMES`, also exported as
+  `CORE_CATEGORY_IDS`) is the SANA-neighborhood seven plus `unknown` —
+  `task/planning`, `wrong source`, `execution/computation`,
+  `incomplete evidence`, `turn-waste`, `finalization`, `tool blockers`,
+  `unknown` — replacing the three flag ids, which live on as the mapper's
+  input contract `MECHANICAL_FLAGS`. `categorize_failed_session` now
+  returns frozen names in frozen order (`missing_completion` →
+  `finalization`, `process_failed` → `tool blockers`, `score_failed` →
+  `task/planning`; all flags false still returns `()`, never `unknown`),
+  so `EvalBenchSession.taxonomy_categories` and the
+  `evalbench-failed-sessions` CLI output carry frozen names. The config
+  accessor is renamed `taxonomy_config()`; `scaffold_taxonomy_config()`
+  remains as a compatibility wrapper returning the same frozen config.
+  Assignment stays mechanical until the labeler study; the six-week clock
+  has not started.
 
-#### Migration Story
+## [0.5.1] - 2026-08-29
 
-- Users should no longer construct `_JudgeCriterion` or its sub-criteria. Construct `PerformanceEvaluator` or use `SystemEvaluator` factory methods instead.
-- `Client.evaluate(LLMAsJudge)` is deprecated but remains supported as a backward-compatible fallback that routes legacy evaluations per-session. New code should prefer `Client.evaluate()` with the new `SystemEvaluator` or `PerformanceEvaluator` instances.
-- The BigQuery-side `AI.GENERATE` batch SQL path has been migrated to use `PerformanceEvaluator`.
+### Release highlights
+
+An evaluation-focused wheel update and a rebuilt dashboard entrance. The
+wheel gains the EvalBench BigQuery run reader
+(`bigquery_agent_analytics.evalbench`), the canonical evaluation rubrics
+(`bigquery_agent_analytics.evaluation_rubrics`), and the golden Q&A
+matching producer (`bigquery_agent_analytics.golden_matching`), plus a CLI
+judge-feedback escaping fix. The published Looker Studio configurator (repo/live-template
+side) collapses its three identifier fields into a single fully qualified
+table-ID input, and the template's external accessibility is now an
+attested, monitored contract after a real external-user failure (#445).
+
+### Added
+
+- **EvalBench BigQuery run reader (#444)** — new
+  `bigquery_agent_analytics.evalbench` module: reads EvalBench evaluation
+  runs from BigQuery and maps imported runs onto BQAA traces, with
+  corrected imported-trace semantics. Reference doc in `docs/evalbench.md`.
+- **Canonical evaluation rubrics in core (#430, #431)** — new
+  `bigquery_agent_analytics.evaluation_rubrics` module extracts the
+  canonical 8-metric rubric data (response usefulness with the
+  scope-conditional declined category, task grounding, correctness, tool
+  usage, specificity, scope compliance, first-time-right, failure
+  attribution) and the interpreter (`builtin_metric_config()`,
+  `build_metrics()`) from `quality_report`, which now consumes them.
+  Rubric reference doc in `docs/evaluation_rubrics.md`.
+- **Golden Q&A matching in core (#428, #432)** — new
+  `bigquery_agent_analytics.golden_matching` module, the producer side of
+  answer-key grounding whose consumer landed in #378: `embed_texts()`
+  (L2-normalised vectors with bounded 429/503 retry),
+  `DEFAULT_GOLDEN_THRESHOLD` (0.92), and `match_golden_qa()` mapping
+  session questions to golden expected answers and out-of-scope decline
+  notes ready for `evaluate_categorical(per_session_context=...)` —
+  extracted verbatim from `quality_report`, which now consumes it, with
+  the three names exported at the package top level.
+
+### Fixed
+
+- **CLI: LLM judge feedback rendering (#438)** — judge feedback quotes are
+  escaped and the max-length cap is applied correctly.
+- **Examples (#426, #427)** — the Colab notebook authenticates before
+  creating the BigQuery client, and the context-graph example reads
+  `BQ_LOCATION` with a discoverable dataset location.
+
+### Dashboard (repo and live-template side, not in the wheel)
+
+- **Single fully-qualified table-ID entrance (#448, #449)** — the
+  configurator's three identifier fields collapse into one
+  `project.dataset.table` input (superseding #403's separate-fields
+  decision while keeping its per-segment diagnostics): a five-state
+  fail-closed field machine, whole-field vs segment-level error classes
+  with sentinel collisions gating Ready, an explicit Enter activation
+  bridge (repeat/IME-safe), billing-gated actionability, paste takeover for
+  every supported form, and unchanged three-parameter setup links and
+  Linking API URLs. The browser smoke re-anchors on a runtime
+  app-initialized marker with a live-state snapshot and nine negative
+  fixtures.
+- **BigQuery Console table links accepted (#424)** — pasting a Console
+  table URL fills the configurator; unambiguous single-table workspaces on
+  both supported hosts parse, everything else fails closed.
+- **External template access is an attested contract (#445, #446)** — after
+  an external user hit the terminal "This report isn't shared with you"
+  dialog, `bindings/report_template.yaml` gains a two-control
+  `external_access_verification` attestation (Permissions API link-role
+  read with the `datastudio.readonly` scope; dated external-identity copy
+  canary scoped by identity class), a durable `known_live_issues` record,
+  an evidence-consistent status contract enforced by tests, and a weekly
+  staleness workflow (`external-access-staleness.yml`) that opens a
+  tracking issue when the canary is overdue. All user-facing docs now name
+  the terminal dialog and stop advising users to wait it out.
+- **End-user manual (#425)** — `dashboard/looker_studio/USER_MANUAL.md`:
+  prerequisites, three-step setup, page guide, troubleshooting.
+
+### Grafana
+
+- **Metric correctness and scan bounds (#373 follow-ups, #433)** — LLM
+  calls are counted per distinct trace/span (streaming chunks no longer
+  overcount), every public-demo query enforces a strict half-open 72-hour
+  window per table scan, and the sync lint gains block-comment stripping,
+  foreign-table-path detection, and negative regression tests.
+- **One-command local run (#421, #422)** — from checkout to a rendering
+  dashboard against a local fixture dataset.
+
+### Documentation
+
+- LangSmith re-export guidance corrected and the 24-hour ingest window
+  documented (#423); thinking-token accounting clarified (#441); BigQuery
+  concept-index semantics clarified (#439); time-series point-marker
+  requirement recorded (#437).
+
+### Infrastructure
+
+- CI pins `pyink<26` so the Format check tracks the style the repository
+  is actually formatted in (#447).
+
+## [0.5.0] - 2026-08-11
+
+### Release highlights
+
+Two new export/observability surfaces and a rebuilt dashboard first-run
+experience. The wheel gains the BigQuery-to-LangSmith export connector
+(`bqaa export langsmith`) and the native Grafana integration; the published
+Looker Studio dashboard (repo/live-template side, tracked in #404) now
+defaults to one rolling 90-day report-level date control across all eight
+pages, ships a trust-hardened configurator, and is guarded by a
+browser-level CI gate.
+
+### Added
+
+- **BigQuery-to-LangSmith export connector (#410, #414)** — new
+  `bigquery_agent_analytics.export` subpackage plus the `bqaa export
+  langsmith` CLI: dumps BQAA `agent_events` rows to a LangSmith project,
+  schema/row-content agnostic, with bounded batching and structured error
+  handling. Verified against a real LangSmith project.
+- **Native Grafana dashboard integration (#339, #373).**
+- **Skill-evolution lab on the shared-table, server-side path (#360 U6)** —
+  the two disclosed demo workarounds are removed now that #358/#359 have
+  landed: the lab writes every pass to one shared `agent_events` table
+  (rows labeled `custom_tags {run, slice}`, with reused held-out session ids
+  separated by the identity-safe selectors) and judges server-side with each
+  session's matched golden expected answer as identity-bound per-session
+  context. Scoring is bounded by app + exact run/slice labels + a 24h window
+  + a 500-row cap, and `quality_report`'s trajectory fetch now preserves
+  those CLI bounds when delegating to `TraceFilter`. The committed
+  `sample_run/` is a fresh recording of this end-to-end path (provenance in
+  `sample_run/PROVENANCE.md`). This closes the #358/#359 release-notes arc:
+  the example now exercises the shared-table, server-side contract end to
+  end.
+
+### Changed (dashboard, repo/live-template side — issue #404)
+
+- **Configurator accepts a pasted fully qualified table ID (#403, #405)** —
+  `project.dataset.table` (plus backticked, legacy-colon, and
+  trailing-punctuation forms) pastes into any field and distributes across
+  all three, with paste-immediate and change-committed semantics that never
+  hijack hand-typing. Community contribution.
+- **First-run trust cluster (#398, #399, #400, #408)** — the create flow
+  sets a measured ~10-second provisioning expectation before and at the
+  click, step 02 mirrors the real "Review data access" dialog (exact SQL
+  linked, Owner's-Credentials mode explained), and the page moved to a
+  WCAG-AA-verified Google Cloud palette in both themes. The recurring
+  dialog comparison is a durable "Configurator release checks" contract.
+- **Rolling 90-day report-level date range (#401, #417)** — one date
+  control now applies to and persists across all eight report pages,
+  including the Trace Inspector, replacing the 365-day page-scoped
+  defaults; republished under the full nine-method publication gate with
+  re-dated attestations, a validated 1280 px minimum viewport, and a
+  recorded bytes-billed measurement.
+- **Browser-level configurator CI gate (#407)** — headless-Chrome smoke
+  check with instrumented page-error detection, nonce-verified server
+  ownership, honored browser exit status, and five negative fixtures, all
+  enforced through the required test matrix (a Node-only suite cannot see
+  browser-fatal failures).
+
+### Fixed
+
+- **Lock generation converges again under pip 26.2 (#412)** and GitHub
+  Actions workflows hardened for the zizmor policy (#411); `nanoid`
+  upgraded past its advisory (#413).
+
+### Decisions
+
+- **Conversational Analytics over `agent_events` (#402, #409, #416)** —
+  decision framework plus a completed authenticated evaluation: the
+  first-party BigQuery data agent shared to Data Studio (B1) is selected
+  (both stage-1 shapes scored 6/6; no first-party mandatory failure), and
+  implementation is handed off to #418. Dashboard usage attribution is
+  tracked as evidence-gated backlog in #415.
+
+## [0.4.1] - 2026-07-30
+
+_Section cut retroactively: the `v0.4.1` tag (2026-07-30) shipped these
+entries, but the changelog section was not carved out of Unreleased at
+release time._
+
+### Added
+
+- **Identity-safe singular trace resolution (#359)** — `TraceIdentity`,
+  `TraceScope`, `TraceSelector`, `ResolvedTraceSelector`, and
+  `AmbiguousSessionError` distinguish a reusable conversation `session_id`
+  across users, root agents, experiments, and exact custom-label payloads.
+  `Client.get_session_trace()` now resolves candidates without a newest-wins
+  fallback; `Client.get_trace_by_selector()` accepts a retry-ready candidate
+  selector. Scalar pins distinguish unpinned, SQL `NULL`, and string values,
+  and canonical `scope_signature` values make subset/superset label scopes
+  distinct. `allow_mixed_scope=True` is an explicit single-identity escape
+  hatch and reports its included scopes through `Trace.scope_coverage`.
+- **Identity-safe secondary surfaces** — GQL reconstruction, flat fallback,
+  `BigQueryTraceEvaluator`, CLI `get-trace`, Remote Function `analyze`, the
+  self-monitoring agent example, and quality/latency reports now use the shared
+  selector contract. CLI JSON and Remote Function errors expose structured,
+  exact retry selectors; human-readable ambiguity messages remain redacted.
+  Reports retain colliding rows when score attribution is available, fail
+  closed rather than attaching a legacy session-only score to one candidate,
+  and render resolved identity plus exact scope (or mixed-scope coverage) in
+  text, Markdown, and JSON.
+- **Identity-bound categorical judge context (#358 U4)** —
+  `Client.evaluate_categorical(..., per_session_context=...)` accepts exact
+  `ResolvedTraceSelector` keys, plus legacy session-id keys only when the
+  filtered population is unambiguous. A non-empty mapping resolves and
+  deduplicates the U2 identity/scope population before any model call, bypasses
+  AI.CLASSIFY with a recorded reason, and carries the same parameterized
+  transcript/context binding through BigQuery AI.GENERATE, parse/NULL retry,
+  and full Gemini API fallback. Unmapped traces still run without context;
+  empty resolved work makes no model call. Context-aware logs redact model
+  text/raw retry responses so a model echo cannot disclose trusted context.
+- **Identity-safe categorical persistence and latest views (#358 U5)** —
+  categorical result tables gain nullable identity and context-provenance
+  columns through idempotent additive migrations; historical rows are not
+  backfilled. Deploy and roll back in schema → writer → view order. Latest
+  views preserve separate rows for identities that share a `session_id`; while
+  data straddles the migration, a sole typed identity supersedes matching
+  legacy metric/prompt rows, while zero or multiple identities retain the
+  `legacy:<session_id>` lane. Trusted judge/golden-answer input and model
+  echoes are never persisted — only SDK-owned provenance is. U5 closes the
+  remaining #358 persistence/report gate and unlocks U6/#360.
+
+### Changed
+
+- **Migration guidance for session readers** — code that assumed
+  `session_id` uniquely identified one trace must now catch
+  `AmbiguousSessionError`, choose a candidate according to application policy,
+  and pass the complete `candidate["selector"]` to `TraceSelector` and
+  `get_trace_by_selector()`. Preserve explicit JSON `null` pins and
+  `scope_signature`; dropping either can broaden a retry. Callers whose
+  `session_id` resolves uniquely continue unchanged; callers that need every
+  candidate can use `list_traces()` instead of a singular read. Legacy
+  session-only report correlation remains supported only when exactly one
+  candidate exists and otherwise fails closed.
+- Rows with the same intrinsic identity and exact scope are indistinguishable
+  to the selector contract and resolve as one candidate. Producers that need a
+  finer boundary should record a distinct experiment/label scope or use their
+  producer `trace_id`.
+- Structured ambiguity payloads contain user/root-agent/experiment/label
+  metadata and should be handled as sensitive data. They never include event
+  content or judge context.
+- This release aligns read, trajectory-evaluation, CLI/Remote Function,
+  example, report, and categorical judge-context surfaces at one boundary.
+  Context is trusted prompt material: it is a query parameter/model input,
+  never SQL text, a job label, or persisted input. U5 now provides the
+  identity-safe persistence/view-cardinality path for contextual results.
+
+### Fixed
+
+- **dashboard_v2: React Router upgraded past GHSA-qwww-vcr4-c8h2 (#394)**
+  and postcss bumped (#393).
 
 ## [0.4.0] - 2026-06-18
 

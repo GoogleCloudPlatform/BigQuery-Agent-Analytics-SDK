@@ -12,8 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Backward-compatibility module mapping for trace evaluator."""
+"""Compatibility import path for the performance and trace evaluators.
 
-from .performance_evaluator import *
+The module alias also preserves private helper imports and monkeypatches;
+classes, enums, and trace models retain their identity across both paths.
+"""
 
-BigQueryTraceEvaluator = PerformanceEvaluator
+import sys
+
+from . import performance_evaluator
+
+sys.modules[__name__] = performance_evaluator

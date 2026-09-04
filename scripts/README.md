@@ -124,7 +124,9 @@ When `--session` is used, the console shows **all 8 metrics with full
 justifications** for the single session (verbose mode). See
 [sample single-session output](sample_quality_report_session.md).
 
-**Markdown report** (`--report` flag) is saved to `scripts/reports/` and includes:
+**Markdown report** (`--report` flag) is saved to `scripts/reports/` — or, when
+`--output-json <name>.json` is also given, next to it as `<name>.md` (the
+human-readable twin of every scored artifact). It includes:
 - Summary table and Quality Dimensions scores
 - **Dimension drilldowns** — for any dimension rated below 1.50 (needs attention
   or problem area), the report lists the sessions that scored poorly with
@@ -132,6 +134,11 @@ justifications** for the single session (verbose mode). See
   for multi-turn sessions
 - Per-agent breakdown, category distributions
 - Unhelpful / Declined / Partial session details with conversations
+
+**Re-render from JSON** (`--render-json <report.json>`): rebuilds the same
+Markdown report from an existing `--output-json` file — pure formatting, zero
+model calls — and writes `<report>.md` next to it. Use it to (re)produce the
+scorecard for any already-scored run.
 
 **Log files** are saved to `scripts/reports/` for each eval run.
 
@@ -531,6 +538,8 @@ The script automatically detects and resolves responses from remote A2A
 ### Sample output
 
 - [Sample quality report](sample_quality_report.md) — full multi-session report
+  (the V0 held-out scorecard from the committed
+  [skill-evolution sample run](../examples/skill_evolution_lab/sample_run/))
 - [Sample single-session report](sample_quality_report_session.md) — verbose single-session output
 
 ---
@@ -549,7 +558,10 @@ parallel analysts + inductive consolidation) and **AutoSkill**
 The engine is **standalone**: it consumes a report *dict* and returns skill
 text, with no agent / traffic / registry dependencies, so it composes with the
 scorer without importing it. For a complete, runnable V0 → V1 walkthrough see
-[`examples/skill_evolution_lab/`](../examples/skill_evolution_lab/).
+[`examples/skill_evolution_lab/`](../examples/skill_evolution_lab/). To run
+this engine unattended — a weekly Cloud Run Job that builds the quality
+report, evolves the skill, and opens a PR against your agent repo — see
+[`deploy/skill_evolution_job/`](../deploy/skill_evolution_job/).
 
 ### Prerequisites
 
@@ -621,6 +633,10 @@ new_skill = skill_evolution.evolve_skill(
     analyst_mode="both",    # both | error-only | success-only
     score_fn=my_scorer,     # optional (skill_text) -> float; picks best + gates incumbent
     min_improvement=0.5,    # incumbent gate: ship V1 only if it beats V0 by this margin
+    incumbent_score=0.62,   # optional pre-measured V0 score (skips re-scoring the base;
+                            #   effective only together with score_fn; must be finite)
+    error_analyst_fn=my_analyst,  # optional host analyst for FAILURE trajectories:
+                            #   fn(client, model, session, current_skill, tools) -> patch|None
 )
 ```
 
@@ -630,7 +646,15 @@ way — adding `scripts/` to `sys.path`, then `import skill_evolution`.)
 `evolve_skill()` returns the evolved skill as a string (or the unchanged input
 when nothing beat the incumbent). Key knobs: `candidates` (best-of-N),
 `max_chars` (size cap), `analyst_mode`, `max_success_samples`, `max_workers`
-(analyst concurrency), and `score_fn` / `min_improvement` (incumbent guard). The
+(analyst concurrency), `score_fn` / `min_improvement` / `incumbent_score`
+(incumbent guard — `incumbent_score` is the pre-measured base-skill score and
+only takes effect alongside `score_fn`), and `error_analyst_fn` (replace the
+built-in failure analyst with a richer host one, e.g. an agentic investigator;
+success trajectories always use the built-in analyst, and host patches still
+pass the quality gate). Sessions may carry optional enrichment keys the
+analysts render when present — `sub_trajectories`,
+`execution_sub_trajectories` (with per-segment `trace` text), and
+`execution_trace` — see the `evolve_skill` docstring for shapes. The
 skill is kept **behavioral** — the consolidator is instructed not to bake
 specific data values (numbers, dates, dollar amounts) into the skill; those must
 come from tools at runtime.

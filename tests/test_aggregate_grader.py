@@ -367,3 +367,102 @@ class TestAggregateGrader:
     )
     assert verdict.passed is True
     assert len(verdict.grader_results) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "strategy", [WeightedStrategy(), BinaryStrategy(), MajorityStrategy()]
+)
+@pytest.mark.parametrize(
+    "scores, status, details",
+    [
+        ({}, EvalStatus.PASSED, {}),
+        ({"quality": float("nan")}, EvalStatus.PASSED, {}),
+        ({"quality": float("inf")}, EvalStatus.PASSED, {}),
+        ({"quality": 1.0}, EvalStatus.NOT_EVALUATED, {}),
+        (
+            {"response_match": 1.0},
+            EvalStatus.FAILED,
+            {"errors": ["judge failed"]},
+        ),
+    ],
+)
+async def test_performance_grader_requires_valid_measured_evidence(
+    strategy, scores, status, details
+):
+  evaluator = PerformanceEvaluator()
+  evaluator.evaluate_session = AsyncMock(
+      return_value=EvaluationResult(
+          session_id="s1",
+          scores=scores,
+          eval_status=status,
+          details=details,
+      )
+  )
+  verdict = (
+      await AggregateGrader(strategy)
+      .add_performance_grader(evaluator)
+      .evaluate(session_id="s1", final_response="expected")
+  )
+  assert verdict.passed is False
+  assert verdict.final_score == 0.0
+  assert verdict.grader_results[0].passed is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "actual, expected, passed",
+    [("wrong", "right", False), ("right", "right", True)],
+)
+async def test_performance_grader_uses_real_golden_response_metric(
+    actual, expected, passed
+):
+  evaluator = PerformanceEvaluator()
+  evaluator.get_session_trace = AsyncMock(
+      return_value=SessionTrace(
+          session_id="s1",
+          user_id=None,
+          events=[],
+          final_response=actual,
+      )
+  )
+  verdict = (
+      await AggregateGrader(WeightedStrategy())
+      .add_performance_grader(evaluator)
+      .evaluate(session_id="s1", final_response=expected)
+  )
+  assert verdict.passed is passed
+  assert verdict.final_score == (1.0 if passed else 0.0)
+  assert verdict.grader_results[0].scores == {
+      "response_match": verdict.final_score
+  }
+
+
+@pytest.mark.asyncio
+async def test_configured_performance_name_selects_its_aggregate_weight():
+  evaluator = PerformanceEvaluator(name="quality")
+  evaluator.get_session_trace = AsyncMock(
+      return_value=SessionTrace(
+          session_id="s1", user_id=None, events=[], final_response="wrong"
+      )
+  )
+  pipeline = (
+      AggregateGrader(
+          WeightedStrategy(
+              weights={"quality": 9.0, "other": 1.0}, threshold=0.4
+          )
+      )
+      .add_performance_grader(evaluator)
+      .add_custom_grader(
+          "other",
+          lambda _: GraderResult(
+              grader_name="other", scores={"other": 1.0}, passed=True
+          ),
+      )
+  )
+  verdict = await pipeline.evaluate(session_id="s1", final_response="right")
+  assert [r.grader_name for r in verdict.grader_results] == ["quality", "other"]
+  assert verdict.grader_results[0].scores == {"response_match": 0.0}
+  assert verdict.final_score == pytest.approx(0.1)
+  assert verdict.passed is False
+  assert PerformanceEvaluator().name == "performance_evaluator"

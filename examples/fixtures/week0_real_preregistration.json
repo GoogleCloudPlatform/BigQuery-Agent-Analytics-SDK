@@ -1,0 +1,29 @@
+{
+  "example": false,
+  "frozen_by": "#435 Week 0 preregistration seal",
+  "clock_started": false,
+  "freeze_candidate": false,
+  "not_week_1_execution": true,
+  "banner": "Sealed preregistration \u2014 v4 floors plus the three Week-0 numbers the freeze-candidate still left as placeholders. The six-week clock has NOT started and starts only when the first Week 1 snapshot job is kicked.",
+  "floors": {
+    "replicate_agreement_pct": 80,
+    "non_unknown_coverage_pct": 80,
+    "kappa_point": 0.6,
+    "kappa_ci_lower": 0.45,
+    "localization_coverage_pct": 70,
+    "hit_at_1_ci_lower_gt_0": true,
+    "hit_at_1_point_uplift_pp": 10,
+    "value_gate_pct": 50,
+    "absolute_hit_at_1_floor": null,
+    "absolute_hit_at_1_rule": "No separate absolute hit@1 floor. The paired CI lower bound >0 and point uplift >= +10pp are the hit@1 gates."
+  },
+  "decision_rules": {
+    "reserved_revision_week": "One taxonomy revision slot (week 7): a stability miss invokes it once with fresh labels and a re-gate; a second miss ends the MVP with the analysis as the deliverable.",
+    "value_gate": "At least 50% of randomly assigned, completed, non-investigator-adjudicated investigations where the report changed or materially narrowed the next action. A stated preference or unverified acceptance counts for nothing. If investigation volume slips, apply the 50% threshold to completed investigations only (does not silently pass).",
+    "noisy_small_n_localization": "If the point estimate clears but the 95% CI spans zero, the gate FAILS. Do not localize and do not claim uplift. No metric conditions on successful localizations only. This is the week-0 rule; week-6 judgment may not override it.",
+    "sealed_sets": "P-blind is frozen before any tuning and scored exactly once at week 6."
+  },
+  "sealed": true,
+  "sealed_at": "2026-09-02T14:05:00-07:00",
+  "sealed_by": "Hai-Yuan Cao (caohy1988 / haiyuan-eng-google)"
+}

@@ -70,15 +70,38 @@ class SkillRegistry:
       return env_token
     if self._cached_token and time.monotonic() < self._token_expiry:
       return self._cached_token
-    out = subprocess.run(
-        ["gcloud", "auth", "application-default", "print-access-token"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    self._cached_token = out.stdout.strip()
+    token = self._adc_token()
+    if token is None:
+      out = subprocess.run(
+          ["gcloud", "auth", "application-default", "print-access-token"],
+          capture_output=True,
+          text=True,
+          check=True,
+      )
+      token = out.stdout.strip()
+    self._cached_token = token
     self._token_expiry = time.monotonic() + self._TOKEN_TTL
     return self._cached_token
+
+  @staticmethod
+  def _adc_token() -> str | None:
+    """Mint a token from Application Default Credentials.
+
+    Works in environments without the gcloud CLI (Cloud Run, Agent Engine).
+    Returns None when ADC is not configured so the caller can fall back.
+    """
+    try:
+      import google.auth
+      from google.auth.transport.requests import Request
+
+      creds, _ = google.auth.default(
+          scopes=["https://www.googleapis.com/auth/cloud-platform"]
+      )
+      creds.refresh(Request())
+      return creds.token
+    except Exception as e:  # pylint: disable=broad-except
+      logger.debug("ADC token unavailable (%s); trying gcloud CLI", e)
+      return None
 
   def _headers(self) -> dict:
     return {
@@ -170,6 +193,31 @@ class SkillRegistry:
     )
     resp.raise_for_status()
     return resp.json()
+
+  def get_latest(self, skill_id: str) -> dict:
+    """Skill payload of the NEWEST revision.
+
+    GetSkill can keep serving an older revision's payload after updates
+    (observed live: nine revisions in, GetSkill still returned revision
+    two's zip). ListSkillRevisions is newest-first and GetSkillRevision
+    returns that revision's payload under ``skill``, so this is the
+    deterministic way to read what was last published. Falls back to
+    GetSkill when the skill has no readable revisions.
+    """
+    revisions = self.list_revisions(skill_id)
+    if revisions:
+      rev_id = revisions[0].get("name", "").split("/revisions/")[-1]
+      resp = requests.get(
+          f"{self.base}/skills/{skill_id}/revisions/{rev_id}",
+          headers=self._headers(),
+          timeout=60,
+      )
+      resp.raise_for_status()
+      skill = resp.json().get("skill", {})
+      if skill.get("zippedFilesystem"):
+        skill.setdefault("revisionId", rev_id)
+        return skill
+    return self.get(skill_id)
 
   def list_revisions(self, skill_id: str) -> list:
     resp = requests.get(

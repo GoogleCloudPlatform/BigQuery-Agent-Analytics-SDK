@@ -33,10 +33,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import shutil
 import sys
+
+import _quiet  # noqa: F401  -- mute noisy warnings/loggers before google imports
 
 # Import the reusable engine from the SDK's scripts/ (no copy).
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -61,11 +64,30 @@ def _location_for(model: str) -> str:
   return os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 
 
+def _mirror_to_registry(project: str, skill_path: str, skill_id: str, location):
+  """Push the skill directory to the Skill Registry as a new revision."""
+  # Lazy import so the registry client (and gcloud) is only needed on demand.
+  sys.path.insert(0, os.path.join(_SCRIPT_DIR, "agent"))
+  from skill_registry import SkillRegistry  # noqa: E402
+
+  skill_dir = os.path.dirname(os.path.abspath(skill_path))
+  reg = SkillRegistry(project, location=location or "us-central1")
+  logger.info("Mirroring evolved skill to registry %s ...", skill_id)
+  reg.update(
+      skill_id,
+      skill_dir,
+      display_name="Skill Lab Policy Agent",
+      description="Evolved tool-first policy skill",
+  )
+  revs = reg.list_revisions(skill_id)
+  logger.info("Registry now has %d revision(s).", len(revs))
+
+
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("--report", required=True, help="Scored V0 report JSON")
+  parser.add_argument("--report", help="Scored V0 report JSON")
   parser.add_argument("--skill", required=True, help="Current SKILL.md path")
-  parser.add_argument("-o", "--out", required=True, help="Evolved skill output")
+  parser.add_argument("-o", "--out", help="Evolved skill output")
   parser.add_argument(
       "--model",
       default="gemini-3.1-pro-preview",
@@ -80,6 +102,15 @@ def main():
   parser.add_argument("--max-chars", type=int, default=3500)
   parser.add_argument("--max-workers", type=int, default=10)
   parser.add_argument(
+      "--version-label",
+      default="v1",
+      help=(
+          "Version being PRODUCED (artifact filename prefix): 'v1' for the"
+          " V0->V1 round, 'v2' for a V1->V2 round, so successive rounds don't"
+          " overwrite each other's patches/candidates/selection artifacts"
+      ),
+  )
+  parser.add_argument(
       "--write-working-copy",
       action="store_true",
       help="Also overwrite --skill with the evolved skill (the working copy)",
@@ -89,9 +120,26 @@ def main():
       action="store_true",
       help="Mirror the evolved skill to the Skill Registry as a new revision",
   )
+  parser.add_argument(
+      "--registry-push-only",
+      action="store_true",
+      help=(
+          "Skip evolution entirely; just mirror --skill to the Skill Registry."
+          " Used by run_e2e_demo.sh to push V1 only AFTER it wins the held-out"
+          " comparison."
+      ),
+  )
   parser.add_argument("--skill-id", default=None)
   parser.add_argument("--location", default=None, help="Skill Registry region")
   parser.add_argument("--project", default=None)
+  parser.add_argument(
+      "--eval-spec",
+      default=None,
+      help=(
+          "eval_spec.json; its `tools` field is shown to the analysts so they"
+          " can propose 'use the tool' rules instead of NO_PATCH on deflections"
+      ),
+  )
   args = parser.parse_args()
 
   project = (
@@ -99,8 +147,34 @@ def main():
       or os.getenv("GOOGLE_CLOUD_PROJECT")
       or os.getenv("PROJECT_ID")
   )
+
+  if args.registry_push_only:
+    if not args.skill_id:
+      parser.error("--registry-push-only requires --skill-id")
+    _mirror_to_registry(project, args.skill, args.skill_id, args.location)
+    return
+  if not args.report or not args.out:
+    parser.error(
+        "--report and -o/--out are required (unless --registry-push-only)"
+    )
+
   with open(args.skill) as f:
     current_skill = f.read()
+
+  # Tool-aware analysts are part of the core claim, so a provided --eval-spec
+  # must exist and carry a non-empty `tools` field. Fail fast instead of
+  # silently degrading to a non-tool-aware run.
+  tools = None
+  if args.eval_spec:
+    if not os.path.exists(args.eval_spec):
+      parser.error(f"--eval-spec not found: {args.eval_spec}")
+    with open(args.eval_spec) as f:
+      tools = (json.load(f) or {}).get("tools") or None
+    if not tools:
+      parser.error(
+          f"--eval-spec {args.eval_spec} has no non-empty `tools` field; "
+          "tool-aware analysts need it (remove --eval-spec to run without tools)."
+      )
 
   logger.info(
       "Evolving %s from %s (analyst=%s)...",
@@ -117,6 +191,9 @@ def main():
       candidates=args.candidates,
       max_chars=args.max_chars,
       max_workers=args.max_workers,
+      tools=tools,
+      artifacts_dir=os.path.dirname(os.path.abspath(args.out)),
+      version_label=args.version_label,
   )
 
   # Normalize trailing whitespace / EOF so the committed artifact stays clean
@@ -139,21 +216,7 @@ def main():
   if args.registry_update:
     if not args.skill_id:
       parser.error("--registry-update requires --skill-id")
-    # Lazy import so the registry client (and gcloud) is only needed on demand.
-    sys.path.insert(0, os.path.join(_SCRIPT_DIR, "agent"))
-    from skill_registry import SkillRegistry  # noqa: E402
-
-    skill_dir = os.path.dirname(os.path.abspath(args.skill))
-    reg = SkillRegistry(project, location=args.location or "us-central1")
-    logger.info("Mirroring evolved skill to registry %s ...", args.skill_id)
-    reg.update(
-        args.skill_id,
-        skill_dir,
-        display_name="Skill Lab Policy Agent",
-        description="Evolved (V1) tool-first policy skill",
-    )
-    revs = reg.list_revisions(args.skill_id)
-    logger.info("Registry now has %d revision(s).", len(revs))
+    _mirror_to_registry(project, args.skill, args.skill_id, args.location)
 
 
 if __name__ == "__main__":

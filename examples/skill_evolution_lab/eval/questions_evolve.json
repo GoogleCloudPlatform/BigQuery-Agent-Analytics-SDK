@@ -1,55 +1,280 @@
 {
   "description": "Single-agent skill lab - EVOLVE set (what the engine learns from). Same HR facts as the held-out test set but DIFFERENT phrasings, so the test measures generalization, not memorization. The flawed V0 ('answer only from the baked summary, else contact HR') defers on most of these even though lookup_company_policy can answer them; the engine should learn a tool-first rule.",
   "questions": [
-    {"id": "e01_pto", "category": "pto", "question": "How many vacation days do I get a year?"},
-    {"id": "e02_pto", "category": "pto", "question": "How many unused vacation days carry into next year?"},
-    {"id": "e03_pto", "category": "pto", "question": "At what rate does my PTO accrue?"},
-    {"id": "e04_pto", "category": "pto", "question": "Is my unused PTO paid out if I resign?"},
-    {"id": "e05_sick", "category": "sick_leave", "question": "How many sick days am I given annually?"},
-    {"id": "e06_sick", "category": "sick_leave", "question": "Can I bank unused sick days for next year?"},
-    {"id": "e07_sick", "category": "sick_leave", "question": "After how many days out sick is a doctor's note required?"},
-    {"id": "e08_remote", "category": "remote_work", "question": "How often can I work from home each week?"},
-    {"id": "e09_remote", "category": "remote_work", "question": "Does working remotely require sign-off from anyone?"},
-    {"id": "e10_remote", "category": "remote_work", "question": "When are the required overlap hours for remote staff?"},
-    {"id": "e11_remote", "category": "remote_work", "question": "Am I allowed to be remote four days a week?"},
-    {"id": "e12_expenses", "category": "expenses", "question": "What's the per-diem for meals while traveling for work?"},
-    {"id": "e13_expenses", "category": "expenses", "question": "Is a receipt needed for a $40 purchase?"},
-    {"id": "e14_expenses", "category": "expenses", "question": "Does booking a $700 flight need approval first?"},
-    {"id": "e15_expenses", "category": "expenses", "question": "What's the deadline to file an expense report?"},
-    {"id": "e16_benefits", "category": "benefits", "question": "What percentage of my medical premium does the employer pay?"},
-    {"id": "e17_benefits", "category": "benefits", "question": "Which health plan types can I choose from?"},
-    {"id": "e18_benefits", "category": "benefits", "question": "What's the most a family pays out of pocket in-network?"},
-    {"id": "e19_benefits", "category": "benefits", "question": "What's the individual in-network out-of-pocket cap?"},
-    {"id": "e20_benefits", "category": "benefits", "question": "What's the employer HSA contribution for family coverage?"},
-    {"id": "e21_benefits", "category": "benefits", "question": "What does the company put in an HSA for a single employee?"},
-    {"id": "e22_benefits", "category": "benefits", "question": "Is a routine dental cleaning covered?"},
-    {"id": "e23_benefits", "category": "benefits", "question": "How much of a major dental procedure is covered?"},
-    {"id": "e24_benefits", "category": "benefits", "question": "Are braces covered, and what's the cap?"},
-    {"id": "e25_benefits", "category": "benefits", "question": "What's covered for an eye exam and frames?"},
-    {"id": "e26_benefits", "category": "benefits", "question": "What percentage does the company match on 401k?"},
-    {"id": "e27_benefits", "category": "benefits", "question": "How long until I'm fully vested in the match?"},
-    {"id": "e28_benefits", "category": "benefits", "question": "If I quit before a year, do I keep the employer match?"},
-    {"id": "e29_benefits", "category": "benefits", "question": "How many weeks of leave does a primary caregiver get?"},
-    {"id": "e30_benefits", "category": "benefits", "question": "As a secondary caregiver, how much parental leave do I get?"},
-    {"id": "e31_benefits", "category": "benefits", "question": "When can I sign up for benefits each year?"},
-    {"id": "e32_holidays", "category": "holidays", "question": "How many company-paid holidays are there?"},
-    {"id": "e33_holidays", "category": "holidays", "question": "Do we get Juneteenth off?"},
-    {"id": "e34_holidays", "category": "holidays", "question": "Is the Wednesday before Thanksgiving a paid day off?"},
-    {"id": "e35_bereavement", "category": "bereavement", "question": "How much bereavement leave do I get for losing a parent?"},
-    {"id": "e36_bereavement", "category": "bereavement", "question": "How many days off if my sibling passes away?"},
-    {"id": "e37_bereavement", "category": "bereavement", "question": "What's the bereavement allowance for a grandparent?"},
-    {"id": "e38_jury", "category": "jury_duty", "question": "Does the company pay me during jury duty, and is there a limit?"},
-    {"id": "e39_eap", "category": "eap", "question": "How many counseling visits does the EAP cover?"},
-    {"id": "e40_eap", "category": "eap", "question": "Is there a round-the-clock EAP support line?"},
-    {"id": "e41_flex", "category": "flex_time", "question": "Can I do a compressed schedule of four 10-hour days?"},
-    {"id": "e42_flex", "category": "flex_time", "question": "What's the earliest I can begin work under flexible hours?"},
-    {"id": "e43_tuition", "category": "tuition_reimbursement", "question": "How much will the company reimburse for tuition each year?"},
-    {"id": "e44_tuition", "category": "tuition_reimbursement", "question": "What grade must I earn to get tuition reimbursed?"},
-    {"id": "e45_std", "category": "short_term_disability", "question": "What portion of my pay does short-term disability replace?"},
-    {"id": "e46_std", "category": "short_term_disability", "question": "What's the maximum duration of short-term disability?"},
-    {"id": "e47_std", "category": "short_term_disability", "question": "Is there a waiting period before short-term disability starts?"},
-    {"id": "e48_benefits", "category": "benefits", "question": "What fraction of dependent premiums does the employer cover?"},
-    {"id": "e49_tuition", "category": "tuition_reimbursement", "question": "Can I get reimbursed for a job-related class, and up to how much?"},
-    {"id": "e50_sick", "category": "sick_leave", "question": "Do leftover sick days roll into the following year?"}
+    {
+      "id": "e01_pto",
+      "category": "pto",
+      "question": "How many vacation days do I get a year?"
+    },
+    {
+      "id": "e02_pto",
+      "category": "pto",
+      "question": "How many unused vacation days carry into next year?"
+    },
+    {
+      "id": "e03_pto",
+      "category": "pto",
+      "question": "At what rate does my PTO accrue?"
+    },
+    {
+      "id": "e04_pto",
+      "category": "pto",
+      "question": "Is my unused PTO paid out if I resign?"
+    },
+    {
+      "id": "e05_sick",
+      "category": "sick_leave",
+      "question": "How many sick days am I given annually?"
+    },
+    {
+      "id": "e06_sick",
+      "category": "sick_leave",
+      "question": "Can I bank unused sick days for next year?"
+    },
+    {
+      "id": "e07_sick",
+      "category": "sick_leave",
+      "question": "After how many days out sick is a doctor's note required?"
+    },
+    {
+      "id": "e08_remote",
+      "category": "remote_work",
+      "question": "How often can I work from home each week?"
+    },
+    {
+      "id": "e09_remote",
+      "category": "remote_work",
+      "question": "Does working remotely require sign-off from anyone?"
+    },
+    {
+      "id": "e10_remote",
+      "category": "remote_work",
+      "question": "When are the required overlap hours for remote staff?"
+    },
+    {
+      "id": "e11_remote",
+      "category": "remote_work",
+      "question": "Am I allowed to be remote four days a week?"
+    },
+    {
+      "id": "e12_expenses",
+      "category": "expenses",
+      "question": "What's the per-diem for meals while traveling for work?"
+    },
+    {
+      "id": "e13_expenses",
+      "category": "expenses",
+      "question": "Is a receipt needed for a $40 purchase?"
+    },
+    {
+      "id": "e14_expenses",
+      "category": "expenses",
+      "question": "Does booking a $700 flight need approval first?"
+    },
+    {
+      "id": "e15_expenses",
+      "category": "expenses",
+      "question": "What's the deadline to file an expense report?"
+    },
+    {
+      "id": "e16_benefits",
+      "category": "benefits",
+      "question": "What percentage of my medical premium does the employer pay?"
+    },
+    {
+      "id": "e17_benefits",
+      "category": "benefits",
+      "question": "Which health plan types can I choose from?"
+    },
+    {
+      "id": "e18_benefits",
+      "category": "benefits",
+      "question": "What's the most a family pays out of pocket in-network?"
+    },
+    {
+      "id": "e19_benefits",
+      "category": "benefits",
+      "question": "What's the individual in-network out-of-pocket cap?"
+    },
+    {
+      "id": "e20_benefits",
+      "category": "benefits",
+      "question": "What's the employer HSA contribution for family coverage?"
+    },
+    {
+      "id": "e21_benefits",
+      "category": "benefits",
+      "question": "What does the company put in an HSA for a single employee?"
+    },
+    {
+      "id": "e22_benefits",
+      "category": "benefits",
+      "question": "Is a routine dental cleaning covered?"
+    },
+    {
+      "id": "e23_benefits",
+      "category": "benefits",
+      "question": "How much of a major dental procedure is covered?"
+    },
+    {
+      "id": "e24_benefits",
+      "category": "benefits",
+      "question": "Are braces covered, and what's the cap?"
+    },
+    {
+      "id": "e25_benefits",
+      "category": "benefits",
+      "question": "What's covered for an eye exam and frames?"
+    },
+    {
+      "id": "e26_benefits",
+      "category": "benefits",
+      "question": "What percentage does the company match on 401k?"
+    },
+    {
+      "id": "e27_benefits",
+      "category": "benefits",
+      "question": "How long until I'm fully vested in the match?"
+    },
+    {
+      "id": "e28_benefits",
+      "category": "benefits",
+      "question": "If I quit before a year, do I keep the employer match?"
+    },
+    {
+      "id": "e29_benefits",
+      "category": "benefits",
+      "question": "How many weeks of leave does a primary caregiver get?"
+    },
+    {
+      "id": "e30_benefits",
+      "category": "benefits",
+      "question": "As a secondary caregiver, how much parental leave do I get?"
+    },
+    {
+      "id": "e31_benefits",
+      "category": "benefits",
+      "question": "When can I sign up for benefits each year?"
+    },
+    {
+      "id": "e32_holidays",
+      "category": "holidays",
+      "question": "How many company-paid holidays are there?"
+    },
+    {
+      "id": "e33_holidays",
+      "category": "holidays",
+      "question": "Do we get Juneteenth off?"
+    },
+    {
+      "id": "e34_holidays",
+      "category": "holidays",
+      "question": "Is the Wednesday before Thanksgiving a paid day off?"
+    },
+    {
+      "id": "e35_bereavement",
+      "category": "bereavement",
+      "question": "How much bereavement leave do I get for losing a parent?"
+    },
+    {
+      "id": "e36_bereavement",
+      "category": "bereavement",
+      "question": "How many days off if my sibling passes away?"
+    },
+    {
+      "id": "e37_bereavement",
+      "category": "bereavement",
+      "question": "What's the bereavement allowance for a grandparent?"
+    },
+    {
+      "id": "e38_jury",
+      "category": "jury_duty",
+      "question": "Does the company pay me during jury duty, and is there a limit?"
+    },
+    {
+      "id": "e39_eap",
+      "category": "eap",
+      "question": "How many counseling visits does the EAP cover?"
+    },
+    {
+      "id": "e40_eap",
+      "category": "eap",
+      "question": "Is there a round-the-clock EAP support line?"
+    },
+    {
+      "id": "e41_flex",
+      "category": "flex_time",
+      "question": "Can I do a compressed schedule of four 10-hour days?"
+    },
+    {
+      "id": "e42_flex",
+      "category": "flex_time",
+      "question": "What's the earliest I can begin work under flexible hours?"
+    },
+    {
+      "id": "e43_tuition",
+      "category": "tuition_reimbursement",
+      "question": "How much will the company reimburse for tuition each year?"
+    },
+    {
+      "id": "e44_tuition",
+      "category": "tuition_reimbursement",
+      "question": "What grade must I earn to get tuition reimbursed?"
+    },
+    {
+      "id": "e45_std",
+      "category": "short_term_disability",
+      "question": "What portion of my pay does short-term disability replace?"
+    },
+    {
+      "id": "e46_std",
+      "category": "short_term_disability",
+      "question": "What's the maximum duration of short-term disability?"
+    },
+    {
+      "id": "e47_std",
+      "category": "short_term_disability",
+      "question": "Is there a waiting period before short-term disability starts?"
+    },
+    {
+      "id": "e48_benefits",
+      "category": "benefits",
+      "question": "What fraction of dependent premiums does the employer cover?"
+    },
+    {
+      "id": "e49_tuition",
+      "category": "tuition_reimbursement",
+      "question": "Can I get reimbursed for a job-related class, and up to how much?"
+    },
+    {
+      "id": "e50_sick",
+      "category": "sick_leave",
+      "question": "Do leftover sick days roll into the following year?"
+    },
+    {
+      "id": "ec05_calc_std",
+      "category": "calc",
+      "question": "I make $104,000 a year. If I'm out 6 weeks on short-term disability, what's my total payout?"
+    },
+    {
+      "id": "ec06_calc_std",
+      "category": "calc",
+      "question": "On a $130,000 salary, how much would short-term disability pay me per week?"
+    },
+    {
+      "id": "ec07_calc_std",
+      "category": "calc",
+      "question": "I earn $78,000. If I need 15 weeks of short-term disability, how much do I get in total?"
+    },
+    {
+      "id": "ec08_calc_std",
+      "category": "calc",
+      "question": "What's the weekly short-term disability check on a $156,000 salary?"
+    },
+    {
+      "id": "ec10_calc_std",
+      "category": "calc",
+      "question": "If I make $130,000 and take the full 10 weeks of short-term disability, what's the total I'd receive?"
+    }
   ]
 }

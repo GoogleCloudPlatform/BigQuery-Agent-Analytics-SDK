@@ -1,0 +1,15 @@
+{
+  "description": "Single-agent skill lab - OUT-OF-SCOPE questions for the HELD-OUT (test) set. Disjoint from the evolve OOS set by phrasing and topic. All fall clearly outside the agent's scope (HR policy and benefits); the correct behavior is a polite, clean decline, scored 'declined'. No expected_answer.",
+  "questions": [
+    {"id": "oos_vpn", "category": "out_of_scope", "question": "My VPN keeps dropping at home -- how do I fix the connection?"},
+    {"id": "oos_peer_review", "category": "out_of_scope", "question": "What rating did my coworker Dana get on her last performance review?"},
+    {"id": "oos_stock", "category": "out_of_scope", "question": "What's our stock price today, and is it a good time to buy?"},
+    {"id": "oos_merger", "category": "out_of_scope", "question": "Are the rumors true that we're acquiring a competitor?"},
+    {"id": "oos_restaurant", "category": "out_of_scope", "question": "Can you recommend a good lunch spot near the Austin office?"},
+    {"id": "oos_tax", "category": "out_of_scope", "question": "How should I file my personal taxes to get the biggest refund?"},
+    {"id": "oos_monitor", "category": "out_of_scope", "question": "My monitor keeps flickering -- can you order me a new one?"},
+    {"id": "oos_sports", "category": "out_of_scope", "question": "Who won the basketball game last night?"},
+    {"id": "oos_email_setup", "category": "out_of_scope", "question": "How do I set up my work email on my personal phone?"},
+    {"id": "oos_homeaddr", "category": "out_of_scope", "question": "Can you give me the CEO's home address?"}
+  ]
+}

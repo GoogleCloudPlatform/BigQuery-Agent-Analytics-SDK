@@ -33,7 +33,7 @@ For a guided walkthrough, see the [Demo Narration](DEMO_NARRATION.md).
 
 The agent used in this demo is a **company policy Q&A assistant**,
 built with [Google ADK](https://google.github.io/adk-docs/) and the
-[BigQuery Agent Analytics Plugin](https://adk.dev/integrations/bigquery-agent-analytics/).
+[BigQuery Agent Analytics Plugin](https://adk.dev/observability/bigquery-agent-analytics/).
 
 It's deliberately simple: a single LLM agent with just two tools:
 
@@ -98,7 +98,7 @@ predicted.
 
 This demo shows how to close that gap using four components:
 
-1. **[`BigQueryAgentAnalyticsPlugin`](https://adk.dev/integrations/bigquery-agent-analytics/)** captures every real agent session
+1. **[`BigQueryAgentAnalyticsPlugin`](https://adk.dev/observability/bigquery-agent-analytics/)** captures every real agent session
    (questions, tool calls, responses) into BigQuery automatically.
 2. **[`SDK quality_report.py`](../../scripts/quality_report.py)** (the SDK's evaluation script) reads those
    logged sessions back from BigQuery, evaluates quality using an LLM

@@ -14,6 +14,7 @@
 
 """Tests for the CategoricalViewManager and dashboard view generation."""
 
+import sqlite3
 from unittest import mock
 
 import pytest
@@ -35,6 +36,46 @@ def vm():
   )
 
 
+@pytest.fixture
+def run_latest_view(vm):
+  """Executes the generated base-view CTEs against fixture rows."""
+  sql = vm.get_view_sql("categorical_results_latest")
+  query = sql.split(" AS\n", 1)[1]
+  query = query.replace(
+      f"`{PROJECT}.{DATASET}.categorical_results`", "categorical_results"
+  )
+  query = query.replace(
+      "CONCAT('legacy:', session_id)", "('legacy:' || session_id)"
+  )
+  query = query.replace(
+      "SELECT * EXCEPT(_identity_count, _sole_identity_key, "
+      "_effective_identity_key, _rn)\nFROM ranked",
+      "SELECT session_id, identity_key, metric_name, prompt_version, "
+      "created_at, raw_response, _effective_identity_key\nFROM ranked",
+  )
+
+  def run(rows):
+    with sqlite3.connect(":memory:") as connection:
+      connection.row_factory = sqlite3.Row
+      connection.execute(
+          """CREATE TABLE categorical_results (
+            session_id TEXT NOT NULL,
+            identity_key TEXT,
+            metric_name TEXT NOT NULL,
+            prompt_version TEXT,
+            created_at TEXT NOT NULL,
+            raw_response TEXT
+          )"""
+      )
+      connection.executemany(
+          "INSERT INTO categorical_results VALUES (?, ?, ?, ?, ?, ?)",
+          rows,
+      )
+      return [dict(row) for row in connection.execute(query)]
+
+  return run
+
+
 class TestCategoricalViewManager:
 
   def test_available_views(self, vm):
@@ -53,10 +94,136 @@ class TestCategoricalViewManager:
     assert "CREATE OR REPLACE VIEW" in sql
     assert f"`{PROJECT}.{DATASET}." in sql
     assert "ROW_NUMBER()" in sql
-    assert "PARTITION BY session_id, metric_name" in sql
+    assert "PARTITION BY _effective_identity_key, metric_name" in sql
     assert "COALESCE(prompt_version, '')" in sql
-    assert "ORDER BY created_at DESC, raw_response DESC" in sql
+    assert "identity_key IS NOT NULL DESC" in sql
+    assert "created_at DESC, raw_response DESC" in sql
     assert "categorical_results`" in sql
+
+  def test_base_view_uses_versioned_identity_and_namespaced_legacy_lane(
+      self, vm
+  ):
+    sql = vm.get_view_sql("categorical_results_latest")
+
+    assert "COUNT(DISTINCT identity_key) AS _identity_count" in sql
+    assert "MIN(identity_key) AS _sole_identity_key" in sql
+    assert "WHEN identity_key IS NOT NULL THEN identity_key" in sql
+    assert "WHEN _identity_count = 1 THEN _sole_identity_key" in sql
+    assert "CONCAT('legacy:', session_id)" in sql
+
+  def test_base_view_single_identity_supersedes_matching_legacy_rows(self, vm):
+    sql = vm.get_view_sql("categorical_results_latest")
+
+    # A legacy row is assigned the sole post-migration identity key. It then
+    # shares a metric/prompt partition with the versioned row, whose explicit
+    # identity wins even if timestamps tie.
+    assert "LEFT JOIN identity_population USING (session_id)" in sql
+    assert (
+        "PARTITION BY _effective_identity_key, metric_name,"
+        " COALESCE(prompt_version, '')" in sql
+    )
+    assert (
+        "ORDER BY identity_key IS NOT NULL DESC, created_at DESC,"
+        " raw_response DESC" in sql
+    )
+
+  def test_base_view_ambiguous_legacy_session_never_merges(self, vm):
+    sql = vm.get_view_sql("categorical_results_latest")
+
+    # Only an exactly-one identity population inherits the versioned key.
+    # Zero/multiple identities retain an isolated legacy namespace.
+    assert "WHEN _identity_count = 1" in sql
+    assert "ELSE CONCAT('legacy:', session_id)" in sql
+
+  def test_base_view_keeps_colliding_post_migration_identities(
+      self, run_latest_view
+  ):
+    rows = run_latest_view(
+        [
+            ("shared", "v1:alice", "tone", "p1", "2026-01-01", "a"),
+            ("shared", "v1:bob", "tone", "p1", "2026-01-02", "b"),
+        ]
+    )
+
+    assert len(rows) == 2
+    assert {row["_effective_identity_key"] for row in rows} == {
+        "v1:alice",
+        "v1:bob",
+    }
+
+  def test_base_view_deduplicates_legacy_only_session(self, run_latest_view):
+    rows = run_latest_view(
+        [
+            ("legacy", None, "tone", "p1", "2026-01-01", "old"),
+            ("legacy", None, "tone", "p1", "2026-01-02", "new"),
+        ]
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["_effective_identity_key"] == "legacy:legacy"
+    assert rows[0]["raw_response"] == "new"
+
+  def test_base_view_explicit_identity_supersedes_newer_legacy_row(
+      self, run_latest_view
+  ):
+    rows = run_latest_view(
+        [
+            ("shared", "v1:alice", "tone", "p1", "2026-01-01", "typed"),
+            ("shared", None, "tone", "p1", "2026-01-02", "legacy"),
+        ]
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["identity_key"] == "v1:alice"
+    assert rows[0]["_effective_identity_key"] == "v1:alice"
+    assert rows[0]["raw_response"] == "typed"
+
+  def test_base_view_keeps_ambiguous_legacy_lane_separate(
+      self, run_latest_view
+  ):
+    rows = run_latest_view(
+        [
+            ("shared", "v1:alice", "tone", "p1", "2026-01-01", "a"),
+            ("shared", "v1:bob", "tone", "p1", "2026-01-02", "b"),
+            ("shared", None, "tone", "p1", "2026-01-03", "legacy"),
+        ]
+    )
+
+    assert len(rows) == 3
+    assert {row["_effective_identity_key"] for row in rows} == {
+        "v1:alice",
+        "v1:bob",
+        "legacy:shared",
+    }
+    legacy = next(row for row in rows if row["identity_key"] is None)
+    assert legacy["_effective_identity_key"] == "legacy:shared"
+
+  def test_base_view_preserves_metric_and_prompt_partitions(
+      self, run_latest_view
+  ):
+    rows = run_latest_view(
+        [
+            ("shared", "v1:alice", "tone", "p1", "2026-01-01", "old"),
+            ("shared", "v1:alice", "tone", "p1", "2026-01-02", "new"),
+            ("shared", "v1:alice", "safety", "p1", "2026-01-01", "s1"),
+            ("shared", "v1:alice", "tone", "p2", "2026-01-01", "t2"),
+            ("shared", "v1:alice", "safety", "p2", "2026-01-01", "s2"),
+        ]
+    )
+
+    assert len(rows) == 4
+    assert {(row["metric_name"], row["prompt_version"]) for row in rows} == {
+        ("tone", "p1"),
+        ("safety", "p1"),
+        ("tone", "p2"),
+        ("safety", "p2"),
+    }
+    tone_p1 = next(
+        row
+        for row in rows
+        if row["metric_name"] == "tone" and row["prompt_version"] == "p1"
+    )
+    assert tone_p1["raw_response"] == "new"
 
   def test_get_view_sql_daily_counts(self, vm):
     sql = vm.get_view_sql("categorical_daily_counts")
@@ -88,6 +255,11 @@ class TestCategoricalViewManager:
     assert "validation_failures" in sql
     assert "fallback_count" in sql
     assert "fallback_rate" in sql
+    fallback_countif = (
+        "COUNTIF(execution_mode IN ('api_fallback', 'api_retry'))"
+    )
+    assert f"{fallback_countif} AS fallback_count" in sql
+    assert sql.count(fallback_countif) == 2
     assert "categorical_results_latest" in sql
 
   def test_get_view_sql_unknown_raises(self, vm):
@@ -201,7 +373,10 @@ class TestCategoricalViewManager:
   def test_base_view_dedup_excludes_rn(self, vm):
     """The base view uses SELECT * EXCEPT(_rn) to hide the helper column."""
     sql = vm.get_view_sql("categorical_results_latest")
-    assert "EXCEPT(_rn)" in sql
+    assert (
+        "EXCEPT(_identity_count, _sole_identity_key,"
+        " _effective_identity_key, _rn)" in sql
+    )
     assert "_rn = 1" in sql
 
   def test_operational_metrics_excludes_parse_errors_from_validation(self, vm):

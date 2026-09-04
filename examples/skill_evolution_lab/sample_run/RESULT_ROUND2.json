@@ -1,0 +1,80 @@
+{
+  "v0": {
+    "overall": {
+      "rate": 91.2,
+      "correct": 73,
+      "total": 80
+    },
+    "single_turn": {
+      "rate": 90.9,
+      "correct": 50,
+      "total": 55
+    },
+    "corrections": {
+      "rate": 93.3,
+      "correct": 14,
+      "total": 15
+    },
+    "out_of_scope": {
+      "rate": 90.0,
+      "correct": 9,
+      "total": 10
+    },
+    "parroted": 0,
+    "missing": 0
+  },
+  "v1": {
+    "overall": {
+      "rate": 97.5,
+      "correct": 78,
+      "total": 80
+    },
+    "single_turn": {
+      "rate": 100.0,
+      "correct": 55,
+      "total": 55
+    },
+    "corrections": {
+      "rate": 100.0,
+      "correct": 15,
+      "total": 15
+    },
+    "out_of_scope": {
+      "rate": 80.0,
+      "correct": 8,
+      "total": 10
+    },
+    "parroted": 0,
+    "missing": 0
+  },
+  "v0_dimensions": {
+    "correctness": 1.85,
+    "tool_usage": 1.9,
+    "specificity": 1.8,
+    "scope_compliance": 1.82,
+    "first_time_right": 1.8
+  },
+  "v1_dimensions": {
+    "correctness": 1.98,
+    "tool_usage": 1.98,
+    "specificity": 1.95,
+    "scope_compliance": 1.98,
+    "first_time_right": 1.95
+  },
+  "v0_tool_selection": {
+    "any_tool": 61,
+    "by_tool": {
+      "lookup_company_policy": 56,
+      "calculate_disability_pay": 5
+    },
+    "total": 80
+  },
+  "v1_tool_selection": {
+    "any_tool": 70,
+    "by_tool": {
+      "lookup_company_policy": 65,
+      "calculate_disability_pay": 5
+    },
+    "total": 80
+  }
+}

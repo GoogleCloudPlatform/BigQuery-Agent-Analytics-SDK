@@ -16,7 +16,7 @@
 
 Reads a manifest written by run_sweep.sh -- one ``<model>\\t<run_dir>`` line per
 run -- and reports V0 baseline + V1 correctness (golden-matched meaningful rate)
-and V1 grounding (tool-call share), averaged across that model's seeds with the
+and V1 grounding (tool-call share), averaged across that model's runs with the
 range, so a single unlucky run can't masquerade as the result.
 
 Usage:
@@ -82,7 +82,7 @@ def main():
 
   lines = [
       "| Model | V0 correctness (mean) | V1 correctness mean [range] |"
-      " V1 grounding mean [range] | seeds |",
+      " V1 grounding mean [range] | runs |",
       "| --- | --- | --- | --- | --- |",
   ]
   for model in order:

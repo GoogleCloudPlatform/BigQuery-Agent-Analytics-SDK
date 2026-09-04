@@ -37,11 +37,13 @@ def extract_tool_signatures(tools: list[Callable]) -> list[dict]:
     params = {k: v for k, v in sig.parameters.items() if k != "tool_context"}
     sig_str = f"{tool.__name__}({', '.join(str(v) for v in params.values())})"
     doc = inspect.getdoc(tool) or ""
-    signatures.append({
-        "name": tool.__name__,
-        "signature": sig_str,
-        "description": doc,
-    })
+    signatures.append(
+        {
+            "name": tool.__name__,
+            "signature": sig_str,
+            "description": doc,
+        }
+    )
   return signatures
 
 

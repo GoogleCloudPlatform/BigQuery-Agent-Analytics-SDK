@@ -1,0 +1,18 @@
+{
+  "example": true,
+  "illustrative": true,
+  "not_a_freeze": true,
+  "g1_frozen": false,
+  "clock_started": false,
+  "fail_closed": true,
+  "report_consumers": [
+    "Alex Rivera (example collaborator)",
+    "Jordan Lee (example collaborator)"
+  ],
+  "fixture_validates": ["ingestion", "taxonomy mechanics", "stability"],
+  "fixture_validates_only": true,
+  "never_produces": "Part II funding recommendation",
+  "reference_project": "test-project-0728-467323",
+  "pre_redacted": true,
+  "stop_go_memo_is_governed_artifact": true
+}

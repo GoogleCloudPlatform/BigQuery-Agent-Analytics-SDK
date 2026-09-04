@@ -23,7 +23,7 @@ traces in BigQuery. It supports:
 - Deterministic replay for debugging
 
 Example usage:
-    evaluator = BigQueryTraceEvaluator(
+    evaluator = PerformanceEvaluator(
         project_id="my-project",
         dataset_id="agent_analytics",
     )
@@ -41,12 +41,15 @@ Example usage:
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+import copy
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
 from enum import Enum
 import json
 import logging
+import math
 from typing import Any, Callable, Optional
 
 from google.cloud import bigquery
@@ -59,7 +62,11 @@ from bigquery_agent_analytics.utils import strip_markdown_fences
 
 from ._telemetry import LabeledBigQueryClient
 from ._telemetry import make_bq_client
-from ._telemetry import with_sdk_labels
+from .trace import Trace
+from .trace import TraceIdentity
+from .trace import TraceScope
+from .trace import TraceSelector
+from .trace import UNSET
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -96,7 +103,7 @@ class TraceEvent:
   attributes: dict[str, Any]
   span_id: Optional[str] = None
   parent_span_id: Optional[str] = None
-  latency_ms: Optional[int] = None
+  latency_ms: Optional[float] = None
   status: str = "OK"
   error_message: Optional[str] = None
 
@@ -154,7 +161,7 @@ class ToolCall:
   result: Optional[dict[str, Any]] = None
   status: str = "OK"
   error_message: Optional[str] = None
-  latency_ms: Optional[int] = None
+  latency_ms: Optional[float] = None
 
 
 @dataclass
@@ -167,20 +174,28 @@ class SessionTrace:
   tool_calls: list[ToolCall] = field(default_factory=list)
   final_response: Optional[str] = None
   total_latency_ms: Optional[int] = None
+  identity: Optional[TraceIdentity] = None
+  scope: Optional[TraceScope] = None
+  scope_coverage: Optional[tuple[str, ...]] = None
 
   def extract_tool_trajectory(self) -> list[ToolCall]:
-    """Extracts the tool call trajectory from events."""
+    """Extracts tool calls even when stable SQL ties put terminals first."""
     tool_calls = []
-    tool_starts: dict[str, TraceEvent] = {}
-
+    tool_starts: dict[tuple[str, str], deque[TraceEvent]] = {}
     for event in self.events:
       if event.event_type == "TOOL_STARTING":
         tool_name = event.content.get("tool", "unknown")
-        tool_starts[event.span_id or tool_name] = event
+        key = ("span", event.span_id) if event.span_id else ("tool", tool_name)
+        tool_starts.setdefault(key, deque()).append(event)
 
-      elif event.event_type == "TOOL_COMPLETED":
+    for event in self.events:
+      if event.event_type == "TOOL_COMPLETED":
         tool_name = event.content.get("tool", "unknown")
-        start_event = tool_starts.pop(event.span_id or tool_name, None)
+        key = ("span", event.span_id) if event.span_id else ("tool", tool_name)
+        starts = tool_starts.get(key)
+        start_event = None
+        if starts and starts[0].timestamp <= event.timestamp:
+          start_event = starts.popleft()
 
         args = {}
         if start_event:
@@ -198,7 +213,11 @@ class SessionTrace:
 
       elif event.event_type == "TOOL_ERROR":
         tool_name = event.content.get("tool", "unknown")
-        start_event = tool_starts.pop(event.span_id or tool_name, None)
+        key = ("span", event.span_id) if event.span_id else ("tool", tool_name)
+        starts = tool_starts.get(key)
+        start_event = None
+        if starts and starts[0].timestamp <= event.timestamp:
+          start_event = starts.popleft()
 
         args = {}
         if start_event:
@@ -397,7 +416,7 @@ class EvaluationResult(BaseModel):
 
 
 class PerformanceEvaluator:
-  """Evaluates agent traces stored in BigQuery to assess performance.
+  """Evaluates agent traces stored in BigQuery.
 
   This evaluator retrieves trace data from BigQuery and computes various
   metrics including trajectory matching, response quality, and custom metrics.
@@ -414,7 +433,6 @@ class PerformanceEvaluator:
       )
   """
 
-  # SQL query to retrieve complete session trace
   _DEFAULT_EVENT_TYPES = [
       "USER_MESSAGE_RECEIVED",
       "AGENT_STARTING",
@@ -442,25 +460,6 @@ class PerformanceEvaluator:
       "WORKFLOW_NODE_STARTING",
       "WORKFLOW_NODE_COMPLETED",
   ]
-
-  _SESSION_TRACE_QUERY = """
-  SELECT
-    event_type,
-    agent,
-    timestamp,
-    content,
-    attributes,
-    span_id,
-    parent_span_id,
-    latency_ms,
-    status,
-    error_message,
-    user_id
-  FROM `{project}.{dataset}.{table}`
-  WHERE session_id = @session_id
-    AND event_type IN UNNEST(@event_types)
-  ORDER BY timestamp ASC
-  """
 
   # One-Sided LLM Judge Prompt (No golden response required)
   _ONE_SIDED_JUDGE_PROMPT = """You are evaluating an AI agent's task execution trajectory and final response for sentiment and hallucination (faithfulness).
@@ -539,11 +538,13 @@ Required JSON format:
       name: Optional[str] = None,
   ) -> None:
     """Initializes the PerformanceEvaluator."""
+    self._name = name if name is not None else "performance_evaluator"
     self.project_id = project_id
     self.dataset_id = dataset_id
     self.table_id = table_id
     self.table_ref = f"{project_id}.{dataset_id}.{table_id}"
     self._client = client
+    self._trace_client = None
     self._warned_unlabeled_client = False
     self.llm_judge_model = llm_judge_model or "gemini-2.5-flash"
     self.include_event_types = include_event_types or self._DEFAULT_EVENT_TYPES
@@ -551,7 +552,7 @@ Required JSON format:
 
   @property
   def name(self) -> str:
-    return "performance_evaluator"
+    return self._name
 
   @property
   def client(self) -> bigquery.Client:
@@ -583,9 +584,11 @@ Required JSON format:
 
     Args:
         name: Rubric metric name.
-        prompt_template: Prompt with {trace_text} and {final_response}
-          placeholders.
-        score_key: JSON key in LLM response containing score.
+        prompt_template: Prompt with {trace_text}, {final_response}, and
+          {golden_response} placeholders. The judge is instructed to return
+          a JSON score on a 0-10 scale.
+        score_key: Required numeric JSON key in the judge response (0-10),
+          normalized to 0-1 by dividing by 10.
         threshold: Pass/fail threshold (0-1 scale).
 
     Returns:
@@ -601,59 +604,110 @@ Required JSON format:
     )
     return self
 
-  async def get_session_trace(self, session_id: str) -> SessionTrace:
-    """Retrieves the complete trace for a session."""
-    query = self._SESSION_TRACE_QUERY.format(
-        project=self.project_id,
-        dataset=self.dataset_id,
-        table=self.table_id,
-    )
+  @property
+  def trace_client(self):
+    """Returns the shared identity-safe trace resolver."""
+    if self._trace_client is None:
+      # Import lazily so importing the standalone evaluator does not
+      # eagerly load the full public client surface.
+      from .client import Client
 
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter(
-                "session_id",
-                "STRING",
-                session_id,
-            ),
-            bigquery.ArrayQueryParameter(
-                "event_types",
-                "STRING",
-                self.include_event_types,
-            ),
-        ]
-    )
-    job_config = with_sdk_labels(job_config, feature="trace-read")
+      self._trace_client = Client(
+          project_id=self.project_id,
+          dataset_id=self.dataset_id,
+          table_id=self.table_id,
+          verify_schema=False,
+          bq_client=self.client,
+      )
+    return self._trace_client
 
-    loop = asyncio.get_event_loop()
-    query_job = await loop.run_in_executor(
-        None,
-        lambda: self.client.query(query, job_config=job_config),
-    )
-
-    results = await loop.run_in_executor(None, lambda: list(query_job.result()))
-
-    events = [TraceEvent.from_bigquery_row(dict(row)) for row in results]
-
-    user_id = None
-    if results:
-      user_id = results[0].get("user_id")
-
-    trace = SessionTrace(
-        session_id=session_id,
-        user_id=user_id,
+  @staticmethod
+  def _to_session_trace(
+      trace: Trace,
+      include_event_types: list[str],
+  ) -> SessionTrace:
+    """Converts the U2 trace model without weakening its attribution."""
+    included = set(include_event_types)
+    events = [
+        TraceEvent(
+            event_type=span.event_type,
+            agent=span.agent,
+            timestamp=span.timestamp,
+            content=copy.deepcopy(span.content),
+            attributes=copy.deepcopy(span.attributes),
+            span_id=span.span_id,
+            parent_span_id=span.parent_span_id,
+            latency_ms=span.latency_ms,
+            status=span.status,
+            error_message=span.error_message,
+        )
+        for span in trace.spans
+        if span.event_type in included
+    ]
+    result = SessionTrace(
+        session_id=trace.session_id,
+        user_id=trace.user_id,
         events=events,
+        identity=trace.identity,
+        scope=trace.scope,
+        scope_coverage=trace.scope_coverage,
+    )
+    result.extract_tool_trajectory()
+    result.final_response = result.extract_final_response()
+    if events:
+      start = min(event.timestamp for event in events)
+      end = max(event.timestamp for event in events)
+      result.total_latency_ms = int((end - start).total_seconds() * 1000)
+    return result
+
+  async def get_session_trace(
+      self,
+      session_id: str,
+      *,
+      user_id: Any = UNSET,
+      root_agent_name: Any = UNSET,
+      experiment_id: Any = UNSET,
+      custom_labels: Optional[dict[str, str]] = None,
+      scope_signature: Optional[str] = None,
+      allow_mixed_scope: bool = False,
+  ) -> SessionTrace:
+    """Retrieves one identity-safe trace for a session.
+
+    The scalar pins use the same three-state contract as
+    :meth:`Client.get_session_trace`: omitted means unpinned, explicit
+    ``None`` pins SQL NULL, and strings pin equality.
+    """
+    return await self.get_trace_by_selector(
+        TraceSelector(
+            session_id=session_id,
+            user_id=user_id,
+            root_agent_name=root_agent_name,
+            experiment_id=experiment_id,
+            custom_labels=custom_labels,
+            scope_signature=scope_signature,
+        ),
+        allow_mixed_scope=allow_mixed_scope,
     )
 
-    trace.extract_tool_trajectory()
-    trace.final_response = trace.extract_final_response()
-
-    if events:
-      start = min(e.timestamp for e in events)
-      end = max(e.timestamp for e in events)
-      trace.total_latency_ms = int((end - start).total_seconds() * 1000)
-
-    return trace
+  async def get_trace_by_selector(
+      self,
+      selector: TraceSelector,
+      *,
+      allow_mixed_scope: bool = False,
+  ) -> SessionTrace:
+    """Retrieves a trace through the shared U2 candidate resolver."""
+    if type(selector) is not TraceSelector:
+      raise TypeError("selector must be a TraceSelector.")
+    loop = asyncio.get_running_loop()
+    trace = await loop.run_in_executor(
+        None,
+        lambda: self.trace_client.get_trace_by_selector(
+            selector,
+            allow_mixed_scope=allow_mixed_scope,
+            event_types=self.include_event_types,
+        ),
+    )
+    return self._to_session_trace(trace, self.include_event_types)
 
   def evaluate_deterministic_trajectory(
       self,
@@ -703,18 +757,63 @@ Required JSON format:
       use_llm_judge: bool = False,
       custom_metrics: Optional[dict[str, Callable]] = None,
       thresholds: Optional[dict[str, float]] = None,
+      selector: Optional[TraceSelector] = None,
+      *,
+      trace: Trace | SessionTrace | None = None,
   ) -> EvaluationResult:
-    """Evaluates a single session against golden data."""
-    trace = await self.get_session_trace(session_id)
+    """Evaluates a session against golden data and configured metrics.
+
+    ``selector`` retains the exact identity/scope lookup contract. A
+    materialized ``trace`` instead evaluates the caller's already selected
+    data without another query. Its session ID must match ``session_id``;
+    ``trace`` and ``selector`` cannot be supplied together. Missing or invalid
+    requested metrics fail evaluation, including an entirely empty score set.
+    """
+    if trace is not None:
+      if selector is not None:
+        raise ValueError("Pass either trace or selector, not both.")
+      if not isinstance(trace, (Trace, SessionTrace)):
+        raise TypeError("trace must be a Trace or SessionTrace.")
+      if trace.session_id != session_id:
+        raise ValueError("trace.session_id must match session_id.")
+      trace = (
+          self._to_session_trace(trace, self.include_event_types)
+          if isinstance(trace, Trace)
+          else copy.deepcopy(trace)
+      )
+    elif selector is not None:
+      if type(selector) is not TraceSelector:
+        raise TypeError("selector must be a TraceSelector.")
+      if selector.session_id != session_id:
+        raise ValueError("selector.session_id must match session_id.")
+      trace = await self.get_trace_by_selector(selector)
+    else:
+      trace = await self.get_session_trace(session_id)
 
     scores: dict[str, float] = {}
+    errors: list[str] = []
     details: dict[str, Any] = {
         "actual_tool_calls": len(trace.tool_calls),
         "expected_tool_calls": (
             len(golden_trajectory) if golden_trajectory else 0
         ),
+        "user_id": (
+            trace.identity.user_id
+            if trace.identity is not None
+            else trace.user_id
+        ),
+        "root_agent_name": (
+            trace.identity.root_agent_name
+            if trace.identity is not None
+            else None
+        ),
+        "experiment_id": (
+            trace.scope.experiment_id if trace.scope is not None else None
+        ),
+        "scope_signature": (
+            trace.scope.scope_signature if trace.scope is not None else None
+        ),
     }
-
     if golden_trajectory is not None:
       scores.update(
           self.evaluate_deterministic_trajectory(
@@ -722,49 +821,93 @@ Required JSON format:
           )
       )
 
+    if golden_response is not None:
+      scores["response_match"] = (
+          self._compute_response_match(trace.final_response, golden_response)
+          if trace.final_response is not None
+          else 0.0
+      )
+
     llm_feedback = None
     if use_llm_judge:
-      llm_scores, llm_feedback = await self.llm_judge_evaluate(
-          trace=trace,
-          task_description=task_description or "Complete the user's request.",
-          expected_trajectory=golden_trajectory,
-          golden_response=golden_response,
-      )
-      scores.update(llm_scores)
+      try:
+        llm_scores, llm_feedback = await self.llm_judge_evaluate(
+            trace=trace,
+            task_description=task_description or "Complete the user's request.",
+            expected_trajectory=golden_trajectory,
+            golden_response=golden_response,
+        )
+        required = {"llm_judge_sentiment", "llm_judge_hallucination"}
+        if golden_response is not None:
+          required.update(
+              {
+                  "llm_judge_final_answer_correct",
+                  "llm_judge_tool_usage_correct",
+                  "llm_judge_sound_reasoning",
+                  "llm_judge_efficiency",
+                  "llm_judge_correctness",
+              }
+          )
+        if not isinstance(llm_scores, dict):
+          raise ValueError("LLM judge must return a score mapping.")
+        missing = required - llm_scores.keys()
+        if missing:
+          errors.append(
+              "LLM judge missing required metrics: "
+              + ", ".join(sorted(missing))
+          )
+        for name, value in llm_scores.items():
+          scores[name] = self._validated_score(value, name, 1.0)
+      except Exception as exc:
+        errors.append(f"LLM judge failed: {exc}")
+        llm_feedback = str(exc)
 
-      # Custom LLM rubrics
+      feedback_parts = [llm_feedback] if llm_feedback else []
       if self._custom_rubrics:
         trace_text = "\n".join(
             f"{e.event_type}: {json.dumps(e.content)}" for e in trace.events
         )
-        feedback_parts = []
-        if llm_feedback:
-          feedback_parts.append(llm_feedback)
         for rubric in self._custom_rubrics:
-          score, feedback = await self._evaluate_custom_rubric(
-              rubric,
-              trace_text,
-              trace.final_response,
-              golden_response,
-          )
-          scores[rubric["name"]] = score
-          if feedback:
-            feedback_parts.append(f"{rubric['name']}: {feedback}")
-        llm_feedback = "\n".join(feedback_parts)
+          try:
+            score, feedback = await self._evaluate_custom_rubric(
+                rubric, trace_text, trace.final_response, golden_response
+            )
+            if score is None:
+              errors.append(
+                  f"Custom rubric {rubric['name']} failed: {feedback}"
+              )
+            else:
+              scores[rubric["name"]] = self._validated_score(
+                  score, rubric["name"], 1.0
+              )
+            if feedback:
+              feedback_parts.append(f"{rubric['name']}: {feedback}")
+          except Exception as exc:
+            errors.append(f"Custom rubric {rubric['name']} failed: {exc}")
+      llm_feedback = "\n".join(feedback_parts)
 
     if custom_metrics:
       for metric_name, metric_fn in custom_metrics.items():
         try:
-          score = metric_fn(trace, golden_trajectory, golden_response)
-          scores[metric_name] = float(score)
-        except Exception as e:
-          logger.warning("Custom metric %s failed: %s", metric_name, e)
-          scores[metric_name] = 0.0
+          score = float(metric_fn(trace, golden_trajectory, golden_response))
+          if not math.isfinite(score):
+            raise ValueError("score must be finite")
+          scores[metric_name] = score
+        except Exception as exc:
+          logger.warning("Custom metric %s failed: %s", metric_name, exc)
+          errors.append(f"Custom metric {metric_name} failed: {exc}")
 
-    thresholds = thresholds or {}
-    passed = True
+    if not scores:
+      errors.append("No evaluation metrics were produced.")
+    if errors:
+      details["errors"] = errors
+    rubric_thresholds = {
+        r["name"]: r["threshold"] for r in self._custom_rubrics
+    }
+    rubric_thresholds.update(thresholds or {})
+    passed = bool(scores) and not errors
     for metric_name, score in scores.items():
-      threshold = thresholds.get(metric_name, 0.5)
+      threshold = rubric_thresholds.get(metric_name, 0.5)
       if score < threshold:
         passed = False
         details[f"{metric_name}_threshold"] = threshold
@@ -785,23 +928,114 @@ Required JSON format:
       use_llm_judge: bool = False,
       concurrency: int = 5,
   ) -> list[EvaluationResult]:
-    """Evaluates multiple sessions from an eval dataset."""
+    """Evaluates multiple sessions from an eval dataset.
+
+    Args:
+        eval_dataset: List of dicts with session_id, expected_trajectory, etc.
+        match_type: Type of trajectory matching.
+        use_llm_judge: Whether to use LLM judge.
+        concurrency: Max concurrent evaluations.
+
+    Returns:
+        List of EvaluationResult for each session.
+    """
     semaphore = asyncio.Semaphore(concurrency)
 
     async def evaluate_one(item: dict[str, Any]) -> EvaluationResult:
       async with semaphore:
+        raw_selector = item.get("selector")
+        selector = None
+        if raw_selector is not None:
+          if type(raw_selector) is TraceSelector:
+            selector = raw_selector
+          elif type(raw_selector) is dict:
+            selector = TraceSelector(**raw_selector)
+          else:
+            raise TypeError(
+                "eval dataset selector must be a TraceSelector or mapping."
+            )
+        session_id = item.get("session_id")
+        if session_id is None and selector is not None:
+          session_id = selector.session_id
+        if session_id is None:
+          raise ValueError("eval dataset item requires session_id or selector.")
         return await self.evaluate_session(
-            session_id=item["session_id"],
+            session_id=session_id,
             golden_trajectory=item.get("expected_trajectory"),
             golden_response=item.get("expected_response"),
             match_type=match_type,
             task_description=item.get("task_description"),
             use_llm_judge=use_llm_judge,
             thresholds=item.get("thresholds"),
+            selector=selector,
         )
 
     tasks = [evaluate_one(item) for item in eval_dataset]
     return await asyncio.gather(*tasks)
+
+  def _compute_response_match(
+      self,
+      actual: str,
+      expected: str,
+  ) -> float:
+    """Computes simple response match score.
+
+    Args:
+        actual: Actual response text.
+        expected: Expected response text.
+
+    Returns:
+        Score between 0.0 and 1.0.
+    """
+    if not actual or not expected:
+      return 0.0 if actual != expected else 1.0
+
+    # Normalize strings
+    actual_norm = actual.lower().strip()
+    expected_norm = expected.lower().strip()
+
+    if actual_norm == expected_norm:
+      return 1.0
+
+    # Simple word overlap score
+    actual_words = set(actual_norm.split())
+    expected_words = set(expected_norm.split())
+
+    if not expected_words:
+      return 1.0 if not actual_words else 0.0
+
+    intersection = actual_words & expected_words
+    return len(intersection) / len(expected_words)
+
+  @staticmethod
+  def _validated_score(value: Any, key: str, maximum: float) -> float:
+    """Require an actual finite JSON number within the rubric's scale."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+      raise ValueError(f"{key} must be a numeric score")
+    value = float(value)
+    if not math.isfinite(value) or not 0 <= value <= maximum:
+      raise ValueError(f"{key} must be finite and between 0 and {maximum:g}")
+    return value
+
+  @classmethod
+  def _judge_scores(
+      cls, text: str, keys: tuple[str, ...], maximum: float
+  ) -> dict[str, float]:
+    result = _parse_json_from_text(text)
+    if not isinstance(result, dict):
+      raise ValueError("Judge response must contain a JSON score object")
+    missing = set(keys) - result.keys()
+    if missing:
+      raise ValueError(
+          "Missing required judge keys: " + ", ".join(sorted(missing))
+      )
+    scores = {}
+    for key in keys:
+      value = cls._validated_score(result[key], key, maximum)
+      if maximum == 1.0 and value not in (0.0, 1.0):
+        raise ValueError(f"{key} must be a binary score (0 or 1)")
+      scores[f"llm_judge_{key}"] = value / maximum
+    return scores
 
   async def llm_judge_evaluate(
       self,
@@ -810,150 +1044,147 @@ Required JSON format:
       expected_trajectory: Optional[list[dict[str, Any]]],
       golden_response: Optional[str] = None,
   ) -> tuple[dict[str, float], str]:
-    """Uses LLM as judge to evaluate the trace."""
+    """Evaluate the authored one-sided and optional side-by-side rubrics.
+
+    Each requested rubric must return all required finite numeric keys on
+    its documented scale. Invalid rubrics produce no scores and explicit
+    failure feedback; evaluate_session treats missing metrics as failure.
+    """
     try:
       from google import genai
       from google.genai import types
     except ImportError:
-      logger.warning("google-genai not installed, skipping LLM judge.")
-      return {}, "LLM judge unavailable - google-genai not installed"
+      return {}, "LLM judge unavailable: google-genai is not installed"
 
     trajectory_data = [
-        {
-            "tool": tc.tool_name,
-            "args": tc.args,
-            "status": tc.status,
-        }
+        {"tool": tc.tool_name, "args": tc.args, "status": tc.status}
         for tc in trace.tool_calls
     ]
-
-    # Generate prompts
-    one_sided_prompt = self._ONE_SIDED_JUDGE_PROMPT.format(
-        task_description=task_description,
-        trajectory_json=json.dumps(trajectory_data, indent=2),
-        final_response=trace.final_response or "No response captured",
-    )
-
-    side_by_side_prompt = None
-    if golden_response:
-      side_by_side_prompt = self._SIDE_BY_SIDE_JUDGE_PROMPT.format(
-          task_description=task_description,
-          trajectory_json=json.dumps(trajectory_data, indent=2),
-          expected_trajectory=json.dumps(expected_trajectory, indent=2)
-          if expected_trajectory
-          else "Not provided",
-          golden_response=golden_response,
-          final_response=trace.final_response or "No response captured",
+    prompts = [
+        (
+            "One-sided",
+            self._ONE_SIDED_JUDGE_PROMPT.format(
+                task_description=task_description,
+                trajectory_json=json.dumps(trajectory_data, indent=2),
+                final_response=trace.final_response or "No response captured",
+            ),
+            ("sentiment", "hallucination"),
+            10.0,
+        )
+    ]
+    if golden_response is not None:
+      prompts.append(
+          (
+              "Side-by-side",
+              self._SIDE_BY_SIDE_JUDGE_PROMPT.format(
+                  task_description=task_description,
+                  trajectory_json=json.dumps(trajectory_data, indent=2),
+                  expected_trajectory=(
+                      json.dumps(expected_trajectory, indent=2)
+                      if expected_trajectory is not None
+                      else "Not provided"
+                  ),
+                  golden_response=golden_response,
+                  final_response=trace.final_response or "No response captured",
+              ),
+              (
+                  "final_answer_correct",
+                  "tool_usage_correct",
+                  "sound_reasoning",
+                  "efficiency",
+              ),
+              1.0,
+          )
       )
-
-    scores = {}
-    feedback_parts = []
-
-    # 1. Run One-Sided Evaluation
-    try:
-      client = genai.Client()
-      response = await client.aio.models.generate_content(
-          model=self.llm_judge_model,
-          contents=one_sided_prompt,
-          config=types.GenerateContentConfig(
-              temperature=0.1,
-              max_output_tokens=1024,
-          ),
-      )
-      response_text = (response.text or "").strip()
-      json_str = _extract_json_from_text(response_text)
-      if json_str:
-        result = json.loads(json_str)
-        sentiment = float(result.get("sentiment", 10)) / 10.0
-        hallucination = float(result.get("hallucination", 10)) / 10.0
-        scores["llm_judge_sentiment"] = sentiment
-        scores["llm_judge_hallucination"] = hallucination
-        feedback_parts.append(result.get("justification", response_text))
-    except Exception as e:
-      logger.warning("One-sided LLM evaluation failed: %s", e)
-
-    # 2. Run Side-by-Side Evaluation
-    if side_by_side_prompt:
+    scores: dict[str, float] = {}
+    feedback_parts: list[str] = []
+    for label, prompt, keys, maximum in prompts:
       try:
         client = genai.Client()
         response = await client.aio.models.generate_content(
             model=self.llm_judge_model,
-            contents=side_by_side_prompt,
+            contents=prompt,
             config=types.GenerateContentConfig(
-                temperature=0.1,
-                max_output_tokens=1024,
+                temperature=0.1, max_output_tokens=1024
             ),
         )
-        response_text = (response.text or "").strip()
-        json_str = _extract_json_from_text(response_text)
-        if json_str:
-          result = json.loads(json_str)
-          final_answer_correct = float(result.get("final_answer_correct", 0))
-          tool_usage_correct = float(result.get("tool_usage_correct", 0))
-          sound_reasoning = float(result.get("sound_reasoning", 0))
-          efficiency = float(result.get("efficiency", 0))
-
-          scores["llm_judge_final_answer_correct"] = final_answer_correct
-          scores["llm_judge_tool_usage_correct"] = tool_usage_correct
-          scores["llm_judge_sound_reasoning"] = sound_reasoning
-          scores["llm_judge_efficiency"] = efficiency
-
-          scores["llm_judge_correctness"] = (
-              1.0
-              if (
-                  final_answer_correct == 1.0
-                  and tool_usage_correct == 1.0
-                  and sound_reasoning == 1.0
+        text = (response.text or "").strip()
+        parsed_scores = self._judge_scores(text, keys, maximum)
+        if label == "Side-by-side":
+          parsed_scores["llm_judge_correctness"] = float(
+              all(
+                  parsed_scores["llm_judge_" + key] == 1.0
+                  for key in (
+                      "final_answer_correct",
+                      "tool_usage_correct",
+                      "sound_reasoning",
+                  )
               )
-              else 0.0
           )
-          feedback_parts.append(result.get("justification", response_text))
-      except Exception as e:
-        logger.warning("Side-by-side LLM evaluation failed: %s", e)
+        scores.update(parsed_scores)
+        result = _parse_json_from_text(text)
+        feedback_parts.append(str(result.get("justification", text)))
+      except Exception as exc:
+        message = f"{label} LLM evaluation failed: {exc}"
+        logger.warning("%s", message)
+        feedback_parts.append(message)
+    return scores, "\n".join(feedback_parts)
 
-    feedback = "\n".join(feedback_parts)
-    return scores, feedback
+  async def _llm_judge_evaluate(
+      self,
+      trace: SessionTrace,
+      task_description: str,
+      expected_trajectory: Optional[list[dict[str, Any]]],
+  ) -> tuple[dict[str, float], str]:
+    """Compatibility entry point for the former private judge method."""
+    return await self.llm_judge_evaluate(
+        trace, task_description, expected_trajectory
+    )
 
   async def _evaluate_custom_rubric(
       self,
       rubric: dict[str, Any],
       trace_text: str,
-      final_response: str,
+      final_response: Optional[str],
       golden_response: Optional[str] = None,
-  ) -> tuple[float, str]:
-    """Evaluates a custom LLM rubric."""
-    prompt = rubric["prompt_template"].format(
-        trace_text=trace_text,
-        final_response=final_response or "No response.",
-        golden_response=golden_response or "No golden response.",
-    )
+  ) -> tuple[Optional[float], str]:
+    """Evaluate a custom rubric, distinguishing invalid output from zero."""
     try:
       from google import genai
       from google.genai import types
 
+      prompt = rubric["prompt_template"].format(
+          trace_text=trace_text,
+          final_response=final_response or "No response.",
+          golden_response=golden_response or "No golden response.",
+      )
+      prompt += (
+          "\nReturn only a JSON object with a numeric "
+          f"{rubric['score_key']!r} score from 0 to 10 and a justification."
+      )
       client = genai.Client()
       response = await client.aio.models.generate_content(
           model=self.llm_judge_model,
           contents=prompt,
           config=types.GenerateContentConfig(
-              temperature=0.1,
-              max_output_tokens=2048,
+              temperature=0.1, max_output_tokens=2048
           ),
       )
-      text = response.text.strip()
+      text = (response.text or "").strip()
       result = _parse_json_from_text(text)
-      if result and rubric["score_key"] in result:
-        raw = float(result[rubric["score_key"]])
-        score = raw / 10.0 if raw > 1.0 else raw
-        justification = result.get("justification", "")
-        return score, justification
-      return 0.0, text
-    except Exception as e:
-      logger.warning("Custom rubric %s failed: %s", rubric["name"], e)
-      return 0.0, str(e)
+      if not isinstance(result, dict) or rubric["score_key"] not in result:
+        raise ValueError(f"Missing required rubric key: {rubric['score_key']}")
+      raw = self._validated_score(
+          result[rubric["score_key"]], rubric["score_key"], 10.0
+      )
+      score = raw / 10.0
+      return score, str(result.get("justification", ""))
+    except Exception as exc:
+      logger.warning("Custom rubric %s failed: %s", rubric["name"], exc)
+      return None, str(exc)
 
 
-# Keep aliases for backward compatibility
+# Both import paths share the same classes, enums, and model instances.
 BigQueryTraceEvaluator = PerformanceEvaluator
 
 
@@ -997,13 +1228,27 @@ class TraceReplayRunner:
       )
   """
 
-  def __init__(self, evaluator: BigQueryTraceEvaluator) -> None:
+  def __init__(self, evaluator: PerformanceEvaluator) -> None:
     """Initializes the replay runner.
 
     Args:
-        evaluator: BigQueryTraceEvaluator for trace retrieval.
+        evaluator: PerformanceEvaluator for trace retrieval.
     """
     self.evaluator = evaluator
+
+  async def _get_trace(
+      self,
+      session_id: str,
+      selector: Optional[TraceSelector],
+  ) -> SessionTrace:
+    """Resolve one replay input through the shared selector surface."""
+    if selector is None:
+      return await self.evaluator.get_session_trace(session_id)
+    if type(selector) is not TraceSelector:
+      raise TypeError("selector must be a TraceSelector.")
+    if selector.session_id != session_id:
+      raise ValueError("selector.session_id must match session_id.")
+    return await self.evaluator.get_trace_by_selector(selector)
 
   async def replay_session(
       self,
@@ -1012,19 +1257,22 @@ class TraceReplayRunner:
       step_callback: Optional[
           Callable[[TraceEvent, ReplayContext], None]
       ] = None,
+      *,
+      selector: Optional[TraceSelector] = None,
   ) -> ReplayContext:
     """Replays a recorded session step by step.
 
     Args:
         session_id: The session ID to replay.
         replay_mode: "full" for all events, "step" for pause at each step,
-          "tool_only" for only tool calls.
+                     "tool_only" for only tool calls.
         step_callback: Optional callback invoked at each step.
+        selector: Optional exact identity/scope selector for a reused session.
 
     Returns:
         ReplayContext with all injected responses.
     """
-    trace = await self.evaluator.get_session_trace(session_id)
+    trace = await self._get_trace(session_id, selector)
 
     replay_context = ReplayContext()
 
@@ -1062,20 +1310,25 @@ class TraceReplayRunner:
       self,
       session_id_1: str,
       session_id_2: str,
+      *,
+      selector_1: Optional[TraceSelector] = None,
+      selector_2: Optional[TraceSelector] = None,
   ) -> dict[str, Any]:
     """Compares two session replays to identify differences.
 
     Args:
         session_id_1: First session ID.
         session_id_2: Second session ID.
+        selector_1: Optional exact selector for the first reused session.
+        selector_2: Optional exact selector for the second reused session.
 
     Returns:
         Dict with comparison results.
     """
-    trace1 = await self.evaluator.get_session_trace(session_id_1)
-    trace2 = await self.evaluator.get_session_trace(session_id_2)
+    trace1 = await self._get_trace(session_id_1, selector_1)
+    trace2 = await self._get_trace(session_id_2, selector_2)
 
-    differences: dict[str, Any] = {
+    differences = {
         "event_count_diff": len(trace1.events) - len(trace2.events),
         "tool_count_diff": len(trace1.tool_calls) - len(trace2.tool_calls),
         "tool_differences": [],
@@ -1106,9 +1359,9 @@ class TraceReplayRunner:
         )
 
     # Compare responses
-    r1 = trace1.final_response
-    r2 = trace2.final_response
-    if r1 and r2:
-      differences["response_match"] = r1.strip() == r2.strip()
+    if trace1.final_response and trace2.final_response:
+      differences["response_match"] = (
+          trace1.final_response.strip() == trace2.final_response.strip()
+      )
 
     return differences

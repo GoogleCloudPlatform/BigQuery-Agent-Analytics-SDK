@@ -1,0 +1,46 @@
+{
+  "_comment": "DERIVED / DEMO. Computed by okf-bqaa-adapter:v0 from a live BQAA agent_events export (PROFILE.md rules). Not canonical authoring; distinct bundle_key from cymbal-finance-core. Nothing attested.",
+  "label": "derived/demo, observer-only, nothing attested",
+  "inputs": {
+    "bundle_key": "bqaa-derived-cymbal-demo",
+    "source_uri": "bqaa://test-project-0728-467323.okf_rfc_demo.agent_events?session_id=f21ee192-d989-4c38-894f-66b6b82eaf18",
+    "revision": "bqaa-trace:e-c7214361-4017-43d7-af4e-cddfe51b09a4",
+    "deployment_key": "cymbal-finance-prod/eu/bqaa-derived-demo",
+    "compiler_semantics_version": "okf-context-compiler:v0.1",
+    "profile_contract_version": "okf-context/1",
+    "adapter_version": "okf-bqaa-adapter:v0",
+    "session_id": "f21ee192-d989-4c38-894f-66b6b82eaf18",
+    "trace_id": "e-c7214361-4017-43d7-af4e-cddfe51b09a4",
+    "observed_publication_id": "sha256:674153c572f6be57618a8d769a1a2b21a3e20d98406b3d1e58dd00027bc45905"
+  },
+  "observation_id": "sha256:85ea62a96e5076a292572a996f0408865c4c56aac696bbeb79a73bbc5eda8af6",
+  "snapshot_id": "sha256:f18befd010ff7e3d1fe140303626a82dc985c986846093f73643e7d0eea92b75",
+  "publication_id": "sha256:53bd1651c43f69d53f591e4f91e3ccdda4640d8b36cb1dce1ac97328ffa39a77",
+  "source_manifest_hash": "sha256:769601797f70482d1316db8473a1f83a3011768cba24f3107ba955574b232153",
+  "manifest_hashes": {
+    "canonicalization-manifest": "sha256:7fac23eb7d8eefa3914a53df29e07c6052d0694796916c10fd4d28c5dc4efb9b",
+    "semantic-config": "sha256:541582d5194689659b619e91ef9dd23fb1337733cfbf0e6359079ba054eb19b0",
+    "resolver-manifest": "sha256:bc204147add44ba4619ef831ee3feab08f0c104ed1a00cf0c5732201de151ad8",
+    "vocabulary-manifest": "sha256:3ff50b89fd5b3ff7ce13266238e228270c63ce2b0573982118ed8aa019456063"
+  },
+  "file_sha256": {
+    "computations/active-customer-revenue-by-region-and-quarter.md": "e0a2329b549f4bfade63cd601ade80c4c60543cb29c4802e8ad1097cc34d9e5f",
+    "concepts/active-customer.md": "92a21c49c3fd08a7112cabfd9b6095b533de260c49c87d72eac8b9770ba680d3",
+    "log.md": "593c4088e76867ddaf4d9bfac6058edac20b7738d1183a39bd60edce6dbef710",
+    "metrics/active-customer-revenue.md": "fc172c916492005aac8a6859d80bc3c2f5de7f000c228d3aeb698e99de905594",
+    "metrics/customer-revenue-legacy.md": "96d3cc35035b299816d849c96d72f85de38e9fcac9b8e7caaa4013a47791492a",
+    "policies/revenue-recognition-eligibility.md": "cba3948fec206247f305d65f52c9bc4ae8a488638a8285a5e1adac96a6ddea29",
+    "tables/billing-invoice-lines.md": "7c93491f10f56f125bcb6866997c7e78f861ac11dbc6e0b6d5317ad4544d1fda",
+    "tables/crm-customers.md": "356fa8c3f7f01c69f625b605868cf6fd954db08210316cac0c4f7d2a54a329bb"
+  },
+  "concept_version_ids": {
+    "computations/active-customer-revenue-by-region-and-quarter.md": "sha256:52f3accae4476443c3951105ddc45791c620215bb659ef1edeff0d0e7ae80bbc",
+    "concepts/active-customer.md": "sha256:f08685cf5672bbcfcbbc106467a723aa4734394471215469d1d6664c344df237",
+    "metrics/active-customer-revenue.md": "sha256:468436ac6913224401fb9e4c5b248bc3211d30be255e6ae02542ccbc426b4e8e",
+    "metrics/customer-revenue-legacy.md": "sha256:8b05a67fab191f42c0169e7cb18054a88c6e5a86662507f148710610b775900b",
+    "policies/revenue-recognition-eligibility.md": "sha256:d5857d4ce50ee154eb998cd561d650658064380daffa0cc99b239ac6c63e0075",
+    "tables/billing-invoice-lines.md": "sha256:803878d2d57f3cae703078d56a82b74680d0a31a50f06bc7de8a4557c5f63269",
+    "tables/crm-customers.md": "sha256:10d28098c34b0968cdaef07de0eae3f4e3de5f955124eb5304bcfad2cdebac9a"
+  },
+  "demo_envelope_id": "env-d3db4dd5e2451aa2"
+}

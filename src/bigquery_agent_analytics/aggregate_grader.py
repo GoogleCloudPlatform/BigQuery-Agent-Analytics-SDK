@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import abc
 import logging
+import math
 from typing import Any, Callable
 
 from pydantic import BaseModel
@@ -461,10 +462,19 @@ class AggregateGrader:
           session_id=sid,
           golden_response=final_response,
       )
+      # Performance grading needs measured scores, not just a PASSED flag.
+      # Invalid or incomplete evaluations must contribute zero evidence to
+      # weighted aggregation even if another metric happened to succeed.
+      valid = (
+          bool(score.scores)
+          and score.eval_status != EvalStatus.NOT_EVALUATED
+          and not score.details.get("errors")
+          and all(math.isfinite(value) for value in score.scores.values())
+      )
       return GraderResult(
           grader_name=entry.name,
-          scores=score.scores,
-          passed=score.eval_status == EvalStatus.PASSED,
+          scores=score.scores if valid else {},
+          passed=valid and score.eval_status == EvalStatus.PASSED,
       )
 
     if isinstance(evaluator, LLMAsJudge):

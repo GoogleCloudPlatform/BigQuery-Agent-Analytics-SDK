@@ -62,6 +62,35 @@ __all__.extend(
     ]
 )
 
+# --- Identity/selector contract (issue #359, stdlib-only) ---
+# Exported unconditionally: the trace module imports BigQuery lazily,
+# so the identity value objects, selectors, sentinels, and the
+# ambiguity error must stay importable even when optional client
+# dependencies are unavailable.
+from .trace import AmbiguousSessionError
+from .trace import decode_pin
+from .trace import resolve_singular_candidate
+from .trace import ResolvedTraceSelector
+from .trace import SQL_NULL
+from .trace import TraceIdentity
+from .trace import TraceScope
+from .trace import TraceSelector
+from .trace import UNSET
+
+__all__.extend(
+    [
+        "TraceIdentity",
+        "TraceScope",
+        "TraceSelector",
+        "ResolvedTraceSelector",
+        "AmbiguousSessionError",
+        "resolve_singular_candidate",
+        "UNSET",
+        "SQL_NULL",
+        "decode_pin",
+    ]
+)
+
 # --- SDK Client & Core ---
 try:
   from .client import Client
@@ -342,6 +371,7 @@ except ImportError as e:
 
 # Categorical Evaluator
 try:
+  from .categorical_evaluator import CategoricalContextSource
   from .categorical_evaluator import CategoricalEvaluationConfig
   from .categorical_evaluator import CategoricalEvaluationReport
   from .categorical_evaluator import CategoricalMetricCategory
@@ -351,6 +381,7 @@ try:
 
   __all__.extend(
       [
+          "CategoricalContextSource",
           "CategoricalEvaluationConfig",
           "CategoricalEvaluationReport",
           "CategoricalMetricCategory",
@@ -362,6 +393,42 @@ try:
 except ImportError as e:
   logger.debug(
       "Could not import categorical evaluator components: %s.",
+      e,
+  )
+
+# Evaluation Rubrics (canonical metric templates + interpreter)
+try:
+  from .evaluation_rubrics import build_metrics
+  from .evaluation_rubrics import builtin_metric_config
+
+  __all__.extend(
+      [
+          "build_metrics",
+          "builtin_metric_config",
+      ]
+  )
+except ImportError as e:
+  logger.debug(
+      "Could not import evaluation rubrics components: %s.",
+      e,
+  )
+
+# Golden Q&A matching (producer for GOLDEN_EXPECTED_ANSWER judge context)
+try:
+  from .golden_matching import DEFAULT_GOLDEN_THRESHOLD
+  from .golden_matching import embed_texts
+  from .golden_matching import match_golden_qa
+
+  __all__.extend(
+      [
+          "DEFAULT_GOLDEN_THRESHOLD",
+          "embed_texts",
+          "match_golden_qa",
+      ]
+  )
+except ImportError as e:
+  logger.debug(
+      "Could not import golden matching components: %s.",
       e,
   )
 

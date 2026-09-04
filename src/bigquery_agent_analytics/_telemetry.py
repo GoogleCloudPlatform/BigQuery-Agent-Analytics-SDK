@@ -189,8 +189,9 @@ def make_bq_client(project, location=None, sdk_surface="python", **kwargs):
     project: GCP project ID.
     location: Optional BigQuery location.
     sdk_surface: Which SDK entry point is constructing this client. One of
-      ``"python"``, ``"cli"``, ``"remote-function"``. Drives the ``sdk_surface``
-      label on every job this client submits.
+      ``"python"``, ``"cli"``, ``"remote-function"``, or
+      ``"langsmith-export"``. Drives the ``sdk_surface`` label on every job
+      this client submits.
     **kwargs: Forwarded to ``bigquery.Client`` (e.g. ``credentials``).
 
   Returns:

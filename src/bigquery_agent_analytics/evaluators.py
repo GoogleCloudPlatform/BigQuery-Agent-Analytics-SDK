@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Compatibility exports and legacy LLM judge API and SQL helpers."""
+
 from __future__ import annotations
 
-"""Backward-compatibility module re-exports + legacy LLM-as-judge SQL templates."""
-
+from dataclasses import dataclass
 import logging
+import math
 from typing import Any, Optional
 import warnings
 
@@ -24,9 +26,13 @@ from .performance_evaluator import BigQueryTraceEvaluator
 from .performance_evaluator import PerformanceEvaluator
 from .system_evaluator import CodeEvaluator
 from .system_evaluator import EvaluationReport
+from .system_evaluator import SESSION_SUMMARY_QUERY
 from .system_evaluator import SessionScore
 from .system_evaluator import SystemEvaluator
 from .utils import _parse_json_from_text
+from .utils import strip_markdown_fences
+
+DEFAULT_ENDPOINT = "gemini-2.5-flash"
 
 __all__ = [
     "SystemEvaluator",
@@ -35,6 +41,10 @@ __all__ = [
     "BigQueryTraceEvaluator",
     "LLMAsJudge",
     "EvaluationReport",
+    "SessionScore",
+    "SESSION_SUMMARY_QUERY",
+    "DEFAULT_ENDPOINT",
+    "strip_markdown_fences",
     "render_ai_generate_judge_query",
     "AI_GENERATE_JUDGE_BATCH_QUERY",
     "LLM_JUDGE_BATCH_QUERY",
@@ -97,51 +107,42 @@ Respond with ONLY a valid JSON object:
 """
 
 
+@dataclass
 class _JudgeCriterion:
   """A single LLM-as-judge criterion."""
 
-  def __init__(
-      self,
-      name: str,
-      prompt_template: str,
-      score_key: str,
-      threshold: float = 0.5,
-  ):
-    self.name = name
-    self.prompt_template = prompt_template
-    self.score_key = score_key
-    self.threshold = threshold
+  name: str
+  prompt_template: str
+  score_key: str
+  threshold: float = 0.5
 
 
 class LLMAsJudge:
-  """Legacy LLMAsJudge subclass preserving pre-built factories for backwards compatibility."""
+  """Legacy criterion-based evaluator using the Gemini API per session.
+
+  This standalone adapter preserves the existing factories and custom
+  criteria API. New one-sided and side-by-side evaluations can use
+  :class:`PerformanceEvaluator`.
+  """
 
   def __init__(
       self,
       name: str = "llm_judge",
+      criteria: Optional[list[_JudgeCriterion]] = None,
       model: Optional[str] = None,
-      threshold: float = 0.5,
-  ):
-    self._name = name
-    self.llm_judge_model = model or "gemini-2.5-flash"
-    self._threshold = threshold
-    self._criteria: list[_JudgeCriterion] = []
-
-    # Add default criterion based on name for backward compatibility with factories
-    if name == "correctness_judge":
-      self.add_criterion(
-          "correctness", _CORRECTNESS_PROMPT, "correctness", threshold
-      )
-    elif name == "hallucination_judge":
-      self.add_criterion(
-          "faithfulness", _HALLUCINATION_PROMPT, "faithfulness", threshold
-      )
-    elif name == "sentiment_judge":
-      self.add_criterion("sentiment", _SENTIMENT_PROMPT, "sentiment", threshold)
+  ) -> None:
+    self.name = name
+    self._criteria: list[_JudgeCriterion] = criteria or []
+    self.model = model or DEFAULT_ENDPOINT
 
   @property
-  def name(self) -> str:
-    return self._name
+  def llm_judge_model(self) -> str:
+    """Model alias shared with the performance evaluator configuration."""
+    return self.model
+
+  @llm_judge_model.setter
+  def llm_judge_model(self, model: str) -> None:
+    self.model = model
 
   def add_criterion(
       self,
@@ -150,98 +151,193 @@ class LLMAsJudge:
       score_key: str,
       threshold: float = 0.5,
   ) -> LLMAsJudge:
+    """Adds a custom evaluation criterion.
+
+    Args:
+        name: Criterion name.
+        prompt_template: Prompt with {trace_text} and
+            {final_response} placeholders.
+        score_key: JSON key in LLM response containing score.
+        threshold: Pass/fail threshold (0-1 scale).
+
+    Returns:
+        Self for chaining.
+    """
     self._criteria.append(
-        _JudgeCriterion(name, prompt_template, score_key, threshold)
+        _JudgeCriterion(
+            name=name,
+            prompt_template=prompt_template,
+            score_key=score_key,
+            threshold=threshold,
+        )
     )
     return self
 
   async def evaluate_session(
-      self, trace_text: str, final_response: str
+      self,
+      trace_text: str,
+      final_response: str,
   ) -> SessionScore:
-    """Evaluates a single session trace text against all criteria."""
+    """Evaluates a session using the LLM judge.
+
+    Args:
+        trace_text: Formatted trace text.
+        final_response: Final agent response.
+
+    Returns:
+        SessionScore with LLM-judged scores.
+    """
+    scores: dict[str, float] = {}
+    feedback_parts: list[str] = []
+    passed = bool(self._criteria)
+
+    for criterion in self._criteria:
+      score, feedback = await self._judge_criterion(
+          criterion,
+          trace_text,
+          final_response,
+      )
+      scores[criterion.name] = score
+      if feedback:
+        feedback_parts.append(f"{criterion.name}: {feedback}")
+      if score < criterion.threshold:
+        passed = False
+
+    return SessionScore(
+        session_id="",
+        scores=scores,
+        passed=passed,
+        llm_feedback="\n".join(feedback_parts) or None,
+    )
+
+  async def _judge_criterion(
+      self,
+      criterion: _JudgeCriterion,
+      trace_text: str,
+      final_response: str,
+  ) -> tuple[float, str]:
+    """Evaluates one criterion via LLM call."""
+    prompt = criterion.prompt_template.format(
+        trace_text=trace_text,
+        final_response=final_response or "No response.",
+    )
+
     try:
       from google import genai
       from google.genai import types
 
       client = genai.Client()
+      response = await client.aio.models.generate_content(
+          model=self.model,
+          contents=prompt,
+          config=types.GenerateContentConfig(
+              temperature=0.1,
+              max_output_tokens=2048,
+          ),
+      )
+
+      text = response.text.strip()
+      result = _parse_json_from_text(text)
+
+      if result and criterion.score_key in result:
+        value = result[criterion.score_key]
+        if isinstance(value, bool):
+          return 0.0, "Invalid judge score: expected a number from 0 to 10"
+        raw = float(value)
+        if not math.isfinite(raw) or not 0 <= raw <= 10:
+          return 0.0, "Invalid judge score: expected a number from 0 to 10"
+        score = raw / 10.0  # Normalize 1-10 to 0-1
+        justification = result.get("justification", "")
+        return score, justification
+
+      return 0.0, text
+
     except ImportError:
       logger.warning("google-genai not installed, skipping LLM judge.")
-      return SessionScore(
-          session_id="unknown",
-          scores={},
-          passed=False,
-          details={"error": "google-genai not installed"},
-      )
+      return 0.0, "google-genai not installed"
+    except Exception as e:
+      logger.warning("LLM judge failed: %s", e)
+      return 0.0, str(e)
 
-    scores: dict[str, float] = {}
-    feedback_parts = []
-    passed = True
-
-    for criterion in self._criteria:
-      prompt = criterion.prompt_template.format(
-          trace_text=trace_text,
-          final_response=final_response or "No response.",
-      )
-      try:
-        response = await client.aio.models.generate_content(
-            model=self.llm_judge_model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.1,
-                max_output_tokens=1024,
-            ),
-        )
-        text = response.text.strip()
-        result = _parse_json_from_text(text)
-        if result and criterion.score_key in result:
-          raw = float(result[criterion.score_key])
-          score = raw / 10.0 if raw > 1.0 else raw
-          scores[criterion.name] = score
-          if score < criterion.threshold:
-            passed = False
-          justification = result.get("justification", "")
-          if justification:
-            feedback_parts.append(f"{criterion.name}: {justification}")
-        else:
-          scores[criterion.name] = 0.0
-          passed = False
-          feedback_parts.append(
-              f"{criterion.name}: Failed to parse score from {text}"
-          )
-      except Exception as e:
-        logger.warning("Criterion %s failed: %s", criterion.name, e)
-        scores[criterion.name] = 0.0
-        passed = False
-        feedback_parts.append(f"{criterion.name}: Error {e}")
-
-    return SessionScore(
-        session_id="unknown",
-        scores=scores,
-        passed=passed,
-        llm_feedback="\n".join(feedback_parts) if feedback_parts else None,
-    )
+  # ---- Pre-built evaluators ---- #
 
   @staticmethod
   def correctness(
-      threshold: float = 0.5, model: Optional[str] = None
+      threshold: float = 0.5,
+      model: Optional[str] = None,
   ) -> LLMAsJudge:
-    return LLMAsJudge(
-        name="correctness_judge", model=model, threshold=threshold
+    """Pre-built correctness evaluator.
+
+    Args:
+        threshold: Minimum score to pass (0-1).
+        model: LLM model to use for judging.
+
+    Returns:
+        LLMAsJudge configured for correctness.
+    """
+    judge = LLMAsJudge(
+        name="correctness_judge",
+        model=model,
     )
+    judge.add_criterion(
+        name="correctness",
+        prompt_template=_CORRECTNESS_PROMPT,
+        score_key="correctness",
+        threshold=threshold,
+    )
+    return judge
 
   @staticmethod
   def hallucination(
-      threshold: float = 0.5, model: Optional[str] = None
+      threshold: float = 0.5,
+      model: Optional[str] = None,
   ) -> LLMAsJudge:
-    return LLMAsJudge(
-        name="hallucination_judge", model=model, threshold=threshold
+    """Pre-built hallucination (faithfulness) evaluator.
+
+    Args:
+        threshold: Minimum faithfulness score to pass (0-1).
+        model: LLM model to use for judging.
+
+    Returns:
+        LLMAsJudge configured for hallucination detection.
+    """
+    judge = LLMAsJudge(
+        name="hallucination_judge",
+        model=model,
     )
+    judge.add_criterion(
+        name="faithfulness",
+        prompt_template=_HALLUCINATION_PROMPT,
+        score_key="faithfulness",
+        threshold=threshold,
+    )
+    return judge
 
   @staticmethod
   def sentiment(
-      threshold: float = 0.5, model: Optional[str] = None
+      threshold: float = 0.5,
+      model: Optional[str] = None,
   ) -> LLMAsJudge:
-    return LLMAsJudge(name="sentiment_judge", model=model, threshold=threshold)
+    """Pre-built sentiment evaluator.
+
+    Args:
+        threshold: Minimum sentiment score to pass (0-1).
+        model: LLM model to use for judging.
+
+    Returns:
+        LLMAsJudge configured for sentiment analysis.
+    """
+    judge = LLMAsJudge(
+        name="sentiment_judge",
+        model=model,
+    )
+    judge.add_criterion(
+        name="sentiment",
+        prompt_template=_SENTIMENT_PROMPT,
+        score_key="sentiment",
+        threshold=threshold,
+    )
+    return judge
 
 
 _AI_GENERATE_JUDGE_BATCH_QUERY_TEMPLATE = """\
@@ -394,7 +490,38 @@ _RESPONSE_SENTINEL = "\x00__BQAA_JUDGE_RESPONSE__\x00"
 def split_judge_prompt_template(prompt_template: str) -> tuple[str, str, str]:
   """Split a Python judge prompt into ``(prefix, middle, suffix)``.
 
-  .. deprecated:: 0.3.0
+  The Python ``LLMAsJudge`` prompt template uses ``{trace_text}`` and
+  ``{final_response}`` placeholders (in that order) to interpolate
+  per-session inputs. The BigQuery-native ``AI.GENERATE`` and
+  ``ML.GENERATE_TEXT`` paths can't use Python ``str.format`` — they
+  build the prompt at SQL time. This helper returns the three
+  literal segments those SQL paths need to ``CONCAT`` together with
+  the SQL-side ``trace_text`` and ``final_response`` columns,
+  preserving the exact full template (including the per-criterion
+  output-format spec that follows the placeholders).
+
+  Internally the helper format()s the template once with sentinel
+  values, so any literal ``{{...}}`` braces in the source template
+  (e.g. the JSON output spec ``{{"correctness": <score>, ...}}``)
+  are correctly un-escaped before splitting. The SQL paths see the
+  same string the API-fallback path's ``str.format(...)`` would
+  produce.
+
+  Args:
+      prompt_template: The Python prompt template, expected to
+          contain both ``{trace_text}`` and ``{final_response}``
+          placeholders in that order.
+
+  Returns:
+      ``(prefix, middle, suffix)`` such that
+      ``prefix + trace_text + middle + final_response + suffix``
+      reproduces ``prompt_template.format(trace_text=..., final_response=...)``
+      for any inputs. When a placeholder is missing, the helper
+      synthesizes a labeled section for the missing input and
+      places the label *immediately before* the injected value
+      (label first, then value), so the model reads
+      ``...Trace:\n<TRACE>\nResponse:\n<RESPONSE>...`` rather than
+      the value followed by an orphan label.
   """
   warnings.warn(
       "split_judge_prompt_template is deprecated and will be removed in a future version.",
@@ -404,7 +531,17 @@ def split_judge_prompt_template(prompt_template: str) -> tuple[str, str, str]:
   has_trace = "{trace_text}" in prompt_template
   has_response = "{final_response}" in prompt_template
 
+  # Reminder for the fallback branches below: the SQL CONCAT runs
+  #   prefix ++ trace_text ++ middle ++ final_response ++ suffix
+  # so any label we synthesize for an absent placeholder must end
+  # up *next to* the value it labels (label first, then value),
+  # not on the far side of it. Earlier versions appended labels
+  # *after* the values, which produced ``<TRACE>\nTrace:\n...``.
+
   if not has_trace and not has_response:
+    # No placeholders at all. Append a labeled trace + response
+    # block after the user's instructions. The labels precede the
+    # values so the model reads them in order.
     return (
         prompt_template + "\nTrace:\n",
         "\nResponse:\n",
@@ -412,6 +549,9 @@ def split_judge_prompt_template(prompt_template: str) -> tuple[str, str, str]:
     )
 
   if not has_trace:
+    # final_response placeholder only. Honor the user's structure
+    # and inject a labeled trace block right before the response,
+    # so the trace label sits next to the trace.
     formatted = prompt_template.format(final_response=_RESPONSE_SENTINEL)
     before_response, _, after_response = formatted.partition(_RESPONSE_SENTINEL)
     return (
@@ -421,6 +561,9 @@ def split_judge_prompt_template(prompt_template: str) -> tuple[str, str, str]:
     )
 
   if not has_response:
+    # trace_text placeholder only. Append a labeled response block
+    # after the original template's tail, so the response label
+    # sits next to the response value (not after it).
     formatted = prompt_template.format(trace_text=_TRACE_SENTINEL)
     prefix, _, after_trace = formatted.partition(_TRACE_SENTINEL)
     return (

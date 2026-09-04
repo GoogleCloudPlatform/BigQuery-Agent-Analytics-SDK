@@ -20,59 +20,55 @@ from typing import Any, Optional
 
 
 def strip_markdown_fences(text: Optional[str]) -> Optional[str]:
-  """Strips markdown backticks and fences around a JSON block."""
+  """Strip markdown code block fences (``\\`\\`\\`json ... \\`\\`\\```) if present.
+
+  Models frequently wrap JSON output in fenced code blocks. This helper
+  removes the opening ``\\`\\`\\`json`` (or plain ``\\`\\`\\```) and closing
+  ``\\`\\`\\``` markers so the result can be passed to ``json.loads()``.
+
+  The regex pattern matches the same fences handled server-side by
+  ``REGEXP_REPLACE`` in ``ontology_graph.py`` and ``context_graph.py``.
+  """
   if not text:
     return text
   text = text.strip()
-  if text.startswith("```"):
-    closing_fence = text.find("```", 3)
-    if closing_fence != -1:
-      text = text[:closing_fence]
-    first_newline = text.find("\n")
-    if first_newline == -1:
-      text = text[3:]
-      if text.lower().startswith("json"):
-        text = text[4:]
-      elif text.lower().startswith("sql"):
-        text = text[3:]
-      return text.strip()
-    else:
-      text = text[first_newline:]
+  if not text.startswith("```"):
+    return text
+  text = re.sub(r"^```[a-zA-Z0-9]*\s*\n?", "", text)
+  text = re.sub(r"\n?\s*```[\s\S]*$", "", text)
   return text.strip()
 
 
-def _parse_json_from_text(text: Optional[str]) -> Optional[dict[str, Any]]:
-  """Parses JSON out of a text block, strip backticks, extract via braces."""
+def _parse_json_from_text(text: str) -> Optional[dict[str, Any]]:
+  """Extracts and parses JSON from LLM response text."""
   if not text:
     return None
 
-  # Try raw JSON extraction (brace matching) first to bypass any trailing markdown prose
-  if "{" in text:
-    try:
-      start = text.index("{")
-      brace_count = 0
-      end = start
-      for i, char in enumerate(text[start:], start):
-        if char == "{":
-          brace_count += 1
-        elif char == "}":
-          brace_count -= 1
-          if brace_count == 0:
-            end = i + 1
-            break
-      json_str = text[start:end]
-      json_str = "".join(
-          char for char in json_str if char >= " " or char in "\n\r\t"
-      )
-      return json.loads(json_str)
-    except (ValueError, IndexError, json.JSONDecodeError):
-      pass
-
+  # Strip markdown fences first
   stripped = strip_markdown_fences(text)
   try:
     return json.loads(stripped)
   except (json.JSONDecodeError, TypeError):
     pass
+
+  # Try raw JSON extraction (brace matching)
+  if "{" in stripped:
+    try:
+      start = stripped.index("{")
+      brace = 0
+      end = start
+      for i, ch in enumerate(stripped[start:], start):
+        if ch == "{":
+          brace += 1
+        elif ch == "}":
+          brace -= 1
+          if brace == 0:
+            end = i + 1
+            break
+      return json.loads(stripped[start:end])
+    except (ValueError, json.JSONDecodeError):
+      pass
+
   return None
 
 

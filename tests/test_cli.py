@@ -34,8 +34,13 @@ from bigquery_agent_analytics.feedback import QuestionDistribution
 from bigquery_agent_analytics.insights import AggregatedInsights
 from bigquery_agent_analytics.insights import InsightsReport
 from bigquery_agent_analytics.insights import SessionMetadata
+from bigquery_agent_analytics.trace import AmbiguousSessionError
+from bigquery_agent_analytics.trace import ResolvedTraceSelector
 from bigquery_agent_analytics.trace import Span
 from bigquery_agent_analytics.trace import Trace
+from bigquery_agent_analytics.trace import TraceIdentity
+from bigquery_agent_analytics.trace import TraceScope
+from bigquery_agent_analytics.trace import TraceSelector
 
 runner = CliRunner()
 
@@ -58,6 +63,24 @@ def _mock_trace():
       start_time=_NOW,
       end_time=_NOW,
       total_latency_ms=200.0,
+  )
+
+
+def _mock_ambiguity():
+  identity = TraceIdentity(
+      session_id="s1", user_id="private-user", root_agent_name="root"
+  )
+  return AmbiguousSessionError(
+      [
+          ResolvedTraceSelector(
+              identity=identity,
+              scope=TraceScope(custom_labels={"run": "private-v0"}),
+          ),
+          ResolvedTraceSelector(
+              identity=identity,
+              scope=TraceScope(custom_labels={"run": "private-v1"}),
+          ),
+      ]
   )
 
 
@@ -201,6 +224,154 @@ class TestGetTrace:
     assert result.exit_code == 0
     # Text format for Trace uses render() which includes trace_id
     assert "t1" in result.output
+
+  @patch("bigquery_agent_analytics.cli._build_client")
+  def test_get_trace_with_scalar_selector_pins(self, mock_build):
+    client = MagicMock()
+    client.get_trace_by_selector.return_value = _mock_trace()
+    mock_build.return_value = client
+
+    result = runner.invoke(
+        app,
+        [
+            "get-trace",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--session-id=s1",
+            "--user-id=alice",
+            "--root-agent-name=root",
+            "--experiment-id=exp-1",
+            "--label=run=v1",
+            "--label=slice=3",
+            "--scope-signature=v1:signature",
+        ],
+    )
+
+    assert result.exit_code == 0
+    client.get_trace_by_selector.assert_called_once_with(
+        TraceSelector(
+            session_id="s1",
+            user_id="alice",
+            root_agent_name="root",
+            experiment_id="exp-1",
+            custom_labels=[("run", "v1"), ("slice", "3")],
+            scope_signature="v1:signature",
+        )
+    )
+
+  @patch("bigquery_agent_analytics.cli._build_client")
+  def test_get_trace_selector_json_preserves_explicit_null(self, mock_build):
+    client = MagicMock()
+    client.get_trace_by_selector.return_value = _mock_trace()
+    mock_build.return_value = client
+    selector_payload = {
+        "session_id": "s1",
+        "user_id": None,
+        "root_agent_name": "root",
+        "experiment_id": None,
+        "custom_labels": {"run": "v1"},
+        "scope_signature": TraceScope(
+            custom_labels={"run": "v1"}
+        ).scope_signature,
+    }
+
+    result = runner.invoke(
+        app,
+        [
+            "get-trace",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            f"--selector-json={json.dumps(selector_payload)}",
+        ],
+    )
+
+    assert result.exit_code == 0
+    client.get_trace_by_selector.assert_called_once_with(
+        TraceSelector(**selector_payload)
+    )
+
+  @patch("bigquery_agent_analytics.cli._build_client")
+  def test_get_trace_allows_conversation_complete_mixed_scope(self, mock_build):
+    client = MagicMock()
+    client.get_session_trace.return_value = _mock_trace()
+    mock_build.return_value = client
+
+    result = runner.invoke(
+        app,
+        [
+            "get-trace",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--session-id=s1",
+            "--allow-mixed-scope",
+        ],
+    )
+
+    assert result.exit_code == 0
+    client.get_session_trace.assert_called_once_with(
+        "s1", allow_mixed_scope=True
+    )
+
+  @patch("bigquery_agent_analytics.cli._build_client")
+  def test_get_trace_json_ambiguity_is_actionable(self, mock_build):
+    client = MagicMock()
+    client.get_session_trace.side_effect = _mock_ambiguity()
+    mock_build.return_value = client
+
+    result = runner.invoke(
+        app,
+        [
+            "get-trace",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--session-id=s1",
+            "--format=json",
+        ],
+    )
+
+    assert result.exit_code == 2
+    payload = json.loads(result.output)
+    assert payload["error"] == "ambiguous_session"
+    assert payload["candidate_count"] == 2
+    assert payload["candidates"][0]["selector"]["session_id"] == "s1"
+    assert payload["candidates"][0]["selector"]["user_id"] == "private-user"
+
+  @patch("bigquery_agent_analytics.cli._build_client")
+  def test_get_trace_text_ambiguity_stays_redacted(self, mock_build):
+    client = MagicMock()
+    client.get_session_trace.side_effect = _mock_ambiguity()
+    mock_build.return_value = client
+
+    result = runner.invoke(
+        app,
+        [
+            "get-trace",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--session-id=s1",
+            "--format=text",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "Exactly 2 candidates" in result.output
+    assert "private-user" not in result.output
+    assert "private-v0" not in result.output
+
+  def test_get_trace_rejects_malformed_label(self):
+    result = runner.invoke(
+        app,
+        [
+            "get-trace",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--session-id=s1",
+            "--label=missing-separator",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "KEY=VALUE" in result.output
 
 
 # ------------------------------------------------------------------ #
@@ -447,8 +618,8 @@ class TestEvaluate:
                 passed=False,
                 details={},
                 llm_feedback=(
-                    "The agent confirmed a booking but the booking"
-                    " tool never ran for that session."
+                    'The agent added "(Design)" to Jordan Lee\'s name, '
+                    "which was not present in the user's request or any provided context."
                 ),
             ),
         ],
@@ -476,7 +647,9 @@ class TestEvaluate:
     assert "score=0.3" in combined
     # Feedback snippet appears, quoted, with the actual justification.
     assert 'feedback="' in combined
-    assert "booking tool never ran" in combined
+    assert "(Design)" in combined
+    assert '\\"(Design)\\"' in combined
+    assert "Jordan Lee's name" in combined
 
   @patch("bigquery_agent_analytics.cli._build_client")
   def test_evaluate_exit_code_llm_judge_truncates_long_feedback(
@@ -836,6 +1009,30 @@ class TestFormatFeedbackSnippet:
 
     out = _format_feedback_snippet("y" * 200, max_chars=50)
     assert len(out) == 50
+    assert out.endswith("\u2026")
+
+  def test_escapes_quotes_and_backslashes(self):
+    from bigquery_agent_analytics.cli import _format_feedback_snippet
+
+    out = _format_feedback_snippet(
+        'The agent added "(Design)" and used path\\to\\file.'
+    )
+    assert out == 'The agent added \\"(Design)\\" and used path\\\\to\\\\file.'
+
+  def test_quote_only_feedback_respects_max_chars_after_escaping(self):
+    from bigquery_agent_analytics.cli import _format_feedback_snippet
+
+    out = _format_feedback_snippet('"' * 120, max_chars=120)
+
+    assert len(out) <= 120
+    assert out.endswith("\u2026")
+
+  def test_backslash_only_feedback_respects_max_chars_after_escaping(self):
+    from bigquery_agent_analytics.cli import _format_feedback_snippet
+
+    out = _format_feedback_snippet("\\" * 120, max_chars=120)
+
+    assert len(out) <= 120
     assert out.endswith("\u2026")
 
 

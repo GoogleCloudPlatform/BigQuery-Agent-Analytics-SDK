@@ -31,7 +31,9 @@ import os
 
 import pytest
 
+from bigquery_agent_analytics import Client
 from bigquery_agent_analytics import PerformanceEvaluator
+from bigquery_agent_analytics import TraceFilter
 from bigquery_agent_analytics.performance_evaluator import EvalStatus
 
 _LIVE = os.environ.get("BQAA_LIVE_BQ", "").lower() in ("1", "true", "yes")
@@ -69,40 +71,43 @@ def bq_client(live_config):
 
 
 @pytest.fixture(scope="module")
-def sample_session_id(bq_client, live_config):
-  """Finds a session ID in the source table to use for evaluation."""
-  sql = (
-      f"SELECT session_id "
-      f"FROM `{live_config['project']}.{live_config['dataset']}.{live_config['table']}` "
-      f"LIMIT 1"
+def sample_trace(bq_client, live_config):
+  """Fetch one identity- and scope-resolved trace from the live source."""
+  client = Client(
+      project_id=live_config["project"],
+      dataset_id=live_config["dataset"],
+      table_id=live_config["table"],
+      bq_client=bq_client,
   )
-  rows = list(bq_client.query(sql).result())
-  if not rows:
-    pytest.skip(
-        f"No sessions found in {live_config['project']}.{live_config['dataset']}.{live_config['table']}"
-    )
-  return rows[0].session_id
+  traces = client.list_traces(TraceFilter(limit=1))
+  if not traces:
+    pytest.skip("No traces found in the configured live source")
+  return traces[0]
 
 
-def test_performance_evaluator_live_llm_judge(live_config, sample_session_id):
+def test_performance_evaluator_live_llm_judge(
+    live_config, sample_trace, bq_client
+):
   """E2E check that PerformanceEvaluator can evaluate a session using LLM judge."""
   evaluator = PerformanceEvaluator(
       project_id=live_config["project"],
       dataset_id=live_config["dataset"],
       table_id=live_config["table"],
-      location=live_config["location"],
+      client=bq_client,
   )
 
   # Run evaluation synchronously
   async def run_eval():
     return await evaluator.evaluate_session(
-        session_id=sample_session_id,
+        session_id=sample_trace.session_id,
+        trace=sample_trace,
         use_llm_judge=True,
     )
 
   result = asyncio.run(run_eval())
 
-  assert result.session_id == sample_session_id
+  assert result.session_id == sample_trace.session_id
+  assert not result.details.get("errors"), result.llm_judge_feedback
   assert result.eval_status in (EvalStatus.PASSED, EvalStatus.FAILED)
 
   # One-sided judge should populate these scores

@@ -1,0 +1,15 @@
+{
+  "resolver_manifest_version": "okf-context:resolver:v1",
+  "resolved": [
+    {
+      "authored": "https://console.cloud.google.com/bigquery?p=cymbal-finance-prod&d=finance_core&t=billing_invoice_lines",
+      "canonical": "bq://cymbal-finance-prod.finance_core.billing_invoice_lines",
+      "status": "resolved"
+    },
+    {
+      "authored": "https://console.cloud.google.com/bigquery?p=cymbal-finance-prod&d=finance_core&t=crm_customers",
+      "canonical": "bq://cymbal-finance-prod.finance_core.crm_customers",
+      "status": "resolved"
+    }
+  ]
+}

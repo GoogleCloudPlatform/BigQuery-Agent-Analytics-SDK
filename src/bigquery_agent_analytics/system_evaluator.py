@@ -64,7 +64,12 @@ class SessionScore(BaseModel):
   )
   details: dict[str, Any] = Field(
       default_factory=dict,
-      description="Additional per-session details.",
+      description=(
+          "Additional per-session details. The SDK reserves user_id,"
+          " root_agent_name, and scope_signature for authoritative"
+          " attribution when one session expands into multiple"
+          " evaluated trace identities/scopes."
+      ),
   )
   llm_feedback: Optional[str] = Field(
       default=None,
@@ -202,9 +207,9 @@ class SystemEvaluator:
 
     Args:
         name: Metric name.
-        fn: Function taking session summary, returning 0-1 score. The score is
-          compared to ``threshold``; a session passes the metric when ``score >=
-          threshold``.
+        fn: Function taking session summary, returning 0-1 score.
+            The score is compared to ``threshold``; a session passes
+            the metric when ``score >= threshold``.
         threshold: Pass/fail threshold applied to ``fn``'s score.
         observed_key: Optional session-summary key whose value is the
             raw observed metric (e.g. ``"avg_latency_ms"``). When set,
@@ -377,8 +382,7 @@ class SystemEvaluator:
   ) -> SystemEvaluator:
     """Pre-built evaluator that fails when tool error rate exceeds the budget.
 
-    Pass/fail is a raw comparison: ``(tool_errors / tool_calls) <=
-    max_error_rate``
+    Pass/fail is a raw comparison: ``(tool_errors / tool_calls) <= max_error_rate``
     passes, strictly greater fails. Sessions with zero tool calls pass
     trivially (nothing to fail).
 

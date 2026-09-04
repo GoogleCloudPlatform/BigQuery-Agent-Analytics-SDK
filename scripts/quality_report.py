@@ -51,6 +51,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import argparse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import json
@@ -346,124 +347,12 @@ def _build_scope_context(spec=None):
 # Golden Q&A matching — optional correctness grounding + scope calibration
 # ---------------------------------------------------------------------------
 
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-005")
-
-
-def _embed_texts(texts, model=None, batch_size=50):
-  """Embed *texts* for semantic similarity; returns L2-normalised vectors."""
-  from google import genai
-  from google.genai import types
-
-  model = model or EMBEDDING_MODEL
-  client = genai.Client()
-  vectors = []
-  for i in range(0, len(texts), batch_size):
-    batch = texts[i : i + batch_size]
-    resp = client.models.embed_content(
-        model=model,
-        contents=batch,
-        config=types.EmbedContentConfig(task_type="SEMANTIC_SIMILARITY"),
-    )
-    for e in resp.embeddings:
-      v = list(e.values)
-      norm = math.sqrt(sum(x * x for x in v)) or 1.0
-      vectors.append([x / norm for x in v])
-  return vectors
-
-
-# Default cosine-similarity threshold for matching a session question to a
-# golden-Q&A entry. Referenced by match_golden_qa, the eval entry points, and
-# the --golden-threshold argparse default so the value lives in one place.
-_DEFAULT_GOLDEN_THRESHOLD = 0.92
-
-
-def match_golden_qa(
-    question_by_sid, golden_qa, threshold=_DEFAULT_GOLDEN_THRESHOLD
-):
-  """Match session questions to golden Q&A by embedding cosine similarity.
-
-  Args:
-    question_by_sid: dict mapping session_id -> user question text.
-    golden_qa: list of dicts with ``question`` and optional
-        ``expected_answer``, ``topic``, ``expected_behavior``.
-    threshold: minimum cosine similarity (0-1) for a match.
-
-  Returns:
-    (per_session_context, golden_metadata):
-      - per_session_context maps session_id -> a judge-context string
-        (expected answer and/or a "should decline" note).
-      - golden_metadata maps session_id -> match details (matched flag,
-        matched question, expected answer, topic, out_of_scope, similarity).
-  """
-  if not golden_qa or not question_by_sid:
-    return {}, {}
-
-  sids = [sid for sid, q in question_by_sid.items() if q]
-  conv_qs = [question_by_sid[sid] for sid in sids]
-  golden_qs = [g["question"] for g in golden_qa]
-  if not conv_qs or not golden_qs:
-    return {}, {}
-
-  logger.info(
-      "Golden matching: embedding %d golden + %d session questions...",
-      len(golden_qs),
-      len(conv_qs),
-  )
-  golden_vecs = _embed_texts(golden_qs)
-  conv_vecs = _embed_texts(conv_qs)
-
-  per_session_context = {}
-  golden_metadata = {}
-  matched = 0
-  for sid, cvec in zip(sids, conv_vecs):
-    best_idx, best_score = -1, -1.0
-    for gi, gvec in enumerate(golden_vecs):
-      # Both vectors are L2-normalised, so the dot product is cosine.
-      score = sum(a * b for a, b in zip(cvec, gvec))
-      if score > best_score:
-        best_score, best_idx = score, gi
-
-    if best_score >= threshold:
-      g = golden_qa[best_idx]
-      is_oos = (
-          g.get("expected_behavior") == "decline"
-          or g.get("topic") == "out_of_scope"
-      )
-      ctx = [
-          "EXPECTED ANSWER FOR THIS QUESTION "
-          "(use to judge factual correctness):",
-          f"Q: {g['question']}",
-      ]
-      if g.get("expected_answer"):
-        ctx.append(f"A: {g['expected_answer']}")
-      if is_oos:
-        ctx.append(
-            "NOTE: This question is OUT OF SCOPE — the agent should decline."
-            " A polite decline is the correct ('declined') outcome."
-        )
-      per_session_context[sid] = "\n".join(ctx)
-      golden_metadata[sid] = {
-          "matched": True,
-          "golden_question": g["question"],
-          "expected_answer": g.get("expected_answer", ""),
-          "topic": g.get("topic", "unknown"),
-          "out_of_scope": is_oos,
-          "similarity": round(best_score, 4),
-      }
-      matched += 1
-    else:
-      golden_metadata[sid] = {
-          "matched": False,
-          "similarity": round(best_score, 4),
-      }
-
-  logger.info(
-      "Golden matching: %d/%d sessions matched (threshold=%.2f)",
-      matched,
-      len(sids),
-      threshold,
-  )
-  return per_session_context, golden_metadata
+# Golden matching now lives in the SDK core (extracted from this script);
+# these aliases keep this module's public/test surface stable.
+from bigquery_agent_analytics.golden_matching import DEFAULT_GOLDEN_THRESHOLD as _DEFAULT_GOLDEN_THRESHOLD  # noqa: E402
+from bigquery_agent_analytics.golden_matching import embed_texts as _embed_texts  # noqa: E402
+from bigquery_agent_analytics.golden_matching import EMBEDDING_MODEL  # noqa: E402,F401
+from bigquery_agent_analytics.golden_matching import match_golden_qa  # noqa: E402
 
 
 def _inject_golden_summary(report, golden_metadata):
@@ -485,10 +374,20 @@ def _inject_golden_summary(report, golden_metadata):
       "unmatched_partial": 0,
   }
   mismatches = []
+  session_id_counts = Counter(
+      session.get("session_id", "") for session in report.get("sessions", [])
+  )
 
   for session in report.get("sessions", []):
     sid = session.get("session_id", "")
-    meta = golden_metadata.get(sid)
+    selector = _resolved_selector_from_context(session)
+    meta = (
+        golden_metadata.get(selector)
+        if selector is not None and selector in golden_metadata
+        else None
+    )
+    if meta is None and selector is None and session_id_counts[sid] == 1:
+      meta = golden_metadata.get(sid)
     if meta is None:
       session["golden_eval"] = None
       continue
@@ -555,6 +454,40 @@ def _inject_golden_summary(report, golden_metadata):
   }
 
 
+def _resolved_selector_from_context(context):
+  """Rebuild an exact selector from report-safe identity/scope fields."""
+  from bigquery_agent_analytics.trace import ResolvedTraceSelector
+  from bigquery_agent_analytics.trace import TraceIdentity
+  from bigquery_agent_analytics.trace import TraceScope
+
+  identity_fields = (
+      "session_id",
+      "user_id",
+      "root_agent_name",
+      "scope_signature",
+  )
+  if any(field not in context for field in identity_fields):
+    return None
+  if context["session_id"] is None or context["scope_signature"] is None:
+    return None
+  try:
+    identity = TraceIdentity(
+        session_id=context.get("session_id"),
+        user_id=context.get("user_id"),
+        root_agent_name=context.get("root_agent_name"),
+    )
+    scope = TraceScope(
+        experiment_id=context.get("experiment_id"),
+        custom_labels=context.get("custom_labels"),
+    )
+  except (TypeError, ValueError):
+    return None
+  signature = context.get("scope_signature")
+  if signature is not None and signature != scope.scope_signature:
+    return None
+  return ResolvedTraceSelector(identity=identity, scope=scope)
+
+
 # ---------------------------------------------------------------------------
 # Eval config (prompts + metrics from external file)
 # ---------------------------------------------------------------------------
@@ -597,11 +530,14 @@ def _load_eval_config(eval_config_path=None):
       _EVAL_CONFIG_CACHE[cache_key] = result
       return result
 
-  raise FileNotFoundError(
-      "No eval_config.json found. Expected at eval/eval_config.json "
-      "relative to the repo root or script directory, or pass "
-      "--eval-config <path> explicitly."
-  )
+  # No file anywhere: fall back to the SDK's canonical builtin rubrics
+  # (the same data this repo ships in scripts/eval/eval_config.json).
+  from bigquery_agent_analytics import builtin_metric_config
+
+  logger.info("No eval_config.json found; using the SDK builtin rubrics.")
+  result = builtin_metric_config()
+  _EVAL_CONFIG_CACHE[cache_key] = result
+  return result
 
 
 # ---------------------------------------------------------------------------
@@ -618,46 +554,18 @@ def get_eval_metrics(eval_spec=None, eval_config=None):
   also enables the ``declined`` category so the judge can credit correct
   out-of-scope refusals.
   """
-  from bigquery_agent_analytics import CategoricalMetricCategory
-  from bigquery_agent_analytics import CategoricalMetricDefinition
+  # The interpreter lives in the SDK core (evaluation_rubrics.build_metrics);
+  # this wrapper derives the scope inputs from the eval spec and delegates.
+  from bigquery_agent_analytics import build_metrics
 
   scope_context = _build_scope_context(eval_spec)
   has_scope = bool(eval_spec and eval_spec.get("scope"))
 
   if eval_config is None:
     eval_config = _load_eval_config()
-  ext_metrics = eval_config.get("metrics", [])
-  result = []
-  for m in ext_metrics:
-    cats = [
-        CategoricalMetricCategory(name=c["name"], definition=c["definition"])
-        for c in m["categories"]
-    ]
-    defn = m["definition"]
-    if m.get("scope_aware") and scope_context:
-      defn += scope_context
-    if has_scope and m.get("declined_category"):
-      dc = m["declined_category"]
-      declined_cat = CategoricalMetricCategory(
-          name=dc["name"], definition=dc["definition"]
-      )
-      insert_after = dc.get("insert_after")
-      if insert_after:
-        idx = next(
-            (i for i, c in enumerate(cats) if c.name == insert_after), -1
-        )
-        cats.insert(idx + 1, declined_cat)
-      else:
-        cats.append(declined_cat)
-      if m.get("scope_suffix"):
-        defn += m["scope_suffix"]
-    result.append(
-        CategoricalMetricDefinition(
-            name=m["name"], definition=defn, categories=cats
-        )
-    )
-  logger.info("Loaded %d metrics from eval config", len(result))
-  return result
+  return build_metrics(
+      eval_config, scope_context=scope_context, has_scope=has_scope
+  )
 
 
 # ---------------------------------------------------------------------------
@@ -1036,31 +944,259 @@ def resolve_trace_responses(traces):
     user_turns, tool_calls = _count_trace_metrics(trace)
     conversation = _extract_conversation(trace) if user_turns > 1 else []
 
-    results.append(
-        {
-            "session_id": trace.session_id,
-            "time": (
-                trace.start_time.strftime("%Y-%m-%d %H:%M:%S")
-                if trace.start_time
-                else "?"
-            ),
-            "question": question,
-            "answered_by": answered_by,
-            "response": (response or ""),
-            "latency_s": latency_s,
-            "is_a2a": is_a2a,
-            "user_turns": user_turns,
-            "tool_calls": tool_calls,
-            "conversation": conversation,
-            "corrections": 0,
-            "verifications": 0,
-        }
-    )
+    # The conversation opener anchors the session's topic. `question` is the
+    # *last* user message (aligned with the final response); golden matching
+    # must use the FIRST one, or a correction session gets matched by its
+    # pushback text ("I thought it was 10, right?") and never finds its
+    # golden pair -- the conversations-file path already matches on turns[0].
+    first_question = question
+    for span in trace.spans:
+      if span.event_type == "USER_MESSAGE_RECEIVED":
+        c = span.content
+        text = (
+            (c.get("text_summary") or c.get("text") or "")
+            if isinstance(c, dict)
+            else (str(c) if c else "")
+        )
+        if text:
+          first_question = text
+          break
+
+    result = {
+        "session_id": trace.session_id,
+        "user_id": (
+            trace.identity.user_id
+            if getattr(trace, "identity", None) is not None
+            else getattr(trace, "user_id", None)
+        ),
+        "root_agent_name": (
+            trace.identity.root_agent_name
+            if getattr(trace, "identity", None) is not None
+            else None
+        ),
+        "experiment_id": (
+            trace.scope.experiment_id
+            if getattr(trace, "scope", None) is not None
+            else None
+        ),
+        "custom_labels": (
+            trace.scope.labels_dict
+            if getattr(trace, "scope", None) is not None
+            else None
+        ),
+        "scope_signature": (
+            trace.scope.scope_signature
+            if getattr(trace, "scope", None) is not None
+            else None
+        ),
+        "scope_coverage": getattr(trace, "scope_coverage", None),
+        "time": (
+            trace.start_time.strftime("%Y-%m-%d %H:%M:%S")
+            if trace.start_time
+            else "?"
+        ),
+        "question": question,
+        "first_question": first_question,
+        "answered_by": answered_by,
+        "response": (response or ""),
+        "latency_s": latency_s,
+        "is_a2a": is_a2a,
+        "user_turns": user_turns,
+        "tool_calls": tool_calls,
+        "conversation": conversation,
+        "corrections": 0,
+        "verifications": 0,
+    }
+    # Structured tool detail from the trace's TOOL_* spans, so BigQuery-scored
+    # sessions carry the same {name, args} records local conversations do
+    # (tool-aware analysts + compare_runs' tool-selection table). Emitted only
+    # when the spans actually name their tools (or there were zero calls) --
+    # key-absence stays a truthful "not captured" for older tables.
+    tool_detail = [
+        {"name": tc.get("tool_name") or "", "args": tc.get("args") or {}}
+        for tc in trace.tool_calls
+        if tc.get("tool_name") and tc.get("tool_name") != "unknown"
+    ]
+    if tool_detail or tool_calls == 0:
+      result["tool_calls_detail"] = tool_detail
+    results.append(result)
 
   if remote_lookups:
     logger.info("Resolved %d A2A responses", remote_lookups)
 
   return results
+
+
+_REPORT_ATTRIBUTION_FIELDS = (
+    "user_id",
+    "root_agent_name",
+    "scope_signature",
+)
+# U2 bounds one singular candidate-enumeration page at 64 exact
+# identity/scope candidates. Explicit report session lists start with the same
+# reservation, then grow until the returned population is provably complete.
+_REPORT_INITIAL_CANDIDATES_PER_SESSION = 64
+_REPORT_TRACE_LIMIT_CEILING = 1_048_576
+
+
+class _ReportTracePopulationTruncatedError(RuntimeError):
+  """A report listing saturated its last permitted completeness probe."""
+
+
+def _resolved_entry_key(entry):
+  """Stable identity/scope key for a resolved report context."""
+  return (
+      entry.get("session_id"),
+      entry.get("user_id"),
+      entry.get("root_agent_name"),
+      entry.get("scope_signature"),
+  )
+
+
+class _ResolvedEntriesIndex(dict):
+  """Dict-compatible report index with a reusable session lookup."""
+
+  def __init__(self, indexed):
+    super().__init__(indexed)
+    by_session = {}
+    by_attribution = {}
+    for key, context in self.items():
+      session_id = context.get(
+          "session_id", key if isinstance(key, str) else None
+      )
+      by_session.setdefault(session_id, []).append(context)
+      by_attribution.setdefault(_resolved_entry_key(context), []).append(
+          context
+      )
+    self.by_session = by_session
+    self.by_attribution = by_attribution
+
+
+def _index_resolved_entries(entries):
+  """Index resolved contexts without overwriting reused session IDs.
+
+  Unique sessions retain their legacy string key. Colliding sessions use
+  their full resolved identity/scope tuple. A duplicate full tuple is kept
+  under an ordinal suffix rather than silently replacing earlier data.
+  """
+  grouped = {}
+  for entry in entries:
+    grouped.setdefault(entry.get("session_id"), []).append(entry)
+
+  indexed = {}
+  for session_id, candidates in grouped.items():
+    if len(candidates) == 1:
+      indexed[session_id] = candidates[0]
+      continue
+    for ordinal, entry in enumerate(candidates):
+      key = _resolved_entry_key(entry)
+      if key in indexed:
+        logger.warning(
+            "Duplicate resolved report candidate for session %s and the"
+            " same identity/scope; retaining both with an ordinal key.",
+            session_id,
+        )
+        key = (*key, ordinal)
+      indexed[key] = entry
+  return _ResolvedEntriesIndex(indexed)
+
+
+def _resolved_candidates(resolved_map, session_id):
+  """Return one session's candidates without rescanning a built index."""
+  if isinstance(resolved_map, _ResolvedEntriesIndex):
+    return list(resolved_map.by_session.get(session_id, ()))
+  return [
+      context
+      for key, context in resolved_map.items()
+      if context.get("session_id", key if isinstance(key, str) else None)
+      == session_id
+  ]
+
+
+def _resolved_context_for_score(resolved_map, score):
+  """Correlate a score to one context, failing closed on ambiguity."""
+  session_id = score.session_id
+  details = getattr(score, "details", None) or {}
+  pinned_fields = [
+      field for field in _REPORT_ATTRIBUTION_FIELDS if field in details
+  ]
+  exact_indexed_lookup = (
+      isinstance(resolved_map, _ResolvedEntriesIndex)
+      and type(session_id) is str
+      and len(pinned_fields) == len(_REPORT_ATTRIBUTION_FIELDS)
+      and all(
+          type(details[field]) in (str, type(None))
+          for field in _REPORT_ATTRIBUTION_FIELDS
+      )
+  )
+  if exact_indexed_lookup:
+    attribution = (
+        session_id,
+        *(details[field] for field in _REPORT_ATTRIBUTION_FIELDS),
+    )
+    candidates = list(resolved_map.by_attribution.get(attribution, ()))
+  else:
+    candidates = _resolved_candidates(resolved_map, session_id)
+  if not candidates:
+    return {}
+
+  if pinned_fields and not exact_indexed_lookup:
+    candidates = [
+        context
+        for context in candidates
+        if all(context.get(field) == details[field] for field in pinned_fields)
+    ]
+
+  if len(candidates) == 1:
+    return candidates[0]
+  if candidates:
+    logger.warning(
+        "Ambiguous report correlation for session %s: %d trace candidates"
+        " remain and the score has insufficient identity/scope attribution;"
+        " omitting the association.",
+        session_id,
+        len(candidates),
+    )
+  else:
+    logger.warning(
+        "No report trace candidate matches the identity/scope attribution"
+        " on score for session %s; omitting the association.",
+        session_id,
+    )
+  return {}
+
+
+def _resolved_context_for_session(resolved_map, session_id):
+  """Return a legacy session context only when it is unique."""
+
+  class _SessionOnlyScore:
+    details = {}
+
+    def __init__(self, value):
+      self.session_id = value
+
+  return _resolved_context_for_score(
+      resolved_map, _SessionOnlyScore(session_id)
+  )
+
+
+def _report_identity_suffix(context):
+  """Printable identity/scope attribution for a resolved report row."""
+  dimensions = []
+  for label, field in (
+      ("user", "user_id"),
+      ("root", "root_agent_name"),
+      ("experiment", "experiment_id"),
+      ("scope", "scope_signature"),
+  ):
+    value = context.get(field)
+    if value is not None:
+      dimensions.append(f"{label}={value}")
+  if context.get("scope_signature") is None:
+    coverage = context.get("scope_coverage")
+    if coverage is not None:
+      dimensions.append(f"scope_coverage={','.join(coverage)}")
+  return f" [{', '.join(dimensions)}]" if dimensions else ""
 
 
 # ---------------------------------------------------------------------------
@@ -1189,7 +1325,7 @@ async def _build_resolved_map_from_conversations(
         entries[idx]["corrections"] = corr
         entries[idx]["verifications"] = verif
 
-  resolved = {}
+  resolved = []
   for entry in entries:
     conv = entry["conv"]
     resolved_entry = {
@@ -1205,14 +1341,18 @@ async def _build_resolved_map_from_conversations(
         "verifications": entry["verifications"],
         "conversation": entry["turns"],
     }
+    # Carry structured tool detail only when the conversation actually has it,
+    # so a legacy conversations file (no such field) stays truthfully "absent".
+    if "tool_calls_detail" in conv:
+      resolved_entry["tool_calls_detail"] = conv["tool_calls_detail"]
     if tag_turns:
       resolved_entry["turn_tags"] = entry.get("turn_tags", [])
       resolved_entry["correction_boundaries"] = entry.get(
           "correction_boundaries", []
       )
       resolved_entry["sub_trajectories"] = entry.get("sub_trajectories", [])
-    resolved[entry["sid"]] = resolved_entry
-  return resolved
+    resolved.append(resolved_entry)
+  return _index_resolved_entries(resolved)
 
 
 # ---------------------------------------------------------------------------
@@ -1236,6 +1376,7 @@ def run_evaluation(
 ) -> dict:
   from bigquery_agent_analytics import CategoricalEvaluationConfig
   from bigquery_agent_analytics import TraceFilter
+  from bigquery_agent_analytics.categorical_evaluator import CategoricalContextSource
 
   model = model or EVAL_MODEL_ID
   client = get_client()
@@ -1263,12 +1404,14 @@ def run_evaluation(
 
   if session_id:
     trace_filter = TraceFilter(
-        session_ids=[session_id], custom_labels=custom_labels
+        session_ids=[session_id],
+        limit=_explicit_report_trace_limit([session_id]),
+        custom_labels=custom_labels,
     )
   elif session_ids:
     trace_filter = TraceFilter(
         session_ids=session_ids,
-        limit=len(session_ids),
+        limit=_explicit_report_trace_limit(session_ids),
         custom_labels=custom_labels,
     )
     if app_name:
@@ -1288,40 +1431,67 @@ def run_evaluation(
     if app_name:
       trace_filter.root_agent_name = app_name
 
-  report = client.evaluate_categorical(config=cat_config, filters=trace_filter)
+  # Fetch traces and match golden Q&A BEFORE evaluation so the server-side
+  # judge and report enrichment use the same exact resolved selector keys.
+  explicit_sessions = bool(session_id or session_ids)
+  if explicit_sessions:
+    traces, trace_filter = _list_complete_report_traces(client, trace_filter)
+  else:
+    traces = client.list_traces(filter_criteria=trace_filter)
+  resolved = resolve_trace_responses(traces)
+  resolved_map = _index_resolved_entries(resolved)
+
+  golden_metadata = {}
+  golden_ctx = {}
+  golden_qa = (eval_spec or {}).get("golden_qa")
+  if golden_qa:
+    # Matching keys off the conversation's FIRST user message (the
+    # topic anchor), consistent with the conversations-file path.
+    question_by_selector = {}
+    for ctx in resolved_map.values():
+      selector = _resolved_selector_from_context(ctx)
+      if selector is not None:
+        question_by_selector[selector] = ctx.get("first_question") or ctx.get(
+            "question", ""
+        )
+    golden_ctx, golden_metadata = match_golden_qa(
+        question_by_selector, golden_qa, threshold=golden_threshold
+    )
+
+  evaluation_kwargs = dict(
+      config=cat_config,
+      filters=trace_filter,
+  )
+  if golden_ctx:
+    evaluation_kwargs.update(
+        per_session_context=golden_ctx,
+        context_source=CategoricalContextSource.GOLDEN_EXPECTED_ANSWER,
+    )
+  report = client.evaluate_categorical(**evaluation_kwargs)
 
   all_session_ids = [sr.session_id for sr in report.session_results]
   logger.info("Resolving responses for %d sessions...", len(all_session_ids))
 
-  traces = client.list_traces(
-      filter_criteria=TraceFilter(
-          session_ids=all_session_ids, limit=len(all_session_ids)
-      )
-  )
-  resolved = resolve_trace_responses(traces)
-  resolved_map = {r["session_id"]: r for r in resolved}
-
-  # Golden Q&A matching (same as the --conversations-file path). The server-side
-  # judge (AI.GENERATE over BigQuery) can't receive per-session expected answers,
-  # so on this path golden Q&A drives the golden_eval_summary regression headline
-  # and per-session matched/expected reporting — but does NOT inject the expected
-  # answer into the judge for correctness grounding (that is conversations-only).
-  # scope/ground_truth still ground the judge on both paths.
-  golden_metadata = {}
-  golden_qa = (eval_spec or {}).get("golden_qa")
-  if golden_qa:
-    question_by_sid = {
-        sid: ctx.get("question", "") for sid, ctx in resolved_map.items()
-    }
-    _golden_ctx, golden_metadata = match_golden_qa(
-        question_by_sid, golden_qa, threshold=golden_threshold
+  # The pre-fetch and the evaluation run the same filter, but the
+  # evaluation's transcript CTE can admit sessions the pre-fetch missed
+  # (or vice versa); backfill any evaluated session we did not resolve.
+  resolved_session_ids = {
+      context.get("session_id") for context in resolved_map.values()
+  }
+  missing = [sid for sid in all_session_ids if sid not in resolved_session_ids]
+  if missing:
+    extra, _ = _list_complete_report_traces(
+        client,
+        TraceFilter(
+            session_ids=missing,
+            limit=_explicit_report_trace_limit(missing),
+            custom_labels=custom_labels,
+        ),
     )
-    logger.warning(
-        "Golden Q&A on the BigQuery path produces the golden_eval_summary and "
-        "per-session matches, but the server-side judge cannot take per-session "
-        "expected answers — expected-answer correctness grounding applies on the "
-        "--conversations-file path only (scope/ground_truth ground both paths)."
+    resolved_map = _index_resolved_entries(
+        [*resolved_map.values(), *resolve_trace_responses(extra)]
     )
+    resolved = list(resolved_map.values())
 
   # Infer corrections/verifications for multi-turn sessions (concurrent).
   mt_sessions = [
@@ -1554,6 +1724,7 @@ def generate_quality_report_from_conversations(
     per_session_context=None,
     golden_threshold=_DEFAULT_GOLDEN_THRESHOLD,
     eval_config=None,
+    trace_filter=None,
 ) -> dict:
   """Evaluate local conversations and return a structured quality report.
 
@@ -1575,6 +1746,8 @@ def generate_quality_report_from_conversations(
       golden_threshold: Cosine-similarity threshold for golden matching.
       eval_config: Optional metric-definition override (same as the CLI
           ``--eval-config``); when None the built-in metrics are used.
+      trace_filter: Optional ``TraceFilter`` carrying app/label/time bounds
+          for the trajectory fetch; only its session_ids/limit are replaced.
 
   Returns:
       Dict with ``summary`` and ``sessions`` keys. When the eval spec carries
@@ -1598,12 +1771,18 @@ def generate_quality_report_from_conversations(
 
   trajectories = {}
   if trajectory_samples and trajectory_samples > 0:
-    traj_sids = _select_trajectory_sessions(
+    traj_sids, trajectory_map = _select_trajectory_population(
         result["report"],
         result["resolved_map"],
         trajectory_samples,
     )
-    trajectories = _fetch_session_traces(traj_sids, trajectory_samples)
+    trajectories = _fetch_session_traces(
+        traj_sids,
+        trajectory_samples,
+        max_traces=_trace_fetch_limit(trajectory_map, traj_sids),
+        resolved_map=trajectory_map,
+        base_filter=trace_filter,
+    )
 
   output = _build_json_output(
       result["report"],
@@ -1772,7 +1951,10 @@ def run_browse(args):
 
   for r in results:
     a2a_tag = "  [A2A]" if r.get("is_a2a") else ""
-    print(f"\n  [{r['time']}] {r['session_id']}{a2a_tag}")
+    print(
+        f"\n  [{r['time']}] {r['session_id']}"
+        f"{_report_identity_suffix(r)}{a2a_tag}"
+    )
     print(f"    Question:  {r['question']}")
     print(f"    Agent:     {r['answered_by']}")
     if r["response"]:
@@ -1829,6 +2011,10 @@ def run_eval(args):
         sys.exit(1)
       k, v = item.split("=", 1)
       custom_labels[k] = v
+
+  # CLI-derived bounds for every trajectory fetch in this invocation: the
+  # trace reads stay scoped to the same app/labels/time the scoring ran with.
+  base_trace_filter = _enrichment_base_filter(args, custom_labels)
 
   if conversations_file:
     # --- Local conversations path (no BigQuery) ---
@@ -1964,29 +2150,47 @@ def run_eval(args):
   trajectory_samples = getattr(args, "trajectory_samples", 0)
   tag_turns = getattr(args, "tag_turns", False)
   if trajectory_samples and trajectory_samples > 0:
-    traj_sids = _select_trajectory_sessions(
+    traj_sids, trajectory_map = _select_trajectory_population(
         result["report"],
         result["resolved_map"],
         trajectory_samples,
     )
     # Also fetch trajectories for all correction sessions (for inline display)
     if tag_turns:
-      correction_sids = [
-          sid
-          for sid, ctx in result["resolved_map"].items()
-          if ctx.get("correction_boundaries")
-      ]
-      for sid in correction_sids:
-        if sid not in traj_sids:
-          traj_sids.append(sid)
+      selected_contexts = list(trajectory_map.values())
+      selected_keys = {
+          _resolved_entry_key(context) for context in selected_contexts
+      }
+      for context in result["resolved_map"].values():
+        if not context.get("correction_boundaries"):
+          continue
+        key = _resolved_entry_key(context)
+        if key in selected_keys:
+          continue
+        selected_keys.add(key)
+        selected_contexts.append(context)
+      trajectory_map = _index_resolved_entries(selected_contexts)
+      traj_sids = list(
+          dict.fromkeys(
+              ctx.get("session_id")
+              for ctx in trajectory_map.values()
+              if ctx.get("session_id")
+          )
+      )
     logger.info(
         "Fetching %d execution trajectories from BigQuery...", len(traj_sids)
     )
-    trajectories = _fetch_session_traces(traj_sids, len(traj_sids))
+    trajectories = _fetch_session_traces(
+        traj_sids,
+        len(traj_sids),
+        max_traces=_trace_fetch_limit(trajectory_map, traj_sids),
+        resolved_map=trajectory_map,
+        base_filter=base_trace_filter,
+    )
     if trajectories:
       logger.info("Fetched %d trajectories", len(trajectories))
-      for sid, trace_obj in trajectories.items():
-        ctx = result["resolved_map"].get(sid)
+      for trace_obj in trajectories.values():
+        ctx = _resolved_context_for_trace(result["resolved_map"], trace_obj)
         if ctx and ctx.get("answered_by") == "unknown":
           ctx["answered_by"] = get_responding_agent(trace_obj)
     else:
@@ -1994,23 +2198,29 @@ def run_eval(args):
 
   # Single-session mode: always fetch trajectory from BQ
   if args.session and not trajectories and not conversations_file:
-    trajectories = _fetch_session_traces([args.session], max_sessions=1)
+    trajectories = _fetch_session_traces(
+        [args.session],
+        max_sessions=1,
+        max_traces=_trace_fetch_limit(result["resolved_map"], [args.session]),
+        resolved_map=result["resolved_map"],
+        base_filter=base_trace_filter,
+    )
     if trajectories:
-      for sid, trace_obj in trajectories.items():
-        ctx = result["resolved_map"].get(sid)
+      for trace_obj in trajectories.values():
+        ctx = _resolved_context_for_trace(result["resolved_map"], trace_obj)
         if ctx and ctx.get("answered_by") == "unknown":
           ctx["answered_by"] = get_responding_agent(trace_obj)
 
   # Print execution trace to console for single-session mode
   if args.session and trajectories:
-    trace_obj = trajectories.get(args.session)
+    trace_obj = _trace_for_session(trajectories, args.session)
     if trace_obj:
       hr = "─" * 70
       print(f"\n{'=' * 70}")
       print("EXECUTION TRACE")
       print(f"{'=' * 70}")
       print(_render_trace(trace_obj))
-      ctx = result["resolved_map"].get(args.session, {})
+      ctx = _resolved_context_for_session(result["resolved_map"], args.session)
       sub_trajs = ctx.get("sub_trajectories", [])
       conversation = ctx.get("conversation", [])
       if sub_trajs and conversation:
@@ -2036,8 +2246,13 @@ def run_eval(args):
 
   report_path = None
   md_dir = None
+  md_out_path = None
   if args.output_json and args.output_json != "-":
     md_dir = os.path.dirname(os.path.abspath(args.output_json))
+    # Name the markdown after the JSON (v0_test_report.json -> v0_test_report.md)
+    # so every scored artifact has a human-readable twin with a stable name.
+    if args.output_json.endswith(".json"):
+      md_out_path = os.path.abspath(args.output_json)[: -len(".json")] + ".md"
   if args.report:
     report_path = _write_md_report(
         result["report"],
@@ -2045,6 +2260,7 @@ def run_eval(args):
         args,
         report_dir=md_dir,
         trajectories=trajectories,
+        out_path=md_out_path,
     )
 
   if report_path:
@@ -2088,7 +2304,7 @@ def _group_by_category(report):
 def _build_agent_stats(report, resolved_map):
   agent_stats = {}
   for sr in report.session_results:
-    ctx = resolved_map.get(sr.session_id, {})
+    ctx = _resolved_context_for_score(resolved_map, sr)
     agent = ctx.get("answered_by") or "unknown"
     if agent not in agent_stats:
       agent_stats[agent] = {
@@ -2268,9 +2484,7 @@ def _print_eval_results(
   hr = "\u2500" * 70
 
   by_category = _group_by_category(report)
-  a2a_session_ids = {
-      sid for sid, ctx in resolved_map.items() if ctx.get("is_a2a")
-  }
+  a2a_count = sum(bool(ctx.get("is_a2a")) for ctx in resolved_map.values())
 
   # --- Per-session details ---
   samples_dict = _parse_samples(samples)
@@ -2296,14 +2510,17 @@ def _print_eval_results(
 
     for sr in sessions[:limit]:
       sid = sr.session_id
-      ctx = resolved_map.get(sid, {})
+      ctx = _resolved_context_for_score(resolved_map, sr)
       question = ctx.get("question", "")
       response = ctx.get("response", "")
       answered_by = ctx.get("answered_by", "")
 
-      a2a_tag = "  [A2A]" if sid in a2a_session_ids else ""
+      a2a_tag = "  [A2A]" if ctx.get("is_a2a") else ""
       agent_tag = f"  \u2192 {answered_by}" if answered_by else ""
-      print(f"\n  Session:     {sid}{a2a_tag}{agent_tag}")
+      print(
+          f"\n  Session:     {sid}{_report_identity_suffix(ctx)}"
+          f"{a2a_tag}{agent_tag}"
+      )
       q = " ".join(question.split()) if question else "(none)"
       r = " ".join(response.split()) if response else "(none)"
       print(f"  Question:    {q}")
@@ -2464,8 +2681,8 @@ def _print_eval_results(
         f"  Parse errors             : "
         f"{unknown_count} session(s) ({parse_error_metrics} metric evals)"
     )
-  if a2a_session_ids:
-    print(f"  A2A sessions detected    : {len(a2a_session_ids)}")
+  if a2a_count:
+    print(f"  A2A sessions detected    : {a2a_count}")
 
   # --- Failure breakdown: skill gap vs knowledge gap vs tool gap ---
   counts, _ = _failure_breakdown_from_report(report)
@@ -2697,10 +2914,274 @@ def _segment_trace_by_turns(trace, conversation, sub_trajectories):
   return segments
 
 
-def _fetch_session_traces(session_ids, max_sessions=3):
+def _trace_attribution(trace):
+  identity = getattr(trace, "identity", None)
+  scope = getattr(trace, "scope", None)
+  return {
+      "session_id": trace.session_id,
+      "user_id": (
+          identity.user_id
+          if identity is not None
+          else getattr(trace, "user_id", None)
+      ),
+      "root_agent_name": (
+          identity.root_agent_name if identity is not None else None
+      ),
+      "scope_signature": (scope.scope_signature if scope is not None else None),
+  }
+
+
+class _TraceIndex(dict):
+  """Dict-compatible trace index carrying its correlation contexts."""
+
+  def __init__(self, indexed, contexts):
+    super().__init__(indexed)
+    self.contexts = contexts
+
+
+def _index_traces(traces):
+  """Index traces without collapsing reused session IDs."""
+  entries = [{**_trace_attribution(trace), "_trace": trace} for trace in traces]
+  contexts = _index_resolved_entries(entries)
+  indexed = {key: entry["_trace"] for key, entry in contexts.items()}
+  return _TraceIndex(indexed, contexts)
+
+
+def _trace_contexts(trajectories):
+  """Return a reusable collision-safe context index for traces."""
+  contexts = getattr(trajectories, "contexts", None)
+  if isinstance(contexts, _ResolvedEntriesIndex):
+    return contexts
+  return _index_resolved_entries(
+      [
+          {**_trace_attribution(trace), "_trace": trace}
+          for trace in trajectories.values()
+      ]
+  )
+
+
+def _trace_for_score(trajectories, score):
+  """Correlate one score to one trace using reserved attribution details."""
+  contexts = _trace_contexts(trajectories)
+  context = _resolved_context_for_score(contexts, score)
+  return context.get("_trace") if context else None
+
+
+def _resolved_context_for_trace(resolved_map, trace):
+  """Correlate one resolved trace to its report context."""
+  attribution = _trace_attribution(trace)
+  session_candidates = _resolved_candidates(
+      resolved_map, attribution["session_id"]
+  )
+  if len(session_candidates) == 1 and not any(
+      field in session_candidates[0] for field in _REPORT_ATTRIBUTION_FIELDS
+  ):
+    # Legacy/local report rows predate identity attribution. Preserve their
+    # historical unique-session association without broadening collisions.
+    return session_candidates[0]
+
+  class _TraceAttribution:
+    pass
+
+  record = _TraceAttribution()
+  record.session_id = attribution["session_id"]
+  record.details = {
+      field: attribution[field] for field in _REPORT_ATTRIBUTION_FIELDS
+  }
+  return _resolved_context_for_score(resolved_map, record)
+
+
+def _trace_for_context(trajectories, context):
+  """Correlate one resolved context to its exact trace."""
+
+  class _ContextAttribution:
+    pass
+
+  record = _ContextAttribution()
+  record.session_id = context.get("session_id")
+  record.details = {
+      field: context[field]
+      for field in _REPORT_ATTRIBUTION_FIELDS
+      if field in context
+  }
+  return _trace_for_score(trajectories, record)
+
+
+def _trace_for_session(trajectories, session_id):
+  """Return a session trace only when the report population is unique."""
+  contexts = _trace_contexts(trajectories)
+  context = _resolved_context_for_session(contexts, session_id)
+  return context.get("_trace") if context else None
+
+
+def _trace_fetch_limit(resolved_map, session_ids):
+  """Return the resolved trace count needed for selected sessions.
+
+  A legacy session id can resolve to multiple identity/scope candidates.
+  ``TraceFilter.limit`` bounds resolved traces, not distinct session ids, so
+  sizing it from the latter would silently discard collision candidates.
+  """
+  wanted = set(session_ids)
+  resolved_count = sum(
+      1
+      for context in resolved_map.values()
+      if context.get("session_id") in wanted
+  )
+  return max(len(wanted), resolved_count)
+
+
+def _explicit_report_trace_limit(session_ids):
+  """Initial size for a completeness-probed explicit-session listing."""
+  return max(
+      1,
+      len(set(session_ids)) * _REPORT_INITIAL_CANDIDATES_PER_SESSION,
+  )
+
+
+def _list_complete_report_traces(client, filter_criteria):
+  """List an explicit report population without a silent trace cap.
+
+  ``list_traces`` returns at most ``TraceFilter.limit`` resolved traces. An
+  exactly full page therefore proves neither completeness nor truncation.
+  Double the limit until the result is shorter than the request. If the
+  defensive ceiling is itself saturated, fail explicitly instead of dropping
+  identity/scope candidates from a report.
+
+  Returns:
+      ``(traces, effective_filter)`` where ``effective_filter.limit`` is the
+      completeness-proving request size and can be reused by the evaluator.
+  """
+  request = filter_criteria.snapshot()
+  limit = max(1, request.limit)
+  if limit > _REPORT_TRACE_LIMIT_CEILING:
+    raise _ReportTracePopulationTruncatedError(
+        "The requested report trace population exceeds the completeness"
+        f" ceiling ({_REPORT_TRACE_LIMIT_CEILING}); narrow the explicit"
+        " session set."
+    )
+
+  while True:
+    request.limit = limit
+    traces = client.list_traces(filter_criteria=request)
+    if len(traces) < limit:
+      return traces, request
+    if limit >= _REPORT_TRACE_LIMIT_CEILING:
+      raise _ReportTracePopulationTruncatedError(
+          "The report trace population saturated the completeness ceiling"
+          f" ({_REPORT_TRACE_LIMIT_CEILING}); no partial report was produced."
+      )
+    limit = min(limit * 2, _REPORT_TRACE_LIMIT_CEILING)
+
+
+def _retain_report_traces(fetched, resolved_map):
+  """Keep only traces provably attributable to the resolved report rows."""
+  by_session = {}
+  for trace in fetched:
+    by_session.setdefault(trace.session_id, []).append(trace)
+
+  retained = []
+  unmatched_count = 0
+  legacy_collision_count = 0
+  for session_id, traces in by_session.items():
+    contexts = _resolved_candidates(resolved_map, session_id)
+    has_attributed_context = any(
+        any(field in context for field in _REPORT_ATTRIBUTION_FIELDS)
+        for context in contexts
+    )
+    if has_attributed_context:
+      for trace in traces:
+        if _resolved_context_for_trace(resolved_map, trace):
+          retained.append(trace)
+        else:
+          unmatched_count += 1
+      continue
+
+    # A legacy report row has only a session id. It remains compatible when
+    # the fetched population is singular, but cannot safely choose among a
+    # reused session's identity/scope candidates.
+    if len(contexts) == 1 and len(traces) == 1:
+      retained.append(traces[0])
+    elif contexts:
+      legacy_collision_count += len(traces)
+    else:
+      unmatched_count += len(traces)
+
+  if unmatched_count:
+    logger.warning(
+        "Omitting %d execution trace(s) outside the resolved report"
+        " population.",
+        unmatched_count,
+    )
+  if legacy_collision_count:
+    logger.warning(
+        "Omitting %d execution trace(s): a legacy report context cannot"
+        " distinguish reused-session identity/scope candidates.",
+        legacy_collision_count,
+    )
+  return retained
+
+
+def _cli_base_trace_filter(app_name=None, custom_labels=None, time_period=None):
+  """Build the CLI-derived base TraceFilter for trajectory fetches.
+
+  Preserves the app/label/time bounds the evaluation ran with so the trace
+  fetch cannot select rows outside the scored population's scope (e.g. a
+  shared events table holding several passes that reuse session ids).
+  Returns None when no bound is set (legacy unbounded fetch).
+  """
+  if not app_name and not custom_labels and time_period in (None, "", "all"):
+    return None
+  try:
+    from bigquery_agent_analytics import TraceFilter as _TraceFilter
+  except ImportError:
+    return None
+  last = None if time_period in (None, "", "all") else time_period
+  base = _TraceFilter.from_cli_args(last=last, custom_labels=custom_labels)
+  if app_name:
+    base.root_agent_name = app_name
+  return base
+
+
+def _enrichment_base_filter(args, custom_labels):
+  """Derive the trajectory-fetch bounds from the evaluator's own selector.
+
+  Mirrors run_evaluation(): app + labels always apply; the time bound
+  applies ONLY when sessions are selected by window. Explicit session
+  selection (``--session`` / ``--session-ids-file``) documents
+  ``--time-period`` as ignored and the evaluator builds its selector
+  without a time bound — enrichment must drop it too, otherwise an older
+  explicitly selected session scores but silently loses its trace.
+  """
+  explicit_session_mode = bool(
+      getattr(args, "session", None) or getattr(args, "session_ids_file", None)
+  )
+  return _cli_base_trace_filter(
+      app_name=getattr(args, "app_name", None),
+      custom_labels=custom_labels,
+      time_period=(
+          None if explicit_session_mode else getattr(args, "time_period", None)
+      ),
+  )
+
+
+def _fetch_session_traces(
+    session_ids,
+    max_sessions=3,
+    *,
+    max_traces=None,
+    resolved_map=None,
+    base_filter=None,
+):
   """Fetch execution traces from BigQuery for the given session IDs.
 
-  Returns a dict mapping session_id -> Trace object.
+  Returns a collision-safe mapping. Unique sessions keep their legacy
+  ``session_id`` key; reused sessions are keyed by identity/scope tuples.
+  When ``resolved_map`` is supplied, only traces matching that report
+  population are retained; legacy session-only rows fail closed on collision.
+  When ``base_filter`` is supplied (a ``TraceFilter``), the fetch delegates
+  to a snapshot of it and replaces ONLY the requested ``session_ids`` and
+  display ``limit`` — the caller's app/label/time bounds are preserved and
+  the caller's filter object is never mutated.
   Silently returns empty dict if BQ is not configured or unavailable.
   """
   if not session_ids:
@@ -2733,64 +3214,113 @@ def _fetch_session_traces(session_ids, max_sessions=3):
     logger.debug("Failed to create BQ client", exc_info=True)
     return {}
 
-  def _fetch_one(sid):
-    try:
-      trace = client.get_session_trace(sid)
-      if trace and trace.spans:
-        return (sid, trace)
-    except Exception:
-      logger.debug("Failed to fetch trace for %s", sid, exc_info=True)
-    return None
+  # One batched listing operation (with completeness probes only when a page
+  # saturates), instead of one get_session_trace query per session.
+  wanted = list(dict.fromkeys(session_ids))[:max_sessions]
+  trace_limit = max_traces if max_traces is not None else len(wanted)
+  if resolved_map is not None:
+    # The listing is necessarily session-wide because one report can contain
+    # multiple identity/scope candidates. Reserve U2's full candidate bound so
+    # a newer foreign candidate cannot consume the caller's smaller display
+    # limit before attribution is checked below.
+    trace_limit = max(trace_limit, _explicit_report_trace_limit(wanted))
+  try:
+    from bigquery_agent_analytics import TraceFilter as _TraceFilter
 
-  traces = {}
-  with ThreadPoolExecutor(max_workers=10) as executor:
-    results = executor.map(_fetch_one, session_ids[:max_sessions])
-    for result in results:
-      if result:
-        sid, trace = result
-        traces[sid] = trace
-  return traces
+    if base_filter is not None:
+      fetch_filter = base_filter.snapshot()
+    else:
+      fetch_filter = _TraceFilter()
+    fetch_filter.session_ids = wanted
+    fetch_filter.limit = trace_limit
+    fetched, _ = _list_complete_report_traces(client, fetch_filter)
+  except _ReportTracePopulationTruncatedError as exc:
+    logger.warning("Skipping execution trajectories: %s", exc)
+    return {}
+  except Exception:
+    logger.debug("Batch trace fetch failed", exc_info=True)
+    return {}
+
+  retained = [
+      trace
+      for trace in fetched
+      if trace and trace.spans and trace.session_id in set(wanted)
+  ]
+  if resolved_map is not None:
+    retained = _retain_report_traces(retained, resolved_map)
+  return _index_traces(retained)
+
+
+def _select_trajectory_population(report, resolved_map, n):
+  """Pick N score-attributed contexts for trajectory display.
+
+  Priority: unhelpful with corrections > unhelpful > partial > corrections > any.
+  A session-only score that maps to multiple identity/scope contexts is
+  deliberately omitted: fetching by its bare session ID could render every
+  candidate as the explanation for one score.
+  """
+  by_category = _group_by_category(report)
+  unhelpful = {id(sr) for sr in by_category.get("unhelpful", [])}
+  partial = {id(sr) for sr in by_category.get("partial", [])}
+  candidates = []
+  for ordinal, score in enumerate(report.session_results):
+    context = _resolved_context_for_score(resolved_map, score)
+    if not context:
+      continue
+    correction = bool(context.get("correction_boundaries"))
+    if id(score) in unhelpful:
+      priority = 0 if correction else 1
+    elif id(score) in partial:
+      priority = 2
+    elif correction:
+      priority = 3
+    else:
+      priority = 4
+    candidates.append((priority, ordinal, context))
+
+  selected = []
+  selected_keys = set()
+  for _, _, context in sorted(candidates):
+    key = _resolved_entry_key(context)
+    if key in selected_keys:
+      continue
+    selected_keys.add(key)
+    selected.append(context)
+    if len(selected) >= n:
+      break
+
+  selected_map = _index_resolved_entries(selected)
+  session_ids = list(
+      dict.fromkeys(
+          context.get("session_id")
+          for context in selected
+          if context.get("session_id")
+      )
+  )
+  return session_ids, selected_map
 
 
 def _select_trajectory_sessions(report, resolved_map, n):
-  """Pick the N most interesting sessions for trajectory display.
-
-  Priority: unhelpful with corrections > unhelpful > partial > corrections > any.
-  """
-  by_category = _group_by_category(report)
-  candidates = []
-
-  unhelpful_sids = {sr.session_id for sr in by_category.get("unhelpful", [])}
-  partial_sids = {sr.session_id for sr in by_category.get("partial", [])}
-  correction_sids = {
-      sid
-      for sid, ctx in resolved_map.items()
-      if ctx.get("correction_boundaries")
-  }
-
-  for sid in unhelpful_sids & correction_sids:
-    candidates.append(sid)
-  for sid in unhelpful_sids - correction_sids:
-    candidates.append(sid)
-  for sid in partial_sids:
-    if sid not in candidates:
-      candidates.append(sid)
-  for sid in correction_sids - unhelpful_sids - partial_sids:
-    candidates.append(sid)
-
-  if len(candidates) < n:
-    for sr in report.session_results:
-      if sr.session_id not in candidates:
-        candidates.append(sr.session_id)
-      if len(candidates) >= n:
-        break
-
-  return candidates[:n]
+  """Backward-compatible session-id view of safe trajectory selection."""
+  session_ids, _ = _select_trajectory_population(report, resolved_map, n)
+  return session_ids
 
 
 def _md_write_trajectory_section(w, trajectories, resolved_map):
   """Write the Sample Trajectories section to the markdown report."""
   if not trajectories:
+    return
+
+  matched = []
+  for trace_obj in trajectories.values():
+    ctx = _resolved_context_for_trace(resolved_map, trace_obj)
+    if not ctx:
+      logger.warning(
+          "Omitting an execution trace outside the resolved report population."
+      )
+      continue
+    matched.append((trace_obj, ctx))
+  if not matched:
     return
 
   w("## Sample Execution Trajectories")
@@ -2802,8 +3332,8 @@ def _md_write_trajectory_section(w, trajectories, resolved_map):
   )
   w("")
 
-  for sid, trace_obj in trajectories.items():
-    ctx = resolved_map.get(sid, {})
+  for trace_obj, ctx in matched:
+    sid = trace_obj.session_id
     # Skip correction sessions — their traces are shown in Correction Analysis
     if ctx.get("correction_boundaries"):
       continue
@@ -2811,7 +3341,7 @@ def _md_write_trajectory_section(w, trajectories, resolved_map):
     answered_by = ctx.get("answered_by", "")
     q = " ".join(question.split()) if question else "(none)"
 
-    w(f"### `{sid}` → {answered_by}")
+    w(f"### `{sid}`{_report_identity_suffix(ctx)}" f" → {answered_by}")
     w("")
     w(f"**Question:** {q}")
     w("")
@@ -2896,7 +3426,6 @@ def _md_write_session_section(
     sessions,
     md_samples,
     resolved_map,
-    a2a_session_ids,
     heading_level=2,
 ):
   """Write a section of per-session details to the markdown report."""
@@ -2909,16 +3438,19 @@ def _md_write_session_section(
   w("")
   for sr in shown:
     sid = sr.session_id
-    ctx = resolved_map.get(sid, {})
+    ctx = _resolved_context_for_score(resolved_map, sr)
     question = ctx.get("question", "")
     response = ctx.get("response", "")
     answered_by = ctx.get("answered_by", "")
-    a2a_tag = " [A2A]" if sid in a2a_session_ids else ""
+    a2a_tag = " [A2A]" if ctx.get("is_a2a") else ""
 
     q = " ".join(question.split()) if question else "(none)"
     r = " ".join(response.split()) if response else "(none)"
 
-    w(f"{sh} `{sid}`{a2a_tag} \u2192 {answered_by}")
+    w(
+        f"{sh} `{sid}`{_report_identity_suffix(ctx)}"
+        f"{a2a_tag} \u2192 {answered_by}"
+    )
     w("")
     w(f"- **Question:** {q}")
     r_display = (r[:500] + "\u2026") if len(r) > 500 else r
@@ -2982,7 +3514,7 @@ def _md_write_low_dimension_section(
     w("")
   for sr, mr in shown:
     sid = sr.session_id
-    ctx = resolved_map.get(sid, {})
+    ctx = _resolved_context_for_score(resolved_map, sr)
     question = ctx.get("question", "")
     response = ctx.get("response", "")
     answered_by = ctx.get("answered_by", "")
@@ -2990,7 +3522,7 @@ def _md_write_low_dimension_section(
     q = " ".join(question.split()) if question else "(none)"
     r = " ".join(response.split()) if response else "(none)"
 
-    w(f"{sh} `{sid}` → {answered_by}")
+    w(f"{sh} `{sid}`{_report_identity_suffix(ctx)} → {answered_by}")
     w("")
     w(f"- **Question:** {q}")
     r_display = (r[:500] + "…") if len(r) > 500 else r
@@ -3069,7 +3601,8 @@ def _md_write_correction_analysis(
   sessions_with_corrections = []
   tag_counts = {}
 
-  for sid, ctx in resolved_map.items():
+  for ctx in resolved_map.values():
+    sid = ctx.get("session_id")
     tags = ctx.get("turn_tags", [])
     boundaries = ctx.get("correction_boundaries", [])
     if tags:
@@ -3122,6 +3655,22 @@ def _md_write_correction_analysis(
   w("")
 
   # --- Correction Boundaries ---
+  def _correction_segment_heading(outcome, label):
+    """Map a sub-trajectory outcome to its report heading, suffix, and icon."""
+    if outcome == "wrong":
+      return "Before correction", "agent got it wrong", "❌"
+    if outcome == "recovered":
+      return "After correction", "agent recovered", "✅"
+    if outcome == "parroted":
+      return (
+          "After correction",
+          "agent parroted user's fact without verification",
+          "🔁",
+      )
+    if outcome == "not_recovered":
+      return "After correction", "agent did not recover", "❌"
+    return label, outcome, "➖"
+
   if sessions_with_corrections:
     w(f"{h1} Corrections")
     w("")
@@ -3146,11 +3695,12 @@ def _md_write_correction_analysis(
 
     routing_failures = []
 
-    for sid, ctx in shown:
+    for _key, ctx in shown:
+      sid = ctx.get("session_id")
       question = ctx.get("question", "")
       answered_by = ctx.get("answered_by", "")
       q = " ".join(question.split()) if question else "(none)"
-      w(f"{h2} `{sid}` → {answered_by}")
+      w(f"{h2} `{sid}`{_report_identity_suffix(ctx)} → {answered_by}")
       w("")
       w(f"- **Question:** {q}")
 
@@ -3165,16 +3715,16 @@ def _md_write_correction_analysis(
         w(f'  - User corrected: *"{correct[:200]}"*')
         w(f"  - Agent recovered: {recovered_icon}")
 
-      trace_obj = trajectories.get(sid)
+      trace_obj = _trace_for_context(trajectories, ctx)
       diagnosis, failure_type = _diagnose_correction_trace(trace_obj)
       if diagnosis:
         w(f"- **Diagnosis:** {diagnosis}")
         if failure_type == "routing_failure":
-          routing_failures.append((sid, answered_by, q))
+          routing_failures.append((sid, answered_by, q, ctx))
 
       # Render sub-trajectories with inline execution traces
       sub_trajs = ctx.get("sub_trajectories", [])
-      trace_obj = trajectories.get(sid)
+      trace_obj = _trace_for_context(trajectories, ctx)
       conversation = ctx.get("conversation", [])
 
       if sub_trajs and trace_obj and hasattr(trace_obj, "spans"):
@@ -3185,28 +3735,28 @@ def _md_write_correction_analysis(
         )
         if segments:
           w("")
+          # Seeded sessions (rows tagged custom_tags.seeded) carry event
+          # streams RECONSTRUCTED from the recorded conversation, with tool
+          # placement certified by the scored sub-trajectory outcomes --
+          # label them so span trees are never mistaken for live telemetry.
+          seeded_from = next(
+              (
+                  (s.attributes or {}).get("custom_tags", {}).get("seeded")
+                  for s in trace_obj.spans
+                  if (s.attributes or {}).get("custom_tags", {}).get("seeded")
+              ),
+              None,
+          )
+          if seeded_from:
+            w(
+                f"*Spans reconstructed from the recorded conversation"
+                f" (seeded from `{seeded_from}`).*"
+            )
+            w("")
           for seg in segments:
-            outcome = seg.get("outcome", "?")
-            if outcome == "wrong":
-              heading = "Before correction"
-              outcome_suffix = "agent got it wrong"
-              outcome_icon = "❌"
-            elif outcome == "recovered":
-              heading = "After correction"
-              outcome_suffix = "agent recovered"
-              outcome_icon = "✅"
-            elif outcome == "parroted":
-              heading = "After correction"
-              outcome_suffix = "agent parroted user's fact without verification"
-              outcome_icon = "🔁"
-            elif outcome == "not_recovered":
-              heading = "After correction"
-              outcome_suffix = "agent did not recover"
-              outcome_icon = "❌"
-            else:
-              heading = seg.get("label", "Segment")
-              outcome_suffix = outcome
-              outcome_icon = "➖"
+            heading, outcome_suffix, outcome_icon = _correction_segment_heading(
+                seg.get("outcome", "?"), seg.get("label", "Segment")
+            )
             w(
                 f"**{heading}** (turns {seg['start_turn']}–"
                 f"{seg['end_turn']}) — {outcome_suffix} {outcome_icon}"
@@ -3217,22 +3767,32 @@ def _md_write_correction_analysis(
             w("```")
             w("")
       elif sub_trajs:
-        w("- **Sub-trajectories:**")
+        # No execution spans (conversations-path sessions have no trace tree),
+        # so render the same Before/After blocks with the segment's dialogue
+        # as the evidence instead of a span tree.
+        w("")
         for st in sub_trajs:
-          label = st.get("label", "")
-          start = st.get("start_turn", "?")
-          end = st.get("end_turn", "?")
-          outcome = st.get("outcome", "?")
-          outcome_icon = (
-              "❌"
-              if outcome in ("wrong", "not_recovered")
-              else "✅"
-              if outcome == "recovered"
-              else "🔁"
-              if outcome == "parroted"
-              else "➖"
+          heading, outcome_suffix, outcome_icon = _correction_segment_heading(
+              st.get("outcome", "?"), st.get("label", "Segment")
           )
-          w(f"  - `{label}`: turns {start}–{end} → {outcome_icon} {outcome}")
+          start = st.get("start_turn")
+          end = st.get("end_turn")
+          span = (
+              f" (turns {start}–{end})"
+              if start is not None and end is not None
+              else ""
+          )
+          w(f"**{heading}**{span} — {outcome_suffix} {outcome_icon}")
+          w("")
+          if conversation and start is not None and end is not None:
+            w("```")
+            for i, turn in enumerate(conversation):
+              if start <= i <= end:
+                role = turn.get("role") or "?"
+                text = " ".join((turn.get("text") or "").split())
+                w(f"{role}: {text[:400]}")
+            w("```")
+            w("")
 
       _md_write_conversation(
           w,
@@ -3258,8 +3818,8 @@ def _md_write_correction_analysis(
           f"had no tool or agent routing:"
       )
       w("")
-      for sid, agent, question in routing_failures:
-        w(f"- `{sid}` → {agent}: {question}")
+      for sid, agent, question, ctx in routing_failures:
+        w(f"- `{sid}`{_report_identity_suffix(ctx)} → {agent}: {question}")
       w("")
 
   # --- Tagged Conversations (no corrections) ---
@@ -3306,7 +3866,7 @@ def _md_write_correction_analysis(
           t for t in tags if t.get("tag") in ("VERIFY", "SPECIFICS", "SCOPE")
       ]
 
-      w(f"{h2} `{sid}` → {answered_by}")
+      w(f"{h2} `{sid}`{_report_identity_suffix(ctx)} → {answered_by}")
       w("")
       w(f"- **Question:** {q}")
       for ft in flag_tags:
@@ -3333,6 +3893,7 @@ def _write_md_report(
     args,
     report_dir=None,
     trajectories=None,
+    out_path=None,
 ):
   lines = []
   w = lines.append
@@ -3341,9 +3902,7 @@ def _write_md_report(
     trajectories = {}
 
   by_category = _group_by_category(report)
-  a2a_session_ids = {
-      sid for sid, ctx in resolved_map.items() if ctx.get("is_a2a")
-  }
+  a2a_count = sum(bool(ctx.get("is_a2a")) for ctx in resolved_map.values())
 
   fp_count = len(by_category.get("unhelpful", []))
   partial_count = len(by_category.get("partial", []))
@@ -3404,16 +3963,18 @@ def _write_md_report(
       toc.append("    * [Correction Analysis](#correction-analysis)")
       toc.append("      * [Turn Tag Distribution](#turn-tag-distribution)")
       correction_sessions = [
-          sid
-          for sid, ctx in resolved_map.items()
+          ctx
+          for ctx in resolved_map.values()
           if ctx.get("correction_boundaries")
       ]
       if correction_sessions:
         toc.append("      * [Corrections](#corrections)")
         has_routing_failures = any(
-            _diagnose_correction_trace(trajectories.get(sid))[1]
+            _diagnose_correction_trace(
+                _trace_for_context(trajectories, context)
+            )[1]
             == "routing_failure"
-            for sid in correction_sessions
+            for context in correction_sessions
         )
         if has_routing_failures:
           toc.append("      * [Routing Failures](#routing-failures)")
@@ -3431,7 +3992,13 @@ def _write_md_report(
   w("")
 
   model = args.model or EVAL_MODEL_ID
-  cmd_parts = ["./scripts/quality_report.sh"] + sys.argv[1:]
+  # Reproduce the invocation, but never leak workstation paths into a
+  # publishable artifact: absolute path arguments are reduced to basenames.
+  cmd_parts = ["./scripts/quality_report.sh"]
+  for arg in sys.argv[1:]:
+    if arg.startswith(os.sep) or arg.startswith("~"):
+      arg = os.path.basename(arg)
+    cmd_parts.append(arg)
   if "--report" not in cmd_parts:
     cmd_parts.insert(1, "--report")
   w(f"Markdown report generated by `{' '.join(cmd_parts)}`.")
@@ -3456,7 +4023,7 @@ def _write_md_report(
   w(f"| Partial | {partial_count} |")
   w(f"| Unhelpful | {fp_count} |")
   w(f"| Unhelpful rate | {fp_rate:.1f}% |")
-  counts, gap_sids = _failure_breakdown_from_report(report)
+  counts, gap_scores = _failure_breakdown_from_report(report)
   unaddressable = counts["knowledge_gap"] + counts["tool_gap"]
   addressable = total - unaddressable
   good = meaningful_count + declined_count
@@ -3478,19 +4045,17 @@ def _write_md_report(
         f"| Parse errors | {unknown_count} session(s) "
         f"({parse_error_metrics} metric evals) |"
     )
-  if a2a_session_ids:
-    w(f"| A2A sessions | {len(a2a_session_ids)} |")
+  if a2a_count:
+    w(f"| A2A sessions | {a2a_count} |")
   w("")
 
   # --- Failure breakdown: which gaps evolution can vs cannot fix ---
-  def _gap_questions(sids):
+  def _gap_questions(scores):
     out = []
-    sid_set = set(sids)
-    for sr in report.session_results:
-      if sr.session_id in sid_set:
-        q = resolved_map.get(sr.session_id, {}).get("question", "")
-        if q:
-          out.append(" ".join(q.split()))
+    for sr in scores:
+      q = _resolved_context_for_score(resolved_map, sr).get("question", "")
+      if q:
+        out.append(" ".join(q.split()))
     return out
 
   for gap_key, title, blurb in [
@@ -3508,7 +4073,7 @@ def _write_md_report(
           " tool:",
       ),
   ]:
-    questions = _gap_questions(gap_sids[gap_key])
+    questions = _gap_questions(gap_scores[gap_key])
     if not questions:
       continue
     w(f"### {title}")
@@ -3637,7 +4202,6 @@ def _write_md_report(
         unhelpful_sessions,
         _get_sample_limit(_samples_dict, "unhelpful"),
         resolved_map,
-        a2a_session_ids,
         heading_level=3,
     )
 
@@ -3649,7 +4213,6 @@ def _write_md_report(
         declined_sessions,
         _get_sample_limit(_samples_dict, "declined"),
         resolved_map,
-        a2a_session_ids,
         heading_level=3,
     )
 
@@ -3677,7 +4240,6 @@ def _write_md_report(
         partial_sessions,
         _get_sample_limit(_samples_dict, "partial"),
         resolved_map,
-        a2a_session_ids,
         heading_level=3,
     )
 
@@ -3706,16 +4268,159 @@ def _write_md_report(
   w(f"- **created_at:** {report.created_at.isoformat()}")
   w("")
 
-  # Write file
-  if report_dir is None:
-    report_dir = os.path.join(_script_dir, "reports")
-  os.makedirs(report_dir, exist_ok=True)
-  ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-  report_path = os.path.join(report_dir, f"quality_report_{ts}.md")
+  # Write file. An explicit out_path (e.g. <report>.json -> <report>.md) wins;
+  # otherwise fall back to the timestamped name under report_dir.
+  if out_path:
+    report_path = out_path
+    os.makedirs(os.path.dirname(os.path.abspath(report_path)), exist_ok=True)
+  else:
+    if report_dir is None:
+      report_dir = os.path.join(_script_dir, "reports")
+    os.makedirs(report_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = os.path.join(report_dir, f"quality_report_{ts}.md")
+  # Strip trailing whitespace per physical line (conversation text often
+  # carries it), so committed scorecards pass `git diff --check`. The writer
+  # never relies on trailing-double-space GFM line breaks.
+  text = "\n".join(lines)
+  text = "\n".join(line.rstrip() for line in text.split("\n"))
   with open(report_path, "w") as f:
-    f.write("\n".join(lines) + "\n")
+    f.write(text + "\n")
 
   return os.path.abspath(report_path)
+
+
+def _render_md_from_json(json_path, args):
+  """Re-render the markdown report from an existing scored JSON output.
+
+  Pure formatting -- no model calls, no re-scoring: reconstructs the report
+  objects from the JSON that ``--output-json`` wrote and feeds them to the
+  same markdown writer. Writes ``<name>.md`` next to ``<name>.json`` and
+  returns the md path.
+  """
+  from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationReport
+  from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricResult
+  from bigquery_agent_analytics.categorical_evaluator import CategoricalSessionResult
+
+  with open(json_path) as f:
+    data = json.load(f)
+  sessions = data.get("sessions", [])
+
+  session_results = []
+  distributions = {}
+  for s in sessions:
+    metric_results = []
+    for name, m in (s.get("metrics") or {}).items():
+      m = m or {}
+      metric_results.append(
+          CategoricalMetricResult(
+              metric_name=name,
+              category=m.get("category"),
+              justification=m.get("justification"),
+          )
+      )
+      if m.get("category") is not None:
+        by_cat = distributions.setdefault(name, {})
+        by_cat[m["category"]] = by_cat.get(m["category"], 0) + 1
+    session_results.append(
+        CategoricalSessionResult(
+            session_id=s.get("session_id", ""),
+            metrics=metric_results,
+            details={
+                field: s.get(field)
+                for field in _REPORT_ATTRIBUTION_FIELDS
+                if field in s
+            },
+        )
+    )
+
+  # Preserve the ORIGINAL scoring run's provenance (project, dataset, eval
+  # model, elapsed time) so the rendered report documents the run it came
+  # from, plus a record of what this render added.
+  details = dict(data.get("details") or {})
+  details["rendered_from"] = os.path.basename(json_path)
+  report = CategoricalEvaluationReport(
+      dataset=f"rendered from {os.path.basename(json_path)}",
+      total_sessions=len(session_results),
+      category_distributions=distributions,
+      details=details,
+      session_results=session_results,
+  )
+
+  # Older JSONs fold the turn-tagging artifacts into the conversation
+  # (inferred_tag per turn) and sub_trajectories; the Correction Analysis
+  # section keys on turn_tags / correction_boundaries, so reconstruct them.
+  for s in sessions:
+    conversation = s.get("conversation") or []
+    if "turn_tags" not in s:
+      tags = []
+      for i, turn in enumerate(conversation):
+        tag = turn.get("inferred_tag") or turn.get("tag")
+        if tag:
+          tags.append({"turn_index": i, "tag": tag})
+      if tags:
+        s["turn_tags"] = tags
+    if "correction_boundaries" not in s:
+      boundaries = []
+      for st in s.get("sub_trajectories") or []:
+        outcome = st.get("outcome")
+        if outcome not in ("recovered", "parroted", "not_recovered"):
+          continue
+        start = st.get("start_turn")
+        boundary = {
+            "turn_index": start,
+            "agent_recovered": outcome == "recovered",
+        }
+        if start is not None and 0 <= start < len(conversation):
+          boundary["correct_fact"] = (conversation[start].get("text") or "")[
+              :200
+          ]
+          if start >= 1:
+            boundary["wrong_claim"] = (
+                conversation[start - 1].get("text") or ""
+            )[:200]
+        boundaries.append(boundary)
+      if boundaries:
+        s["correction_boundaries"] = boundaries
+
+  resolved_map = _index_resolved_entries(sessions)
+
+  # Pull execution traces from BigQuery for these session ids ONLY when the
+  # env is explicitly configured (offline renders stay pure: no queries).
+  # The spans live in the events table; without them the report falls back
+  # to dialogue-only correction blocks.
+  trajectories = {}
+  if PROJECT_ID and DATASET_ID and DATASET_ID != "local":
+    session_ids = [s.get("session_id", "") for s in sessions]
+    trajectories = _fetch_session_traces(
+        session_ids,
+        max_sessions=len(session_ids),
+        max_traces=_trace_fetch_limit(resolved_map, session_ids),
+        resolved_map=resolved_map,
+    )
+    if trajectories:
+      logger.info(
+          "Fetched %d execution trace(s) from BigQuery (%s.%s.%s).",
+          len(trajectories),
+          PROJECT_ID,
+          DATASET_ID,
+          TABLE_ID,
+      )
+      # Mutate report.details (pydantic copies the dict at construction).
+      report.details["traces_source"] = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
+
+  out_path = os.path.abspath(json_path)
+  if out_path.endswith(".json"):
+    out_path = out_path[: -len(".json")] + ".md"
+  else:
+    out_path += ".md"
+  return _write_md_report(
+      report,
+      resolved_map,
+      args,
+      trajectories=trajectories,
+      out_path=out_path,
+  )
 
 
 # ---------------------------------------------------------------------------
@@ -3789,9 +4494,9 @@ def _has_failure_attribution_data(report):
 
 
 def _failure_breakdown_from_report(report):
-  """Return (counts_by_class, gap_session_ids_by_class) from a raw report."""
+  """Return (counts_by_class, attributed score rows by class)."""
   counts = {c: 0 for c in _FAILURE_CLASSES}
-  gap_sids = {c: [] for c in _FAILURE_CLASSES}
+  gap_scores = {c: [] for c in _FAILURE_CLASSES}
   for sr in report.session_results:
     cats = {mr.metric_name: mr.category for mr in sr.metrics}
     fc = _failure_class(
@@ -3802,8 +4507,8 @@ def _failure_breakdown_from_report(report):
     )
     if fc in counts:
       counts[fc] += 1
-      gap_sids[fc].append(sr.session_id)
-  return counts, gap_sids
+      gap_scores[fc].append(sr)
+  return counts, gap_scores
 
 
 def _classify_failures(report):
@@ -3865,7 +4570,12 @@ def _build_json_output(report, resolved_map, trajectories=None):
 
   sessions = []
   for sr in report.session_results:
-    ctx = resolved_map.get(sr.session_id, {})
+    ctx = _resolved_context_for_score(resolved_map, sr)
+    identity = getattr(sr, "identity", None)
+    scope = getattr(sr, "scope", None)
+    context_source = getattr(sr, "context_source", None)
+    if hasattr(context_source, "value"):
+      context_source = context_source.value
     metrics = {}
     quality_scores = {}
     for mr in sr.metrics:
@@ -3881,6 +4591,39 @@ def _build_json_output(report, resolved_map, trajectories=None):
         }
     session_dict = {
         "session_id": sr.session_id,
+        "user_id": (
+            identity.user_id
+            if identity is not None
+            else (getattr(sr, "details", None) or {}).get(
+                "user_id", ctx.get("user_id")
+            )
+        ),
+        "root_agent_name": (
+            identity.root_agent_name
+            if identity is not None
+            else (getattr(sr, "details", None) or {}).get(
+                "root_agent_name", ctx.get("root_agent_name")
+            )
+        ),
+        "experiment_id": (
+            scope.experiment_id
+            if scope is not None
+            else ctx.get("experiment_id")
+        ),
+        "custom_labels": (
+            scope.labels_dict if scope is not None else ctx.get("custom_labels")
+        ),
+        "scope_signature": (
+            scope.scope_signature
+            if scope is not None
+            else (getattr(sr, "details", None) or {}).get(
+                "scope_signature", ctx.get("scope_signature")
+            )
+        ),
+        "scope_coverage": ctx.get("scope_coverage"),
+        "context_applied": getattr(sr, "context_applied", False),
+        "context_source": context_source,
+        "execution_mode": getattr(sr, "execution_mode", None),
         "question": ctx.get("question", ""),
         "response": ctx.get("response", ""),
         "answered_by": ctx.get("answered_by", ""),
@@ -3893,6 +4636,12 @@ def _build_json_output(report, resolved_map, trajectories=None):
         "metrics": metrics,
         "quality_scores": quality_scores,
     }
+    # Only emit structured tool detail when it was actually captured (the
+    # conversations path records it; the BigQuery/trace path does not). Keeping
+    # key-absence truthful lets consumers tell "not captured" from "no calls"
+    # instead of rendering a false "(none)" for a BQ session that used tools.
+    if "tool_calls_detail" in ctx:
+      session_dict["tool_calls_detail"] = ctx["tool_calls_detail"]
     conversation = ctx.get("conversation", [])
     if conversation:
       turn_tags = ctx.get("turn_tags", [])
@@ -3915,8 +4664,14 @@ def _build_json_output(report, resolved_map, trajectories=None):
     sub_trajectories = ctx.get("sub_trajectories", [])
     if sub_trajectories:
       session_dict["sub_trajectories"] = sub_trajectories
-    if trajectories and sr.session_id in trajectories:
-      trace_obj = trajectories[sr.session_id]
+    # Persist the turn-tagging artifacts too, so a scored JSON is
+    # self-sufficient for re-rendering the markdown report (--render-json).
+    if ctx.get("turn_tags"):
+      session_dict["turn_tags"] = ctx["turn_tags"]
+    if ctx.get("correction_boundaries"):
+      session_dict["correction_boundaries"] = ctx["correction_boundaries"]
+    trace_obj = _trace_for_score(trajectories, sr) if trajectories else None
+    if trace_obj is not None:
       if hasattr(trace_obj, "spans"):
         session_dict["execution_trace"] = _render_trace(trace_obj)
         if sub_trajectories and conversation:
@@ -4103,6 +4858,14 @@ Custom metrics (overrides auto-discovered eval/eval_config.json):
       help="Generate a Markdown report in scripts/reports/",
   )
   parser.add_argument(
+      "--render-json",
+      metavar="REPORT_JSON",
+      help=(
+          "Re-render the Markdown report from an existing --output-json file"
+          " (pure formatting, no model calls); writes <name>.md next to it"
+      ),
+  )
+  parser.add_argument(
       "--samples",
       type=_samples_arg,
       default=None,
@@ -4251,6 +5014,22 @@ Custom metrics (overrides auto-discovered eval/eval_config.json):
         ("DATASET_LOCATION", os.getenv("GOOGLE_CLOUD_LOCATION", "local")),
     ]:
       os.environ.setdefault(var, default)
+
+  if args.render_json:
+    # Pure offline formatting: BigQuery configuration is OPTIONAL here. When
+    # the env is configured, execution traces are fetched to enrich the
+    # correction blocks; when it is absent, the report renders from the JSON
+    # alone -- no model calls, no BigQuery, no config required.
+    try:
+      _load_config()
+    except SystemExit:
+      logger.info(
+          "BigQuery env not configured -- rendering offline from the JSON"
+          " (correction blocks fall back to the recorded dialogue)."
+      )
+    md_path = _render_md_from_json(args.render_json, args)
+    print(f"Markdown report: {md_path}")
+    return
 
   _load_config()
 

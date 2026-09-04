@@ -1,0 +1,6 @@
+node_modules/
+dist/
+assets/
+.env
+service-account.json
+*-credentials.json

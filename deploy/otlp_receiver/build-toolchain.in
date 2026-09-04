@@ -1,0 +1,3 @@
+# The trusted-anchor build toolchain (see regen-locks.sh).
+hatchling
+build

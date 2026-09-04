@@ -20,15 +20,71 @@
 # is distinct from the root `vX.Y.Z` tags used by the consumption SDK
 # so the two release pipelines never collide.
 #
-# Pipeline:
+# Pipeline (issue #349 release contract — staging→promote, digest-pinned):
 #   verify          - tag matches pyproject; run producer tests on 3.12
-#   build           - wheel + sdist + Claude Code plugin tarball
-#   github-release  - attach all artifacts to the GitHub release for
-#                     this tag, with auto-generated release notes
+#   build-image     - build the receiver image and run the checked-in
+#                     self-test (deploy/otlp_receiver/selftest.sh, also
+#                     run by PR CI): version + factory assertions, then
+#                     401/200 against a pinned Pub/Sub emulator on a
+#                     private bridge network. The tested image ID is
+#                     re-asserted immediately before the push to the
+#                     PRIVATE staging repo (candidate tag includes
+#                     run_id.run_attempt). Auth: Workload Identity
+#                     Federation (no long-lived keys).
+#   build           - inject the FINAL public coordinate + digest into
+#                     _release.py, then build wheel + sdist (BOTH embed
+#                     the constant), plugin tarball, run the mechanical
+#                     digest-equality gate, write SHA256SUMS
+#   github-release  - DRAFT release with all artifacts + checksums; it
+#                     is published only by `finalize`, after BOTH
+#                     approvals and byte-identity reconciliation. The
+#                     guard (guard_existing_release.py) NEVER deletes
+#                     automatically (GET+DELETE is a TOCTOU race): a
+#                     stale draft with both indexes 404 fails the job
+#                     with manual verify-and-delete instructions; once
+#                     an index accepted files, the draft is their only
+#                     byte-identical counterpart — rerun the FAILED
+#                     jobs from the original attempt, never full-rerun
 #   publish-testpypi - upload wheel + sdist to TestPyPI via Trusted
-#                      Publishing (no secrets)
-#   publish-pypi    - same, to PyPI (gated by the `pypi` environment
-#                     so maintainers can require manual approval)
+#                      Publishing (no secrets). The full-lifecycle gate
+#                      (install from TestPyPI → bootstrap --image
+#                      <staging>@digest → verify → teardown) runs against
+#                      this upload BEFORE `release-promote` is approved.
+#   promote         - manual-approval environment `release-promote`
+#                     (impersonates the promoter SA, which alone can
+#                     write the public repo): crane-copy staging@digest →
+#                     public coordinate (idempotent; digest unchanged),
+#                     assert public digest equals the packaged constant
+#   publish-pypi    - PyPI (gated by the `tracing-pypi` environment).
+#                     Version-burn
+#                     rule: a candidate that failed the gate burns its
+#                     version; never re-tag — bump and rebuild.
+#   finalize        - always() but gated on github-release success (a
+#                     failed rerun guard must keep its recovery advice
+#                     authoritative): reconciles PyPI + TestPyPI file
+#                     sets, release assets AND release visibility (a
+#                     draft published early during the approval pause
+#                     becomes premature-publication, not "keep the
+#                     draft"); publishes the draft ONLY on complete
+#                     state via a snapshot-bound, ID-based edit (asset
+#                     digests re-verified against the anchor before AND
+#                     after; never as the repository Latest), reasserting
+#                     canonical title/body/prerelease=false/latest=false
+#                     and asserting the published release is IMMUTABLE;
+#                     surfaces partial publication with the
+#                     yank/version-burn recovery.
+#
+# One-time GitHub setup: environments `tracing-testpypi`,
+# `tracing-pypi`, and `release-promote` (the latter two with required
+# reviewers; all three restricted to tag `tracing-v*`). The names are
+# tracing-PREFIXED on purpose: the root SDK's release.yml publishes
+# through the shared `pypi`/`testpypi` environments on `v*` tags, and a
+# `tracing-v*` restriction there would block root releases. And
+# ENABLE IMMUTABLE RELEASES (Settings → General → Releases) BEFORE the
+# first release: finalize verifies the setting BEFORE publishing —
+# GitHub does not apply immutability retroactively, so a release
+# published while the setting is off stays permanently mutable and can
+# only be burned, not repaired.
 #
 # Trusted Publishing setup (one-time, on the PyPI side):
 #   - https://docs.pypi.org/trusted-publishers/adding-a-publisher/
@@ -36,7 +92,8 @@
 #   - Owner:   GoogleCloudPlatform
 #   - Repo:    BigQuery-Agent-Analytics-SDK
 #   - Workflow: release-tracing.yml
-#   - Environment: testpypi / pypi (match the `environment:` blocks
+#   - Environment: tracing-testpypi / tracing-pypi (match the
+#     `environment:` blocks
 #     below). Until the project + trusted publisher are configured on
 #     TestPyPI/PyPI, the publish jobs will fail with a clear error —
 #     `build` and `github-release` still produce + attach artifacts so
@@ -49,23 +106,61 @@ on:
     tags:
       - 'tracing-v*'
 
+# Deny by default at the workflow level; each job below grants only
+# the scopes it needs.
+permissions: {}
+
 concurrency:
   group: release-tracing-${{ github.ref }}
   cancel-in-progress: false
+
+env:
+  # Frozen coordinate (issue #349): the project id is the stable asset.
+  PUBLIC_IMAGE: us-docker.pkg.dev/bqaa-releases/bqaa/otlp-receiver
+  STAGING_IMAGE: us-docker.pkg.dev/bqaa-releases/bqaa-staging/otlp-receiver
+  WIF_PROVIDER: projects/383897661993/locations/global/workloadIdentityPools/github/providers/github-actions
+  # Stager: can write ONLY the private staging repo (used by build-image,
+  # which runs unprotected). Promoter: can write ONLY the public repo and
+  # its WIF binding trusts ONLY the release-promote environment subject —
+  # an unapproved workflow cannot reach the public registry.
+  RELEASE_SA: bqaa-release-publisher@bqaa-releases.iam.gserviceaccount.com
+  PROMOTER_SA: bqaa-release-promoter@bqaa-releases.iam.gserviceaccount.com
 
 jobs:
   verify:
     name: Verify version + tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: producers
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - name: Verify the tag points at the CURRENT protected-main head
+        # Tag provenance: any tracing-v* tag triggers this workflow, and
+        # later jobs mint cloud credentials. A mere ancestor check would
+        # accept stale or reverted commits, so the tagged SHA must equal
+        # origin/main's head at verification time. If main advanced
+        # between approval and tagging, re-tag from the new head. Tag
+        # creation itself is admin-restricted by the tag ruleset.
+        run: |
+          git fetch origin main --quiet
+          MAIN_HEAD=$(git rev-parse origin/main)
+          if [ "$GITHUB_SHA" != "$MAIN_HEAD" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, but origin/main is at ${MAIN_HEAD} — release tags must be cut from the current protected head (re-tag if main moved)"
+            exit 1
+          fi
+          echo "tag SHA is the current protected-main head"
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: "3.12"
 
@@ -82,38 +177,145 @@ jobs:
           fi
           echo "version=${PKG_VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Install producers with dev deps
-        run: pip install -e ".[dev]"
+      - name: Install producers with dev + receiver deps
+        # The receiver extra makes the protobuf decode path TESTABLE:
+        # without it the only protobuf test importorskips and the release
+        # silently ships an unexercised documented path (found in review:
+        # a clean run was 389 passed / 5 skipped, the 5th being protobuf).
+        run: pip install -e ".[dev,receiver]"
+
+      - name: Protobuf path is mandatory in the release suite
+        run: python -c "import opentelemetry.proto; print('protobuf decode path importable')"
 
       - name: Run tests
         run: pytest --tb=short -q
 
+  build-image:
+    name: Build + self-test + stage receiver image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: verify
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+      staging_ref: ${{ steps.digest.outputs.staging_ref }}
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      RUN_ID: ${{ github.run_id }}
+      RUN_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Build image (repo root context, per Dockerfile contract)
+        run: |
+          docker build -f deploy/otlp_receiver/Dockerfile \
+            -t "${STAGING_IMAGE}:${VERSION}-candidate.${RUN_ID}.${RUN_ATTEMPT}" .
+
+      - name: Self-test image BEFORE anything is pushed (checked-in script)
+        # deploy/otlp_receiver/selftest.sh — also executed by PR CI, so
+        # the gate is not tag-only. Pinned emulator, private bridge
+        # network, bounded waits, payload generated INSIDE the image (no
+        # host installs while this job holds id-token: write).
+        id: selftest
+        run: |
+          IMG="${STAGING_IMAGE}:${VERSION}-candidate.${RUN_ID}.${RUN_ATTEMPT}"
+          bash deploy/otlp_receiver/selftest.sh "$IMG" "${VERSION}" | tee selftest.log
+          echo "image_id=$(grep '^SELFTEST_IMAGE_ID=' selftest.log | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed  # v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.RELEASE_SA }}
+
+      - name: Push candidate to the private staging repo
+        env:
+          SELFTEST_IMAGE_ID: ${{ steps.selftest.outputs.image_id }}
+        # The image ID is re-checked against the one the self-test ran:
+        # nothing that executed since (including the auth action) can
+        # swap in untested bytes.
+        run: |
+          IMG="${STAGING_IMAGE}:${VERSION}-candidate.${RUN_ID}.${RUN_ATTEMPT}"
+          NOW=$(docker inspect "$IMG" --format '{{.Id}}')
+          test "$NOW" = "${SELFTEST_IMAGE_ID}" \
+            || (echo "::error::image ID changed after self-test (${NOW} != ${SELFTEST_IMAGE_ID})" && exit 1)
+          gcloud auth configure-docker us-docker.pkg.dev --quiet
+          docker push "$IMG"
+
+      - name: Capture digest
+        id: digest
+        run: |
+          DIGEST=$(gcloud artifacts docker images describe \
+            "${STAGING_IMAGE}:${VERSION}-candidate.${RUN_ID}.${RUN_ATTEMPT}" \
+            --format='value(image_summary.digest)')
+          echo "staged: ${STAGING_IMAGE}@${DIGEST}"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "staging_ref=${STAGING_IMAGE}:${VERSION}-candidate.${RUN_ID}.${RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build wheel + plugin tarball
     runs-on: ubuntu-latest
-    needs: verify
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    needs: [verify, build-image]
+    outputs:
+      # Downstream jobs must consume the artifact identity the PRODUCING
+      # attempt created: a downstream-only rerun increments run_attempt
+      # without recreating this job, so reconstructing the name there
+      # would request an artifact that never existed.
+      dist_name: release-tracing-dist-a${{ github.run_attempt }}
     defaults:
       run:
         working-directory: producers
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      IMAGE_DIGEST: ${{ needs.build-image.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: "3.12"
 
-      - name: Install build tools
-        run: pip install build
+      - name: Install the hash-locked build toolchain
+        # The wheel/sdist/plugin become the trusted release anchor: their
+        # toolchain must not resolve mutable upstream code. hatchling +
+        # build come from the reviewed lock; --no-isolation below makes
+        # the locked backend authoritative.
+        run: pip install --require-hashes -r build-requirements.lock
 
-      - name: Build wheel and sdist
-        run: python -m build
+      - name: Inject the pinned public image reference
+        # BEFORE building: wheel AND sdist must both embed the constant.
+        # The image itself never carries it (a digest cannot appear in
+        # the artifact it is computed from).
+        run: |
+          python scripts/release_image_tool.py inject \
+            --target src/bigquery_agent_analytics_tracing/otlp/_release.py \
+            --coordinate "${PUBLIC_IMAGE}:${VERSION}" \
+            --digest "${IMAGE_DIGEST}"
 
-      - name: Install built wheel
+      - name: Build wheel and sdist (no isolation — locked backend)
+        run: python -m build --no-isolation
+
+      - name: Digest-equality gate (wheel == sdist == expected)
+        run: |
+          python scripts/release_image_tool.py verify \
+            --wheel dist/bigquery_agent_analytics_tracing-${VERSION}-py3-none-any.whl \
+            --sdist dist/bigquery_agent_analytics_tracing-${VERSION}.tar.gz \
+            --expected "${PUBLIC_IMAGE}:${VERSION}@${IMAGE_DIGEST}"
+
+      - name: Install built wheel (metadata only, no dependency resolution)
         # importlib.metadata.version() needs to see the dist-info so
-        # build_claude_plugin.py stamps the real version (not the
-        # pyproject fallback). Installing the wheel mirrors the
-        # producers-ci build path exactly.
-        run: pip install dist/bigquery_agent_analytics_tracing-*.whl
+        # build_claude_plugin.py stamps the real version. --no-deps: this
+        # step must not pull mutable runtime dependencies into the job
+        # that produces the trusted anchor.
+        run: pip install --no-deps dist/bigquery_agent_analytics_tracing-*.whl
 
       - name: Build Claude Code plugin tarball
         run: python scripts/build_claude_plugin.py
@@ -121,51 +323,188 @@ jobs:
       - name: Verify all expected artifacts are present
         run: |
           ls -la dist/
-          test -f dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}.tar.gz \
+          test -f dist/bigquery_agent_analytics_tracing-${VERSION}.tar.gz \
             || (echo "::error::missing sdist" && exit 1)
-          test -f dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}-py3-none-any.whl \
+          test -f dist/bigquery_agent_analytics_tracing-${VERSION}-py3-none-any.whl \
             || (echo "::error::missing wheel" && exit 1)
-          test -f dist/bigquery-agent-analytics-tracing-claude-code-${{ needs.verify.outputs.version }}.tar.gz \
+          test -f dist/bigquery-agent-analytics-tracing-claude-code-${VERSION}.tar.gz \
             || (echo "::error::missing plugin tarball" && exit 1)
 
-      - uses: actions/upload-artifact@v4
+      - name: Write SHA256SUMS
+        run: python scripts/release_image_tool.py checksums --dist-dir dist/
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: release-tracing-dist
+          name: release-tracing-dist-a${{ github.run_attempt }}
           path: producers/dist/
           if-no-files-found: error
 
   github-release:
-    name: Create GitHub release
+    name: Create GitHub release (draft)
     runs-on: ubuntu-latest
-    needs: [verify, build]
+    timeout-minutes: 15
+    needs: [verify, build-image, build]
     permissions:
       contents: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      IMAGE_DIGEST: ${{ needs.build-image.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
-          name: release-tracing-dist
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: ${{ needs.build.outputs.dist_name }}
           path: dist/
 
       - name: List downloaded artifacts
         run: ls -la dist/
 
-      - name: Create release with artifacts
-        uses: softprops/action-gh-release@v2
+      - name: Render customer-first release notes (PR-tested script)
+        run: |
+          python3 producers/scripts/render_release_notes.py \
+            --version "${VERSION}" \
+            --digest "${IMAGE_DIGEST}" \
+            --public-image "${PUBLIC_IMAGE}" \
+            --out release_body.md
+
+      - name: Fail closed on existing-release state
+        # A full rerun must never mutate something customers already see,
+        # and an indeterminate lookup (auth/rate-limit/network) must fail,
+        # not fall through. The proceed/fail decision lives in the
+        # PR-TESTED guard (scripts/guard_existing_release.py). This
+        # workflow NEVER deletes a release automatically (#356 round 13):
+        # GitHub has no conditional delete, so any GET-then-DELETE pair
+        # is a race — the draft could be published between the two
+        # requests and the DELETE would remove a customer-visible
+        # release. A stale draft (both indexes 404) fails the job with
+        # instructions to verify + delete it MANUALLY and re-run; once
+        # either index accepted files, the draft is their only
+        # byte-identical counterpart and must be preserved (rerun the
+        # FAILED jobs from the original attempt instead). A published
+        # release always fails: the version is burned.
+        #
+        # Discovery uses authenticated LIST RELEASES, never the by-tag
+        # endpoint: GET /releases/tags/{tag} returns only PUBLISHED
+        # releases, so a draft would 404 and be misread as absent (#356
+        # round 12). Index lookups carry a unique cache-busting query
+        # string: PyPI responses are CDN-cached
+        # (https://docs.pypi.org/api/), and a cached 404 is not a fresh
+        # absence proof.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! MATCHES=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" 2> releases.err \
+              | jq -c -s --arg tag "$GITHUB_REF_NAME" 'add | map(select(.tag_name == $tag))'); then
+            echo "::error::release list INDETERMINATE (refusing to proceed): $(head -1 releases.err)"
+            exit 1
+          fi
+          COUNT=$(jq length <<<"$MATCHES")
+          RELEASE_STATE=absent
+          if [ "$COUNT" -gt 1 ]; then
+            echo "::error::${COUNT} releases/drafts share tag ${GITHUB_REF_NAME} — ambiguous state, resolve manually"
+            exit 1
+          elif [ "$COUNT" = "1" ]; then
+            # The draft flag must be a BOOLEAN (#356 round 14): a
+            # missing/null/string value is an indeterminate API state,
+            # never silently classified either way.
+            DRAFT_RAW=$(jq -r '.[0].draft | if type == "boolean" then tostring else "invalid" end' <<<"$MATCHES")
+            case "$DRAFT_RAW" in
+              true) RELEASE_STATE=draft ;;
+              false) RELEASE_STATE=published ;;
+              *)
+                echo "::error::release draft flag is not a Boolean — refusing to classify"
+                exit 1
+                ;;
+            esac
+          fi
+          # Index states are BYTE-VALIDATED (#356 round 14): 404 =
+          # absent; an HTTP-200 body is compared against the CURRENT
+          # dist by the PR-tested check_index_publication.py — exact
+          # (original-attempt bytes) vs deviating (burned). Anything
+          # else (auth, rate limit, transport, malformed body) is
+          # indeterminate and fails here so it can never reach the
+          # guard as a fake state.
+          mkdir -p gate-dist
+          cp "dist/bigquery_agent_analytics_tracing-${VERSION}-py3-none-any.whl" \
+             "dist/bigquery_agent_analytics_tracing-${VERSION}.tar.gz" gate-dist/
+          BUST="bqaa-fresh=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s)"
+          index_state() {  # $1 = URL, $2 = scratch prefix
+            local http status
+            if ! http=$(curl -sS --connect-timeout 10 --max-time 30 \
+                -o "$2.json" -w '%{http_code}' "${1}?${BUST}" 2> curl.err); then
+              echo "::error::index lookup transport failure (${1}): $(head -1 curl.err)" >&2
+              return 1
+            fi
+            case "$http" in
+              404)
+                echo absent
+                return 0
+                ;;
+              200) ;;
+              *)
+                echo "::error::index lookup indeterminate (${1}, HTTP ${http})" >&2
+                return 1
+                ;;
+            esac
+            set +e
+            python3 producers/scripts/check_index_publication.py \
+              --version "${VERSION}" --dist-dir gate-dist \
+              --index-json "$2.json" > "$2.check"
+            set -e
+            status=$(grep '^status=' "$2.check" | cut -d= -f2 || true)
+            case "$status" in
+              satisfied) echo exact ;;
+              conflict) echo deviating ;;
+              *)
+                echo "::error::index state INDETERMINATE (${1}): $(grep '^detail=' "$2.check" | cut -d= -f2- || true)" >&2
+                return 1
+                ;;
+            esac
+          }
+          PYPI_STATE=$(index_state "https://pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json" pypi-gate)
+          TESTPYPI_STATE=$(index_state "https://test.pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json" testpypi-gate)
+          set +e
+          python3 producers/scripts/guard_existing_release.py \
+            --release-state "$RELEASE_STATE" \
+            --pypi "$PYPI_STATE" \
+            --testpypi "$TESTPYPI_STATE" | tee guard.out
+          RC=$?
+          set -e
+          if [ $RC -ne 0 ]; then
+            echo "::error::$(grep '^message=' guard.out | cut -d= -f2-)"
+            exit $RC
+          fi
+
+      - name: Create DRAFT release with artifacts
+        # Draft until `finalize` publishes it (after PyPI approval) —
+        # nothing customer-visible exists for a candidate that never
+        # survived the gates. No generic generated notes: the repo-wide
+        # tag stream would pull unrelated SDK PRs into the base diff;
+        # the curated tracing changelog lives in the rendered template.
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           name: "Tracing ${{ github.ref_name }}"
           tag_name: ${{ github.ref_name }}
-          generate_release_notes: true
+          draft: true
+          make_latest: false
+          overwrite_files: false
           fail_on_unmatched_files: true
+          body_path: release_body.md
           files: |
             dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}-py3-none-any.whl
             dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}.tar.gz
             dist/bigquery-agent-analytics-tracing-claude-code-${{ needs.verify.outputs.version }}.tar.gz
+            dist/SHA256SUMS
 
   publish-testpypi:
     name: Publish to TestPyPI
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Depend on github-release too: the plugin tarball ships ONLY as a
     # GitHub release asset, so if that step fails we must not let the
     # wheel/sdist reach PyPI. Otherwise the "wheel and plugin always
@@ -173,48 +512,484 @@ jobs:
     # publish-pypi inherits the guard transitively via needs: publish-testpypi.
     needs: [verify, build, github-release]
     environment:
-      name: testpypi
+      name: tracing-testpypi
       url: https://test.pypi.org/p/bigquery-agent-analytics-tracing
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
-          name: release-tracing-dist
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: ${{ needs.build.outputs.dist_name }}
           path: dist/
 
       - name: Strip non-PyPI artifacts
-        # The plugin tarball is a release artifact, not a PyPI
-        # distribution. Filename uses hyphens in
-        # 'bigquery-agent-analytics-tracing-claude-code-*' so it's
-        # distinguishable from the underscore-named sdist.
+        # The plugin tarball and SHA256SUMS are release artifacts, not
+        # PyPI distributions — twine rejects unknown file types, and
+        # checksums belong on the GitHub release only.
         run: |
           rm -f dist/bigquery-agent-analytics-tracing-claude-code-*.tar.gz
+          rm -f dist/SHA256SUMS
           ls -la dist/
 
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Pre-check index state (rerun-safe upload gate, PR-tested)
+        # The uploader can succeed while the job fails afterward (lost
+        # response). skip-existing stays disabled, so a plain rerun would
+        # die on "version already exists" with no recovery (#356 round
+        # 12). scripts/check_index_publication.py makes the rerun viable
+        # without weakening byte identity: absent → upload; an EXACT
+        # verified existing publication (same names, digests, nothing
+        # yanked) → the stage is already satisfied, skip the upload;
+        # anything else → the version is burned there, fail. The unique
+        # query string forces a CDN cache miss (PyPI caches responses).
+        id: precheck
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          BUST="bqaa-fresh=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s)"
+          if ! HTTP=$(curl -sS --connect-timeout 10 --max-time 30 \
+              -o index.json -w '%{http_code}' \
+              "https://test.pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json?${BUST}" 2> curl.err); then
+            echo "::error::TestPyPI lookup transport failure: $(head -1 curl.err)"
+            exit 1
+          fi
+          INDEX_ARG="--index-json index.json"
+          if [ "$HTTP" = "404" ]; then
+            INDEX_ARG=--index-missing
+          elif [ "$HTTP" != "200" ]; then
+            echo "::error::TestPyPI lookup indeterminate (HTTP ${HTTP}) — not treating as absent"
+            exit 1
+          fi
+          set +e
+          python3 producers/scripts/check_index_publication.py \
+            --version "${VERSION}" --dist-dir dist/ $INDEX_ARG | tee precheck.out
+          RC=$?
+          set -e
+          if [ $RC -ne 0 ]; then
+            echo "::error::$(grep '^detail=' precheck.out | cut -d= -f2-)"
+            exit $RC
+          fi
+          echo "status=$(grep '^status=' precheck.out | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1 branch
+        # No skip-existing: the version-burn rule requires byte-identical
+        # artifacts at the same version on TestPyPI and PyPI. If the
+        # version already exists, the upload MUST fail loudly — a burned
+        # version silently skipping would make the gate test old bytes.
+        # (An exact byte-identical existing publication was already
+        # verified by the pre-check above and skips this step entirely.)
+        if: steps.precheck.outputs.status == 'absent'
         with:
           repository-url: https://test.pypi.org/legacy/
-          skip-existing: true
+
+      - name: Upload already satisfied (verified byte-identical rerun)
+        if: steps.precheck.outputs.status == 'satisfied'
+        run: echo "TestPyPI already carries the exact wheel + sdist — upload stage satisfied without re-upload"
+
+  promote:
+    name: Promote image (gate-approved)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Manual approval on `release-promote` = the TestPyPI full-lifecycle
+    # gate verdict (install from TestPyPI → bootstrap --image
+    # <staging_ref>@digest → verify --smoke → teardown, evidence on the
+    # release issue). Approving asserts the gate passed.
+    needs: [verify, build-image, publish-testpypi]
+    environment:
+      name: release-promote
+    permissions:
+      # No contents: write — promote copies the image and asserts digests;
+      # only finalize touches the GitHub release.
+      id-token: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      IMAGE_DIGEST: ${{ needs.build-image.outputs.digest }}
+    steps:
+      - name: Install crane (pinned + checksum-verified, BEFORE credentials exist)
+        # Supply-chain guard: never fetch a mutable 'latest' binary in a
+        # job that holds release credentials. Pinned version, pinned
+        # sha256, and installed before the auth step mints any token.
+        env:
+          CRANE_VERSION: v0.20.2
+          CRANE_SHA256: c14340087103ba9dadf61d45acd20675490fd0ccbd56ac7901fc1b502137f44b
+        run: |
+          curl -sL -o crane.tar.gz \
+            "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "${CRANE_SHA256}  crane.tar.gz" | sha256sum -c -
+          tar -xzf crane.tar.gz crane && sudo mv crane /usr/local/bin/
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed  # v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          # The promoter: writable ONLY on the public repo, impersonable
+          # ONLY by this environment-protected job's OIDC subject.
+          service_account: ${{ env.PROMOTER_SA }}
+
+      - name: Promote staging digest to the public coordinate (idempotent)
+        # Content-addressed copy: the digest the artifacts already embed
+        # is preserved; only the public tag comes into existence here.
+        # Reruns: the public tag is immutable, so an existing tag is
+        # accepted ONLY if it already carries the exact expected digest.
+        run: |
+          gcloud auth print-access-token \
+            | crane auth login us-docker.pkg.dev -u oauth2accesstoken --password-stdin
+          set +e
+          EXISTING=$(crane digest "${PUBLIC_IMAGE}:${VERSION}" 2> digest.err)
+          RC=$?
+          set -e
+          if [ $RC -eq 0 ]; then
+            test "$EXISTING" = "${IMAGE_DIGEST}" \
+              || (echo "::error::public tag exists with digest ${EXISTING}, expected ${IMAGE_DIGEST} — version is burned" && exit 1)
+            echo "public tag already carries the expected digest (rerun) — skipping copy"
+          elif grep -qi "MANIFEST_UNKNOWN\|manifest unknown" digest.err; then
+            # ONLY an explicit manifest-not-found enters the mutating path;
+            # auth/rate-limit/network failures must never become a copy.
+            crane copy \
+              "${STAGING_IMAGE}@${IMAGE_DIGEST}" \
+              "${PUBLIC_IMAGE}:${VERSION}"
+          else
+            echo "::error::registry state INDETERMINATE: $(head -1 digest.err)"
+            exit 1
+          fi
+
+      - name: Assert public digest equals the packaged constant
+        run: |
+          PUBLIC_DIGEST=$(crane digest "${PUBLIC_IMAGE}:${VERSION}")
+          echo "public:  ${PUBLIC_DIGEST}"
+          echo "staged:  ${IMAGE_DIGEST}"
+          test "${PUBLIC_DIGEST}" = "${IMAGE_DIGEST}" \
+            || (echo "::error::digest drift between staging and public" && exit 1)
 
   publish-pypi:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: [verify, publish-testpypi]
+    timeout-minutes: 15
+    needs: [verify, build, promote, publish-testpypi]
     environment:
-      name: pypi
+      name: tracing-pypi
       url: https://pypi.org/p/bigquery-agent-analytics-tracing
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
-          name: release-tracing-dist
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: ${{ needs.build.outputs.dist_name }}
           path: dist/
 
       - name: Strip non-PyPI artifacts
         run: |
           rm -f dist/bigquery-agent-analytics-tracing-claude-code-*.tar.gz
+          rm -f dist/SHA256SUMS
           ls -la dist/
 
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Pre-check index state (rerun-safe upload gate, PR-tested)
+        # Same rerun-safety as publish-testpypi: an exact verified
+        # existing publication satisfies the stage; anything else that
+        # exists at this version is a burn (#356 round 12).
+        id: precheck
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          BUST="bqaa-fresh=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s)"
+          if ! HTTP=$(curl -sS --connect-timeout 10 --max-time 30 \
+              -o index.json -w '%{http_code}' \
+              "https://pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json?${BUST}" 2> curl.err); then
+            echo "::error::PyPI lookup transport failure: $(head -1 curl.err)"
+            exit 1
+          fi
+          INDEX_ARG="--index-json index.json"
+          if [ "$HTTP" = "404" ]; then
+            INDEX_ARG=--index-missing
+          elif [ "$HTTP" != "200" ]; then
+            echo "::error::PyPI lookup indeterminate (HTTP ${HTTP}) — not treating as absent"
+            exit 1
+          fi
+          set +e
+          python3 producers/scripts/check_index_publication.py \
+            --version "${VERSION}" --dist-dir dist/ $INDEX_ARG | tee precheck.out
+          RC=$?
+          set -e
+          if [ $RC -ne 0 ]; then
+            echo "::error::$(grep '^detail=' precheck.out | cut -d= -f2-)"
+            exit $RC
+          fi
+          echo "status=$(grep '^status=' precheck.out | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1 branch
+        if: steps.precheck.outputs.status == 'absent'
+
+      - name: Upload already satisfied (verified byte-identical rerun)
+        if: steps.precheck.outputs.status == 'satisfied'
+        run: echo "PyPI already carries the exact wheel + sdist — upload stage satisfied without re-upload"
+
+  finalize:
+    name: Reconcile + publish the GitHub release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Runs even when publish-pypi fails: a PARTIAL PyPI publication (one
+    # distribution public, one not) must be surfaced with the recovery
+    # path, not stranded silently in a draft. Publishes the release only
+    # on COMPLETE state; --latest=false preserves the SDK's vX.Y.Z
+    # release as the repository's Latest.
+    #
+    # github-release MUST have succeeded (#356 round 12): when its guard
+    # deliberately fails a full rerun to preserve the original draft,
+    # finalize must NOT reconcile that draft against the newly rebuilt,
+    # byte-different anchor — it would override the guard's correct
+    # "rerun the original attempt" advice with invalid-draft/yank/burn
+    # guidance. Recovery must use the original attempt's anchor.
+    if: always() && needs.verify.result == 'success' && needs.build.result == 'success' && needs.github-release.result == 'success'
+    needs: [verify, build, github-release, publish-pypi]
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: ${{ needs.build.outputs.dist_name }}
+          path: anchor/
+
+      - name: Reconcile against the IMMUTABLE build artifact
+        # scripts/reconcile_release.py is unit-tested with a full state
+        # matrix (exact sets, byte identity, extras rejected, yanked
+        # rejected) — the mutable draft's own manifest is never the
+        # anchor. The public image digest is additionally re-checked
+        # against the packaged constant extracted from the anchor wheel.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          CRANE_VERSION: v0.20.2
+          CRANE_SHA256: c14340087103ba9dadf61d45acd20675490fd0ccbd56ac7901fc1b502137f44b
+        run: |
+          set -euo pipefail
+          # Surface 1: the GitHub release — discovered via authenticated
+          # LIST RELEASES, never the by-tag endpoint (that returns only
+          # PUBLISHED releases, so the normal draft would 404 and be
+          # misread as missing, #356 round 12). Metadata first (a draft
+          # accidentally published during the approval pause must become
+          # premature-publication, never "keep the draft" advice), then
+          # the assets, downloaded BY ASSET ID from the same release
+          # object. Absence is a CLASSIFICATION, not an early exit — a
+          # deleted draft after a PyPI upload is a cross-surface partial,
+          # not "unpublished".
+          RELEASE_ARG=--release-missing
+          PUBLISHED_ARG=""
+          RELEASE_ID=""
+          # Only a DRAFT publication performs the Administration:read
+          # policy lookup — the helper's published/idempotent path
+          # returns before it (#356 round 15), so the App token must
+          # not be minted (or required) for those reruns.
+          echo "RELEASE_IS_DRAFT=0" >> "$GITHUB_ENV"
+          if ! MATCHES=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" 2> releases.err \
+              | jq -c -s --arg tag "$GITHUB_REF_NAME" 'add | map(select(.tag_name == $tag))'); then
+            # Auth/rate-limit/network/API failures are INDETERMINATE —
+            # the wrong recovery advice is worse than an error.
+            echo "::error::GitHub release list indeterminate: $(head -1 releases.err)"
+            exit 1
+          fi
+          COUNT=$(jq length <<<"$MATCHES")
+          if [ "$COUNT" -gt 1 ]; then
+            echo "::error::${COUNT} releases/drafts share tag ${GITHUB_REF_NAME} — ambiguous state, resolve manually"
+            exit 1
+          elif [ "$COUNT" = "1" ]; then
+            RELEASE_ID=$(jq -r '.[0].id' <<<"$MATCHES")
+            # The draft flag must be a BOOLEAN (#356 round 14): a
+            # missing/null/string value is indeterminate, never
+            # silently classified as a draft.
+            DRAFT_RAW=$(jq -r '.[0].draft | if type == "boolean" then tostring else "invalid" end' <<<"$MATCHES")
+            if [ "$DRAFT_RAW" = "false" ]; then
+              PUBLISHED_ARG=--release-published
+            elif [ "$DRAFT_RAW" = "true" ]; then
+              echo "RELEASE_IS_DRAFT=1" >> "$GITHUB_ENV"
+            else
+              echo "::error::release draft flag is not a Boolean — refusing to classify"
+              exit 1
+            fi
+            mkdir -p release
+            # The asset trust boundary is PR-TESTED code, not inline
+            # shell (#356 round 14): plan_asset_downloads.py validates
+            # the metadata (well-formed ids/names/sizes, no duplicates,
+            # no unsafe names) and plans downloads ONLY for the four
+            # expected hardcoded names within the size cap; unexpected
+            # or oversized assets become EMPTY placeholders so the
+            # tested reconciler still sees the exact-set/byte mismatch
+            # without unbounded downloads (#356 round 13).
+            jq '.[0].assets' <<<"$MATCHES" > assets-metadata.json
+            set +e
+            python3 producers/scripts/plan_asset_downloads.py \
+              --version "${VERSION}" --assets-json assets-metadata.json > plan.out
+            RC=$?
+            set -e
+            if [ $RC -ne 0 ]; then
+              echo "::error::$(grep '^detail=' plan.out | cut -d= -f2-)"
+              exit 1
+            fi
+            while IFS=$'\t' read -r action f1 f2; do
+              case "$action" in
+                download)
+                  gh api -H "Accept: application/octet-stream" \
+                    "repos/${GITHUB_REPOSITORY}/releases/assets/${f1}" \
+                    > "release/${f2}"
+                  ;;
+                placeholder)
+                  echo "asset ${f1} not downloaded — empty placeholder for exact-set/byte classification"
+                  : > "release/${f1}"
+                  ;;
+              esac
+            done < plan.out
+            RELEASE_ARG="--release-dir release/"
+            echo "RELEASE_ID=${RELEASE_ID}" >> "$GITHUB_ENV"
+          fi
+          # Surfaces 2 + 3: production PyPI AND TestPyPI (#356: a partial
+          # TestPyPI upload burns the version there — production-404 plus
+          # an exact draft must not become same-version rerun advice).
+          # Transport failures (DNS/TLS/connect) are indeterminate and
+          # must not fall into the HTTP branches. The unique query string
+          # forces a CDN cache miss (PyPI responses are cached,
+          # https://docs.pypi.org/api/) so absence proof is fresh.
+          BUST="bqaa-fresh=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s)"
+          fetch_index() {  # $1 = URL, $2 = output file; prints the HTTP code
+            local http
+            if ! http=$(curl -sS --connect-timeout 10 --max-time 30 \
+                -o "$2" -w '%{http_code}' "${1}?${BUST}" 2> curl.err); then
+              echo "::error::index lookup transport failure (${1}): $(head -1 curl.err)" >&2
+              return 1
+            fi
+            echo "$http"
+          }
+          HTTP=$(fetch_index "https://pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json" pypi.json)
+          PYPI_ARG="--pypi-json pypi.json"
+          if [ "$HTTP" = "404" ]; then
+            # The explicit 404 is the ONLY absence marker; an HTTP-200
+            # body must satisfy the complete schema in the reconciler.
+            PYPI_ARG=--pypi-missing
+          elif [ "$HTTP" != "200" ]; then
+            echo "::error::PyPI lookup indeterminate (HTTP ${HTTP}) — not treating as absent"
+            exit 1
+          fi
+          HTTP=$(fetch_index "https://test.pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json" testpypi.json)
+          TESTPYPI_ARG="--testpypi-json testpypi.json"
+          if [ "$HTTP" = "404" ]; then
+            TESTPYPI_ARG=--testpypi-missing
+          elif [ "$HTTP" != "200" ]; then
+            echo "::error::TestPyPI lookup indeterminate (HTTP ${HTTP}) — not treating as absent"
+            exit 1
+          fi
+          # Surface combination lives IN the tested reconciler: the anchor
+          # and both index schemas are validated on EVERY path, so a
+          # truncated success body can never become destructive
+          # yank/version-burn advice (#356 round 7).
+          set +e
+          python3 producers/scripts/reconcile_release.py \
+            --version "${VERSION}" --anchor-dir anchor/ \
+            $RELEASE_ARG $PUBLISHED_ARG $PYPI_ARG $TESTPYPI_ARG | tee reconcile.out
+          set -e
+          STATE=$(grep '^state=' reconcile.out | cut -d= -f2)
+          if [ "$STATE" = "complete" ]; then
+            curl -sL -o crane.tar.gz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+            echo "${CRANE_SHA256}  crane.tar.gz" | sha256sum -c -
+            tar -xzf crane.tar.gz crane
+            PUBLIC_DIGEST=$(./crane digest "${PUBLIC_IMAGE}:${VERSION}")
+            WHEEL_DIGEST=$(python3 -c "
+          import sys, zipfile
+          sys.path.insert(0, 'producers/scripts')
+          import release_image_tool
+          ref = release_image_tool.extract_from_wheel(__import__('pathlib').Path('anchor/bigquery_agent_analytics_tracing-${VERSION}-py3-none-any.whl'))
+          print(ref.split('@')[1])")
+            if [ "$PUBLIC_DIGEST" != "$WHEEL_DIGEST" ]; then
+              # The published-visibility signal must survive this
+              # override (#356 round 12): a mismatch on an already
+              # public release is premature-publication (containment
+              # first), not plain partial.
+              if [ -n "$PUBLISHED_ARG" ]; then
+                echo "state=premature-publication" >> "$GITHUB_ENV"
+              else
+                echo "state=partial" >> "$GITHUB_ENV"
+              fi
+              echo "public image ${PUBLIC_DIGEST} != anchor wheel ${WHEEL_DIGEST}"
+              exit 0
+            fi
+          fi
+          echo "state=${STATE}" >> "$GITHUB_ENV"
+
+      - name: Mint the policy-read token (GitHub App, Administration:read)
+        # GET /repos/{repo}/immutable-releases requires repository
+        # Administration:read — a permission the workflow GITHUB_TOKEN
+        # can NEVER carry (it is not among the workflow-grantable
+        # permissions), so the round-13 preflight would fail on every
+        # release with the job token (#356 round 14). A narrowly scoped
+        # GitHub App installation token (ONLY Administration:read) is
+        # minted, and ONLY when a DRAFT publication will actually
+        # happen: `complete` also covers the already-published
+        # idempotent rerun, whose helper path performs NO policy read —
+        # minting there would let missing/rotated App credentials break
+        # a harmless rerun and mask the helper's burn guidance for an
+        # exact-but-public mutable release (#356 round 15). Every other
+        # API call keeps the standard job token. One-time setup: create
+        # the App, install it on this repository, and set
+        # BQAA_RELEASE_POLICY_APP_ID (variable) +
+        # BQAA_RELEASE_POLICY_APP_PRIVATE_KEY (secret) — see
+        # RELEASING.md.
+        id: policy_token
+        if: env.state == 'complete' && env.RELEASE_IS_DRAFT == '1'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ vars.BQAA_RELEASE_POLICY_APP_ID }}
+          private-key: ${{ secrets.BQAA_RELEASE_POLICY_APP_PRIVATE_KEY }}
+          permission-administration: read
+
+      - name: Publish the draft release (complete state only, never as Latest)
+        # The state→action mapping lives in reconcile_release.dispatch()
+        # (unit-tested, exhaustive, fail-closed — an unknown or
+        # invalid-anchor state can never fall through with exit 0).
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ADMIN_GH_TOKEN: ${{ steps.policy_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          VERDICT=$(python3 -c "
+          import sys
+          sys.path.insert(0, 'producers/scripts')
+          import reconcile_release
+          action = reconcile_release.dispatch('$state')
+          print(f'{int(action.publish)}|{action.exit_code}|{action.message}')")
+          PUBLISH=$(echo "$VERDICT" | cut -d'|' -f1)
+          EXIT_CODE=$(echo "$VERDICT" | cut -d'|' -f2)
+          MESSAGE=$(echo "$VERDICT" | cut -d'|' -f3-)
+          if [ "$PUBLISH" = "1" ]; then
+            # Snapshot-bound publish via the PR-TESTED helper: the
+            # immutable-releases policy is verified BEFORE anything
+            # becomes public (enabling it later is NOT retroactive);
+            # the exact RELEASE ID that was reconciled is fetched and
+            # every asset digest verified against the anchor immediately
+            # BEFORE and AFTER the ID-based publish edit (a JSON --input
+            # payload — gh raw fields do not read @files); canonical
+            # title/body/prerelease are verified on every snapshot and
+            # repaired where GitHub permits edits (#356 rounds 12-13).
+            python3 producers/scripts/publish_release_body.py \
+              --version "${VERSION}" \
+              --public-image "${PUBLIC_IMAGE}" \
+              --anchor-dir anchor/ \
+              --tag "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --release-id "${RELEASE_ID}" \
+              --admin-token-env ADMIN_GH_TOKEN
+            echo "release published with re-anchored body: ${MESSAGE}"
+          else
+            echo "::error::${MESSAGE}"
+          fi
+          exit "$EXIT_CODE"

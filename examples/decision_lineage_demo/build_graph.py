@@ -50,10 +50,11 @@ from __future__ import annotations
 import os
 import sys
 
-from bigquery_agent_analytics.context_graph import ContextGraphConfig
-from bigquery_agent_analytics.context_graph import ContextGraphManager
 from dotenv import load_dotenv
 from google.cloud import bigquery
+
+from bigquery_agent_analytics.context_graph import ContextGraphConfig
+from bigquery_agent_analytics.context_graph import ContextGraphManager
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _env_path = os.path.join(_SCRIPT_DIR, ".env")
