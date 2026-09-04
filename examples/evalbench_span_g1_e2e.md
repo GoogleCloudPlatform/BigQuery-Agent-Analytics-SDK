@@ -27,12 +27,12 @@ bash examples/evalbench_span_g1_e2e.sh --fixture
 without running anything (there is no `--synth` here, and the
 `EVALBENCH_FIXTURE` environment variable is not read).
 
-This is the native-path analog of the native freeze demo
-([PR #465](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/465)):
-same session, same six-act shape, but the load-bearing new act consumes
+This guide combines the native-import setup from
+[PR #465](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/465)
+with the span-localization walkthrough from
 [PR #467](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/467)
-(the span taxonomy library) instead of PR #464 (the native writer, which
-stays as already-landed context here). PR #467 is deliberately a **pure
+(the span taxonomy library). The native writer from PR #464 supplies the
+snapshot. PR #467 is deliberately a **pure
 library** — `label_failed_session_spans` / `label_native_run`, no CLI —
 and this demo adds **no new CLI** around it; act 4 shows the library's
 sample output as JSON. The `evalbench-import` adapter
@@ -40,6 +40,49 @@ sample output as JSON. The `evalbench-import` adapter
 stays as an optional on-ramp; this demo never calls it. **The six-week
 clock has NOT started.** It starts only when the first Week 1 snapshot
 job is kicked, not at this demo.
+
+## Native import setup
+
+The fixture script prints a recorded/example story; it does not execute
+the following commands. For an authorized run on your own data, replace
+the source and target projects, dataset, and session ID, and set
+`SNAPSHOT_AT` to an available source snapshot timestamp in ISO-8601 form.
+The pilot's D4 boundary still forbids new BigQuery jobs; this example does
+not authorize one.
+
+```bash
+bq-agent-sdk evalbench-native-import \
+  --source-table source-project.telemetry.agent_events \
+  --target-project analytics-project \
+  --target-dataset bqaa \
+  --job-id native-widget-stock-one-session \
+  --session-id 7e352c34-4c1c-4395-acd5-fb3c8f215346 \
+  --location US \
+  --snapshot-at "${SNAPSHOT_AT}" \
+  --import-version v1 \
+  --failed-sessions-view native_widget_stock_failed_sessions \
+  --min-score goal_completion=1.0
+
+bq-agent-sdk evalbench-failed-sessions \
+  --project-id analytics-project --target-dataset bqaa \
+  --job-id native-widget-stock-one-session --import-version v1 \
+  --min-score goal_completion=1.0 --format json
+```
+
+This filter selects **one session**, so it does not reproduce the
+seven-session counts in the presenter transcript. Repeat `--session-id`
+for each additional session you intend to include. The separate job and
+view names keep this example distinct from the seven-session demo.
+
+The native writer reads production `agent_events` without modifying it;
+it does not read EvalBench `configs`, `results`, or `scores`. It derives
+`goal_completion=1.0` when a session logged `AGENT_COMPLETED`, otherwise
+`0.0`, and writes the snapshot, derived scores, and manifest to the target
+dataset. Completion alone does not establish correctness. The explicit
+score gate is shared with the failed-session consumer and the span
+localization call below, preserving the three expected categories.
+Native rows retain the ADK session ID; the short `eval_id` uses its first
+eight characters, falling back to the full ID on a collision.
 
 ## The session (same protagonist as the merged MVP e2e demo)
 
@@ -161,7 +204,7 @@ started.**
   — the native `agent_events` snapshot writer (already-landed context in
   act 3).
 - [PR #465](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/465)
-  — the native freeze demo this one mirrors.
+  — the earlier native demo whose setup guidance is consolidated here.
 - Issues
   [#466](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/466)
   (span-level G1 on span_id),

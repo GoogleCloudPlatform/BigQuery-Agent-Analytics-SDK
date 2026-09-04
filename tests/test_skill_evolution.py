@@ -26,7 +26,9 @@ import sys
 # Make scripts/ importable.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from skill_evolution import _has_parroted_recovery  # noqa: E402
+from skill_evolution import _validate_incumbent_score
 from skill_evolution import _write_evolution_artifacts
+from skill_evolution import collect_patches
 from skill_evolution import compute_prevalence_summary
 from skill_evolution import format_trajectory
 from skill_evolution import partition_trajectories
@@ -85,6 +87,17 @@ def test_has_parroted_recovery():
   assert not _has_parroted_recovery({})
 
 
+def test_has_parroted_recovery_in_execution_sub_trajectories():
+  # Hosts that segment execution traces per correction mark the outcome on
+  # execution_sub_trajectories; a parroted segment there reclassifies too.
+  assert _has_parroted_recovery(
+      {"execution_sub_trajectories": [{"outcome": "parroted"}]}
+  )
+  assert not _has_parroted_recovery(
+      {"execution_sub_trajectories": [{"outcome": "recovered"}]}
+  )
+
+
 # --- format_trajectory ------------------------------------------------------
 
 
@@ -135,6 +148,68 @@ def test_format_renders_subtrajectory_outcomes():
   assert "parroted" in out
   assert "post_correction_1" in out
   assert "[~]" in out  # parroted icon
+
+
+def test_format_renders_execution_sub_trajectories_with_traces():
+  # When per-segment execution traces exist, the analyst must see WHAT the
+  # agent executed in each segment (preferred over the brief outcome list).
+  s = _session(
+      "unhelpful",
+      conversation=[
+          {"role": "user", "text": "is it 25 days?", "tag": "CORRECTION"},
+          {"role": "assistant", "text": "yes, 25"},
+      ],
+      execution_sub_trajectories=[
+          {
+              "label": "post_correction_1",
+              "outcome": "parroted",
+              "start_turn": 1,
+              "end_turn": 2,
+              "trace": "agent->policy_agent (no tool call)",
+          }
+      ],
+  )
+  out = format_trajectory(s)
+  assert "=== Execution sub-trajectories ===" in out
+  assert "[~]" in out
+  assert "agent->policy_agent (no tool call)" in out
+
+
+def test_format_renders_correction_evidence_and_verifications():
+  s = _session(
+      "unhelpful",
+      conversation=[
+          {"role": "user", "text": "PTO is 25 days", "tag": "CORRECTION"},
+          {"role": "assistant", "text": "you are right"},
+      ],
+      corrections=1,
+      verifications=2,
+      correction_boundaries=[
+          {
+              "turn_index": 1,
+              "wrong_claim": "PTO is 20 days",
+              "correct_fact": "PTO is 25 days",
+              "agent_recovered": False,
+          }
+      ],
+  )
+  out = format_trajectory(s)
+  assert "User verification requests: 2" in out
+  assert "=== Correction Evidence ===" in out
+  assert "PTO is 20 days" in out
+  assert "Agent recovered: False" in out
+
+
+def test_format_renders_full_session_execution_trace():
+  # A single undivided trace renders when no per-segment traces exist.
+  s = _session(
+      "unhelpful",
+      conversation=[{"role": "user", "text": "q"}],
+      execution_trace="invoke supervisor -> transfer policy_agent",
+  )
+  out = format_trajectory(s)
+  assert "=== Execution trace ===" in out
+  assert "invoke supervisor -> transfer policy_agent" in out
 
 
 def test_format_renders_tool_calls_single_turn():
@@ -345,6 +420,979 @@ def test_select_candidate_picks_better_when_it_clears_margin():
       ["cand1", "cand2"], "BASE", score_fn=scores.get, min_improvement=0.5
   )
   assert out == "cand1"
+
+
+def test_select_candidate_uses_incumbent_score_without_rescoring_base():
+  # A host that already measured the base skill passes incumbent_score;
+  # score_fn must then NEVER be called on the base (re-scoring on fresh
+  # traffic is noisy and expensive).
+  def score_fn(skill):
+    assert skill != "BASE", "must not re-score the incumbent"
+    return {"cand1": 0.95, "cand2": 0.60}[skill]
+
+  out = select_candidate(
+      ["cand1", "cand2"],
+      "BASE",
+      score_fn=score_fn,
+      min_improvement=0.5,
+      incumbent_score=0.40,
+  )
+  assert out == "cand1"
+
+
+def test_select_candidate_incumbent_score_gates_selection():
+  # The provided incumbent score participates in the margin gate.
+  scores = {"cand1": 0.95}
+  out = select_candidate(
+      ["cand1"],
+      "BASE",
+      score_fn=scores.get,
+      min_improvement=0.5,
+      incumbent_score=0.90,
+  )
+  assert out == "BASE"
+
+
+# --- collect_patches (host analyst hook) ------------------------------------
+
+
+def test_collect_patches_dispatches_error_analyst_fn():
+  # A host-supplied analyst replaces the built-in one for FAILURE
+  # trajectories; no client/model calls happen when it handles them all.
+  seen = []
+
+  def fake_analyst(client, model, session, current_skill, tools):
+    seen.append(session["question"])
+    return (
+        "## Root Cause\nTOOL_USAGE: skipped the tool.\n"
+        "## Proposed Patch\nContent: call the tool first."
+    )
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="q1"),
+          _session("partial", question="q2"),
+      ]
+  }
+  patches = collect_patches(
+      report,
+      "BASE",
+      client=None,
+      model="unused",
+      analyst_mode="error-only",
+      error_analyst_fn=fake_analyst,
+  )
+  assert sorted(seen) == ["q1", "q2"]
+  assert len(patches) == 2
+
+
+def test_collect_patches_requires_client_outside_hosted_error_only():
+  # client=None is legitimate ONLY with a host analyst in error-only mode;
+  # anywhere else every built-in analyst future would fail and be swallowed.
+  import pytest
+
+  report = {"sessions": [_session("unhelpful", question="q1")]}
+  with pytest.raises(ValueError, match="client is required"):
+    collect_patches(report, "BASE", client=None, model="unused")
+  with pytest.raises(ValueError, match="client is required"):
+    collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="both",
+        error_analyst_fn=lambda *a: None,
+    )
+
+
+def test_select_candidate_rejects_non_finite_incumbent_score():
+  # NaN/inf make every margin comparison False -- the exact "never ship a
+  # worse skill" property this function enforces, silently defeated.
+  import pytest
+
+  for bad in (float("nan"), float("-inf"), float("inf")):
+    with pytest.raises(ValueError, match="finite"):
+      select_candidate(
+          ["CAND"], "BASE", score_fn=lambda _s: 1.0, incumbent_score=bad
+      )
+
+
+def test_select_candidate_warns_when_incumbent_score_unused(caplog):
+  # incumbent_score without score_fn: median-size selection, no gate -- the
+  # host must be told the guard is NOT active.
+  import logging
+
+  with caplog.at_level(logging.WARNING):
+    out = select_candidate(["A", "BB", "CCC"], "BASE", incumbent_score=0.9)
+  assert out == "BB"
+  assert any("UNGATED" in r.message for r in caplog.records)
+
+
+def test_format_renders_both_segment_and_full_session_traces():
+  # A session carrying BOTH per-segment traces and a full-session trace
+  # renders both: segments suppress only the brief sub_trajectories outcome
+  # list (redundant), never the full-session evidence.
+  s = _session(
+      "unhelpful",
+      conversation=[{"role": "user", "text": "q"}],
+      sub_trajectories=[
+          {
+              "label": "corr",
+              "outcome": "parroted",
+              "start_turn": 1,
+              "end_turn": 2,
+          }
+      ],
+      execution_sub_trajectories=[
+          {
+              "label": "corr",
+              "outcome": "parroted",
+              "start_turn": 1,
+              "end_turn": 2,
+              "trace": "SEGMENT-TRACE",
+          }
+      ],
+      execution_trace="FULL-SESSION-TRACE",
+  )
+  out = format_trajectory(s)
+  assert "SEGMENT-TRACE" in out
+  assert "FULL-SESSION-TRACE" in out
+  assert "=== Execution sub-trajectories ===" in out
+  assert "=== Execution trace ===" in out
+  assert "=== Correction sub-trajectories ===" not in out
+
+
+def test_format_renders_execution_trace_for_single_turn_sessions():
+  # question/response sessions (no conversation list) are a supported
+  # quality_report shape and must not silently lose their trace evidence.
+  s = _session(
+      "unhelpful",
+      question="What is the meal limit?",
+      response="Ask HR.",
+      execution_trace="invoke supervisor -> NO tool call",
+  )
+  s.pop("conversation", None)
+  out = format_trajectory(s)
+  assert "Question: What is the meal limit?" in out
+  assert "=== Execution trace ===" in out
+  assert "invoke supervisor -> NO tool call" in out
+
+
+def test_error_analyst_fn_in_both_mode_keeps_builtin_for_successes():
+  # Docstring contract: the host analyst replaces FAILURE analysts only;
+  # success trajectories always use the built-in single-pass analyst.
+  calls = {"host": [], "builtin": []}
+
+  def fake_analyst(client, model, session, current_skill, tools):
+    calls["host"].append(session["question"])
+    return (
+        "## Root Cause\nTOOL_USAGE: skipped the tool.\n"
+        "## Proposed Patch\nContent: call the tool first."
+    )
+
+  class _FakeModels:
+
+    def generate_content(self, **_kw):
+      raise AssertionError("built-in analyst should be stubbed")
+
+  class _FakeClient:
+    models = _FakeModels()
+
+  import skill_evolution as _se
+
+  original = _se.run_analyst
+
+  def spy_run_analyst(client, model, prompt, session, current_skill, *a, **kw):
+    calls["builtin"].append(session["question"])
+    return (
+        "## Pattern\nRESPONSE_PATTERN: kept the derived rate.\n"
+        "## Proposed Patch\nContent: keep deriving rates."
+    )
+
+  _se.run_analyst = spy_run_analyst
+  try:
+    report = {
+        "sessions": [
+            _session("unhelpful", question="fail-1"),
+            _session("meaningful", question="win-1"),
+        ]
+    }
+    patches = collect_patches(
+        report,
+        "BASE",
+        client=_FakeClient(),
+        model="unused",
+        analyst_mode="both",
+        error_analyst_fn=fake_analyst,
+    )
+  finally:
+    _se.run_analyst = original
+  assert calls["host"] == ["fail-1"]
+  assert calls["builtin"] == ["win-1"]
+  assert len(patches) == 2
+
+
+def test_format_renders_uncovered_brief_outcomes_alongside_segments():
+  # execution_sub_trajectories can be PARTIAL (the producer skips segments it
+  # cannot align to trace spans) -- a parroted outcome with no traced
+  # counterpart must still render, matched on start/end turns.
+  s = _session(
+      "unhelpful",
+      conversation=[{"role": "user", "text": "q"}],
+      sub_trajectories=[
+          {
+              "label": "covered",
+              "outcome": "recovered",
+              "start_turn": 1,
+              "end_turn": 2,
+          },
+          {
+              "label": "uncovered",
+              "outcome": "parroted",
+              "start_turn": 3,
+              "end_turn": 4,
+          },
+      ],
+      execution_sub_trajectories=[
+          {
+              "label": "covered",
+              "outcome": "recovered",
+              "start_turn": 1,
+              "end_turn": 2,
+              "trace": "SEGMENT-TRACE",
+          }
+      ],
+  )
+  out = format_trajectory(s)
+  assert "SEGMENT-TRACE" in out
+  assert "uncovered" in out and "parroted" in out
+  assert "=== Correction sub-trajectories ===" in out
+  # The covered segment's brief entry stays suppressed (redundant); the
+  # traced segment header ("--- [+] covered ...") is the only occurrence.
+  assert "\n[+] covered" not in out
+  assert "--- [+] covered" in out
+
+
+def test_format_coerces_structured_execution_trace():
+  # A host supplying a structured (non-str) trace must get a readable dump,
+  # not a per-session TypeError swallowed inside the analyst future.
+  s = _session(
+      "unhelpful",
+      conversation=[{"role": "user", "text": "q"}],
+      execution_trace=[{"event": "TOOL_STARTING", "tool": "lookup"}],
+  )
+  out = format_trajectory(s)
+  assert "=== Execution trace ===" in out
+  assert "TOOL_STARTING" in out
+
+
+def test_partition_survives_malformed_segment_entries():
+  # A non-dict entry in a host-supplied segment list must not kill
+  # partitioning for the whole report.
+  report = {
+      "sessions": [
+          _session(
+              "meaningful",
+              execution_sub_trajectories=["not-a-dict", None],
+          )
+      ]
+  }
+  successes, failures = partition_trajectories(report)
+  assert len(successes) == 1 and not failures
+
+
+def test_select_candidate_rejects_non_finite_computed_incumbent():
+  # The guard covers the score_fn(current_skill) fallback too, not just the
+  # incumbent_score parameter.
+  import pytest
+
+  def scorer(text):
+    return float("nan") if text == "BASE" else 1.0
+
+  with pytest.raises(ValueError, match="non-finite incumbent"):
+    select_candidate(["CAND"], "BASE", score_fn=scorer)
+
+
+def test_host_patch_envelope_enforced_with_reason_logged(caplog):
+  # A well-typed host patch that misses the envelope is dropped with a
+  # logged reason; a valid one passes the gate.
+  import logging
+
+  results = iter(
+      [
+          "too short",
+          (
+              "## Root Cause\nTOOL_USAGE: skipped the tool despite having"
+              " it available.\n## Proposed Patch\nContent: call the tool"
+              " first."
+          ),
+      ]
+  )
+
+  def fake_analyst(client, model, session, current_skill, tools):
+    return next(results)
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="q1"),
+          _session("partial", question="q2"),
+      ]
+  }
+  with caplog.at_level(logging.WARNING):
+    patches = collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="error-only",
+        error_analyst_fn=fake_analyst,
+    )
+  assert len(patches) == 1
+  assert any("Quality gate rejected" in r.message for r in caplog.records)
+
+
+def test_all_type_violating_host_raises_like_all_failures():
+  # A host returning a non-string for EVERY session is the same failure
+  # class as raising for every session: zero usable host patches.
+  import pytest
+
+  def dict_analyst(client, model, session, current_skill, tools):
+    return {"patch": "structured"}
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="q1"),
+          _session("partial", question="q2"),
+      ]
+  }
+  with pytest.raises(RuntimeError, match="unusable"):
+    collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="error-only",
+        error_analyst_fn=dict_analyst,
+    )
+
+
+def test_spanless_traced_segment_does_not_suppress_spanless_brief_entries():
+  # A traced segment with no turn keys must not blanket-suppress brief
+  # entries that also lack spans ((None, None) collision).
+  s = _session(
+      "unhelpful",
+      conversation=[{"role": "user", "text": "q"}],
+      sub_trajectories=[{"label": "brief-spanless", "outcome": "parroted"}],
+      execution_sub_trajectories=[
+          {
+              "label": "traced-spanless",
+              "outcome": "recovered",
+              "trace": "SEGMENT-TRACE",
+          }
+      ],
+  )
+  out = format_trajectory(s)
+  assert "SEGMENT-TRACE" in out
+  assert "brief-spanless" in out and "parroted" in out
+
+
+def test_ungated_warning_logs_once_through_evolve_flow(caplog):
+  # evolve_skill validates early with warn_ungated=False; the warning fires
+  # exactly once, inside select_candidate.
+  import logging
+
+  with caplog.at_level(logging.WARNING):
+    _validate_incumbent_score(0.9, None, warn_ungated=False)
+    select_candidate(["A", "BB", "CCC"], "BASE", incumbent_score=0.9)
+  ungated = [r for r in caplog.records if "UNGATED" in r.message]
+  assert len(ungated) == 1
+
+
+def test_non_string_host_patch_dropped_not_crashed(caplog):
+  # A truthy non-string return must be dropped with a warning BEFORE the
+  # quality gate, never crash after the full fleet spend.
+  import logging
+
+  results = iter(
+      [
+          {"patch": "structured"},
+          (
+              "## Root Cause\nTOOL_USAGE: skipped the tool despite having"
+              " it available.\n## Proposed Patch\nContent: call the tool"
+              " first."
+          ),
+      ]
+  )
+
+  def fake_analyst(client, model, session, current_skill, tools):
+    return next(results)
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="q1"),
+          _session("partial", question="q2"),
+      ]
+  }
+  with caplog.at_level(logging.WARNING):
+    patches = collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="error-only",
+        error_analyst_fn=fake_analyst,
+    )
+  assert len(patches) == 1
+  assert any("instead of patch text" in r.message for r in caplog.records)
+
+
+def test_raising_host_analyst_partial_failure_tolerated(caplog):
+  # One raising host analyst degrades to a warning; the surviving patch is
+  # still collected and no exception propagates.
+  import logging
+
+  def fake_analyst(client, model, session, current_skill, tools):
+    if session["question"] == "boom":
+      raise RuntimeError("host exploded")
+    return (
+        "## Root Cause\nTOOL_USAGE: skipped the tool despite having it"
+        " available.\n## Proposed Patch\nContent: call the tool first."
+    )
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="boom"),
+          _session("partial", question="ok"),
+      ]
+  }
+  with caplog.at_level(logging.WARNING):
+    patches = collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="error-only",
+        error_analyst_fn=fake_analyst,
+    )
+  assert len(patches) == 1
+  assert any("failed: host exploded" in r.message for r in caplog.records)
+
+
+def test_all_host_analysts_failing_raises():
+  # A systematically broken host analyst must not degrade into a
+  # clean-looking zero-patch run.
+  import pytest
+
+  def broken_analyst(client, model, session, current_skill, tools):
+    raise RuntimeError("bad credentials")
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="q1"),
+          _session("partial", question="q2"),
+      ]
+  }
+  with pytest.raises(RuntimeError, match="every host error_analyst_fn"):
+    collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="error-only",
+        error_analyst_fn=broken_analyst,
+    )
+
+
+def test_analyst_timeout_bounds_a_hung_host_analyst(caplog):
+  # A blocking host analyst must not hang collect_patches; the timed-out
+  # future degrades to a warning like any other analyst failure.
+  import logging
+  import threading
+
+  release = threading.Event()
+
+  def hung_analyst(client, model, session, current_skill, tools):
+    if session["question"] == "hang":
+      release.wait(5)
+      return None
+    return (
+        "## Root Cause\nTOOL_USAGE: skipped the tool despite having it"
+        " available.\n## Proposed Patch\nContent: call the tool first."
+    )
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="hang"),
+          _session("partial", question="ok"),
+      ]
+  }
+  try:
+    with caplog.at_level(logging.WARNING):
+      patches = collect_patches(
+          report,
+          "BASE",
+          client=None,
+          model="unused",
+          analyst_mode="error-only",
+          error_analyst_fn=hung_analyst,
+          analyst_timeout_s=0.3,
+      )
+  finally:
+    release.set()
+  assert len(patches) == 1
+  assert any("failed" in r.message for r in caplog.records)
+
+
+def test_hung_analyst_does_not_starve_queued_analyst_one_worker(caplog):
+  # With max_workers=1, a hung host analyst must lose its slot on timeout so
+  # the queued healthy analyst still runs. Previously the queued future
+  # never started, both timed out, and collect_patches raised a FALSE
+  # all-host-failures RuntimeError.
+  import logging
+  import threading
+
+  release = threading.Event()
+
+  def hung_then_ok(client, model, session, current_skill, tools):
+    if session["question"] == "hang":
+      release.wait(5)
+      return None
+    return (
+        "## Root Cause\nTOOL_USAGE: skipped the tool despite having it"
+        " available.\n## Proposed Patch\nContent: call the tool first."
+    )
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="hang"),
+          _session("unhelpful", question="ok"),
+      ]
+  }
+  try:
+    with caplog.at_level(logging.WARNING):
+      patches = collect_patches(
+          report,
+          "BASE",
+          client=None,
+          model="unused",
+          analyst_mode="error-only",
+          error_analyst_fn=hung_then_ok,
+          analyst_timeout_s=0.3,
+          max_workers=1,
+      )
+  finally:
+    release.set()
+  assert len(patches) == 1
+  assert any("timed out" in r.message for r in caplog.records)
+
+
+def test_hung_host_does_not_drop_queued_builtin_success_analyst(
+    monkeypatch, caplog
+):
+  # analyst_mode="both" at max_workers=1: the queued built-in success
+  # analyst must still run after the hung host analyst is quarantined,
+  # not be silently omitted from the run.
+  import logging
+  import threading
+
+  import skill_evolution as _se
+
+  release = threading.Event()
+
+  def host_analyst(client, model, session, current_skill, tools):
+    if session["question"] == "hang":
+      release.wait(5)
+      return None
+    return (
+        "## Root Cause\nTOOL_USAGE: skipped the tool despite having it"
+        " available.\n## Proposed Patch\nContent: call the tool first."
+    )
+
+  builtin_calls = []
+
+  def fake_run_analyst(client, model, prompt, session, current_skill, *a, **k):
+    builtin_calls.append(session["question"])
+    return (
+        "## Pattern\nRESPONSE_PATTERN: kept the derived rate.\n"
+        "## Proposed Patch\nContent: keep deriving rates."
+    )
+
+  monkeypatch.setattr(_se, "run_analyst", fake_run_analyst)
+  report = {
+      "sessions": [
+          _session("unhelpful", question="hang"),
+          _session("unhelpful", question="fail-ok"),
+          _session("meaningful", question="win-1"),
+      ]
+  }
+  try:
+    with caplog.at_level(logging.WARNING):
+      patches = collect_patches(
+          report,
+          "BASE",
+          client=object(),
+          model="unused",
+          analyst_mode="both",
+          error_analyst_fn=host_analyst,
+          analyst_timeout_s=0.3,
+          max_workers=1,
+      )
+  finally:
+    release.set()
+  assert builtin_calls == ["win-1"]
+  assert len(patches) == 2  # healthy host patch + built-in success patch
+
+
+def test_falsy_non_string_host_results_trip_the_guard():
+  # False/0/[]/{} are NOT the no-patch sentinel: a host returning falsy
+  # non-strings for every session must raise like any all-failures host,
+  # not read as a healthy zero-patch run.
+  import pytest
+
+  falsy_by_question = {"q0": False, "q1": 0, "q2": [], "q3": {}}
+
+  def falsy_host(client, model, session, current_skill, tools):
+    return falsy_by_question[session["question"]]
+
+  report = {
+      "sessions": [_session("unhelpful", question=f"q{i}") for i in range(4)]
+  }
+  with pytest.raises(RuntimeError, match="every host error_analyst_fn"):
+    collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="error-only",
+        error_analyst_fn=falsy_host,
+    )
+
+
+def test_all_none_host_results_stay_a_healthy_zero_patch_run():
+  # None remains the one valid empty sentinel: an all-None host is a
+  # healthy zero-patch run, not an all-host-failures error.
+  def quiet_host(client, model, session, current_skill, tools):
+    return None
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="q1"),
+          _session("unhelpful", question="q2"),
+      ]
+  }
+  patches = collect_patches(
+      report,
+      "BASE",
+      client=None,
+      model="unused",
+      analyst_mode="error-only",
+      error_analyst_fn=quiet_host,
+  )
+  assert patches == []
+
+
+def test_quarantine_keeps_live_callables_bounded():
+  # Timeouts must not fan the fleet out: with max_workers=1 and a report of
+  # slow analysts, live callables are capped at 2 * max_workers (one running
+  # slot + one budgeted quarantine donation), NOT one per timed-out call.
+  import threading
+
+  import pytest
+
+  release = threading.Event()
+  lock = threading.Lock()
+  active = 0
+  peak = 0
+
+  def slow_host(client, model, session, current_skill, tools):
+    nonlocal active, peak
+    with lock:
+      active += 1
+      peak = max(peak, active)
+    try:
+      release.wait(10)  # slower than every timeout window in this test
+      return None
+    finally:
+      with lock:
+        active -= 1
+
+  report = {
+      "sessions": [_session("unhelpful", question=f"q{i}") for i in range(12)]
+  }
+  try:
+    # Every call times out or is cancelled unstarted -> all-host-failures.
+    with pytest.raises(RuntimeError, match="every host error_analyst_fn"):
+      collect_patches(
+          report,
+          "BASE",
+          client=None,
+          model="unused",
+          analyst_mode="error-only",
+          error_analyst_fn=slow_host,
+          analyst_timeout_s=0.05,
+          max_workers=1,
+      )
+  finally:
+    release.set()
+  assert peak <= 2, f"expected <= 2 concurrent callables, saw {peak}"
+
+
+def test_thread_allocation_bounded_by_workers_not_report_size():
+  # Threads are created lazily as slots free up: a large report must not
+  # allocate one thread per trajectory up front.
+  import threading
+
+  lock = threading.Lock()
+  baseline = threading.active_count()
+  peak = 0
+
+  def counting_host(client, model, session, current_skill, tools):
+    nonlocal peak
+    with lock:
+      peak = max(peak, threading.active_count())
+    return (
+        "## Root Cause\nTOOL_USAGE: skipped the tool despite having it"
+        " available.\n## Proposed Patch\nContent: call the tool first."
+    )
+
+  report = {
+      "sessions": [_session("unhelpful", question=f"q{i}") for i in range(60)]
+  }
+  patches = collect_patches(
+      report,
+      "BASE",
+      client=None,
+      model="unused",
+      analyst_mode="error-only",
+      error_analyst_fn=counting_host,
+      max_workers=2,
+  )
+  assert len(patches) == 60
+  # 2 workers + dispatcher + slack for unrelated/lingering daemons; the old
+  # dispatch allocated all 60 threads up front and busted any such bound.
+  assert peak - baseline <= 6, (
+      f"expected thread growth bounded by max_workers, saw"
+      f" {peak - baseline} extra threads"
+  )
+
+
+def test_non_positive_max_workers_rejected_before_dispatch():
+  # BoundedSemaphore(0) used to be accepted and every analyst blocked in
+  # acquire() forever under the default wait(None). Reject bad worker
+  # counts up front, before any analyst runs.
+  import pytest
+
+  calls = []
+
+  def host(client, model, session, current_skill, tools):
+    calls.append(session["question"])
+    return None
+
+  report = {"sessions": [_session("unhelpful", question="q1")]}
+  for bad in (0, -3, 2.5, True):
+    with pytest.raises(ValueError, match="max_workers must be a positive"):
+      collect_patches(
+          report,
+          "BASE",
+          client=None,
+          model="unused",
+          analyst_mode="error-only",
+          error_analyst_fn=host,
+          max_workers=bad,
+      )
+  assert calls == []
+
+
+def test_evolve_skill_rejects_bad_max_workers_before_any_spend(monkeypatch):
+  # The hoisted check must fire before client creation, so a bad worker
+  # count cannot burn the analyst fleet + consolidation first.
+  import pytest
+  import skill_evolution as _se
+
+  def boom(project, location):
+    raise AssertionError("client must not be created for bad max_workers")
+
+  monkeypatch.setattr(_se, "_make_client", boom)
+  report = {"sessions": [_session("unhelpful", question="q1")]}
+  with pytest.raises(ValueError, match="max_workers must be a positive"):
+    _se.evolve_skill(report, "BASE", max_workers=0)
+
+
+def test_all_blank_string_host_results_trip_the_guard():
+  # "" and whitespace-only strings are NOT the no-patch sentinel (None is):
+  # an all-blank host must raise like any all-failures host, not read as a
+  # healthy zero-patch run (or as mere quality-gate rejects).
+  import pytest
+
+  blank_by_question = {"q0": "", "q1": "   ", "q2": "\n\t", "q3": ""}
+
+  def blank_host(client, model, session, current_skill, tools):
+    return blank_by_question[session["question"]]
+
+  report = {
+      "sessions": [_session("unhelpful", question=f"q{i}") for i in range(4)]
+  }
+  with pytest.raises(RuntimeError, match="every host error_analyst_fn"):
+    collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="error-only",
+        error_analyst_fn=blank_host,
+    )
+
+
+def test_blank_host_result_is_partial_failure_not_fatal(caplog):
+  # One blank return + one valid patch: the blank is warned and dropped,
+  # the valid patch survives, and nothing raises.
+  import logging
+
+  def mixed_host(client, model, session, current_skill, tools):
+    if session["question"] == "blank":
+      return "   "
+    return (
+        "## Root Cause\nTOOL_USAGE: skipped the tool despite having it"
+        " available.\n## Proposed Patch\nContent: call the tool first."
+    )
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="blank"),
+          _session("unhelpful", question="ok"),
+      ]
+  }
+  with caplog.at_level(logging.WARNING):
+    patches = collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="error-only",
+        error_analyst_fn=mixed_host,
+    )
+  assert len(patches) == 1
+  assert any(
+      "empty/whitespace-only string" in r.message for r in caplog.records
+  )
+
+
+def test_select_candidate_rejects_non_finite_candidate_score():
+  # An inf/NaN CANDIDATE score must not defeat the improvement gate that
+  # already rejects non-finite incumbent scores (inf would always win
+  # selection AND pass the margin check).
+  import pytest
+
+  for bad in (float("inf"), float("-inf"), float("nan")):
+
+    def scorer(text, _bad=bad):
+      return 1.0 if text == "BASE" else _bad
+
+    with pytest.raises(ValueError, match="non-finite candidate"):
+      select_candidate(["CAND"], "BASE", score_fn=scorer)
+
+
+def test_format_coerces_structured_segment_trace():
+  # A dict/list per-segment trace degrades to a readable dump instead of a
+  # TypeError inside the analyst future (parity with the full-session
+  # trace coercion).
+  s = _session(
+      "unhelpful",
+      conversation=[{"role": "user", "text": "q"}],
+      execution_sub_trajectories=[
+          {
+              "label": "post_correction_1",
+              "outcome": "parroted",
+              "start_turn": 1,
+              "end_turn": 2,
+              "trace": [{"event": "TOOL_STARTING", "tool": "lookup"}],
+          }
+      ],
+  )
+  out = format_trajectory(s)
+  assert "=== Execution sub-trajectories ===" in out
+  assert "TOOL_STARTING" in out
+
+
+def test_format_filters_malformed_correction_boundaries():
+  # Non-dict boundary entries are filtered; optional malformed evidence
+  # must not discard an otherwise valid trajectory with AttributeError.
+  s = _session(
+      "unhelpful",
+      conversation=[{"role": "user", "text": "q"}],
+      correction_boundaries=[
+          None,
+          "not-a-dict",
+          {
+              "turn_index": 1,
+              "wrong_claim": "PTO is 20 days",
+              "correct_fact": "PTO is 25 days",
+              "agent_recovered": True,
+          },
+      ],
+  )
+  out = format_trajectory(s)
+  assert "=== Correction Evidence ===" in out
+  assert "PTO is 25 days" in out
+
+
+def test_single_turn_sessions_render_all_enrichment_sections():
+  # The question/response shape shares the enrichment renderer with the
+  # conversation shape -- it must not drop verifications, correction
+  # evidence, segment outcomes, or per-segment traces.
+  s = _session(
+      "unhelpful",
+      question="What is the meal limit?",
+      response="Ask HR.",
+      verifications=2,
+      correction_boundaries=[
+          {
+              "turn_index": 1,
+              "wrong_claim": "no limit",
+              "correct_fact": "$50 per day",
+              "agent_recovered": False,
+          }
+      ],
+      sub_trajectories=[
+          {
+              "label": "post_correction_1",
+              "outcome": "parroted",
+              "start_turn": 1,
+              "end_turn": 2,
+          }
+      ],
+      execution_sub_trajectories=[
+          {
+              "label": "post_correction_2",
+              "outcome": "recovered",
+              "start_turn": 3,
+              "end_turn": 4,
+              "trace": "agent->policy_agent (tool call)",
+          }
+      ],
+      execution_trace="invoke supervisor -> transfer policy_agent",
+  )
+  out = format_trajectory(s)
+  assert "User verification requests: 2" in out
+  assert "=== Correction Evidence ===" in out
+  assert "$50 per day" in out
+  assert "=== Execution sub-trajectories ===" in out
+  assert "agent->policy_agent (tool call)" in out
+  # The brief segment has no traced counterpart, so it still renders.
+  assert "post_correction_1" in out
+  assert "=== Execution trace ===" in out
+
+
+def test_legacy_sessions_render_without_new_sections():
+  # Backward-compat parity: sessions without any of the new keys must not
+  # gain new section headings, in either session shape.
+  conv = _session("unhelpful", conversation=[{"role": "user", "text": "q"}])
+  single = _session("unhelpful", question="q", response="a")
+  single.pop("conversation", None)
+  for sess in (conv, single):
+    out = format_trajectory(sess)
+    assert "=== Execution" not in out
+    assert "=== Correction" not in out
 
 
 # --- _write_evolution_artifacts --------------------------------------------
