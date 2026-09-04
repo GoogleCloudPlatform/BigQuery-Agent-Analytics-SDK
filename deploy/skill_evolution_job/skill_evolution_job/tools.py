@@ -960,6 +960,26 @@ def _session_count(report_path: str | None) -> int | None:
     return None
 
 
+def _baseline_report_path(
+    run_dir: str, exclude: str | None = None
+) -> str | None:
+  """Oldest quality report in run_dir (by mtime), skipping ``exclude``.
+
+  The baseline is the first report a run writes; alphabetical order is
+  wrong because ``best_v1_``/``evolved_`` sort before ``v0_``.
+  """
+  exclude_abs = os.path.abspath(exclude) if exclude else None
+  candidates = [
+      p
+      for p in glob.glob(os.path.join(run_dir, "*_quality_report.json"))
+      if exclude_abs is None or os.path.abspath(p) != exclude_abs
+  ]
+  if not candidates:
+    return None
+  candidates.sort(key=lambda p: (os.path.getmtime(p), p))
+  return candidates[0]
+
+
 def _denominators_differ(metrics: dict) -> bool:
   """True when the baseline and evolved rates do not share a denominator.
 
@@ -1118,13 +1138,9 @@ def _collect_quality_metrics(run_dir: str, version: str) -> dict:
       )
       evolved_report = best_any
 
-  baseline_report = None
   baseline_label = "initial"
-  baseline_candidates = sorted(
-      glob.glob(os.path.join(run_dir, "*_quality_report.json"))
-  )
-  if baseline_candidates:
-    baseline_report = baseline_candidates[0]
+  baseline_report = _baseline_report_path(run_dir, exclude=evolved_report)
+  if baseline_report:
     baseline_label = os.path.basename(baseline_report).split("_quality_report")[
         0
     ]
@@ -1260,12 +1276,10 @@ def _gather_run_context(run_dir: str, version: str, agent: str) -> str:
     parts.append("")
 
   # Sample failures from baseline report
-  baseline_reports = sorted(
-      glob.glob(os.path.join(run_dir, "*_quality_report.json"))
-  )
-  if baseline_reports:
+  baseline_report = _baseline_report_path(run_dir)
+  if baseline_report:
     try:
-      with open(baseline_reports[0]) as f:
+      with open(baseline_report) as f:
         report = json.load(f)
       sessions = report.get("sessions", [])
       failures = [
@@ -2125,7 +2139,7 @@ def count_failures(quality_report_path: str) -> dict:
   total = summary.get("total_sessions", 0)
   meaningful = summary.get("meaningful", 0)
   failures = total - meaningful
-  min_failures = int(os.getenv("MIN_FAILURES", "30"))
+  min_failures = config._env_int("MIN_FAILURES", 30)
 
   return {
       "total_sessions": total,

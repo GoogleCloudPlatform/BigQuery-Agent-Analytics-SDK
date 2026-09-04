@@ -452,7 +452,7 @@ def _run_batch_mode(args, common_kwargs) -> str:
   from . import gcs_utils
   from . import tools
 
-  min_issues = int(os.getenv("EVOLUTION_MIN_OPEN_ISSUES", "10"))
+  min_issues = config._env_int("EVOLUTION_MIN_OPEN_ISSUES", 10)
 
   cmd = [
       "gh",
@@ -665,9 +665,9 @@ Examples:
   # Make the scoping flags BINDING at the tool layer (the orchestrating
   # agent treats prompt overrides as hints; these env vars are enforced
   # by evolve.py / coevolve.py regardless of what the agent decides).
-  if args.candidates:
+  if args.candidates is not None:
     os.environ["EVOLUTION_CANDIDATES"] = str(args.candidates)
-  if args.rounds:
+  if args.rounds is not None:
     os.environ["EVOLUTION_MAX_ROUNDS"] = str(args.rounds)
   if args.mode not in ("auto", "coevolve"):
     os.environ["EVOLUTION_TARGET_AGENTS"] = args.mode

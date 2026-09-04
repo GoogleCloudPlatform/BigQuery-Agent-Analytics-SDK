@@ -179,7 +179,7 @@ defaults, and `gcloud run jobs execute --args` reaches every CLI mode:
 | `--test` | Self-test; prints `SELF-TEST PASS` (used by `deploy.sh --smoke`) |
 | `--report path.json --mode <agent>` | Evolve one agent from an existing report (no BigQuery) |
 | `--mode coevolve` | Multi-agent co-evolution in registry order |
-| `--mode bottleneck` | Classify which agent is responsible for current failures |
+| `--mode auto` (default) | Classify which agent owns the current failures, then evolve it |
 | `--batch` | Process open `[quality]` GitHub issues (requires `GITHUB_REPO`; `EVOLUTION_MIN_OPEN_ISSUES` gates the run) |
 | `--from-issue N` | Evolve from one specific quality issue |
 
@@ -190,6 +190,9 @@ Useful knobs: `--rounds`, `--candidates`, `--min-failures`, `--run-dir`,
 ## Environment reference
 
 Set by `deploy.sh` (override with `gcloud run jobs update --update-env-vars`):
+Note that `deploy.sh` deploys with `--set-env-vars`, which replaces the
+whole variable set, so overrides made with `--update-env-vars` are lost
+on the next `deploy.sh` run; re-apply them afterwards.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
@@ -200,7 +203,7 @@ Set by `deploy.sh` (override with `gcloud run jobs update --update-env-vars`):
 | `GITHUB_REPO` / `GITHUB_BASE_BRANCH` | — / `main` | Agent repo for clone + PRs; unset = dry-run (no PRs) |
 | `GH_TOKEN` | — | GitHub token (wired from Secret Manager by `deploy.sh`) |
 | `FULL_LOOP` | unset | `true` = scheduled full-loop behavior |
-| `EVOLUTION_GCS_BUCKET` | — | Run-artifact bucket (also accepts `GCS_BUCKET`) |
+| `EVOLUTION_GCS_BUCKET` | — | Run-artifact bucket (also accepts `GCS_BUCKET`) ; uploads happen only when `GCS_UPLOAD=true` (set by `deploy.sh --gcs-bucket`) |
 
 Tuning (all optional):
 
@@ -211,8 +214,8 @@ Tuning (all optional):
 | `QUALITY_THRESHOLD` | `0.95` | Meaningful-rate gate; at/above = no evolution |
 | `QUALITY_APP_NAME` | registry default | Report `app_name` filter |
 | `EVOLUTION_TRACE_LABELS` | — | `K=V,K2=V2` report label filters |
-| `SKILL_EVOLUTION_MODEL_ID` | `gemini-2.5-pro` | Analyst/consolidation model |
-| `EVOLUTION_MODEL_ID` / `EVAL_MODEL_ID` | `gemini-2.5-pro` / — | Orchestrating agent / judge models |
+| `SKILL_EVOLUTION_MODEL_ID` | `gemini-2.5-pro` | Orchestrating agent's own model |
+| `EVOLUTION_MODEL_ID` / `EVAL_MODEL_ID` | `gemini-2.5-pro` / — | Engine analyst/consolidation model / judge model |
 | `EVOLUTION_MODE` | `evolve` | Default mode for scheduled fires |
 | `EVOLUTION_TARGET_AGENTS` / `EVOLUTION_ORDER` | — | Restrict / reorder co-evolution |
 | `EVOLUTION_CANDIDATES` / `EVOLUTION_MAX_ROUNDS` | auto | Candidate count / round cap. Both are binding: `run_evolution` and `run_coevolution` refuse rounds past the cap (per agent) and use the bound candidate count over whatever the orchestrating agent asks for |

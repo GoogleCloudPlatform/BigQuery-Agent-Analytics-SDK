@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -194,6 +195,18 @@ def test_count_failures_missing_report(tmp_path):
   result = tools.count_failures(str(tmp_path / "missing.json"))
   assert "error" in result
   assert "not found" in result["error"]
+
+
+def test_count_failures_non_integer_min_failures_env_falls_back(
+    tmp_path, monkeypatch
+):
+  monkeypatch.setenv("MIN_FAILURES", "abc")
+  report_path = tmp_path / "quality_report.json"
+  _write_report(
+      report_path, meaningful_rate=50.0, total_sessions=50, meaningful=25
+  )
+  result = tools.count_failures(str(report_path))
+  assert result["min_failures_threshold"] == 30
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +567,25 @@ def test_collect_quality_metrics_denominators(tmp_path):
   metrics = tools._collect_quality_metrics(str(bare), "v1")
   assert metrics["denominators_differ"] is True
   assert "evolved_score.json" in metrics["denominators_note"]
+
+
+def test_collect_quality_metrics_baseline_picked_by_mtime_not_name(tmp_path):
+  # "best_v1_" sorts before "v0_" alphabetically; the baseline must still
+  # be the oldest report by mtime, not the alphabetically-first one.
+  run_dir = tmp_path / "run"
+  run_dir.mkdir()
+  now = time.time()
+  v0_path = run_dir / "v0_quality_report.json"
+  best_v1_path = run_dir / "best_v1_quality_report.json"
+  _write_report(v0_path, meaningful_rate=23.1, total_sessions=26, meaningful=6)
+  _write_report(
+      best_v1_path, meaningful_rate=26.9, total_sessions=26, meaningful=7
+  )
+  os.utime(v0_path, (now - 100, now - 100))
+  os.utime(best_v1_path, (now, now))
+
+  metrics = tools._collect_quality_metrics(str(run_dir), "v1")
+  assert metrics["baseline_label"] == "v0"
 
 
 # ---------------------------------------------------------------------------

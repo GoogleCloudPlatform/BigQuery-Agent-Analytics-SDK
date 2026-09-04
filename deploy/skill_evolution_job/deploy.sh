@@ -150,7 +150,8 @@ Optional:
                                  gcloud secrets create NAME --data-file=-
                              Wired to the job as GH_TOKEN.
   --gcs-bucket BUCKET        GCS bucket for run artifacts (created
-                             if absent). Wired as EVOLUTION_GCS_BUCKET.
+                             if absent). Wired as EVOLUTION_GCS_BUCKET
+                             and enables GCS_UPLOAD.
   --base-branch NAME         Base branch for evolution PRs
                              (default: main).
   --task-timeout SECONDS     Cloud Run task timeout (default: 14400).
@@ -596,6 +597,7 @@ if [[ -n "$GITHUB_REPO" && -n "$GH_SECRET" ]]; then
 fi
 if [[ -n "$GCS_BUCKET" ]]; then
   ENV_VARS+=("EVOLUTION_GCS_BUCKET=${GCS_BUCKET}")
+  ENV_VARS+=("GCS_UPLOAD=true")
 fi
 ENV_VAR_FLAG="$(IFS=','; echo "${ENV_VARS[*]}")"
 

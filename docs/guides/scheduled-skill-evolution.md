@@ -103,8 +103,8 @@ nothing.
   go to GCS only, you apply skills manually.
 - **Multi-agent repos** — register several agents; `--mode coevolve`
   (or `EVOLUTION_MODE=coevolve`) evolves them in registry order,
-  re-measuring between agents; `--mode bottleneck` first classifies which
-  agent owns the failures.
+  re-measuring between agents; `--mode auto` (the default) first
+  classifies which agent owns the failures and evolves only that one.
 - **Issue-driven** — `--batch` consumes open `[quality]` GitHub issues
   (e.g. filed by your monitoring) instead of running its own report;
   `--from-issue N` targets one.

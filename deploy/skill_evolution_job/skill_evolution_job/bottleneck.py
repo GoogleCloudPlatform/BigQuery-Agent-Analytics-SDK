@@ -37,11 +37,11 @@ from dataclasses import dataclass
 from dataclasses import field
 import json
 import logging
-import os
 
 from google import genai
 from google.genai import types
 
+from . import config
 from . import evolve
 from . import registry
 
@@ -103,8 +103,8 @@ Output format (JSON):
 
 def _build_classifier_prompt(agents: dict) -> str:
   agent_lines = []
-  for name, config in agents.items():
-    label = config.get("label", name)
+  for name, agent_cfg in agents.items():
+    label = agent_cfg.get("label", name)
     agent_lines.append(f"- A **{name}** ({label})")
   agent_names = [f'"{name}"' for name in agents] + ['"system"']
   return _CLASSIFIER_TEMPLATE.format(
@@ -290,7 +290,7 @@ def detect_bottleneck(
   # Modest parallelism: 10 workers on a large failure set trips per-minute
   # Gemini quota (each worker fires one classifier call per session).
   with ThreadPoolExecutor(
-      max_workers=int(os.getenv("BOTTLENECK_WORKERS", "4"))
+      max_workers=config._env_int("BOTTLENECK_WORKERS", 4)
   ) as executor:
     futures = {executor.submit(_classify_one, s): s for s in classify_set}
     for future in as_completed(futures):

@@ -73,7 +73,7 @@ _CMD_ENV = {
     "gate": "GATE_CMD",
 }
 
-_CMD_TIMEOUT_S = int(os.environ.get("HOOK_CMD_TIMEOUT_S", "3600"))
+_CMD_TIMEOUT_S = config._env_int("HOOK_CMD_TIMEOUT_S", 3600)
 
 _module_cache: dict[str, Any] = {}
 
