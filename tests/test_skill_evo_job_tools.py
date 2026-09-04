@@ -416,12 +416,13 @@ def test_round_guard_refuses_second_round_per_key(monkeypatch):
   assert tools._round_guard("run_evolution[/b]") is None
 
 
-def test_round_guard_never_refuses_without_env(monkeypatch):
+def test_round_guard_defaults_to_two_without_env(monkeypatch):
   monkeypatch.delenv("EVOLUTION_MAX_ROUNDS", raising=False)
   monkeypatch.setattr(tools, "_rounds_run", {})
 
-  for _ in range(5):
+  for _ in range(2):
     assert tools._round_guard("run_evolution[/a]") is None
+  assert tools._round_guard("run_evolution[/a]")["status"] == "refused"
 
 
 def test_run_evolution_refuses_past_max_rounds(tmp_path, monkeypatch):
@@ -711,10 +712,15 @@ def test_create_evolution_pr_reports_commit_failure(tmp_path, monkeypatch):
 
   def _fake_run(cmd, *args, **kwargs):
     failed = list(cmd[:2]) == ["git", "commit"]
+    stdout = "nothing to commit, working tree clean" if failed else ""
+    if list(cmd[:2]) == ["git", "rev-parse"]:
+      stdout = "a" * 40 + "\n"
+    elif list(cmd[:2]) == ["git", "symbolic-ref"]:
+      stdout = "main\n"
     return subprocess.CompletedProcess(
         cmd,
         1 if failed else 0,
-        stdout="nothing to commit, working tree clean" if failed else "",
+        stdout=stdout,
         stderr="",
     )
 

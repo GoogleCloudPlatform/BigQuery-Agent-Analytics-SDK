@@ -39,9 +39,11 @@ from __future__ import annotations
 import glob
 import json
 import logging
+import math
 import os
 import re
 import shutil
+import sys
 import time
 
 from google import genai
@@ -227,11 +229,7 @@ def _record_evolved_score(
     if reason:
       payload["reason"] = reason
     if unmeasurable:
-      # Explicit null marker: in co-evolution the file is shared across
-      # agents, and writing nothing would leave the PREVIOUS agent's
-      # score attributed to a system that now includes this agent's
-      # skill. _refresh_incumbent treats a null rate as
-      # keep-the-current-bar.
+      # Clear a prior agent/attempt's score when this evaluation failed.
       payload["unmeasurable"] = True
     with open(os.path.join(run_dir, "evolved_score.json"), "w") as f:
       json.dump(payload, f)
@@ -405,9 +403,9 @@ def evolve(
       score_fn: Optional ``(skill_content) -> float`` for candidate
           selection; without it the engine picks the median-size viable
           candidate.
-      incumbent_score: Pre-measured score of the current skill; the
-          incumbent guard uses it instead of re-scoring V0. Dropped on an
-          engine that predates it, which then re-scores V0 itself.
+      incumbent_score: Legacy baseline argument. With score_fn, the
+          current skill is always measured on that same evaluation set;
+          an unrelated production-report baseline is never used.
       min_improvement: Margin a candidate must clear over the incumbent.
 
   Returns:
@@ -434,30 +432,56 @@ def evolve(
 
   error_analyst_fn = _resolve_error_analyst(agentic)
 
-  # Memoize candidate scores so the selected skill's score can be recorded
-  # without re-scoring (compare_versions reads evolved_score.json).
-  # score_fn may return None = unmeasurable (its report lost records to
-  # the error-shaped preflight): floored to 0.0 for selection so a flaked
-  # candidate cannot win, and NOT memoized so it is never recorded as the
-  # authoritative deployed score / next incumbent bar.
+  # Measure the incumbent through the same hook as its candidates. Cache
+  # scores so older engines that re-score V0 see exactly this measurement.
   scores: dict[str, float] = {}
   unmeasured: set[str] = set()
   wrapped_score_fn = None
   if score_fn is not None:
 
     def wrapped_score_fn(skill_content: str) -> float:
+      if skill_content in scores:
+        return scores[skill_content]
+      if skill_content in unmeasured:
+        return -sys.float_info.max
       raw = score_fn(skill_content)
-      if raw is None:
+      try:
+        score = float(raw) if not isinstance(raw, bool) else float("nan")
+      except (TypeError, ValueError, OverflowError):
+        score = float("nan")
+      if not math.isfinite(score):
+        if skill_content == current_skill:
+          _record_evolved_score(
+              candidates_dir,
+              None,
+              unmeasurable=True,
+              reason="incumbent evaluation is unmeasurable",
+          )
+          raise ValueError(
+              "Current skill's evaluation is unmeasurable; refusing"
+              " candidate selection without a measured incumbent"
+          )
         unmeasured.add(skill_content)
         logger.warning(
-            "Candidate score unmeasurable (score hook error or preflight"
-            " exclusions — see preceding log lines); using 0.0 for"
-            " selection, not recording it"
+            "Candidate score unmeasurable; it cannot replace the incumbent"
         )
-        return 0.0
-      score = float(raw)
+        # Engines require finite floats. The lowest finite score plus
+        # the explicit selection check below prevents promotion even when
+        # the caller set a zero/negative improvement margin.
+        return -sys.float_info.max
       scores[skill_content] = score
       return score
+
+    _record_evolved_score(
+        candidates_dir,
+        None,
+        unmeasurable=True,
+        reason="incumbent evaluation has not completed",
+    )
+    incumbent_score = wrapped_score_fn(current_skill)
+    # If later candidate scoring raises, the hook restored this incumbent
+    # and its measured score remains the deployed outcome's record.
+    _record_evolved_score(candidates_dir, incumbent_score)
 
   selected = engine.evolve_skill_compat(
       report,
@@ -477,24 +501,19 @@ def evolve(
       version_label=_version_label(current_skill),
       client=client,
   )
+  if selected in unmeasured:
+    selected = current_skill
 
   if candidates_dir and os.path.isdir(candidates_dir):
     _flatten_candidates(candidates_dir)
 
   # Authoritative score of the deployed outcome, on the same eval set as V0.
   if selected == current_skill:
-    _record_evolved_score(candidates_dir, incumbent_score)
+    _record_evolved_score(
+        candidates_dir, scores.get(current_skill, incumbent_score)
+    )
   elif selected in scores:
     _record_evolved_score(candidates_dir, scores[selected])
-  elif selected in unmeasured:
-    # Winner was scored and came back unmeasurable (its report lost
-    # records to the preflight): write the explicit null marker.
-    _record_evolved_score(
-        candidates_dir,
-        None,
-        unmeasurable=True,
-        reason="preflight exclusions in the winner's scored report",
-    )
   elif wrapped_score_fn is not None:
     # Memo miss without an unmeasurable verdict: the engine returned
     # content that is not byte-identical to what it scored (compaction

@@ -35,12 +35,14 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 from . import config
 from . import engine
 from . import hooks
 from . import registry
+from . import scoring
 from .config import mask_tokens as _mask_tokens
 
 logger = logging.getLogger(__name__)
@@ -156,6 +158,19 @@ def run_evolution(
 
   model_id = model_id or config.get_config().evolution_model_id
   skill_dir = _resolve_skill_dir(skill_dir)
+  targets = config.get_config().evolution_target_agents
+  if targets:
+    try:
+      reg = registry.get_registry()
+      names = [name.strip() for name in targets.split(",") if name.strip()]
+      allowed = {os.path.realpath(reg.agent(name).skill_dir) for name in names}
+    except registry.RegistryError as exc:
+      return {"status": "error", "error": str(exc)}
+    if os.path.realpath(skill_dir) not in allowed:
+      return {
+          "status": "refused",
+          "reason": f"EVOLUTION_TARGET_AGENTS={targets} excludes {skill_dir}",
+      }
 
   if not os.path.isfile(quality_report_path):
     return {"error": f"Quality report not found: {quality_report_path}"}
@@ -188,18 +203,16 @@ def run_evolution(
       )
     candidates = bound
 
-  candidates_dir = None
-  if candidates is not None and candidates > 1:
-    if not run_dir:
-      return {"error": "run_dir is required when candidates > 1"}
-    candidates_dir = os.path.join(run_dir, "candidates")
-  elif candidates is None and run_dir:
-    candidates_dir = os.path.join(run_dir, "candidates")
-
+  if candidates is not None and candidates > 1 and not run_dir:
+    _round_release(guard_key)
+    return {"error": "run_dir is required when candidates > 1"}
+  candidates_dir = os.path.join(run_dir, "candidates") if run_dir else None
+  original_bytes = None
   try:
-    # Read current skill for comparison
-    with open(skill_path) as f:
-      original_content = f.read()
+    # Preserve exact bytes even if a hook installs a candidate and then fails.
+    with open(skill_path, "rb") as f:
+      original_bytes = f.read()
+    original_content = original_bytes.decode("utf-8")
     original_size = len(original_content)
 
     # Always snapshot the pre-evolution skill in run_dir
@@ -219,8 +232,6 @@ def run_evolution(
     # a stub scorer, which would score every candidate 0.0 and make the
     # incumbent guard reject everything.
     _score_fn = None
-    _incumbent = None
-    _score_dir = run_dir or candidates_dir
     score_hook, score_reason = hooks.get_hook("score")
     if score_hook is None:
       logger.info(
@@ -228,53 +239,11 @@ def run_evolution(
           " candidate selection",
           score_reason,
       )
-    elif _score_dir:
-      try:
-        with open(quality_report_path) as _rf:
-          _incumbent = json.load(_rf).get("summary", {}).get("meaningful_rate")
-        if _excluded_count(quality_report_path) > 0:
-          logger.warning(
-              "Incumbent quality report %s has preflight exclusions;"
-              " disabling incumbent_score guard for evolution",
-              quality_report_path,
-          )
-          _incumbent = None
-      except Exception:  # noqa: BLE001
-        _incumbent = None
-
-      def _score_fn(skill_content, _sd=skill_dir, _rd=_score_dir):
-        tmp = os.path.join(_rd, "_score_candidate_tmp.md")
-        with open(tmp, "w") as fh:
-          fh.write(skill_content)
-        res = score_hook(tmp, _sd, _rd)
-        if not isinstance(res, dict):
-          logger.warning(
-              "Score hook returned non-dict %r; candidate unmeasurable", res
-          )
-          return None
-        if res.get("status") == "error" or res.get("error"):
-          logger.warning(
-              "Score hook reported an error; candidate unmeasurable: %s",
-              _mask_tokens(str(res)),
-          )
-          return None
-        if res.get("skipped") or res.get("unmeasurable"):
-          return None
-        report_path = res.get("report_path")
-        if report_path and _excluded_count(report_path) > 0:
-          # None = unmeasurable: evolve() floors it for selection but
-          # never records it as the deployed score, so a flaked run
-          # cannot lower the bar.
-          logger.warning(
-              "Candidate scored report %s has preflight exclusions; score"
-              " unmeasurable",
-              report_path,
-          )
-          return None
-        rate = res.get("meaningful_rate")
-        if rate is None:
-          return None
-        return float(rate)
+    else:
+      if not run_dir:
+        run_dir = tempfile.mkdtemp(prefix="skill_evolution_")
+        candidates_dir = os.path.join(run_dir, "candidates")
+      _score_fn = scoring.make_score_fn(score_hook, skill_dir, run_dir)
 
     evolved_content = evolve_mod.evolve(
         report_path=quality_report_path,
@@ -286,7 +255,7 @@ def run_evolution(
         candidates_dir=candidates_dir,
         max_chars=max_chars,
         score_fn=_score_fn,
-        incumbent_score=_incumbent,
+        incumbent_score=None,
     )
 
     # Write evolved skill (first candidate or single result)
@@ -300,6 +269,8 @@ def run_evolution(
         "evolved_size": len(evolved_content),
         "growth": f"{len(evolved_content) - original_size:+d} chars",
     }
+    if run_dir:
+      result["run_dir"] = run_dir
 
     # List candidate paths if best-of-N was used
     if candidates_dir and os.path.isdir(candidates_dir):
@@ -335,6 +306,9 @@ def run_evolution(
 
   except Exception as e:
     logger.error("Evolution failed: %s", e, exc_info=True)
+    if original_bytes is not None:
+      with open(skill_path, "wb") as f:
+        f.write(original_bytes)
     _round_release(guard_key)
     return {"status": "error", "error": str(e)}
 
@@ -432,9 +406,12 @@ def _round_guard(key: str) -> dict | None:
   ``run_coevolution``). Returns the refusal dict for the tool to hand
   back, or None (and counts the round) when the call may proceed.
   """
-  max_rounds = os.getenv("EVOLUTION_MAX_ROUNDS")
+  try:
+    max_rounds = config.evolution_max_rounds()
+  except ValueError as exc:
+    return {"status": "error", "error": str(exc)}
   done = _rounds_run.get(key, 0)
-  if max_rounds and done >= int(max_rounds):
+  if done >= max_rounds:
     logger.warning(
         "%s refused: EVOLUTION_MAX_ROUNDS=%s reached (%d round(s) already"
         " run)",
@@ -1017,20 +994,21 @@ def _find_evolved_skill(run_dir: str, version: str, agent: str) -> str | None:
   return None
 
 
-def _resolve_repo_skill_path(agent: str) -> str | None:
-  """In-repo path of an agent's SKILL.md, relative to the repo root.
-
-  Relative to the registry's ``repo_root`` inside the host-repo workdir
-  — the directory ``create_evolution_pr`` commits in — so joining it
-  back onto the workdir root can never escape the clone.
-  """
+def _resolve_repo_skill_path(
+    agent: str, git_root: str | None = None
+) -> str | None:
+  """Return the skill path relative to the checkout, preserving registry roots."""
   reg = registry.get_registry()
   spec = reg.agents.get(agent)
   if spec is None:
     return None
-  return os.path.relpath(
-      os.path.join(spec.skill_dir, "SKILL.md"), reg.repo_root
-  )
+  root = os.path.realpath(git_root or config.workdir_or_none() or reg.repo_root)
+  skill_path = os.path.realpath(os.path.join(spec.skill_dir, "SKILL.md"))
+  if os.path.commonpath([root, skill_path]) != root:
+    raise registry.RegistryError(
+        f"Refusing skill outside the git workdir {root}: {skill_path}"
+    )
+  return os.path.relpath(skill_path, root)
 
 
 def _authoritative_evolved_score(run_dir: str) -> float | None:
@@ -1689,9 +1667,10 @@ def create_evolution_pr(
   SKILL.md file), then ``gh pr create`` for the PR. The PR body is a
   metrics table built from the run's reports.
 
-  Before opening a real PR the ``gate`` hook decides whether the winner
-  may be published. With no gate hook configured the behavior follows
-  GATE_POLICY: ``skip`` (default) continues, ``require`` fails.
+  The selected snapshot is committed locally on its intended base before
+  the ``gate`` hook runs. An explicit False blocks publication; None remains
+  inconclusive. Hooks must not modify that commit or its tracked files.
+  With no gate hook configured the behavior follows GATE_POLICY: ``skip`` (default) continues, ``require`` fails.
 
   When ``output_file`` is set, writes the evolved skill to that path
   instead of creating a PR.
@@ -1725,23 +1704,16 @@ def create_evolution_pr(
     dry_run = True
     publish_disabled = True
 
+  gate_hook = None
   if not dry_run and not output_file:
     gate_agent, error = _resolve_agent(agent)
     if error:
       return error
-    gate_hook, gate_reason = hooks.get_hook("gate")
-    if gate_hook is not None:
-      passed, detail = gate_hook(run_dir, version, gate_agent)
-      if passed is False:
-        return {
-            "status": "refused_by_gate",
-            "reason": (
-                "Winner failed the publish gate — PR NOT opened"
-                f" ({detail}). Fix the skill or run another round; the"
-                " refusal stays in this log."
-            ),
-        }
-    elif cfg.gate_policy == "require":
+    try:
+      gate_hook, gate_reason = hooks.get_hook("gate")
+    except Exception as exc:
+      return {"status": "error", "error": _mask_tokens(str(exc))}
+    if gate_hook is None and cfg.gate_policy == "require":
       return {
           "status": "error",
           "error": (
@@ -1749,7 +1721,7 @@ def create_evolution_pr(
               " (set EVOLUTION_HOOKS or GATE_CMD)"
           ),
       }
-    else:
+    elif gate_hook is None:
       logger.info(
           "Publish gate skipped (%s); GATE_POLICY=%s — continuing to PR"
           " creation.",
@@ -1835,72 +1807,56 @@ def create_evolution_pr(
       )
     return result
 
-  # --- Resolve the git workdir (the single clone of the host repo) ---
+  # Resolve the commit path against the checkout actually used below.
   try:
-    git_root = _ensure_git_workdir()
-  except RuntimeError as e:
-    return {"status": "error", "error": _mask_tokens(str(e))}
+    git_root = os.path.realpath(_ensure_git_workdir())
+    repo_skill_path = _resolve_repo_skill_path(agent, git_root=git_root)
+    if repo_skill_path is None:
+      raise registry.RegistryError(f"Agent {agent!r} is not registered")
+  except (RuntimeError, registry.RegistryError) as exc:
+    return {"status": "error", "error": _mask_tokens(str(exc))}
+  abs_skill_path = os.path.join(git_root, repo_skill_path)
 
-  # The registry's repo_root lives inside this clone, so the relative
-  # skill path must stay inside it — reject anything that climbs out
-  # via '..' rather than writing outside the checkout.
-  git_root = os.path.abspath(git_root)
-  abs_skill_path = os.path.abspath(os.path.join(git_root, repo_skill_path))
-  if os.path.commonpath([git_root, abs_skill_path]) != git_root:
-    return {
-        "status": "error",
-        "error": (
-            f"Refusing to commit {repo_skill_path}: it resolves outside the"
-            f" git workdir {git_root}. Check 'repo_root' and 'skill_dir' in"
-            " the agent registry."
-        ),
-    }
-
-  # --- Remember current branch to restore later ---
-  try:
-    original_branch = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd=git_root,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-  except Exception:  # noqa: BLE001
-    original_branch = base_branch
-
-  # --- Stash uncommitted changes ---
-  stashed = False
-  dirty = (
-      subprocess.run(["git", "diff", "--quiet"], cwd=git_root).returncode != 0
-  )
-  cached = (
-      subprocess.run(
-          ["git", "diff", "--cached", "--quiet"], cwd=git_root
-      ).returncode
-      != 0
-  )
-  if dirty or cached:
-    subprocess.run(
-        ["git", "stash", "push", "-m", "create_evolution_pr: temp stash"],
-        cwd=git_root,
-        capture_output=True,
+  def _git(*args, check=True):
+    proc = subprocess.run(
+        ["git", *args], cwd=git_root, capture_output=True, text=True
     )
-    stashed = True
+    if check and proc.returncode != 0:
+      raise RuntimeError(
+          f"git {args[0]} failed (exit {proc.returncode}):"
+          f" {_mask_tokens(proc.stderr or proc.stdout)}"
+      )
+    return proc
 
-  try:
-    # --- Create branch from base ---
-    r = subprocess.run(
-        ["git", "checkout", "-b", branch_name, f"origin/{base_branch}"],
-        cwd=git_root,
-        capture_output=True,
-        text=True,
+  original_head = None
+  original_branch = None
+  stash_oid = None
+  branch_created = False
+  prepared_head = None
+
+  def _tracked_tree_changed(expected_head):
+    return (
+        _git("rev-parse", "HEAD").stdout.strip() != expected_head
+        or _git(
+            "symbolic-ref", "--quiet", "--short", "HEAD", check=False
+        ).stdout.strip()
+        != branch_name
+        or bool(_git("status", "--porcelain", "--untracked-files=no").stdout)
     )
-    if r.returncode != 0:
-      return {
-          "status": "error",
-          "error": f"Branch creation failed: {_mask_tokens(r.stderr)}",
-      }
 
-    # --- Copy evolved skill and commit ---
+  def _publish():
+    nonlocal branch_created, prepared_head
+    _git("checkout", "-b", branch_name, f"origin/{base_branch}")
+    branch_created = True
+    prepared_head = _git("rev-parse", "HEAD").stdout.strip()
+    # The base branch can have different symlinks from the caller's tree.
+    if (
+        os.path.commonpath([git_root, os.path.realpath(abs_skill_path)])
+        != git_root
+    ):
+      raise RuntimeError(
+          "Selected skill resolves outside the publication checkout"
+      )
     os.makedirs(os.path.dirname(abs_skill_path), exist_ok=True)
     with open(abs_skill_path, "w") as f:
       f.write(evolved_content)
@@ -1913,20 +1869,33 @@ def create_evolution_pr(
     if _denominators_differ(metrics):
       commit_msg += " [denominators differ]"
     commit_msg += f"\nRun: {os.path.basename(run_dir)}"
+    _git("add", "--", repo_skill_path)
+    _git("commit", "-m", commit_msg)
+    prepared_head = _git("rev-parse", "HEAD").stdout.strip()
+    if _tracked_tree_changed(prepared_head):
+      return {
+          "status": "refused_by_gate",
+          "reason": "Publication tree changed during preparation; PR NOT opened.",
+      }
 
-    for step, cmd in (
-        ("git add", ["git", "add", repo_skill_path]),
-        ("git commit", ["git", "commit", "-m", commit_msg]),
-    ):
-      r = subprocess.run(cmd, cwd=git_root, capture_output=True, text=True)
-      if r.returncode != 0:
-        # An unchecked failure here pushed an unchanged branch and opened
-        # an empty PR.
+    # Both module hooks anchored to __file__ and command hooks see the
+    # exact clean tree that will be pushed, in the original host checkout.
+    if gate_hook is not None:
+      passed, detail = gate_hook(run_dir, version, gate_agent)
+      if _tracked_tree_changed(prepared_head):
         return {
-            "status": "error",
-            "error": (
-                f"{step} failed (exit {r.returncode}):"
-                f" {_mask_tokens(r.stderr or r.stdout)}"
+            "status": "refused_by_gate",
+            "reason": (
+                "Publish gate changed the publication commit or tracked files;"
+                " PR NOT opened. Gates must inspect without changing the tree."
+            ),
+        }
+      if passed is False:
+        return {
+            "status": "refused_by_gate",
+            "reason": (
+                "Winner did not pass the publish gate — PR NOT opened"
+                f" ({_mask_tokens(str(detail))})."
             ),
         }
 
@@ -2020,19 +1989,73 @@ def create_evolution_pr(
 
     return result
 
-  except Exception as e:
-    logger.error("Failed to create PR: %s", e)
-    return {"status": "error", "error": _mask_tokens(str(e))}
-
+  result = None
+  cleanup_errors = []
+  try:
+    original_head = _git("rev-parse", "HEAD").stdout.strip()
+    if not original_head:
+      raise RuntimeError("Cannot identify the original checkout HEAD")
+    branch = _git("symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+    if branch.returncode not in (0, 1):
+      raise RuntimeError("Cannot identify the original checkout branch")
+    original_branch = branch.stdout.strip() or None
+    if _git("status", "--porcelain", "--untracked-files=no").stdout:
+      previous = _git("rev-parse", "--verify", "refs/stash", check=False)
+      _git("stash", "push", "-m", f"create_evolution_pr: {branch_name}")
+      saved = _git("rev-parse", "--verify", "refs/stash").stdout.strip()
+      if not saved or saved == previous.stdout.strip():
+        raise RuntimeError("Could not verify that tracked changes were stashed")
+      stash_oid = saved
+    result = _publish()
+  except Exception as exc:
+    logger.error("Failed to create PR: %s", exc)
+    result = {"status": "error", "error": _mask_tokens(str(exc))}
   finally:
-    # --- Restore original branch and stash ---
-    subprocess.run(
-        ["git", "checkout", original_branch],
-        cwd=git_root,
-        capture_output=True,
-    )
-    if stashed:
-      subprocess.run(["git", "stash", "pop"], cwd=git_root, capture_output=True)
+    restored = not branch_created
+    if branch_created:
+      try:
+        current = _git(
+            "symbolic-ref", "--quiet", "--short", "HEAD", check=False
+        )
+        if current.stdout.strip() != branch_name:
+          raise RuntimeError(
+              "Publication hook changed the checkout branch; refusing to reset"
+              " a branch that was not created by this publication attempt"
+          )
+        # Only discard work on OUR generated branch. Never reset the
+        # original branch, where the host's changes must be preserved.
+        _git("reset", "--hard", prepared_head)
+        if original_branch:
+          _git("checkout", original_branch)
+        else:
+          _git("checkout", "--detach", original_head)
+        if _git("rev-parse", "HEAD").stdout.strip() != original_head:
+          raise RuntimeError(
+              "Original checkout HEAD changed during publication"
+          )
+        restored = True
+      except Exception as exc:
+        cleanup_errors.append(_mask_tokens(str(exc)))
+    if stash_oid and restored:
+      try:
+        # Restore the original index as well as file contents. Apply the
+        # exact stash saved above, never another caller's newest stash.
+        _git("stash", "apply", "--index", stash_oid)
+        latest = _git("rev-parse", "--verify", "refs/stash", check=False)
+        if latest.stdout.strip() == stash_oid:
+          _git("stash", "drop", "stash@{0}")
+      except Exception as exc:
+        cleanup_errors.append(_mask_tokens(str(exc)))
+    if cleanup_errors:
+      logger.error(
+          "Publication checkout restoration failed: %s", cleanup_errors
+      )
+      result = dict(result or {})
+      result["status"] = "error"
+      result["cleanup_error"] = "; ".join(cleanup_errors)
+      if stash_oid:
+        result["saved_stash"] = stash_oid
+  return result
 
 
 # ---------------------------------------------------------------------------

@@ -22,8 +22,10 @@ each hook in this order:
    callable attribute with the hook's name wins.
 2. **Command** — for ``traffic``/``score``/``gate`` only, a
    ``TRAFFIC_CMD``/``SCORE_CMD``/``GATE_CMD`` shell command with
-   ``{run_dir}``/``{report}``/``{candidate}``/``{skill_dir}``/``{agent}``
-   placeholders.
+   hook-specific placeholders: traffic accepts ``{run_dir}``; score
+   accepts ``{candidate}``, ``{skill_dir}``, ``{run_dir}``; gate accepts
+   ``{run_dir}``, ``{version}``, ``{agent}``. Placeholders are unquoted
+   shell words (or parts of words); their values are shell-quoted once.
 3. **Skip** — hook unconfigured; callers log the returned reason and
    continue with the generic behavior (e.g. the engine's size-based
    candidate selection when ``score`` is missing).
@@ -49,6 +51,8 @@ import importlib
 import json
 import logging
 import os
+import re
+import shlex
 import subprocess
 import sys
 from typing import Any, Callable
@@ -76,6 +80,10 @@ _CMD_ENV = {
 _CMD_TIMEOUT_S = config._env_int("HOOK_CMD_TIMEOUT_S", 3600)
 
 _module_cache: dict[str, Any] = {}
+
+_PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z_0-9]*)\}")
+_PATH_PLACEHOLDERS = frozenset({"run_dir", "candidate", "skill_dir"})
+_HOOK_PLACEHOLDERS = _PATH_PLACEHOLDERS | {"version", "agent", "report"}
 
 
 def reset_cache() -> None:
@@ -126,15 +134,98 @@ def _hooks_module():
 
 
 def substitute(command: str, values: dict[str, str]) -> str:
-  """Replace ``{placeholder}`` tokens; unknown tokens are left alone."""
-  for key, value in values.items():
-    command = command.replace("{" + key + "}", str(value))
-  return command
+  """Quote unquoted placeholder values once, without rescanning values.
+
+  Unknown tokens remain literal. Quoted/escaped placeholders and nested
+  shell syntax are rejected: shell quoting is only correct in ordinary
+  unquoted words, not inside a quoted script, expansion, or here-document.
+  Complex scripts belong in a host file that receives placeholder arguments.
+  """
+  if not any(m.group(1) in values for m in _PLACEHOLDER.finditer(command)):
+    return command
+  if "\\\n" in command:
+    raise ValueError(
+        "Hook templates with placeholders cannot use backslash-newline"
+        " continuations; put that logic in a host script and pass"
+        " unquoted placeholders as its arguments."
+    )
+
+  rendered = []
+  quote = None
+  comment = False
+  index = 0
+  while index < len(command):
+    match = _PLACEHOLDER.match(command, index)
+    if match and match.group(1) in values:
+      if quote or comment:
+        raise ValueError(
+            f"Hook placeholder {match.group(0)} must be unquoted and"
+            " outside comments; pass it as an argument to a host script."
+        )
+      rendered.append(shlex.quote(str(values[match.group(1)])))
+      index = match.end()
+      continue
+
+    char = command[index]
+    if (
+        quote != "'"
+        and not comment
+        and (char == "`" or command.startswith(("$(", "${", "$["), index))
+    ):
+      raise ValueError(
+          "Hook templates with placeholders cannot use nested shell"
+          " expansions; put that logic in a host script and pass"
+          " unquoted placeholders as its arguments."
+      )
+    if comment:
+      if char == "\n":
+        comment = False
+    elif char == "\\" and quote != "'":
+      escaped = _PLACEHOLDER.match(command, index + 1)
+      if escaped and escaped.group(1) in values:
+        raise ValueError(
+            f"Hook placeholder {escaped.group(0)} must not be escaped;"
+            " leave placeholders unquoted."
+        )
+      rendered.append(command[index : index + 2])
+      index += 2
+      continue
+    elif quote:
+      if char == quote:
+        quote = None
+    elif char in ("'", '"'):
+      quote = char
+    elif char == "#":
+      comment = True
+    elif command.startswith(("<<", "<(", ">(", "(("), index):
+      raise ValueError(
+          "Hook templates with placeholders cannot use nested shell"
+          " expansions or here-documents; put that logic in a host script"
+          " and pass unquoted placeholders as its arguments."
+      )
+    rendered.append(char)
+    index += 1
+  return "".join(rendered)
 
 
 def _run_cmd(name: str, command: str, values: dict[str, str]) -> dict:
   """Run a *_CMD hook; returns exit code, output tail, parsed result."""
+  for match in _PLACEHOLDER.finditer(command):
+    key = match.group(1)
+    if key in _HOOK_PLACEHOLDERS and key not in values:
+      supported = ", ".join("{" + key + "}" for key in values)
+      raise ValueError(
+          f"{_CMD_ENV[name]} does not support {match.group(0)};"
+          f" supported placeholders: {supported}"
+      )
+  # Resolve paths in the caller's context, before running from the host
+  # checkout. A relative run directory must not move with subprocess cwd.
+  values = {
+      key: os.path.abspath(value) if key in _PATH_PLACEHOLDERS else value
+      for key, value in values.items()
+  }
   rendered = substitute(command, values)
+  workdir = config.workdir_or_none() or os.getcwd()
   logger.info("Running %s hook command: %s", name.upper(), rendered)
   proc = subprocess.run(
       rendered,
@@ -142,14 +233,12 @@ def _run_cmd(name: str, command: str, values: dict[str, str]) -> dict:
       capture_output=True,
       text=True,
       timeout=_CMD_TIMEOUT_S,
+      cwd=workdir,
   )
   output = config.mask_tokens(
       (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
   ).strip()
-  result: dict[str, Any] = {
-      "returncode": proc.returncode,
-      "output_tail": output[-2000:],
-  }
+  result: dict[str, Any] = {}
   # The last non-empty stdout line may carry structured output.
   for line in reversed((proc.stdout or "").strip().splitlines()):
     line = line.strip()
@@ -164,6 +253,13 @@ def _run_cmd(name: str, command: str, values: dict[str, str]) -> dict:
     except (ValueError, TypeError):
       pass
     break
+  report_path = result.get("report_path")
+  if isinstance(report_path, str) and report_path:
+    result["report_path"] = os.path.abspath(os.path.join(workdir, report_path))
+  # Process metadata is authoritative; structured stdout is hook data and
+  # cannot turn a failed gate/score/traffic command into a successful one.
+  result["returncode"] = proc.returncode
+  result["output_tail"] = output[-2000:]
   return result
 
 

@@ -68,6 +68,10 @@ for _noisy in (
 logger = logging.getLogger("skill_evolution_job.run")
 
 
+class QualityReportError(RuntimeError):
+  """A baseline report failed instead of finding insufficient traffic."""
+
+
 def _default_run_dir(suffix: str) -> str:
   ts = time.strftime("%Y-%m-%d_%H%M%S")
   return os.path.join(
@@ -93,7 +97,8 @@ def _bigquery_quality_report(run_dir: str) -> tuple[str | None, int]:
   via the SDK's ``scripts/quality_report.py``.
 
   Returns ``(report_path, total_sessions)``; ``report_path`` is None
-  when the report failed or holds fewer than MIN_SESSIONS sessions.
+  only when a successful report holds fewer than MIN_SESSIONS sessions.
+  Raises ``QualityReportError`` when report generation fails.
   """
   from . import tools
 
@@ -119,8 +124,9 @@ def _bigquery_quality_report(run_dir: str) -> tuple[str | None, int]:
       run_dir=run_dir,
   )
   if result.get("error"):
-    logger.warning("BigQuery quality report failed: %s", result["error"])
-    return None, 0
+    raise QualityReportError(
+        f"BigQuery quality report failed: {result['error']}"
+    )
   total = int(
       result.get("total_sessions")
       or result.get("summary", {}).get("total_sessions", 0)
@@ -199,14 +205,23 @@ async def run_evolution_agent(
     from_issue: int | None = None,
 ) -> str:
   """Run the skill-evolution agent and return its response."""
+  try:
+    max_rounds = config.evolution_max_rounds(rounds)
+  except ValueError as exc:
+    return f"ERROR: {exc}"
+  os.environ["EVOLUTION_MAX_ROUNDS"] = str(max_rounds)
+  # Round accounting belongs to this agent run, not earlier issues handled
+  # by the same process. Individual tool calls still share this run's cap.
+  from . import tools
+
+  tools._rounds_run.clear()
+
   # Set env vars for tools to pick up (only when overridden).
   if min_failures is not None:
     os.environ["MIN_FAILURES"] = str(min_failures)
 
-  # Build override notes — only mention params that were explicitly set.
-  overrides = []
-  if rounds is not None:
-    overrides.append(f"Maximum rounds: {rounds}")
+  # Always tell the agent its bound cap; other notes are explicit overrides.
+  overrides = [f"Maximum rounds: {max_rounds} (enforced by tools)"]
   if candidates is not None:
     overrides.append(f"Candidates: {candidates} (best-of-N selection)")
   if min_failures is not None:
@@ -262,7 +277,11 @@ async def run_evolution_agent(
     report_path = None
     total = 0
     if cfg.quality_source.lower() == "bigquery":
-      report_path, total = _bigquery_quality_report(run_dir)
+      try:
+        report_path, total = _bigquery_quality_report(run_dir)
+      except QualityReportError as exc:
+        logger.error("%s", exc)
+        return f"ERROR: {exc}"
 
     if report_path is None:
       # Not enough real sessions (or QUALITY_SOURCE=synthetic): the only
@@ -283,7 +302,11 @@ async def run_evolution_agent(
       ):
         logger.error("Traffic hook failed: %s", traffic_result)
         return f"ERROR: Traffic generation failed: {traffic_result}"
-      report_path, total = _bigquery_quality_report(run_dir)
+      try:
+        report_path, total = _bigquery_quality_report(run_dir)
+      except QualityReportError as exc:
+        logger.error("%s", exc)
+        return f"ERROR: {exc}"
       if report_path is None:
         return (
             "ERROR: still fewer than MIN_SESSIONS sessions"
@@ -344,7 +367,7 @@ async def run_evolution_agent(
     logger.info(
         "Starting full evolution loop: rounds=%s, candidates=%s,"
         " min_failures=%s, run_dir=%s",
-        rounds or "agent-decided",
+        max_rounds,
         candidates or "agent-decided",
         min_failures or "agent-decided",
         run_dir,
@@ -389,6 +412,7 @@ async def run_evolution_agent(
   elif mode == "coevolve":
     prompt = (
         f"Run co-evolution on the quality report at {report_path}. "
+        f"{overrides_note}"
         "Use run_coevolution which handles bottleneck detection and "
         "multi-agent evolution automatically. Then compare_versions and "
         "create_evolution_pr if a winner emerged."
@@ -402,7 +426,7 @@ async def run_evolution_agent(
     )
     prompt = (
         f"Run skill evolution on the {mode} agent using the quality "
-        f"report at {report_path}. Call run_evolution with "
+        f"report at {report_path}. {overrides_note}Call run_evolution with "
         f'skill_dir="{mode}"{run_dir_note}. Then compare_versions and'
         " report the outcome."
     )
@@ -541,7 +565,7 @@ def main() -> None:
       formatter_class=argparse.RawDescriptionHelpFormatter,
       epilog="""
 Examples:
-  %(prog)s --full-loop                           # agent decides everything
+  %(prog)s --full-loop                           # at most two rounds
   %(prog)s --full-loop --rounds 1                # override: single round
   %(prog)s --full-loop --candidates 5            # override: best-of-5
   %(prog)s --report runs/.../quality_report.json # from an existing report
@@ -611,7 +635,10 @@ Examples:
       "--rounds",
       type=int,
       default=None,
-      help="Maximum evolution rounds (default: agent decides)",
+      help=(
+          "Maximum evolution rounds, 0 to 2 (0 disables evolution;"
+          " default: EVOLUTION_MAX_ROUNDS or 2)"
+      ),
   )
   parser.add_argument(
       "--candidates",
@@ -667,8 +694,11 @@ Examples:
   # by evolve.py / coevolve.py regardless of what the agent decides).
   if args.candidates is not None:
     os.environ["EVOLUTION_CANDIDATES"] = str(args.candidates)
-  if args.rounds is not None:
-    os.environ["EVOLUTION_MAX_ROUNDS"] = str(args.rounds)
+  try:
+    max_rounds = config.evolution_max_rounds(args.rounds)
+  except ValueError as exc:
+    parser.error(str(exc))
+  os.environ["EVOLUTION_MAX_ROUNDS"] = str(max_rounds)
   if args.mode not in ("auto", "coevolve"):
     os.environ["EVOLUTION_TARGET_AGENTS"] = args.mode
   if getattr(args, "trace_labels", None):

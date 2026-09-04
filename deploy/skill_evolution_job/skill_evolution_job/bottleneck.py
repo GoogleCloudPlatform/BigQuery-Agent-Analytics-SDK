@@ -255,13 +255,9 @@ def detect_bottleneck(
   agent_names = list(agents.keys())
   default_agent = agent_names[0] if agent_names else "unknown"
 
-  sessions = report.get("sessions", [])
-  failures = [
-      s
-      for s in sessions
-      if s.get("metrics", {}).get("response_usefulness", {}).get("category")
-      in ("unhelpful", "partial")
-  ]
+  # Keep the classifier input identical to evolution/count_failures,
+  # including parroted recoveries in otherwise successful sessions.
+  _, failures = evolve.partition_trajectories(report)
 
   if not failures:
     return BottleneckResult(

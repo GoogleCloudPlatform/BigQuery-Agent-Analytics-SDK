@@ -84,6 +84,25 @@ def _env_float(name: str) -> float | None:
     return None
 
 
+def evolution_max_rounds(value: int | None = None) -> int:
+  """Resolve the hard evolution limit: explicit value, environment, then 2."""
+  if value is None:
+    raw = os.environ.get("EVOLUTION_MAX_ROUNDS", "2")
+    try:
+      value = int(raw)
+    except (TypeError, ValueError) as exc:
+      raise ValueError(
+          "EVOLUTION_MAX_ROUNDS must be an integer from 0 to 2"
+      ) from exc
+  if (
+      isinstance(value, bool)
+      or not isinstance(value, int)
+      or not 0 <= value <= 2
+  ):
+    raise ValueError("EVOLUTION_MAX_ROUNDS must be an integer from 0 to 2")
+  return value
+
+
 @dataclasses.dataclass(frozen=True)
 class JobConfig:
   """Snapshot of the job's environment contract.

@@ -148,11 +148,37 @@ define any subset of:
 | `error_analyst` | `error_analyst(client, model, session, skill, tools)` | Custom per-failure analyst (only used when the engine supports `error_analyst_fn`; see `--scripts-dir` above) |
 | `publish` | `publish(skill_dir, run_dir)` | Push the accepted skill to a registry/deployment target after the PR |
 
+The publish gate runs in the host checkout after the selected snapshot is
+committed locally on the intended PR base. It evaluates that exact standalone
+skill change, with other skills at their base versions. Changes to the commit
+or tracked files during the gate block publication. The original branch (or
+detached HEAD), staged changes, and unstaged changes are restored afterward.
+Use a gate that tests dependencies when publishing a co-evolved skill;
+`GATE_POLICY=skip` with no hook performs no such acceptance check.
+
 `traffic`, `score` and `gate` also accept a **shell-command fallback** via
 `TRAFFIC_CMD` / `SCORE_CMD` / `GATE_CMD` for hosts whose tooling isn't
-importable Python. Placeholders `{run_dir}`, `{report}`, `{candidate}`,
-`{skill_dir}`, `{agent}` are substituted before execution
-(`HOOK_CMD_TIMEOUT_S` bounds each call, default 3600s):
+importable Python. Commands run from the host-repo checkout, or the caller's
+directory when no checkout is configured. Artifact paths are made absolute
+before changing the command's working directory. A returned `report_path`
+is resolved relative to that working directory. `HOOK_CMD_TIMEOUT_S` bounds
+each call (default 3600s).
+
+| Command | Supported placeholders |
+|---------|------------------------|
+| `TRAFFIC_CMD` | `{run_dir}` |
+| `SCORE_CMD` | `{candidate}`, `{skill_dir}`, `{run_dir}` |
+| `GATE_CMD` | `{run_dir}`, `{version}`, `{agent}` |
+
+Leave placeholders **unquoted and unescaped**; each value is shell-quoted
+exactly once, including when joined to a suffix such as
+`{run_dir}/score.json`. A value containing another placeholder is kept
+literal. Quoted placeholders (such as `"{candidate}"`), placeholders in
+comments, and placeholder templates with nested shell expansions or
+here-documents fail with a configuration error. Put complex shell logic
+in a host script and pass placeholders as its arguments. There is no
+`{report}` placeholder; pass a specific report path under `{run_dir}` if
+your host hook requires one.
 
 ```bash
 SCORE_CMD='python eval/score.py --skill {candidate} --out {run_dir}/score.json'
@@ -164,6 +190,8 @@ GATE_CMD='pytest tests/skill_contract -q'
 - `GATE_CMD` contract: exit code decides pass/fail; the output tail becomes
   the gate reason. `GATE_POLICY=require` makes a missing/failing gate block
   the PR (default `skip`: missing gate logs and proceeds).
+- `returncode` and `output_tail` are reserved process metadata; JSON
+  printed by a hook cannot override either field.
 
 A module hook always wins over its `*_CMD` fallback; a broken
 `EVOLUTION_HOOKS` import fails loudly rather than silently skipping.
@@ -218,7 +246,8 @@ Tuning (all optional):
 | `EVOLUTION_MODEL_ID` / `EVAL_MODEL_ID` | `gemini-2.5-pro` / — | Engine analyst/consolidation model / judge model |
 | `EVOLUTION_MODE` | `evolve` | Default mode for scheduled fires |
 | `EVOLUTION_TARGET_AGENTS` / `EVOLUTION_ORDER` | — | Restrict / reorder co-evolution |
-| `EVOLUTION_CANDIDATES` / `EVOLUTION_MAX_ROUNDS` | auto | Candidate count / round cap. Both are binding: `run_evolution` and `run_coevolution` refuse rounds past the cap (per agent) and use the bound candidate count over whatever the orchestrating agent asks for |
+| `EVOLUTION_CANDIDATES` | auto | Binding candidate count: both evolution tools use this value over the orchestrating agent’s request |
+| `EVOLUTION_MAX_ROUNDS` | `2` | Binding per-agent round cap, an integer from `0` to `2`; `0` disables evolution. Both evolution tools refuse rounds past this cap |
 | `EVOLUTION_TOOLBOX` | — | Toolbox text (literal or `@/path/to/file`) |
 | `GATE_POLICY` | `skip` | `require` = missing/failing gate blocks the PR |
 | `EVOLUTION_PUBLISH` | `false` | Gates **real** PR/issue creation. `false` = local previews only (`pr_preview.md` / issue file in the run dir), even with `GITHUB_REPO` set. `deploy.sh` sets it to `true` when both `--github-repo` and `--gh-secret` are wired |

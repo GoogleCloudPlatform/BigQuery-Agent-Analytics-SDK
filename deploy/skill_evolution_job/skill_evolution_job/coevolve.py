@@ -28,6 +28,8 @@ from dataclasses import field
 import json
 import logging
 import os
+from pathlib import Path
+import tempfile
 import time
 from types import SimpleNamespace
 
@@ -37,6 +39,7 @@ from . import registry
 from .bottleneck import detect_bottleneck
 from .evolve import evolve
 from .evolve import validate_evolved_skill
+from .scoring import make_score_fn
 
 logger = logging.getLogger(__name__)
 
@@ -55,18 +58,6 @@ def _default_agent_configs() -> dict:
     return {}
 
 
-def _excluded_count(report_path: str) -> int:
-  """Error-shaped records a scorer's preflight dropped from this report.
-
-  A non-zero count means the report's rates use a shrunken denominator
-  and cannot be compared against other reports by raw rate. Delegates to
-  tools.py, imported lazily because tools.py imports this module.
-  """
-  from . import tools
-
-  return tools._excluded_count(report_path)
-
-
 @dataclass
 class CoevolutionResult:
   """Result of a co-evolution run."""
@@ -75,6 +66,7 @@ class CoevolutionResult:
   bottleneck_summary: str = ""
   evolved_agents: dict = field(default_factory=dict)
   elapsed_seconds: float = 0.0
+  output_dir: str | None = None
 
   @property
   def summary(self) -> str:
@@ -115,30 +107,6 @@ def _evolution_order(agent_names: list[str]) -> list[str]:
   return sorted(agent_names, key=lambda n: rank.get(n, len(rank)))
 
 
-def _refresh_incumbent(
-    output_dir: str | None, current: float | None
-) -> float | None:
-  """Return the latest deployed score from ``<output_dir>/evolved_score.json``.
-
-  ``evolve()`` records the deployed outcome's score there ("last writer
-  wins" by design). Falls back to ``current`` when the file is absent,
-  unreadable, or carries no rate — the bar never silently drops to None.
-  """
-  if not output_dir:
-    return current
-  path = os.path.join(output_dir, "evolved_score.json")
-  try:
-    with open(path) as f:
-      score = json.load(f).get("meaningful_rate")
-    if score is not None:
-      return float(score)
-  except FileNotFoundError:
-    pass
-  except Exception as e:  # noqa: BLE001
-    logger.warning("Could not refresh incumbent from %s: %s", path, e)
-  return current
-
-
 def coevolve(
     report_path: str,
     agent_configs: dict | None = None,
@@ -156,16 +124,17 @@ def coevolve(
       report_path: Path to quality report JSON.
       agent_configs: Dict mapping agent name -> {skill_dir, label}.
           Defaults to agents from agent_registry.json.
-      output_dir: Directory to save evolved skills and logs.
+      output_dir: Directory to save evolved skills and logs. With a score
+          hook, omission allocates a temporary directory, exposed as
+          result.output_dir, so measurement is never disabled implicitly.
       model_id: Gemini model for all LLM calls.
       max_workers: Max parallel threads.
       candidates: Number of consolidation candidates (best-of-N).
           None = auto-decide based on meaningful_rate.
       max_chars: Max chars for evolved skill.
       agentic: Use agentic error analysts.
-      select_by_score: Select candidates by measured score. Needs both
-          an ``output_dir`` and a configured ``score`` hook; without them
-          the engine's size-based selection is used instead.
+      select_by_score: Select candidates by measured score when a ``score``
+          hook is configured; otherwise use size-based selection.
 
   Returns:
       CoevolutionResult with bottleneck analysis and evolved skills.
@@ -277,60 +246,23 @@ def coevolve(
       agents_to_evolve,
   )
 
-  if _excluded_count(report_path) > 0:
-    logger.warning(
-        "Incumbent quality report has preflight exclusions; "
-        "disabling incumbent_score guard for co-evolution"
-    )
-    incumbent_score = None
-  else:
-    incumbent_score = report.get("summary", {}).get("meaningful_rate")
+  score_hook = None
+  if select_by_score:
+    score_hook, reason = hooks.get_hook("score")
+    if score_hook is not None and not output_dir:
+      output_dir = tempfile.mkdtemp(prefix="skill_coevolution_")
+      logger.info("Scoring artifacts will be saved to %s", output_dir)
+    elif score_hook is None:
+      logger.info(
+          "Scoring candidates by size, not by measured rate: %s", reason
+      )
+  result.output_dir = output_dir
 
   def _make_score_fn(skill_dir):
     """Score a candidate skill on the eval set; returns meaningful_rate."""
-    if not (select_by_score and output_dir):
-      return None
-
-    score_hook, reason = hooks.get_hook("score")
     if score_hook is None:
-      # None (not a 0.0 "skipped" score): a constant 0.0 would lose to
-      # the incumbent guard on every candidate, turning evolution into a
-      # permanent no-op. None restores the engine's size-based selection.
-      logger.info(
-          "Scoring candidates by size, not by measured rate: %s",
-          reason,
-      )
       return None
-
-    _counter = {"n": 0}
-
-    def _score(skill_content):
-      # Distinct name per candidate: the score hook derives its
-      # report filename from this, so every candidate report
-      # survives for regression extraction and PR metrics (a
-      # shared tmp name left only the LAST report on disk).
-      _counter["n"] += 1
-      tmp = os.path.join(
-          output_dir,
-          f"_score_candidate_{_counter['n']}.md",
-      )
-      with open(tmp, "w") as fh:
-        fh.write(skill_content)
-      res = score_hook(tmp, skill_dir, output_dir)
-      scored_report = res.get("report_path")
-      if scored_report and _excluded_count(scored_report) > 0:
-        # None = unmeasurable: evolve() floors it for selection but
-        # never records it as the deployed score, so a flaked run
-        # cannot lower the bar.
-        logger.warning(
-            "Candidate scored report %s has preflight exclusions; "
-            "score unmeasurable",
-            scored_report,
-        )
-        return None
-      return float(res.get("meaningful_rate", 0.0))
-
-    return _score
+    return make_score_fn(score_hook, skill_dir, output_dir)
 
   # Step 3: Evolve agents (with validation + retry)
   MAX_ATTEMPTS = 5
@@ -345,7 +277,9 @@ def coevolve(
     skill_path = os.path.join(skill_dir, "SKILL.md")
     label = config.get("label", agent_name)
     current_skill = ""
+    original_bytes = None
     if os.path.isfile(skill_path):
+      original_bytes = Path(skill_path).read_bytes()
       with open(skill_path) as f:
         current_skill = f.read()
 
@@ -378,11 +312,13 @@ def coevolve(
             max_chars=max_chars,
             agentic=agentic,
             score_fn=_make_score_fn(skill_dir),
-            incumbent_score=incumbent_score,
+            incumbent_score=None,
         )
 
         issues = validate_evolved_skill(evolved, current_skill)
         if issues and attempt < MAX_ATTEMPTS:
+          if original_bytes is not None:
+            Path(skill_path).write_bytes(original_bytes)
           logger.warning(
               "Evolved %s failed validation (attempt %d): %s. Retrying...",
               label,
@@ -407,9 +343,7 @@ def coevolve(
             "attempt": attempt,
         }
 
-        # Deploy the SELECTED winner to SKILL.md. The score hook (used
-        # during score-based selection) leaves the last-scored candidate
-        # there, so we must write the actual winner back.
+        # Scoring restored the incumbent; install only the selected winner.
         with open(skill_path, "w") as f:
           f.write(evolved)
         logger.info(
@@ -436,6 +370,8 @@ def coevolve(
         return agent_name, agent_result
 
       except Exception as e:  # noqa: BLE001
+        if original_bytes is not None:
+          Path(skill_path).write_bytes(original_bytes)
         logger.error("Failed to evolve %s (attempt %d): %s", label, attempt, e)
         if attempt == MAX_ATTEMPTS:
           return agent_name, {"error": str(e)}
@@ -447,9 +383,7 @@ def coevolve(
   for name in agents_to_evolve:
     agent_name, agent_result = _evolve_agent(name)
     result.evolved_agents[agent_name] = agent_result
-    # The bar the next agent must clear is the system as it now runs,
-    # including this agent's deployed winner (or the kept incumbent).
-    incumbent_score = _refresh_incumbent(output_dir, incumbent_score)
+    # The next agent measures its incumbent with prior winners installed.
 
   # Save co-evolution summary
   result.elapsed_seconds = time.time() - t0
