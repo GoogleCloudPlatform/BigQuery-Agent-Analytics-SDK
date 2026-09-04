@@ -75,6 +75,14 @@ partner is the fictional "Acme Retail Support". The pack **remains
 illustrative** now that the real freeze landed; the real artifacts are the
 `week0_*.md` docs and `week0_real_*.json` fixtures above.
 
+A **span-G1 e2e team demo** also exists
+(`examples/evalbench_span_g1_e2e.md`, run with
+`bash examples/evalbench_span_g1_e2e.sh --fixture`): it consumes the #467
+`span_taxonomy` library to show the widget-stock session's frozen G1
+categories localized onto the real native `AGENT_STARTING` span, offline
+and fixture-only, with session-level `failed_sessions` + G1 unchanged as
+the denominator — it does not start the six-week clock.
+
 ---
 
 ## Preface — what was verified before acceptance

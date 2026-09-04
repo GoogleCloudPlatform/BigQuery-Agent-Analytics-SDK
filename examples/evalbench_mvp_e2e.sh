@@ -235,6 +235,9 @@ JSON
   note "process_failed=True      returncode 1: the run did not finish cleanly"
   note "missing_completion=True  no AGENT_COMPLETED event in the trace"
   note "score_failed=True        goal_completion 0.0 misses --min-score goal_completion=1"
+  note "Use --format json to include the frozen G1 v0.1.0 categories on this row:"
+  echo '  {"taxonomy_categories": ["task/planning", "finalization", "tool blockers"]}'
+  note "These map the observed flags to categories; they do not establish why the process stopped."
   note "session_count=7 failed_count=1. The session_id embeds the version, so"
   note "client.get_session_trace(session_id=\"${sid}\","
   note "experiment_id=\"${job_id}\") returns only ${version}'s rows for it."

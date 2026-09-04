@@ -11,8 +11,10 @@ This covers the reader and deterministic row mapping from
 and the MVP snapshot + failed-session denominator from
 [issue #435](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/435):
 the versioned writer (slice 1) and the queryable `evalbench_failed_sessions`
-view plus version-pinned consumer (slice 2). Localization, failure taxonomy,
-and other harnesses are later slices; the sequencing and gates are in
+view plus version-pinned consumer (slice 2). Frozen G1 categories and the
+native `agent_events` writer also exist; the
+[native setup and span walkthrough](../examples/evalbench_span_g1_e2e.md)
+shows that route without EvalBench source tables. The sequencing and gates are in
 [`docs/agentforensics_mvp_plan.md`](agentforensics_mvp_plan.md).
 
 ## Data Flow

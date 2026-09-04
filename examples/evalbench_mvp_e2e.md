@@ -69,6 +69,18 @@ viewer can read; `tests/test_evalbench_mvp_e2e.py` asserts the same order.
    `AGENT_COMPLETED`), `score_failed` (`goal_completion` 0.0 misses
    `--min-score goal_completion=1`). The `session_id` embeds the version,
    so `Client.get_session_trace` drills into `v1`'s rows only.
+
+   With `--format json`, that same row also includes the frozen G1 v0.1.0
+   categories (the table format omits them):
+
+   ```json
+   {"taxonomy_categories": ["task/planning", "finalization", "tool blockers"]}
+   ```
+
+   These names mechanically map `score_failed` to `task/planning`,
+   `missing_completion` to `finalization`, and `process_failed` to
+   `tool blockers`, in frozen category order. They identify observable
+   failure conditions; they do not establish why the process stopped.
 5. **`Score this session`**, then `=== Step 3: evalbench-score ===` —
    `Client.evaluate` + `LLMAsJudge` (`correctness`) over the same version,
    narrowed to its 7 pinned session ids; `details.evalbench` names the
