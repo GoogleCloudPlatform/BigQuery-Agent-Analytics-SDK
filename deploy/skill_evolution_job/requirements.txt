@@ -1,0 +1,16 @@
+# Runtime dependencies for the skill-evolution Cloud Run Job image.
+#
+# bigquery-agent-analytics[llm] brings the SDK package that
+# scripts/quality_report.py imports (golden matching, evaluation
+# rubrics) plus the BigQuery/Vertex clients.
+#
+# google-adk / google-genai are pinned EXPLICITLY on top of the SDK's
+# own floors: the SDK allows adk>=1.0 uncapped, which a fresh build
+# would resolve to untested adk 2.x / genai 2.x. The agent harness
+# needs App/LoggingPlugin (adk >= 1.32) and is proven on adk 1.32.x +
+# genai 1.73.x — keep both below the next major.
+bigquery-agent-analytics[llm]>=0.5.1
+google-adk>=1.32,<2.0
+google-genai>=1.73,<2.0
+google-cloud-storage>=2.18.0
+python-dotenv>=1.0.0

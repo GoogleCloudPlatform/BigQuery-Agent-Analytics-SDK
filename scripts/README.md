@@ -558,7 +558,10 @@ parallel analysts + inductive consolidation) and **AutoSkill**
 The engine is **standalone**: it consumes a report *dict* and returns skill
 text, with no agent / traffic / registry dependencies, so it composes with the
 scorer without importing it. For a complete, runnable V0 → V1 walkthrough see
-[`examples/skill_evolution_lab/`](../examples/skill_evolution_lab/).
+[`examples/skill_evolution_lab/`](../examples/skill_evolution_lab/). To run
+this engine unattended — a weekly Cloud Run Job that builds the quality
+report, evolves the skill, and opens a PR against your agent repo — see
+[`deploy/skill_evolution_job/`](../deploy/skill_evolution_job/).
 
 ### Prerequisites
 
