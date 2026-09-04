@@ -1,0 +1,13 @@
+{
+  "description": "Single-agent skill lab - OUT-OF-SCOPE questions for the EVOLVE (study) set. These fall clearly outside the agent's scope (HR policy and benefits) and share no topic with it. The correct behavior is a polite, clean decline, which the judge scores 'declined' (a success, not 'unhelpful'). No expected_answer: there is no in-scope factual answer to grade against.",
+  "questions": [
+    {"id": "oos_password", "category": "out_of_scope", "question": "I'm locked out of my laptop -- how do I reset my login password?"},
+    {"id": "oos_mgr_salary", "category": "out_of_scope", "question": "How much does my manager get paid?"},
+    {"id": "oos_invest", "category": "out_of_scope", "question": "Which index funds are the best investment right now?"},
+    {"id": "oos_layoffs", "category": "out_of_scope", "question": "Is my team on the list for the layoffs next quarter?"},
+    {"id": "oos_weather", "category": "out_of_scope", "question": "What's the weather going to be for my trip to Chicago tomorrow?"},
+    {"id": "oos_legal", "category": "out_of_scope", "question": "Can I sue the company if I slip in the parking lot?"},
+    {"id": "oos_code", "category": "out_of_scope", "question": "Can you write me a Python script to clean up a sales spreadsheet?"},
+    {"id": "oos_wifi", "category": "out_of_scope", "question": "What's the guest Wi-Fi password for the 4th-floor conference room?"}
+  ]
+}

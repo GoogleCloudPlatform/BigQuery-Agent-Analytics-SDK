@@ -1,0 +1,28 @@
+{
+  "eval_cases": [
+    {
+      "id": "player_compare_jokic_embiid",
+      "question": "For half-court offense, who is the better hub: Nikola Jokic or Joel Embiid?",
+      "expected_tool": "compare_players",
+      "avoid_tool": "lookup_basketball_reference"
+    },
+    {
+      "id": "team_compare_celtics_thunder",
+      "question": "Which team has the stronger playoff profile, the Celtics or the Thunder?",
+      "expected_tool": "compare_teams",
+      "avoid_tool": "lookup_basketball_reference"
+    },
+    {
+      "id": "single_player_shai",
+      "question": "Give me a quick read on Shai Gilgeous-Alexander's scoring profile.",
+      "expected_tool": "get_player_stats",
+      "avoid_tool": "lookup_basketball_reference"
+    },
+    {
+      "id": "single_team_nuggets",
+      "question": "How should Denver build its late-game offense around the Nuggets' strengths?",
+      "expected_tool": "get_team_profile",
+      "avoid_tool": "lookup_basketball_reference"
+    }
+  ]
+}

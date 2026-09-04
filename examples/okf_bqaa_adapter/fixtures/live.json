@@ -1,0 +1,15 @@
+{
+  "label": "derived/demo, observer-only, nothing attested",
+  "session_id": "f21ee192-d989-4c38-894f-66b6b82eaf18",
+  "trace_id": "e-c7214361-4017-43d7-af4e-cddfe51b09a4",
+  "agent": "okf_rfc_observe_agent",
+  "model": "gemini-3.8-flash",
+  "project": "test-project-0728-467323",
+  "dataset": "okf_rfc_demo",
+  "table": "test-project-0728-467323.okf_rfc_demo.agent_events",
+  "vertex_location": "global",
+  "ran_at": "2026-09-03T04:10:36.152769+00:00",
+  "event_count": 180,
+  "context_ref": "okf:env-observe#674153c572f6",
+  "receipt_context_ref": "okf:env-observe#674153c572f6"
+}

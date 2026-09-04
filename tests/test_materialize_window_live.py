@@ -26,7 +26,7 @@ BigQuery infrastructure to prove the end-to-end claim from #161.
   it, and drops it on teardown.
 * ``BQAA_LIVE_BQ_SOURCE_DATASET`` — dataset that contains a
   pre-populated ``agent_events`` table (seed it once with the
-  migration-v5 demo agent; see the bootstrap recipe below). The
+  context-graph demo agent; see the bootstrap recipe below). The
   test reads events from here read-only — never writes to it.
 
 Optional:
@@ -46,7 +46,7 @@ quota.
 ::
 
     bq mk --location=US <project>:<source_dataset>
-    PYTHONPATH=src python examples/migration_v5/run_agent.py \\
+    PYTHONPATH=src python examples/context_graph/run_agent.py \\
         --project <project> --dataset <source_dataset> --sessions 3
 
 The ``agent_events`` table in ``<source_dataset>`` is the input;
@@ -125,8 +125,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-_MIGRATION_V5_DIR = (
-    pathlib.Path(__file__).resolve().parent.parent / "examples" / "migration_v5"
+_CONTEXT_GRAPH_DIR = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "examples"
+    / "context_graph"
 )
 
 
@@ -139,7 +141,7 @@ def _unique_scratch_name() -> str:
 
 @pytest.fixture(scope="module")
 def scratch_dataset():
-  """Create a fresh scratch dataset, bootstrap the migration-v5
+  """Create a fresh scratch dataset, bootstrap the context-graph
   entity-table DDL into it, yield its name, and DROP it on
   teardown.
 
@@ -160,15 +162,15 @@ def scratch_dataset():
   try:
     # Bootstrap the entity-table schemas. The committed DDL
     # hard-codes the full canonical
-    # ``test-project-0728-467323.migration_v5_demo`` prefix —
+    # ``test-project-0728-467323.context_graph`` prefix —
     # swap the **full** prefix for ``{_PROJECT}.{scratch}`` so the
     # DDL targets the operator-supplied project, not the canonical
     # demo project. Replacing only the dataset segment would
     # silently create tables in the wrong project when
     # ``BQAA_LIVE_BQ_PROJECT`` differs from the canonical.
-    ddl_text = (_MIGRATION_V5_DIR / "table_ddl.sql").read_text()
+    ddl_text = (_CONTEXT_GRAPH_DIR / "table_ddl.sql").read_text()
     ddl_text = ddl_text.replace(
-        "test-project-0728-467323.migration_v5_demo",
+        "test-project-0728-467323.context_graph",
         f"{_PROJECT}.{scratch}",
     )
     for stmt in ddl_text.strip().split(";"):
@@ -197,10 +199,10 @@ def retargeted_binding_path(tmp_path_factory, scratch_dataset):
   path points at the scratch dataset.
 
   The committed binding hard-codes
-  ``test-project-0728-467323.migration_v5_demo``; the test
+  ``test-project-0728-467323.context_graph``; the test
   materializes into the scratch dataset instead so the source
   dataset's ``agent_events`` stays untouched."""
-  with open(_MIGRATION_V5_DIR / "binding.yaml") as f:
+  with open(_CONTEXT_GRAPH_DIR / "binding.yaml") as f:
     binding = yaml.safe_load(f)
   binding["target"]["project"] = _PROJECT
   binding["target"]["dataset"] = scratch_dataset
@@ -319,7 +321,7 @@ def test_materialize_window_live_smoke_and_re_run(
   run1 = mw.run_materialize_window(
       project_id=_PROJECT,
       dataset_id=_SOURCE_DATASET,
-      ontology_path=str(_MIGRATION_V5_DIR / "ontology.yaml"),
+      ontology_path=str(_CONTEXT_GRAPH_DIR / "ontology.yaml"),
       binding_path=str(retargeted_binding_path),
       lookback_hours=lookback_hours,
       overlap_minutes=15.0,
@@ -398,7 +400,7 @@ def test_materialize_window_live_smoke_and_re_run(
   run2 = mw.run_materialize_window(
       project_id=_PROJECT,
       dataset_id=_SOURCE_DATASET,
-      ontology_path=str(_MIGRATION_V5_DIR / "ontology.yaml"),
+      ontology_path=str(_CONTEXT_GRAPH_DIR / "ontology.yaml"),
       binding_path=str(retargeted_binding_path),
       lookback_hours=lookback_hours,
       overlap_minutes=lookback_hours * 60.0,  # cover full lookback

@@ -149,8 +149,8 @@ As demonstrated in the [e2e demo](../examples/e2e_demo.py):
 5. `plugin.flush()` ensures all buffered events are written
 
 **Phase 2 — Evaluation:**
-1. `Client.get_trace()` retrieves all events for a session
-2. `CodeEvaluator` preset factories assess latency, turn count, error rate, token efficiency
+1. `Client.get_trace()` retrieves all events for one producer `trace_id`
+2. `SystemEvaluator` preset factories assess latency, turn count, error rate, token efficiency
 3. `LLMAsJudge.correctness()` performs semantic evaluation via BigQuery `AI.GENERATE`
 4. `BigQueryTraceEvaluator.evaluate_session()` performs trajectory matching against golden tool sequences
 
@@ -204,11 +204,11 @@ As demonstrated in the [e2e demo](../examples/e2e_demo.py):
    └──────────────────┘  └───────────────────┘  │ world-change detect) │
                                                 └──────────────────────┘
 
-   ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────┐
+   ┌──────────────────────┐  ┌───────────────────────┐  ┌──────────────────┐
    │ categorical_evaluator│  │ ontology_* (6 modules)│  │      cli         │
    │ categorical_views    │  │ (YAML → AI.GENERATE → │  │ (Typer commands) │
    │ (label evaluation)   │  │  tables → PG → GQL)   │  │                  │
-   └──────────────────────┘  └──────────────────────┘  └──────────────────┘
+   └──────────────────────┘  └───────────────────────┘  └──────────────────┘
 
    ┌──────────────────┐  ┌───────────────────┐
    │ udf_kernels      │  │ serialization     │
@@ -248,7 +248,7 @@ Aggregations, filtering, joins, and even LLM evaluation (via `AI.GENERATE`) are 
 LLM-based evaluation can run via (1) BigQuery `AI.GENERATE`, (2) legacy BigQuery ML `ML.GENERATE_TEXT`, or (3) the Gemini API directly. This maximizes compatibility across different GCP configurations.
 
 **Decision 4: Composition over inheritance.**
-The `GraderPipeline` composes `CodeEvaluator`, `LLMAsJudge`, and custom functions via a builder pattern rather than requiring them to share a common base class. The `BigQueryMemoryService` composes four internal services rather than extending a single monolithic class.
+The `GraderPipeline` composes `SystemEvaluator`, `LLMAsJudge`, and custom functions via a builder pattern rather than requiring them to share a common base class. The `BigQueryMemoryService` composes four internal services rather than extending a single monolithic class.
 
 ---
 
@@ -278,8 +278,11 @@ Client(
 
 | Method | Returns | SQL Template | Description |
 |--------|---------|-------------|-------------|
-| `get_trace(session_id)` | `Trace` | `_SESSION_EVENTS_QUERY` | Fetches all events for a session, constructs Span tree |
-| `list_traces(filter_criteria)` | `list[Trace]` | `_LIST_SESSIONS_QUERY` + per-session fetch | Discovers sessions matching `TraceFilter`, fetches each |
+| `get_trace(trace_id)` | `Trace` | `_GET_TRACE_QUERY` | Fetches one producer trace ID and constructs its Span tree |
+| `get_session_trace(session_id, **pins)` | `Trace` | `_RESOLVE_SESSION_CANDIDATES_QUERY` + `_GET_SESSION_TRACE_QUERY` | Resolves one intrinsic identity and exact scope; raises `AmbiguousSessionError` rather than choosing a collision |
+| `get_trace_by_selector(selector)` | `Trace` | Same shared resolver/fetch | Exact one-step retry surface for a structured ambiguity candidate |
+| `get_session_trace_gql(...)` / `get_trace_by_selector_gql(...)` | `Trace` | Shared flat resolver + GQL edges | Resolves the authoritative span population first, then lets GQL supply parent links without broadening identity/scope |
+| `list_traces(filter_criteria)` | `list[Trace]` | `_LIST_TRACES_QUERY` | Discovers and constructs resolved identity/scope traces under one immutable filter snapshot |
 | `evaluate(evaluator, filters)` | `EvaluationReport` | `SESSION_SUMMARY_QUERY` or `AI_GENERATE_JUDGE_BATCH_QUERY` | Runs code or LLM evaluation over matching sessions |
 | `drift_detection(golden_dataset, filters)` | `DriftReport` | Production + golden question queries | Compares golden vs. production question coverage |
 | `insights(filters, config)` | `InsightsReport` | Multi-stage pipeline (5 SQL templates) | Generates comprehensive analysis report |
@@ -337,15 +340,67 @@ Handles polymorphic content extraction:
 3. Parses `latency_ms` from JSON (`{"total_ms": ...}`) or direct numeric
 4. Parses `attributes` from JSON string or dict
 
+**Identity and scope value types:**
+
+```python
+@dataclass(frozen=True)
+class TraceIdentity:
+    session_id: str
+    user_id: str | None
+    root_agent_name: str | None
+
+@dataclass(frozen=True)
+class TraceScope:
+    experiment_id: str | None
+    custom_labels: tuple[tuple[str, str], ...]
+
+@dataclass(frozen=True)
+class TraceSelector:
+    session_id: str
+    user_id: str | None | UNSET
+    root_agent_name: str | None | UNSET
+    experiment_id: str | None | UNSET
+    custom_labels: tuple[tuple[str, str], ...] | None
+    scope_signature: str | None
+```
+
+`session_id` is a conversation-thread identifier, not a singular trace key.
+The resolver distinguishes intrinsic identity (`session_id`, user, root agent)
+from a recorded pass (`experiment_id`, labels). Scalar selector pins are
+three-state: `UNSET` is unpinned, `None` pins SQL `NULL`, and strings pin
+equality. `scope_signature` is the versioned canonical encoding of the complete
+scope, while `custom_labels` is only a subset pin.
+
+Rows that persist the same intrinsic identity and exact scope are
+indistinguishable to this contract and form one candidate. A producer that
+needs a finer execution boundary must emit a distinct experiment/label scope
+or supply a producer `trace_id`; the resolver cannot invent a discriminator
+that was not stored.
+
+When more than one candidate remains, `AmbiguousSessionError` exposes
+retry-ready `ResolvedTraceSelector` candidates. Its printable message is
+redacted; `to_dict()` intentionally carries identity/scope metadata but no
+event content or judge context. Consumers must preserve the whole candidate
+selector for the exact retry.
+
 **`Trace` class:**
 
 ```python
 @dataclass
 class Trace:
+    trace_id: str
     session_id: str
     spans: list[Span]
+    identity: TraceIdentity | None
+    scope: TraceScope | None
+    scope_coverage: tuple[str, ...] | None
     _roots: list[Span]         # Top-level spans (no parent)
 ```
+
+Identity and scope become immutable once attached so the scalar mirrors cannot
+desynchronize. `scope_coverage` is populated only by the opt-in mixed-scope
+read; such a trace has `scope=None`. Multiple intrinsic identities are never
+merged.
 
 **DAG reconstruction algorithm** (`_build_tree`):
 
@@ -396,7 +451,7 @@ Each field generates a separate `AND` condition with a corresponding `bigquery.S
 
 This module contains two evaluator classes and the SQL templates that power batch evaluation.
 
-#### 4.3.1 `CodeEvaluator`
+#### 4.3.1 `SystemEvaluator`
 
 Deterministic evaluation using code-defined metric functions.
 
@@ -424,6 +479,19 @@ value strictly exceeds the budget.
 | `context_cache_hit_rate(min_hit_rate)` | `cached_tokens / input_tokens` when cache telemetry exists | `observed >= min_hit_rate` |
 | `ttft(threshold_ms)` | `avg_ttft_ms` | `observed <= threshold_ms` |
 | `cost_per_session(max_cost_usd, ...)` | `(input_tokens/1K)*input_rate + (output_tokens/1K)*output_rate` | `observed <= max_cost_usd` |
+
+For `token_efficiency()`, `total_tokens` prefers an explicit provider total:
+`usage_metadata.total_token_count`, followed by `content.usage.total` from
+other telemetry shapes. Gemini can include `usage_metadata.thoughts_token_count`
+in its total, so the value is not guaranteed to equal prompt plus completion
+tokens. When neither provider total exists, the session summary falls back
+specifically to the raw `attributes.input_tokens` plus
+`attributes.output_tokens` event fields. That fallback does not reuse all
+alternate paths recognized by the separate input and output counters.
+
+`cost_per_session()` does not consume a separate `thoughts_token_count` field;
+it remains an estimate over the extracted input and output counts and the
+caller-supplied rates.
 
 `context_cache_hit_rate()` treats missing cache telemetry as unknown,
 not as a cache miss. Older plugin rows without
@@ -528,7 +596,7 @@ Evaluates agent behavior against expected tool-call trajectories.
 **`evaluate_session()` flow:**
 
 ```
-1. Fetch trace from BigQuery (_SESSION_TRACE_QUERY)
+1. Resolve `TraceSelector` through the shared Client candidate resolver
 2. Parse into SessionTrace (tool_calls, events, final_response)
 3. Extract actual ToolCall sequence
 4. Compute trajectory score (based on MatchType)
@@ -543,11 +611,16 @@ Evaluates agent behavior against expected tool-call trajectories.
 ```
 1. Create asyncio.Semaphore(concurrency)
 2. For each task in eval_dataset:
+   - Reconstruct an optional TraceSelector instance or mapping
    - Acquire semaphore
    - evaluate_session(task)
    - Release semaphore
 3. Gather all results
 ```
+
+Every evaluation result carries the resolved user, root agent, experiment, and
+scope signature in `details`. This keeps GQL, flat SQL, retry, and evaluator
+fallback paths on one resolution contract.
 
 #### 4.4.2 `TrajectoryMetrics` (static methods)
 
@@ -578,8 +651,32 @@ Three matching algorithms:
 
 Deterministic replay for debugging and comparison:
 
-- **`replay_session(session_id, replay_mode, step_callback)`**: Fetches trace, replays events in order. Modes: `"full"` (all events), `"step"` (with callback per event), `"tool_only"` (only tool events)
-- **`compare_replays(session_a, session_b)`**: Replays both sessions, diffs tool sequences and response similarity
+- **`replay_session(session_id, replay_mode, step_callback, *, selector=None)`**: Fetches an unambiguous or exactly selected trace and replays events in order. Modes: `"full"` (all events), `"step"` (with callback per event), `"tool_only"` (only tool events)
+- **`compare_replays(session_a, session_b, *, selector_1=None, selector_2=None)`**: Replays both sessions, with optional exact retry selectors for reused IDs, then diffs tool sequences and response similarity
+
+#### 4.4.4 Secondary-surface identity contract
+
+Every secondary trace consumer delegates singular resolution to the same
+`TraceSelector` contract:
+
+- GQL reconstruction resolves the authoritative flat trace once and restricts
+  traversal to its span IDs under the Property Graph's unique TechNode-key
+  contract. A flat population with duplicate span IDs skips GQL rather than
+  attributing a relationship to an arbitrary copy.
+- `BigQueryTraceEvaluator` accepts a selector on single evaluations and either
+  a selector object or mapping in batch datasets.
+- CLI JSON failures and Remote Function `_error.details` expose the structured
+  ambiguity payload for an exact retry; human-readable errors stay redacted.
+- Quality and latency reports correlate score rows to traces with the reserved
+  `SessionScore.details` identity/scope fields. They retain colliding rows and
+  fail closed when an old session-only score is ambiguous; the session-only
+  compatibility fallback applies only when exactly one candidate exists.
+- Text, Markdown, and JSON report output include resolved identity and exact
+  scope (or mixed-scope coverage).
+
+These are read/output semantics only. Judge-context binding and result-table
+cardinality are separate follow-up migrations; this layer does not change
+persisted evaluation schemas.
 
 ### 4.5 `multi_trial.py` — Statistical Evaluation
 
@@ -641,7 +738,7 @@ Combines heterogeneous evaluators into a unified verdict using a strategy patter
                              │
               ┌──────────────┼──────────────┐
               ▼              ▼              ▼
-        CodeEvaluator   LLMAsJudge    Custom Fn
+       SystemEvaluator   LLMAsJudge    Custom Fn
         (sync)          (async)        (sync)
               │              │              │
               ▼              ▼              ▼
@@ -1232,12 +1329,15 @@ results = client.query(formatted, job_config=job_config)
 
 | Module | Template | Purpose |
 |--------|----------|---------|
-| `client.py` | `_SESSION_EVENTS_QUERY` | Fetch all events for a session |
-| `client.py` | `_LIST_SESSIONS_QUERY` | Discover sessions matching filter |
+| `client.py` | `_GET_TRACE_QUERY` | Fetch all events for a producer trace ID |
+| `client.py` | `_RESOLVE_SESSION_CANDIDATES_QUERY` / `_RESOLVE_CANDIDATES_BATCH_QUERY` | Bounded identity/scope candidate discovery |
+| `client.py` | `_RESOLVE_SESSION_IDENTITIES_QUERY` | Bounded intrinsic-identity discovery for mixed reads |
+| `client.py` | `_GET_SESSION_TRACE_QUERY` | Fetch one anchored, selector-resolved session population |
+| `client.py` | `_LIST_TRACES_QUERY` | Discover and fetch matching trace anchors |
 | `evaluators.py` | `SESSION_SUMMARY_QUERY` | Aggregate session metrics for code evaluation |
 | `evaluators.py` | `AI_GENERATE_JUDGE_BATCH_QUERY` | Batch LLM-as-judge via AI.GENERATE |
 | `evaluators.py` | `LLM_JUDGE_BATCH_QUERY` | Legacy batch evaluation via ML.GENERATE_TEXT |
-| `trace_evaluator.py` | `_SESSION_TRACE_QUERY` | Fetch trace for trajectory matching |
+| `trace_evaluator.py` | shared `Client.get_trace_by_selector()` | Resolve traces for trajectory matching and replay |
 | `insights.py` | `_SESSION_METADATA_QUERY` | Aggregate session metadata |
 | `insights.py` | `_SESSION_TRANSCRIPT_QUERY` | Build session transcripts |
 | `insights.py` | `_AI_GENERATE_FACET_EXTRACTION_QUERY` | Extract structured facets via AI.GENERATE |
@@ -1273,7 +1373,7 @@ results = client.query(formatted, job_config=job_config)
 
 ```
 Evaluation
-├── Deterministic (CodeEvaluator)
+├── Deterministic (SystemEvaluator)
 │   ├── Latency
 │   ├── Turn count
 │   ├── Error rate
@@ -1321,7 +1421,7 @@ All evaluation scores in the SDK are normalized to `[0.0, 1.0]`:
 
 | Mode | Evaluator | Where Computation Runs |
 |------|-----------|----------------------|
-| Single session (sync) | `CodeEvaluator.evaluate_session()` | Python |
+| Single session (sync) | `SystemEvaluator.evaluate_session()` | Python |
 | Single session (async) | `LLMAsJudge.evaluate_session()` | Gemini API |
 | Batch via Client | `Client.evaluate()` | BigQuery (SQL + AI.GENERATE) |
 | Trajectory matching | `BigQueryTraceEvaluator.evaluate_session()` | BigQuery (fetch) + Python (matching) |
@@ -1420,7 +1520,7 @@ Synchronous (user-facing):
 ├── Client.drift_detection()
 ├── Client.insights()
 ├── Client.deep_analysis()
-├── CodeEvaluator.evaluate_session()
+├── SystemEvaluator.evaluate_session()
 ├── EvalSuite.*
 ├── EvalValidator.*
 └── BigFramesEvaluator.*
@@ -1480,10 +1580,10 @@ results = await asyncio.gather(*[_run_one(t) for t in tasks])
 
 ## 10. Extensibility & Plugin Points
 
-### 10.1 Custom Metrics (CodeEvaluator)
+### 10.1 Custom Metrics (SystemEvaluator)
 
 ```python
-evaluator = CodeEvaluator(name="custom").add_metric(
+evaluator = SystemEvaluator(name="custom").add_metric(
     name="business_metric",
     fn=lambda session: your_scoring_logic(session),
     threshold=0.7,
@@ -1586,7 +1686,7 @@ All tests mock BigQuery — no GCP credentials or live BigQuery access is needed
 ```
 tests/
 ├── test_sdk_client.py              # Client integration tests
-├── test_sdk_evaluators.py          # CodeEvaluator + LLMAsJudge
+├── test_sdk_evaluators.py          # SystemEvaluator + LLMAsJudge
 ├── test_sdk_trace.py               # Trace/Span reconstruction
 ├── test_sdk_feedback.py            # Drift detection
 ├── test_sdk_insights.py            # Insights pipeline

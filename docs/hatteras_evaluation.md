@@ -7,7 +7,7 @@ agent sessions into user-defined categories directly against traces stored in
 BigQuery, without relying on an external service.
 
 This should be implemented as a new categorical evaluation subsystem, not as
-an overload of the existing numeric `CodeEvaluator` / `LLMAsJudge` report
+an overload of the existing numeric `SystemEvaluator` / `LLMAsJudge` report
 path.
 
 The goal is to support Hatteras-like functionality inside the SDK:
@@ -22,7 +22,7 @@ The goal is to support Hatteras-like functionality inside the SDK:
 
 Today the SDK supports two major evaluation modes:
 
-- deterministic numeric scoring via `CodeEvaluator`
+- deterministic numeric scoring via `SystemEvaluator`
 - semantic numeric scoring via `LLMAsJudge`
 
 What is missing is a first-class way to answer questions like:
@@ -60,7 +60,7 @@ That capability is useful for:
 This design is not proposing:
 
 - a full clone of an external Hatteras service
-- a replacement for `CodeEvaluator`
+- a replacement for `SystemEvaluator`
 - a replacement for `LLMAsJudge`
 - a new remote function or Python UDF surface in the first phase
 - real-time ingestion-time classification in phase 1
@@ -281,12 +281,24 @@ already used by `LLMAsJudge` and `insights`:
 
 1. Filter sessions with `TraceFilter`
 2. Build one ordered transcript per `session_id`
-3. Call `AI.GENERATE` once per session
+3. Call `AI.GENERATE` once per session transcript
 4. Read typed output columns or parse a constrained JSON/string envelope
 5. Convert rows into `CategoricalSessionResult`
 
 This keeps the execution model aligned with the existing SDK design instead of
 introducing a separate trace-by-trace Python-only path.
+
+> **Current identity boundary (#359):** `session_id` is a persistent
+> conversation identifier and may be reused by different users, root agents,
+> experiments, or labeled passes. With U4, non-empty
+> `per_session_context` evaluation resolves the filtered population through the
+> shared U2 selector contract and supplies one parameterized transcript/context
+> struct per exact `ResolvedTraceSelector`; AI.GENERATE, retry, and API fallback
+> keep that selector key unchanged. Legacy string context keys are accepted only
+> for an unambiguous evaluated session. The bare-session SQL below remains the
+> compatibility path when no context mapping is supplied. Persistence
+> cardinality is still U5: U4 context calls reject `persist_results=True` until
+> the results schema, writer, and views carry the same identity provenance.
 
 ### Concrete SQL template
 
@@ -492,7 +504,9 @@ belong in `evaluators.py`, which is focused on numeric scoring contracts.
 This proposal should reuse and align with current SDK patterns:
 
 - `TraceFilter` for session selection
-- `Client.get_session_trace()` transcript semantics
+- `Client.get_session_trace()` / `get_trace_by_selector()` identity-safe
+  transcript semantics for trace-consuming secondary surfaces and U4
+  selector-keyed judge-context inputs
 - BigQuery-native `AI.GENERATE` execution patterns already used in `insights`
   and other modules
 - Gemini API fallback patterns already used by `LLMAsJudge`
@@ -530,6 +544,9 @@ Those numeric contracts should remain numeric.
 - Add result table DDL/template
 - Add `persist_results=True` flow
 - Add export/query helpers if needed
+- Migrate schema, writer, and views in that order so identity/scope attribution
+  is part of the persistence key before colliding sessions are written. The U3
+  read/report plumbing intentionally does not claim this cardinality migration.
 
 ### Phase 4: CLI exposure
 

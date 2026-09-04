@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Generate the base-table-only Looker Studio production query.
+
+The query reads one BQAA ``agent_events`` table and directly applies the JSON
+extractions used by the ADK generated views. Generated views are not required.
+
+Regenerating must be byte-identical (CI asserts no drift).
+"""
+
+import argparse
+import pathlib
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def generate() -> str:
+  """Return the deterministic base-table reporting query."""
+  return """\
+-- events_v1.sql.tmpl — stable reporting schema over one BQAA event table.
+--
+-- The three logical placeholders (PROJECT, DATASET, TABLE) are rendered to
+-- executable sentinel bindings by tools/render_template.py, producing the
+-- exact SQL embedded in the canonical Looker Studio report. At hydration,
+-- Linking API sqlReplace substitutes the sentinel strings with user values.
+--
+-- This query does not require the optional BQAA generated views. It directly
+-- reproduces their JSON extraction semantics for the fields used by the
+-- dashboard and includes every event type present in the base table.
+--
+-- Date-range parameters must be enabled on the Looker Studio data source.
+-- Timezone is UTC; @DS_START_DATE/@DS_END_DATE arrive as YYYYMMDD strings,
+-- with the end date inclusive.
+SELECT
+  timestamp,
+  event_type,
+  agent,
+  session_id,
+  invocation_id,
+  user_id,
+  trace_id,
+  span_id,
+  parent_span_id,
+  status,
+  error_message,
+  is_truncated,
+  IF(
+    event_type = 'LLM_RESPONSE',
+    COALESCE(
+      SAFE_CAST(
+        JSON_VALUE(
+          attributes, '$.usage_metadata.prompt_token_count'
+        ) AS INT64
+      ),
+      SAFE_CAST(
+        JSON_VALUE(
+          attributes, '$.usage_metadata.prompt_tokens'
+        ) AS INT64
+      ),
+      SAFE_CAST(JSON_VALUE(content, '$.usage.prompt') AS INT64)
+    ),
+    NULL
+  ) AS usage_prompt_tokens,
+  IF(
+    event_type = 'LLM_RESPONSE',
+    COALESCE(
+      SAFE_CAST(
+        JSON_VALUE(
+          attributes, '$.usage_metadata.candidates_token_count'
+        ) AS INT64
+      ),
+      SAFE_CAST(
+        JSON_VALUE(
+          attributes, '$.usage_metadata.completion_tokens'
+        ) AS INT64
+      ),
+      SAFE_CAST(JSON_VALUE(content, '$.usage.completion') AS INT64)
+    ),
+    NULL
+  ) AS usage_completion_tokens,
+  IF(
+    event_type = 'LLM_RESPONSE',
+    COALESCE(
+      SAFE_CAST(
+        JSON_VALUE(
+          attributes, '$.usage_metadata.total_token_count'
+        ) AS INT64
+      ),
+      SAFE_CAST(
+        JSON_VALUE(
+          attributes, '$.usage_metadata.total_tokens'
+        ) AS INT64
+      ),
+      SAFE_CAST(JSON_VALUE(content, '$.usage.total') AS INT64)
+    ),
+    NULL
+  ) AS usage_total_tokens,
+  IF(
+    event_type = 'LLM_RESPONSE',
+    SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64),
+    NULL
+  ) AS llm_total_ms,
+  IF(
+    event_type = 'LLM_RESPONSE',
+    SAFE_CAST(
+      JSON_VALUE(latency_ms, '$.time_to_first_token_ms') AS INT64
+    ),
+    NULL
+  ) AS ttft_ms,
+  IF(
+    event_type = 'LLM_RESPONSE',
+    JSON_VALUE(attributes, '$.model_version'),
+    NULL
+  ) AS model_version,
+  IF(
+    event_type = 'TOOL_COMPLETED',
+    JSON_VALUE(content, '$.tool'),
+    NULL
+  ) AS tool_completed_name,
+  IF(
+    event_type = 'TOOL_COMPLETED',
+    JSON_VALUE(content, '$.tool_origin'),
+    NULL
+  ) AS tool_completed_origin,
+  IF(
+    event_type = 'TOOL_COMPLETED',
+    SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64),
+    NULL
+  ) AS tool_completed_total_ms,
+  IF(
+    event_type = 'TOOL_ERROR',
+    JSON_VALUE(content, '$.tool'),
+    NULL
+  ) AS tool_error_name,
+  IF(
+    event_type = 'TOOL_ERROR',
+    JSON_VALUE(content, '$.tool_origin'),
+    NULL
+  ) AS tool_error_origin,
+  IF(
+    event_type = 'TOOL_ERROR',
+    SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64),
+    NULL
+  ) AS tool_error_total_ms,
+  DATE(timestamp, 'UTC') AS event_date,
+  CONCAT(trace_id, '|', span_id) AS event_pk,
+  IF(
+    event_type = 'LLM_RESPONSE',
+    CONCAT(trace_id, '|', span_id),
+    NULL
+  ) AS llm_response_pk,
+  IF(
+    event_type = 'TOOL_COMPLETED',
+    CONCAT(trace_id, '|', span_id),
+    NULL
+  ) AS tool_completed_pk,
+  IF(
+    event_type = 'TOOL_ERROR',
+    CONCAT(trace_id, '|', span_id),
+    NULL
+  ) AS tool_error_pk
+FROM `{{PROJECT}}.{{DATASET}}.{{TABLE}}`
+WHERE timestamp >= TIMESTAMP(
+        PARSE_DATE('%Y%m%d', @DS_START_DATE), 'UTC'
+      )
+  AND timestamp < TIMESTAMP(
+        DATE_ADD(
+          PARSE_DATE('%Y%m%d', @DS_END_DATE),
+          INTERVAL 1 DAY
+        ),
+        'UTC'
+      )
+"""
+
+
+def main() -> None:
+  parser = argparse.ArgumentParser()
+  parser.add_argument(
+      "--output",
+      type=pathlib.Path,
+      default=ROOT / "sql/events_v1.sql.tmpl",
+  )
+  args = parser.parse_args()
+  args.output.write_text(generate())
+  print(f"wrote {args.output} (one base-table scan)")
+
+
+if __name__ == "__main__":
+  main()

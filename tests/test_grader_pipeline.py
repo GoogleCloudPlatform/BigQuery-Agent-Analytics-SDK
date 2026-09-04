@@ -20,9 +20,9 @@ from unittest.mock import patch
 
 import pytest
 
-from bigquery_agent_analytics.evaluators import CodeEvaluator
 from bigquery_agent_analytics.evaluators import LLMAsJudge
 from bigquery_agent_analytics.evaluators import SessionScore
+from bigquery_agent_analytics.evaluators import SystemEvaluator
 from bigquery_agent_analytics.grader_pipeline import AggregateVerdict
 from bigquery_agent_analytics.grader_pipeline import BinaryStrategy
 from bigquery_agent_analytics.grader_pipeline import GraderPipeline
@@ -164,11 +164,11 @@ class TestGraderPipeline:
   """Tests for GraderPipeline."""
 
   @pytest.mark.asyncio
-  async def test_code_grader(self):
-    """Test pipeline with a code grader."""
-    pipeline = GraderPipeline(WeightedStrategy(threshold=0.5)).add_code_grader(
-        CodeEvaluator.latency(threshold_ms=5000)
-    )
+  async def test_system_grader(self):
+    """Test pipeline with a system grader."""
+    pipeline = GraderPipeline(
+        WeightedStrategy(threshold=0.5)
+    ).add_system_grader(SystemEvaluator.latency(threshold_ms=5000))
 
     verdict = await pipeline.evaluate(
         session_summary={
@@ -239,7 +239,7 @@ class TestGraderPipeline:
 
     pipeline = (
         GraderPipeline(BinaryStrategy())
-        .add_code_grader(CodeEvaluator.latency(threshold_ms=5000))
+        .add_system_grader(SystemEvaluator.latency(threshold_ms=5000))
         .add_llm_grader(judge)
     )
 
@@ -260,8 +260,8 @@ class TestGraderPipeline:
     """Test fluent builder chaining."""
     pipeline = (
         GraderPipeline(WeightedStrategy())
-        .add_code_grader(CodeEvaluator.latency())
-        .add_code_grader(CodeEvaluator.error_rate())
+        .add_system_grader(SystemEvaluator.latency())
+        .add_system_grader(SystemEvaluator.error_rate())
     )
     # Verify chaining works
     assert len(pipeline._graders) == 2
@@ -281,3 +281,18 @@ class TestGraderPipeline:
 
     assert verdict.passed is False
     assert verdict.grader_results[0].passed is False
+
+  @pytest.mark.asyncio
+  async def test_code_grader_legacy_alias(self):
+    """Test that the legacy add_code_grader alias still works."""
+    pipeline = GraderPipeline(WeightedStrategy(threshold=0.5)).add_code_grader(
+        SystemEvaluator.latency(threshold_ms=5000)
+    )
+    verdict = await pipeline.evaluate(
+        session_summary={
+            "session_id": "s1",
+            "avg_latency_ms": 2000,
+        }
+    )
+    assert verdict.passed is True
+    assert len(verdict.grader_results) == 1

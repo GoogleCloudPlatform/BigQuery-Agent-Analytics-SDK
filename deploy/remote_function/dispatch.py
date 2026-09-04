@@ -25,10 +25,12 @@ import json
 from typing import Any
 
 from bigquery_agent_analytics import Client
-from bigquery_agent_analytics import CodeEvaluator
+from bigquery_agent_analytics import AmbiguousSessionError
 from bigquery_agent_analytics import LLMAsJudge
 from bigquery_agent_analytics import serialize
+from bigquery_agent_analytics import SystemEvaluator
 from bigquery_agent_analytics import TraceFilter
+from bigquery_agent_analytics import TraceSelector
 from bigquery_agent_analytics._deploy_runtime import resolve_client_options
 
 
@@ -68,12 +70,15 @@ def process_calls(
       result["_version"] = "1.0"
       replies.append(result)
     except Exception as e:
+      error = {
+          "code": type(e).__name__,
+          "message": str(e),
+      }
+      if isinstance(e, AmbiguousSessionError):
+        error["details"] = e.to_dict()
       replies.append(
           {
-              "_error": {
-                  "code": type(e).__name__,
-                  "message": str(e),
-              },
+              "_error": error,
               "_version": "1.0",
           }
       )
@@ -83,7 +88,13 @@ def process_calls(
 def dispatch(client, operation, params):
   """Route operation to SDK method, return JSON-safe dict."""
   if operation == "analyze":
-    trace = client.get_session_trace(params["session_id"])
+    selector = _analyze_selector(params)
+    trace = client.get_trace_by_selector(
+        selector,
+        allow_mixed_scope=_bool_param(
+            params.get("allow_mixed_scope", False)
+        ),
+    )
     return serialize(trace)
 
   if operation == "evaluate":
@@ -117,6 +128,43 @@ def dispatch(client, operation, params):
   raise ValueError(f"Unknown operation: {operation!r}")
 
 
+_ANALYZE_SELECTOR_FIELDS = (
+    "user_id",
+    "root_agent_name",
+    "experiment_id",
+    "custom_labels",
+    "scope_signature",
+)
+
+
+def _analyze_selector(params: dict[str, Any]) -> TraceSelector:
+  """Build a selector while preserving absent versus explicit null pins."""
+  if "selector" in params:
+    conflicts = [
+        field
+        for field in ("session_id", *_ANALYZE_SELECTOR_FIELDS)
+        if field in params
+    ]
+    if conflicts:
+      raise ValueError(
+          "analyze 'selector' cannot be combined with additive selector"
+          f" fields: {', '.join(conflicts)}"
+      )
+    payload = params["selector"]
+    if type(payload) is not dict:
+      raise TypeError("analyze 'selector' must be a JSON object.")
+    return TraceSelector(**payload)
+
+  if "session_id" not in params:
+    raise ValueError("analyze requires 'session_id' or 'selector'.")
+  selector_kwargs = {
+      field: params[field]
+      for field in _ANALYZE_SELECTOR_FIELDS
+      if field in params
+  }
+  return TraceSelector(session_id=params["session_id"], **selector_kwargs)
+
+
 def _bool_param(value: Any) -> bool:
   """Parse boolean-ish JSON or string values from remote function params."""
   if isinstance(value, bool):
@@ -137,7 +185,7 @@ def build_filters(params):
 
 
 def build_evaluator(params):
-  """Build CodeEvaluator from params dict."""
+  """Build SystemEvaluator from params dict."""
   metric = params.get("metric", "latency")
   threshold = params.get("threshold")
   fail_on_missing_telemetry = _bool_param(
@@ -145,35 +193,35 @@ def build_evaluator(params):
   )
 
   factories_with_t = {
-      "latency": lambda t: CodeEvaluator.latency(threshold_ms=t),
-      "error_rate": lambda t: CodeEvaluator.error_rate(
+      "latency": lambda t: SystemEvaluator.latency(threshold_ms=t),
+      "error_rate": lambda t: SystemEvaluator.error_rate(
           max_error_rate=t,
       ),
-      "turn_count": lambda t: CodeEvaluator.turn_count(
+      "turn_count": lambda t: SystemEvaluator.turn_count(
           max_turns=int(t),
       ),
-      "token_efficiency": lambda t: CodeEvaluator.token_efficiency(
+      "token_efficiency": lambda t: SystemEvaluator.token_efficiency(
           max_tokens=int(t),
       ),
-      "ttft": lambda t: CodeEvaluator.ttft(threshold_ms=t),
-      "cost": lambda t: CodeEvaluator.cost_per_session(
+      "ttft": lambda t: SystemEvaluator.ttft(threshold_ms=t),
+      "cost": lambda t: SystemEvaluator.cost_per_session(
           max_cost_usd=t,
       ),
   }
   factories_default = {
-      "latency": CodeEvaluator.latency,
-      "error_rate": CodeEvaluator.error_rate,
-      "turn_count": CodeEvaluator.turn_count,
-      "token_efficiency": CodeEvaluator.token_efficiency,
-      "ttft": CodeEvaluator.ttft,
-      "cost": CodeEvaluator.cost_per_session,
+      "latency": SystemEvaluator.latency,
+      "error_rate": SystemEvaluator.error_rate,
+      "turn_count": SystemEvaluator.turn_count,
+      "token_efficiency": SystemEvaluator.token_efficiency,
+      "ttft": SystemEvaluator.ttft,
+      "cost": SystemEvaluator.cost_per_session,
   }
 
   if metric == "context_cache_hit_rate":
     kwargs = {"fail_on_missing_telemetry": fail_on_missing_telemetry}
     if threshold is not None:
       kwargs["min_hit_rate"] = threshold
-    return CodeEvaluator.context_cache_hit_rate(**kwargs)
+    return SystemEvaluator.context_cache_hit_rate(**kwargs)
 
   if metric not in factories_with_t:
     raise ValueError(f"Unknown metric: {metric!r}")

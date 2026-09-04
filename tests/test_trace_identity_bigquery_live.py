@@ -1,0 +1,909 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Live BigQuery behavior tests for the #359 identity contract.
+
+Unit tests assert the SQL text and parameters the SDK generates; this
+module proves the generated JSONPath actually selects the intended
+member in real BigQuery, because the JSONPath grammar (backslashes
+matched literally, quotes escaped with ``\\"``) cannot be verified
+offline. See PR #362 round 8: JSON-string escaping of backslashes
+silently matched nothing.
+
+**Gating** — skipped unless BOTH env vars are set (burns quota):
+
+* ``BQAA_LIVE_BQ=1`` — explicit opt-in.
+* ``BQAA_LIVE_BQ_PROJECT`` — GCP project ID to bill the queries to.
+
+The JSONPath probes query literal JSON built with ``JSON_OBJECT``.
+The collision tests create a temporary dataset and table, then delete
+the dataset during fixture teardown.
+
+## Run
+
+::
+
+    BQAA_LIVE_BQ=1 BQAA_LIVE_BQ_PROJECT=<project> \\
+    pytest tests/test_trace_identity_bigquery_live.py -v -s
+"""
+
+import os
+
+import pytest
+
+from bigquery_agent_analytics.trace import _jsonpath_member_segment
+
+_OPTED_IN = os.environ.get("BQAA_LIVE_BQ") == "1" and bool(
+    os.environ.get("BQAA_LIVE_BQ_PROJECT")
+)
+
+pytestmark = pytest.mark.skipif(
+    not _OPTED_IN,
+    reason=(
+        "live BigQuery tests are opt-in: set BQAA_LIVE_BQ=1 and"
+        " BQAA_LIVE_BQ_PROJECT"
+    ),
+)
+
+# The production shape from TraceFilter.to_sql_conditions():
+# JSON_VALUE(attributes, CONCAT('$.custom_tags.', @label_key_N)).
+_PROBE_QUERY = """
+SELECT JSON_VALUE(
+    JSON_OBJECT('custom_tags', JSON_OBJECT(@key, 'expected')),
+    CONCAT('$.custom_tags.', @segment)
+) AS v
+"""
+
+# Keys exercising every character class the segment helper handles.
+_HOSTILE_KEYS = [
+    "run",
+    "a.b",
+    "a[0]",
+    'a"b',
+    "a\\b",  # the round-8 P1: literal backslash must match
+    "a\\\\b",  # interior double backslash: also literal
+    "\\a",  # leading backslash
+    "a\\\\",  # round-10: EVEN trailing run is valid
+    'a\\\\"b',  # round-10: EVEN run before a quote is valid
+    "",
+    "a b",
+    "a\nb",
+    "a\tb",
+]
+
+# Round-9 P1: these key shapes have NO valid quoted-member encoding —
+# BigQuery aborts with "Invalid token in JSONPath". The SDK rejects
+# them before query submission (unit-tested); the live tests below
+# prove the underlying unaddressability.
+_UNADDRESSABLE_KEYS = [
+    "a\\",  # odd trailing run (1)
+    "a\\\\\\",  # odd trailing run (3)
+    'a\\"b',  # odd run (1) before a quote
+    'a\\\\\\"b',  # odd run (3) before a quote
+]
+
+
+def _probe(client, key: str, segment: str):
+  from google.cloud import bigquery
+
+  job_config = bigquery.QueryJobConfig(
+      query_parameters=[
+          bigquery.ScalarQueryParameter("key", "STRING", key),
+          bigquery.ScalarQueryParameter("segment", "STRING", segment),
+      ]
+  )
+  rows = list(client.query(_PROBE_QUERY, job_config=job_config).result())
+  return rows[0].v
+
+
+@pytest.fixture(scope="module")
+def bq_client():
+  from google.cloud import bigquery
+
+  return bigquery.Client(project=os.environ["BQAA_LIVE_BQ_PROJECT"])
+
+
+class TestJsonPathMemberSegmentLive:
+  """The generated segment must select the literal member."""
+
+  @pytest.mark.parametrize("key", _HOSTILE_KEYS, ids=repr)
+  def test_segment_selects_the_member(self, bq_client, key):
+    assert _probe(bq_client, key, _jsonpath_member_segment(key)) == "expected"
+
+  @pytest.mark.parametrize("key", _UNADDRESSABLE_KEYS, ids=repr)
+  def test_unaddressable_keys_rejected_before_submission(self, key):
+    with pytest.raises(ValueError, match="cannot be addressed"):
+      _jsonpath_member_segment(key)
+
+  @pytest.mark.parametrize("key", _UNADDRESSABLE_KEYS, ids=repr)
+  def test_unaddressable_keys_abort_live_queries(self, bq_client, key):
+    # Raw probe with quote-only escaping (what the pre-round-9 helper
+    # emitted): live BigQuery rejects the whole query, proving these
+    # keys must be rejected client-side rather than encoded.
+    from google.api_core import exceptions as gexc
+
+    raw_segment = '"' + key.replace('"', '\\"') + '"'
+    with pytest.raises(gexc.BadRequest, match="Invalid token"):
+      _probe(bq_client, key, raw_segment)
+
+  def test_doubled_backslash_regression(self, bq_client):
+    # The pre-fix encoding doubled backslashes; BigQuery matches
+    # backslashes literally inside quoted members, so the doubled
+    # form selects nothing. Guard against reintroducing it.
+    key = "a\\b"
+    doubled_segment = '"a\\\\b"'
+    assert _probe(bq_client, key, doubled_segment) is None
+    assert _probe(bq_client, key, _jsonpath_member_segment(key)) == "expected"
+
+
+# ------------------------------------------------------------------ #
+# U2: dry runs and the live collision fixture (issue #359)            #
+# ------------------------------------------------------------------ #
+
+
+@pytest.fixture(scope="module")
+def collision_dataset(bq_client):
+  """Scratch dataset seeded with colliding sessions, dropped on exit.
+
+  Sessions:
+    * ``collide``: same session id for users alice and bob.
+    * ``nulls``: reused id where one candidate has NULL user and
+      root agent and the other has both set.
+    * ``passes``: one identity carrying run=v0 rows, run=v1 rows,
+      an enrichment row (v0 + subagent — its own exact scope), one
+      untagged shared row, and one foreign-tagged row whose payload
+      lacks the run key entirely.
+    * ``poison-scalar``: valid NULL-root scopes beside a malformed
+      row on the same SQL anchor whose attributes are a JSON string
+      scalar.
+    * ``poison-only``: the newest raw row is a malformed-only session,
+      proving discovery still fails closed while listing anchor limits
+      skip it in favor of older valid sessions.
+  """
+  import uuid
+
+  from google.cloud import bigquery as bq
+
+  project = os.environ["BQAA_LIVE_BQ_PROJECT"]
+  dataset_id = f"bqaa_live_test_u2_{uuid.uuid4().hex[:8]}"
+  dataset = bq.Dataset(f"{project}.{dataset_id}")
+  dataset.location = os.environ.get("BQAA_LIVE_BQ_LOCATION", "US")
+  bq_client.create_dataset(dataset)
+  table = f"{project}.{dataset_id}.agent_events"
+  # Cleanup must survive setup failure: any exception below would
+  # otherwise leak the scratch dataset (PR #371 review round 7, P3).
+  try:
+    bq_client.query(
+        f"""
+        CREATE TABLE `{table}` (
+          timestamp TIMESTAMP, event_type STRING, agent STRING,
+          session_id STRING, invocation_id STRING, user_id STRING,
+          trace_id STRING, span_id STRING, parent_span_id STRING,
+          content JSON, content_parts ARRAY<STRUCT<mime_type STRING>>,
+          attributes JSON, latency_ms JSON, status STRING,
+          error_message STRING, is_truncated BOOL
+        )
+    """
+    ).result()
+    bq_client.query(
+        f"""
+        INSERT INTO `{table}`
+          (timestamp, event_type, agent, session_id, user_id, trace_id,
+           span_id, content, attributes, status)
+        VALUES
+          -- collide: alice vs bob
+          ('2026-07-01 10:00:00', 'USER_MESSAGE_RECEIVED', 'a', 'collide',
+           'alice', 'tr-a', 'a1', JSON '{{}}', JSON '{{}}', 'OK'),
+          ('2026-07-01 10:00:01', 'LLM_RESPONSE', 'a', 'collide',
+           'alice', 'tr-a', 'a2', JSON '{{}}', JSON '{{}}', 'OK'),
+          ('2026-07-01 11:00:00', 'USER_MESSAGE_RECEIVED', 'a', 'collide',
+           'bob', 'tr-b', 'b1', JSON '{{}}', JSON '{{}}', 'OK'),
+          -- nulls: NULL identity vs fully set identity
+          ('2026-07-01 12:00:00', 'LLM_RESPONSE', 'a', 'nulls',
+           NULL, 'tr-n', 'n1', JSON '{{}}', JSON '{{}}', 'OK'),
+          ('2026-07-01 12:00:01', 'LLM_RESPONSE', 'a', 'nulls',
+           'carol', 'tr-c', 'c1', JSON '{{}}',
+           JSON '{{"root_agent_name": "rooty"}}', 'OK'),
+          -- passes: v0 rows, v1 rows, enrichment, shared untagged
+          ('2026-07-01 13:00:00', 'LLM_RESPONSE', 'a', 'passes',
+           'eve', 'tr-p', 'p0', JSON '{{}}',
+           JSON '{{"custom_tags": {{"run": "v0"}}}}', 'OK'),
+          ('2026-07-01 13:00:01', 'LLM_RESPONSE', 'a', 'passes',
+           'eve', 'tr-p', 'p0e', JSON '{{}}',
+           JSON '{{"custom_tags": {{"run": "v0", "subagent_id": "sx"}}}}',
+           'OK'),
+          ('2026-07-01 13:00:02', 'LLM_RESPONSE', 'a', 'passes',
+           'eve', 'tr-p', 'p1', JSON '{{}}',
+           JSON '{{"custom_tags": {{"run": "v1"}}}}', 'OK'),
+          ('2026-07-01 13:00:03', 'USER_MESSAGE_RECEIVED', 'a', 'passes',
+           'eve', 'tr-p', 'shared', JSON '{{}}', JSON '{{}}', 'OK'),
+          -- foreign-tagged row: tags present but no 'run' key (P1-1)
+          ('2026-07-01 13:00:04', 'LLM_RESPONSE', 'a', 'passes',
+           'eve', 'tr-p', 'foreign', JSON '{{}}',
+           JSON '{{"custom_tags": {{"other": "x"}}}}', 'OK'),
+          -- poison-scalar: valid NULL-root rows beside attributes
+          -- stored as a JSON STRING scalar on the same SQL anchor.
+          -- The decoder yields the inner str while every SQL path
+          -- sees NULL (round 10, P1-1).
+          ('2026-07-01 13:59:57', 'USER_MESSAGE_RECEIVED', 'a',
+           'poison-scalar', 'mallory', 'tr-good', 'good', JSON '{{}}',
+           JSON '{{}}', 'OK'),
+          ('2026-07-01 13:59:58', 'LLM_RESPONSE', 'a', 'poison-scalar',
+           'mallory', 'tr-good', 'good-v0', JSON '{{}}',
+           JSON '{{"custom_tags": {{"run": "v0"}}}}', 'OK'),
+          ('2026-07-01 13:59:59', 'LLM_RESPONSE', 'a', 'poison-scalar',
+           'mallory', 'tr-good', 'good-v1', JSON '{{}}',
+           JSON '{{"custom_tags": {{"run": "v1"}}}}', 'OK'),
+          ('2026-07-01 14:00:00', 'LLM_RESPONSE', 'a', 'poison-scalar',
+           'mallory', 'tr-x', 'x1', JSON '{{}}',
+           TO_JSON(TO_JSON_STRING(JSON_OBJECT(
+               'root_agent_name', 'fabricated',
+               'custom_tags', JSON_OBJECT('run', 'v1')))),
+           'OK'),
+          -- poison-only: no valid discovery row can mask the typed
+          -- malformed-attributes failure.
+          ('2026-07-01 14:01:00', 'LLM_RESPONSE', 'a', 'poison-only',
+           'mallory', 'tr-x', 'only-bad', JSON '{{}}',
+           TO_JSON(TO_JSON_STRING(JSON_OBJECT(
+               'root_agent_name', 'fabricated'))),
+           'OK')
+    """
+    ).result()
+  except Exception:
+    bq_client.delete_dataset(
+        f"{project}.{dataset_id}", delete_contents=True, not_found_ok=True
+    )
+    raise
+  yield project, dataset_id
+  bq_client.delete_dataset(
+      f"{project}.{dataset_id}", delete_contents=True, not_found_ok=True
+  )
+
+
+@pytest.fixture(scope="module")
+def sdk_client(collision_dataset):
+  from bigquery_agent_analytics.client import Client
+
+  project, dataset_id = collision_dataset
+  return Client(project_id=project, dataset_id=dataset_id, verify_schema=False)
+
+
+class TestIdentityQueriesDryRun:
+  """The generated queries parse and bind with real parameters."""
+
+  def test_list_query_dry_runs_with_scope(self, collision_dataset, bq_client):
+    from google.cloud import bigquery as bq
+
+    from bigquery_agent_analytics.client import _LIST_TRACES_QUERY
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    project, dataset_id = collision_dataset
+    filt = TraceFilter(custom_labels={"run": "v0"}, experiment_id="e1")
+    where, params = filt.to_sql_conditions()
+    query = _LIST_TRACES_QUERY.format(
+        project=project,
+        dataset=dataset_id,
+        table="agent_events",
+        where=where,
+        row_where=filt.row_scope_where(),
+    )
+    job = bq_client.query(
+        query,
+        job_config=bq.QueryJobConfig(query_parameters=params, dry_run=True),
+    )
+    assert job.total_bytes_processed is not None
+
+  def test_singular_queries_dry_run(self, collision_dataset, bq_client):
+    from google.cloud import bigquery as bq
+
+    from bigquery_agent_analytics.client import _GET_SESSION_SCOPE_METADATA_QUERY
+    from bigquery_agent_analytics.client import _GET_SESSION_TRACE_QUERY
+    from bigquery_agent_analytics.client import _RESOLVE_SESSION_CANDIDATES_QUERY
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    project, dataset_id = collision_dataset
+    resolve = _RESOLVE_SESSION_CANDIDATES_QUERY.format(
+        project=project,
+        dataset=dataset_id,
+        table="agent_events",
+        identity_pins="\n  AND user_id = @pin_user_id",
+    )
+    bq_client.query(
+        resolve,
+        job_config=bq.QueryJobConfig(
+            query_parameters=[
+                bq.ScalarQueryParameter("session_id", "STRING", "collide"),
+                bq.ScalarQueryParameter("pin_user_id", "STRING", "alice"),
+                bq.ScalarQueryParameter("candidate_limit", "INT64", 65),
+            ],
+            dry_run=True,
+        ),
+    )
+    row_filter = TraceFilter(custom_labels={"run": "v0"})
+    fetch = _GET_SESSION_TRACE_QUERY.format(
+        project=project,
+        dataset=dataset_id,
+        table="agent_events",
+        row_where=row_filter.row_scope_where(),
+        event_where="e.event_type IN UNNEST(@selected_event_types)",
+    )
+    bq_client.query(
+        fetch,
+        job_config=bq.QueryJobConfig(
+            query_parameters=[
+                bq.ScalarQueryParameter("session_id", "STRING", "passes"),
+                bq.ScalarQueryParameter("anchor_user_id", "STRING", None),
+                bq.ScalarQueryParameter(
+                    "anchor_root_agent_name", "STRING", None
+                ),
+                bq.ScalarQueryParameter("label_key_0", "STRING", '"run"'),
+                bq.ScalarQueryParameter("label_val_0", "STRING", "v0"),
+                bq.ArrayQueryParameter(
+                    "selected_event_types", "STRING", ["TOOL_COMPLETED"]
+                ),
+            ],
+            dry_run=True,
+        ),
+    )
+    metadata = _GET_SESSION_SCOPE_METADATA_QUERY.format(
+        project=project,
+        dataset=dataset_id,
+        table="agent_events",
+    )
+    bq_client.query(
+        metadata,
+        job_config=bq.QueryJobConfig(
+            query_parameters=[
+                bq.ScalarQueryParameter("session_id", "STRING", "passes"),
+                bq.ScalarQueryParameter("anchor_user_id", "STRING", None),
+                bq.ScalarQueryParameter(
+                    "anchor_root_agent_name", "STRING", None
+                ),
+            ],
+            dry_run=True,
+        ),
+    )
+
+  def test_batched_discovery_queries_dry_run(
+      self, collision_dataset, bq_client
+  ):
+    # PR #371 review round 8, P2-4: the QUALIFY-windowed batch query
+    # and the DISTINCT-identity query are the only discovery queries
+    # that had no grammar coverage; both bind here with the exact
+    # fragment/parameter shapes the client generates.
+    from google.cloud import bigquery as bq
+
+    from bigquery_agent_analytics.client import _RESOLVE_CANDIDATES_BATCH_QUERY
+    from bigquery_agent_analytics.client import _RESOLVE_SESSION_IDENTITIES_QUERY
+
+    project, dataset_id = collision_dataset
+    batch = _RESOLVE_CANDIDATES_BATCH_QUERY.format(
+        project=project,
+        dataset=dataset_id,
+        table="agent_events",
+        identity_pins="\n    AND user_id = @pin_user_id",
+        identity_disjunction=(
+            "(user_id IS NOT DISTINCT FROM @batch_user_0"
+            " AND JSON_VALUE(attributes, '$.root_agent_name')"
+            " IS NOT DISTINCT FROM @batch_root_0)"
+            " OR (user_id IS NOT DISTINCT FROM @batch_user_1"
+            " AND JSON_VALUE(attributes, '$.root_agent_name')"
+            " IS NOT DISTINCT FROM @batch_root_1)"
+        ),
+    )
+    bq_client.query(
+        batch,
+        job_config=bq.QueryJobConfig(
+            query_parameters=[
+                bq.ScalarQueryParameter("session_id", "STRING", "collide"),
+                bq.ScalarQueryParameter("per_identity_capped", "INT64", 33),
+                bq.ScalarQueryParameter("pin_user_id", "STRING", "alice"),
+                bq.ScalarQueryParameter("batch_user_0", "STRING", "alice"),
+                bq.ScalarQueryParameter("batch_root_0", "STRING", None),
+                bq.ScalarQueryParameter("batch_user_1", "STRING", "bob"),
+                bq.ScalarQueryParameter("batch_root_1", "STRING", "root-b"),
+            ],
+            dry_run=True,
+        ),
+    )
+    identities = _RESOLVE_SESSION_IDENTITIES_QUERY.format(
+        project=project,
+        dataset=dataset_id,
+        table="agent_events",
+        identity_pins="",
+    )
+    bq_client.query(
+        identities,
+        job_config=bq.QueryJobConfig(
+            query_parameters=[
+                bq.ScalarQueryParameter("session_id", "STRING", "collide"),
+                bq.ScalarQueryParameter("identity_limit", "INT64", 9),
+            ],
+            dry_run=True,
+        ),
+    )
+
+  @pytest.mark.parametrize("empty", [False, True])
+  def test_identity_bound_categorical_input_dry_runs(
+      self, collision_dataset, bq_client, empty
+  ):
+    """The exact ARRAY<STRUCT> + AI.GENERATE grammar binds in BigQuery."""
+    from google.cloud import bigquery as bq
+
+    from bigquery_agent_analytics.categorical_evaluator import _build_evaluation_inputs_parameter
+    from bigquery_agent_analytics.categorical_evaluator import _CategoricalEvaluationInput
+    from bigquery_agent_analytics.categorical_evaluator import build_ai_generate_query
+    from bigquery_agent_analytics.trace import ResolvedTraceSelector
+    from bigquery_agent_analytics.trace import TraceIdentity
+    from bigquery_agent_analytics.trace import TraceScope
+
+    project, dataset_id = collision_dataset
+    selector = ResolvedTraceSelector(
+        TraceIdentity("collide", "alice", None),
+        TraceScope(),
+    )
+    inputs = (
+        []
+        if empty
+        else [
+            _CategoricalEvaluationInput(
+                selector=selector,
+                transcript="USER_MESSAGE_RECEIVED: hello",
+                judge_context="Expected answer: hello",
+            )
+        ]
+    )
+    query = build_ai_generate_query(
+        project=project,
+        dataset=dataset_id,
+        table="agent_events",
+        where="TRUE",
+        endpoint="gemini-2.5-flash",
+        temperature=0.0,
+        identity_bound=True,
+    )
+    job = bq_client.query(
+        query,
+        job_config=bq.QueryJobConfig(
+            query_parameters=[
+                _build_evaluation_inputs_parameter(inputs),
+                bq.ScalarQueryParameter(
+                    "categorical_prompt",
+                    "STRING",
+                    "Return one allowed category.",
+                ),
+            ],
+            dry_run=True,
+        ),
+    )
+    assert job.total_bytes_processed is not None
+
+
+class TestCategoricalContextCollisionLive:
+  """U4 context binds to the exact U2 selector on live collision data."""
+
+  def test_reused_session_gets_two_separate_context_inputs(self, sdk_client):
+    from bigquery_agent_analytics.categorical_evaluator import _normalize_categorical_evaluation_inputs
+    from bigquery_agent_analytics.trace import AmbiguousSessionError
+    from bigquery_agent_analytics.trace import ResolvedTraceSelector
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    traces = sdk_client.list_traces(
+        TraceFilter(session_ids=["collide"], limit=10)
+    )
+    selectors = [
+        ResolvedTraceSelector(trace.identity, trace.scope) for trace in traces
+    ]
+    by_user = {selector.identity.user_id: selector for selector in selectors}
+    inputs = _normalize_categorical_evaluation_inputs(
+        traces,
+        {
+            by_user["alice"]: "Alice expected",
+            by_user["bob"]: "Bob expected",
+        },
+    )
+
+    assert {
+        item.selector.identity.user_id: item.judge_context for item in inputs
+    } == {
+        "alice": "Alice expected",
+        "bob": "Bob expected",
+    }
+    with pytest.raises(AmbiguousSessionError):
+      _normalize_categorical_evaluation_inputs(
+          traces,
+          {"collide": "unsafe shared context"},
+      )
+
+
+class TestCategoricalPersistenceCollisionLive:
+  """U5 persistence and latest views preserve colliding identities."""
+
+  def test_persisted_and_latest_cardinality_match_identity_results(
+      self, sdk_client, bq_client, collision_dataset
+  ):
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalContextSource
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationConfig
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationReport
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricCategory
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricDefinition
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricResult
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalSessionResult
+    from bigquery_agent_analytics.trace import TraceIdentity
+    from bigquery_agent_analytics.trace import TraceScope
+
+    project, dataset_id = collision_dataset
+    results_table = "categorical_results_u5"
+    view_prefix = "u5_"
+    secret = "golden-answer-live-secret"
+    session_results = [
+        CategoricalSessionResult(
+            session_id="collide",
+            identity=TraceIdentity("collide", user_id, None),
+            scope=TraceScope(),
+            context_applied=True,
+            context_source=CategoricalContextSource.GOLDEN_EXPECTED_ANSWER,
+            execution_mode="ai_generate",
+            metrics=[
+                CategoricalMetricResult(
+                    metric_name="tone",
+                    category=category,
+                    justification=secret,
+                    raw_response=secret,
+                )
+            ],
+        )
+        for user_id, category in (
+            ("alice", "positive"),
+            ("bob", "negative"),
+        )
+    ]
+    config = CategoricalEvaluationConfig(
+        metrics=[
+            CategoricalMetricDefinition(
+                name="tone",
+                definition="Overall tone.",
+                categories=[
+                    CategoricalMetricCategory(
+                        name="positive",
+                        definition="Positive tone.",
+                    ),
+                    CategoricalMetricCategory(
+                        name="negative",
+                        definition="Negative tone.",
+                    ),
+                ],
+            )
+        ],
+        persist_results=True,
+        results_table=results_table,
+        prompt_version="u5-live",
+    )
+    report = CategoricalEvaluationReport(
+        dataset=dataset_id,
+        total_sessions=len(session_results),
+        session_results=session_results,
+    )
+
+    sdk_client._persist_categorical_if_configured(
+        report,
+        config,
+        endpoint="gemini-2.5-flash",
+    )
+    created = sdk_client.create_categorical_views(
+        results_table=results_table,
+        view_prefix=view_prefix,
+    )
+
+    assert report.details["persisted"] is True
+    assert len(report.session_results) == 2
+    assert "categorical_results_latest" in created
+
+    raw = list(
+        bq_client.query(
+            f"""
+            SELECT
+              COUNT(*) AS row_count,
+              COUNT(DISTINCT identity_key) AS identity_count,
+              COUNTIF(justification IS NOT NULL OR raw_response IS NOT NULL)
+                AS contextual_payload_count
+            FROM `{project}.{dataset_id}.{results_table}`
+            """
+        ).result()
+    )[0]
+    latest = list(
+        bq_client.query(
+            f"""
+            SELECT
+              COUNT(*) AS row_count,
+              COUNT(DISTINCT identity_key) AS identity_count
+            FROM `{project}.{dataset_id}.{view_prefix}categorical_results_latest`
+            """
+        ).result()
+    )[0]
+
+    assert raw.row_count == len(report.session_results)
+    assert raw.identity_count == len(report.session_results)
+    assert raw.contextual_payload_count == 0
+    assert latest.row_count == len(report.session_results)
+    assert latest.identity_count == len(report.session_results)
+
+
+class TestLiveCollisionFixture:
+  """Reused session ids must not cross-contaminate (issue #359)."""
+
+  def test_list_traces_separates_users(self, sdk_client):
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    traces = [
+        t
+        for t in sdk_client.list_traces(TraceFilter(limit=50))
+        if t.session_id == "collide"
+    ]
+    assert len(traces) == 2
+    by_user = {t.identity.user_id: t for t in traces}
+    assert set(by_user) == {"alice", "bob"}
+    assert {s.span_id for s in by_user["alice"].spans} == {"a1", "a2"}
+    assert {s.span_id for s in by_user["bob"].spans} == {"b1"}
+
+  def test_null_identity_stays_separate(self, sdk_client):
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    traces = [
+        t
+        for t in sdk_client.list_traces(TraceFilter(limit=50))
+        if t.session_id == "nulls"
+    ]
+    assert len(traces) == 2
+    null_trace = next(t for t in traces if t.identity.user_id is None)
+    named = next(t for t in traces if t.identity.user_id == "carol")
+    assert {s.span_id for s in null_trace.spans} == {"n1"}
+    assert {s.span_id for s in named.spans} == {"c1"}
+    assert named.identity.root_agent_name == "rooty"
+
+  def test_bare_singular_read_ambiguous(self, sdk_client):
+    from bigquery_agent_analytics.trace import AmbiguousSessionError
+
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      sdk_client.get_session_trace("collide")
+    assert "user_id" in exc_info.value.retry_dimensions
+
+  def test_pinned_singular_read_isolated(self, sdk_client):
+    trace = sdk_client.get_session_trace("collide", user_id="alice")
+    assert {s.span_id for s in trace.spans} == {"a1", "a2"}
+    assert trace.identity.user_id == "alice"
+
+  def test_null_pin_selects_null_candidate(self, sdk_client):
+    trace = sdk_client.get_session_trace(
+        "nulls", user_id=None, root_agent_name=None
+    )
+    assert {s.span_id for s in trace.spans} == {"n1"}
+    assert trace.identity.user_id is None
+
+  def test_pass_selection_and_ambiguity(self, sdk_client):
+    from bigquery_agent_analytics.trace import AmbiguousSessionError
+    from bigquery_agent_analytics.trace import TraceScope
+
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      sdk_client.get_session_trace("passes")
+    assert "custom_labels" in exc_info.value.retry_dimensions
+
+    # Exact scope splitting: the subset label pin run=v0 matches both
+    # the {run:v0} scope and its {run:v0, subagent} superset scope,
+    # so it stays ambiguous; the exact signature pin resolves it.
+    with pytest.raises(AmbiguousSessionError):
+      sdk_client.get_session_trace("passes", custom_labels={"run": "v0"})
+    v0 = sdk_client.get_session_trace(
+        "passes",
+        scope_signature=TraceScope(custom_labels={"run": "v0"}).scope_signature,
+    )
+    # The v0 scope: its own rows plus the untagged shared row — never
+    # the v1 row, never the enrichment scope's row, and never the
+    # foreign-tagged row that merely lacks the run key (P1-1).
+    assert {s.span_id for s in v0.spans} == {"p0", "shared"}
+    assert v0.scope.labels_dict == {"run": "v0"}
+
+    v1 = sdk_client.get_session_trace("passes", custom_labels={"run": "v1"})
+    assert {s.span_id for s in v1.spans} == {"p1", "shared"}
+
+  def test_mixed_scope_escape_hatch(self, sdk_client):
+    # KTD4: the conversation-complete read for one identity.
+    trace = sdk_client.get_session_trace("passes", allow_mixed_scope=True)
+    assert {s.span_id for s in trace.spans} == {
+        "p0",
+        "p0e",
+        "p1",
+        "shared",
+        "foreign",
+    }
+    assert trace.identity.user_id == "eve"
+    assert trace.scope is None
+
+  def test_ambiguity_payload_retry_round_trip(self, sdk_client):
+    from bigquery_agent_analytics.trace import AmbiguousSessionError
+    from bigquery_agent_analytics.trace import TraceSelector
+
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      sdk_client.get_session_trace("collide")
+    payload = exc_info.value.to_dict()
+    selectors = [TraceSelector(**c["selector"]) for c in payload["candidates"]]
+    seen_users = set()
+    for selector in selectors:
+      trace = sdk_client.get_trace_by_selector(selector)
+      seen_users.add(trace.identity.user_id)
+    assert seen_users == {"alice", "bob"}
+
+  def test_string_scalar_attributes_excluded_live(self, sdk_client, caplog):
+    # PR #371 review round 10, P1-1: the REAL BigQuery decoder hands
+    # the poison-scalar row's attributes over as the decoded inner str.
+    # Discovery excludes it from public candidates and every advertised
+    # exact retry remains executable even though the malformed row shares
+    # the valid rows' NULL-root SQL anchor.
+    from bigquery_agent_analytics.trace import AmbiguousSessionError
+    from bigquery_agent_analytics.trace import TraceFilter
+    from bigquery_agent_analytics.trace import TraceSelector
+
+    with caplog.at_level("WARNING"):
+      listed = sdk_client.list_traces(TraceFilter(limit=50))
+      newest = sdk_client.list_traces(TraceFilter(limit=1))
+    poison_traces = [
+        trace for trace in listed if trace.session_id == "poison-scalar"
+    ]
+    assert len(poison_traces) == 2
+    assert {trace.scope.labels_dict["run"] for trace in poison_traces} == {
+        "v0",
+        "v1",
+    }
+    assert all(
+        "x1" not in {span.span_id for span in trace.spans}
+        for trace in poison_traces
+    )
+    assert [trace.session_id for trace in newest] == ["poison-scalar"]
+    assert not [
+        record
+        for record in caplog.records
+        if record.message.startswith("Quarantined")
+    ]
+
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      sdk_client.get_session_trace("poison-scalar")
+    selectors = [
+        TraceSelector(**candidate["selector"])
+        for candidate in exc_info.value.to_dict()["candidates"]
+    ]
+    assert len(selectors) == 2
+    for selector in selectors:
+      trace = sdk_client.get_trace_by_selector(selector)
+      assert trace.identity.root_agent_name is None
+      assert "x1" not in {span.span_id for span in trace.spans}
+
+    mixed = sdk_client.get_session_trace(
+        "poison-scalar", allow_mixed_scope=True
+    )
+    assert mixed.scope is None
+    assert {span.span_id for span in mixed.spans} == {
+        "good",
+        "good-v0",
+        "good-v1",
+    }
+
+    with pytest.raises(ValueError, match="JSON object"):
+      sdk_client.get_session_trace("poison-only")
+
+
+# --------------------------------------------------------------------- #
+# U6: label / time-window / limit bounds probe (issue #360, design #384) #
+# --------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module")
+def bounds_probe_table(bq_client, collision_dataset):
+  """Seed the U6 bounds fixture under a dedicated, non-demo label.
+
+  Rows land in ``BQAA_U6_PROBE_DATASET`` when set (the populated AE8
+  scratch dataset, so the probe is recorded as U6 evidence; rows are
+  left to the dataset's default expiration) and otherwise in this
+  module's own scratch dataset. Fixture shape per design #384: three
+  recent traces with the probe label, one 48-hour-old trace with the
+  SAME label, and one recent trace with a foreign label.
+  """
+  import uuid
+
+  project, module_dataset = collision_dataset
+  dataset_id = os.environ.get("BQAA_U6_PROBE_DATASET") or module_dataset
+  probe = f"u6probe_{uuid.uuid4().hex[:8]}"
+  table = f"{project}.{dataset_id}.agent_events"
+  bq_client.query(
+      f"""
+      INSERT INTO `{table}`
+        (timestamp, event_type, agent, session_id, user_id, trace_id,
+         span_id, content, attributes, status)
+      VALUES
+        (CURRENT_TIMESTAMP(), 'LLM_RESPONSE', 'probe', '{probe}-r1',
+         'probe-user', 'tr-{probe}-1', 's1', JSON '{{}}',
+         JSON '{{"custom_tags": {{"u6probe": "{probe}"}}}}', 'OK'),
+        (CURRENT_TIMESTAMP(), 'LLM_RESPONSE', 'probe', '{probe}-r2',
+         'probe-user', 'tr-{probe}-2', 's2', JSON '{{}}',
+         JSON '{{"custom_tags": {{"u6probe": "{probe}"}}}}', 'OK'),
+        (CURRENT_TIMESTAMP(), 'LLM_RESPONSE', 'probe', '{probe}-r3',
+         'probe-user', 'tr-{probe}-3', 's3', JSON '{{}}',
+         JSON '{{"custom_tags": {{"u6probe": "{probe}"}}}}', 'OK'),
+        (TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR),
+         'LLM_RESPONSE', 'probe', '{probe}-old',
+         'probe-user', 'tr-{probe}-4', 's4', JSON '{{}}',
+         JSON '{{"custom_tags": {{"u6probe": "{probe}"}}}}', 'OK'),
+        (CURRENT_TIMESTAMP(), 'LLM_RESPONSE', 'probe', '{probe}-foreign',
+         'probe-user', 'tr-{probe}-5', 's5', JSON '{{}}',
+         JSON '{{"custom_tags": {{"u6probe": "someone-else"}}}}', 'OK')
+      """
+  ).result()
+  yield project, dataset_id, probe
+
+
+class TestU6BoundsProbeLive:
+  """Label + 24h window + limit enforcement on a shared events table.
+
+  The normal 80-session demo never reaches the 500-row score cap, so
+  this cheap fixture proves cap behavior without judging 500 synthetic
+  sessions: a read-only selector requesting the dedicated label, a 24h
+  window, and ``limit=2`` must return exactly two recent, correctly
+  labeled resolved traces — and neither sentinel (the 48h-old same-label
+  trace, or the recent foreign-label trace).
+  """
+
+  def test_label_window_and_limit_bounds_enforced(
+      self, bq_client, bounds_probe_table
+  ):
+    from bigquery_agent_analytics.client import Client
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    project, dataset_id, probe = bounds_probe_table
+    client = Client(
+        project_id=project, dataset_id=dataset_id, verify_schema=False
+    )
+    recent = {f"{probe}-r1", f"{probe}-r2", f"{probe}-r3"}
+
+    # 1) Time-only, uncapped: proves the 24h predicate on its own. Exactly
+    #    the three recent labeled traces come back; the 48h-old same-label
+    #    sentinel is excluded by TIME (no limit can hide it at limit=50).
+    flt_time = TraceFilter.from_cli_args(
+        last="24h", custom_labels={"u6probe": probe}, limit=50
+    )
+    time_traces = client.list_traces(filter_criteria=flt_time)
+    assert {t.session_id for t in time_traces} == recent
+
+    # 2) Label-only, no time bound: the stale sentinel MUST appear, proving
+    #    the time predicate above is load-bearing (a regression that drops
+    #    start_time flips assertion 1, and this one detects a fixture where
+    #    the sentinel never matched the label at all).
+    flt_label = TraceFilter(custom_labels={"u6probe": probe}, limit=50)
+    label_traces = client.list_traces(filter_criteria=flt_label)
+    assert {t.session_id for t in label_traces} == recent | {f"{probe}-old"}
+
+    # 3) The capped read from the design: label + 24h + limit=2 returns
+    #    exactly two recent, correctly labeled resolved traces and neither
+    #    sentinel — the limit is enforced on the already time/label-bounded
+    #    population.
+    flt = TraceFilter.from_cli_args(
+        last="24h", custom_labels={"u6probe": probe}, limit=2
+    )
+    traces = client.list_traces(filter_criteria=flt)
+    assert len(traces) == 2
+    for trace in traces:
+      assert trace.session_id in recent
+      assert trace.scope is not None
+      assert trace.scope.labels_dict.get("u6probe") == probe
+    assert {t.session_id for t in traces}.isdisjoint(
+        {f"{probe}-old", f"{probe}-foreign"}
+    )

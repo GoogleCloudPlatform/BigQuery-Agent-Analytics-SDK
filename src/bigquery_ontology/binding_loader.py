@@ -332,7 +332,15 @@ def _check_relationship_endpoint_arity(
     rel: Relationship,
     entity_map: dict[str, Entity],
 ) -> None:
-  """``from_columns`` / ``to_columns`` arity must match the endpoint keys."""
+  """``from_columns`` / ``to_columns`` arity must match the endpoint keys.
+
+  Works against both legacy ``list[str]`` and the new
+  ``list[dict[str, str]]`` shape — each list entry counts as one
+  column regardless of which shape it takes. The semantic check
+  that every ``target_property`` names an effective primary-key
+  property on the endpoint is in
+  :func:`normalize_relationship_columns`.
+  """
   from_pk = _primary_key_len(rel.from_, entity_map)
   to_pk = _primary_key_len(rel.to, entity_map)
   if len(rb.from_columns) != from_pk:
@@ -347,6 +355,245 @@ def _check_relationship_endpoint_arity(
         f"{len(rb.to_columns)} column(s) but endpoint entity "
         f"{rel.to!r} has {to_pk}-column primary key."
     )
+
+
+def normalize_relationship_columns(
+    column_entries: list,
+    endpoint_entity_name: str,
+    entity_map: dict[str, Entity],
+    *,
+    side: str,
+    relationship_name: str,
+) -> tuple[tuple[str, str], ...]:
+  """Resolve a ``RelationshipBinding`` column list to canonical form.
+
+  Returns a tuple of ``(edge_column, target_property)`` pairs in the
+  declared order. The two input shapes resolve as follows:
+
+  * ``str`` (legacy) — ``target_property`` defaults to the endpoint
+    entity's Nth primary-key property (1-to-1 by position).
+  * ``dict[str, str]`` (explicit) — the dict's single key is the
+    edge column and its value is the target property name. The
+    target property MUST be one of the endpoint's effective
+    primary-key properties — this is FK→PK mapping, not FK→any-
+    column, because a non-PK target would let a relationship edge
+    point at a row that isn't uniquely identified by its endpoint
+    columns.
+
+  This is the bridge between the pydantic shape (which accepts both)
+  and the canonical form ``ResolvedRelationship.from_column_mapping``
+  / ``to_column_mapping`` carry. The shape check in
+  :class:`RelationshipBinding._validate_column_entries` already
+  guarantees each entry is a non-empty string or a single-key
+  ``str → str`` dict; this function does the semantic check that
+  ``target_property`` names a real PK property on
+  ``endpoint_entity_name``, honoring inherited keys.
+
+  Args:
+    column_entries: ``rb.from_columns`` or ``rb.to_columns``.
+    endpoint_entity_name: ``rel.from_`` or ``rel.to``.
+    entity_map: Map of entity name → :class:`Entity` for property
+        lookup. Inheritance is followed via :func:`_effective_keys`
+        and :func:`_effective_properties` so an endpoint that
+        inherits its PK from a parent entity resolves correctly.
+    side: ``"from"`` or ``"to"`` — used in error messages.
+    relationship_name: ``rb.name`` — used in error messages.
+
+  Returns:
+    A tuple of ``(edge_column, target_property)`` pairs.
+
+  Raises:
+    ValueError: If ``target_property`` doesn't name a declared
+      primary-key property on the endpoint entity (including
+      inherited PKs), or if a legacy ``str``-shape entry's position
+      exceeds the endpoint's PK arity.
+  """
+  endpoint = entity_map.get(endpoint_entity_name)
+  if endpoint is None:
+    raise ValueError(
+        f"Relationship binding {relationship_name!r}: endpoint entity "
+        f"{endpoint_entity_name!r} not found in the ontology."
+    )
+  # Use the inheritance-aware helpers so an endpoint that inherits
+  # its PK from a parent entity resolves correctly. Mirrors what the
+  # arity check already does via ``_primary_key_len``; not doing it
+  # here would silently regress every ontology that uses an
+  # ``extends`` chain on the endpoint side of a relationship.
+  effective_keys = _effective_keys(endpoint, entity_map)
+  if effective_keys is None or not effective_keys.primary:
+    raise ValueError(
+        f"Relationship binding {relationship_name!r}: endpoint entity "
+        f"{endpoint_entity_name!r} has no effective primary key declared "
+        "in the ontology (including inherited keys)."
+    )
+  endpoint_pk_properties = list(effective_keys.primary)
+  # FK→PK: explicit mappings must target a PK property. Allowing any
+  # property would let C2's materializer fix consume a canonical
+  # mapping that points an edge endpoint at a non-key column, which
+  # doesn't uniquely identify the target row.
+  endpoint_pk_property_set = set(endpoint_pk_properties)
+
+  canonical: list[tuple[str, str]] = []
+  for idx, entry in enumerate(column_entries):
+    if isinstance(entry, str):
+      # Legacy shape: target_property = endpoint's Nth PK property.
+      if idx >= len(endpoint_pk_properties):
+        # Caught earlier by the arity check, but defend in depth so
+        # this helper is safe to call in isolation.
+        raise ValueError(
+            f"Relationship binding {relationship_name!r}: {side}_columns "
+            f"entry [{idx}] is a legacy string entry but endpoint "
+            f"{endpoint_entity_name!r} has only "
+            f"{len(endpoint_pk_properties)} primary-key column(s)."
+        )
+      target_property = endpoint_pk_properties[idx]
+      canonical.append((entry, target_property))
+      continue
+    if isinstance(entry, dict):
+      # The pydantic validator already guaranteed single-key str→str.
+      edge_column, target_property = next(iter(entry.items()))
+      if target_property not in endpoint_pk_property_set:
+        raise ValueError(
+            f"Relationship binding {relationship_name!r}: {side}_columns "
+            f"entry [{idx}] maps {edge_column!r} → "
+            f"{target_property!r}, but endpoint entity "
+            f"{endpoint_entity_name!r} has no primary-key property "
+            f"named {target_property!r}. Effective PK properties: "
+            f"{sorted(endpoint_pk_property_set)!r}. This is FK→PK "
+            "mapping; the target must be a primary-key property "
+            "(including inherited PKs) so the edge uniquely "
+            "identifies the target row."
+        )
+      canonical.append((edge_column, target_property))
+      continue
+    # Unreachable: the pydantic validator rejected anything else.
+    raise ValueError(  # pragma: no cover
+        f"Relationship binding {relationship_name!r}: {side}_columns "
+        f"entry [{idx}] has unexpected type {type(entry).__name__}."
+    )
+
+  # Coverage invariant: the canonical mapping's target-property
+  # sequence must be a permutation of the endpoint's effective PK
+  # properties (each PK property covered exactly once). Arity has
+  # already been enforced upstream (``_check_relationship_endpoint_arity``)
+  # so ``len(targets) == len(endpoint_pk_properties)``; if every
+  # target is also in the PK set (which the per-entry check above
+  # guarantees) and the targets are unique, the three conditions
+  # together imply the permutation invariant.
+  #
+  # Without this check a composite PK ``[k1, k2]`` could be bound as
+  # two entries that both target ``k1``, leaving ``k2`` uncovered —
+  # C2's materializer would then consume a canonical endpoint
+  # mapping that cannot uniquely identify the target row.
+  target_sequence = [target for _, target in canonical]
+  if len(set(target_sequence)) != len(target_sequence):
+    # Find the first duplicate for a precise error.
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for target in target_sequence:
+      if target in seen and target not in duplicates:
+        duplicates.append(target)
+      seen.add(target)
+    raise ValueError(
+        f"Relationship binding {relationship_name!r}: {side}_columns "
+        f"covers some endpoint PK properties more than once "
+        f"({duplicates!r}) which necessarily leaves at least one PK "
+        "property uncovered. The canonical mapping must be a "
+        "permutation of the endpoint's effective primary-key "
+        f"properties {sorted(endpoint_pk_property_set)!r} — each PK "
+        "property mapped exactly once. C2's materializer needs this "
+        "invariant so the edge uniquely identifies the target row."
+    )
+  return tuple(canonical)
+
+
+def edge_column_names(
+    column_entries: list,
+) -> tuple[str, ...]:
+  """Extract just the edge column names from a mixed ``ColumnRef`` list.
+
+  Used by downstream surfaces that only need the list-view of edge
+  column names (the legacy ``ResolvedRelationship.from_columns`` /
+  ``to_columns`` shim). The canonical
+  ``(edge_column, target_property)`` form is produced by
+  :func:`normalize_relationship_columns`.
+
+  Important: returns column names in **declared binding order**, not
+  in endpoint-PK declaration order. Consumers that pair these
+  columns positionally with the endpoint's PK columns (DDL emitters,
+  property-graph compilers) must NOT use this function for permuted
+  dict-shape bindings; they should go through
+  :func:`require_legacy_column_shape` to assert the legacy
+  list-of-strings shape (which is implicitly PK-ordered) until they
+  are wired to consume :func:`normalize_relationship_columns`
+  output directly.
+  """
+  out: list[str] = []
+  for entry in column_entries:
+    if isinstance(entry, str):
+      out.append(entry)
+    elif isinstance(entry, dict):
+      # Pydantic validator guarantees a single key.
+      out.append(next(iter(entry.keys())))
+  return tuple(out)
+
+
+def require_legacy_column_shape(
+    column_entries: list,
+    *,
+    consumer_name: str,
+    side: str,
+    relationship_name: str,
+) -> tuple[str, ...]:
+  """Assert ``column_entries`` uses the legacy ``list[str]`` shape.
+
+  Returns the list-view as ``tuple[str, ...]`` when every entry is a
+  bare string. Raises ``ValueError`` with a precise, actionable
+  error if any entry is a dict.
+
+  Background: PR C1 (issue #179) introduced an explicit
+  ``{edge_column: target_property}`` dict-shape entry on
+  ``RelationshipBinding.from_columns`` / ``to_columns`` so the
+  binding can express self-edges (same entity on both ends) by
+  giving each side a distinct edge column name. The dict shape
+  parses cleanly through :class:`RelationshipBinding` and resolves
+  into the canonical ``ResolvedRelationship.from_column_mapping`` /
+  ``to_column_mapping`` via :func:`normalize_relationship_columns`.
+
+  After PR C2 (#179 follow-up), every modern consumer — the
+  materializer, the binding validator, the extracted-graph
+  validator, ``bigquery_ontology.graph_ddl_compiler.compile_graph``,
+  and the public ``bigquery_agent_analytics.ontology_property_graph``
+  PG compiler — reads the canonical mapping directly and handles
+  both shapes. This helper is retained for the one legacy consumer
+  that still targets the local ``BindingSpec.from_columns:
+  list[str]`` shape (``runtime_spec.graph_spec_from_ontology_binding``,
+  which feeds the older ``GraphSpec`` model used by the TTL
+  importer and the combined-spec loader). Widening ``BindingSpec``
+  itself is a separate refactor; until then, this helper gives
+  ``graph_spec_from_ontology_binding`` a precise, actionable error
+  when handed a dict-shape binding instead of silently mispairing
+  edge columns against endpoint PK columns at the next ``''.join``.
+  """
+  for idx, entry in enumerate(column_entries):
+    if isinstance(entry, dict):
+      raise ValueError(
+          f"{consumer_name}: relationship binding "
+          f"{relationship_name!r} {side}_columns[{idx}] uses the "
+          f"explicit FK→PK mapping shape ({entry!r}) introduced in "
+          "#179. This consumer targets the legacy "
+          "``BindingSpec.from_columns: list[str]`` shape and cannot "
+          "represent the dict form. Either route your code through "
+          "``bigquery_agent_analytics.resolved_spec.resolve()`` and "
+          "consume ``ResolvedRelationship.from_column_mapping`` / "
+          "``to_column_mapping`` directly (recommended — used by the "
+          "materializer, the PG DDL compilers, and the binding/graph "
+          "validators), or revert this entry to the legacy "
+          "``[edge_column_name, ...]`` list-of-strings shape."
+      )
+  # All entries are str at this point — the pydantic validator
+  # already rejected anything else.
+  return tuple(column_entries)
 
 
 def _primary_key_len(entity_name: str, entity_map: dict[str, Entity]) -> int:

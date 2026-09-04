@@ -41,6 +41,8 @@ Example usage:
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+import copy
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
@@ -57,7 +59,11 @@ from bigquery_agent_analytics.evaluators import strip_markdown_fences
 
 from ._telemetry import LabeledBigQueryClient
 from ._telemetry import make_bq_client
-from ._telemetry import with_sdk_labels
+from .trace import Trace
+from .trace import TraceIdentity
+from .trace import TraceScope
+from .trace import TraceSelector
+from .trace import UNSET
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -94,7 +100,7 @@ class TraceEvent:
   attributes: dict[str, Any]
   span_id: Optional[str] = None
   parent_span_id: Optional[str] = None
-  latency_ms: Optional[int] = None
+  latency_ms: Optional[float] = None
   status: str = "OK"
   error_message: Optional[str] = None
 
@@ -152,7 +158,7 @@ class ToolCall:
   result: Optional[dict[str, Any]] = None
   status: str = "OK"
   error_message: Optional[str] = None
-  latency_ms: Optional[int] = None
+  latency_ms: Optional[float] = None
 
 
 @dataclass
@@ -165,20 +171,28 @@ class SessionTrace:
   tool_calls: list[ToolCall] = field(default_factory=list)
   final_response: Optional[str] = None
   total_latency_ms: Optional[int] = None
+  identity: Optional[TraceIdentity] = None
+  scope: Optional[TraceScope] = None
+  scope_coverage: Optional[tuple[str, ...]] = None
 
   def extract_tool_trajectory(self) -> list[ToolCall]:
-    """Extracts the tool call trajectory from events."""
+    """Extracts tool calls even when stable SQL ties put terminals first."""
     tool_calls = []
-    tool_starts: dict[str, TraceEvent] = {}
-
+    tool_starts: dict[tuple[str, str], deque[TraceEvent]] = {}
     for event in self.events:
       if event.event_type == "TOOL_STARTING":
         tool_name = event.content.get("tool", "unknown")
-        tool_starts[event.span_id or tool_name] = event
+        key = ("span", event.span_id) if event.span_id else ("tool", tool_name)
+        tool_starts.setdefault(key, deque()).append(event)
 
-      elif event.event_type == "TOOL_COMPLETED":
+    for event in self.events:
+      if event.event_type == "TOOL_COMPLETED":
         tool_name = event.content.get("tool", "unknown")
-        start_event = tool_starts.pop(event.span_id or tool_name, None)
+        key = ("span", event.span_id) if event.span_id else ("tool", tool_name)
+        starts = tool_starts.get(key)
+        start_event = None
+        if starts and starts[0].timestamp <= event.timestamp:
+          start_event = starts.popleft()
 
         args = {}
         if start_event:
@@ -196,7 +210,11 @@ class SessionTrace:
 
       elif event.event_type == "TOOL_ERROR":
         tool_name = event.content.get("tool", "unknown")
-        start_event = tool_starts.pop(event.span_id or tool_name, None)
+        key = ("span", event.span_id) if event.span_id else ("tool", tool_name)
+        starts = tool_starts.get(key)
+        start_event = None
+        if starts and starts[0].timestamp <= event.timestamp:
+          start_event = starts.popleft()
 
         args = {}
         if start_event:
@@ -412,7 +430,6 @@ class BigQueryTraceEvaluator:
       )
   """
 
-  # SQL query to retrieve complete session trace
   _DEFAULT_EVENT_TYPES = [
       "USER_MESSAGE_RECEIVED",
       "AGENT_STARTING",
@@ -432,26 +449,14 @@ class BigQueryTraceEvaluator:
       "HITL_CREDENTIAL_REQUEST_COMPLETED",
       "HITL_INPUT_REQUEST",
       "HITL_INPUT_REQUEST_COMPLETED",
+      # ADK 2.0 event types (producer #293).
+      "AGENT_TRANSFER",
+      "EVENT_COMPACTION",
+      "AGENT_STATE_CHECKPOINT",
+      "TOOL_PAUSED",
+      "WORKFLOW_NODE_STARTING",
+      "WORKFLOW_NODE_COMPLETED",
   ]
-
-  _SESSION_TRACE_QUERY = """
-  SELECT
-    event_type,
-    agent,
-    timestamp,
-    content,
-    attributes,
-    span_id,
-    parent_span_id,
-    latency_ms,
-    status,
-    error_message,
-    user_id
-  FROM `{project}.{dataset}.{table}`
-  WHERE session_id = @session_id
-    AND event_type IN UNNEST(@event_types)
-  ORDER BY timestamp ASC
-  """
 
   # Default LLM judge prompt for trajectory evaluation
   _LLM_JUDGE_PROMPT = """You are evaluating an AI agent's task execution trajectory.
@@ -511,6 +516,7 @@ Required JSON format:
     self.table_id = table_id
     self.table_ref = f"{project_id}.{dataset_id}.{table_id}"
     self._client = client
+    self._trace_client = None
     self._warned_unlabeled_client = False
     self.llm_judge_model = llm_judge_model or "gemini-2.5-flash"
     self.include_event_types = include_event_types or self._DEFAULT_EVENT_TYPES
@@ -534,71 +540,110 @@ Required JSON format:
         self._warned_unlabeled_client = True
     return self._client
 
-  async def get_session_trace(self, session_id: str) -> SessionTrace:
-    """Retrieves the complete trace for a session.
+  @property
+  def trace_client(self):
+    """Returns the shared identity-safe trace resolver."""
+    if self._trace_client is None:
+      # Import lazily so importing the standalone evaluator does not
+      # eagerly load the full public client surface.
+      from .client import Client
 
-    Args:
-        session_id: The session ID to retrieve.
+      self._trace_client = Client(
+          project_id=self.project_id,
+          dataset_id=self.dataset_id,
+          table_id=self.table_id,
+          verify_schema=False,
+          bq_client=self.client,
+      )
+    return self._trace_client
 
-    Returns:
-        SessionTrace containing all events for the session.
-    """
-    query = self._SESSION_TRACE_QUERY.format(
-        project=self.project_id,
-        dataset=self.dataset_id,
-        table=self.table_id,
-    )
-
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter(
-                "session_id",
-                "STRING",
-                session_id,
-            ),
-            bigquery.ArrayQueryParameter(
-                "event_types",
-                "STRING",
-                self.include_event_types,
-            ),
-        ]
-    )
-    # Apply labels BEFORE executor dispatch so they materialize on the
-    # QueryJobConfig in the caller's thread.
-    job_config = with_sdk_labels(job_config, feature="trace-read")
-
-    # Run query in executor to avoid blocking
-    loop = asyncio.get_event_loop()
-    query_job = await loop.run_in_executor(
-        None,
-        lambda: self.client.query(query, job_config=job_config),
-    )
-
-    results = await loop.run_in_executor(None, lambda: list(query_job.result()))
-
-    events = [TraceEvent.from_bigquery_row(dict(row)) for row in results]
-
-    user_id = None
-    if results:
-      user_id = results[0].get("user_id")
-
-    trace = SessionTrace(
-        session_id=session_id,
-        user_id=user_id,
+  @staticmethod
+  def _to_session_trace(
+      trace: Trace,
+      include_event_types: list[str],
+  ) -> SessionTrace:
+    """Converts the U2 trace model without weakening its attribution."""
+    included = set(include_event_types)
+    events = [
+        TraceEvent(
+            event_type=span.event_type,
+            agent=span.agent,
+            timestamp=span.timestamp,
+            content=copy.deepcopy(span.content),
+            attributes=copy.deepcopy(span.attributes),
+            span_id=span.span_id,
+            parent_span_id=span.parent_span_id,
+            latency_ms=span.latency_ms,
+            status=span.status,
+            error_message=span.error_message,
+        )
+        for span in trace.spans
+        if span.event_type in included
+    ]
+    result = SessionTrace(
+        session_id=trace.session_id,
+        user_id=trace.user_id,
         events=events,
+        identity=trace.identity,
+        scope=trace.scope,
+        scope_coverage=trace.scope_coverage,
+    )
+    result.extract_tool_trajectory()
+    result.final_response = result.extract_final_response()
+    if events:
+      start = min(event.timestamp for event in events)
+      end = max(event.timestamp for event in events)
+      result.total_latency_ms = int((end - start).total_seconds() * 1000)
+    return result
+
+  async def get_session_trace(
+      self,
+      session_id: str,
+      *,
+      user_id: Any = UNSET,
+      root_agent_name: Any = UNSET,
+      experiment_id: Any = UNSET,
+      custom_labels: Optional[dict[str, str]] = None,
+      scope_signature: Optional[str] = None,
+      allow_mixed_scope: bool = False,
+  ) -> SessionTrace:
+    """Retrieves one identity-safe trace for a session.
+
+    The scalar pins use the same three-state contract as
+    :meth:`Client.get_session_trace`: omitted means unpinned, explicit
+    ``None`` pins SQL NULL, and strings pin equality.
+    """
+    return await self.get_trace_by_selector(
+        TraceSelector(
+            session_id=session_id,
+            user_id=user_id,
+            root_agent_name=root_agent_name,
+            experiment_id=experiment_id,
+            custom_labels=custom_labels,
+            scope_signature=scope_signature,
+        ),
+        allow_mixed_scope=allow_mixed_scope,
     )
 
-    # Extract tool trajectory and final response
-    trace.extract_tool_trajectory()
-    trace.final_response = trace.extract_final_response()
-
-    # Compute total latency
-    if events:
-      start = min(e.timestamp for e in events)
-      end = max(e.timestamp for e in events)
-      trace.total_latency_ms = int((end - start).total_seconds() * 1000)
-
-    return trace
+  async def get_trace_by_selector(
+      self,
+      selector: TraceSelector,
+      *,
+      allow_mixed_scope: bool = False,
+  ) -> SessionTrace:
+    """Retrieves a trace through the shared U2 candidate resolver."""
+    if type(selector) is not TraceSelector:
+      raise TypeError("selector must be a TraceSelector.")
+    loop = asyncio.get_running_loop()
+    trace = await loop.run_in_executor(
+        None,
+        lambda: self.trace_client.get_trace_by_selector(
+            selector,
+            allow_mixed_scope=allow_mixed_scope,
+            event_types=self.include_event_types,
+        ),
+    )
+    return self._to_session_trace(trace, self.include_event_types)
 
   async def evaluate_session(
       self,
@@ -610,6 +655,7 @@ Required JSON format:
       use_llm_judge: bool = False,
       custom_metrics: Optional[dict[str, Callable]] = None,
       thresholds: Optional[dict[str, float]] = None,
+      selector: Optional[TraceSelector] = None,
   ) -> EvaluationResult:
     """Evaluates a single session against golden data.
 
@@ -622,18 +668,42 @@ Required JSON format:
         use_llm_judge: Whether to use LLM-as-judge evaluation.
         custom_metrics: Dict of custom metric functions.
         thresholds: Dict of metric name to threshold for pass/fail.
+        selector: Optional exact identity/scope selector. Its session ID
+            must match ``session_id``.
 
     Returns:
         EvaluationResult with scores and status.
     """
-    # Retrieve trace
-    trace = await self.get_session_trace(session_id)
+    if selector is not None:
+      if type(selector) is not TraceSelector:
+        raise TypeError("selector must be a TraceSelector.")
+      if selector.session_id != session_id:
+        raise ValueError("selector.session_id must match session_id.")
+      trace = await self.get_trace_by_selector(selector)
+    else:
+      trace = await self.get_session_trace(session_id)
 
     scores: dict[str, float] = {}
     details: dict[str, Any] = {
         "actual_tool_calls": len(trace.tool_calls),
         "expected_tool_calls": (
             len(golden_trajectory) if golden_trajectory else 0
+        ),
+        "user_id": (
+            trace.identity.user_id
+            if trace.identity is not None
+            else trace.user_id
+        ),
+        "root_agent_name": (
+            trace.identity.root_agent_name
+            if trace.identity is not None
+            else None
+        ),
+        "experiment_id": (
+            trace.scope.experiment_id if trace.scope is not None else None
+        ),
+        "scope_signature": (
+            trace.scope.scope_signature if trace.scope is not None else None
         ),
     }
 
@@ -736,14 +806,31 @@ Required JSON format:
 
     async def evaluate_one(item: dict[str, Any]) -> EvaluationResult:
       async with semaphore:
+        raw_selector = item.get("selector")
+        selector = None
+        if raw_selector is not None:
+          if type(raw_selector) is TraceSelector:
+            selector = raw_selector
+          elif type(raw_selector) is dict:
+            selector = TraceSelector(**raw_selector)
+          else:
+            raise TypeError(
+                "eval dataset selector must be a TraceSelector or mapping."
+            )
+        session_id = item.get("session_id")
+        if session_id is None and selector is not None:
+          session_id = selector.session_id
+        if session_id is None:
+          raise ValueError("eval dataset item requires session_id or selector.")
         return await self.evaluate_session(
-            session_id=item["session_id"],
+            session_id=session_id,
             golden_trajectory=item.get("expected_trajectory"),
             golden_response=item.get("expected_response"),
             match_type=match_type,
             task_description=item.get("task_description"),
             use_llm_judge=use_llm_judge,
             thresholds=item.get("thresholds"),
+            selector=selector,
         )
 
     tasks = [evaluate_one(item) for item in eval_dataset]
@@ -964,6 +1051,20 @@ class TraceReplayRunner:
     """
     self.evaluator = evaluator
 
+  async def _get_trace(
+      self,
+      session_id: str,
+      selector: Optional[TraceSelector],
+  ) -> SessionTrace:
+    """Resolve one replay input through the shared selector surface."""
+    if selector is None:
+      return await self.evaluator.get_session_trace(session_id)
+    if type(selector) is not TraceSelector:
+      raise TypeError("selector must be a TraceSelector.")
+    if selector.session_id != session_id:
+      raise ValueError("selector.session_id must match session_id.")
+    return await self.evaluator.get_trace_by_selector(selector)
+
   async def replay_session(
       self,
       session_id: str,
@@ -971,6 +1072,8 @@ class TraceReplayRunner:
       step_callback: Optional[
           Callable[[TraceEvent, ReplayContext], None]
       ] = None,
+      *,
+      selector: Optional[TraceSelector] = None,
   ) -> ReplayContext:
     """Replays a recorded session step by step.
 
@@ -979,11 +1082,12 @@ class TraceReplayRunner:
         replay_mode: "full" for all events, "step" for pause at each step,
                      "tool_only" for only tool calls.
         step_callback: Optional callback invoked at each step.
+        selector: Optional exact identity/scope selector for a reused session.
 
     Returns:
         ReplayContext with all injected responses.
     """
-    trace = await self.evaluator.get_session_trace(session_id)
+    trace = await self._get_trace(session_id, selector)
 
     replay_context = ReplayContext()
 
@@ -1021,18 +1125,23 @@ class TraceReplayRunner:
       self,
       session_id_1: str,
       session_id_2: str,
+      *,
+      selector_1: Optional[TraceSelector] = None,
+      selector_2: Optional[TraceSelector] = None,
   ) -> dict[str, Any]:
     """Compares two session replays to identify differences.
 
     Args:
         session_id_1: First session ID.
         session_id_2: Second session ID.
+        selector_1: Optional exact selector for the first reused session.
+        selector_2: Optional exact selector for the second reused session.
 
     Returns:
         Dict with comparison results.
     """
-    trace1 = await self.evaluator.get_session_trace(session_id_1)
-    trace2 = await self.evaluator.get_session_trace(session_id_2)
+    trace1 = await self._get_trace(session_id_1, selector_1)
+    trace2 = await self._get_trace(session_id_2, selector_2)
 
     differences = {
         "event_count_diff": len(trace1.events) - len(trace2.events),

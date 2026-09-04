@@ -1,0 +1,320 @@
+# Product-layer contract for the published Looker Studio report.
+#
+# spec/chart_manifest.yaml remains the immutable translation of the pinned
+# community Looker block. This file records intentional product behavior and
+# live-report fixes that differ from that source snapshot.
+meta:
+  contract_version: 1
+  review_issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#377
+  source_parity_contract: spec/chart_manifest.yaml
+  live_review_date: "2026-08-11"
+  report_id: 5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40
+
+source:
+  mode: BASE_TABLE
+  object_default: agent_events
+  generated_views_required: false
+  data_source_count: 1
+
+defaults:
+  date_range:
+    mode: rolling
+    start_offset_days: 89
+    end_offset_days: 0
+    include_today: true
+    page_scope: all_report_pages
+
+pages:
+  - name: Token Consumption
+    id: p_70hoa89q5d
+  - name: Agent & Sessions
+    id: JjD
+  - name: Tool Usage
+    id: KjD
+  - name: LLM Interactions
+    id: MjD
+  - name: User Analytics
+    id: 00IH
+  - name: Latency
+    id: p_9om48zps5d
+  - name: Errors
+    id: v0IH
+  - name: Trace Inspector
+    id: BKJH
+
+layout:
+  page_heading:
+    present_on_every_page: true
+    left: 68
+    top_range: [43, 45]
+  date_control:
+    scope: report_level
+    present_on_all_pages: true
+    left: 825
+    top_range: [43, 45]
+  scorecard_start:
+    left: 68
+    top_range: [130, 132]
+  percentile_order:
+    llm: [P50, P75, P90, P99]
+    tool: [P50, P75, P90, P99]
+  latency_sections:
+    llm_percentile_top: 377
+    tool_percentile_top: 494
+    trend_title_top: 611
+    trend_chart_top: 670
+    overlap_free: true
+  page_bounds:
+    minimum_bottom_padding_px: 24
+    acceptance_rule: component_top_plus_height_lte_page_height_minus_bottom_padding
+    coordinate_space: page_local_css_px
+    verification_status: verified
+    verified_date: "2026-07-29"
+    tracking_issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#388
+    pages:
+      - name: Token Consumption
+        page_height: 1030
+        max_component_bottom: 999
+        bottom_padding: 31
+      - name: Latency
+        page_height: 1100
+        max_component_bottom: 1070
+        bottom_padding: 30
+
+behavioral_fixes:
+  usage-llm-call-trends:
+    dimension: event_date
+    oracle_grain: minute
+    compare_at: event_date
+    reason: Raw timestamp exceeded the Looker Studio chart row limit.
+  usage-events-by-agent:
+    event_scope: TOOL_COMPLETED
+    display_title: Tool Completions by Agent
+  tool-completed-charts:
+    filter_name: Tool completed rows
+    event_scope: TOOL_COMPLETED
+    charts:
+      - usage-tool-invocations
+      - usage-tool-calls-over-time
+      - performance-tool-latency-trend
+    reason: >-
+      Excluding non-completed event rows removes blank and null tool-name
+      categories while preserving the pinned query semantics.
+
+filtering:
+  filter_bar:
+    enabled: true
+    available_fields:
+      - agent
+      - user_id
+      - trace_id
+      - span_id
+      - session_id
+      - model_version
+  date_controls:
+    apply_to_all_charts_on_page: true
+    report_level_override:
+      field: agent_events.timestamp_date
+      default_range_days: 90
+      persists_across_pages: true
+      supersedes:
+        - usage-control-date
+        - performance-control-date
+  predefined_tool_name_control:
+    status: intentionally_not_published
+    reason: >-
+      A report-wide tool_completed_name filter would exclude TOOL_ERROR rows,
+      while tool_error_name would exclude TOOL_COMPLETED rows. A unified
+      tool_name source field and page-scoped control are required before this
+      control can be correct.
+  user_id:
+    status: available_in_filter_bar
+    applies_to_all_compatible_charts: true
+  top_user_rankings:
+    group_remaining_as_others: false
+    charts:
+      - usage-top-5-users-with-most-tokens-consumption
+      - usage-top-5-users-with-most-traces
+      - usage-top-5-users-by-session
+      - usage-top-5-users-by-events
+
+visual_system:
+  single_series:
+    mode: google_blue
+    color: "#4285f4"
+    legend: hidden_when_title_defines_metric
+  multi_series:
+    mode: categorical_google_palette
+    legend: visible
+    dimension_values_are_series_labels: true
+  semantic_palette:
+    status: deferred
+    reason: >-
+      The live report uses a categorical palette only to distinguish
+      breakdown values. A cross-chart semantic palette should be introduced
+      only with contrast and color-blind testing.
+  chart_titles:
+    present_for_all_non_scorecard_charts: true
+    title_case: true
+    unit_style: "(ms)"
+
+viewer_qa:
+  # Bar, time-series, scorecard, and table components use Looker Studio's native
+  # chart implementation. usercontent.goog render frames are not evidence of
+  # a third-party or Vega community visualization.
+  chart_implementation: native_data_studio
+  community_visualizations: not_used
+  completion_signal: non_degenerate_rendered_output
+  cold_load_timeout_seconds: 90
+  fresh_load_runs: 3
+  navigation_loops: 3
+  # Observational evidence from one browser/viewport, not an SLA. Future
+  # verification records its own environment and timings.
+  observed_baseline:
+    verified_date: "2026-07-27"
+    viewport_width_css_px: 1568
+    cold_load:
+      blank_observed_at_seconds: 40
+      fully_rendered_by_seconds: 70
+      cache_state: view_miss
+    warm_navigation:
+      return_rendered_within_seconds: 10
+      second_page_rendered_within_seconds: 18
+    network:
+      usercontent_goog_requests: 0
+      community_visualization_requests: 0
+  required_evidence:
+    - browser_and_version
+    - signed_in_state
+    - viewport_css_pixels
+    - load_type
+    - page_navigation_sequence
+    - time_to_non_degenerate_render
+    - timestamped_page_capture
+    - failed_network_requests
+    - bigquery_job_activity
+
+viewport_support:
+  layout_mode: freeform
+  target: desktop
+  minimum_supported_width_css_px: 1280
+  recommended_width_css_px: 1440
+  narrow_screen_support: not_supported_in_v1
+  responsive_template: separate_report_required
+  minimum_width_validation: passed
+  minimum_width_navigation_drawer_state: collapsed
+  last_validated_width_css_px: 1280
+  last_validated_date: "2026-08-11"
+
+charts:
+  - id: usage-token-usage-split-by-agent
+    title: Token Usage by Agent
+  - id: usage-top-5-users-with-most-tokens-consumption
+    title: Top 5 Users by Token Consumption
+  - id: usage-total-tokens-consumption-over-the-time
+    title: Token Consumption Over Time
+  - id: usage-total-tokens
+    title: Total Tokens
+  - id: usage-top-5-users-with-most-traces
+    title: Top 5 Users by Traces
+  - id: usage-total-traces
+    title: Total Traces
+  - id: usage-traces-split-by-agent
+    title: Traces by Agent
+  - id: usage-total-traces-generation-over-the-time
+    title: Trace Volume Over Time
+  - id: usage-total-sessions
+    title: Total Sessions
+  - id: usage-number-of-sessions-trend
+    title: Session Volume Over Time
+  - id: usage-top-5-agents-split-by-session-count
+    title: Top 5 Agents by Sessions
+  - id: usage-tool-invocations
+    title: Tool Invocations
+  - id: usage-events-by-agent
+    title: Tool Completions by Agent
+  - id: usage-tool-calls-over-time
+    title: Tool Calls Over Time
+  - id: usage-total-calls
+    title: Total LLM Calls
+  - id: usage-llm-call-trends
+    title: LLM Call Volume Over Time
+  - id: usage-top-5-agents-by-llm-calls
+    title: Top 5 Agents by LLM Calls
+  - id: usage-total-users
+    title: Total Users
+  - id: usage-user-growth-over-time
+    title: User Growth Over Time
+  - id: usage-top-5-users-by-session
+    title: Top 5 Users by Sessions
+  - id: usage-top-5-users-by-events
+    title: Top 5 Users by Events
+  - id: performance-average-tool-latency-ms
+    title: Average Tool Latency (ms)
+  - id: performance-tool-latency-trend
+    title: Tool Latency Over Time
+  - id: performance-average-llm-latency-in-ms
+    title: Average LLM Latency (ms)
+  - id: performance-llm-latency-trend
+    title: LLM Latency Over Time
+  - id: performance-p50-tool-latency
+    title: P50 Tool Latency
+  - id: performance-p75-tool-latency
+    title: P75 Tool Latency
+  - id: performance-p90-tool-latency
+    title: P90 Tool Latency
+  - id: performance-p99-tool-latency
+    title: P99 Tool Latency
+  - id: performance-p50-llm-latency
+    title: P50 LLM Latency
+  - id: performance-p75-llm-latency
+    title: P75 LLM Latency
+  - id: performance-p90-llm-latency
+    title: P90 LLM Latency
+  - id: performance-p99-llm-latency
+    title: P99 LLM Latency
+  - id: performance-total-errors
+    title: Tool Errors
+  - id: performance-tool-errors-trend
+    title: Tool Errors Over Time
+  - id: performance-top-5-agents-by-errors
+    title: Top 5 Agents by Tool Errors
+  - id: performance-top-5-tools-by-errors
+    title: Top 5 Tools by Errors
+
+deferred_enhancements:
+  - id: scoped-tool-name-filter
+    dependency: Add a unified tool_name field and verify grouped control scope.
+  - id: semantic-palette
+    dependency: Contrast and color-blind QA for every chart role.
+  - id: value-labels
+    dependency: Truncation QA for long agent, user, and tool identifiers.
+  - id: compact-number-formatting
+    dependency: Confirm scorecard and tooltip precision requirements.
+  - id: percentile-trends
+    dependency: Product design and query-cost measurement.
+  - id: error-rates
+    dependency: Freeze denominator semantics for tool and LLM failures.
+  - id: llm-error-visibility
+    dependency: >-
+      Add LLM_ERROR measures and charts, then freeze their relationship to
+      request and response events before defining rates.
+  - id: estimated-cost
+    dependency: Versioned, user-configurable model pricing source.
+  - id: hourly-grain
+    dependency: Add an event_hour field and remeasure chart query cost.
+  - id: inspector-drill-through
+    dependency: Verify cross-page filter carry-over in copied reports.
+  - id: data-freshness-scorecard
+    dependency: Add MAX(timestamp) without conflating it with connector refresh.
+  - id: google-managed-template-ownership
+    dependency: Maintainer-controlled Google account and transfer approval.
+  - id: native-chart-rendering-investigation
+    dependency: >-
+      Compare future time-to-render observations with the dated viewer_qa
+      baseline. Reproduce issue #381 under that protocol before changing chart
+      bindings, chart types, or the published report.
+  - id: responsive-mobile-template
+    dependency: >-
+      Maintainer approval for a separately owned responsive report, followed
+      by parity, hydration, credential, and mobile-viewport validation.

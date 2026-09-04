@@ -112,6 +112,7 @@ def is_tool_event(event_type: str) -> bool:
       "TOOL_STARTING",
       "TOOL_COMPLETED",
       "TOOL_ERROR",
+      "TOOL_PAUSED",
   )
 
 
@@ -140,12 +141,18 @@ EVENT_FAMILIES = {
         "INVOCATION_STARTING",
         "INVOCATION_COMPLETED",
     ],
-    "agent": ["AGENT_STARTING", "AGENT_COMPLETED"],
+    "agent": [
+        "AGENT_STARTING",
+        "AGENT_COMPLETED",
+        "AGENT_TRANSFER",
+        "AGENT_STATE_CHECKPOINT",
+    ],
     "llm": ["LLM_REQUEST", "LLM_RESPONSE", "LLM_ERROR"],
     "tool": [
         "TOOL_STARTING",
         "TOOL_COMPLETED",
         "TOOL_ERROR",
+        "TOOL_PAUSED",
     ],
     "state": ["STATE_DELTA"],
     "hitl": [
@@ -156,6 +163,10 @@ EVENT_FAMILIES = {
         "HITL_INPUT_REQUEST",
         "HITL_INPUT_REQUEST_COMPLETED",
     ],
+    # ADK 2.0 (producer #293): session-history compaction + workflow
+    # node boundaries (boundary derivation tracked in #207).
+    "compaction": ["EVENT_COMPACTION"],
+    "workflow": ["WORKFLOW_NODE_STARTING", "WORKFLOW_NODE_COMPLETED"],
 }
 
 ALL_KNOWN_EVENT_TYPES = [

@@ -41,12 +41,15 @@ client = Client(
 
 ## 2. Trace Reconstruction & Visualization
 
-### Retrieve a Single Trace
+### Retrieve a Producer Trace
 
-Fetch the full conversation DAG for a specific session and render it as a hierarchical tree.
+Fetch the span DAG for one producer `trace_id` and render it as a hierarchical
+tree. A multi-turn conversation can contain more than one producer trace; use
+the identity-safe session resolver below when the conversation is the desired
+boundary.
 
 ```python
-# Retrieve and visualize a session trace
+# Retrieve and visualize one producer execution trace.
 trace = client.get_trace("trace-abc-123")
 trace.render()
 ```
@@ -72,6 +75,53 @@ print(trace.tool_calls)       # List of tool invocations
 print(trace.final_response)   # The agent's final answer
 print(trace.error_spans)      # Any errors that occurred
 ```
+
+### Resolve a Session Safely
+
+`session_id` identifies a persistent conversation thread; it is not a globally
+unique trace key. Different users, root agents, experiments, or labeled passes
+can legitimately reuse it. Singular session reads therefore resolve
+`TraceIdentity` plus `TraceScope` and never choose a newest row implicitly:
+
+```python
+from bigquery_agent_analytics import AmbiguousSessionError
+from bigquery_agent_analytics import TraceSelector
+
+try:
+    trace = client.get_session_trace("sess-001")
+except AmbiguousSessionError as exc:
+    payload = exc.to_dict()
+    # Choose a candidate according to application policy, then retry exactly.
+    selector = TraceSelector(**payload["candidates"][0]["selector"])
+    trace = client.get_trace_by_selector(selector)
+
+print(trace.identity)               # session + user + root agent
+print(trace.scope.scope_signature)  # exact experiment/label payload
+```
+
+Scalar selector fields are three-state: omitted means unpinned, explicit
+`None` pins SQL `NULL`, and a string (including `""`) pins equality. Preserve
+the complete candidate `selector` object when retrying; its
+`scope_signature` distinguishes an exact label payload from subset matches.
+
+If one intrinsic identity intentionally spans multiple recorded scopes,
+`allow_mixed_scope=True` returns its conversation-complete, attested row set
+with `trace.scope is None` and `trace.scope_coverage` describing the included
+scopes. It never merges multiple identities.
+
+Persisted rows with the same intrinsic identity and the same exact scope have
+no remaining selector dimension and are intentionally one resolved candidate.
+If an application needs to distinguish those executions, record a different
+experiment/label scope or query by a producer `trace_id`.
+
+`str(exc)` is redacted to counts and differing dimension names. Structured
+payloads from `exc.to_dict()`, JSON CLI output, and the Remote Function include
+candidate identity dimensions and scope signatures so a caller can retry; do
+not publish those payloads where user or experiment identifiers are sensitive.
+
+Quality and latency reports use the same attribution dimensions. Colliding
+session rows remain separate in text, Markdown, and JSON; an old session-only
+score is correlated only when exactly one candidate exists.
 
 ### List & Filter Traces
 
@@ -112,37 +162,52 @@ traces = client.list_traces(
 
 ## 3. Code-Based Evaluation (Deterministic Metrics)
 
-`CodeEvaluator` runs deterministic, code-defined metric functions against session summaries. Each metric returns a score between 0.0 and 1.0.
+`SystemEvaluator` runs deterministic, code-defined metric functions against session summaries. Each metric returns a score between 0.0 and 1.0.
 
 ### Pre-Built Evaluators
 
 The SDK ships with seven ready-to-use evaluators:
 
 ```python
-from bigquery_agent_analytics import CodeEvaluator
+from bigquery_agent_analytics import SystemEvaluator
 
-# Latency: fails when average latency exceeds the budget
-evaluator = CodeEvaluator.latency(threshold_ms=5000)
+# Latency: fails when average latency exceeds the threshold
+evaluator = SystemEvaluator.latency(threshold_ms=5000)
 
-# Turn count: fails when sessions use too many back-and-forth turns
-evaluator = CodeEvaluator.turn_count(max_turns=10)
+# Turn count: fails when session turns exceed the max turns
+evaluator = SystemEvaluator.turn_count(max_turns=10)
 
-# Error rate: fails on high tool error rates
-evaluator = CodeEvaluator.error_rate(max_error_rate=0.1)
+# Error rate: fails when tool error rate exceeds the max error rate
+evaluator = SystemEvaluator.error_rate(max_error_rate=0.1)
 
 # Token efficiency: checks total token usage stays within budget
-evaluator = CodeEvaluator.token_efficiency(max_tokens=50000)
+evaluator = SystemEvaluator.token_efficiency(max_tokens=50000)
 
 # Context cache hit rate: checks repeated prompt-prefix reuse
-evaluator = CodeEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
 
 # Cost per session: checks estimated USD cost stays under budget
-evaluator = CodeEvaluator.cost_per_session(
+evaluator = SystemEvaluator.cost_per_session(
     max_cost_usd=1.0,
     input_cost_per_1k=0.00025,
     output_cost_per_1k=0.00125,
 )
 ```
+
+`token_efficiency()` uses the session's `total_tokens`. The session query
+prefers an explicit provider total: Gemini
+`usage_metadata.total_token_count`, followed by `content.usage.total` from
+other telemetry shapes. Gemini's total can include
+`usage_metadata.thoughts_token_count`; it is therefore not guaranteed to equal
+`prompt_token_count + candidates_token_count`. If neither provider total
+exists, the query falls back specifically to the raw `attributes.input_tokens`
+plus `attributes.output_tokens` event fields. That fallback does not reuse all
+alternate paths recognized by the separate input and output counters.
+
+`cost_per_session()` is a separate estimate based only on `input_tokens` and
+`output_tokens` plus the configured rates. It does not consume a separate
+`thoughts_token_count` field, so do not treat it as provider invoice
+reconciliation when thinking tokens are present.
 
 `context_cache_hit_rate()` requires source telemetry that includes
 Gemini `usage_metadata.cached_content_token_count`. Older plugin data
@@ -173,7 +238,7 @@ Define your own metric functions and chain multiple metrics together:
 
 ```python
 evaluator = (
-    CodeEvaluator(name="my_quality_check")
+    SystemEvaluator(name="my_quality_check")
     .add_metric(
         name="latency",
         fn=lambda s: 1.0 - min(s.get("avg_latency_ms", 0) / 5000, 1.0),
@@ -216,7 +281,7 @@ Run evaluation across all sessions matching a filter:
 from bigquery_agent_analytics import TraceFilter
 
 report = client.evaluate(
-    evaluator=CodeEvaluator.latency(threshold_ms=3000),
+    evaluator=SystemEvaluator.latency(threshold_ms=3000),
     filters=TraceFilter(agent_id="my_agent"),
 )
 
@@ -374,7 +439,7 @@ The `details` dict on `EvaluationReport` holds operational metadata that is sepa
 ### Evaluate Against a Golden Trajectory
 
 ```python
-from bigquery_agent_analytics import BigQueryTraceEvaluator
+from bigquery_agent_analytics import BigQueryTraceEvaluator, TraceSelector
 from bigquery_agent_analytics.trace_evaluator import MatchType
 
 evaluator = BigQueryTraceEvaluator(
@@ -388,6 +453,14 @@ evaluator = BigQueryTraceEvaluator(
 
 result = await evaluator.evaluate_session(
     session_id="sess-001",
+    # Optional, but required when the session ID resolves ambiguously.
+    selector=TraceSelector(
+        session_id="sess-001",
+        user_id="user-42",
+        root_agent_name="support_agent",
+        custom_labels={"run": "v1"},
+        scope_signature='v1:{"custom_labels":[["run","v1"]],"experiment_id":null}',
+    ),
     golden_trajectory=[
         {"tool_name": "search_docs", "args": {"query": "password reset"}},
         {"tool_name": "format_response", "args": {}},
@@ -408,7 +481,18 @@ print(f"Step efficiency: {result.scores.get('step_efficiency')}")
 ```python
 eval_dataset = [
     {
-        "session_id": "sess-001",
+        # A TraceSelector instance or its mapping form is accepted.
+        "selector": {
+            "session_id": "sess-001",
+            "user_id": "user-42",
+            "root_agent_name": "support_agent",
+            "experiment_id": None,
+            "custom_labels": {"run": "v1"},
+            "scope_signature": (
+                'v1:{"custom_labels":[["run","v1"]],'
+                '"experiment_id":null}'
+            ),
+        },
         "expected_trajectory": [
             {"tool_name": "search_docs", "args": {}},
         ],
@@ -463,19 +547,32 @@ efficiency = TrajectoryMetrics.compute_step_efficiency(2, 2)         # 1.0
 Replay a recorded session step-by-step for debugging:
 
 ```python
-from bigquery_agent_analytics import TraceReplayRunner
+from bigquery_agent_analytics import TraceReplayRunner, TraceSelector
 
 replay_runner = TraceReplayRunner(evaluator)
+selector = TraceSelector(
+    session_id="sess-001",
+    user_id="user-42",
+    root_agent_name="support_agent",
+    experiment_id=None,
+    custom_labels={"run": "v1"},
+    scope_signature='v1:{"custom_labels":[["run","v1"]],"experiment_id":null}',
+)
 
 # Full replay with step-by-step callback
 context = await replay_runner.replay_session(
     session_id="sess-001",
+    selector=selector,  # optional exact retry selector for a reused session
     replay_mode="step",  # "full", "step", or "tool_only"
     step_callback=lambda event, ctx: print(f"  {event.event_type}: {event.content}"),
 )
 
 # Compare two replays to find differences
-diff = await replay_runner.compare_replays("sess-001", "sess-002")
+diff = await replay_runner.compare_replays(
+    "sess-001",
+    "sess-002",
+    selector_1=selector,  # either selector is optional
+)
 print(f"Tool differences: {diff['tool_differences']}")
 print(f"Response match: {diff['response_match']}")
 ```
@@ -561,7 +658,7 @@ pass_pow_k = compute_pass_pow_k(num_trials=10, num_passed=8)  # ~0.107
 
 ## 7. Grader Composition Pipeline
 
-Combine multiple evaluators (`CodeEvaluator` + `LLMAsJudge` + custom functions) into a single aggregated verdict using configurable scoring strategies.
+Combine multiple evaluators (`SystemEvaluator` + `LLMAsJudge` + custom functions) into a single aggregated verdict using configurable scoring strategies.
 
 ### Scoring Strategies
 
@@ -575,7 +672,7 @@ Combine multiple evaluators (`CodeEvaluator` + `LLMAsJudge` + custom functions) 
 
 ```python
 from bigquery_agent_analytics import (
-    CodeEvaluator, GraderPipeline, LLMAsJudge,
+    SystemEvaluator, GraderPipeline, LLMAsJudge,
     WeightedStrategy, GraderResult,
 )
 
@@ -588,8 +685,8 @@ pipeline = (
         },
         threshold=0.6,
     ))
-    .add_code_grader(CodeEvaluator.latency(threshold_ms=5000), weight=0.2)
-    .add_code_grader(CodeEvaluator.cost_per_session(max_cost_usd=0.50), weight=0.1)
+    .add_system_grader(SystemEvaluator.latency(threshold_ms=5000), weight=0.2)
+    .add_system_grader(SystemEvaluator.cost_per_session(max_cost_usd=0.50), weight=0.1)
     .add_llm_grader(LLMAsJudge.correctness(threshold=0.7), weight=0.7)
 )
 
@@ -618,8 +715,8 @@ from bigquery_agent_analytics import BinaryStrategy
 
 pipeline = (
     GraderPipeline(BinaryStrategy())
-    .add_code_grader(CodeEvaluator.latency(threshold_ms=3000))
-    .add_code_grader(CodeEvaluator.error_rate(max_error_rate=0.05))
+    .add_system_grader(SystemEvaluator.latency(threshold_ms=3000))
+    .add_system_grader(SystemEvaluator.error_rate(max_error_rate=0.05))
     .add_llm_grader(LLMAsJudge.hallucination(threshold=0.8))
 )
 
@@ -649,7 +746,7 @@ def business_rules_grader(context):
 
 pipeline = (
     GraderPipeline(BinaryStrategy())
-    .add_code_grader(CodeEvaluator.latency())
+    .add_system_grader(SystemEvaluator.latency())
     .add_custom_grader("business_rules", business_rules_grader)
 )
 ```
@@ -1292,6 +1389,25 @@ vm.create_view("LLM_REQUEST")
 print(vm.get_view_sql("TOOL_COMPLETED"))
 ```
 
+#### ADK 2.0 event types
+
+The plugin emits additional event types under ADK 2.0, each with a typed view:
+`AGENT_TRANSFER` (`from_agent`, `to_agent`), `EVENT_COMPACTION`
+(`start_timestamp`, `end_timestamp`, `compacted_content`),
+`AGENT_STATE_CHECKPOINT` (`agent_state`, `agent_state_type`, `end_of_agent`;
+`agent_state_type` is a `JSON_TYPE` discriminator that distinguishes a missing
+state key from an explicit JSON null), and `TOOL_PAUSED`
+(`function_call_id`, `pause_kind`). `WORKFLOW_NODE_STARTING` /
+`WORKFLOW_NODE_COMPLETED` are registered with header-only views for now; their
+typed columns follow the workflow-boundary derivation work.
+
+The `TOOL_COMPLETED` view also exposes the long-running pair keys
+`function_call_id`, `pause_kind`, and `pause_orphan`. These are populated only
+on the resume row that pairs with a `TOOL_PAUSED`; on ordinary (non-long-running)
+tool completions they are **null**. `pause_orphan` is reserved for the pause
+registry and stays null until that ships — treat a null `pause_orphan` as
+"not yet determined", not as "not an orphan".
+
 ---
 
 ## 17. Categorical Evaluation & Real-Time Dashboards
@@ -1389,6 +1505,53 @@ report = client.evaluate_categorical(
 print(report.category_distributions)
 # {'tone': {'positive': 42, 'negative': 12, 'neutral': 46}}
 ```
+
+#### Bind trusted context to an exact trace
+
+Golden expected answers and other judge-only context must be keyed to the
+resolved identity and exact scope, not to a reusable `session_id`:
+
+```python
+from bigquery_agent_analytics import ResolvedTraceSelector
+
+filters = TraceFilter.from_cli_args(last="24h")
+traces = client.list_traces(filters)
+per_trace_context = {
+    ResolvedTraceSelector(trace.identity, trace.scope): (
+        f"Expected answer:\n{goldens[trace.identity.user_id]}"
+    )
+    for trace in traces
+}
+
+context_report = client.evaluate_categorical(
+    config=config.model_copy(update={"persist_results": False}),
+    filters=filters,
+    per_session_context=per_trace_context,
+)
+```
+
+Every non-empty `per_session_context` mapping starts at AI.GENERATE (even when
+`include_justification=False`) because AI.CLASSIFY has no per-row context
+input. `report.details["classify_skip_reason"]` records that cost/latency
+decision. The same selector-keyed context is reused unchanged for
+AI.GENERATE parse/NULL retries and full Gemini API fallback; unmapped traces
+still run without extra context.
+
+A legacy string key is allowed when it names exactly one transcript-eligible
+trace in the filtered population. The transcript-length gate runs before this
+ambiguity check, so a short ineligible colliding trace does not make the
+survivor ambiguous. Prefer exact `ResolvedTraceSelector` keys whenever session
+IDs may be reused. Reused/ambiguous eligible session IDs raise
+`AmbiguousSessionError` before a model call; mapping entries outside the
+filtered population are ignored.
+
+Treat context as trusted evaluator material subject to the same governance as
+your evaluation prompts. It is carried as query-parameter/model input and is
+redacted from context-aware error logs; it is never SQL text or a job label.
+The U4 API deliberately rejects `persist_results=True` with context until the
+U5 identity columns, writer, views, and cardinality migration land, preventing
+two identities that reuse a session ID from being persisted as indistinguishable
+rows.
 
 ### Step 3: Create Dashboard Views
 
@@ -1505,9 +1668,9 @@ See [`examples/categorical_dashboard.sql`](examples/categorical_dashboard.sql) f
 
 ---
 
-## 18. Context Graph (Property Graph for Agentic Ads)
+## 18. Agent Context Graph (Decision-Trace Extraction)
 
-The **Context Graph** module builds a BigQuery Property Graph that cross-links technical execution traces (TechNodes) with business-domain entities (BizNodes). It enables GQL-based trace reconstruction, causal reasoning, and world-change detection for long-running agent tasks.
+The **Agent Context Graph** module extracts decision traces from your agent's context graph: it builds a BigQuery property graph that cross-links technical execution traces (TechNodes) with the business-domain entities the agent reasoned over (BizNodes), so you can reconstruct any decision — the request, the options weighed, the outcome committed — with GQL traversal, causal reasoning, and world-change detection for long-running agent tasks.
 
 ### Architecture: 4-Pillar Property Graph
 
@@ -1530,7 +1693,7 @@ The **Context Graph** module builds a BigQuery Property Graph that cross-links t
                                        └────────────────────┘
 ```
 
-### Initialize the Context Graph Manager
+### Initialize the Agent Context Graph Manager
 
 ```python
 from bigquery_agent_analytics import ContextGraphManager, ContextGraphConfig
@@ -1558,7 +1721,7 @@ cgm = ContextGraphManager(
 
 ### End-to-End Pipeline
 
-Build the full Context Graph in one call:
+Build the full Agent Context Graph in one call:
 
 ```python
 results = cgm.build_context_graph(
@@ -1624,11 +1787,25 @@ print(cgm.get_property_graph_ddl())
 
 ### GQL Trace Reconstruction
 
-Reconstruct traces using native Graph Query Language instead of recursive CTEs:
+Reconstruct traces using native Graph Query Language instead of recursive CTEs.
+The shared flat resolver first selects the exact identity/scope; GQL receives
+only that trace's span IDs. This confinement relies on the Property Graph's
+`TechNode KEY (span_id)` uniqueness contract; if the resolved flat population
+contains duplicate span IDs, the SDK skips GQL and returns the authoritative
+flat trace instead of applying an edge to an arbitrary duplicate:
 
 ```python
-# GQL-based trace reconstruction (quantified-path traversal)
-trace = client.get_session_trace_gql(session_id="sess-001")
+# GQL-based reconstruction with the same retry selector as flat reads.
+from bigquery_agent_analytics import TraceSelector
+
+selector = TraceSelector(
+    session_id="sess-001",
+    user_id="user-42",
+    root_agent_name="support_agent",
+    custom_labels={"run": "v1"},
+    scope_signature='v1:{"custom_labels":[["run","v1"]],"experiment_id":null}',
+)
+trace = client.get_trace_by_selector_gql(selector)
 trace.render()
 ```
 
@@ -1761,7 +1938,31 @@ bq-agent-sdk doctor --project-id=P --dataset-id=D
 ```bash
 bq-agent-sdk get-trace --project-id=P --dataset-id=D --session-id=S
 bq-agent-sdk get-trace --project-id=P --dataset-id=D --trace-id=T
+
+# Additive identity/scope pins.
+bq-agent-sdk get-trace --project-id=P --dataset-id=D --session-id=S \
+  --user-id=user-42 --root-agent-name=support_agent \
+  --experiment-id=exp-7 --label=run=v1
+
+# Save the structured ambiguity, choose a candidate, and retry it exactly.
+bq-agent-sdk get-trace --project-id=P --dataset-id=D \
+  --session-id=S --format=json > ambiguity.json || test $? -eq 2
+SELECTOR="$(jq -c '.candidates[0].selector' ambiguity.json)"
+bq-agent-sdk get-trace --project-id=P --dataset-id=D \
+  --selector-json="$SELECTOR"
+
+# Merge multiple scopes only when they belong to one intrinsic identity.
+# Cross-identity ambiguity still raises.
+bq-agent-sdk get-trace --project-id=P --dataset-id=D --session-id=S \
+  --allow-mixed-scope
 ```
+
+On ambiguity, `--format=json` writes the structured
+`AmbiguousSessionError.to_dict()` payload and exits nonzero. Text/table output
+uses the redacted message. Use `--selector-json` when explicit JSON `null` pins
+must survive the retry; a scalar CLI option left absent means unpinned.
+`--allow-mixed-scope` is the conversation-complete escape hatch for one
+identity spanning multiple scopes; it never merges identities.
 
 #### `evaluate` — Run Evaluations
 
@@ -1913,6 +2114,21 @@ The script:
 -- Analyze a session trace
 SELECT `PROJECT.DATASET.agent_analytics`('analyze', JSON'{"session_id": "s1"}');
 
+-- Exact retry: carry candidates[0].selector through as JSON.
+WITH initial AS (
+  SELECT `PROJECT.DATASET.agent_analytics`(
+    'analyze', JSON'{"session_id": "s1"}'
+  ) AS result
+)
+SELECT `PROJECT.DATASET.agent_analytics`(
+  'analyze',
+  JSON_OBJECT(
+    'selector',
+    JSON_QUERY(result, '$._error.details.candidates[0].selector')
+  )
+)
+FROM initial;
+
 -- Run a code evaluator
 SELECT `PROJECT.DATASET.agent_analytics`('evaluate', JSON'{
   "metric": "latency",
@@ -1944,6 +2160,41 @@ returns a per-row `_error` object; other rows succeed normally:
 ```json
 {"_error": {"code": "ValueError", "message": "..."}, "_version": "1.0"}
 ```
+
+For `AmbiguousSessionError`, `_error.details` is the structured retry payload:
+
+```json
+{
+  "_error": {
+    "code": "AmbiguousSessionError",
+    "message": "Ambiguous singular session lookup: Exactly 2 candidates match. Retry with an explicit selector for: user_id, scope_signature.",
+    "details": {
+      "error": "ambiguous_session",
+      "candidate_count": 2,
+      "population_truncated": false,
+      "retry_dimensions": ["user_id", "scope_signature"],
+      "candidates": [
+        {
+          "selector": {
+            "session_id": "s1",
+            "user_id": null,
+            "root_agent_name": "support_agent",
+            "experiment_id": null,
+            "custom_labels": {"run": "v1"},
+            "scope_signature": "v1:{...}"
+          },
+          "scope_signature": "v1:{...}"
+        }
+      ]
+    }
+  },
+  "_version": "1.0"
+}
+```
+
+Candidate selectors contain identity and experiment metadata; treat the
+structured response as sensitive. Event content and judge context are never
+included.
 
 ### Configuration
 
@@ -2014,8 +2265,8 @@ pipeline.
 | --- | ----- |
 | `sdk` | constant `bigquery-agent-analytics` |
 | `sdk_version` | package version, BQ-safe (e.g. `0-4-0`) |
-| `sdk_surface` | `python` \| `cli` \| `remote-function` |
-| `sdk_feature` | `trace-read` \| `eval-code` \| `eval-llm-judge` \| `eval-categorical` \| `insights` \| `drift` \| `memory` \| `context-graph` \| `ontology-build` \| `ontology-gql` \| `views` \| `ai-ml` \| `feedback` |
+| `sdk_surface` | `python` \| `cli` \| `remote-function` \| `langsmith-export` |
+| `sdk_feature` | `trace-read` \| `eval-code` \| `eval-llm-judge` \| `eval-categorical` \| `insights` \| `drift` \| `memory` \| `context-graph` \| `ontology-build` \| `ontology-gql` \| `views` \| `ai-ml` \| `feedback` \| `langsmith-export` |
 | `sdk_ai_function` | set only on AI/ML invocations: `ai-generate` \| `ai-embed` \| `ai-classify` \| `ai-forecast` \| `ai-detect-anomalies` \| `ml-generate-text` \| `ml-generate-embedding` \| `ml-detect-anomalies` \| `ml-forecast` |
 
 All labels also apply to load jobs submitted by the SDK (e.g. the
@@ -2049,6 +2300,224 @@ and surface attribution.
 
 ---
 
+## 23. LangSmith Export
+
+The optional LangSmith connector exports a BigQuery table or arbitrary SQL
+result as LangSmith run trees. It streams rows ordered by trace, reconstructs
+the existing `span_id` / `parent_span_id` hierarchy, and adds one stable
+structural root per trace. Every source event gets a UUID derived from the
+canonical source, trace ID, and run ID. The exporter treats created runs as
+immutable: overlapping backfills are idempotent no-ops for existing run IDs
+while still creating previously unseen IDs. The destination project is not one
+of those UUID inputs, so exporting to a fresh LangSmith project reuses the same
+run IDs and creates nothing: the runs already exist and are immutable, and the
+new project stays empty. Correcting already-exported data therefore requires a
+deliberately versioned `--source-id`.
+
+### Install and authenticate
+
+```bash
+pip install 'bigquery-agent-analytics[langsmith]'
+
+export LANGSMITH_API_KEY=lsv2_...
+export LANGSMITH_PROJECT=agent-production
+# Required only for organization-scoped keys:
+export LANGSMITH_WORKSPACE_ID=...
+```
+
+BigQuery uses Application Default Credentials, consistent with the rest of the
+SDK. The export query carries `sdk_surface=langsmith-export` and
+`sdk_feature=langsmith-export` labels.
+
+### Python API
+
+```python
+from pathlib import Path
+
+from bigquery_agent_analytics.export import export
+from bigquery_agent_analytics.export import ExportConfig
+
+stats = export(
+    "my-project.analytics.agent_events",
+    config=ExportConfig(
+        langsmith_project="agent-production",
+        since=None,
+        batch_size=100,
+        requests_per_second=5,
+        max_retries=3,
+    ),
+)
+print(stats.to_dict())
+```
+
+`ExportStats.to_dict()` reports source rows read, exported, skipped, failed,
+successful traces, batches, the current watermark, bounded `dropped_rows`
+details, and `dropped_rows_truncated` (the number omitted from that list).
+`exported` counts source rows in batches accepted by the client, not destination
+mutations, so a replay of existing IDs can report exported rows while leaving
+the server-side runs unchanged.
+Retryable 408/425/429 and 5xx errors use bounded exponential backoff. A create
+conflict is expected during replay, is not retried, and is treated as an
+idempotent success. `requests_per_second` and `max_retries` govern exporter
+calls to `batch_ingest_runs`; the LangSmith SDK may split or retry transport
+requests inside one call. A failed batch never advances incremental state.
+
+### Custom schemas and opaque values
+
+The default `FieldMapping.standard_adk()` targets the standard ADK
+`agent_events` fields. A YAML/JSON mapping uses LangSmith field names on the
+left and source columns or nested mapping paths on the right:
+
+```yaml
+fields:
+  run_id: event_key
+  trace_id: trace.key
+  parent_run_id: parent_key
+  name: event_kind
+  run_type: operation_type
+  start_time: occurred_at
+  end_time: completed_at
+  latency_ms: timing.total_ms
+  error: failure_message
+  inputs: payload
+  outputs: result
+```
+
+Only declared paths are traversed, and omitted optional fields remain unmapped;
+custom mappings never inherit ADK defaults. Custom JSON strings are not decoded
+or interpreted. The built-in ADK mapping is the narrow exception: it decodes
+the standard `content` and `latency_ms` JSON columns because BigQuery clients
+may return those JSON values as either mappings or strings. A mapped
+scalar/list is wrapped as `{"value": ...}` because LangSmith inputs and outputs
+are objects. Unmapped columns are copied to `extra.metadata`. When a nested
+path is mapped, the original top-level column also remains in metadata so
+sibling data is not lost. Non-JSON BigQuery scalars use loss-minimizing
+transport encodings: decimal/date/time values become strings and bytes become
+a tagged base64 object.
+
+```python
+from bigquery_agent_analytics.export import FieldMapping
+
+mapping = FieldMapping.from_file("mapping.yaml")
+stats = export(
+    "SELECT * FROM `my-project.custom.events` WHERE environment = 'prod'",
+    config=ExportConfig(
+        mapping=mapping,
+        # Stabilizes IDs and watermark ownership if harmless SQL text changes.
+        source_id="custom-events-v1",
+    ),
+)
+```
+
+### Backfill and incremental CLI
+
+```bash
+# Bounded backfill. --filter is trusted SQL appended to the outer query.
+bq-agent-sdk export langsmith \
+  --source=my-project.analytics.agent_events \
+  --since=2026-08-01T00:00:00Z \
+  --until=2026-08-08T00:00:00Z \
+  --filter="status != 'DEBUG'"
+
+# Scheduler-friendly incremental sync.
+bq-agent-sdk export langsmith \
+  --source=my-project.analytics.agent_events \
+  --incremental \
+  --watermark-file=/var/lib/bqaa/langsmith-watermark.json \
+  --max-dropped-rows=1000
+```
+
+LangSmith Cloud accepts a run only when its `start_time` lies within 24 hours
+of the current time, in either direction. Rows outside that window are rejected
+by the ingest endpoint:
+
+```text
+422 Unprocessable entity: error parsing run: start_time for post must be
+within ±24 hours of current time
+```
+
+The rejection applies per batch, so a backfill over an older window fails every
+row and reports `exported: 0` with a non-zero `failed` count. The bounded
+backfill above is useful for re-running a recent window or for narrowing a
+sync with `--filter`; it cannot import trace history that has aged out. Keep
+`--incremental` on a schedule frequent enough that rows reach LangSmith inside
+the window. Self-hosted LangSmith deployments may enforce a different limit.
+
+For CLI use, `LANGSMITH_API_KEY` is intentionally environment-only so the
+secret does not appear in shell history or process arguments. Python callers
+may still pass `langsmith_api_key` to `ExportConfig` explicitly.
+
+The synthetic root keeps a fixed epoch segment only in `dotted_order`, where a
+stable prefix is required across overlapping windows. When mapped source times
+are valid, its displayed `start_time` and `end_time` use the earliest and latest
+source-run times in the current window instead of forcing the root to 1970.
+
+Incremental state contains a timestamp plus source run-ID tie breaker and is
+atomically replaced. It is bound to the canonical source and field-mapping
+fingerprint; reusing it for another table/query or mapping fails closed. Use a
+separate state file per export job and a single scheduler writer. For mutable
+SQL text, set `--source-id` to a stable logical source name. Incremental mode
+requires a `start_time` mapping. Time predicates safely cast the mapped value
+to `TIMESTAMP`, so ISO-8601 STRING columns are supported; unparseable values do
+not match a filtered query.
+
+Successfully processed rows, including rows reported as skipped, advance the
+cursor so one permanently malformed row cannot wedge every later scheduled
+run. A LangSmith batch failure blocks advancement for the whole invocation.
+Exit code `1` means at least one source row was skipped or a LangSmith batch
+failed; configuration/query failures use exit code `2`. The JSON summary
+always reports total skipped/failed counts; `--max-dropped-rows` only bounds
+retained per-row diagnostics. Set it to `0` when row-level details should not
+be retained.
+
+The cursor is based on source event time. A row that arrives after the cursor
+has advanced but carries an equal or earlier `start_time` is not discovered by
+a later incremental run. Schedule an overlapping bounded backfill when the
+source permits late arrival. Stable IDs make the replay idempotent: previously
+unseen run IDs are created, but existing runs remain unchanged. To correct an
+already-exported run, use a deliberately versioned `--source-id`. Exporting to
+a fresh LangSmith project does not achieve this, because the destination does
+not participate in run ID derivation.
+
+Each query window reconstructs hierarchy only from rows present in that
+window. If a child arrives after its parent was exported in an earlier window,
+the child is attached to the synthetic root and its original parent ID remains
+in `extra.bqaa.source_parent_run_id`. For sources with long-lived traces,
+prefer filtering for traces that have been quiescent for an appropriate delay
+before export to avoid these cross-window splits.
+
+The v1 connector is one-way and scheduled/batch only. It does not import
+LangSmith data or provide a real-time streaming surface.
+
+---
+
+## 24. EvalBench Import Reader
+
+The optional `bigquery_agent_analytics.evalbench` submodule reads one
+EvalBench `job_id` from its BigQuery `configs`, `results`, and `scores` tables
+and maps each scenario to BQAA-compatible synthetic trace rows. Source queries
+filter by a parameterized `job_id`; agentic and NL2SQL result aliases are both
+supported.
+
+```python
+from bigquery_agent_analytics.evalbench import EvalBenchRun
+
+run = EvalBenchRun.from_bigquery(
+    project_id="benchmark-project",
+    evalbench_dataset="evalbench",
+    job_id="abc123",
+    location="US",
+)
+rows = run.to_agent_event_rows()
+```
+
+This reader phase performs no writes. See
+[docs/evalbench.md](docs/evalbench.md) for the mapping contract, schema
+caveats, and the remaining materialization and CLI phases tracked by issue
+#97.
+
+---
+
 ## Module Architecture
 
 ```
@@ -2057,9 +2526,10 @@ bigquery_agent_analytics/
 │   Core
 │   ├── client.py              ← High-level SDK entry point
 │   ├── trace.py               ← Trace/Span reconstruction & DAG rendering
-│   └── evaluators.py          ← CodeEvaluator + LLMAsJudge + SQL templates
+│   └── evaluators.py          ← SystemEvaluator + LLMAsJudge + SQL templates
 │
 │   Evaluation Harness
+│   ├── evalbench.py           ← EvalBench BigQuery reader + event mapping
 │   ├── trace_evaluator.py     ← BigQueryTraceEvaluator, trajectory matching, replay
 │   ├── multi_trial.py         ← TrialRunner, pass@k, pass^k
 │   ├── grader_pipeline.py     ← GraderPipeline + scoring strategies
@@ -2075,8 +2545,14 @@ bigquery_agent_analytics/
 │   ├── memory_service.py      ← Long-horizon agent memory (requires google-adk)
 │   └── bigframes_evaluator.py ← BigFrames DataFrame evaluator (optional)
 │
-│   Context Graph
-│   └── context_graph.py       ← Property Graph, BizNode extraction, GQL, world-change
+│   Export
+│   └── export/
+│       ├── __init__.py         ← Stable public export API
+│       ├── cli.py              ← `bq-agent-sdk export` command group
+│       └── langsmith.py        ← BigQuery-to-LangSmith connector (optional)
+│
+│   Agent Context Graph
+│   └── context_graph.py       ← Decision-trace extraction, GQL, world-change
 │
 │   CLI & Interfaces
 │   ├── cli.py                 ← typer CLI (bq-agent-sdk)

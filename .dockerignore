@@ -1,0 +1,9 @@
+# The image build needs ONLY the producers package and its lock file —
+# review round 4 measured a 920 MB context without this.
+*
+!producers
+!deploy/otlp_receiver/requirements.lock
+producers/.venv
+producers/dist
+producers/**/__pycache__
+producers/**/*.egg-info

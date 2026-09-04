@@ -11,10 +11,21 @@ build/
 .venv/
 venv/
 env/
+.adk/
 uv.lock
+.env
+/.idea/
 
 # Script outputs
 scripts/reports/
+
+# Example run artifacts
+examples/*/reports/
+examples/*/trials_*/
+scripts/**/*.log
+examples/**/*.log
+# ...but keep the curated console log committed with the recorded sample run.
+!examples/skill_evolution_lab/sample_run/run.log
 
 # Local workspace metadata
 .code*/
@@ -24,3 +35,8 @@ deploy/streaming_evaluation/.streaming_evaluation_state.json
 .DS_Store
 .DS_Store?
 ._*
+grafana/datasource.yaml
+grafana/.local/
+
+# Service-account credentials (never commit downloaded JSON keys).
+grafana/*.json

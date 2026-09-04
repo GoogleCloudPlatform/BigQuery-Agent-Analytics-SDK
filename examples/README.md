@@ -12,9 +12,9 @@ artifacts that demonstrate SDK capabilities.
 | [e2e_notebook_demo.ipynb](e2e_notebook_demo.ipynb) | End-to-end SDK workflow |
 | [ai_ml_integration_demo.ipynb](ai_ml_integration_demo.ipynb) | AI.GENERATE, AI.EMBED, anomaly detection |
 | [categorical_evaluation_demo.ipynb](categorical_evaluation_demo.ipynb) | Hatteras categorical evaluation |
-| [context_graph_adcp_demo.ipynb](context_graph_adcp_demo.ipynb) | Property Graph use cases |
+| [context_graph_adcp_demo.ipynb](context_graph_adcp_demo.ipynb) | Agent Context Graph decision-trace use cases |
 | [ontology_graph_v5_demo.ipynb](ontology_graph_v5_demo.ipynb) | OWL import, mixed extraction, temporal lineage, GQL |
-| [migration_v5_demo_notebook.ipynb](migration_v5_demo_notebook.ipynb) | Migrated V5 pipeline using separated ontology + binding |
+| [_archive/context_graph_historical_notebook.ipynb](_archive/context_graph_historical_notebook.ipynb) | Archived: the original MAKO context-graph pipeline (explicit ontology + binding), kept as frozen evidence |
 | [ontology_graph_v4_demo.ipynb](ontology_graph_v4_demo.ipynb) | Ontology extraction + GQL **(legacy)** |
 | [memory_service_demo.ipynb](memory_service_demo.ipynb) | Cross-session memory |
 | [event_semantics_views_bigframes_demo.ipynb](event_semantics_views_bigframes_demo.ipynb) | Event views + BigFrames |
@@ -44,15 +44,73 @@ artifacts that demonstrate SDK capabilities.
 | File | Description |
 |------|-------------|
 | [e2e_demo.py](e2e_demo.py) | Complete end-to-end workflow |
-| [cli_agent_tool.py](cli_agent_tool.py) | CLI agent tool example |
+| [cli_agent_tool.py](cli_agent_tool.py) | CLI agent tool example with structured ambiguous-session retry selectors |
 | [ci_eval_pipeline.sh](ci_eval_pipeline.sh) | CI evaluation pipeline |
+| [evalbench_mvp_e2e.sh](evalbench_mvp_e2e.sh) | EvalBench MVP end to end, told through one failed support-agent session ("How many widgets are in stock?", never answered): `evalbench-import` → `evalbench-failed-sessions` → `evalbench-score`; `--fixture` runs the story offline, `--synth` replays it live from real traces (walkthrough: [evalbench_mvp_e2e.md](evalbench_mvp_e2e.md)) |
+| [evalbench_synth_from_traces.py](evalbench_synth_from_traces.py) | Fold a real BQAA `agent_events` table into EvalBench-shaped `configs`/`results`/`scores` tables (one scenario per session, real prompts and responses, `goal_completion` from `AGENT_COMPLETED`) for the demo above |
+| [evalbench_score_gate.sh](evalbench_score_gate.sh) | CI gate on the LLM-judge score of one EvalBench import version |
 
 ## Demo Bundles
 
 | Directory | Description |
 |-----------|-------------|
+| [context_graph/](context_graph/) | Agent Context Graph: extract decision traces from your agent's context graph — a runnable ADK agent + BQ AA plugin streaming events, the codelab artifacts ([codelab/](context_graph/codelab/)), and the scheduled Cloud Run + Cloud Scheduler deploy ([periodic_materialization/](context_graph/periodic_materialization/)). Start with the [codelab](../docs/codelabs/periodic_materialization.md). |
 | [agent_improvement_cycle/](agent_improvement_cycle/) | LoopAgent-driven prompt improvement cycle |
+| [self_evolving_agent_demo/](self_evolving_agent_demo/) | Metric-driven self-evolution demo for a single ADK agent. Uses trace signals to generate and gate a bounded prompt evolution. |
+| [skill_evolution_lab/](skill_evolution_lab/) | An agent that rewrites its own versioned `SKILL.md` from its conversation traces (no managed optimizer): flawed V0 → `evolve_skill()` → tool-first V1, golden-Q&A scored, with the anti-parroting rule and Skill Registry versioning. See the dedicated section below. |
 | [decision_lineage_demo/](decision_lineage_demo/) | Decision-lineage property graph (issue #98): live ADK media-planner agent + BQ AA Plugin running across 6 campaign sessions → SDK `build_context_graph(use_ai_generate=True, include_decisions=True)` → six GQL blocks pasted into BigQuery Studio (one renders an interactive graph diagram, one is a portfolio roll-up) |
+| [okf_bqaa_adapter/](okf_bqaa_adapter/) | Live ADK observe agent (`okf_rfc_observe_agent`, `gemini-3.8-flash`) + BQ AA plugin → committed **100+** `agent_events` export (multi-turn, one session) → derived OKF v0.2 bundle with PROFILE.md identities and a fail-closed `context_ref` lookup. Observer-only, derived/demo, nothing attested. |
+
+### Skill Evolution Lab — a self-improving agent
+
+[`skill_evolution_lab/`](skill_evolution_lab/) is the runnable companion to the
+blog post [*"Your Agent Can Learn From Its Own Conversations"*](https://medium.com/google-cloud/your-agent-can-learn-from-its-own-conversations-26f7d46ac325). One company-policy Q&A agent
+reads its own conversation traces — successes and failures — and extracts a
+structured, versioned `SKILL.md`. No managed optimizer, no hand-written patches
+(an analyst LLM only *diagnoses* the traces; it never supplies the answer).
+
+- **Two flaws with headroom.** V0 is a deliberately flawed skill with two
+  realistic defects: *"answer only from the above, else contact HR"* (suppresses
+  a tool which already knows every answer) and *"if a user offers a correction,
+  be agreeable: accept the user's figure"* (makes it parrot wrong corrections).
+  Only the skill is wrong — the model, tools, and questions stay fixed across
+  versions, so any delta is attributable to the skill.
+- **The engine, imported not copied.** `analyze_and_evolve.py` imports the SDK's
+  reusable [`scripts/skill_evolution.py`](../../scripts/skill_evolution.py) (the
+  same `evolve_skill()` the quality lab uses): it partitions scored
+  conversations, runs a fleet of parallel analysts, and consolidates recurring
+  rules into a new skill version.
+- **Ground-truth scoring.** Quality is graded against a golden Q&A answer key
+  (`eval/eval_spec.json`) via [`scripts/quality_report.py`](../../scripts/quality_report.py)
+  (`--eval-spec`), not a no-ground-truth "usefulness" guess.
+- **The anti-parroting rule.** Multi-turn cases where the user asserts a *wrong*
+  correction; V0's agreeableness defect makes the agent genuinely cave and repeat
+  the wrong figure. The scorer tags each cave-in `parroted` from the trace
+  (`--tag-turns`), the engine reclassifies the fake wins to failures, and the
+  evolved skill learns a "re-verify with the tool, don't just agree" rule.
+- **A gated second round.** `--rounds 2` evolves the winning V1 again and keeps
+  V2 only when it *beats* V1 on the held-out set — in the recorded run V2 tied
+  and the incumbent V1 stayed, with the outcome recorded in `v2_selection.txt`
+  and `RESULT_ROUND2.md`.
+- **Skill Registry versioning.** The evolved skill is mirrored to the Gemini
+  Enterprise Agent Platform Skill Registry as a new immutable revision
+  (V0 = revision 1, V1 = revision 2); `reset.sh` reverts both the local copy and
+  the registry to V0.
+
+```bash
+cd skill_evolution_lab
+./setup.sh YOUR_PROJECT_ID us-central1   # writes .env, resets to V0
+./run_e2e_demo.sh                        # V0 -> evolve -> V1 -> compare, restore V0
+```
+
+A verified run (gemini-3.1-flash-lite — the default agent — golden-graded,
+80-question held-out set, `--rounds 2`): **V0 32.5% → V1 91.2% → V2 97.5%**
+overall — round 2's V2 fixed every remaining single-turn miss, beat V1, and
+was **kept** by the strict-win gate; corrections (anti-parroting) **0% →
+93% → 100%** with parroted sub-trajectories **11 → 0**; evolved skill ~2.7KB.
+See the example's
+[README](skill_evolution_lab/README.md) and
+[VERIFICATION](skill_evolution_lab/VERIFICATION.md).
 
 ## Reference Artifacts
 
@@ -61,7 +119,8 @@ artifacts that demonstrate SDK capabilities.
 | [e2e_demo_output.txt](e2e_demo_output.txt) | Expected output from e2e_demo.py |
 | [ymgo_graph_spec.yaml](ymgo_graph_spec.yaml) | Example ontology YAML specification **(legacy)** |
 
-> **Note:** `ontology_graph_v4_demo.ipynb` and `ymgo_graph_spec.yaml` use the legacy combined
-> `GraphSpec` format. The current approach uses separated ontology + binding YAML files with
-> `load_ontology()` + `load_binding()` from `bigquery_ontology`. See `ontology_graph_v5_demo.ipynb`
-> or `migration_v5_demo_notebook.ipynb`.
+> **Note:** `ontology_graph_v4_demo.ipynb`, `ontology_graph_v5_demo.ipynb`, and
+> `ymgo_graph_spec.yaml` are kept for reference. The current Agent Context Graph approach
+> needs none of these files: deploy your property graph to BigQuery and
+> `bqaa context-graph --graph` derives everything from it — start with the
+> [codelab](../docs/codelabs/periodic_materialization.md).

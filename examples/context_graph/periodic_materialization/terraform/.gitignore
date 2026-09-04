@@ -1,0 +1,9 @@
+# Terraform local state + provider cache — never commit.
+# Production deploys use remote state (see README's "State file"
+# section); the local files below show up after a local
+# ``terraform init`` / ``apply`` and shouldn't track into git.
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.*
+*.tfplan

@@ -1,0 +1,5 @@
+# Vendored package source — populated at build time by
+# producers/scripts/build_claude_plugin.py. The source of truth lives in
+# producers/src/bigquery_agent_analytics_tracing/; vendor/ is never
+# checked in to avoid drift.
+vendor/

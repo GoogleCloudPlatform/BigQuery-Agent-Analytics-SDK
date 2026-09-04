@@ -50,6 +50,8 @@ from bigquery_agent_analytics.feedback import _semantic_drift
 from bigquery_agent_analytics.feedback import AnalysisConfig
 from bigquery_agent_analytics.feedback import compute_drift
 from bigquery_agent_analytics.feedback import compute_question_distribution
+from bigquery_agent_analytics.trace import Span
+from bigquery_agent_analytics.trace import Trace
 from bigquery_agent_analytics.trace_evaluator import BigQueryTraceEvaluator
 
 # ================================================================== #
@@ -224,7 +226,7 @@ class TestGoldenDatasetRemoved:
 
   def test_evaluate_still_works(self):
     """evaluate() should still work with remaining params."""
-    from bigquery_agent_analytics import CodeEvaluator
+    from bigquery_agent_analytics import SystemEvaluator
 
     client = Client(
         project_id="p",
@@ -246,7 +248,7 @@ class TestGoldenDatasetRemoved:
             ]
         ),
     )
-    evaluator = CodeEvaluator.latency(threshold_ms=5000)
+    evaluator = SystemEvaluator.latency(threshold_ms=5000)
     report = client.evaluate(evaluator)
     assert report.total_sessions == 1
 
@@ -518,31 +520,9 @@ class TestIncludeEventTypes:
     )
     assert evaluator.include_event_types == custom
 
-  async def test_event_types_passed_to_query(self):
-    """Query should use include_event_types as parameter."""
-    from google.cloud import bigquery
-
+  async def test_event_types_filter_shared_resolver_result(self):
+    """Event filtering is applied after identity-safe trace resolution."""
     mock_client = MagicMock()
-    mock_result = MagicMock()
-    mock_result.result.return_value = [
-        _MockRow(
-            {
-                "event_type": "TOOL_COMPLETED",
-                "agent": "test_agent",
-                "timestamp": datetime(2026, 1, 1, tzinfo=timezone.utc),
-                "content": '{"tool": "search"}',
-                "attributes": "{}",
-                "span_id": "sp1",
-                "parent_span_id": None,
-                "latency_ms": None,
-                "status": "OK",
-                "error_message": None,
-                "user_id": "u1",
-            }
-        ),
-    ]
-    mock_client.query.return_value = mock_result
-
     custom = ["TOOL_COMPLETED"]
     evaluator = BigQueryTraceEvaluator(
         project_id="p",
@@ -550,24 +530,36 @@ class TestIncludeEventTypes:
         client=mock_client,
         include_event_types=custom,
     )
-    await evaluator.get_session_trace("s1")
-
-    # Verify the query was called with event_types parameter
-    call_args = mock_client.query.call_args
-    job_config = call_args[1].get("job_config") or call_args[0][1]
-    param_names = [p.name for p in job_config.query_parameters]
-    assert "event_types" in param_names
-
-    # Find the event_types parameter value
-    for p in job_config.query_parameters:
-      if p.name == "event_types":
-        assert p.values == custom
-
-  def test_query_uses_unnest(self):
-    """SQL query should use UNNEST for event type filtering."""
-    assert "IN UNNEST(@event_types)" in (
-        BigQueryTraceEvaluator._SESSION_TRACE_QUERY
+    resolved = Trace(
+        trace_id="t1",
+        session_id="s1",
+        spans=[
+            Span(
+                event_type="TOOL_COMPLETED",
+                agent="test_agent",
+                timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                content={"tool": "search"},
+                span_id="sp1",
+            ),
+            Span(
+                event_type="LLM_RESPONSE",
+                agent="test_agent",
+                timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                span_id="sp2",
+            ),
+        ],
     )
+    with patch.object(
+        Client, "get_trace_by_selector", return_value=resolved
+    ) as get:
+      trace = await evaluator.get_session_trace("s1")
+
+    get.assert_called_once()
+    assert [event.event_type for event in trace.events] == custom
+
+  def test_evaluator_has_no_session_only_query(self):
+    """The evaluator must not bypass the shared identity resolver."""
+    assert not hasattr(BigQueryTraceEvaluator, "_SESSION_TRACE_QUERY")
 
 
 # ================================================================== #

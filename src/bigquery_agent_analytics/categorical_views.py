@@ -21,6 +21,12 @@ dashboard summaries.
 All downstream views read from the dedup base view
 (``categorical_results_latest``), never from the raw table.  This
 ensures retries and overlapping micro-batch runs do not inflate counts.
+The base view keeps identity-safe cardinality when a ``session_id`` is reused:
+typed identities remain separate, while historical rows occupy a
+``legacy:<session_id>`` lane unless exactly one typed identity exists for that
+session. In that sole-identity migration straddle, the typed result supersedes
+matching legacy metric/prompt rows. Apply the additive schema, writer, and
+views in that order; historical rows are intentionally not backfilled.
 
 Example usage::
 
@@ -58,15 +64,43 @@ logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 _CATEGORICAL_VIEW_DEFS: dict[str, str] = {
     "categorical_results_latest": """\
 CREATE OR REPLACE VIEW `{project}.{dataset}.{prefix}categorical_results_latest` AS
-WITH ranked AS (
+WITH identity_population AS (
+  SELECT
+    session_id,
+    COUNT(DISTINCT identity_key) AS _identity_count,
+    MIN(identity_key) AS _sole_identity_key
+  FROM `{project}.{dataset}.{results_table}`
+  WHERE identity_key IS NOT NULL
+  GROUP BY session_id
+),
+population_joined AS (
+  SELECT
+    results.*,
+    COALESCE(_identity_count, 0) AS _identity_count,
+    _sole_identity_key
+  FROM `{project}.{dataset}.{results_table}` AS results
+  LEFT JOIN identity_population USING (session_id)
+),
+keyed AS (
+  SELECT *,
+    CASE
+      WHEN identity_key IS NOT NULL THEN identity_key
+      WHEN _identity_count = 1 THEN _sole_identity_key
+      ELSE CONCAT('legacy:', session_id)
+    END AS _effective_identity_key
+  FROM population_joined
+),
+ranked AS (
   SELECT *,
     ROW_NUMBER() OVER (
-      PARTITION BY session_id, metric_name, COALESCE(prompt_version, '')
-      ORDER BY created_at DESC, raw_response DESC
+      PARTITION BY _effective_identity_key, metric_name, COALESCE(prompt_version, '')
+      ORDER BY identity_key IS NOT NULL DESC, created_at DESC, raw_response DESC
     ) AS _rn
-  FROM `{project}.{dataset}.{results_table}`
+  FROM keyed
 )
-SELECT * EXCEPT(_rn) FROM ranked WHERE _rn = 1
+SELECT * EXCEPT(_identity_count, _sole_identity_key, _effective_identity_key, _rn)
+FROM ranked
+WHERE _rn = 1
 """,
     "categorical_daily_counts": """\
 CREATE OR REPLACE VIEW `{project}.{dataset}.{prefix}categorical_daily_counts` AS
@@ -97,10 +131,12 @@ SELECT
   endpoint,
   COUNTIF(parse_error) AS parse_errors,
   COUNTIF(NOT passed_validation AND NOT parse_error) AS validation_failures,
-  COUNTIF(execution_mode = 'api_fallback') AS fallback_count,
+  COUNTIF(execution_mode IN ('api_fallback', 'api_retry')) AS fallback_count,
   COUNT(*) AS total,
   SAFE_DIVIDE(COUNTIF(parse_error), COUNT(*)) AS parse_error_rate,
-  SAFE_DIVIDE(COUNTIF(execution_mode = 'api_fallback'), COUNT(*)) AS fallback_rate
+  SAFE_DIVIDE(
+    COUNTIF(execution_mode IN ('api_fallback', 'api_retry')), COUNT(*)
+  ) AS fallback_rate
 FROM `{project}.{dataset}.{prefix}categorical_results_latest`
 GROUP BY 1, 2, 3
 """,

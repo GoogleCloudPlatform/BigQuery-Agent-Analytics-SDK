@@ -1,0 +1,47 @@
+[
+  {
+    "index": 1,
+    "category": "RESPONSE_PATTERN",
+    "patch": "## Pattern\nRESPONSE_PATTERN: Declining general non-company topics without tool use.\n\n## Analysis\nThe agent correctly identified that a question about weather was entirely outside its domain and declined it directly without attempting to query the policy lookup tool. This prevents unnecessary tool calls for clearly unrelated topics. Reinforcing this ensures the agent handles general out-of-scope queries gracefully while clarifying its specific purpose.\n\n## Proposed Patch\nSection: Out of Scope Handling\nAction: add_rule\nContent:\n- **General Non-Company Topics**: If a user asks about clearly unrelated topics (e.g., weather, sports, personal advice), politely decline and clarify that your scope is limited to company policies and benefits. Do not attempt to search the policy tool for these topics."
+  },
+  {
+    "index": 2,
+    "category": "MISSING_RULE",
+    "patch": "## Root Cause\nMISSING_RULE: The agent called the correct tool but ignored its result, deflecting to HR instead.\n\n## Analysis\nThe execution trace shows that the agent correctly called `lookup_company_policy({\"topic\": \"parental_leave\"})`. However, instead of using the retrieved information, the agent ignored the tool's result and deflected to HR, falsely claiming the information was not in its database. \n\n## Proposed Patch\nSection: Anti-Patterns\nAction: add_anti_pattern\nContent:\n- **Ignoring Tool Results**: When a tool returns policy information, you must use it to answer the user's question. Never claim the information is missing from your database or deflect to HR after successfully retrieving details via a tool."
+  },
+  {
+    "index": 3,
+    "category": "MISSING_RULE",
+    "patch": "## Root Cause\nMISSING_RULE: The agent ignored the tool result because the user's terminology (\"primary caregiver\") did not exactly match the policy name (\"parental leave\").\n\n## Analysis\nThe execution trace shows the agent correctly called `lookup_company_policy` for \"parental leave\". However, it then deflected to HR, claiming it lacked information on \"primary caregiver\" leave. This indicates the agent failed to use the retrieved tool result because of a terminology difference, violating the instruction to only deflect if the tool search explicitly returns no results.\n\n## Proposed Patch\nSection: Anti-Patterns\nAction: add_anti_pattern\nContent:\n- **Terminology Mismatch**: Do not deflect to HR if a tool returns relevant policy information under a different name or synonym (e.g., \"parental leave\" instead of \"primary caregiver\"). Always use the retrieved policy to answer the question, clarifying the company's official terminology if necessary."
+  },
+  {
+    "index": 4,
+    "category": "MISSING_RULE",
+    "patch": "## Root Cause\nMISSING_RULE: The agent deflected to HR for a confidential request instead of explicitly refusing based on confidentiality.\n\n## Analysis\nThe user asked for their manager's salary, which is highly confidential. The agent stated it lacked access and suggested contacting HR. The agent needs a rule to explicitly refuse requests for confidential information about other employees without directing the user to HR, as HR will also not disclose this information.\n\n## Proposed Patch\nSection: Out of Scope Handling\nAction: add_edge_case\nContent:\n- **Confidential Information**: If a user asks for confidential or personal information about another employee (such as their salary, compensation, or personal details), explicitly state that this information is confidential company data and cannot be disclosed. Do not suggest they contact HR for this information."
+  },
+  {
+    "index": 5,
+    "category": "RESPONSE_PATTERN",
+    "patch": "## Pattern\nRESPONSE_PATTERN: Decline investment advice and suggest a financial advisor.\n\n## Analysis\nThe agent successfully recognized that providing specific investment advice (like choosing index funds) is outside the scope of company HR policies. It correctly declined the request and suggested consulting a qualified financial advisor without needlessly querying the HR policy tool. Reinforcing this ensures the agent consistently handles financial advice requests appropriately and avoids unnecessary tool calls.\n\n## Proposed Patch\nSection: Out of Scope Handling\nAction: add_rule\nContent:\n- **Investment Advice**: If a user asks for financial recommendations or specific investment advice (e.g., which funds to choose), decline to answer and suggest they consult with a qualified financial advisor. Do not query the policy tool for investment advice."
+  },
+  {
+    "index": 6,
+    "category": "MISSING_RULE",
+    "patch": "## Root Cause\nMISSING_RULE: The agent called the policy lookup tool but ignored the result and deflected to HR instead of extracting the requested detail.\n\n## Analysis\nThe user asked about the vesting schedule for the company match. The execution trace shows the agent correctly called `lookup_company_policy({\"topic\": \"401k match\"})`, but it then deflected to HR, claiming it lacked the information. This indicates the agent ignored the tool's output or failed to extract the specific sub-topic (vesting) from the returned policy document, violating the instruction to only deflect if the search explicitly returns no results.\n\n## Proposed Patch\nSection: Anti-Patterns\nAction: add_anti_pattern\nContent:\n- **Ignoring Tool Results**: Do not deflect to HR after successfully calling `lookup_company_policy` unless the tool explicitly states there are no results. If the tool returns policy text, you must carefully read the entire document to extract answers to specific sub-questions (e.g., vesting schedules for a 401k match) rather than claiming you lack the information."
+  },
+  {
+    "index": 7,
+    "category": "TOOL_USAGE",
+    "patch": "## Pattern\nTOOL_USAGE: Inferring `weeks_out: 1` for weekly rate requests.\n\n## Analysis\nThe agent successfully handled a request for a weekly short-term disability payout by passing `weeks_out: 1` to the `calculate_disability_pay` tool, even though the user did not specify a total duration. This is a valuable pattern to reinforce, ensuring the agent knows how to compute weekly rates using the existing tool parameters when a specific duration is absent.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\n- **Weekly Rate Calculations**: If a user asks for a \"per week\" or weekly payout amount for short-term disability but does not specify a total duration, pass `weeks_out: 1` to the `calculate_disability_pay` tool to compute the weekly rate."
+  },
+  {
+    "index": 8,
+    "category": "RESPONSE_PATTERN",
+    "patch": "## Pattern\nRESPONSE_PATTERN: Calculation Breakdown\n\n## Analysis\nThe agent successfully provided a clear, itemized breakdown of the disability calculation, including the weekly benefit, maximum duration, and waiting period. This is highly effective for explaining why a requested duration (15 weeks) results in a capped payout (12 weeks), and should be reinforced as a standard response format for personalized calculations to build trust and clarity.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\n- **Calculation Breakdowns**: When returning personalized calculations (such as short-term disability payouts), always provide a clear, itemized breakdown of the components returned by the tool (e.g., weekly benefit, maximum covered duration, waiting periods). Use this breakdown to explicitly explain how the final total was reached, which is especially important for clarifying capped payouts when a user's requested duration exceeds the policy maximum."
+  },
+  {
+    "index": 9,
+    "category": "SCOPE_GAP",
+    "patch": "## Root Cause\nSCOPE_GAP: The agent lacks a specific protocol for handling inquiries about confidential future events like layoffs, resulting in a generic and unhelpful deflection.\n\n## Analysis\nThe user asked if their team was on the list for layoffs next quarter. The agent provided a generic deflection stating it lacked access and directed the user to HR or their manager, which the evaluator rated as unhelpful. The agent needs a specific rule to definitively address questions about confidential personnel matters or rumors by clarifying its role, rather than just saying \"I don't know\" or deflecting.\n\n## Proposed Patch\nSection: Out of Scope Handling\nAction: add_rule\nContent:\n- **Confidential Personnel Matters**: If a user asks about specific future events such as layoffs, restructuring, or individual personnel changes, state clearly that your role is limited to established company policies and you cannot comment on confidential organizational plans or rumors. Do not provide a generic \"I don't have access\" message or simply deflect to HR."
+  }
+]

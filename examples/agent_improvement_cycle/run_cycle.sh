@@ -42,9 +42,11 @@ RUN_TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 REPORTS_DIR="$SCRIPT_DIR/reports/run_${RUN_TIMESTAMP}"
 mkdir -p "$REPORTS_DIR"
 
-# Tee all output: terminal gets colour, log file gets plain text.
+# Tee all output: terminal gets colour, log file gets plain text. The $'...'
+# quoting makes bash produce the ESC byte itself -- BSD sed (macOS) does not
+# interpret \x1b, so an escape inside the sed pattern would not strip anything.
 RUN_LOG="$REPORTS_DIR/run.log"
-exec > >(tee >(sed 's/\x1b\[[0-9;]*m//g' >> "$RUN_LOG")) 2>&1
+exec > >(tee >(sed $'s/\033\[[0-9;]*m//g' >> "$RUN_LOG")) 2>&1
 
 # Suppress noisy Python warnings (authlib, etc.) and INFO-level log spam.
 # Belt-and-suspenders: env var for child processes, -W flag for direct calls.

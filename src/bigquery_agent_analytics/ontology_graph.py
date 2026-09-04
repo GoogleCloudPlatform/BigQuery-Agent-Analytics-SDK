@@ -44,7 +44,7 @@ import datetime
 import json
 import logging
 import pathlib
-from typing import Optional
+from typing import Literal, Optional
 
 from google.cloud import bigquery
 
@@ -55,6 +55,7 @@ from .extracted_models import ExtractedEdge
 from .extracted_models import ExtractedGraph
 from .extracted_models import ExtractedNode
 from .extracted_models import ExtractedProperty
+from .extracted_models import ExtractionDiagnostic
 from .ontology_schema_compiler import compile_extraction_prompt
 from .ontology_schema_compiler import compile_output_schema
 from .resolved_spec import resolve_from_graph_spec
@@ -634,31 +635,135 @@ class OntologyGraphManager:
       self,
       session_ids: list[str],
       use_ai_generate: bool = True,
+      *,
+      run_structured: Optional[bool] = None,
+      on_unhandled_span: Optional[
+          Literal["ai_fallback", "fail", "stub"]
+      ] = None,
   ) -> ExtractedGraph:
     """Extract a typed graph from agent telemetry.
 
+    Two surfaces:
+
+    **Legacy bool surface** (back-compat with prior SDK versions).
+    ``extract_graph(session_ids, use_ai_generate=True)`` runs
+    structured extractors (if registered) and then ``AI.GENERATE``,
+    merging both into one graph. ``extract_graph(session_ids, False)``
+    runs neither and returns a stub via ``_extract_payloads``.
+    Diagnostics are NOT emitted on this surface — the returned
+    ``ExtractedGraph.diagnostics`` is an empty list and the
+    extraction semantics are unchanged. Note: ``model_dump()`` now
+    includes a ``'diagnostics': []`` key as an additive field
+    (see ``ExtractedGraph.diagnostics`` for the compatibility
+    contract).
+
+    **Orthogonal-flag surface** (new in #178). Pass both
+    ``run_structured`` and ``on_unhandled_span`` to opt into the
+    diagnostics-emitting path. The two flags must be set together;
+    setting only one raises ``ValueError`` (the contract is
+    intentionally explicit so an incomplete migration doesn't
+    silently produce the wrong behavior).
+
     Args:
-        session_ids: Sessions to extract from.
-        use_ai_generate: If True, runs AI.GENERATE server-side.
-            If False, fetches raw payloads (stub graph returned).
+      session_ids: Sessions to extract from.
+      use_ai_generate: When ``True`` (the default), ``AI.GENERATE`` is
+        callable as the fallback for unstructured content. When
+        ``False``, no AI calls are issued.
+      run_structured: New keyword-only. ``True`` runs the registered
+        structured extractors; ``False`` skips them. Required when
+        ``on_unhandled_span`` is set.
+      on_unhandled_span: New keyword-only. What to do with spans the
+        structured extractors did not handle.
+
+        * ``"ai_fallback"`` — invoke ``AI.GENERATE`` to handle the
+          gaps. Requires ``use_ai_generate=True``.
+        * ``"fail"`` — surface unhandled spans as
+          ``structured_unhandled`` diagnostics; do not call AI; do
+          not return a stub. The materializer (``materialize_window``)
+          reads these diagnostics and translates them to typed
+          ``empty_extraction`` failures. This is the "compiled-only"
+          mode.
+        * ``"stub"`` — fetch raw payloads via ``_extract_payloads``
+          (the legacy ``use_ai_generate=False`` behavior). Useful
+          when ``run_structured=False`` and AI is also disabled.
+
+        Required when ``run_structured`` is set.
 
     Returns:
-        An ``ExtractedGraph`` with nodes and edges.
+      An ``ExtractedGraph`` with nodes, edges, and (only on the
+      orthogonal-flag surface) per-span / session diagnostics.
+
+    Raises:
+      ValueError: If exactly one of ``run_structured`` /
+        ``on_unhandled_span`` is set; if
+        ``on_unhandled_span='ai_fallback'`` is paired with
+        ``use_ai_generate=False`` (the fallback target is
+        disabled).
     """
-    # Run structured extractors first if any are registered.
+    # Legacy bool surface (back-compat): both new params unset.
+    if run_structured is None and on_unhandled_span is None:
+      return self._extract_graph_impl(
+          session_ids,
+          run_structured=bool(self.extractors and use_ai_generate),
+          use_ai_generate=use_ai_generate,
+          on_unhandled_span="ai_fallback" if use_ai_generate else "stub",
+          emit_diagnostics=False,
+      )
+    # Orthogonal-flag surface: both required, set together.
+    if run_structured is None or on_unhandled_span is None:
+      raise ValueError(
+          "run_structured and on_unhandled_span must be set together "
+          "(or both omitted to use the legacy bool surface); got "
+          f"run_structured={run_structured!r}, "
+          f"on_unhandled_span={on_unhandled_span!r}."
+      )
+    # Coherence: 'ai_fallback' needs AI on.
+    if on_unhandled_span == "ai_fallback" and not use_ai_generate:
+      raise ValueError(
+          "on_unhandled_span='ai_fallback' requires use_ai_generate=True; "
+          "the fallback target is disabled."
+      )
+    return self._extract_graph_impl(
+        session_ids,
+        run_structured=run_structured,
+        use_ai_generate=use_ai_generate,
+        on_unhandled_span=on_unhandled_span,
+        emit_diagnostics=True,
+    )
+
+  def _extract_graph_impl(
+      self,
+      session_ids: list[str],
+      *,
+      run_structured: bool,
+      use_ai_generate: bool,
+      on_unhandled_span: str,
+      emit_diagnostics: bool,
+  ) -> ExtractedGraph:
+    """Shared core for both extract_graph surfaces.
+
+    The public ``extract_graph`` validates inputs + resolves the
+    legacy bool to internal mode flags; this private method runs the
+    actual extraction. Splitting them keeps the legacy and diagnostic
+    paths semantically identical at the merge step — the only
+    runtime difference is whether diagnostics are emitted into the
+    returned ``ExtractedGraph``.
+    """
+    diagnostics: list[ExtractionDiagnostic] = []
     structured_nodes: list[ExtractedNode] = []
     structured_edges: list[ExtractedEdge] = []
     excluded_span_ids: list[str] = []
     partial_span_ids: list[str] = []
     partial_hint = ""
 
-    if self.extractors and use_ai_generate:
+    if run_structured and self.extractors:
       raw_events = self._fetch_raw_events(session_ids)
       if raw_events:
         structured_result = run_structured_extractors(
             raw_events,
             self.extractors,
             self.spec,
+            capture_extractor_exceptions=emit_diagnostics,
         )
         structured_nodes = structured_result.nodes
         structured_edges = structured_result.edges
@@ -676,15 +781,80 @@ class OntologyGraphManager:
               "unstructured content only: " + ", ".join(entity_names) + ".\n"
           )
 
-    if use_ai_generate:
+        if emit_diagnostics:
+          # Per-span codes attributable from the structured pipeline.
+          for span_id in sorted(structured_result.fully_handled_span_ids):
+            diagnostics.append(
+                ExtractionDiagnostic(
+                    diagnostic_code="structured_fully_handled",
+                    span_id=span_id,
+                )
+            )
+          for span_id in sorted(structured_result.partially_handled_span_ids):
+            diagnostics.append(
+                ExtractionDiagnostic(
+                    diagnostic_code="structured_partially_handled",
+                    span_id=span_id,
+                )
+            )
+          for exc in structured_result.exceptions:
+            diagnostics.append(
+                ExtractionDiagnostic(
+                    diagnostic_code="extractor_exception",
+                    span_id=exc.span_id,
+                    event_type=exc.event_type,
+                    detail=exc.detail,
+                )
+            )
+          # structured_unhandled: spans seen in raw_events but for
+          # which NO registered extractor was even invoked
+          # (event_type didn't match any key in self.extractors).
+          # An extractor that matched and returned an empty
+          # StructuredExtractionResult (e.g.
+          # reference_extractor._extract_capture_context's
+          # missing-required-field path) is NOT unhandled — the
+          # extractor recognized the event and concluded there was
+          # nothing structured to emit. That's a legitimate silent
+          # outcome and B2's compiled-only failure semantics should
+          # NOT flip ok=false on it. Use the orchestrator's
+          # ``invoked_span_ids`` set to distinguish the two cases.
+          invoked_span_ids = set(structured_result.invoked_span_ids)
+          for event in raw_events:
+            span_id = event.get("span_id")
+            if not span_id or span_id in invoked_span_ids:
+              continue
+            diagnostics.append(
+                ExtractionDiagnostic(
+                    diagnostic_code="structured_unhandled",
+                    span_id=span_id,
+                    event_type=event.get("event_type"),
+                )
+            )
+
+    if on_unhandled_span == "ai_fallback":
       ai_graph = self._extract_via_ai_generate(
           session_ids,
           excluded_span_ids,
           partial_span_ids,
           partial_hint,
       )
-    else:
+      if emit_diagnostics:
+        for sid in session_ids:
+          diagnostics.append(
+              ExtractionDiagnostic(
+                  diagnostic_code="session_ai_fallback_attempted",
+                  session_id=sid,
+              )
+          )
+    elif on_unhandled_span == "stub":
       ai_graph = self._extract_payloads(session_ids)
+    elif on_unhandled_span == "fail":
+      # Compiled-only: no AI, no stub. Unhandled spans are surfaced
+      # via the structured_unhandled diagnostics above; the
+      # materializer translates them to typed failures.
+      ai_graph = ExtractedGraph(name=self.spec.name)
+    else:  # pragma: no cover - dispatcher validated above
+      raise ValueError(f"Unknown on_unhandled_span: {on_unhandled_span!r}")
 
     # Merge: structured nodes/edges + AI-extracted, dedup by node_id.
     if structured_nodes or structured_edges:
@@ -695,13 +865,23 @@ class OntologyGraphManager:
         if node.node_id not in seen_nodes:
           seen_nodes[node.node_id] = node
       all_edges = structured_edges + ai_graph.edges
-      return ExtractedGraph(
+      result = ExtractedGraph(
           name=self.spec.name,
           nodes=list(seen_nodes.values()),
           edges=all_edges,
       )
+    else:
+      result = ai_graph
 
-    return ai_graph
+    # Attach diagnostics only on the new path. Legacy callers see
+    # an empty ``diagnostics`` list — Pydantic default — so the
+    # extraction semantics are unchanged for the back-compat
+    # surface. (``model_dump()`` does pick up the new field as an
+    # additive key; see ``ExtractedGraph.diagnostics`` description
+    # for the compatibility contract.)
+    if emit_diagnostics and diagnostics:
+      result = result.model_copy(update={"diagnostics": diagnostics})
+    return result
 
   def _fetch_raw_events(self, session_ids: list[str]) -> list[dict]:
     """Fetch raw events with full content for structured extraction.
