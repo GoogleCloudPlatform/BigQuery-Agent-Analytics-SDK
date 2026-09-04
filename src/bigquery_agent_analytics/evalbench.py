@@ -62,6 +62,7 @@ from google.cloud import bigquery
 
 from ._telemetry import make_bq_client
 from ._telemetry import with_sdk_labels
+from .failure_taxonomy import categorize_failed_session
 
 if TYPE_CHECKING:
   from .trace import TraceFilter
@@ -2196,14 +2197,24 @@ class EvalBenchSession:
   def trace_selector(self) -> dict[str, Any]:
     """Keyword arguments that drill this session into ``get_session_trace``.
 
-    ``session_id`` alone already pins the import version (it is part of the
-    identity); ``experiment_id`` additionally pins the job scope, matching
-    ``attributes.experiment_id`` that every published row carries. Use with
-    a ``Client`` whose ``table_id`` is the mirror events table::
+    ``experiment_id`` pins the job scope, matching
+    ``attributes.experiment_id`` that every published row carries, and
+    ``import_version`` pins the published version through the top-level
+    ``import_version`` column ``materialize`` stamps on every mirror row.
+    On the adapter path the version pin is redundant (the versioned
+    ``session_id`` is already unique per version); on the native path
+    (#463) retained versions share the real ADK ``session_id`` and the
+    job-scoped ``experiment_id``, so the version pin is what keeps a v2
+    read from replaying v1 rows. Use with a ``Client`` whose ``table_id``
+    is the mirror events table::
 
         client.get_session_trace(**session.trace_selector())
     """
-    return {"session_id": self.session_id, "experiment_id": self.job_id}
+    return {
+        "session_id": self.session_id,
+        "experiment_id": self.job_id,
+        "import_version": self.import_version,
+    }
 
   def get_trace(self, client: Any, **overrides: Any) -> Any:
     """Thin wrapper: ``client.get_session_trace(**trace_selector())``."""
@@ -2220,8 +2231,24 @@ class EvalBenchSession:
         failed=self.failed,
     )
 
+  @property
+  def taxonomy_categories(self) -> tuple[str, ...]:
+    """G1-frozen taxonomy names tripped by this session's mechanical flags.
+
+    Computed from the three flags via
+    ``failure_taxonomy.categorize_failed_session`` (a property, not a stored
+    field, so it can never drift from the flags). Frozen vocabulary
+    (taxonomy v0.1.0): each tripped flag maps to its frozen name and the
+    names come back in ``FROZEN_CATEGORY_NAMES`` order — assignment stays
+    mechanical until the labeler study. All flags false (an
+    ``include_passed`` row) yields ``()``, never ``("unknown",)``.
+    """
+    return categorize_failed_session(self)
+
   def to_dict(self) -> dict[str, Any]:
-    return _json_safe(dataclasses.asdict(self))
+    payload = _json_safe(dataclasses.asdict(self))
+    payload["taxonomy_categories"] = list(self.taxonomy_categories)
+    return payload
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2243,7 +2270,11 @@ class EvalBenchFailedSessions:
   manifest: dict[str, Any] = dataclasses.field(default_factory=dict)
 
   def to_dict(self) -> dict[str, Any]:
-    return _json_safe(dataclasses.asdict(self))
+    # Nested sessions go through EvalBenchSession.to_dict so each row also
+    # carries the computed taxonomy_categories (asdict only sees fields).
+    payload = _json_safe(dataclasses.asdict(self))
+    payload["sessions"] = [session.to_dict() for session in self.sessions]
+    return payload
 
 
 def failed_sessions(
@@ -2408,11 +2439,16 @@ class EvalBenchImportSessions:
   def trace_filter(self) -> "TraceFilter":
     """``TraceFilter`` selecting exactly this version's sessions.
 
-    Pins ``experiment_id`` to the job and ``session_ids`` to the version's
-    identities, with ``limit`` raised to the session count so no session is
-    truncated. Refuses an empty session set: ``TraceFilter`` treats no
-    ``session_ids`` as "unfiltered", which would silently widen the
-    evaluation to every retained version of the job.
+    Pins ``experiment_id`` to the job, ``session_ids`` to the version's
+    identities, and ``import_version`` to the published version (the
+    top-level mirror column), with ``limit`` raised to the session count
+    so no session is truncated. The version pin is a no-op on the adapter
+    path (versioned session ids are already unique per version) but load-
+    bearing on the native path (#463), where retained versions share the
+    real ADK session ids — without it the listing would widen to every
+    retained version of those sessions. Refuses an empty session set:
+    ``TraceFilter`` treats no ``session_ids`` as "unfiltered", which would
+    silently widen the evaluation to every retained version of the job.
     """
     from .trace import TraceFilter  # local: keep evalbench import-light
 
@@ -2426,6 +2462,7 @@ class EvalBenchImportSessions:
         experiment_id=self.job_id,
         session_ids=list(self.session_ids),
         limit=len(self.session_ids),
+        import_version=self.import_version,
     )
 
   def to_dict(self) -> dict[str, Any]:

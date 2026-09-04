@@ -630,6 +630,10 @@ new_skill = skill_evolution.evolve_skill(
     analyst_mode="both",    # both | error-only | success-only
     score_fn=my_scorer,     # optional (skill_text) -> float; picks best + gates incumbent
     min_improvement=0.5,    # incumbent gate: ship V1 only if it beats V0 by this margin
+    incumbent_score=0.62,   # optional pre-measured V0 score (skips re-scoring the base;
+                            #   effective only together with score_fn; must be finite)
+    error_analyst_fn=my_analyst,  # optional host analyst for FAILURE trajectories:
+                            #   fn(client, model, session, current_skill, tools) -> patch|None
 )
 ```
 
@@ -639,7 +643,15 @@ way — adding `scripts/` to `sys.path`, then `import skill_evolution`.)
 `evolve_skill()` returns the evolved skill as a string (or the unchanged input
 when nothing beat the incumbent). Key knobs: `candidates` (best-of-N),
 `max_chars` (size cap), `analyst_mode`, `max_success_samples`, `max_workers`
-(analyst concurrency), and `score_fn` / `min_improvement` (incumbent guard). The
+(analyst concurrency), `score_fn` / `min_improvement` / `incumbent_score`
+(incumbent guard — `incumbent_score` is the pre-measured base-skill score and
+only takes effect alongside `score_fn`), and `error_analyst_fn` (replace the
+built-in failure analyst with a richer host one, e.g. an agentic investigator;
+success trajectories always use the built-in analyst, and host patches still
+pass the quality gate). Sessions may carry optional enrichment keys the
+analysts render when present — `sub_trajectories`,
+`execution_sub_trajectories` (with per-segment `trace` text), and
+`execution_trace` — see the `evolve_skill` docstring for shapes. The
 skill is kept **behavioral** — the consolidator is instructed not to bake
 specific data values (numbers, dates, dollar amounts) into the skill; those must
 come from tools at runtime.

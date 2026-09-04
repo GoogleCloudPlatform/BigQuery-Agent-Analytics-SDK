@@ -1,0 +1,24 @@
+{
+  "example": true,
+  "illustrative": true,
+  "not_a_freeze": true,
+  "not_week_1_freeze": true,
+  "g1_frozen": false,
+  "clock_started": false,
+  "banner": "EXAMPLE — not week-1 freeze, clock not started",
+  "floors": {
+    "replicate_agreement_pct": 80,
+    "non_unknown_coverage_pct": 80,
+    "kappa_point": 0.6,
+    "kappa_ci_lower": 0.45,
+    "localization_coverage_pct": 70,
+    "hit_at_1_ci_lower_gt_0": true,
+    "hit_at_1_point_uplift_pp": 10
+  },
+  "decision_rules": {
+    "reserved_revision_week": "One taxonomy revision slot (week 7): a stability miss invokes it once with fresh labels and a re-gate; a second miss ends the MVP with the analysis as the deliverable.",
+    "value_gate": "At least the preregistered fraction of randomly assigned investigations where the report changed or materially narrowed the next action, adjudicated by a non-investigator; a stated preference or unverified acceptance counts for nothing.",
+    "noisy_small_n_localization": "Point-clears-but-CI-spans-zero resolves per the preregistered week-0 rule, not week-6 judgment; no metric conditions on successful localizations only.",
+    "sealed_sets": "P-blind is frozen before any tuning and scored exactly once at week 6."
+  }
+}

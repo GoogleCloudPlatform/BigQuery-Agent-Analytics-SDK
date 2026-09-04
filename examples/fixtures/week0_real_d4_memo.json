@@ -1,0 +1,22 @@
+{
+  "example": false,
+  "frozen_by": "#435 Week 0 D4 freeze",
+  "clock_started": false,
+  "fail_closed": true,
+  "scope_project": "test-project-0728-467323",
+  "scope_datasets": [
+    "bqaa_e2e_real",
+    "bqaa_evalbench_mvp_demo",
+    "bqaa_evalbench_mvp_mirror"
+  ],
+  "scope_derived": ["failed_sessions", "taxonomy labels"],
+  "report_consumers": ["Hai-Yuan Cao (caohy1988 / haiyuan-eng-google)"],
+  "grants_policy": "No additional per-user grants or notebook/export access beyond Hai-Yuan Cao until a later D4 amendment; fail closed (deny) if a consumer is not named here. Documented as policy text only — no IAM API calls.",
+  "fixture_validates": ["ingestion", "taxonomy mechanics", "stability"],
+  "fixture_validates_only": true,
+  "never_produces": "Part II funding recommendation",
+  "no_new_live_judge_calls": true,
+  "no_new_bq_jobs": true,
+  "no_labeler_access_expansion": true,
+  "stop_go_memo_is_governed_artifact": true
+}
