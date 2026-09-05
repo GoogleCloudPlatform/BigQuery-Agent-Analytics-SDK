@@ -892,19 +892,25 @@ def test_collect_patches_tracks_sources_after_quality_gate(monkeypatch):
           _session("meaningful", question="kept builtin"),
       ]
   }
-  sources = []
-  patches = collect_patches(
-      report,
-      "BASE",
-      client=object(),
-      model="unused",
-      analyst_mode="both",
-      error_analyst_fn=host_analyst,
-      _patch_sources=sources,
-  )
+  provenance = {}
+  token = _se._PATCH_PROVENANCE.set(provenance)
+  try:
+    patches = collect_patches(
+        report,
+        "BASE",
+        client=object(),
+        model="unused",
+        analyst_mode="both",
+        error_analyst_fn=host_analyst,
+    )
+  finally:
+    _se._PATCH_PROVENANCE.reset(token)
 
   assert len(patches) == 2
-  assert sources == ["host", "builtin"]
+  assert [provenance[id(patch)] for patch in patches] == [
+      ["host"],
+      ["builtin"],
+  ]
 
 
 def test_raising_host_analyst_partial_failure_tolerated(caplog):
@@ -1582,7 +1588,23 @@ def test_evolve_skill_preserves_legacy_collect_patches_replacements(
       "## Root Cause\nTOOL_USAGE: skipped the available lookup.\n"
       "## Proposed Patch\nContent: call the lookup before answering."
   )
-  monkeypatch.setattr(_se, "collect_patches", lambda *args, **kwargs: [patch])
+
+  def legacy_collector(
+      report,
+      current_skill,
+      *,
+      client,
+      model,
+      max_workers=10,
+      max_success_samples=15,
+      analyst_mode="both",
+      tools=None,
+      error_analyst_fn=None,
+      analyst_timeout_s=None,
+  ):
+    return [patch]
+
+  monkeypatch.setattr(_se, "collect_patches", legacy_collector)
   monkeypatch.setattr(
       _se,
       "_consolidate_once",
@@ -1600,6 +1622,129 @@ def test_evolve_skill_preserves_legacy_collect_patches_replacements(
   assert "## C" in result
   records = json.load(open(tmp_path / "v1_patches.json"))
   assert records[0]["source"] == "builtin"
+
+
+def _legacy_collector_wrapper(original_collector, transform):
+  """Wrap a collector without accepting any post-#395 private keywords."""
+
+  def collector(
+      report,
+      current_skill,
+      *,
+      client,
+      model,
+      max_workers=10,
+      max_success_samples=15,
+      analyst_mode="both",
+      tools=None,
+      error_analyst_fn=None,
+      analyst_timeout_s=None,
+  ):
+    patches = original_collector(
+        report,
+        current_skill,
+        client=client,
+        model=model,
+        max_workers=max_workers,
+        max_success_samples=max_success_samples,
+        analyst_mode=analyst_mode,
+        tools=tools,
+        error_analyst_fn=error_analyst_fn,
+        analyst_timeout_s=analyst_timeout_s,
+    )
+    return transform(patches)
+
+  return collector
+
+
+def _run_wrapped_provenance_case(monkeypatch, tmp_path, transform):
+  import skill_evolution as _se
+
+  host_patch = (
+      "## Root Cause\nTOOL_USAGE: host patch skipped the lookup.\n"
+      "## Proposed Patch\nContent: host should call the lookup first."
+  )
+  builtin_patch = (
+      "## Pattern\nRESPONSE_PATTERN: builtin patch verified the result.\n"
+      "## Proposed Patch\nContent: builtin should keep verification."
+  )
+
+  def host_analyst(client, model, session, current_skill, tools):
+    return host_patch
+
+  def builtin_analyst(client, model, prompt, session, current_skill, tools):
+    return builtin_patch
+
+  monkeypatch.setattr(_se, "run_analyst", builtin_analyst)
+  monkeypatch.setattr(
+      _se,
+      "collect_patches",
+      _legacy_collector_wrapper(_se.collect_patches, transform),
+  )
+  monkeypatch.setattr(
+      _se,
+      "_consolidate_once",
+      lambda *args, **kwargs: _BASE + "\n## C\nnew rule c\n",
+  )
+
+  _se.evolve_skill(
+      {
+          "sessions": [
+              _session("unhelpful", question="host"),
+              _session("meaningful", question="builtin"),
+          ]
+      },
+      _BASE,
+      client=object(),
+      candidates=1,
+      error_analyst_fn=host_analyst,
+      artifacts_dir=str(tmp_path),
+  )
+
+  return (
+      json.load(open(tmp_path / "v1_patches.json")),
+      host_patch,
+      builtin_patch,
+  )
+
+
+def test_evolve_skill_keeps_provenance_when_wrapper_reorders(
+    monkeypatch, tmp_path
+):
+  records, host_patch, builtin_patch = _run_wrapped_provenance_case(
+      monkeypatch, tmp_path, lambda patches: list(reversed(patches))
+  )
+  assert [(record["patch"], record["source"]) for record in records] == [
+      (builtin_patch, "builtin"),
+      (host_patch, "host"),
+  ]
+
+
+def test_evolve_skill_keeps_provenance_when_wrapper_filters(
+    monkeypatch, tmp_path
+):
+  records, host_patch, _ = _run_wrapped_provenance_case(
+      monkeypatch,
+      tmp_path,
+      lambda patches: [patch for patch in patches if "host patch" in patch],
+  )
+  assert [(record["patch"], record["source"]) for record in records] == [
+      (host_patch, "host")
+  ]
+
+
+def test_evolve_skill_keeps_provenance_when_wrapper_deduplicates(
+    monkeypatch, tmp_path
+):
+  records, host_patch, builtin_patch = _run_wrapped_provenance_case(
+      monkeypatch,
+      tmp_path,
+      lambda patches: list(dict.fromkeys([patches[0], *patches])),
+  )
+  assert [(record["patch"], record["source"]) for record in records] == [
+      (host_patch, "host"),
+      (builtin_patch, "builtin"),
+  ]
 
 
 def test_prevalence_exact_tie_stays_strong():

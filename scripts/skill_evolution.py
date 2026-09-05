@@ -50,6 +50,7 @@ import argparse
 from collections import Counter
 from concurrent.futures import as_completed
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 import json
 import logging
 import math
@@ -70,6 +71,15 @@ __all__ = [
     "partition_trajectories",
     "select_candidate",
 ]
+
+# ``collect_patches`` is an established replacement seam, so its signature and
+# exact ``list[str]`` result must stay unchanged. During ``evolve_skill`` only,
+# this context-local identity map carries provenance alongside the returned
+# string objects. Wrappers that reorder, filter, or deduplicate those objects
+# therefore retain correct provenance without receiving a new private keyword.
+_PATCH_PROVENANCE: ContextVar[Optional[dict[int, list[str]]]] = ContextVar(
+    "skill_evolution_patch_provenance", default=None
+)
 
 # Segment outcome icons shared by both sub-trajectory renderers.
 _SEGMENT_OUTCOME_ICONS = {"recovered": "+", "parroted": "~"}
@@ -1040,7 +1050,6 @@ def collect_patches(
     tools=None,
     error_analyst_fn: Optional[ErrorAnalystFn] = None,
     analyst_timeout_s: Optional[float] = None,
-    _patch_sources: Optional[list[str]] = None,
 ):
   """Run the analyst fleet over the report. Returns the list of kept patches.
 
@@ -1210,12 +1219,13 @@ def collect_patches(
     )
 
   kept = []
-  kept_sources = []
+  provenance = _PATCH_PROVENANCE.get()
   for patch, source in patches:
     reason = _quality_gate_reason(patch)
     if reason is None:
       kept.append(patch)
-      kept_sources.append(source)
+      if provenance is not None:
+        provenance.setdefault(id(patch), []).append(source)
     else:
       logger.warning("Quality gate rejected a patch (%s): %.80r", reason, patch)
   logger.info(
@@ -1223,8 +1233,6 @@ def collect_patches(
       len(patches),
       len(kept),
   )
-  if _patch_sources is not None:
-    _patch_sources.extend(kept_sources)
   return kept
 
 
@@ -1425,29 +1433,34 @@ def evolve_skill(
   # applies to standalone collect_patches usage only.
   client = client or _make_client(project, location)
 
-  patch_sources: list[str] = []
-  patches = collect_patches(
-      report,
-      current_skill,
-      client=client,
-      model=model,
-      max_workers=max_workers,
-      max_success_samples=max_success_samples,
-      analyst_mode=analyst_mode,
-      tools=tools,
-      error_analyst_fn=error_analyst_fn,
-      analyst_timeout_s=analyst_timeout_s,
-      _patch_sources=patch_sources,
-  )
+  patch_provenance: dict[int, list[str]] = {}
+  provenance_token = _PATCH_PROVENANCE.set(patch_provenance)
+  try:
+    patches = collect_patches(
+        report,
+        current_skill,
+        client=client,
+        model=model,
+        max_workers=max_workers,
+        max_success_samples=max_success_samples,
+        analyst_mode=analyst_mode,
+        tools=tools,
+        error_analyst_fn=error_analyst_fn,
+        analyst_timeout_s=analyst_timeout_s,
+    )
+  finally:
+    _PATCH_PROVENANCE.reset(provenance_token)
   if not patches:
     logger.warning("No patches to consolidate; returning the current skill.")
     return current_skill
-  # Older hosts and tests may replace ``collect_patches`` with a compatible
-  # callable that returns ``list[str]`` but does not know about the private
-  # provenance sink. Preserve that extension pattern and conservatively label
-  # those patches as builtin-generated.
-  if not patch_sources:
-    patch_sources = ["builtin"] * len(patches)
+  # Plain strings from a legacy replacement have no recorded provenance, so use
+  # the conservative builtin fallback. Identity-retaining wrappers around the
+  # SDK collector resolve through the context map even when they reorder or
+  # filter the result.
+  patch_sources = []
+  for patch in patches:
+    sources = patch_provenance.get(id(patch), [])
+    patch_sources.append(sources.pop(0) if sources else "builtin")
 
   logger.info("Generating %d candidate(s)...", candidates)
   cands = []
