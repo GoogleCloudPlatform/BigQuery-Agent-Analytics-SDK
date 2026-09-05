@@ -1461,18 +1461,28 @@ def evolve_skill(
   if not patches:
     logger.warning("No patches to consolidate; returning the current skill.")
     return current_skill
-  # Plain strings from a legacy replacement have no recorded provenance, so use
-  # the conservative builtin fallback. Identity-retaining wrappers around the
-  # SDK collector resolve through the context map even when they reorder or
-  # filter the result.
+  # Identity-retaining wrappers resolve each occurrence exactly, even when they
+  # reorder or filter equal patch strings. For wrappers that reconstruct the
+  # strings (for example, via serialization), fall back to text only when every
+  # recorded occurrence of that text has the same source. Plain strings from a
+  # legacy replacement and ambiguous equal-text copies remain conservative.
+  recorded_sources_by_patch: dict[str, set[str]] = {}
+  for recorded_patch, recorded_source in patch_provenance.values():
+    recorded_sources_by_patch.setdefault(recorded_patch, set()).add(
+        recorded_source
+    )
   patch_sources = []
   for patch in patches:
     provenance_entry = patch_provenance.get(id(patch))
-    source = (
-        provenance_entry[1]
-        if provenance_entry is not None and provenance_entry[0] is patch
-        else "builtin"
-    )
+    if provenance_entry is not None and provenance_entry[0] is patch:
+      source = provenance_entry[1]
+    else:
+      matching_sources = recorded_sources_by_patch.get(patch, set())
+      source = (
+          next(iter(matching_sources))
+          if len(matching_sources) == 1
+          else "builtin"
+      )
     patch_sources.append(source)
 
   logger.info("Generating %d candidate(s)...", candidates)

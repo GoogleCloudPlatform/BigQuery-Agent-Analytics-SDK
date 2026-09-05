@@ -1656,6 +1656,13 @@ def _legacy_collector_wrapper(original_collector, transform):
   return collector
 
 
+def _copy_patch_text(patches):
+  copies = [patch.encode("utf-8").decode("utf-8") for patch in patches]
+  assert all(copy == patch for copy, patch in zip(copies, patches))
+  assert all(copy is not patch for copy, patch in zip(copies, patches))
+  return copies
+
+
 def _run_wrapped_provenance_case(
     monkeypatch, tmp_path, transform, *, shared_patch=False
 ):
@@ -1747,6 +1754,33 @@ def test_evolve_skill_keeps_provenance_when_wrapper_deduplicates(
   assert [(record["patch"], record["source"]) for record in records] == [
       (host_patch, "host"),
       (builtin_patch, "builtin"),
+  ]
+
+
+def test_evolve_skill_keeps_unambiguous_provenance_when_wrapper_copies_text(
+    monkeypatch, tmp_path
+):
+  records, host_patch, builtin_patch = _run_wrapped_provenance_case(
+      monkeypatch, tmp_path, _copy_patch_text
+  )
+  assert [(record["patch"], record["source"]) for record in records] == [
+      (host_patch, "host"),
+      (builtin_patch, "builtin"),
+  ]
+
+
+def test_evolve_skill_does_not_guess_provenance_for_conflicting_equal_text(
+    monkeypatch, tmp_path
+):
+  records, shared_patch, _ = _run_wrapped_provenance_case(
+      monkeypatch,
+      tmp_path,
+      _copy_patch_text,
+      shared_patch=True,
+  )
+  assert [(record["patch"], record["source"]) for record in records] == [
+      (shared_patch, "builtin"),
+      (shared_patch, "builtin"),
   ]
 
 
