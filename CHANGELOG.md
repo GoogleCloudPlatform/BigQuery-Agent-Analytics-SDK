@@ -40,21 +40,6 @@ still not started**.
   rubric (`compliant` / `violation`) covers confidentiality, data
   minimization, and requested redaction or masking across international
   PII identifiers — a model-judged checklist, not legal certification.
-- **Skill-evolution host integration hooks (#395)** — `scripts/skill_evolution.py`
-  gains three additive seams so a host can adopt the engine instead of
-  forking it: `error_analyst_fn` (a host-supplied analyst for failure
-  trajectories; success trajectories keep the built-in one),
-  `incumbent_score` (reuse an already-measured base-skill score instead of
-  re-measuring), and richer trajectory context for the analyst. Existing
-  callers are unchanged.
-- **Auditable skill-evolution host contract (#397)** —
-  `scripts/skill_evolution.py` now declares its supported integration surface
-  with `__all__` and documents the additive quality-report session contract;
-  incompatible session-schema changes must be recorded here. The host analyst
-  contract also marks user corrections as hypotheses that require tool
-  verification. Evolution patch artifacts now include `source: builtin|host`
-  for every quality-gated patch, so runs using `error_analyst_fn` can be audited
-  without changing the existing `collect_patches() -> list[str]` API.
 - **Span-level G1 labels persisted on the native snapshot (#469, parent
   #435)** — the existing `bq-agent-sdk evalbench-native-import` command
   gains a thin `--span-labels-table` flag (no new command family): when
@@ -374,6 +359,24 @@ still not started**.
   remains as a compatibility wrapper returning the same frozen config.
   Assignment stays mechanical until the labeler study; the six-week clock
   has not started.
+
+### Skill evolution (repo side, not in the wheel)
+
+- **Auditable skill-evolution host contract (#397)** —
+  `scripts/skill_evolution.py` now declares its supported integration surface
+  with `__all__` and documents the additive quality-report session contract;
+  incompatible session-schema changes must be recorded here. The host analyst
+  contract also marks user corrections as hypotheses that require tool
+  verification. Evolution patch artifacts now include `source: builtin|host`
+  for every quality-gated patch, so runs using `error_analyst_fn` can be audited
+  without changing the existing `collect_patches() -> list[str]` API.
+- **Skill-evolution host integration hooks (#395)** — `scripts/skill_evolution.py`
+  gains three additive seams so a host can adopt the engine instead of
+  forking it: `error_analyst_fn` (a host-supplied analyst for failure
+  trajectories; success trajectories keep the built-in one),
+  `incumbent_score` (reuse an already-measured base-skill score instead of
+  re-measuring), and richer trajectory context for the analyst. Existing
+  callers are unchanged.
 
 ### Deploy (repo side, not in the wheel)
 
