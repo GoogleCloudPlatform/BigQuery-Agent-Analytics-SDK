@@ -1,0 +1,150 @@
+{
+  "executed_at": "2026-09-05T23:37:53.204678+00:00",
+  "project": "test-project-0728-467323",
+  "location": "US",
+  "dataset": "okf_receipt_spike_20260905",
+  "jobs": {
+    "approved_jan": {
+      "job_id": "okf_receipt_preflight_jan_71b3b21715fe",
+      "user_email": "raincoatrun@gmail.com",
+      "state": "DONE",
+      "cache_hit": false,
+      "query_sha256": "7c166b94483bd931f74a1073174ad09ca964d47593a5f20ce9819b74c55b1330",
+      "query_present": true,
+      "params": [
+        [
+          "period_start",
+          "DATE",
+          "2026-01-01"
+        ],
+        [
+          "period_end",
+          "DATE",
+          "2026-01-31"
+        ]
+      ],
+      "schema": [
+        [
+          "gross_margin_usd",
+          "NUMERIC"
+        ]
+      ],
+      "totalRows": "1",
+      "jobComplete": true,
+      "rows": [
+        [
+          "400"
+        ]
+      ],
+      "total_bytes_processed": 591,
+      "slot_millis": 119,
+      "total_bytes_billed": 73400320,
+      "referenced_tables": [
+        "test-project-0728-467323.okf_receipt_spike_20260905.shipment_cost",
+        "test-project-0728-467323.okf_receipt_spike_20260905.products",
+        "test-project-0728-467323.okf_receipt_spike_20260905.fx_daily_rates",
+        "test-project-0728-467323.okf_receipt_spike_20260905.order_lines",
+        "test-project-0728-467323.okf_receipt_spike_20260905.payment_fees",
+        "test-project-0728-467323.okf_receipt_spike_20260905.fulfillment_cost",
+        "test-project-0728-467323.okf_receipt_spike_20260905.orders"
+      ],
+      "created": "2026-09-05T23:37:50.123000+00:00",
+      "ended": "2026-09-05T23:37:50.666000+00:00"
+    },
+    "approved_janfeb": {
+      "job_id": "okf_receipt_preflight_janfeb_4baa03f238fe",
+      "user_email": "raincoatrun@gmail.com",
+      "state": "DONE",
+      "cache_hit": false,
+      "query_sha256": "7c166b94483bd931f74a1073174ad09ca964d47593a5f20ce9819b74c55b1330",
+      "query_present": true,
+      "params": [
+        [
+          "period_start",
+          "DATE",
+          "2026-01-01"
+        ],
+        [
+          "period_end",
+          "DATE",
+          "2026-02-28"
+        ]
+      ],
+      "schema": [
+        [
+          "gross_margin_usd",
+          "NUMERIC"
+        ]
+      ],
+      "totalRows": "1",
+      "jobComplete": true,
+      "rows": [
+        [
+          "515"
+        ]
+      ],
+      "total_bytes_processed": 591,
+      "slot_millis": 44,
+      "total_bytes_billed": 73400320,
+      "referenced_tables": [
+        "test-project-0728-467323.okf_receipt_spike_20260905.payment_fees",
+        "test-project-0728-467323.okf_receipt_spike_20260905.fulfillment_cost",
+        "test-project-0728-467323.okf_receipt_spike_20260905.fx_daily_rates",
+        "test-project-0728-467323.okf_receipt_spike_20260905.order_lines",
+        "test-project-0728-467323.okf_receipt_spike_20260905.shipment_cost",
+        "test-project-0728-467323.okf_receipt_spike_20260905.products",
+        "test-project-0728-467323.okf_receipt_spike_20260905.orders"
+      ],
+      "created": "2026-09-05T23:37:51.084000+00:00",
+      "ended": "2026-09-05T23:37:51.463000+00:00"
+    },
+    "wrong_formula_jan": {
+      "job_id": "okf_receipt_preflight_wrong_eeeabdb00901",
+      "user_email": "raincoatrun@gmail.com",
+      "state": "DONE",
+      "cache_hit": false,
+      "query_sha256": "371fd5cd69983e1251c2ae1cc600897d3ae24c40cb766b9b74df311042d36549",
+      "query_present": true,
+      "params": [
+        [
+          "period_start",
+          "DATE",
+          "2026-01-01"
+        ],
+        [
+          "period_end",
+          "DATE",
+          "2026-01-31"
+        ]
+      ],
+      "schema": [
+        [
+          "gross_margin_usd",
+          "NUMERIC"
+        ]
+      ],
+      "totalRows": "1",
+      "jobComplete": true,
+      "rows": [
+        [
+          "600"
+        ]
+      ],
+      "total_bytes_processed": 495,
+      "slot_millis": 35,
+      "total_bytes_billed": 73400320,
+      "referenced_tables": [
+        "test-project-0728-467323.okf_receipt_spike_20260905.products",
+        "test-project-0728-467323.okf_receipt_spike_20260905.shipment_cost",
+        "test-project-0728-467323.okf_receipt_spike_20260905.order_lines",
+        "test-project-0728-467323.okf_receipt_spike_20260905.fx_daily_rates",
+        "test-project-0728-467323.okf_receipt_spike_20260905.fulfillment_cost",
+        "test-project-0728-467323.okf_receipt_spike_20260905.payment_fees",
+        "test-project-0728-467323.okf_receipt_spike_20260905.orders"
+      ],
+      "created": "2026-09-05T23:37:51.899000+00:00",
+      "ended": "2026-09-05T23:37:52.308000+00:00"
+    }
+  },
+  "compiled_sql_sha256": "7c166b94483bd931f74a1073174ad09ca964d47593a5f20ce9819b74c55b1330"
+}
