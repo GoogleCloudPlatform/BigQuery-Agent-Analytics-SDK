@@ -907,10 +907,9 @@ def test_collect_patches_tracks_sources_after_quality_gate(monkeypatch):
     _se._PATCH_PROVENANCE.reset(token)
 
   assert len(patches) == 2
-  assert [provenance[id(patch)] for patch in patches] == [
-      ["host"],
-      ["builtin"],
-  ]
+  assert all(type(patch) is str for patch in patches)
+  assert all(provenance[id(patch)][0] is patch for patch in patches)
+  assert [provenance[id(patch)][1] for patch in patches] == ["host", "builtin"]
 
 
 def test_raising_host_analyst_partial_failure_tolerated(caplog):
@@ -1657,7 +1656,9 @@ def _legacy_collector_wrapper(original_collector, transform):
   return collector
 
 
-def _run_wrapped_provenance_case(monkeypatch, tmp_path, transform):
+def _run_wrapped_provenance_case(
+    monkeypatch, tmp_path, transform, *, shared_patch=False
+):
   import skill_evolution as _se
 
   host_patch = (
@@ -1668,6 +1669,8 @@ def _run_wrapped_provenance_case(monkeypatch, tmp_path, transform):
       "## Pattern\nRESPONSE_PATTERN: builtin patch verified the result.\n"
       "## Proposed Patch\nContent: builtin should keep verification."
   )
+  if shared_patch:
+    builtin_patch = host_patch
 
   def host_analyst(client, model, session, current_skill, tools):
     return host_patch
@@ -1744,6 +1747,127 @@ def test_evolve_skill_keeps_provenance_when_wrapper_deduplicates(
   assert [(record["patch"], record["source"]) for record in records] == [
       (host_patch, "host"),
       (builtin_patch, "builtin"),
+  ]
+
+
+def test_evolve_skill_distinguishes_shared_patch_occurrences_when_filtered(
+    monkeypatch, tmp_path
+):
+  def keep_second_occurrence(patches):
+    assert patches[0] == patches[1]
+    assert patches[0] is not patches[1]
+    assert all(type(patch) is str for patch in patches)
+    return patches[1:]
+
+  records, shared_patch, _ = _run_wrapped_provenance_case(
+      monkeypatch,
+      tmp_path,
+      keep_second_occurrence,
+      shared_patch=True,
+  )
+  assert [(record["patch"], record["source"]) for record in records] == [
+      (shared_patch, "builtin")
+  ]
+
+
+def test_evolve_skill_distinguishes_shared_patch_occurrences_when_reordered(
+    monkeypatch, tmp_path
+):
+  records, shared_patch, _ = _run_wrapped_provenance_case(
+      monkeypatch,
+      tmp_path,
+      lambda patches: list(reversed(patches)),
+      shared_patch=True,
+  )
+  assert [(record["patch"], record["source"]) for record in records] == [
+      (shared_patch, "builtin"),
+      (shared_patch, "host"),
+  ]
+
+
+def test_evolve_skill_keeps_discarded_batch_alive_for_provenance(
+    monkeypatch, tmp_path
+):
+  import skill_evolution as _se
+
+  host_patch = (
+      "## Root Cause\nTOOL_USAGE: discarded host patch skipped lookup.\n"
+      "## Proposed Patch\nContent: call the host lookup first."
+  )
+  builtin_patch = (
+      "## Pattern\nRESPONSE_PATTERN: returned builtin patch verified data.\n"
+      "## Proposed Patch\nContent: keep builtin verification."
+  )
+
+  def host_analyst(client, model, session, current_skill, tools):
+    return host_patch
+
+  def builtin_analyst(client, model, prompt, session, current_skill, tools):
+    return builtin_patch
+
+  original_collector = _se.collect_patches
+
+  def discarding_collector(
+      report,
+      current_skill,
+      *,
+      client,
+      model,
+      max_workers=10,
+      max_success_samples=15,
+      analyst_mode="both",
+      tools=None,
+      error_analyst_fn=None,
+      analyst_timeout_s=None,
+  ):
+    discarded = original_collector(
+        {"sessions": [_session("unhelpful", question="discarded host")]},
+        current_skill,
+        client=client,
+        model=model,
+        max_workers=max_workers,
+        max_success_samples=max_success_samples,
+        analyst_mode="error-only",
+        tools=tools,
+        error_analyst_fn=error_analyst_fn,
+        analyst_timeout_s=analyst_timeout_s,
+    )
+    provenance = _se._PATCH_PROVENANCE.get()
+    assert provenance[id(discarded[0])][0] is discarded[0]
+    del discarded
+    return original_collector(
+        {"sessions": [_session("meaningful", question="returned builtin")]},
+        current_skill,
+        client=client,
+        model=model,
+        max_workers=max_workers,
+        max_success_samples=max_success_samples,
+        analyst_mode="success-only",
+        tools=tools,
+        error_analyst_fn=error_analyst_fn,
+        analyst_timeout_s=analyst_timeout_s,
+    )
+
+  monkeypatch.setattr(_se, "run_analyst", builtin_analyst)
+  monkeypatch.setattr(_se, "collect_patches", discarding_collector)
+  monkeypatch.setattr(
+      _se,
+      "_consolidate_once",
+      lambda *args, **kwargs: _BASE + "\n## C\nnew rule c\n",
+  )
+
+  _se.evolve_skill(
+      {"sessions": []},
+      _BASE,
+      client=object(),
+      candidates=1,
+      error_analyst_fn=host_analyst,
+      artifacts_dir=str(tmp_path),
+  )
+
+  records = json.load(open(tmp_path / "v1_patches.json"))
+  assert [(record["patch"], record["source"]) for record in records] == [
+      (builtin_patch, "builtin")
   ]
 
 

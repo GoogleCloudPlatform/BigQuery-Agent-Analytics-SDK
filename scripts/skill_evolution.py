@@ -77,8 +77,8 @@ __all__ = [
 # this context-local identity map carries provenance alongside the returned
 # string objects. Wrappers that reorder, filter, or deduplicate those objects
 # therefore retain correct provenance without receiving a new private keyword.
-_PATCH_PROVENANCE: ContextVar[Optional[dict[int, list[str]]]] = ContextVar(
-    "skill_evolution_patch_provenance", default=None
+_PATCH_PROVENANCE: ContextVar[Optional[dict[int, tuple[str, str]]]] = (
+    ContextVar("skill_evolution_patch_provenance", default=None)
 )
 
 # Segment outcome icons shared by both sub-trajectory renderers.
@@ -1223,9 +1223,17 @@ def collect_patches(
   for patch, source in patches:
     reason = _quality_gate_reason(patch)
     if reason is None:
-      kept.append(patch)
+      # Each accepted occurrence needs its own identity: host and builtin
+      # analysts may return the same cached string object. Prefix-and-slice
+      # creates an equal, exact ``str`` without encoding assumptions.
+      kept_patch = (" " + patch)[1:]
+      kept.append(kept_patch)
       if provenance is not None:
-        provenance.setdefault(id(patch), []).append(source)
+        # Keep a strong reference for the map's lifetime so a wrapper can
+        # discard this patch without letting Python recycle its ID for a later
+        # collection. The identity check at lookup closes the other half of
+        # that invariant.
+        provenance[id(kept_patch)] = (kept_patch, source)
     else:
       logger.warning("Quality gate rejected a patch (%s): %.80r", reason, patch)
   logger.info(
@@ -1433,7 +1441,7 @@ def evolve_skill(
   # applies to standalone collect_patches usage only.
   client = client or _make_client(project, location)
 
-  patch_provenance: dict[int, list[str]] = {}
+  patch_provenance: dict[int, tuple[str, str]] = {}
   provenance_token = _PATCH_PROVENANCE.set(patch_provenance)
   try:
     patches = collect_patches(
@@ -1459,8 +1467,13 @@ def evolve_skill(
   # filter the result.
   patch_sources = []
   for patch in patches:
-    sources = patch_provenance.get(id(patch), [])
-    patch_sources.append(sources.pop(0) if sources else "builtin")
+    provenance_entry = patch_provenance.get(id(patch))
+    source = (
+        provenance_entry[1]
+        if provenance_entry is not None and provenance_entry[0] is patch
+        else "builtin"
+    )
+    patch_sources.append(source)
 
   logger.info("Generating %d candidate(s)...", candidates)
   cands = []
