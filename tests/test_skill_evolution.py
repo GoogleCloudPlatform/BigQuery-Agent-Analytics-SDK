@@ -45,6 +45,22 @@ def _session(category, **extra):
   return s
 
 
+def test_public_host_contract_exports_stable_surface():
+  import skill_evolution
+
+  assert skill_evolution.__all__ == [
+      "ErrorAnalystFn",
+      "collect_patches",
+      "evolve_skill",
+      "format_trajectory",
+      "partition_trajectories",
+      "select_candidate",
+  ]
+  assert "unverified user hypothesis" in " ".join(
+      collect_patches.__doc__.split()
+  )
+
+
 # --- partition_trajectories -------------------------------------------------
 
 
@@ -846,6 +862,51 @@ def test_non_string_host_patch_dropped_not_crashed(caplog):
   assert any("instead of patch text" in r.message for r in caplog.records)
 
 
+def test_collect_patches_tracks_sources_after_quality_gate(monkeypatch):
+  import skill_evolution as _se
+
+  host_results = iter(
+      [
+          "too short",
+          (
+              "## Root Cause\nTOOL_USAGE: skipped the available lookup.\n"
+              "## Proposed Patch\nContent: call the lookup before answering."
+          ),
+      ]
+  )
+
+  def host_analyst(client, model, session, current_skill, tools):
+    return next(host_results)
+
+  def builtin_analyst(client, model, prompt, session, current_skill, tools):
+    return (
+        "## Pattern\nRESPONSE_PATTERN: verified the result before replying.\n"
+        "## Proposed Patch\nContent: keep verifying tool results."
+    )
+
+  monkeypatch.setattr(_se, "run_analyst", builtin_analyst)
+  report = {
+      "sessions": [
+          _session("unhelpful", question="rejected host"),
+          _session("partial", question="kept host"),
+          _session("meaningful", question="kept builtin"),
+      ]
+  }
+  sources = []
+  patches = collect_patches(
+      report,
+      "BASE",
+      client=object(),
+      model="unused",
+      analyst_mode="both",
+      error_analyst_fn=host_analyst,
+      _patch_sources=sources,
+  )
+
+  assert len(patches) == 2
+  assert sources == ["host", "builtin"]
+
+
 def test_raising_host_analyst_partial_failure_tolerated(caplog):
   # One raising host analyst degrades to a warning; the surviving patch is
   # still collected and no exception propagates.
@@ -1409,7 +1470,14 @@ def test_write_evolution_artifacts(tmp_path):
   selected = "CAND TWO"
 
   out = str(tmp_path)
-  _write_evolution_artifacts(out, patches, candidates, selected, base)
+  _write_evolution_artifacts(
+      out,
+      patches,
+      candidates,
+      selected,
+      base,
+      patch_sources=["host", "builtin", "builtin"],
+  )
 
   # Patches: one record per patch, with parsed category.
   records = json.load(open(os.path.join(out, "v1_patches.json")))
@@ -1417,6 +1485,11 @@ def test_write_evolution_artifacts(tmp_path):
   assert records[0]["category"] == "TOOL_USAGE"
   assert records[2]["category"] == "RESPONSE_PATTERN"
   assert records[0]["patch"] == patches[0]
+  assert [record["source"] for record in records] == [
+      "host",
+      "builtin",
+      "builtin",
+  ]
 
   # Candidates: base/empty filtered; selected one tagged.
   cand_dir = os.path.join(out, "v1_candidates")
@@ -1453,6 +1526,80 @@ def test_write_evolution_artifacts_version_label_and_selection(tmp_path):
   assert os.listdir(os.path.join(out, "v2_candidates")) == []
   note = open(os.path.join(out, "v2_selection.txt")).read()
   assert note.startswith("kept incumbent:")
+
+
+def test_write_evolution_artifacts_rejects_misaligned_sources(tmp_path):
+  import pytest
+
+  with pytest.raises(ValueError, match="align one-to-one"):
+    _write_evolution_artifacts(
+        str(tmp_path),
+        ["patch one", "patch two"],
+        [],
+        "BASE",
+        "BASE",
+        patch_sources=["host"],
+    )
+
+
+def test_evolve_skill_writes_host_patch_provenance(monkeypatch, tmp_path):
+  import skill_evolution as _se
+
+  def host_analyst(client, model, session, current_skill, tools):
+    return (
+        "## Root Cause\nTOOL_USAGE: skipped the available lookup.\n"
+        "## Proposed Patch\nContent: call the lookup before answering."
+    )
+
+  monkeypatch.setattr(
+      _se,
+      "_consolidate_once",
+      lambda *args, **kwargs: _BASE + "\n## C\nnew rule c\n",
+  )
+  result = _se.evolve_skill(
+      {"sessions": [_session("unhelpful", question="q")]},
+      _BASE,
+      client=object(),
+      candidates=1,
+      analyst_mode="error-only",
+      error_analyst_fn=host_analyst,
+      artifacts_dir=str(tmp_path),
+  )
+
+  assert "## C" in result
+  records = json.load(open(tmp_path / "v1_patches.json"))
+  assert [(record["source"], record["category"]) for record in records] == [
+      ("host", "TOOL_USAGE")
+  ]
+
+
+def test_evolve_skill_preserves_legacy_collect_patches_replacements(
+    monkeypatch, tmp_path
+):
+  import skill_evolution as _se
+
+  patch = (
+      "## Root Cause\nTOOL_USAGE: skipped the available lookup.\n"
+      "## Proposed Patch\nContent: call the lookup before answering."
+  )
+  monkeypatch.setattr(_se, "collect_patches", lambda *args, **kwargs: [patch])
+  monkeypatch.setattr(
+      _se,
+      "_consolidate_once",
+      lambda *args, **kwargs: _BASE + "\n## C\nnew rule c\n",
+  )
+
+  result = _se.evolve_skill(
+      {"sessions": [_session("unhelpful", question="q")]},
+      _BASE,
+      client=object(),
+      candidates=1,
+      artifacts_dir=str(tmp_path),
+  )
+
+  assert "## C" in result
+  records = json.load(open(tmp_path / "v1_patches.json"))
+  assert records[0]["source"] == "builtin"
 
 
 def test_prevalence_exact_tie_stays_strong():

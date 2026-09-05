@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Auditable skill-evolution host contract (#397)** —
+  `scripts/skill_evolution.py` now declares its supported integration surface
+  with `__all__` and documents the additive quality-report session contract;
+  incompatible session-schema changes must be recorded here. The host analyst
+  contract also marks user corrections as hypotheses that require tool
+  verification. Evolution patch artifacts now include `source: builtin|host`
+  for every quality-gated patch, so runs using `error_analyst_fn` can be audited
+  without changing the existing `collect_patches() -> list[str]` API.
 - **Span-level G1 labels persisted on the native snapshot (#469, parent
   #435)** — the existing `bq-agent-sdk evalbench-native-import` command
   gains a thin `--span-labels-table` flag (no new command family): when
