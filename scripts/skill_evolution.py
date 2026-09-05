@@ -36,12 +36,21 @@ Or run as a CLI:
 Auth: uses Vertex AI via the google-genai client. Set GOOGLE_CLOUD_PROJECT and
 GOOGLE_CLOUD_LOCATION (or pass project/location), and authenticate with ADC
 (gcloud auth application-default login).
+
+Host contract: integrations should import only the names listed in ``__all__``.
+``evolve_skill`` and ``collect_patches`` accept the quality-report session
+mapping described in their docstrings; new optional session fields are additive,
+and any incompatible schema change must be called out in ``CHANGELOG.md``.
+``error_analyst_fn`` is the supported extension seam for failure analysis and
+must return patch text or ``None``. The public return value of
+``collect_patches`` remains ``list[str]``.
 """
 
 import argparse
 from collections import Counter
 from concurrent.futures import as_completed
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 import json
 import logging
 import math
@@ -53,6 +62,24 @@ from typing import Any, Callable, Optional
 # Host analyst signature: fn(client, model, session, current_skill, tools)
 # -> patch text or None (see collect_patches).
 ErrorAnalystFn = Callable[[Any, str, dict, str, Optional[str]], Optional[str]]
+
+__all__ = [
+    "ErrorAnalystFn",
+    "collect_patches",
+    "evolve_skill",
+    "format_trajectory",
+    "partition_trajectories",
+    "select_candidate",
+]
+
+# ``collect_patches`` is an established replacement seam, so its signature and
+# exact ``list[str]`` result must stay unchanged. During ``evolve_skill`` only,
+# this context-local identity map carries provenance alongside the returned
+# string objects. Wrappers that reorder, filter, or deduplicate those objects
+# therefore retain correct provenance without receiving a new private keyword.
+_PATCH_PROVENANCE: ContextVar[Optional[dict[int, tuple[str, str]]]] = (
+    ContextVar("skill_evolution_patch_provenance", default=None)
+)
 
 # Segment outcome icons shared by both sub-trajectory renderers.
 _SEGMENT_OUTCOME_ICONS = {"recovered": "+", "parroted": "~"}
@@ -639,12 +666,14 @@ def _write_evolution_artifacts(
     current_skill,
     version_label="v1",
     selection_note=None,
+    patch_sources=None,
 ):
   """Persist the engine's intermediate reasoning for inspection/audit.
 
   When ``evolve_skill`` is given ``artifacts_dir`` it writes, under that dir
   (``<label>`` is ``version_label``, so a V1->V2 round writes ``v2_*``):
-    - ``<label>_patches.json``  -- every analyst patch (root-cause category + text)
+    - ``<label>_patches.json``  -- every analyst patch (source, root-cause
+                                   category, and text)
     - ``<label>_candidates/``   -- each best-of-N consolidation candidate (the
                                    chosen one tagged ``_SELECTED``)
     - ``<label>_prevalence.txt``-- root-cause category tally across the patches
@@ -653,14 +682,26 @@ def _write_evolution_artifacts(
   """
   os.makedirs(artifacts_dir, exist_ok=True)
 
+  if patch_sources is None:
+    patch_sources = ["builtin"] * len(patches)
+  if len(patch_sources) != len(patches):
+    raise ValueError("patch_sources must align one-to-one with patches")
+  unexpected_sources = set(patch_sources) - {"builtin", "host"}
+  if unexpected_sources:
+    raise ValueError(
+        "patch_sources entries must be 'builtin' or 'host'; got"
+        f" {sorted(unexpected_sources)!r}"
+    )
+
   records = []
-  for i, patch in enumerate(patches):
+  for i, (patch, source) in enumerate(zip(patches, patch_sources)):
     match = re.search(r"## Root Cause\s*\n\s*\[?(\w+)\]?", patch) or re.search(
         r"## Pattern\s*\n\s*\[?(\w+)\]?", patch
     )
     records.append(
         {
             "index": i + 1,
+            "source": source,
             "category": match.group(1) if match else None,
             "patch": patch,
         }
@@ -1030,7 +1071,10 @@ def collect_patches(
       with a warning and counts as a host failure. If EVERY host call
       fails, collect_patches raises RuntimeError instead of degrading a
       broken host analyst into a clean-looking zero-patch run (partial
-      failures stay tolerated).
+      failures stay tolerated). Host analysts must treat
+      ``correction_boundaries[*].correct_fact`` as an unverified user
+      hypothesis: verify it with available tools and never copy it into a
+      patch as fact.
     analyst_timeout_s: Optional per-analyst timeout in seconds. A call
       exceeding it is treated like any other analyst failure (warning,
       skipped) and QUARANTINED: its daemon thread may linger until the
@@ -1066,7 +1110,7 @@ def collect_patches(
     failures = []
   successes = successes[:max_success_samples]
 
-  patches = []
+  patches: list[tuple[str, str]] = []
   # Dispatch goes through _AnalystCall + a lazy dispatcher thread rather than
   # a ThreadPoolExecutor: a timed-out call is quarantined and its slot handed
   # to the next queued analyst (within the bounded donation budget), so one
@@ -1163,7 +1207,7 @@ def collect_patches(
             question,
         )
       continue
-    patches.append(result)
+    patches.append((result, "host" if is_host else "builtin"))
 
   if error_analyst_fn is not None and host_total and host_failed == host_total:
     raise RuntimeError(
@@ -1175,10 +1219,21 @@ def collect_patches(
     )
 
   kept = []
-  for patch in patches:
+  provenance = _PATCH_PROVENANCE.get()
+  for patch, source in patches:
     reason = _quality_gate_reason(patch)
     if reason is None:
-      kept.append(patch)
+      # Each accepted occurrence needs its own identity: host and builtin
+      # analysts may return the same cached string object. Prefix-and-slice
+      # creates an equal, exact ``str`` without encoding assumptions.
+      kept_patch = (" " + patch)[1:]
+      kept.append(kept_patch)
+      if provenance is not None:
+        # Keep a strong reference for the map's lifetime so a wrapper can
+        # discard this patch without letting Python recycle its ID for a later
+        # collection. The identity check at lookup closes the other half of
+        # that invariant.
+        provenance[id(kept_patch)] = (kept_patch, source)
     else:
       logger.warning("Quality gate rejected a patch (%s): %.80r", reason, patch)
   logger.info(
@@ -1386,21 +1441,49 @@ def evolve_skill(
   # applies to standalone collect_patches usage only.
   client = client or _make_client(project, location)
 
-  patches = collect_patches(
-      report,
-      current_skill,
-      client=client,
-      model=model,
-      max_workers=max_workers,
-      max_success_samples=max_success_samples,
-      analyst_mode=analyst_mode,
-      tools=tools,
-      error_analyst_fn=error_analyst_fn,
-      analyst_timeout_s=analyst_timeout_s,
-  )
+  patch_provenance: dict[int, tuple[str, str]] = {}
+  provenance_token = _PATCH_PROVENANCE.set(patch_provenance)
+  try:
+    patches = collect_patches(
+        report,
+        current_skill,
+        client=client,
+        model=model,
+        max_workers=max_workers,
+        max_success_samples=max_success_samples,
+        analyst_mode=analyst_mode,
+        tools=tools,
+        error_analyst_fn=error_analyst_fn,
+        analyst_timeout_s=analyst_timeout_s,
+    )
+  finally:
+    _PATCH_PROVENANCE.reset(provenance_token)
   if not patches:
     logger.warning("No patches to consolidate; returning the current skill.")
     return current_skill
+  # Identity-retaining wrappers resolve each occurrence exactly, even when they
+  # reorder or filter equal patch strings. For wrappers that reconstruct the
+  # strings (for example, via serialization), fall back to text only when every
+  # recorded occurrence of that text has the same source. Plain strings from a
+  # legacy replacement and ambiguous equal-text copies remain conservative.
+  recorded_sources_by_patch: dict[str, set[str]] = {}
+  for recorded_patch, recorded_source in patch_provenance.values():
+    recorded_sources_by_patch.setdefault(recorded_patch, set()).add(
+        recorded_source
+    )
+  patch_sources = []
+  for patch in patches:
+    provenance_entry = patch_provenance.get(id(patch))
+    if provenance_entry is not None and provenance_entry[0] is patch:
+      source = provenance_entry[1]
+    else:
+      matching_sources = recorded_sources_by_patch.get(patch, set())
+      source = (
+          next(iter(matching_sources))
+          if len(matching_sources) == 1
+          else "builtin"
+      )
+    patch_sources.append(source)
 
   logger.info("Generating %d candidate(s)...", candidates)
   cands = []
@@ -1469,6 +1552,7 @@ def evolve_skill(
         current_skill,
         version_label=version_label,
         selection_note=selection_note,
+        patch_sources=patch_sources,
     )
   return selected
 
