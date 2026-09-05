@@ -7,35 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Evaluator API unification
+## [0.5.2] - 2026-09-05
 
-- `PerformanceEvaluator` now supports one-sided judging and side-by-side
-  comparisons, including deterministic trajectory and response checks.
-- Deterministic metrics and shared report models live in `system_evaluator`;
-  trial aggregation lives in `multi_trial_performance_evaluator` and
-  `aggregate_grader`. Existing evaluator names remain compatibility aliases.
-- `LLMAsJudge` keeps its factories, custom criteria API, and existing
-  `Client.evaluate` execution order: BigQuery `AI.GENERATE`, then BQML
-  `ML.GENERATE_TEXT`, then Gemini API fallback. Configured BigQuery endpoints,
-  connections, and execution/fallback metadata remain supported. The API
-  fallback uses bounded concurrency and preserves per-session failures.
-- `PerformanceEvaluator` provides opt-in API-only judging with bounded
-  concurrency. Existing `LLMAsJudge` callers retain their BigQuery path.
-- The deprecated BigQuery `AI.GENERATE` and `ML.GENERATE_TEXT` SQL helpers remain
-  in `evaluators` for compatibility. `PerformanceEvaluator` uses the Gemini API;
-  it does not execute those SQL templates.
+### Release highlights
 
+An EvalBench-centred wheel update and a reorganised evaluation API. The
+wheel gains the versioned EvalBench import pipeline — immutable
+`(job_id, import_version)` snapshots with the W0.4 failed-session contract,
+the version-pinned `evalbench_failed_sessions` view, `bq-agent-sdk
+evalbench-score`, and the native `agent_events` snapshot writer that needs
+no EvalBench tables at all — plus the failure taxonomy frozen at G1 v0.1.0
+(`failure_taxonomy`) and its span-level localisation layer
+(`span_taxonomy`, persisted on the native snapshot with
+`--span-labels-table`). Evaluation is unified behind `PerformanceEvaluator`
+with compatibility aliases for every existing evaluator name (#123), and
+the canonical rubrics gain metric factories and an opt-in policy-compliance
+scorecard (#91). Around the wheel: `scripts/skill_evolution.py` grows
+host-integration hooks and auditable patch provenance (#395, #477) with a
+scheduled Cloud Run Job wrapper (#472), and the AgentForensics Week 0 gates
+are frozen and the preregistration sealed (#435) — **the six-week clock has
+still not started**.
 
 ### Added
 
-- **Auditable skill-evolution host contract (#397)** —
-  `scripts/skill_evolution.py` now declares its supported integration surface
-  with `__all__` and documents the additive quality-report session contract;
-  incompatible session-schema changes must be recorded here. The host analyst
-  contract also marks user corrections as hypotheses that require tool
-  verification. Evolution patch artifacts now include `source: builtin|host`
-  for every quality-gated patch, so runs using `error_analyst_fn` can be audited
-  without changing the existing `collect_patches() -> list[str]` API.
+- **Canonical metric factories and opt-in policy scorecard (#91)** — four
+  public factories exported from the SDK and `evaluation_rubrics`:
+  `response_usefulness_metric`, `task_grounding_metric`,
+  `policy_compliance_metric`, and `three_pillar_scorecard_metrics`.
+  Usefulness and grounding come from the same canonical interpreter
+  `quality_report` uses (with `scope_context` / `has_scope` forwarded, so
+  scope adds `declined` to usefulness); the new opt-in `policy_compliance`
+  rubric (`compliant` / `violation`) covers confidentiality, data
+  minimization, and requested redaction or masking across international
+  PII identifiers — a model-judged checklist, not legal certification.
 - **Span-level G1 labels persisted on the native snapshot (#469, parent
   #435)** — the existing `bq-agent-sdk evalbench-native-import` command
   gains a thin `--span-labels-table` flag (no new command family): when
@@ -318,6 +322,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Evaluator API unification (#123)** — `PerformanceEvaluator` is the
+  one entry point for deterministic trajectory/response checks, one-sided
+  LLM judging, and side-by-side reference comparisons; every existing
+  evaluator name remains a compatibility alias.
+  - `PerformanceEvaluator` now supports one-sided judging and side-by-side
+    comparisons, including deterministic trajectory and response checks.
+  - Deterministic metrics and shared report models live in `system_evaluator`;
+    trial aggregation lives in `multi_trial_performance_evaluator` and
+    `aggregate_grader`. Existing evaluator names remain compatibility aliases.
+  - `LLMAsJudge` keeps its factories, custom criteria API, and existing
+    `Client.evaluate` execution order: BigQuery `AI.GENERATE`, then BQML
+    `ML.GENERATE_TEXT`, then Gemini API fallback. Configured BigQuery endpoints,
+    connections, and execution/fallback metadata remain supported. The API
+    fallback uses bounded concurrency and preserves per-session failures.
+  - `PerformanceEvaluator` provides opt-in API-only judging with bounded
+    concurrency. Existing `LLMAsJudge` callers retain their BigQuery path.
+  - The deprecated BigQuery `AI.GENERATE` and `ML.GENERATE_TEXT` SQL helpers remain
+    in `evaluators` for compatibility. `PerformanceEvaluator` uses the Gemini API;
+    it does not execute those SQL templates.
+
 - **`failure_taxonomy` frozen at G1 v0.1.0 (#435)** — the scaffold era
   ends: `taxonomy_version` is `0.1.0` and `g1_frozen` is `true`. The
   frozen vocabulary (`FROZEN_CATEGORY_NAMES`, also exported as
@@ -335,6 +359,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remains as a compatibility wrapper returning the same frozen config.
   Assignment stays mechanical until the labeler study; the six-week clock
   has not started.
+
+### Skill evolution (repo side, not in the wheel)
+
+- **Auditable skill-evolution host contract (#397)** —
+  `scripts/skill_evolution.py` now declares its supported integration surface
+  with `__all__` and documents the additive quality-report session contract;
+  incompatible session-schema changes must be recorded here. The host analyst
+  contract also marks user corrections as hypotheses that require tool
+  verification. Evolution patch artifacts now include `source: builtin|host`
+  for every quality-gated patch, so runs using `error_analyst_fn` can be audited
+  without changing the existing `collect_patches() -> list[str]` API.
+- **Skill-evolution host integration hooks (#395)** — `scripts/skill_evolution.py`
+  gains three additive seams so a host can adopt the engine instead of
+  forking it: `error_analyst_fn` (a host-supplied analyst for failure
+  trajectories; success trajectories keep the built-in one),
+  `incumbent_score` (reuse an already-measured base-skill score instead of
+  re-measuring), and richer trajectory context for the analyst. Existing
+  callers are unchanged.
+
+### Deploy (repo side, not in the wheel)
+
+- **Scheduled skill-evolution Cloud Run Job (#472)** —
+  `deploy/skill_evolution_job/` wraps `scripts/skill_evolution.py` in an
+  agentic orchestrator (ADK agent + tools) that any agent repo can run on a
+  weekly Cloud Scheduler cron: quality report from BigQuery `agent_events`
+  → bottleneck analysis → candidate evolution → publish gate → GitHub PR.
+  Ships the job package, `Dockerfile`, `deploy.sh` (job + scheduler +
+  least-privilege IAM), an example agent registry, offline tests, and the
+  user guide `docs/guides/scheduled-skill-evolution.md`.
+
+### Examples
+
+- **Live ADK+BQAA observe trace → derived OKF adapter (#474)** —
+  `examples/okf_bqaa_adapter/`: a real ADK observe agent writes
+  retrieve/receipt-shaped rows through `BigQueryAgentAnalyticsPlugin`, and a
+  Python port of observe + adapt + computeIdentities (`okf-bqaa-adapter:v0`)
+  derives identities from the committed live fixtures with fail-closed
+  `lookup(context_ref)`. Derived demo only; no catalog or Dataplex writes.
+
+### Infrastructure
+
+- `dashboard_v2` dependency bump: browserslist 4.28.2 → 4.28.9 (#476).
 
 ## [0.5.1] - 2026-08-29
 
