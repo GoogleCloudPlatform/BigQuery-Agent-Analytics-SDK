@@ -1,0 +1,6 @@
+{
+  "_note": "Planned fixture expectations (SYNTHETIC). Measured live results live in evidence/receipt/*.json, never here.",
+  "approved_january": {"period_start": "2026-01-01", "period_end": "2026-01-31", "gross_margin_usd": "400"},
+  "approved_january_february": {"period_start": "2026-01-01", "period_end": "2026-02-28", "gross_margin_usd": "515"},
+  "product_cost_only_january": {"period_start": "2026-01-01", "period_end": "2026-01-31", "gross_margin_usd": "600"}
+}
