@@ -1,0 +1,209 @@
+[
+  {
+    "case": "R1_approved",
+    "consume": {
+      "execution_match": "MATCH",
+      "reason_codes": [],
+      "released": true,
+      "verdict": "VERIFIED"
+    },
+    "display": "Gross margin: $400.00 USD \u00b7 VERIFIED",
+    "first_verify": {
+      "execution_match": "MATCH",
+      "reason_codes": [],
+      "released": false,
+      "verdict": "VERIFIED"
+    },
+    "fresh_process_verify": {
+      "eah": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+      "execution_match": "MATCH",
+      "rc": "ad0d75e236cf9003baa28e63b7739802e8c64e90622641e3891c29e7554bad70",
+      "reason_codes": [],
+      "verdict": "VERIFIED"
+    },
+    "job": {
+      "cache_hit": false,
+      "created": "2026-09-05T23:56:11.064000+00:00",
+      "job_id": "okf_rcpt_9e98122903b09728ef305564_9c851d3d5c44e0c8",
+      "slot_millis": 37,
+      "state": "DONE",
+      "total_bytes_billed": 73400320,
+      "total_bytes_processed": 591,
+      "user_email": "raincoatrun@gmail.com"
+    },
+    "recorded_at": "2026-09-05T23:56:16.890819+00:00"
+  },
+  {
+    "case": "R2_sql_substitution",
+    "consume": {
+      "execution_match": "MISMATCH",
+      "reason_codes": [
+        "sql_mismatch"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    "job": {
+      "cache_hit": false,
+      "created": "2026-09-05T23:56:17.093000+00:00",
+      "job_id": "okf_rcpt_236396cc55221c6df44201d4_6bc5866c7d85eccb",
+      "slot_millis": 47,
+      "state": "DONE",
+      "total_bytes_billed": 73400320,
+      "total_bytes_processed": 495,
+      "user_email": "raincoatrun@gmail.com"
+    },
+    "recorded_at": "2026-09-05T23:56:20.201417+00:00",
+    "wrong_job_actual_value": "600"
+  },
+  {
+    "case": "R3_parameter_substitution",
+    "changed_period_actual_value": "515",
+    "consume": {
+      "execution_match": "MISMATCH",
+      "reason_codes": [
+        "parameter_mismatch"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    "job": {
+      "cache_hit": false,
+      "created": "2026-09-05T23:56:20.469000+00:00",
+      "job_id": "okf_rcpt_a1ca0ac0d57e3bf5e873f299_210b78e7849efbb3",
+      "slot_millis": 34,
+      "state": "DONE",
+      "total_bytes_billed": 73400320,
+      "total_bytes_processed": 591,
+      "user_email": "raincoatrun@gmail.com"
+    },
+    "recorded_at": "2026-09-05T23:56:22.430989+00:00"
+  },
+  {
+    "case": "R4_display_substitution",
+    "claims": {
+      "value_600": {
+        "execution_match": "MATCH",
+        "reason_codes": [
+          "display_mismatch"
+        ],
+        "released": false,
+        "verdict": "REJECTED"
+      },
+      "wrong_field": {
+        "execution_match": "MATCH",
+        "reason_codes": [
+          "display_mismatch"
+        ],
+        "released": false,
+        "verdict": "REJECTED"
+      },
+      "wrong_unit": {
+        "execution_match": "MATCH",
+        "reason_codes": [
+          "display_mismatch"
+        ],
+        "released": false,
+        "verdict": "REJECTED"
+      }
+    },
+    "job": {
+      "cache_hit": false,
+      "created": "2026-09-05T23:56:23.034000+00:00",
+      "job_id": "okf_rcpt_0d5dee6d11a98c7551a44b04_c890dce166d831b4",
+      "slot_millis": 59,
+      "state": "DONE",
+      "total_bytes_billed": 73400320,
+      "total_bytes_processed": 591,
+      "user_email": "raincoatrun@gmail.com"
+    },
+    "recorded_at": "2026-09-05T23:56:24.329462+00:00"
+  },
+  {
+    "case": "R5_missing_evidence",
+    "invented_job": {
+      "execution_match": "UNKNOWN",
+      "reason_codes": [
+        "job_missing"
+      ],
+      "released": false,
+      "verdict": "UNVERIFIABLE"
+    },
+    "metadata_only": {
+      "execution_match": "MATCH",
+      "reason_codes": [
+        "result_unavailable"
+      ],
+      "released": false,
+      "verdict": "UNVERIFIABLE"
+    },
+    "recorded_at": "2026-09-05T23:56:25.807976+00:00"
+  },
+  {
+    "case": "R8_identity_spoof",
+    "consume": {
+      "execution_match": "MISMATCH",
+      "reason_codes": [
+        "owner_mismatch"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    "granted_at": "2026-09-05T23:56:27.615435+00:00",
+    "job": {
+      "cache_hit": false,
+      "created": "2026-09-05T23:56:28.972000+00:00",
+      "job_id": "okf_rcpt_2af7ac1fcedc0d6dcc17985b_be9060b46c4e965f",
+      "slot_millis": 48,
+      "state": "DONE",
+      "total_bytes_billed": 73400320,
+      "total_bytes_processed": 591,
+      "user_email": "okf-receipt-restricted@test-project-0728-467323.iam.gserviceaccount.com"
+    },
+    "label_claimed_requester": "raincoatrun@gmail.com",
+    "recorded_at": "2026-09-05T23:56:30.122589+00:00"
+  },
+  {
+    "case": "R9_revocation_output_denial",
+    "consume_after_revocation": {
+      "execution_match": "MATCH",
+      "reason_codes": [
+        "access_denied"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    "job": {
+      "cache_hit": false,
+      "created": "2026-09-05T23:56:34.981000+00:00",
+      "job_id": "okf_rcpt_e351983f98432d5ac5119a18_7e0d4556bbda7dd2",
+      "slot_millis": 35,
+      "state": "DONE",
+      "total_bytes_billed": 73400320,
+      "total_bytes_processed": 591,
+      "user_email": "okf-receipt-restricted@test-project-0728-467323.iam.gserviceaccount.com"
+    },
+    "recorded_at": "2026-09-05T23:57:01.200624+00:00",
+    "restricted_principal": "okf-receipt-restricted@test-project-0728-467323.iam.gserviceaccount.com",
+    "restricted_reads_user_job": {
+      "execution_match": "UNKNOWN",
+      "reason_codes": [
+        "job_read_denied"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    "timeline": {
+      "allowed_probe_at": 1788652594,
+      "denied_probe_at": 1788652620,
+      "granted_at": "2026-09-05T23:56:33.714759+00:00",
+      "revoked_at": "2026-09-05T23:56:38.814590+00:00"
+    },
+    "verify_before_revocation": {
+      "execution_match": "MATCH",
+      "reason_codes": [],
+      "released": false,
+      "verdict": "VERIFIED"
+    }
+  }
+]

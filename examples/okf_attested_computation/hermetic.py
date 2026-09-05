@@ -128,7 +128,11 @@ class HermeticCallerClient:
       raise verify_mod.EvidenceError("Access Denied", 403)
     value = self._evaluate(sql, parameters)
     self._fake.jobs[key] = {
-        "jobReference": {"projectId": project, "location": location, "jobId": job_id},
+        "jobReference": {
+            "projectId": project,
+            "location": location,
+            "jobId": job_id,
+        },
         "user_email": self._principal,
         "status": {"state": "DONE"},
         "configuration": {
@@ -167,7 +171,15 @@ class HermeticCallerClient:
     self._fake.results[key] = {
         "kind": "bigquery#getQueryResultsResponse",
         "jobComplete": True,
-        "schema": {"fields": [{"name": "gross_margin_usd", "type": "NUMERIC", "mode": "NULLABLE"}]},
+        "schema": {
+            "fields": [
+                {
+                    "name": "gross_margin_usd",
+                    "type": "NUMERIC",
+                    "mode": "NULLABLE",
+                }
+            ]
+        },
         "totalRows": "1",
         "rows": [{"f": [{"v": value}]}],
         "cacheHit": False,
@@ -187,14 +199,24 @@ class HermeticCallerClient:
     res = self._fake.jobs.get(key)
     if res is None:
       raise verify_mod.EvidenceError("Not found", 404)
-    if res["user_email"] != self._principal and self._principal not in self._fake.job_readers:
+    if (
+        res["user_email"] != self._principal
+        and self._principal not in self._fake.job_readers
+    ):
       raise verify_mod.EvidenceError("Access Denied", 403)
 
 
 class HermeticEvidenceClient:
   """Verifier-side emulation. ``mode`` selects an evidence failure model."""
 
-  MODES = ("full", "metadata_only", "job_denied", "result_denied", "transient", "missing")
+  MODES = (
+      "full",
+      "metadata_only",
+      "job_denied",
+      "result_denied",
+      "transient",
+      "missing",
+  )
 
   def __init__(self, fake: FakeBigQuery, principal: str, mode: str = "full"):
     if mode not in self.MODES:
@@ -204,7 +226,9 @@ class HermeticEvidenceClient:
     self.mode = mode
     self.calls: list[tuple[str, str]] = []
 
-  def _lookup(self, store: dict, project: str, location: str, job_id: str, what: str) -> dict:
+  def _lookup(
+      self, store: dict, project: str, location: str, job_id: str, what: str
+  ) -> dict:
     self.calls.append((what, job_id))
     if self.mode == "transient":
       raise verify_mod.EvidenceUnavailable("503 backend unavailable", 503)
@@ -220,8 +244,13 @@ class HermeticEvidenceClient:
     if key not in store:
       raise verify_mod.EvidenceError("Not found", 404)
     res = store[key]
-    owner = self._fake.jobs[key]["user_email"] if key in self._fake.jobs else None
-    if owner != self._principal and self._principal not in self._fake.job_readers:
+    owner = (
+        self._fake.jobs[key]["user_email"] if key in self._fake.jobs else None
+    )
+    if (
+        owner != self._principal
+        and self._principal not in self._fake.job_readers
+    ):
       raise verify_mod.EvidenceError("Access Denied", 403)
     return copy.deepcopy(res)
 
@@ -246,7 +275,9 @@ class HermeticEvidenceClient:
     self.get_job(job["project"], job["location"], job["job_id"])
 
 
-def fixture_world(principal: str = "requester@example.test") -> tuple[FakeBigQuery, dict]:
+def fixture_world(
+    principal: str = "requester@example.test",
+) -> tuple[FakeBigQuery, dict]:
   """A FakeBigQuery with the fixture publication granted to ``principal``."""
   pub = publication_mod.load_fixture_publication(HERE)
   fake = FakeBigQuery()
@@ -255,4 +286,6 @@ def fixture_world(principal: str = "requester@example.test") -> tuple[FakeBigQue
 
 
 def fingerprint(obj: Any) -> str:
-  return hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()[:16]
+  return hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()[
+      :16
+  ]

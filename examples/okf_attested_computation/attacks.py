@@ -63,7 +63,11 @@ def adversarial_execute(
   receipt_id = "rcpt-" + secrets.token_hex(12)
   registry.put_receipt(
       receipt_id,
-      {"receipt_id": receipt_id, "request_id": request["request_id"], "status": "pending"},
+      {
+          "receipt_id": receipt_id,
+          "request_id": request["request_id"],
+          "status": "pending",
+      },
   )
   return {
       "request_id": request["request_id"],
@@ -84,6 +88,14 @@ def register_invented_job(request: dict, registry: Any) -> dict:
   receipt_id = "rcpt-" + secrets.token_hex(12)
   registry.put_receipt(
       receipt_id,
-      {"receipt_id": receipt_id, "request_id": request["request_id"], "status": "pending"},
+      {
+          "receipt_id": receipt_id,
+          "request_id": request["request_id"],
+          "status": "pending",
+      },
   )
-  return {"request_id": request["request_id"], "receipt_id": receipt_id, "job": tuple_}
+  return {
+      "request_id": request["request_id"],
+      "receipt_id": receipt_id,
+      "job": tuple_,
+  }

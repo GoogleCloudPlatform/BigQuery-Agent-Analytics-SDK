@@ -31,23 +31,25 @@ from typing import Any, Callable
 import contracts
 import publication as publication_mod
 
-RESERVED_PARAMETER_NAMES = frozenset({
-    "sql",
-    "query",
-    "requester",
-    "user",
-    "user_email",
-    "identity",
-    "job_id",
-    "job",
-    "nonce",
-    "audience",
-    "expires_at",
-    "publication",
-    "verdict",
-    "receipt",
-    "key",
-})
+RESERVED_PARAMETER_NAMES = frozenset(
+    {
+        "sql",
+        "query",
+        "requester",
+        "user",
+        "user_email",
+        "identity",
+        "job_id",
+        "job",
+        "nonce",
+        "audience",
+        "expires_at",
+        "publication",
+        "verdict",
+        "receipt",
+        "key",
+    }
+)
 
 # Access probe outcomes (spec section 4).
 ALLOWED = "ALLOWED"
@@ -113,12 +115,12 @@ def open_live_session(project: str, location: str) -> Session:
   email = info.get("email")
   if not email:
     raise contracts.ContractError("credential has no verified email")
-  kind = (
-      "service_account" if email.endswith("gserviceaccount.com") else "user"
-  )
+  kind = "service_account" if email.endswith("gserviceaccount.com") else "user"
 
   def _factory() -> Any:
-    return bigquery.Client(project=project, location=location, credentials=creds)
+    return bigquery.Client(
+        project=project, location=location, credentials=creds
+    )
 
   return Session(email, kind, _factory)
 
@@ -147,7 +149,9 @@ def open_impersonated_session(
   creds.refresh(google.auth.transport.requests.Request())
 
   def _factory() -> Any:
-    return bigquery.Client(project=project, location=location, credentials=creds)
+    return bigquery.Client(
+        project=project, location=location, credentials=creds
+    )
 
   return Session(target_principal, "service_account", _factory)
 
@@ -260,7 +264,12 @@ def probe_access(client: Any, request: dict) -> dict:
   """
   outcome: dict[str, Any] = {"sources": None, "output": None}
   for name, call in (
-      ("sources", lambda: client.probe_sources(request["compiled_sql"], request["parameters"])),
+      (
+          "sources",
+          lambda: client.probe_sources(
+              request["compiled_sql"], request["parameters"]
+          ),
+      ),
       ("output", lambda: client.probe_output(request.get("job"))),
   ):
     try:

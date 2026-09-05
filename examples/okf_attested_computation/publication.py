@@ -72,11 +72,13 @@ def _parse_parameters(frontmatter: str) -> list[dict]:
     if in_block:
       m = _PARAM_RE.match(line)
       if m:
-        params.append({
-            "name": m.group(1),
-            "type": m.group(2).upper(),
-            "required": m.group(3) == "true",
-        })
+        params.append(
+            {
+                "name": m.group(1),
+                "type": m.group(2).upper(),
+                "required": m.group(3) == "true",
+            }
+        )
         continue
       if line.strip() and not line.startswith(" "):
         in_block = False
@@ -149,7 +151,9 @@ def load_publication(bundle_dir: str, manifest: dict) -> dict:
   )
   if output["type"] != "NUMERIC":
     raise contracts.ContractError("only a NUMERIC output is supported")
-  contracts.validate_claim({"field": output["field"], "value": "0", "unit": output["unit"]})
+  contracts.validate_claim(
+      {"field": output["field"], "value": "0", "unit": output["unit"]}
+  )
 
   pub = {
       "publication_id": manifest["publication_id"],

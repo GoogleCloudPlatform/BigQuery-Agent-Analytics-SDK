@@ -100,7 +100,11 @@ def execute(
   receipt_id = "rcpt-" + secrets.token_hex(12)
   registry.put_receipt(
       receipt_id,
-      {"receipt_id": receipt_id, "request_id": request["request_id"], "status": "pending"},
+      {
+          "receipt_id": receipt_id,
+          "request_id": request["request_id"],
+          "status": "pending",
+      },
   )
   return {
       "request_id": request["request_id"],
@@ -158,7 +162,9 @@ class BigQueryCallerClient:
         labels=labels,
     )
     try:
-      job = self._client.query(sql, job_config=cfg, job_id=job_id, job_retry=None)
+      job = self._client.query(
+          sql, job_config=cfg, job_id=job_id, job_retry=None
+      )
     except exceptions.Conflict as exc:
       raise JobAlreadyExists(job_id) from exc
     try:

@@ -54,6 +54,7 @@ class EvidenceUnavailable(EvidenceError):
 
 
 class _Outcome(Exception):
+
   def __init__(self, verdict: str, match: str, reasons: list[str]):
     super().__init__(verdict)
     self.verdict, self.match, self.reasons = verdict, match, reasons
@@ -84,7 +85,9 @@ def _read(fn, *args, what: str, match: str = contracts.UNKNOWN) -> Any:
 def _reload_publication(request: dict, trusted_bundle_dir: str | None) -> dict:
   bundle_dir = trusted_bundle_dir or request["bundle_dir"]
   try:
-    manifest = publication_mod.load_manifest(Path(bundle_dir) / "publication.json")
+    manifest = publication_mod.load_manifest(
+        Path(bundle_dir) / "publication.json"
+    )
     pub = publication_mod.load_publication(bundle_dir, manifest)
   except (OSError, ValueError) as exc:
     raise _unverifiable(contracts.UNKNOWN, "publication_unavailable") from exc
@@ -99,7 +102,9 @@ def _reload_publication(request: dict, trusted_bundle_dir: str | None) -> dict:
   return pub
 
 
-def _check_job_resource(job: Any, tuple_: dict, request: dict, pub: dict) -> dict:
+def _check_job_resource(
+    job: Any, tuple_: dict, request: dict, pub: dict
+) -> dict:
   """Compare the authoritative Job resource with the approved request."""
   if not isinstance(job, dict):
     raise _unverifiable(contracts.UNKNOWN, "job_malformed")
@@ -172,7 +177,8 @@ def _check_job_resource(job: Any, tuple_: dict, request: dict, pub: dict) -> dic
   if refs is None:
     raise _unverifiable(contracts.UNKNOWN, "dependencies_missing")
   referenced = sorted(
-      f"{t.get('projectId')}.{t.get('datasetId')}.{t.get('tableId')}" for t in refs
+      f"{t.get('projectId')}.{t.get('datasetId')}.{t.get('tableId')}"
+      for t in refs
   )
   if referenced != sorted(pub["dependencies"]):
     raise _rejected(contracts.MISMATCH, "dependency_mismatch")
@@ -375,7 +381,20 @@ def verify(
       "verdict": verdict,
       "reason_codes": reasons,
   }
-  return _finish(out, request, tuple_, keys, match, verdict, reasons, result, details, store, receipt_id, now)
+  return _finish(
+      out,
+      request,
+      tuple_,
+      keys,
+      match,
+      verdict,
+      reasons,
+      result,
+      details,
+      store,
+      receipt_id,
+      now,
+  )
 
 
 def _finish(

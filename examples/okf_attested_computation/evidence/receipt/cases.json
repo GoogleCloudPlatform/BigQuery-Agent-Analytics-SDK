@@ -1,0 +1,208 @@
+{
+  "cases": [
+    {
+      "attack": null,
+      "case": "approved",
+      "execution_match": "MATCH",
+      "extra": {},
+      "job_id": "okf_rcpt_a759e9d016efd425ea9d625b_ff51609dab3c2681",
+      "mode": "hermetic",
+      "reason_codes": [],
+      "released": true,
+      "verdict": "VERIFIED"
+    },
+    {
+      "attack": "valid approved run; agent claims 600",
+      "case": "display-substitution",
+      "execution_match": "MATCH",
+      "extra": {},
+      "job_id": "okf_rcpt_869c522b02f3bc6091d75cf2_0177ec27d6d595c1",
+      "mode": "hermetic",
+      "reason_codes": [
+        "display_mismatch"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    {
+      "attack": "invented job id never submitted",
+      "case": "missing-evidence",
+      "execution_match": "UNKNOWN",
+      "extra": {
+        "metadata_only": {
+          "execution_match": "MATCH",
+          "reason_codes": [
+            "result_unavailable"
+          ],
+          "verdict": "UNVERIFIABLE"
+        }
+      },
+      "job_id": "okf_rcpt_invented_7d15c1424173",
+      "mode": "hermetic",
+      "reason_codes": [
+        "job_missing"
+      ],
+      "released": false,
+      "verdict": "UNVERIFIABLE"
+    },
+    {
+      "attack": "approved SQL with period_end=2026-02-28; agent claims 515",
+      "case": "parameter-substitution",
+      "execution_match": "MISMATCH",
+      "extra": {},
+      "job_id": "okf_rcpt_843e908a38502d144d7f24ea_9fe9c370f20f5b39",
+      "mode": "hermetic",
+      "reason_codes": [
+        "parameter_mismatch"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    {
+      "attack": "same receipt consumed twice",
+      "case": "replay",
+      "execution_match": "UNKNOWN",
+      "extra": {
+        "first_consumption": "VERIFIED"
+      },
+      "job_id": "okf_rcpt_b958f1349bb35d1fb22f322c_7b470d63d56c8a08",
+      "mode": "hermetic",
+      "reason_codes": [
+        "request_consumed"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    {
+      "attack": "product-cost-only formula; agent claims 600",
+      "case": "sql-substitution",
+      "execution_match": "MISMATCH",
+      "extra": {},
+      "job_id": "okf_rcpt_b0a6426aef799ba8d51e8435_a8b4bd0cf096d1cd",
+      "mode": "hermetic",
+      "reason_codes": [
+        "sql_mismatch"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    {
+      "attack": "stored receipt job_id mutated after sealing",
+      "case": "tamper",
+      "execution_match": "UNKNOWN",
+      "extra": {
+        "verify_before_tamper": "VERIFIED"
+      },
+      "job_id": "okf_rcpt_9b0dbe6b6b9f2121d4d231e8_c74af49bf4000ba3",
+      "mode": "hermetic",
+      "reason_codes": [
+        "receipt_integrity_failed"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    {
+      "attack": null,
+      "case": "approved",
+      "execution_match": "MATCH",
+      "extra": {},
+      "job_id": "okf_rcpt_72517924d1c070745ec94f0a_1f06f6d54473a1e0",
+      "mode": "live",
+      "reason_codes": [],
+      "released": true,
+      "verdict": "VERIFIED"
+    },
+    {
+      "attack": "valid approved run; agent claims 600",
+      "case": "display-substitution",
+      "execution_match": "MATCH",
+      "extra": {},
+      "job_id": "okf_rcpt_75d11380d4c40eac120a4ed7_f29638e467b30064",
+      "mode": "live",
+      "reason_codes": [
+        "display_mismatch"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    {
+      "attack": "invented job id never submitted",
+      "case": "missing-evidence",
+      "execution_match": "UNKNOWN",
+      "extra": {
+        "metadata_only": {
+          "execution_match": "UNKNOWN",
+          "reason_codes": [
+            "request_expired"
+          ],
+          "verdict": "REJECTED"
+        }
+      },
+      "job_id": "okf_rcpt_invented_99db90f081b1",
+      "mode": "live",
+      "reason_codes": [
+        "job_missing"
+      ],
+      "released": false,
+      "verdict": "UNVERIFIABLE"
+    },
+    {
+      "attack": "approved SQL with period_end=2026-02-28; agent claims 515",
+      "case": "parameter-substitution",
+      "execution_match": "MISMATCH",
+      "extra": {},
+      "job_id": "okf_rcpt_a39df03942574d4b99cf9a42_835abec0538af20a",
+      "mode": "live",
+      "reason_codes": [
+        "parameter_mismatch"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    {
+      "attack": "same receipt consumed twice",
+      "case": "replay",
+      "execution_match": "UNKNOWN",
+      "extra": {
+        "first_consumption": "VERIFIED"
+      },
+      "job_id": "okf_rcpt_cdb8c6ac514a4f56eb554562_fb0a3e38a7d39955",
+      "mode": "live",
+      "reason_codes": [
+        "request_consumed"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    {
+      "attack": "product-cost-only formula; agent claims 600",
+      "case": "sql-substitution",
+      "execution_match": "MISMATCH",
+      "extra": {},
+      "job_id": "okf_rcpt_34d0e6e6e36500cd25a291d9_828bcdd85e599f61",
+      "mode": "live",
+      "reason_codes": [
+        "sql_mismatch"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    {
+      "attack": "stored receipt job_id mutated after sealing",
+      "case": "tamper",
+      "execution_match": "UNKNOWN",
+      "extra": {
+        "verify_before_tamper": "VERIFIED"
+      },
+      "job_id": "okf_rcpt_b14082d067b4d582be0bc26f_e16294f3edfd5058",
+      "mode": "live",
+      "reason_codes": [
+        "receipt_integrity_failed"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    }
+  ],
+  "generated_from": "run.py --case ... [--live]",
+  "synthetic_fixture": true
+}

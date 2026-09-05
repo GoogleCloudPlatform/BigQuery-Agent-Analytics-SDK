@@ -23,7 +23,8 @@ pins its output so the two cannot drift silently.
 from __future__ import annotations
 
 import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
+from decimal import InvalidOperation
 import hashlib
 import hmac
 import re
@@ -152,7 +153,9 @@ def cbor(obj: Any) -> bytes:
 
 def digest(domain: str, obj: Any) -> str:
   """Domain-separated SHA-256 hex over canonical CBOR."""
-  return hashlib.sha256(domain.encode("ascii") + b"\x00" + cbor(obj)).hexdigest()
+  return hashlib.sha256(
+      domain.encode("ascii") + b"\x00" + cbor(obj)
+  ).hexdigest()
 
 
 def digest_bytes(domain: str, raw: bytes) -> str:
