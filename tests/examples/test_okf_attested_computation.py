@@ -371,6 +371,8 @@ def metadata_only_client(world):
 def _verify(
     request_, receipt, client, registry, keys, claim=GOOD, now=1100, **kw
 ):
+  # These fixtures use synthetic timestamps; keep the production clock real.
+  kw.setdefault("clock", lambda: now)
   return verify_mod.verify(
       request_["request_id"],
       receipt["receipt_id"],
@@ -387,6 +389,7 @@ def _verify(
 def _consume(
     request_, receipt, client, registry, keys, claim=GOOD, now=1100, **kw
 ):
+  kw.setdefault("clock", lambda: now)
   return consume_mod.consume(
       request_["request_id"],
       receipt["receipt_id"],
@@ -1404,13 +1407,13 @@ def test_p2_5_consumption_transaction_enforces_deadline(registry):
   assert not registry.is_consumed("req-b")
 
 
-def test_p2_5_default_clock_is_entry_relative_and_monotonic():
-  clock = contracts.trusted_clock(1299)
-  first = clock()
-  assert first >= 1299
-  assert clock() >= first
-  explicit = contracts.trusted_clock(1299, lambda: 5)
-  assert explicit() == 5
+def test_p2_5_injected_clock_is_preserved():
+  explicit = _FakeClock(5)
+  clock = contracts.trusted_clock(1299, explicit)
+  assert clock is explicit
+  assert clock() == 5
+  explicit.advance(1)
+  assert clock() == 6
 
 
 def test_p2_5_release_still_works_just_inside_deadline(
@@ -1527,6 +1530,64 @@ def test_p2_5b_fractional_deadline_crossing_blocks_through_cli_helper(tmp_path):
   world.registry.close()
 
 
+@pytest.mark.parametrize(
+    "sample_at,construct_at,read_at,expected_verdict",
+    [
+        (1299.9995, 1300.0005, 1300.25, "REJECTED"),
+        (1298.9995, 1299.0005, 1299.25, "VERIFIED"),
+    ],
+)
+def test_p2_5c_cli_clock_construction_crosses_second_boundary(
+    tmp_path, sample_at, construct_at, read_at, expected_verdict
+):
+  """A pause after CLI timestamp sampling must not move the deadline."""
+  world, req, handle = _fractional_world(tmp_path)
+  wall = [sample_at]
+  now_reads = [0]
+  original_now = run_mod._now
+
+  def sample_then_pause():
+    sampled = original_now()
+    now_reads[0] += 1
+    if now_reads[0] == 2:  # pause after the consumer's timestamp sample
+      wall[0] = construct_at
+    return sampled
+
+  factory = world.evidence
+
+  def evidence_factory(mode="full"):
+    ev = factory(mode)
+    reader = ev.get_query_results
+
+    def read(*args):
+      if now_reads[0] == 2:
+        wall[0] = read_at
+      return reader(*args)
+
+    ev.get_query_results = read
+    return ev
+
+  try:
+    with (
+        mock.patch("time.time", side_effect=lambda: wall[0]),
+        mock.patch.object(run_mod, "_now", side_effect=sample_then_pause),
+        mock.patch.object(world, "evidence", side_effect=evidence_factory),
+    ):
+      issued, out = run_mod._issue_then_consume(world, req, handle, GOOD)
+    assert issued["verdict"] == "VERIFIED"
+    assert out["verdict"] == expected_verdict, out
+    if expected_verdict == "REJECTED":
+      assert out["reason_codes"] == ["request_expired"]
+      assert "value" not in out and "display" not in out
+      assert not world.registry.is_consumed(req["request_id"])
+    else:
+      assert out["reason_codes"] == []
+      assert out["display"] == "Gross margin: $400.00 USD · VERIFIED"
+      assert world.registry.is_consumed(req["request_id"])
+  finally:
+    world.registry.close()
+
+
 def test_p2_5b_fractional_just_inside_deadline_still_releases(tmp_path):
   """Liveness guard: 1299.10 -> 1299.60 stays before 1300 and releases."""
   world, req, handle = _fractional_world(tmp_path)
@@ -1555,10 +1616,11 @@ def test_p2_5b_fractional_just_inside_deadline_still_releases(tmp_path):
   world.registry.close()
 
 
-def test_p2_5b_default_clock_is_wall_aligned_and_fractional():
+@pytest.mark.parametrize("caller_now", [1000, 1299, 1301])
+def test_p2_5b_default_clock_is_wall_aligned_and_fractional(caller_now):
   wall = [1299.75]
   with mock.patch("time.time", side_effect=lambda: wall[0]):
-    clock = contracts.trusted_clock(1299)
+    clock = contracts.trusted_clock(caller_now)
     assert clock() == pytest.approx(1299.75)
     wall[0] = 1300.25
     assert clock() == pytest.approx(1300.25)

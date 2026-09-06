@@ -192,27 +192,19 @@ def trusted_clock(
 ) -> Callable[[], float]:
   """Return a clock the verifier/consumer re-samples before every gate.
 
-  ``now`` is the caller's entry timestamp, an integer second. When no
-  explicit ``clock`` is injected, the returned clock reports fractional
-  time aligned to the absolute wall clock: it anchors ``now`` to the whole
-  second in which this call happened, then adds the exact wall time
-  elapsed since that second boundary. A read that ends at 1300.25 after an
-  entry at 1299.75 (``now`` 1299) therefore reads 1300.25, not 1299, so a
-  deadline of 1300 is honoured. With a synthetic ``now`` the clock is at
-  most one second stricter than the caller's timestamp, never looser. It
-  is clamped so it never runs backwards; a forward wall-clock jump only
-  makes expiry stricter.
+  The default reads fractional absolute wall time, independently of the
+  caller's earlier integer ``now``. Sampling ``now`` and constructing this
+  clock may cross a second boundary; rebasing to ``now`` would move every
+  deadline check behind wall time. The clock is clamped so it never runs
+  backwards; a forward wall-clock jump only makes expiry stricter.
+  Synthetic timelines must use an explicit ``clock``, returned unchanged.
   """
   if clock is not None:
     return clock
-  entry_wall = time.time()
-  entry_second = float(int(entry_wall))
-  base = float(int(now))
-  latest = [base + (entry_wall - entry_second)]
+  latest = [time.time()]
 
   def _clock() -> float:
-    sample = base + (time.time() - entry_second)
-    latest[0] = max(latest[0], sample)
+    latest[0] = max(latest[0], time.time())
     return latest[0]
 
   return _clock
