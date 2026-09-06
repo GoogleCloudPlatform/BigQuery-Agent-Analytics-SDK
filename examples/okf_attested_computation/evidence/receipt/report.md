@@ -24,8 +24,11 @@ compensate for the graph spike.
 ## Review fix pass (2026-09-06)
 
 Astra requested changes on `67889b0` (one P1, six P2); Opus filed three
-overlapping findings. All are fixed in this pass and covered by new
-hermetic tests; the live suite and all seven CLI live cases were rerun.
+overlapping findings. Six were closed in `05fc445`; Astra's re-review
+found P2 #5 only partially fixed (the consumer still judged expiry against
+its entry timestamp after remote reads). The residual is closed in the
+follow-up commit below. Every row is covered by hermetic tests; the live
+suite and the seven CLI live cases were rerun after each pass.
 
 | # | Finding | Fix | Test |
 |---|---|---|---|
@@ -33,7 +36,7 @@ hermetic tests; the live suite and all seven CLI live cases were rerun.
 | P2 | `Decimal.normalize()` under default precision collapsed distinct 38-digit NUMERIC values; `InvalidOperation` escaped | fixed 120-digit local context, 76-digit cap, every `ArithmeticError` mapped to `ContractError` at both the verifier and renderer | `test_decimal_string_is_exact_for_38_digit_numeric` |
 | P2 | no hard cost ceiling | `HARD_MAX_BYTES_BILLED = 1 GiB`; a dry run above it refuses submission; the cap is `min(1 GiB, max(100 MiB, 4×dry-run))` | `test_executor_enforces_hard_cost_ceiling` |
 | P2 | README marked transient-API and full R6/R7 rows as live | table now labels those rows hermetic only | n/a |
-| P2 | CLI captured the clock before approval and reused it | `run.py` reads the clock fresh at each verify/consume call | CLI cases |
+| P2 #5 | CLI captured the clock before approval and reused it; consumer then judged expiry only against its entry `now`, so a request expiring during `getQueryResults` / access probe still released | `run.py` reads the clock fresh per call; `contracts.trusted_clock` (injectable, entry-relative, never backwards) is re-sampled by the verifier after the result read and by the consumer after reads, probes and rendering; `Registry.try_consume` re-checks the deadline **inside** the `BEGIN IMMEDIATE` transaction and returns `expired` without inserting | `test_p2_5_expiry_crossed_during_consumer_reads_blocks_release` (result read / source probe / output probe), `test_p2_5_verifier_rechecks_expiry_after_result_read`, `test_p2_5_consumption_transaction_enforces_deadline`, `test_p2_5_release_still_works_just_inside_deadline`; Astra's `probes.py` `prior_5` now records REJECTED, no value, nonce unconsumed |
 | P2 | a failed display claim overwrote the sealed VERIFIED receipt | the sealed receipt records the evidence verdict only; the claim is bound at return/consume time; an authentic VERIFIED receipt is never downgraded, an UNVERIFIABLE one may be upgraded, a record failing integrity is kept as tamper evidence | `test_wrong_claim_does_not_overwrite_verified_receipt`, `test_verify_can_upgrade_unverifiable_but_never_downgrade_verified`; live R4 now runs all three wrong claims and then releases the honest one |
 | P2 | rendering ran after `consume_once` | render first; a render failure returns `UNVERIFIABLE render_failed` with the nonce intact | `test_render_failure_does_not_spend_nonce` |
 

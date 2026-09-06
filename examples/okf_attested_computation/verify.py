@@ -315,13 +315,18 @@ def verify(
     *,
     keys: receipt_store.KeyStore | None = None,
     trusted_bundle_dir: str | None = None,
+    clock: Any = None,
 ) -> dict:
   """Independently verify a registered execution and bind the claim.
 
   ``store`` is the receipt store (may be the same object as ``registry``).
   ``keys`` is the verifier-owned :class:`KeyStore`; when omitted no receipt
-  can be sealed and the verdict is UNVERIFIABLE.
+  can be sealed and the verdict is UNVERIFIABLE. ``now`` is the entry
+  timestamp; the request deadline is re-checked against the trusted
+  ``clock`` after the remote reads so a slow read cannot carry an expired
+  request into VERIFIED.
   """
+  clock = contracts.trusted_clock(now, clock)
   match = contracts.UNKNOWN
   reasons: list[str] = []
   verdict = contracts.UNVERIFIABLE
@@ -361,6 +366,8 @@ def verify(
     match = contracts.MATCH
     authoritative = _read_result(evidence_client, tuple_, pub)
     details["result_schema"] = [pub["output"]["field"], pub["output"]["type"]]
+    if broker.request_is_expired(request, clock()):
+      raise _rejected(contracts.MATCH, "request_expired")
     result = authoritative
     verdict = contracts.VERIFIED
   except _Outcome as outcome:

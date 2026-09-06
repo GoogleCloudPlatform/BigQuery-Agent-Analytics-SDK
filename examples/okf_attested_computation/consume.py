@@ -60,8 +60,15 @@ def consume(
     *,
     keys: receipt_store.KeyStore | None = None,
     trusted_bundle_dir: str | None = None,
+    clock: Any = None,
 ) -> dict:
-  """Gate and render one governed value; see module docstring."""
+  """Gate and render one governed value; see module docstring.
+
+  ``now`` is the entry timestamp. Deadlines are re-sampled from the trusted
+  ``clock`` after every remote read and again inside the consumption
+  transaction, so a request that expires mid-consume is rejected.
+  """
+  clock = contracts.trusted_clock(now, clock)
   if keys is None:
     return _fail(
         contracts.UNVERIFIABLE,
@@ -199,6 +206,7 @@ def consume(
       now,
       keys=keys,
       trusted_bundle_dir=trusted_bundle_dir,
+      clock=clock,
   )
   if fresh["verdict"] != contracts.VERIFIED or "value" not in fresh:
     return _fail(
@@ -301,10 +309,35 @@ def consume(
         receipt_id,
     )
 
-  # 7. Atomic one-time consumption.
-  if not registry.consume_once(
-      request_id, request["nonce"], request["audience"]
-  ):
+  # 7. Deadline re-check after reads, probes and rendering, then atomic
+  #    one-time consumption with the deadline enforced inside the transaction.
+  deadline = request["expires_at"]
+  if prior is not None:
+    deadline = min(deadline, prior["expires_at"])
+  if clock() >= deadline or broker.request_is_expired(request, clock()):
+    return _fail(
+        contracts.REJECTED,
+        contracts.MATCH,
+        ["request_expired"],
+        request_id,
+        receipt_id,
+    )
+  gate = registry.try_consume(
+      request_id,
+      request["nonce"],
+      request["audience"],
+      deadline=deadline,
+      clock=clock,
+  )
+  if gate == "expired":
+    return _fail(
+        contracts.REJECTED,
+        contracts.MATCH,
+        ["request_expired"],
+        request_id,
+        receipt_id,
+    )
+  if gate != "consumed":
     return _fail(
         contracts.REJECTED,
         contracts.MATCH,

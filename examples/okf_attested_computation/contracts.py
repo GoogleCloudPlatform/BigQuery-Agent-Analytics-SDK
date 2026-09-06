@@ -29,7 +29,8 @@ from decimal import localcontext
 import hashlib
 import hmac
 import re
-from typing import Any
+import time
+from typing import Any, Callable
 import unicodedata
 
 RECEIPT_VERSION = "okf-receipt-spike/v1"
@@ -179,6 +180,36 @@ def commit(key: bytes, domain: str, obj: Any) -> str:
 
 def constant_time_equal(a: str, b: str) -> bool:
   return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
+# --------------------------------------------------------------------------
+# Trusted clock
+# --------------------------------------------------------------------------
+
+
+def trusted_clock(
+    now: int, clock: Callable[[], int] | None = None
+) -> Callable[[], int]:
+  """Return a clock the verifier/consumer re-samples before every gate.
+
+  ``now`` is the caller's entry timestamp. When no explicit ``clock`` is
+  injected, the returned clock advances ``now`` by the wall-clock time
+  elapsed since this call (``time.time``), so long remote reads move it
+  past a deadline even when the caller's ``now`` was synthetic. It is
+  clamped so it never runs backwards; a forward wall-clock jump only makes
+  expiry stricter.
+  """
+  if clock is not None:
+    return clock
+  start = time.time()
+  latest = [int(now)]
+
+  def _clock() -> int:
+    sample = int(now) + int(time.time() - start)
+    latest[0] = max(latest[0], sample)
+    return latest[0]
+
+  return _clock
 
 
 # --------------------------------------------------------------------------

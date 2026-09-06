@@ -1297,3 +1297,123 @@ def test_render_failure_does_not_spend_nonce(
   ]
   assert "display" not in out and "value" not in out
   assert not registry.is_consumed(request_["request_id"])
+
+
+# -- Astra P2 #5: expiry crossed during reads must not release ----------------
+
+
+class _FakeClock:
+  """Controllable trusted clock for boundary tests."""
+
+  def __init__(self, start: int):
+    self.t = start
+
+  def __call__(self) -> int:
+    return self.t
+
+  def advance(self, seconds: int) -> None:
+    self.t += seconds
+
+
+class _SlowEvidence:
+  """Evidence client wrapper that advances the clock inside one method."""
+
+  def __init__(self, inner, clock: _FakeClock, during: str, seconds: int):
+    self._inner, self._clock, self._during, self._seconds = (
+        inner,
+        clock,
+        during,
+        seconds,
+    )
+
+  def _tick(self, name: str) -> None:
+    if name == self._during:
+      self._clock.advance(self._seconds)
+
+  def get_job(self, *a):
+    self._tick("get_job")
+    return self._inner.get_job(*a)
+
+  def get_query_results(self, *a):
+    self._tick("get_query_results")
+    return self._inner.get_query_results(*a)
+
+  def probe_sources(self, *a):
+    self._tick("probe_sources")
+    return self._inner.probe_sources(*a)
+
+  def probe_output(self, *a):
+    self._tick("probe_output")
+    return self._inner.probe_output(*a)
+
+
+@pytest.mark.parametrize(
+    "during", ["get_query_results", "probe_sources", "probe_output"]
+)
+def test_p2_5_expiry_crossed_during_consumer_reads_blocks_release(
+    request_, receipt, registry, keys, good_job_client, during
+):
+  """Astra reproduction: enter at 1299 (deadline 1300), reads take 2 s."""
+  _verify(request_, receipt, good_job_client, registry, keys)
+  clock = _FakeClock(1299)
+  slow = _SlowEvidence(good_job_client, clock, during, 2)
+  out = _consume(request_, receipt, slow, registry, keys, now=1299, clock=clock)
+  assert out["verdict"] == "REJECTED" and out["reason_codes"] == [
+      "request_expired"
+  ]
+  assert "display" not in out and "value" not in out
+  assert not registry.is_consumed(request_["request_id"])
+  assert clock() == 1301
+
+
+def test_p2_5_verifier_rechecks_expiry_after_result_read(
+    request_, receipt, registry, keys, good_job_client
+):
+  clock = _FakeClock(1299)
+  slow = _SlowEvidence(good_job_client, clock, "get_query_results", 2)
+  out = _verify(request_, receipt, slow, registry, keys, now=1299, clock=clock)
+  assert out["verdict"] == "REJECTED" and out["reason_codes"] == [
+      "request_expired"
+  ]
+  assert "value" not in out
+  stored = registry.get_receipt(receipt["receipt_id"])
+  assert stored["verdict"] != "VERIFIED"
+
+
+def test_p2_5_consumption_transaction_enforces_deadline(registry):
+  clock = _FakeClock(1299)
+  assert (
+      registry.try_consume("req-a", "n" * 64, AUD, deadline=1300, clock=clock)
+      == "consumed"
+  )
+  assert (
+      registry.try_consume("req-a", "n" * 64, AUD, deadline=1300, clock=clock)
+      == "already_consumed"
+  )
+  clock.advance(1)
+  assert (
+      registry.try_consume("req-b", "n" * 64, AUD, deadline=1300, clock=clock)
+      == "expired"
+  )
+  assert not registry.is_consumed("req-b")
+
+
+def test_p2_5_default_clock_is_entry_relative_and_monotonic():
+  clock = contracts.trusted_clock(1299)
+  first = clock()
+  assert first >= 1299
+  assert clock() >= first
+  explicit = contracts.trusted_clock(1299, lambda: 5)
+  assert explicit() == 5
+
+
+def test_p2_5_release_still_works_just_inside_deadline(
+    request_, receipt, registry, keys, good_job_client
+):
+  """Seal first, then a 1 s read that ends at 1299 (< 1300) still releases."""
+  _verify(request_, receipt, good_job_client, registry, keys)
+  clock = _FakeClock(1298)
+  slow = _SlowEvidence(good_job_client, clock, "get_query_results", 1)
+  out = _consume(request_, receipt, slow, registry, keys, now=1298, clock=clock)
+  assert out["verdict"] == "VERIFIED" and "display" in out, out
+  assert clock() == 1299

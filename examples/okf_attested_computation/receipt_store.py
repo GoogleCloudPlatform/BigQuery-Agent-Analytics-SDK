@@ -140,9 +140,31 @@ class Registry:
 
   def consume_once(self, request_id: str, nonce: str, audience: str) -> bool:
     """Atomically mark a request consumed. True exactly once per request."""
+    return self.try_consume(request_id, nonce, audience) == "consumed"
+
+  def try_consume(
+      self,
+      request_id: str,
+      nonce: str,
+      audience: str,
+      *,
+      deadline: int | None = None,
+      clock: Any = None,
+  ) -> str:
+    """Atomic consumption gate: ``consumed`` | ``already_consumed`` | ``expired``.
+
+    The deadline is re-sampled from ``clock`` *inside* the write
+    transaction, after the lock is held, so a lock wait cannot carry a
+    request across its expiry.
+    """
     with self._lock:
       try:
         self._conn.execute("BEGIN IMMEDIATE")
+        if deadline is not None:
+          sample = int(clock()) if clock is not None else int(time.time())
+          if sample >= deadline:
+            self._conn.execute("ROLLBACK")
+            return "expired"
         cur = self._conn.execute(
             "INSERT OR IGNORE INTO consumption"
             "(request_id, nonce, audience, consumed_at) VALUES (?, ?, ?, ?)",
@@ -152,7 +174,7 @@ class Registry:
       except Exception:
         self._conn.execute("ROLLBACK")
         raise
-    return cur.rowcount == 1
+    return "consumed" if cur.rowcount == 1 else "already_consumed"
 
   def is_consumed(self, request_id: str) -> bool:
     with self._lock:
