@@ -1084,7 +1084,13 @@ def test_consumer_output_never_contains_rejected_numbers(
       keys,
       claim=dict(GOOD, value="600"),
   )
-  assert "600" not in json.dumps(out) and "400" not in json.dumps(out)
+  # Opaque ids are random hex and may contain digit runs by chance; the
+  # governed-value surface is every other field.
+  surface = {
+      k: v for k, v in out.items() if k not in ("request_id", "receipt_id")
+  }
+  assert "value" not in surface and "display" not in surface
+  assert "600" not in json.dumps(surface) and "400" not in json.dumps(surface)
 
 
 # -- CLI ---------------------------------------------------------------------
