@@ -5,7 +5,55 @@
       "case": "approved",
       "execution_match": "MATCH",
       "extra": {},
-      "job_id": "okf_rcpt_a759e9d016efd425ea9d625b_ff51609dab3c2681",
+      "issue": {
+        "issue_out": {
+          "execution_match": "MATCH",
+          "field": "gross_margin_usd",
+          "label": "Gross margin",
+          "reason_codes": [],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "f6a8dc66f89aed3ebed49762e6b3d865eb4a1e333640a460b84163ef37b4303b",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "MATCH",
+            "expires_at": 1788654764,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-a7542f85d02fee13",
+              "mac": "e23ecd71028ae37b601b43707640dfc9c47cfc66179281bab92e1ef2b4dc6a49"
+            },
+            "issued_at": 1788654464,
+            "job": {
+              "job_id": "okf_rcpt_34d12a130b6518ffc302bce6_916a39a73d0fc4cf",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "916a39a73d0fc4cfd1bacd517a07a5a064cb994e1914dc92020a5569c42d6a53",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "c5bdb38627b1ffe25ebb76d95cc19eb74c89b790bcd7f0bea2eca49c63c38a1e",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [],
+            "receipt_id": "rcpt-5ff205d34ee4ec46053740a3",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-34d12a130b6518ffc302bce6",
+            "requester_commitment": "99b31707376738863ae3afa0b16cc426fec1d2d5b42b911a444a5ad26363d871",
+            "result_commitment": "c15c74701d4b772e622f313273abaa7cd857d6a8bb95f42f2ac29a7f89e70f81",
+            "verdict": "VERIFIED"
+          },
+          "receipt_id": "rcpt-5ff205d34ee4ec46053740a3",
+          "request_id": "req-34d12a130b6518ffc302bce6",
+          "unit": "USD",
+          "value": "400",
+          "verdict": "VERIFIED"
+        }
+      },
+      "job_id": "okf_rcpt_34d12a130b6518ffc302bce6_916a39a73d0fc4cf",
       "mode": "hermetic",
       "reason_codes": [],
       "released": true,
@@ -16,7 +64,53 @@
       "case": "display-substitution",
       "execution_match": "MATCH",
       "extra": {},
-      "job_id": "okf_rcpt_869c522b02f3bc6091d75cf2_0177ec27d6d595c1",
+      "issue": {
+        "issue_out": {
+          "execution_match": "MATCH",
+          "reason_codes": [
+            "display_mismatch"
+          ],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "572551a8b03cde1d85e0b968693ae8a51702e706ca6c0e7d45b993c14db367a8",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "MATCH",
+            "expires_at": 1788654764,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-a53f293961d7dc41",
+              "mac": "6727842e2384c18dfca37f060296193367b9fe2abb7744886877ea8d98e2273b"
+            },
+            "issued_at": 1788654464,
+            "job": {
+              "job_id": "okf_rcpt_b9068cd20c772ebbf23a8602_70d2142a5427f503",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "70d2142a5427f5038ff60177467d1fb6117e7d8f57991ed60bf37fc4f662df91",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "1768154b5a900322060daedde6f10cdab4da9194f83784314497c143b1a248b5",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [],
+            "receipt_id": "rcpt-e6ad2ed276fccca78c500080",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-b9068cd20c772ebbf23a8602",
+            "requester_commitment": "722a731ffb2b9c82919dad238d4a47e284288c868edcb87d804abe78e654caf1",
+            "result_commitment": "5f395dd2be5e663d1d45f2196c0b3c7d74c1878bee72e42be06a13d666be7e4a",
+            "verdict": "VERIFIED"
+          },
+          "receipt_id": "rcpt-e6ad2ed276fccca78c500080",
+          "request_id": "req-b9068cd20c772ebbf23a8602",
+          "verdict": "REJECTED"
+        }
+      },
+      "job_id": "okf_rcpt_b9068cd20c772ebbf23a8602_70d2142a5427f503",
       "mode": "hermetic",
       "reason_codes": [
         "display_mismatch"
@@ -37,7 +131,101 @@
           "verdict": "UNVERIFIABLE"
         }
       },
-      "job_id": "okf_rcpt_invented_7d15c1424173",
+      "issue": {
+        "issue_out": {
+          "execution_match": "UNKNOWN",
+          "reason_codes": [
+            "job_missing"
+          ],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "8e0609c31a2c7d4e85fe457929401684dd1a1e26a81ab5e4a26d32eb4c362101",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "UNKNOWN",
+            "expires_at": 1788654764,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-4d1329e4b9dd1afa",
+              "mac": "18a59014dfd356fd3cc775d81bb506e54435b9380a0cf6f435436b7dc29e5044"
+            },
+            "issued_at": 1788654464,
+            "job": {
+              "job_id": "okf_rcpt_invented_b0d02496398a",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "d5fc0153cecd69546d0f33e0f7074bffcd70a7b0018580a5c32403f793a67d52",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "e709d8d2f30ceb78623c21d7d744ee99af2ee37e38f27e6e30db936cf6218e62",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [
+              "job_missing"
+            ],
+            "receipt_id": "rcpt-4c427667f82a46e24ed42f0e",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-af82e6cb9ec80c29a9ac6885",
+            "requester_commitment": "d435dcd6efacb459c923b0a0c51c55b1d5032525bb23b4434d4ee20a7234a4ca",
+            "result_commitment": "",
+            "verdict": "UNVERIFIABLE"
+          },
+          "receipt_id": "rcpt-4c427667f82a46e24ed42f0e",
+          "request_id": "req-af82e6cb9ec80c29a9ac6885",
+          "verdict": "UNVERIFIABLE"
+        },
+        "issue_out2": {
+          "execution_match": "MATCH",
+          "reason_codes": [
+            "result_unavailable"
+          ],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "534d6f234b45434854ba183658ab60fa8e77b1de8a3f855ee7a1b6134d56b632",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "MATCH",
+            "expires_at": 1788654764,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-4d1329e4b9dd1afa",
+              "mac": "a2559745a924d4c2b1707f0c84cd59f06242891beb40579de9d11034c5011cb8"
+            },
+            "issued_at": 1788654464,
+            "job": {
+              "job_id": "okf_rcpt_15e52dd3900482c68ba9304c_101e1de2b014ddf4",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "101e1de2b014ddf4a707e4a3a0b938b017cd2f46a5c5c5db012d61cd5b178ce3",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "e709d8d2f30ceb78623c21d7d744ee99af2ee37e38f27e6e30db936cf6218e62",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [
+              "result_unavailable"
+            ],
+            "receipt_id": "rcpt-ffc585930eadcba3932bff09",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-15e52dd3900482c68ba9304c",
+            "requester_commitment": "d435dcd6efacb459c923b0a0c51c55b1d5032525bb23b4434d4ee20a7234a4ca",
+            "result_commitment": "",
+            "verdict": "UNVERIFIABLE"
+          },
+          "receipt_id": "rcpt-ffc585930eadcba3932bff09",
+          "request_id": "req-15e52dd3900482c68ba9304c",
+          "verdict": "UNVERIFIABLE"
+        }
+      },
+      "job_id": "okf_rcpt_invented_b0d02496398a",
       "mode": "hermetic",
       "reason_codes": [
         "job_missing"
@@ -50,7 +238,55 @@
       "case": "parameter-substitution",
       "execution_match": "MISMATCH",
       "extra": {},
-      "job_id": "okf_rcpt_843e908a38502d144d7f24ea_9fe9c370f20f5b39",
+      "issue": {
+        "issue_out": {
+          "execution_match": "MISMATCH",
+          "reason_codes": [
+            "parameter_mismatch"
+          ],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "a5b47527a7cb5d9f2b0e93b97a4ea079ad78c457facf3b9bb625e1843c20b792",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "MISMATCH",
+            "expires_at": 1788654764,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-71ce8390508eb389",
+              "mac": "7864cc660856f2474c1346ecb90485703d62d223f798b64e504f13e10b5476fa"
+            },
+            "issued_at": 1788654464,
+            "job": {
+              "job_id": "okf_rcpt_3481e20ae378d157c20a896a_e1bca9fb5df59ef0",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "e1bca9fb5df59ef02460468537630cad291dfc994090d5162f40359e66fc5fd2",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "9152c1c0751d9fc62f93ecff5d73ba0cb255806de451d4202b3b3de762f87c01",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [
+              "parameter_mismatch"
+            ],
+            "receipt_id": "rcpt-07f0a618a9274e1379350c07",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-3481e20ae378d157c20a896a",
+            "requester_commitment": "f5964934454abe760a3d643013cfecd97777ad7fb19101a9a6e0b010ea146c8f",
+            "result_commitment": "",
+            "verdict": "REJECTED"
+          },
+          "receipt_id": "rcpt-07f0a618a9274e1379350c07",
+          "request_id": "req-3481e20ae378d157c20a896a",
+          "verdict": "REJECTED"
+        }
+      },
+      "job_id": "okf_rcpt_3481e20ae378d157c20a896a_e1bca9fb5df59ef0",
       "mode": "hermetic",
       "reason_codes": [
         "parameter_mismatch"
@@ -65,7 +301,101 @@
       "extra": {
         "first_consumption": "VERIFIED"
       },
-      "job_id": "okf_rcpt_b958f1349bb35d1fb22f322c_7b470d63d56c8a08",
+      "issue": {
+        "issue_first": {
+          "execution_match": "MATCH",
+          "field": "gross_margin_usd",
+          "label": "Gross margin",
+          "reason_codes": [],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "4a137c54bcd449830b92cebcbf6a8f81a37a733943129d287bb0a92f601cd449",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "MATCH",
+            "expires_at": 1788654764,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-6ea443aa5d3ec5d2",
+              "mac": "3349a6180f7027369a4393b153b4edb87ba45ba4a4b076a76b386d6dcc77b5b5"
+            },
+            "issued_at": 1788654464,
+            "job": {
+              "job_id": "okf_rcpt_f3e86983c81a01acf07d4921_d7ff4d5dbd7da69d",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "d7ff4d5dbd7da69d164bb803d4bd3db3d0cd971249913553bd9b9586bc6d13ac",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "23e6b7cb6e59b9104b30e99b5668daa400f87d868d5a89f559bacf1e2b6c08cc",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [],
+            "receipt_id": "rcpt-acc30d5966da226c5a65d8a2",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-f3e86983c81a01acf07d4921",
+            "requester_commitment": "6b8fe127221e29408938273983893840b3abffe92f3adc397f56fda7e1a74a1d",
+            "result_commitment": "3e8d86a78e03c04af2cda71d73e7b95628ae13ccc0ef6b836326ae3da3f2cdc7",
+            "verdict": "VERIFIED"
+          },
+          "receipt_id": "rcpt-acc30d5966da226c5a65d8a2",
+          "request_id": "req-f3e86983c81a01acf07d4921",
+          "unit": "USD",
+          "value": "400",
+          "verdict": "VERIFIED"
+        },
+        "issue_out": {
+          "execution_match": "UNKNOWN",
+          "reason_codes": [
+            "request_consumed"
+          ],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "28af3cb10204c6acba2d350fdc3037fa40720444faf3f0da813024a0973e1003",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "UNKNOWN",
+            "expires_at": 1788654764,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-6ea443aa5d3ec5d2",
+              "mac": "75512b8a01fcb6fdd925720854e4e805b58a8a6a8b2aeca3447622e0b3674720"
+            },
+            "issued_at": 1788654464,
+            "job": {
+              "job_id": "okf_rcpt_f3e86983c81a01acf07d4921_d7ff4d5dbd7da69d",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "d7ff4d5dbd7da69d164bb803d4bd3db3d0cd971249913553bd9b9586bc6d13ac",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "23e6b7cb6e59b9104b30e99b5668daa400f87d868d5a89f559bacf1e2b6c08cc",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [
+              "request_consumed"
+            ],
+            "receipt_id": "rcpt-acc30d5966da226c5a65d8a2",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-f3e86983c81a01acf07d4921",
+            "requester_commitment": "6b8fe127221e29408938273983893840b3abffe92f3adc397f56fda7e1a74a1d",
+            "result_commitment": "",
+            "verdict": "REJECTED"
+          },
+          "receipt_id": "rcpt-acc30d5966da226c5a65d8a2",
+          "request_id": "req-f3e86983c81a01acf07d4921",
+          "verdict": "REJECTED"
+        }
+      },
+      "job_id": "okf_rcpt_f3e86983c81a01acf07d4921_d7ff4d5dbd7da69d",
       "mode": "hermetic",
       "reason_codes": [
         "request_consumed"
@@ -78,7 +408,55 @@
       "case": "sql-substitution",
       "execution_match": "MISMATCH",
       "extra": {},
-      "job_id": "okf_rcpt_b0a6426aef799ba8d51e8435_a8b4bd0cf096d1cd",
+      "issue": {
+        "issue_out": {
+          "execution_match": "MISMATCH",
+          "reason_codes": [
+            "sql_mismatch"
+          ],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "f781689f814285aaebc43a1bfe37f2db287171d8499dc23211528e4611224560",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "MISMATCH",
+            "expires_at": 1788654764,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-fa6b72d6a58eb1e2",
+              "mac": "bf9ef2889a324cb64ec1d006fc9dbd5c3a7b050ea2b1424a4772ac36afb69489"
+            },
+            "issued_at": 1788654464,
+            "job": {
+              "job_id": "okf_rcpt_396da24646573560c3af4224_bd55986e2c6f2f0b",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "bd55986e2c6f2f0bec8292eae311062830b716fc335bb1574e07f34358743936",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "3b11aa71061512d7466c93730af7f47d17a3b5e800df21822f38f93e9a3f693f",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [
+              "sql_mismatch"
+            ],
+            "receipt_id": "rcpt-89bee3a990704ee3e3387548",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-396da24646573560c3af4224",
+            "requester_commitment": "916deaa738962b59661c30bb3be725b28b5fc036797ae78956f6431498f89030",
+            "result_commitment": "",
+            "verdict": "REJECTED"
+          },
+          "receipt_id": "rcpt-89bee3a990704ee3e3387548",
+          "request_id": "req-396da24646573560c3af4224",
+          "verdict": "REJECTED"
+        }
+      },
+      "job_id": "okf_rcpt_396da24646573560c3af4224_bd55986e2c6f2f0b",
       "mode": "hermetic",
       "reason_codes": [
         "sql_mismatch"
@@ -93,7 +471,55 @@
       "extra": {
         "verify_before_tamper": "VERIFIED"
       },
-      "job_id": "okf_rcpt_9b0dbe6b6b9f2121d4d231e8_c74af49bf4000ba3",
+      "issue": {
+        "issue_out": {
+          "execution_match": "MATCH",
+          "field": "gross_margin_usd",
+          "label": "Gross margin",
+          "reason_codes": [],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "630a204945adf658ddd1d9b64d705f2bc9b9f9aa67c9269f1e043770c4942bce",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "MATCH",
+            "expires_at": 1788654764,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-b63fcce6c371a414",
+              "mac": "06bb116e9f6481b72d102efd5f2be07eeafb85fd79a66c7a771a1f497891689c"
+            },
+            "issued_at": 1788654464,
+            "job": {
+              "job_id": "okf_rcpt_9a6afb451b06b2af7771e073_a774291878b28301",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "a774291878b283010b3df14c2e4b6848ee824ed9b9cfbb174ac0bec136c4df72",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "aaa67c7150782d4d2a8c5ba3e945da952469f53bda246369072b164e185530fe",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [],
+            "receipt_id": "rcpt-6b18e2757221accb154b5be4",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-9a6afb451b06b2af7771e073",
+            "requester_commitment": "efe655112b67ab2425e9d9465d19e5cc9786c67f5243a923db766ec8617d7cc7",
+            "result_commitment": "71a24aeef97b18ca180fd0e2454aa05e9d6c5914a346f219e4367e5737b65961",
+            "verdict": "VERIFIED"
+          },
+          "receipt_id": "rcpt-6b18e2757221accb154b5be4",
+          "request_id": "req-9a6afb451b06b2af7771e073",
+          "unit": "USD",
+          "value": "400",
+          "verdict": "VERIFIED"
+        }
+      },
+      "job_id": "okf_rcpt_9a6afb451b06b2af7771e073_a774291878b28301",
       "mode": "hermetic",
       "reason_codes": [
         "receipt_integrity_failed"
@@ -106,7 +532,55 @@
       "case": "approved",
       "execution_match": "MATCH",
       "extra": {},
-      "job_id": "okf_rcpt_72517924d1c070745ec94f0a_1f06f6d54473a1e0",
+      "issue": {
+        "issue_out": {
+          "execution_match": "MATCH",
+          "field": "gross_margin_usd",
+          "label": "Gross margin",
+          "reason_codes": [],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "af20a0034768ab846bff2fabe3454470c6b8012e48d9d72f47f656ef5fdfae01",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "MATCH",
+            "expires_at": 1788654835,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-755deb0b2fd2727d",
+              "mac": "b8fd62e639457d0adafc9926d1f1f1c73da82b68e6a802a22fdd2b921af06535"
+            },
+            "issued_at": 1788654536,
+            "job": {
+              "job_id": "okf_rcpt_b477088b0105c26d76abb665_f8510b56fcdc86dc",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "f8510b56fcdc86dce289a71860222e993ee7e404304cd14053c281360d42f4c1",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "1cc65877b1eea666131e6a76386ea26b147d97dabbd4657270feba8ac416e317",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [],
+            "receipt_id": "rcpt-afe42a3a73b8e2e790bb350e",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-b477088b0105c26d76abb665",
+            "requester_commitment": "45280d62725db129bfbc8abc528513b538f7dc0a15bc37fa42334c26162e449e",
+            "result_commitment": "f6582f9661e27c805734eee84f9fb0be3d37287402c2e5a1c9c2b5c3f752cd2c",
+            "verdict": "VERIFIED"
+          },
+          "receipt_id": "rcpt-afe42a3a73b8e2e790bb350e",
+          "request_id": "req-b477088b0105c26d76abb665",
+          "unit": "USD",
+          "value": "400",
+          "verdict": "VERIFIED"
+        }
+      },
+      "job_id": "okf_rcpt_b477088b0105c26d76abb665_f8510b56fcdc86dc",
       "mode": "live",
       "reason_codes": [],
       "released": true,
@@ -117,7 +591,53 @@
       "case": "display-substitution",
       "execution_match": "MATCH",
       "extra": {},
-      "job_id": "okf_rcpt_75d11380d4c40eac120a4ed7_f29638e467b30064",
+      "issue": {
+        "issue_out": {
+          "execution_match": "MATCH",
+          "reason_codes": [
+            "display_mismatch"
+          ],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "400529198524703e7cbf6bbf10a4fca65d50b318efcf52ad14084d7c21ff27ac",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "MATCH",
+            "expires_at": 1788654848,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-755deb0b2fd2727d",
+              "mac": "117f3be95288f167d9ee7b77c3bd29ea933972011dde2beb9843a6fb904019ba"
+            },
+            "issued_at": 1788654549,
+            "job": {
+              "job_id": "okf_rcpt_d96a6e9791ef5e4a9ca33bac_8518dc64929a790f",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "8518dc64929a790fef5bbfbb100d4491dd4ccf11ba114082d5b180a10b45bb18",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "1cc65877b1eea666131e6a76386ea26b147d97dabbd4657270feba8ac416e317",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [],
+            "receipt_id": "rcpt-994cee69620f535e3a18b661",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-d96a6e9791ef5e4a9ca33bac",
+            "requester_commitment": "45280d62725db129bfbc8abc528513b538f7dc0a15bc37fa42334c26162e449e",
+            "result_commitment": "f6582f9661e27c805734eee84f9fb0be3d37287402c2e5a1c9c2b5c3f752cd2c",
+            "verdict": "VERIFIED"
+          },
+          "receipt_id": "rcpt-994cee69620f535e3a18b661",
+          "request_id": "req-d96a6e9791ef5e4a9ca33bac",
+          "verdict": "REJECTED"
+        }
+      },
+      "job_id": "okf_rcpt_d96a6e9791ef5e4a9ca33bac_8518dc64929a790f",
       "mode": "live",
       "reason_codes": [
         "display_mismatch"
@@ -131,14 +651,108 @@
       "execution_match": "UNKNOWN",
       "extra": {
         "metadata_only": {
-          "execution_match": "UNKNOWN",
+          "execution_match": "MATCH",
           "reason_codes": [
-            "request_expired"
+            "result_unavailable"
           ],
-          "verdict": "REJECTED"
+          "verdict": "UNVERIFIABLE"
         }
       },
-      "job_id": "okf_rcpt_invented_99db90f081b1",
+      "issue": {
+        "issue_out": {
+          "execution_match": "UNKNOWN",
+          "reason_codes": [
+            "job_missing"
+          ],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "1ceaa40e7fc164d6421dc846aa39758808e4f2672de5d73093188b0a1823d9ca",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "UNKNOWN",
+            "expires_at": 1788654853,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-755deb0b2fd2727d",
+              "mac": "87f39e416ecc51e8587181c72af3225a70fc49d12c795e3691033cf1d552efed"
+            },
+            "issued_at": 1788654553,
+            "job": {
+              "job_id": "okf_rcpt_invented_e2f52bf6e8a2",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "478a9698b4b7099d2543c8ff1b5305a58436c578a28353c5c61b1b301e0ea8e6",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "1cc65877b1eea666131e6a76386ea26b147d97dabbd4657270feba8ac416e317",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [
+              "job_missing"
+            ],
+            "receipt_id": "rcpt-6a42e0d510861fcd5e41f08d",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-952e4a9b4358def71c2fa270",
+            "requester_commitment": "45280d62725db129bfbc8abc528513b538f7dc0a15bc37fa42334c26162e449e",
+            "result_commitment": "",
+            "verdict": "UNVERIFIABLE"
+          },
+          "receipt_id": "rcpt-6a42e0d510861fcd5e41f08d",
+          "request_id": "req-952e4a9b4358def71c2fa270",
+          "verdict": "UNVERIFIABLE"
+        },
+        "issue_out2": {
+          "execution_match": "MATCH",
+          "reason_codes": [
+            "result_unavailable"
+          ],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "2b77585783cdf0fb3e70da3ed4729fc2e67d6f94e819edbb1d43ef7252313d29",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "MATCH",
+            "expires_at": 1788654853,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-755deb0b2fd2727d",
+              "mac": "5a74de3da08486f1c29fb563833186d68786897f9f2799a9978f1fb78a70aade"
+            },
+            "issued_at": 1788654555,
+            "job": {
+              "job_id": "okf_rcpt_6825e53075a46d65200f82f4_9fcdff6bebd6c789",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "9fcdff6bebd6c7890c4e816d8bf1895cf0714b549c935710de00c659559bfd7b",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "1cc65877b1eea666131e6a76386ea26b147d97dabbd4657270feba8ac416e317",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [
+              "result_unavailable"
+            ],
+            "receipt_id": "rcpt-0dcd1a39312c5a024a25abb0",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-6825e53075a46d65200f82f4",
+            "requester_commitment": "45280d62725db129bfbc8abc528513b538f7dc0a15bc37fa42334c26162e449e",
+            "result_commitment": "",
+            "verdict": "UNVERIFIABLE"
+          },
+          "receipt_id": "rcpt-0dcd1a39312c5a024a25abb0",
+          "request_id": "req-6825e53075a46d65200f82f4",
+          "verdict": "UNVERIFIABLE"
+        }
+      },
+      "job_id": "okf_rcpt_invented_e2f52bf6e8a2",
       "mode": "live",
       "reason_codes": [
         "job_missing"
@@ -151,7 +765,55 @@
       "case": "parameter-substitution",
       "execution_match": "MISMATCH",
       "extra": {},
-      "job_id": "okf_rcpt_a39df03942574d4b99cf9a42_835abec0538af20a",
+      "issue": {
+        "issue_out": {
+          "execution_match": "MISMATCH",
+          "reason_codes": [
+            "parameter_mismatch"
+          ],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "7f249cf3be1f2fccf73a729f831c77a4a1b4a4d833928cfd67ddb4485e26334f",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "MISMATCH",
+            "expires_at": 1788654844,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-755deb0b2fd2727d",
+              "mac": "5713fb91707ba30126a8982e84ddebc613644de55c633ff2047c8c719209cd9e"
+            },
+            "issued_at": 1788654545,
+            "job": {
+              "job_id": "okf_rcpt_8b1b33d86066dbe3ac1386a6_95de70d8ac3ab1dd",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "95de70d8ac3ab1ddc78c98f9ac465c40a716c0201c149a5710555e0704bc4994",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "1cc65877b1eea666131e6a76386ea26b147d97dabbd4657270feba8ac416e317",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [
+              "parameter_mismatch"
+            ],
+            "receipt_id": "rcpt-87cd67f15c18fa440a28c980",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-8b1b33d86066dbe3ac1386a6",
+            "requester_commitment": "45280d62725db129bfbc8abc528513b538f7dc0a15bc37fa42334c26162e449e",
+            "result_commitment": "",
+            "verdict": "REJECTED"
+          },
+          "receipt_id": "rcpt-87cd67f15c18fa440a28c980",
+          "request_id": "req-8b1b33d86066dbe3ac1386a6",
+          "verdict": "REJECTED"
+        }
+      },
+      "job_id": "okf_rcpt_8b1b33d86066dbe3ac1386a6_95de70d8ac3ab1dd",
       "mode": "live",
       "reason_codes": [
         "parameter_mismatch"
@@ -166,7 +828,101 @@
       "extra": {
         "first_consumption": "VERIFIED"
       },
-      "job_id": "okf_rcpt_cdb8c6ac514a4f56eb554562_fb0a3e38a7d39955",
+      "issue": {
+        "issue_first": {
+          "execution_match": "MATCH",
+          "field": "gross_margin_usd",
+          "label": "Gross margin",
+          "reason_codes": [],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "4c547fa1e5c6fc763bb1d52446ea835a6c2de4fc1e6b514a1214fd13a944e75e",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "MATCH",
+            "expires_at": 1788654863,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-755deb0b2fd2727d",
+              "mac": "e8384518113c5381ba0e29d69a2b340b608cfd845c2c63a47fed5c5f660e8447"
+            },
+            "issued_at": 1788654564,
+            "job": {
+              "job_id": "okf_rcpt_ecc2691396a5534643028a48_797deae7b9396c38",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "797deae7b9396c387318a9d099f5b3ab2b5bb34fc5b50b9e4a5a66ad3c85bc4c",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "1cc65877b1eea666131e6a76386ea26b147d97dabbd4657270feba8ac416e317",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [],
+            "receipt_id": "rcpt-c2760eaf46147d14c57e21db",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-ecc2691396a5534643028a48",
+            "requester_commitment": "45280d62725db129bfbc8abc528513b538f7dc0a15bc37fa42334c26162e449e",
+            "result_commitment": "f6582f9661e27c805734eee84f9fb0be3d37287402c2e5a1c9c2b5c3f752cd2c",
+            "verdict": "VERIFIED"
+          },
+          "receipt_id": "rcpt-c2760eaf46147d14c57e21db",
+          "request_id": "req-ecc2691396a5534643028a48",
+          "unit": "USD",
+          "value": "400",
+          "verdict": "VERIFIED"
+        },
+        "issue_out": {
+          "execution_match": "UNKNOWN",
+          "reason_codes": [
+            "request_consumed"
+          ],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "b8b9786917cbcb0947ac316ab8ca1404aabbc250625d0ce35c7fc0aa14cd6d75",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "UNKNOWN",
+            "expires_at": 1788654863,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-755deb0b2fd2727d",
+              "mac": "9cea2ec7556a646ab8a908d7ce00f9b49bfaec0bd9d8973e73a35f6597f689a9"
+            },
+            "issued_at": 1788654565,
+            "job": {
+              "job_id": "okf_rcpt_ecc2691396a5534643028a48_797deae7b9396c38",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "797deae7b9396c387318a9d099f5b3ab2b5bb34fc5b50b9e4a5a66ad3c85bc4c",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "1cc65877b1eea666131e6a76386ea26b147d97dabbd4657270feba8ac416e317",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [
+              "request_consumed"
+            ],
+            "receipt_id": "rcpt-c2760eaf46147d14c57e21db",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-ecc2691396a5534643028a48",
+            "requester_commitment": "45280d62725db129bfbc8abc528513b538f7dc0a15bc37fa42334c26162e449e",
+            "result_commitment": "",
+            "verdict": "REJECTED"
+          },
+          "receipt_id": "rcpt-c2760eaf46147d14c57e21db",
+          "request_id": "req-ecc2691396a5534643028a48",
+          "verdict": "REJECTED"
+        }
+      },
+      "job_id": "okf_rcpt_ecc2691396a5534643028a48_797deae7b9396c38",
       "mode": "live",
       "reason_codes": [
         "request_consumed"
@@ -179,7 +935,55 @@
       "case": "sql-substitution",
       "execution_match": "MISMATCH",
       "extra": {},
-      "job_id": "okf_rcpt_34d0e6e6e36500cd25a291d9_828bcdd85e599f61",
+      "issue": {
+        "issue_out": {
+          "execution_match": "MISMATCH",
+          "reason_codes": [
+            "sql_mismatch"
+          ],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "d91fe7e4a7d9abad404597372405f32153d4e3862fcc6b2e63896fd6d4eac06f",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "MISMATCH",
+            "expires_at": 1788654840,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-755deb0b2fd2727d",
+              "mac": "6e2cb0cbdace4d06d2413163aa0e658dac61c09289dc9df9bc0d3511bd173380"
+            },
+            "issued_at": 1788654541,
+            "job": {
+              "job_id": "okf_rcpt_e6a7916675d1f418d2def964_a3825b5f2e7a60f3",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "a3825b5f2e7a60f3a716cf479b82f187250db692b41a7c704c28097f7029f93a",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "1cc65877b1eea666131e6a76386ea26b147d97dabbd4657270feba8ac416e317",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [
+              "sql_mismatch"
+            ],
+            "receipt_id": "rcpt-e5e02cd119f440e19a7f97be",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-e6a7916675d1f418d2def964",
+            "requester_commitment": "45280d62725db129bfbc8abc528513b538f7dc0a15bc37fa42334c26162e449e",
+            "result_commitment": "",
+            "verdict": "REJECTED"
+          },
+          "receipt_id": "rcpt-e5e02cd119f440e19a7f97be",
+          "request_id": "req-e6a7916675d1f418d2def964",
+          "verdict": "REJECTED"
+        }
+      },
+      "job_id": "okf_rcpt_e6a7916675d1f418d2def964_a3825b5f2e7a60f3",
       "mode": "live",
       "reason_codes": [
         "sql_mismatch"
@@ -194,7 +998,55 @@
       "extra": {
         "verify_before_tamper": "VERIFIED"
       },
-      "job_id": "okf_rcpt_b14082d067b4d582be0bc26f_e16294f3edfd5058",
+      "issue": {
+        "issue_out": {
+          "execution_match": "MATCH",
+          "field": "gross_margin_usd",
+          "label": "Gross margin",
+          "reason_codes": [],
+          "receipt": {
+            "attester_artifact_hash": "fa658683138869c80a02e32bef4e6d24b98a27c7d6e0fa2885da5eb85eb2340a",
+            "audience": "okf-receipt-demo-cli/v1",
+            "canonicalization_version": "receipt-cbor/v1",
+            "computation_digest": "afe2afbd4ab7ffe3144ca317c509b47bb5a03c5d035bf13b0849911eb3823312",
+            "context_ref": "okf:acme-retail-derived#gross-margin-period",
+            "details_digest": "78547b80257ba4a59c7854a0d1d7e8e27626f211b317e3144d07b0837dbd6b5b",
+            "executed_artifact_hash": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+            "execution_match": "MATCH",
+            "expires_at": 1788654858,
+            "integrity_proof": {
+              "algorithm": "HMAC-SHA256",
+              "key_id": "k-755deb0b2fd2727d",
+              "mac": "e2633dbf2fab337b51bd446f9fc6903f3019de3defc0c46d65240a6234303d08"
+            },
+            "issued_at": 1788654560,
+            "job": {
+              "job_id": "okf_rcpt_41cafa6c39eceba4d993a6c9_8ee362327841e766",
+              "location": "US",
+              "project": "test-project-0728-467323"
+            },
+            "nonce": "8ee362327841e7662c02b0b9d30ead89820d356381575d60ff4d06f8d15e4858",
+            "output_contract_digest": "135591ed14b5516a2ddc39964f7ace18a7d7576e0ed40991d1183bd85149a8f0",
+            "parameter_binding_commitment": "1cc65877b1eea666131e6a76386ea26b147d97dabbd4657270feba8ac416e317",
+            "policy_version": "okf-receipt-spike-policy/2026-09-05",
+            "profile_contract_version": "okf-context/1",
+            "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+            "reason_codes": [],
+            "receipt_id": "rcpt-5b29e6061d0342e68a9be84f",
+            "receipt_version": "okf-receipt-spike/v1",
+            "request_id": "req-41cafa6c39eceba4d993a6c9",
+            "requester_commitment": "45280d62725db129bfbc8abc528513b538f7dc0a15bc37fa42334c26162e449e",
+            "result_commitment": "f6582f9661e27c805734eee84f9fb0be3d37287402c2e5a1c9c2b5c3f752cd2c",
+            "verdict": "VERIFIED"
+          },
+          "receipt_id": "rcpt-5b29e6061d0342e68a9be84f",
+          "request_id": "req-41cafa6c39eceba4d993a6c9",
+          "unit": "USD",
+          "value": "400",
+          "verdict": "VERIFIED"
+        }
+      },
+      "job_id": "okf_rcpt_41cafa6c39eceba4d993a6c9_8ee362327841e766",
       "mode": "live",
       "reason_codes": [
         "receipt_integrity_failed"
@@ -203,6 +1055,6 @@
       "verdict": "REJECTED"
     }
   ],
-  "generated_from": "run.py --case ... [--live]",
+  "generated_from": "run.py --case ... [--live] (post-review fix pass 2026-09-06; verifier seals, then consumer gates)",
   "synthetic_fixture": true
 }

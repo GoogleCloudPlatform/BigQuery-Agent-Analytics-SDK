@@ -117,10 +117,45 @@ class World:
     )
 
 
+def _now() -> int:
+  return int(time.time())
+
+
+def _issue_then_consume(
+    world: World, req: dict, handle: dict, claim: dict, mode: str = "full"
+) -> tuple[dict, dict]:
+  """Trusted two-step path: independent verifier seals, then consumer gates.
+
+  The clock is read fresh at each step so expiry is judged at the moment
+  of each check, never against a timestamp captured before approval.
+  """
+  reg = world.registry
+  issued = verify_mod.verify(
+      req["request_id"],
+      handle["receipt_id"],
+      claim,
+      world.evidence(mode),
+      reg,
+      reg,
+      _now(),
+      keys=world.keys,
+  )
+  out = consume_mod.consume(
+      req["request_id"],
+      handle["receipt_id"],
+      claim,
+      world.evidence(mode),
+      reg,
+      reg,
+      _now(),
+      keys=world.keys,
+  )
+  return issued, out
+
+
 def run_case(case: str, world: World) -> dict:
   """Execute one case; returns the consumer output plus private diagnostics."""
   reg = world.registry
-  now = int(time.time())
   good_claim = {"field": "gross_margin_usd", "value": "400", "unit": "USD"}
   diag: dict[str, Any] = {
       "case": case,
@@ -131,30 +166,16 @@ def run_case(case: str, world: World) -> dict:
   if case == "approved":
     req = world.approve(JAN)
     handle = execute_mod.execute(req, world.pub, world.caller(), reg)
-    out = consume_mod.consume(
-        req["request_id"],
-        handle["receipt_id"],
-        good_claim,
-        world.evidence(),
-        reg,
-        reg,
-        now,
-        keys=world.keys,
+    diag["issue_out"], out = _issue_then_consume(
+        world, req, handle, good_claim, "full"
     )
   elif case == "sql-substitution":
     req = world.approve(JAN)
     wrong = hermetic.product_cost_only_sql(req["compiled_sql"])
     handle = attacks.adversarial_execute(req, wrong, JAN, world.caller(), reg)
     diag["attack"] = "product-cost-only formula; agent claims 600"
-    out = consume_mod.consume(
-        req["request_id"],
-        handle["receipt_id"],
-        dict(good_claim, value="600"),
-        world.evidence(),
-        reg,
-        reg,
-        now,
-        keys=world.keys,
+    diag["issue_out"], out = _issue_then_consume(
+        world, req, handle, dict(good_claim, value="600"), "full"
     )
   elif case == "parameter-substitution":
     req = world.approve(JAN)
@@ -162,55 +183,27 @@ def run_case(case: str, world: World) -> dict:
         req, req["compiled_sql"], JAN_FEB, world.caller(), reg
     )
     diag["attack"] = "approved SQL with period_end=2026-02-28; agent claims 515"
-    out = consume_mod.consume(
-        req["request_id"],
-        handle["receipt_id"],
-        dict(good_claim, value="515"),
-        world.evidence(),
-        reg,
-        reg,
-        now,
-        keys=world.keys,
+    diag["issue_out"], out = _issue_then_consume(
+        world, req, handle, dict(good_claim, value="515"), "full"
     )
   elif case == "display-substitution":
     req = world.approve(JAN)
     handle = execute_mod.execute(req, world.pub, world.caller(), reg)
     diag["attack"] = "valid approved run; agent claims 600"
-    out = consume_mod.consume(
-        req["request_id"],
-        handle["receipt_id"],
-        dict(good_claim, value="600"),
-        world.evidence(),
-        reg,
-        reg,
-        now,
-        keys=world.keys,
+    diag["issue_out"], out = _issue_then_consume(
+        world, req, handle, dict(good_claim, value="600"), "full"
     )
   elif case == "missing-evidence":
     req = world.approve(JAN)
     handle = attacks.register_invented_job(req, reg)
     diag["attack"] = "invented job id never submitted"
-    out = consume_mod.consume(
-        req["request_id"],
-        handle["receipt_id"],
-        good_claim,
-        world.evidence(),
-        reg,
-        reg,
-        now,
-        keys=world.keys,
+    diag["issue_out"], out = _issue_then_consume(
+        world, req, handle, good_claim, "full"
     )
     req2 = world.approve(JAN)
     handle2 = execute_mod.execute(req2, world.pub, world.caller(), reg)
-    out2 = consume_mod.consume(
-        req2["request_id"],
-        handle2["receipt_id"],
-        good_claim,
-        world.evidence("metadata_only"),
-        reg,
-        reg,
-        now,
-        keys=world.keys,
+    diag["issue_out2"], out2 = _issue_then_consume(
+        world, req2, handle2, good_claim, "metadata_only"
     )
     diag["metadata_only"] = {
         k: out2[k] for k in ("verdict", "execution_match", "reason_codes")
@@ -225,7 +218,7 @@ def run_case(case: str, world: World) -> dict:
         world.evidence(),
         reg,
         reg,
-        now,
+        _now(),
         keys=world.keys,
     )
     diag["verify_before_tamper"] = first["verdict"]
@@ -234,40 +227,19 @@ def run_case(case: str, world: World) -> dict:
     tampered["job"] = dict(tampered["job"], job_id="okf_rcpt_forged")
     reg.put_receipt(handle["receipt_id"], tampered)
     diag["attack"] = "stored receipt job_id mutated after sealing"
-    out = consume_mod.consume(
-        req["request_id"],
-        handle["receipt_id"],
-        good_claim,
-        world.evidence(),
-        reg,
-        reg,
-        now,
-        keys=world.keys,
+    diag["issue_out"], out = _issue_then_consume(
+        world, req, handle, good_claim, "full"
     )
   elif case == "replay":
     req = world.approve(JAN)
     handle = execute_mod.execute(req, world.pub, world.caller(), reg)
-    first = consume_mod.consume(
-        req["request_id"],
-        handle["receipt_id"],
-        good_claim,
-        world.evidence(),
-        reg,
-        reg,
-        now,
-        keys=world.keys,
+    diag["issue_first"], first = _issue_then_consume(
+        world, req, handle, good_claim, "full"
     )
     diag["first_consumption"] = first["verdict"]
     diag["attack"] = "same receipt consumed twice"
-    out = consume_mod.consume(
-        req["request_id"],
-        handle["receipt_id"],
-        good_claim,
-        world.evidence(),
-        reg,
-        reg,
-        now,
-        keys=world.keys,
+    diag["issue_out"], out = _issue_then_consume(
+        world, req, handle, good_claim, "full"
     )
   else:
     raise SystemExit(f"unknown case {case}")

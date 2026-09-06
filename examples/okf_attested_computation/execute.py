@@ -33,6 +33,7 @@ import contracts
 import publication as publication_mod
 
 MIN_BYTES_BILLED = 100 * 1024 * 1024  # BigQuery bills 10 MiB per table minimum.
+HARD_MAX_BYTES_BILLED = 1024**3  # plan-stated 1 GiB ceiling; never exceeded.
 JOB_TIMEOUT_MS = 60_000
 
 
@@ -78,7 +79,12 @@ def execute(
   labels = {"okf_request": request["request_id"][4:20]}
   try:
     estimated = int(caller_client.dry_run(sql, params, types))
-    max_bytes = max(MIN_BYTES_BILLED, estimated * 4)
+    if estimated > HARD_MAX_BYTES_BILLED:
+      raise ExecutionError(
+          f"dry run estimates {estimated} bytes, above the"
+          f" {HARD_MAX_BYTES_BILLED} byte ceiling"
+      )
+    max_bytes = min(HARD_MAX_BYTES_BILLED, max(MIN_BYTES_BILLED, estimated * 4))
     job = caller_client.submit(
         job_id=job_id,
         sql=sql,

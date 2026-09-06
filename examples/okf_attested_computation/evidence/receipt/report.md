@@ -21,17 +21,44 @@ This earns **MODERATE delivery for receipts only** per the intent. It is
 not `ATTESTED`, not a combined-runtime pass, and does not depend on or
 compensate for the graph spike.
 
+## Review fix pass (2026-09-06)
+
+Astra requested changes on `67889b0` (one P1, six P2); Opus filed three
+overlapping findings. All are fixed in this pass and covered by new
+hermetic tests; the live suite and all seven CLI live cases were rerun.
+
+| # | Finding | Fix | Test |
+|---|---|---|---|
+| P1 | sealed receipt with `receipt_version` deleted was treated as pending and reissued | only the exact executor handle `{receipt_id, request_id, status: pending}` is pending, and a pending handle is **not consumable** (`receipt_not_verified`); every other shape goes through the integrity check and fails as `receipt_integrity_failed`; a tampered record is never overwritten | `test_p1_deleted_receipt_version_is_rejected_not_reissued`, `test_pending_handle_is_not_consumable` |
+| P2 | `Decimal.normalize()` under default precision collapsed distinct 38-digit NUMERIC values; `InvalidOperation` escaped | fixed 120-digit local context, 76-digit cap, every `ArithmeticError` mapped to `ContractError` at both the verifier and renderer | `test_decimal_string_is_exact_for_38_digit_numeric` |
+| P2 | no hard cost ceiling | `HARD_MAX_BYTES_BILLED = 1 GiB`; a dry run above it refuses submission; the cap is `min(1 GiB, max(100 MiB, 4×dry-run))` | `test_executor_enforces_hard_cost_ceiling` |
+| P2 | README marked transient-API and full R6/R7 rows as live | table now labels those rows hermetic only | n/a |
+| P2 | CLI captured the clock before approval and reused it | `run.py` reads the clock fresh at each verify/consume call | CLI cases |
+| P2 | a failed display claim overwrote the sealed VERIFIED receipt | the sealed receipt records the evidence verdict only; the claim is bound at return/consume time; an authentic VERIFIED receipt is never downgraded, an UNVERIFIABLE one may be upgraded, a record failing integrity is kept as tamper evidence | `test_wrong_claim_does_not_overwrite_verified_receipt`, `test_verify_can_upgrade_unverifiable_but_never_downgrade_verified`; live R4 now runs all three wrong claims and then releases the honest one |
+| P2 | rendering ran after `consume_once` | render first; a render failure returns `UNVERIFIABLE render_failed` with the nonce intact | `test_render_failure_does_not_spend_nonce` |
+
+Also: committed evidence now uses `user:owner` / `sa:okf-receipt-restricted`
+aliases (exact topology retained privately); the live suite redacts on
+write. The verifier docstring no longer claims "no query methods".
+
+Post-fix results: hermetic 101 receipt tests + 18 observer tests pass;
+live suite 7/7 (64.8 s); CLI live cases approved → exit 0, six attack
+cases → exit 2 with no number. One earlier live rerun hit a transient
+"project does not have the reservation in the data region" error on three
+jobs while no reservation existed in the project; the immediate rerun
+passed and the error is recorded here rather than hidden.
+
 ## Authority chain (measured)
 
 | Step | Principal / artifact | Evidence |
 |---|---|---|
 | Source pin | `knowledge-catalog` 31da799, `gross-margin-period.md` sha256 `5e96ae11…f0e7` | `fixtures/acme_retail/SOURCE.md`, digest re-checked on every load |
 | Derived publication | `okf-receipt-spike/acme-retail-derived/gross-margin-period`, compiler `okf-receipt-compiler/v1` | `fixtures/publication.json`; compiled SQL digest `c8026298…636c` (same in every live receipt) |
-| Session broker | requester from ADC tokeninfo: `raincoatrun@gmail.com` (kind `user`) | `broker.open_live_session` |
-| Executor | user-delegated `google.cloud.bigquery.Client`, cache off, GoogleSQL, DATE bindings, `maximum_bytes_billed` = max(100 MiB, 4×dry-run) | job resources below |
+| Session broker | requester from ADC tokeninfo: `user:owner` (kind `user`) | `broker.open_live_session` |
+| Executor | user-delegated `google.cloud.bigquery.Client`, cache off, GoogleSQL, DATE bindings, `maximum_bytes_billed` = min(1 GiB, max(100 MiB, 4×dry-run)) | job resources below |
 | Verifier | same requester's delegation, confined REST reads; a **second process** re-read the same job and produced identical `result_commitment` and `executed_artifact_hash` | `live_cases.json` → `R1_approved.fresh_process_verify` |
 | Receipt / keys | HMAC-SHA256, separate commit + integrity keys, mode 0600, `keys.json` metadata | `receipt_store.KeyStore` |
-| Consumer | MAC + key status → re-verify → commitment binding → access probe → `consume_once` → render | `consume.py` |
+| Consumer | sealed receipt required → MAC + key status → re-verify → commitment binding → access probe → render → `consume_once` | `consume.py` |
 
 ## Live evidence (2026-09-05, project `test-project-0728-467323`, location US)
 
@@ -68,9 +95,9 @@ cases hermetic + live), `live_cases.json` (pytest live rows).
 
 | Principal | Grants | Role in spike |
 |---|---|---|
-| `raincoatrun@gmail.com` (ADC user) | project `roles/owner`, `bigquery.jobUser`, `bigquery.dataViewer`; dataset OWNER | requester for R1–R5, evidence reader, provisioning |
-| `okf-receipt-restricted@test-project-0728-467323.iam.gserviceaccount.com` | created 23:40Z; project `roles/bigquery.jobUser` only; `raincoatrun@gmail.com` holds `roles/iam.serviceAccountTokenCreator` on it | real restricted principal for R8/R9 via impersonation; dataset READER granted and revoked inside the tests (timestamps in `live_cases.json`) |
-| `bqaa-ci-sandbox@…`, `grafana-bq@…`, `haiyuan@google.com` | pre-existing | **not used** |
+| `user:owner` (ADC user; exact identity retained privately) | project `roles/owner`, `bigquery.jobUser`, `bigquery.dataViewer`; dataset OWNER | requester for R1–R5, evidence reader, provisioning |
+| `okf-receipt-restricted@test-project-0728-467323.iam.gserviceaccount.com` | created 23:40Z; project `roles/bigquery.jobUser` only; `user:owner` holds `roles/iam.serviceAccountTokenCreator` on it | real restricted principal for R8/R9 via impersonation; dataset READER granted and revoked inside the tests (timestamps in `live_cases.json`) |
+| `bqaa-ci-sandbox@…`, `grafana-bq@…`, a second pre-existing owner user | pre-existing | **not used** |
 
 Impersonation of a pre-existing sandbox SA was denied
 (`iam.serviceAccounts.getAccessToken`), so a dedicated temporary SA was
@@ -80,10 +107,10 @@ created rather than modifying another workflow's identity.
 
 ```text
 python -m pytest tests/examples/test_okf_attested_computation.py tests/examples/test_okf_bqaa_adapter.py -q
-  112 passed (94 receipt + 18 observer; order-independent)
+  119 passed (101 receipt + 18 observer; order-independent) after the fix pass
 OKF_SPIKE_LIVE=1 GOOGLE_CLOUD_PROJECT=test-project-0728-467323 \
   python -m pytest tests/integration/test_okf_attested_computation_live.py -q
-  7 passed in 53.57s (R1 + fresh-process rerun, R2, R3, R4, R5, R8, R9)
+  7 passed in 53.57s (2026-09-05) and 7 passed in 64.78s (2026-09-06 fix pass)
 python -m pytest tests/integration/test_okf_attested_computation_live.py -q   (no env)
   7 skipped   <- a skipped run is NOT acceptance evidence
 python examples/okf_attested_computation/run.py --case <case> [--live]

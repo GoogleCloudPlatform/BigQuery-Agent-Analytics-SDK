@@ -274,12 +274,29 @@ def seal_receipt(receipt: dict, keys: KeyStore) -> dict:
   return sealed
 
 
+PENDING_HANDLE_KEYS = frozenset({"receipt_id", "request_id", "status"})
+
+
+def is_pending_handle(stored: Any) -> bool:
+  """True only for the exact unsealed handle written by the executor."""
+  return (
+      isinstance(stored, dict)
+      and set(stored) == PENDING_HANDLE_KEYS
+      and stored.get("status") == "pending"
+  )
+
+
 def check_receipt_integrity(receipt: Any, keys: KeyStore) -> list[str]:
-  """Return reason codes; empty means the receipt is structurally authentic."""
+  """Return reason codes; empty means the receipt is structurally authentic.
+
+  Anything that is not a well-formed sealed receipt is an integrity
+  failure: a sealed receipt with fields removed is never treated as
+  pending.
+  """
   try:
     contracts.validate_receipt_shape(receipt)
   except contracts.ContractError as exc:
-    return [f"receipt_shape:{exc}"]
+    return ["receipt_integrity_failed", f"receipt_shape:{exc}"]
   proof = receipt["integrity_proof"]
   status = keys.status(proof["key_id"])
   if status != "active":

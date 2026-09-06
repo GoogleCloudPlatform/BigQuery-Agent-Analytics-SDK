@@ -361,19 +361,14 @@ def verify(
     match = contracts.MATCH
     authoritative = _read_result(evidence_client, tuple_, pub)
     details["result_schema"] = [pub["output"]["field"], pub["output"]["type"]]
-    if (
-        claim["field"] != authoritative["field"]
-        or claim["unit"] != authoritative["unit"]
-        or not contracts.constant_time_equal(
-            claim["value"], authoritative["value"]
-        )
-    ):
-      raise _rejected(contracts.MATCH, "display_mismatch")
     result = authoritative
     verdict = contracts.VERIFIED
   except _Outcome as outcome:
     verdict, match, reasons = outcome.verdict, outcome.match, outcome.reasons
 
+  # The sealed receipt records the evidence verdict only. The display claim
+  # is bound below and reported to the caller, but a wrong claim never
+  # overwrites or downgrades an authentic VERIFIED proof.
   out: dict[str, Any] = {
       "request_id": request_id,
       "receipt_id": receipt_id,
@@ -381,7 +376,7 @@ def verify(
       "verdict": verdict,
       "reason_codes": reasons,
   }
-  return _finish(
+  out = _finish(
       out,
       request,
       tuple_,
@@ -395,6 +390,34 @@ def verify(
       receipt_id,
       now,
   )
+  if out["verdict"] == contracts.VERIFIED and result is not None:
+    claim_ok = (
+        isinstance(claim, dict)
+        and claim.get("field") == result["field"]
+        and claim.get("unit") == result["unit"]
+        and contracts.constant_time_equal(
+            str(claim.get("value")), result["value"]
+        )
+    )
+    if not claim_ok:
+      out["verdict"] = contracts.REJECTED
+      out["reason_codes"] = ["display_mismatch"]
+      for key in ("value", "field", "unit", "label"):
+        out.pop(key, None)
+  return out
+
+
+def _may_store(stored: Any, keys: receipt_store.KeyStore) -> bool:
+  """Only a pending handle or an authentic non-VERIFIED receipt is replaced.
+
+  An authentic VERIFIED receipt is never downgraded, and a record that
+  fails integrity is kept as tamper evidence rather than silently reissued.
+  """
+  if stored is None or receipt_store.is_pending_handle(stored):
+    return True
+  if receipt_store.check_receipt_integrity(stored, keys):
+    return False
+  return stored["verdict"] != contracts.VERIFIED
 
 
 def _finish(
@@ -431,7 +454,8 @@ def _finish(
           keys,
           now,
       )
-      store.put_receipt(receipt_id, receipt)
+      if _may_store(store.get_receipt(receipt_id), keys):
+        store.put_receipt(receipt_id, receipt)
       out["receipt"] = receipt
     except contracts.ContractError as exc:
       out["verdict"] = contracts.UNVERIFIABLE
@@ -449,8 +473,9 @@ class BigQueryEvidenceClient:
   """Raw ``jobs.get`` / ``jobs.getQueryResults`` reads via the REST API.
 
   Uses the delegated client's connection so the principal is the broker's
-  requester. Confined to the (project, location, job_id) passed in by the
-  verifier; no list or query methods are exposed.
+  requester. Evidence reads are confined to the (project, location, job_id)
+  passed in by the verifier; the only other method is the dry-run access
+  probe used by the consumer.
   """
 
   def __init__(self, client: Any):

@@ -97,8 +97,18 @@ def consume(
         receipt_id,
     )
 
-  # 1. Authenticity of a sealed receipt (a pending handle has none yet).
-  sealed = "receipt_version" in stored
+  # 1. Authenticity. Only a sealed receipt is consumable; the executor's
+  # pending handle must first pass the independent verifier, and any other
+  # shape (e.g. a sealed receipt with fields removed) is an integrity failure.
+  if receipt_store.is_pending_handle(stored):
+    return _fail(
+        contracts.REJECTED,
+        contracts.UNKNOWN,
+        ["receipt_not_verified"],
+        request_id,
+        receipt_id,
+    )
+  sealed = True
   if sealed:
     problems = receipt_store.check_receipt_integrity(stored, keys)
     if problems:
@@ -275,7 +285,23 @@ def consume(
         receipt_id,
     )
 
-  # 6. Atomic one-time consumption.
+  # 6. Render first so a formatting failure can never spend the nonce.
+  try:
+    display = contracts.money_display(
+        authoritative["value"],
+        authoritative["unit"],
+        request["output"]["label"],
+    )
+  except contracts.ContractError:
+    return _fail(
+        contracts.UNVERIFIABLE,
+        contracts.MATCH,
+        ["render_failed"],
+        request_id,
+        receipt_id,
+    )
+
+  # 7. Atomic one-time consumption.
   if not registry.consume_once(
       request_id, request["nonce"], request["audience"]
   ):
@@ -287,10 +313,7 @@ def consume(
         receipt_id,
     )
 
-  # 7. Render only the authoritative value with the pinned field/unit.
-  display = contracts.money_display(
-      authoritative["value"], authoritative["unit"], request["output"]["label"]
-  )
+  # 8. Release only the authoritative value with the pinned field/unit.
   return {
       "request_id": request_id,
       "receipt_id": receipt_id,

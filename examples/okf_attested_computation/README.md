@@ -9,7 +9,9 @@ BigQuery delegation, then **independently verified** by a separate code
 path that re-reads `jobs.get` and `jobs.getQueryResults`. A deterministic
 consumer releases the number only after the sealed receipt, the fresh
 evidence, the claim and current access all agree, and the request nonce is
-consumed exactly once.
+consumed exactly once. A pending handle is never consumable: the verifier
+must seal a receipt first, and a wrong display claim never overwrites an
+authentic VERIFIED receipt.
 
 This is a follow-on to the PR 474 observer (`examples/okf_bqaa_adapter`),
 which stays untouched and still emits an honest no-execution
@@ -23,9 +25,10 @@ which stays untouched and still emits an honest no-execution
 | R2 product-cost-only formula (real job yields 600) | REJECTED `sql_mismatch` | pass | pass |
 | R3 period_end moved to 2026-02-28 (real job yields 515) | REJECTED `parameter_mismatch` | pass | pass |
 | R4 claim 600 / wrong field / wrong unit on a valid run | REJECTED `display_mismatch` | pass | pass |
-| R5 invented job, metadata-only verifier, transient API | UNVERIFIABLE | pass | pass |
-| R6 mutated receipt fields / MAC / key revoked or erased | REJECTED | pass | pass (tamper) |
-| R7 replay, concurrent consumers, wrong request, expired | one release only | pass | pass (replay) |
+| R5 invented job, metadata-only verifier | UNVERIFIABLE | pass | pass |
+| R5 transient API failure | UNVERIFIABLE | pass | hermetic only |
+| R6 mutated receipt fields / MAC / key revoked or erased | REJECTED | pass | tamper case only; field matrix and key lifecycle hermetic |
+| R7 replay, concurrent consumers, wrong request, expired | one release only | pass | replay case only; concurrency and expiry hermetic |
 | R8 service-account job with a user label | REJECTED `owner_mismatch` | pass | see `evidence/receipt/report.md` |
 | R9 revocation after issuance, denied output | REJECTED, no cached release | pass | see `evidence/receipt/report.md` |
 | R10 publication / table map / output contract mutated | REJECTED `publication_mutated` | pass | n/a (local) |

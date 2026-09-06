@@ -856,6 +856,10 @@ def test_expired_request_rejected(
 def test_consumer_releases_only_after_full_path(
     request_, receipt, registry, keys, good_job_client
 ):
+  assert (
+      _verify(request_, receipt, good_job_client, registry, keys)["verdict"]
+      == "VERIFIED"
+  )
   out = _consume(request_, receipt, good_job_client, registry, keys)
   assert out["verdict"] == "VERIFIED"
   assert out["display"] == "Gross margin: $400.00 USD · VERIFIED"
@@ -882,6 +886,7 @@ def test_display_substitution_is_blocked(
 def test_r7_replay_same_receipt_twice(
     request_, receipt, registry, keys, good_job_client
 ):
+  _verify(request_, receipt, good_job_client, registry, keys)
   first = _consume(request_, receipt, good_job_client, registry, keys)
   second = _consume(request_, receipt, good_job_client, registry, keys)
   assert first["verdict"] == "VERIFIED"
@@ -894,6 +899,13 @@ def test_r7_replay_same_receipt_twice(
 def test_r7_concurrent_consumers_release_once(
     request_, receipt, registry, keys, world
 ):
+  _verify(
+      request_,
+      receipt,
+      hermetic.HermeticEvidenceClient(world, REQUESTER),
+      registry,
+      keys,
+  )
   results: list[dict] = []
   barrier = threading.Barrier(6)
 
@@ -1137,3 +1149,151 @@ def test_observer_example_still_unverifiable():
       EXAMPLE_DIR.parent / "okf_bqaa_adapter" / "observe_agent.py"
   ).read_text()
   assert "UNVERIFIABLE" in src
+
+
+# --------------------------------------------------------------------------
+# PR 479 review fixes (Astra P1 + P2s, Opus 1-3)
+# --------------------------------------------------------------------------
+
+
+def test_p1_deleted_receipt_version_is_rejected_not_reissued(
+    request_, receipt, registry, keys, good_job_client
+):
+  _verify(request_, receipt, good_job_client, registry, keys)
+  sealed = registry.get_receipt(receipt["receipt_id"])
+  corrupted = copy.deepcopy(sealed)
+  del corrupted["receipt_version"]
+  corrupted["job"] = dict(corrupted["job"], job_id="okf_rcpt_forged")
+  corrupted["integrity_proof"]["mac"] = "0" * 64
+  registry.put_receipt(receipt["receipt_id"], corrupted)
+  out = _consume(request_, receipt, good_job_client, registry, keys)
+  assert out["verdict"] == "REJECTED"
+  assert out["reason_codes"][0] == "receipt_integrity_failed"
+  assert "display" not in out and "value" not in out
+  assert not registry.is_consumed(request_["request_id"])
+  # The corrupted record was not silently replaced by a reissued receipt.
+  assert registry.get_receipt(receipt["receipt_id"]) == corrupted
+
+
+def test_pending_handle_is_not_consumable(
+    request_, receipt, registry, keys, good_job_client
+):
+  out = _consume(request_, receipt, good_job_client, registry, keys)
+  assert out["verdict"] == "REJECTED"
+  assert out["reason_codes"] == ["receipt_not_verified"]
+  assert "display" not in out
+  assert not registry.is_consumed(request_["request_id"])
+
+
+def test_wrong_claim_does_not_overwrite_verified_receipt(
+    request_, receipt, registry, keys, good_job_client
+):
+  first = _verify(request_, receipt, good_job_client, registry, keys)
+  assert first["verdict"] == "VERIFIED"
+  sealed = registry.get_receipt(receipt["receipt_id"])
+  bad = _consume(
+      request_,
+      receipt,
+      good_job_client,
+      registry,
+      keys,
+      claim=dict(GOOD, value="600"),
+  )
+  assert bad["verdict"] == "REJECTED" and bad["reason_codes"] == [
+      "display_mismatch"
+  ]
+  assert registry.get_receipt(receipt["receipt_id"]) == sealed
+  # A direct wrong-claim verify call also leaves the sealed proof intact.
+  again = _verify(
+      request_,
+      receipt,
+      good_job_client,
+      registry,
+      keys,
+      claim=dict(GOOD, unit="EUR"),
+  )
+  assert again["verdict"] == "REJECTED"
+  assert registry.get_receipt(receipt["receipt_id"]) == sealed
+  good = _consume(request_, receipt, good_job_client, registry, keys)
+  assert good["verdict"] == "VERIFIED" and good["display"].startswith(
+      "Gross margin: $400.00"
+  )
+
+
+def test_verify_can_upgrade_unverifiable_but_never_downgrade_verified(
+    request_, receipt, registry, keys, world
+):
+  transient = hermetic.HermeticEvidenceClient(world, REQUESTER, "transient")
+  out = _verify(request_, receipt, transient, registry, keys)
+  assert out["verdict"] == "UNVERIFIABLE"
+  assert (
+      registry.get_receipt(receipt["receipt_id"])["verdict"] == "UNVERIFIABLE"
+  )
+  good = hermetic.HermeticEvidenceClient(world, REQUESTER)
+  assert (
+      _verify(request_, receipt, good, registry, keys)["verdict"] == "VERIFIED"
+  )
+  assert registry.get_receipt(receipt["receipt_id"])["verdict"] == "VERIFIED"
+  out = _verify(request_, receipt, transient, registry, keys)
+  assert out["verdict"] == "UNVERIFIABLE"
+  assert registry.get_receipt(receipt["receipt_id"])["verdict"] == "VERIFIED"
+
+
+def test_decimal_string_is_exact_for_38_digit_numeric():
+  a = "12345678901234567890123456785678.91"
+  b = "12345678901234567890123456785678.94"
+  assert contracts.decimal_string(a) == a
+  assert contracts.decimal_string(b) == b
+  assert contracts.decimal_string(a) != contracts.decimal_string(b)
+  big = "99999999999999999999999999999.999999999"
+  assert contracts.decimal_string(big) == big
+  assert contracts.money_display(big, "USD", "X").startswith("X: $")
+  with pytest.raises(contracts.ContractError):
+    contracts.decimal_string("1" * 200)
+  with pytest.raises(contracts.ContractError):
+    contracts.money_display("1" * 200, "USD", "X")
+
+
+def test_executor_enforces_hard_cost_ceiling(
+    request_, publication, caller, registry
+):
+  class Expensive:
+
+    def __init__(self, inner, estimate):
+      self._inner, self._estimate = inner, estimate
+      self.submitted_cap = None
+
+    def dry_run(self, *a):
+      return self._estimate
+
+    def submit(self, **kw):
+      self.submitted_cap = kw["maximum_bytes_billed"]
+      return self._inner.submit(**kw)
+
+    def get_job(self, job_id):
+      return self._inner.get_job(job_id)
+
+  too_big = Expensive(caller, 2 * 1024**3)
+  with pytest.raises(execute_mod.ExecutionError, match="ceiling"):
+    execute_mod.execute(request_, publication, too_big, registry)
+  assert too_big.submitted_cap is None
+  moderate = Expensive(caller, 400 * 1024**2)
+  execute_mod.execute(request_, publication, moderate, registry)
+  assert moderate.submitted_cap == execute_mod.HARD_MAX_BYTES_BILLED == 1024**3
+
+
+def test_render_failure_does_not_spend_nonce(
+    request_, receipt, registry, keys, good_job_client, monkeypatch
+):
+  _verify(request_, receipt, good_job_client, registry, keys)
+
+  def _boom(*a, **k):
+    raise contracts.ContractError("cannot render")
+
+  monkeypatch.setattr(consume_mod.contracts, "money_display", _boom)
+  out = _consume(request_, receipt, good_job_client, registry, keys)
+  assert out["verdict"] == "UNVERIFIABLE" and out["reason_codes"] == [
+      "render_failed"
+  ]
+  assert "display" not in out and "value" not in out
+  assert not registry.is_consumed(request_["request_id"])

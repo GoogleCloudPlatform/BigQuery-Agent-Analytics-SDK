@@ -25,6 +25,7 @@ from __future__ import annotations
 import datetime
 from decimal import Decimal
 from decimal import InvalidOperation
+from decimal import localcontext
 import hashlib
 import hmac
 import re
@@ -62,6 +63,11 @@ DOMAIN_COMMIT_REQUESTER = "okf-receipt:commit:requester"
 DOMAIN_COMMIT_PARAMS = "okf-receipt:commit:parameters"
 DOMAIN_COMMIT_RESULT = "okf-receipt:commit:result"
 DOMAIN_INTEGRITY = "okf-receipt:integrity"
+
+# BigQuery NUMERIC/BIGNUMERIC carry up to 38/76 significant digits; the
+# default decimal context (28) would silently round distinct legal values.
+DECIMAL_PRECISION = 120
+MAX_NUMERIC_DIGITS = 76
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -183,28 +189,34 @@ def constant_time_equal(a: str, b: str) -> bool:
 def decimal_string(value: Any) -> str:
   """Exact normalized decimal string: ``400`` not ``400.00`` or ``4E+2``.
 
-  Accepts str, int or Decimal. Floats are rejected outright.
+  Accepts str, int or Decimal. Floats are rejected outright. All arithmetic
+  runs in a fixed high-precision context so no legal NUMERIC/BIGNUMERIC
+  value is rounded, and every decimal failure surfaces as ContractError.
   """
   if isinstance(value, bool) or isinstance(value, float):
     raise ContractError("NUMERIC values must not be floats or bools")
-  if isinstance(value, int):
-    value = Decimal(value)
-  elif isinstance(value, str):
-    if not value or value != value.strip():
-      raise ContractError("NUMERIC string is empty or padded")
-    try:
-      value = Decimal(value)
-    except InvalidOperation as exc:
-      raise ContractError(f"not a decimal: {value!r}") from exc
-  elif not isinstance(value, Decimal):
-    raise ContractError(f"unsupported NUMERIC type {type(value).__name__}")
-  if not value.is_finite():
-    raise ContractError("NUMERIC must be finite")
-  norm = value.normalize()
-  sign, digits, exp = norm.as_tuple()
-  if exp > 0:
-    norm = norm.quantize(Decimal(1))
-  text = format(norm, "f")
+  try:
+    with localcontext() as ctx:
+      ctx.prec = DECIMAL_PRECISION
+      ctx.traps[InvalidOperation] = True
+      if isinstance(value, int):
+        value = Decimal(value)
+      elif isinstance(value, str):
+        if not value or value != value.strip():
+          raise ContractError("NUMERIC string is empty or padded")
+        value = Decimal(value)
+      elif not isinstance(value, Decimal):
+        raise ContractError(f"unsupported NUMERIC type {type(value).__name__}")
+      if not value.is_finite():
+        raise ContractError("NUMERIC must be finite")
+      if len(value.as_tuple().digits) > MAX_NUMERIC_DIGITS:
+        raise ContractError("NUMERIC exceeds the supported digit count")
+      norm = value.normalize()
+      if norm.as_tuple().exponent > 0:
+        norm = norm.quantize(Decimal(1))
+      text = format(norm, "f")
+  except ArithmeticError as exc:
+    raise ContractError(f"not an exact decimal: {value!r}") from exc
   if text in ("-0", "-0.0"):
     text = "0"
   return text
@@ -227,9 +239,16 @@ def date_string(value: Any) -> str:
 
 def money_display(value: str, unit: str, label: str) -> str:
   """Render ``Gross margin: $400.00 USD`` from a canonical decimal string."""
-  amount = Decimal(value).quantize(Decimal("0.01"))
-  sign = "-" if amount < 0 else ""
-  return f"{label}: {sign}${abs(amount):,.2f} {unit}"
+  try:
+    with localcontext() as ctx:
+      ctx.prec = DECIMAL_PRECISION
+      ctx.traps[InvalidOperation] = True
+      amount = Decimal(decimal_string(value)).quantize(Decimal("0.01"))
+      sign = "-" if amount < 0 else ""
+      body = f"{abs(amount):,.2f}"
+  except ArithmeticError as exc:
+    raise ContractError(f"cannot render {value!r}") from exc
+  return f"{label}: {sign}${body} {unit}"
 
 
 # --------------------------------------------------------------------------

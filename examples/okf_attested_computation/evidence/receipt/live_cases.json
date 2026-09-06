@@ -17,21 +17,21 @@
     "fresh_process_verify": {
       "eah": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
       "execution_match": "MATCH",
-      "rc": "ad0d75e236cf9003baa28e63b7739802e8c64e90622641e3891c29e7554bad70",
+      "rc": "4fe212144d3ac717f96dbfc5baad3d12a5358159e14f9104077f07426fafe915",
       "reason_codes": [],
       "verdict": "VERIFIED"
     },
     "job": {
       "cache_hit": false,
-      "created": "2026-09-05T23:56:11.064000+00:00",
-      "job_id": "okf_rcpt_9e98122903b09728ef305564_9c851d3d5c44e0c8",
-      "slot_millis": 37,
+      "created": "2026-09-06T00:30:11.375000+00:00",
+      "job_id": "okf_rcpt_d2f0f0ff9a75fac2810b07ab_0f0deb3f6d823188",
+      "slot_millis": 49,
       "state": "DONE",
       "total_bytes_billed": 73400320,
       "total_bytes_processed": 591,
-      "user_email": "raincoatrun@gmail.com"
+      "user_email": "user:owner"
     },
-    "recorded_at": "2026-09-05T23:56:16.890819+00:00"
+    "recorded_at": "2026-09-06T00:30:17.214071+00:00"
   },
   {
     "case": "R2_sql_substitution",
@@ -45,15 +45,15 @@
     },
     "job": {
       "cache_hit": false,
-      "created": "2026-09-05T23:56:17.093000+00:00",
-      "job_id": "okf_rcpt_236396cc55221c6df44201d4_6bc5866c7d85eccb",
-      "slot_millis": 47,
+      "created": "2026-09-06T00:30:17.483000+00:00",
+      "job_id": "okf_rcpt_e085885fb7d9839d4bedd15c_13ff7aa2d57a6e2a",
+      "slot_millis": 43,
       "state": "DONE",
       "total_bytes_billed": 73400320,
       "total_bytes_processed": 495,
-      "user_email": "raincoatrun@gmail.com"
+      "user_email": "user:owner"
     },
-    "recorded_at": "2026-09-05T23:56:20.201417+00:00",
+    "recorded_at": "2026-09-06T00:30:19.229945+00:00",
     "wrong_job_actual_value": "600"
   },
   {
@@ -69,19 +69,25 @@
     },
     "job": {
       "cache_hit": false,
-      "created": "2026-09-05T23:56:20.469000+00:00",
-      "job_id": "okf_rcpt_a1ca0ac0d57e3bf5e873f299_210b78e7849efbb3",
-      "slot_millis": 34,
+      "created": "2026-09-06T00:30:19.474000+00:00",
+      "job_id": "okf_rcpt_80715852ef4dfb3e9d65719d_eb12587aae2ebfd2",
+      "slot_millis": 67,
       "state": "DONE",
       "total_bytes_billed": 73400320,
       "total_bytes_processed": 591,
-      "user_email": "raincoatrun@gmail.com"
+      "user_email": "user:owner"
     },
-    "recorded_at": "2026-09-05T23:56:22.430989+00:00"
+    "recorded_at": "2026-09-06T00:30:21.112425+00:00"
   },
   {
     "case": "R4_display_substitution",
     "claims": {
+      "honest_after_rejections": {
+        "execution_match": "MATCH",
+        "reason_codes": [],
+        "released": true,
+        "verdict": "VERIFIED"
+      },
       "value_600": {
         "execution_match": "MATCH",
         "reason_codes": [
@@ -109,15 +115,15 @@
     },
     "job": {
       "cache_hit": false,
-      "created": "2026-09-05T23:56:23.034000+00:00",
-      "job_id": "okf_rcpt_0d5dee6d11a98c7551a44b04_c890dce166d831b4",
-      "slot_millis": 59,
+      "created": "2026-09-06T00:30:21.736000+00:00",
+      "job_id": "okf_rcpt_955a2466e053c9c2e545f74f_7008089c4328de21",
+      "slot_millis": 58,
       "state": "DONE",
       "total_bytes_billed": 73400320,
       "total_bytes_processed": 591,
-      "user_email": "raincoatrun@gmail.com"
+      "user_email": "user:owner"
     },
-    "recorded_at": "2026-09-05T23:56:24.329462+00:00"
+    "recorded_at": "2026-09-06T00:30:25.788043+00:00"
   },
   {
     "case": "R5_missing_evidence",
@@ -137,7 +143,7 @@
       "released": false,
       "verdict": "UNVERIFIABLE"
     },
-    "recorded_at": "2026-09-05T23:56:25.807976+00:00"
+    "recorded_at": "2026-09-06T00:30:27.440126+00:00"
   },
   {
     "case": "R8_identity_spoof",
@@ -149,19 +155,19 @@
       "released": false,
       "verdict": "REJECTED"
     },
-    "granted_at": "2026-09-05T23:56:27.615435+00:00",
+    "granted_at": "2026-09-06T00:30:29.624155+00:00",
     "job": {
       "cache_hit": false,
-      "created": "2026-09-05T23:56:28.972000+00:00",
-      "job_id": "okf_rcpt_2af7ac1fcedc0d6dcc17985b_be9060b46c4e965f",
-      "slot_millis": 48,
+      "created": "2026-09-06T00:30:30.491000+00:00",
+      "job_id": "okf_rcpt_1a8e9ba62a3d1b03cc4500d8_cd51d8378c775313",
+      "slot_millis": 40,
       "state": "DONE",
       "total_bytes_billed": 73400320,
       "total_bytes_processed": 591,
-      "user_email": "okf-receipt-restricted@test-project-0728-467323.iam.gserviceaccount.com"
+      "user_email": "sa:okf-receipt-restricted"
     },
-    "label_claimed_requester": "raincoatrun@gmail.com",
-    "recorded_at": "2026-09-05T23:56:30.122589+00:00"
+    "label_claimed_requester": "user:owner",
+    "recorded_at": "2026-09-06T00:30:31.907908+00:00"
   },
   {
     "case": "R9_revocation_output_denial",
@@ -175,16 +181,16 @@
     },
     "job": {
       "cache_hit": false,
-      "created": "2026-09-05T23:56:34.981000+00:00",
-      "job_id": "okf_rcpt_e351983f98432d5ac5119a18_7e0d4556bbda7dd2",
-      "slot_millis": 35,
+      "created": "2026-09-06T00:30:35.891000+00:00",
+      "job_id": "okf_rcpt_d2ca9c1345d9d2f01316cb52_a7752aa84ad0889b",
+      "slot_millis": 52,
       "state": "DONE",
       "total_bytes_billed": 73400320,
       "total_bytes_processed": 591,
-      "user_email": "okf-receipt-restricted@test-project-0728-467323.iam.gserviceaccount.com"
+      "user_email": "sa:okf-receipt-restricted"
     },
-    "recorded_at": "2026-09-05T23:57:01.200624+00:00",
-    "restricted_principal": "okf-receipt-restricted@test-project-0728-467323.iam.gserviceaccount.com",
+    "recorded_at": "2026-09-06T00:31:12.096694+00:00",
+    "restricted_principal": "sa:okf-receipt-restricted",
     "restricted_reads_user_job": {
       "execution_match": "UNKNOWN",
       "reason_codes": [
@@ -194,10 +200,10 @@
       "verdict": "REJECTED"
     },
     "timeline": {
-      "allowed_probe_at": 1788652594,
-      "denied_probe_at": 1788652620,
-      "granted_at": "2026-09-05T23:56:33.714759+00:00",
-      "revoked_at": "2026-09-05T23:56:38.814590+00:00"
+      "allowed_probe_at": 1788654635,
+      "denied_probe_at": 1788654670,
+      "granted_at": "2026-09-06T00:30:34.720330+00:00",
+      "revoked_at": "2026-09-06T00:30:39.204246+00:00"
     },
     "verify_before_revocation": {
       "execution_match": "MATCH",

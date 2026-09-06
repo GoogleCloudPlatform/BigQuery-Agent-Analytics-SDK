@@ -78,7 +78,27 @@ def _now() -> int:
   return int(time.time())
 
 
+ALIASES = {
+    "raincoatrun@gmail.com": "user:owner",
+    RESTRICTED_SA: "sa:okf-receipt-restricted",
+}
+
+
+def _redact(obj):
+  """Replace real principals with aliases before anything is committed."""
+  if isinstance(obj, dict):
+    return {k: _redact(v) for k, v in obj.items()}
+  if isinstance(obj, list):
+    return [_redact(v) for v in obj]
+  if isinstance(obj, str):
+    for real, alias in ALIASES.items():
+      obj = obj.replace(real, alias)
+    return obj
+  return obj
+
+
 def _record(case: str, payload: dict) -> None:
+  payload = _redact(payload)
   EVIDENCE.parent.mkdir(parents=True, exist_ok=True)
   rows = json.loads(EVIDENCE.read_text()) if EVIDENCE.exists() else []
   rows = [r for r in rows if r.get("case") != case]
@@ -137,6 +157,31 @@ def registry_path(tmp_path_factory):
 @pytest.fixture(scope="module")
 def registry(registry_path):
   return receipt_store.Registry(registry_path)
+
+
+def _issue_then_consume(req, handle, claim, evidence, registry, keys):
+  """Trusted two-step path: verifier seals, consumer gates; fresh clocks."""
+  issued = verify_mod.verify(
+      req["request_id"],
+      handle["receipt_id"],
+      claim,
+      evidence,
+      registry,
+      registry,
+      _now(),
+      keys=keys,
+  )
+  out = consume_mod.consume(
+      req["request_id"],
+      handle["receipt_id"],
+      claim,
+      evidence,
+      registry,
+      registry,
+      _now(),
+      keys=keys,
+  )
+  return issued, out
 
 
 def _user_world(user_session, pub, registry):
@@ -200,15 +245,8 @@ def test_r1_approved_run_verifies_and_releases(
   assert second["verdict"] == "VERIFIED"
   assert second["rc"] == first["receipt"]["result_commitment"]
   assert second["eah"] == first["receipt"]["executed_artifact_hash"]
-  out = consume_mod.consume(
-      req["request_id"],
-      handle["receipt_id"],
-      GOOD,
-      evidence,
-      registry,
-      registry,
-      _now(),
-      keys=keys,
+  issued_out, out = _issue_then_consume(
+      req, handle, GOOD, evidence, registry, keys
   )
   assert out["verdict"] == "VERIFIED"
   assert out["display"] == "Gross margin: $400.00 USD · VERIFIED"
@@ -236,15 +274,8 @@ def test_r2_sql_substitution_real_job_rejected(
   caller, evidence, req = _user_world(user_session, pub, registry)
   wrong = hermetic.product_cost_only_sql(req["compiled_sql"])
   handle = attacks.adversarial_execute(req, wrong, JAN, caller, registry)
-  out = consume_mod.consume(
-      req["request_id"],
-      handle["receipt_id"],
-      dict(GOOD, value="600"),
-      evidence,
-      registry,
-      registry,
-      _now(),
-      keys=keys,
+  issued_out, out = _issue_then_consume(
+      req, handle, dict(GOOD, value="600"), evidence, registry, keys
   )
   assert out["verdict"] == "REJECTED" and out["reason_codes"] == [
       "sql_mismatch"
@@ -272,15 +303,8 @@ def test_r3_parameter_substitution_real_job_rejected(
   handle = attacks.adversarial_execute(
       req, req["compiled_sql"], JAN_FEB, caller, registry
   )
-  out = consume_mod.consume(
-      req["request_id"],
-      handle["receipt_id"],
-      dict(GOOD, value="515"),
-      evidence,
-      registry,
-      registry,
-      _now(),
-      keys=keys,
+  issued_out, out = _issue_then_consume(
+      req, handle, dict(GOOD, value="515"), evidence, registry, keys
   )
   assert out["verdict"] == "REJECTED" and out["reason_codes"] == [
       "parameter_mismatch"
@@ -303,25 +327,45 @@ def test_r3_parameter_substitution_real_job_rejected(
 def test_r4_display_substitution_rejected(user_session, pub, registry, keys):
   caller, evidence, req = _user_world(user_session, pub, registry)
   handle = execute_mod.execute(req, pub, caller, registry)
+  sealed = verify_mod.verify(
+      req["request_id"],
+      handle["receipt_id"],
+      GOOD,
+      evidence,
+      registry,
+      registry,
+      _now(),
+      keys=keys,
+  )
+  assert sealed["verdict"] == "VERIFIED", sealed
+  proof = registry.get_receipt(handle["receipt_id"])
   outs = {}
   for name, claim in (
       ("value_600", dict(GOOD, value="600")),
       ("wrong_field", dict(GOOD, field="total_arr_usd")),
       ("wrong_unit", dict(GOOD, unit="EUR")),
   ):
-    out = consume_mod.consume(
-        req["request_id"],
-        handle["receipt_id"],
-        claim,
-        evidence,
-        registry,
-        registry,
-        _now(),
-        keys=keys,
+    issued_out, out = _issue_then_consume(
+        req, handle, claim, evidence, registry, keys
     )
     assert out["verdict"] == "REJECTED" and "display" not in out, name
+    assert out["reason_codes"] == ["display_mismatch"], (name, out)
+    assert registry.get_receipt(handle["receipt_id"]) == proof, name
     outs[name] = _summary(out)
   assert not registry.is_consumed(req["request_id"])
+  # The honest claim still releases after the rejected attempts.
+  good = consume_mod.consume(
+      req["request_id"],
+      handle["receipt_id"],
+      GOOD,
+      evidence,
+      registry,
+      registry,
+      _now(),
+      keys=keys,
+  )
+  assert good["verdict"] == "VERIFIED", good
+  outs["honest_after_rejections"] = _summary(good)
   _record(
       "R4_display_substitution",
       {
@@ -336,15 +380,8 @@ def test_r5_missing_evidence_stays_unverifiable(
 ):
   caller, evidence, req = _user_world(user_session, pub, registry)
   invented = attacks.register_invented_job(req, registry)
-  out_missing = consume_mod.consume(
-      req["request_id"],
-      invented["receipt_id"],
-      GOOD,
-      evidence,
-      registry,
-      registry,
-      _now(),
-      keys=keys,
+  issued_out_missing, out_missing = _issue_then_consume(
+      req, invented, GOOD, evidence, registry, keys
   )
   assert out_missing["verdict"] == "UNVERIFIABLE" and out_missing[
       "reason_codes"
@@ -354,15 +391,8 @@ def test_r5_missing_evidence_stays_unverifiable(
   )
   handle = execute_mod.execute(req2, pub, caller, registry)
   meta_only = verify_mod.MetadataOnlyEvidenceClient(evidence)
-  out_meta = consume_mod.consume(
-      req2["request_id"],
-      handle["receipt_id"],
-      GOOD,
-      meta_only,
-      registry,
-      registry,
-      _now(),
-      keys=keys,
+  issued_out_meta, out_meta = _issue_then_consume(
+      req2, handle, GOOD, meta_only, registry, keys
   )
   assert (
       out_meta["verdict"] == "UNVERIFIABLE"
@@ -451,15 +481,8 @@ def test_r8_service_account_job_with_user_label_rejected(
             .replace(".", "_")
         },
     )
-    out = consume_mod.consume(
-        req["request_id"],
-        handle["receipt_id"],
-        GOOD,
-        user_evidence,
-        registry,
-        registry,
-        _now(),
-        keys=keys,
+    issued_out, out = _issue_then_consume(
+        req, handle, GOOD, user_evidence, registry, keys
     )
     assert out["verdict"] == "REJECTED" and out["reason_codes"] == [
         "owner_mismatch"
@@ -536,15 +559,8 @@ def test_r9_revocation_and_output_denial(user_session, pub, registry, keys):
     probe = _wait_probe(sa_evidence, req, broker.DENIED)
     timeline["denied_probe_at"] = probe.get("probed_at")
     assert probe.get("sources") == broker.DENIED, probe
-    out = consume_mod.consume(
-        req["request_id"],
-        handle["receipt_id"],
-        GOOD,
-        sa_evidence,
-        registry,
-        registry,
-        _now(),
-        keys=keys,
+    issued_out, out = _issue_then_consume(
+        req, handle, GOOD, sa_evidence, registry, keys
     )
     assert out["verdict"] == "REJECTED" and "display" not in out
     assert out["reason_codes"][0] in (

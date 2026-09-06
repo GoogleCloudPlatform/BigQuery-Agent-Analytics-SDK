@@ -6,7 +6,7 @@
   "jobs": {
     "approved_jan": {
       "job_id": "okf_receipt_preflight_jan_71b3b21715fe",
-      "user_email": "raincoatrun@gmail.com",
+      "user_email": "user:owner (ADC user; exact identity retained privately)",
       "state": "DONE",
       "cache_hit": false,
       "query_sha256": "7c166b94483bd931f74a1073174ad09ca964d47593a5f20ce9819b74c55b1330",
@@ -53,7 +53,7 @@
     },
     "approved_janfeb": {
       "job_id": "okf_receipt_preflight_janfeb_4baa03f238fe",
-      "user_email": "raincoatrun@gmail.com",
+      "user_email": "user:owner (ADC user; exact identity retained privately)",
       "state": "DONE",
       "cache_hit": false,
       "query_sha256": "7c166b94483bd931f74a1073174ad09ca964d47593a5f20ce9819b74c55b1330",
@@ -100,7 +100,7 @@
     },
     "wrong_formula_jan": {
       "job_id": "okf_receipt_preflight_wrong_eeeabdb00901",
-      "user_email": "raincoatrun@gmail.com",
+      "user_email": "user:owner (ADC user; exact identity retained privately)",
       "state": "DONE",
       "cache_hit": false,
       "query_sha256": "371fd5cd69983e1251c2ae1cc600897d3ae24c40cb766b9b74df311042d36549",
