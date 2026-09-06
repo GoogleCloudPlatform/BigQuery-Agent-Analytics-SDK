@@ -1,0 +1,9 @@
+# Private evidence output. Only sanitized, reviewed files are committed.
+*
+!.gitignore
+!receipt/
+receipt/*
+!receipt/report.md
+!receipt/cases.json
+!receipt/preflight.json
+!receipt/live_cases.json

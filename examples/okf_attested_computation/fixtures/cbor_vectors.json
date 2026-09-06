@@ -1,0 +1,66 @@
+[
+ {
+  "value": {
+   "a": 1,
+   "b": [
+    true,
+    false,
+    null,
+    "x"
+   ]
+  },
+  "cbor_hex": "a2616101616284f5f4f66178",
+  "h_hex": "d97cfdb9ec68c387792a3d5d7d7698b35b90e48bf0391be1897febbf6fd26592"
+ },
+ {
+  "value": {
+   "zz": "\u00e9",
+   "aa": {
+    "k": 0
+   }
+  },
+  "cbor_hex": "a2626161a1616b00627a7a62c3a9",
+  "h_hex": "66e87b8b8e7dd8d32652515e7b4a4cd5f9db0d26f84df9c963e1b05e17f3cdd3"
+ },
+ {
+  "value": [
+   "period_start",
+   "2026-01-01",
+   400
+  ],
+  "cbor_hex": "836c706572696f645f73746172746a323032362d30312d3031190190",
+  "h_hex": "8be27d52ad78f017e196418176702dd6126fbb5276cc37d7b7e94683ce72ca7b"
+ },
+ {
+  "value": {
+   "nested": {
+    "deep": [
+     "s",
+     1,
+     {
+      "m": null
+     }
+    ]
+   },
+   "n": 23,
+   "big": 1099511627776
+  },
+  "cbor_hex": "a3616e17636269671b0000010000000000666e6573746564a1646465657083617301a1616df6",
+  "h_hex": "1756dbe26e35378c9487fb26f873d0f8689f277d504fa2c1898ac3998ea29710"
+ },
+ {
+  "value": "",
+  "cbor_hex": "60",
+  "h_hex": "e9bd0c0c7e870ff8ef8eb13a0e3b06ca36f86463aaa326fa59367abb4c8244a2"
+ },
+ {
+  "value": {},
+  "cbor_hex": "a0",
+  "h_hex": "17939446c7ddbbce33dbb9b99b81db015f9ea9a560a579171cac2d06ee69e1b6"
+ },
+ {
+  "value": [],
+  "cbor_hex": "80",
+  "h_hex": "d467f038ced4a7ec0fa973bcc08fa52381dc45b09c33a7bea13431ade152a5d7"
+ }
+]

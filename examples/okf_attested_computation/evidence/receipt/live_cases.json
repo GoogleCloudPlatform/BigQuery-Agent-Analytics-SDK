@@ -1,0 +1,215 @@
+[
+  {
+    "case": "R1_approved",
+    "consume": {
+      "execution_match": "MATCH",
+      "reason_codes": [],
+      "released": true,
+      "verdict": "VERIFIED"
+    },
+    "display": "Gross margin: $400.00 USD \u00b7 VERIFIED",
+    "first_verify": {
+      "execution_match": "MATCH",
+      "reason_codes": [],
+      "released": false,
+      "verdict": "VERIFIED"
+    },
+    "fresh_process_verify": {
+      "eah": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
+      "execution_match": "MATCH",
+      "rc": "3bc34d55cb52f29cb1724b41c26ddeb34c6cbac3bdbcf140d304052e289a612f",
+      "reason_codes": [],
+      "verdict": "VERIFIED"
+    },
+    "job": {
+      "cache_hit": false,
+      "created": "2026-09-06T01:31:32.446000+00:00",
+      "job_id": "okf_rcpt_79e2c4842095e1b07fd40bec_b54fb7bb4c94e21d",
+      "slot_millis": 46,
+      "state": "DONE",
+      "total_bytes_billed": 73400320,
+      "total_bytes_processed": 591,
+      "user_email": "user:owner"
+    },
+    "recorded_at": "2026-09-06T01:31:38.834783+00:00"
+  },
+  {
+    "case": "R2_sql_substitution",
+    "consume": {
+      "execution_match": "MISMATCH",
+      "reason_codes": [
+        "sql_mismatch"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    "job": {
+      "cache_hit": false,
+      "created": "2026-09-06T01:31:39.086000+00:00",
+      "job_id": "okf_rcpt_4664bc700205d81ab4608606_a1c4a76537c9aacc",
+      "slot_millis": 43,
+      "state": "DONE",
+      "total_bytes_billed": 73400320,
+      "total_bytes_processed": 495,
+      "user_email": "user:owner"
+    },
+    "recorded_at": "2026-09-06T01:31:40.951669+00:00",
+    "wrong_job_actual_value": "600"
+  },
+  {
+    "case": "R3_parameter_substitution",
+    "changed_period_actual_value": "515",
+    "consume": {
+      "execution_match": "MISMATCH",
+      "reason_codes": [
+        "parameter_mismatch"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    "job": {
+      "cache_hit": false,
+      "created": "2026-09-06T01:31:41.211000+00:00",
+      "job_id": "okf_rcpt_f39f04adb33ab9b43829d0cf_9f3430b9b71e0ac5",
+      "slot_millis": 43,
+      "state": "DONE",
+      "total_bytes_billed": 73400320,
+      "total_bytes_processed": 591,
+      "user_email": "user:owner"
+    },
+    "recorded_at": "2026-09-06T01:31:43.032015+00:00"
+  },
+  {
+    "case": "R4_display_substitution",
+    "claims": {
+      "honest_after_rejections": {
+        "execution_match": "MATCH",
+        "reason_codes": [],
+        "released": true,
+        "verdict": "VERIFIED"
+      },
+      "value_600": {
+        "execution_match": "MATCH",
+        "reason_codes": [
+          "display_mismatch"
+        ],
+        "released": false,
+        "verdict": "REJECTED"
+      },
+      "wrong_field": {
+        "execution_match": "MATCH",
+        "reason_codes": [
+          "display_mismatch"
+        ],
+        "released": false,
+        "verdict": "REJECTED"
+      },
+      "wrong_unit": {
+        "execution_match": "MATCH",
+        "reason_codes": [
+          "display_mismatch"
+        ],
+        "released": false,
+        "verdict": "REJECTED"
+      }
+    },
+    "job": {
+      "cache_hit": false,
+      "created": "2026-09-06T01:31:43.734000+00:00",
+      "job_id": "okf_rcpt_51c0c17adbf0e37669a42aa9_4e5aacff348a85dc",
+      "slot_millis": 52,
+      "state": "DONE",
+      "total_bytes_billed": 73400320,
+      "total_bytes_processed": 591,
+      "user_email": "user:owner"
+    },
+    "recorded_at": "2026-09-06T01:31:48.410389+00:00"
+  },
+  {
+    "case": "R5_missing_evidence",
+    "invented_job": {
+      "execution_match": "UNKNOWN",
+      "reason_codes": [
+        "job_missing"
+      ],
+      "released": false,
+      "verdict": "UNVERIFIABLE"
+    },
+    "metadata_only": {
+      "execution_match": "MATCH",
+      "reason_codes": [
+        "result_unavailable"
+      ],
+      "released": false,
+      "verdict": "UNVERIFIABLE"
+    },
+    "recorded_at": "2026-09-06T01:31:50.636490+00:00"
+  },
+  {
+    "case": "R8_identity_spoof",
+    "consume": {
+      "execution_match": "MISMATCH",
+      "reason_codes": [
+        "owner_mismatch"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    "granted_at": "2026-09-06T01:31:52.461149+00:00",
+    "job": {
+      "cache_hit": false,
+      "created": "2026-09-06T01:31:53.306000+00:00",
+      "job_id": "okf_rcpt_00141d2169c52ff8480f397e_787fa708c617784b",
+      "slot_millis": 36,
+      "state": "DONE",
+      "total_bytes_billed": 73400320,
+      "total_bytes_processed": 591,
+      "user_email": "sa:okf-receipt-restricted"
+    },
+    "label_claimed_requester": "user:owner",
+    "recorded_at": "2026-09-06T01:31:54.394203+00:00"
+  },
+  {
+    "case": "R9_revocation_output_denial",
+    "consume_after_revocation": {
+      "execution_match": "MATCH",
+      "reason_codes": [
+        "access_denied"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    "job": {
+      "cache_hit": false,
+      "created": "2026-09-06T01:31:58.338000+00:00",
+      "job_id": "okf_rcpt_f13e6fafae88ea6e67612ca7_b12aec57c802f629",
+      "slot_millis": 44,
+      "state": "DONE",
+      "total_bytes_billed": 73400320,
+      "total_bytes_processed": 591,
+      "user_email": "sa:okf-receipt-restricted"
+    },
+    "recorded_at": "2026-09-06T01:32:35.494989+00:00",
+    "restricted_principal": "sa:okf-receipt-restricted",
+    "restricted_reads_user_job": {
+      "execution_match": "UNKNOWN",
+      "reason_codes": [
+        "job_read_denied"
+      ],
+      "released": false,
+      "verdict": "REJECTED"
+    },
+    "timeline": {
+      "allowed_probe_at": 1788658317,
+      "denied_probe_at": 1788658353,
+      "granted_at": "2026-09-06T01:31:57.051206+00:00",
+      "revoked_at": "2026-09-06T01:32:02.163219+00:00"
+    },
+    "verify_before_revocation": {
+      "execution_match": "MATCH",
+      "reason_codes": [],
+      "released": false,
+      "verdict": "VERIFIED"
+    }
+  }
+]

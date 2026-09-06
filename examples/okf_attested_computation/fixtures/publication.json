@@ -1,0 +1,27 @@
+{
+  "publication_id": "okf-receipt-spike/acme-retail-derived/gross-margin-period",
+  "derived_from": "knowledge-catalog okf/bundles/acme_retail @ 31da799a9aef176df12e91abbd119ea9385b75ec",
+  "synthetic": true,
+  "computation_path": "acme_retail/gross-margin-period.md",
+  "computation_sha256": "5e96ae11835ad328ccc94d29ae4bc7cc40176758cbcbad63231d0461c1f8f0e7",
+  "runtime": "bigquery",
+  "project": "test-project-0728-467323",
+  "location": "US",
+  "dataset": "okf_receipt_spike_20260905",
+  "table_map": {
+    "acme.sales.orders": "orders",
+    "acme.finance.fx_daily_rates": "fx_daily_rates",
+    "acme.sales.order_lines": "order_lines",
+    "acme.catalog.products": "products",
+    "acme.logistics.fulfillment_cost": "fulfillment_cost",
+    "acme.logistics.shipment_cost": "shipment_cost",
+    "acme.finance.payment_fees": "payment_fees"
+  },
+  "parameters": [
+    {"name": "period_start", "type": "DATE", "required": true},
+    {"name": "period_end", "type": "DATE", "required": true}
+  ],
+  "output": {"field": "gross_margin_usd", "type": "NUMERIC", "unit": "USD", "label": "Gross margin"},
+  "policy_version": "okf-receipt-spike-policy/2026-09-05",
+  "context_ref": "okf:acme-retail-derived#gross-margin-period"
+}
