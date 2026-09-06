@@ -2,7 +2,7 @@
   "cases": [
     {
       "attack": null,
-      "attester_artifact_hash": "40addcbef18b106487edde179953588f42b456a1ee598a1fcecd007f6cf9b96e",
+      "attester_artifact_hash": "e9bb803540f56ceab8faaac915b9f6e72dd8d64fed7d1c6126b9c75ea1e9365e",
       "case": "approved",
       "execution_match": "MATCH",
       "extra": {},
@@ -10,7 +10,7 @@
         "execution_match": "MATCH",
         "verdict": "VERIFIED"
       },
-      "job_id": "okf_rcpt_35cfb373eed134f0ebc56d92_cc2e8b34a478ebfb",
+      "job_id": "okf_rcpt_2bde23061d8eab4e899d35d4_d3fddfa9166aea41",
       "mode": "hermetic",
       "reason_codes": [],
       "released": true,
@@ -18,7 +18,7 @@
     },
     {
       "attack": "valid approved run; agent claims 600",
-      "attester_artifact_hash": "40addcbef18b106487edde179953588f42b456a1ee598a1fcecd007f6cf9b96e",
+      "attester_artifact_hash": "e9bb803540f56ceab8faaac915b9f6e72dd8d64fed7d1c6126b9c75ea1e9365e",
       "case": "display-substitution",
       "execution_match": "MATCH",
       "extra": {},
@@ -26,7 +26,7 @@
         "execution_match": "MATCH",
         "verdict": "REJECTED"
       },
-      "job_id": "okf_rcpt_5aa60fa587457fa506e820e8_a9f76bf1a3e7cfe6",
+      "job_id": "okf_rcpt_b3f133ce8b1e9316ce5bced0_532f7292f221d9e3",
       "mode": "hermetic",
       "reason_codes": [
         "display_mismatch"
@@ -36,7 +36,7 @@
     },
     {
       "attack": "invented job id never submitted",
-      "attester_artifact_hash": "40addcbef18b106487edde179953588f42b456a1ee598a1fcecd007f6cf9b96e",
+      "attester_artifact_hash": "e9bb803540f56ceab8faaac915b9f6e72dd8d64fed7d1c6126b9c75ea1e9365e",
       "case": "missing-evidence",
       "execution_match": "UNKNOWN",
       "extra": {
@@ -52,7 +52,7 @@
         "execution_match": "UNKNOWN",
         "verdict": "UNVERIFIABLE"
       },
-      "job_id": "okf_rcpt_invented_a6887e0814a0",
+      "job_id": "okf_rcpt_invented_f8b04d3ec489",
       "mode": "hermetic",
       "reason_codes": [
         "job_missing"
@@ -62,7 +62,7 @@
     },
     {
       "attack": "approved SQL with period_end=2026-02-28; agent claims 515",
-      "attester_artifact_hash": "40addcbef18b106487edde179953588f42b456a1ee598a1fcecd007f6cf9b96e",
+      "attester_artifact_hash": "e9bb803540f56ceab8faaac915b9f6e72dd8d64fed7d1c6126b9c75ea1e9365e",
       "case": "parameter-substitution",
       "execution_match": "MISMATCH",
       "extra": {},
@@ -70,7 +70,7 @@
         "execution_match": "MISMATCH",
         "verdict": "REJECTED"
       },
-      "job_id": "okf_rcpt_e305d944e2d1e588b7fa30d2_404c99111fb42bee",
+      "job_id": "okf_rcpt_50f398dd40a2ec8e19c6d0a5_ba255991c73deaf7",
       "mode": "hermetic",
       "reason_codes": [
         "parameter_mismatch"
@@ -80,7 +80,7 @@
     },
     {
       "attack": "same receipt consumed twice",
-      "attester_artifact_hash": "40addcbef18b106487edde179953588f42b456a1ee598a1fcecd007f6cf9b96e",
+      "attester_artifact_hash": "e9bb803540f56ceab8faaac915b9f6e72dd8d64fed7d1c6126b9c75ea1e9365e",
       "case": "replay",
       "execution_match": "UNKNOWN",
       "extra": {
@@ -90,7 +90,7 @@
         "execution_match": "UNKNOWN",
         "verdict": "REJECTED"
       },
-      "job_id": "okf_rcpt_75e9fad2e6bba8b096d2cceb_9d05818ac7695518",
+      "job_id": "okf_rcpt_5ecfd55292a102745f074250_9724210a21093e9b",
       "mode": "hermetic",
       "reason_codes": [
         "request_consumed"
@@ -100,7 +100,7 @@
     },
     {
       "attack": "product-cost-only formula; agent claims 600",
-      "attester_artifact_hash": "40addcbef18b106487edde179953588f42b456a1ee598a1fcecd007f6cf9b96e",
+      "attester_artifact_hash": "e9bb803540f56ceab8faaac915b9f6e72dd8d64fed7d1c6126b9c75ea1e9365e",
       "case": "sql-substitution",
       "execution_match": "MISMATCH",
       "extra": {},
@@ -108,7 +108,7 @@
         "execution_match": "MISMATCH",
         "verdict": "REJECTED"
       },
-      "job_id": "okf_rcpt_0d4dc87cf6430ec8c2f9d986_11fd878b55696f20",
+      "job_id": "okf_rcpt_fb3dc59c4dd0c4126daf625a_968133c05beda106",
       "mode": "hermetic",
       "reason_codes": [
         "sql_mismatch"
@@ -118,7 +118,7 @@
     },
     {
       "attack": "stored receipt job_id mutated after sealing",
-      "attester_artifact_hash": "40addcbef18b106487edde179953588f42b456a1ee598a1fcecd007f6cf9b96e",
+      "attester_artifact_hash": "e9bb803540f56ceab8faaac915b9f6e72dd8d64fed7d1c6126b9c75ea1e9365e",
       "case": "tamper",
       "execution_match": "UNKNOWN",
       "extra": {
@@ -128,7 +128,7 @@
         "execution_match": "MATCH",
         "verdict": "VERIFIED"
       },
-      "job_id": "okf_rcpt_6821939dcc48b2fd84f0d9ca_f3c2f0494207ed39",
+      "job_id": "okf_rcpt_fc33b9fb4cbebd7e77d283db_b4413430b420f613",
       "mode": "hermetic",
       "reason_codes": [
         "receipt_integrity_failed"
@@ -138,7 +138,7 @@
     },
     {
       "attack": null,
-      "attester_artifact_hash": "40addcbef18b106487edde179953588f42b456a1ee598a1fcecd007f6cf9b96e",
+      "attester_artifact_hash": "e9bb803540f56ceab8faaac915b9f6e72dd8d64fed7d1c6126b9c75ea1e9365e",
       "case": "approved",
       "execution_match": "MATCH",
       "extra": {},
@@ -146,7 +146,7 @@
         "execution_match": "MATCH",
         "verdict": "VERIFIED"
       },
-      "job_id": "okf_rcpt_2ed333d955087f76596d5e16_2c828549f73a3ba9",
+      "job_id": "okf_rcpt_9d3ff499b2a4d9fd94b1ec35_4dc32a4aab46ee13",
       "mode": "live",
       "reason_codes": [],
       "released": true,
@@ -154,7 +154,7 @@
     },
     {
       "attack": "valid approved run; agent claims 600",
-      "attester_artifact_hash": "40addcbef18b106487edde179953588f42b456a1ee598a1fcecd007f6cf9b96e",
+      "attester_artifact_hash": "e9bb803540f56ceab8faaac915b9f6e72dd8d64fed7d1c6126b9c75ea1e9365e",
       "case": "display-substitution",
       "execution_match": "MATCH",
       "extra": {},
@@ -162,7 +162,7 @@
         "execution_match": "MATCH",
         "verdict": "REJECTED"
       },
-      "job_id": "okf_rcpt_9d0473eab16bde94f1adbf6d_f6ddc3be029735c7",
+      "job_id": "okf_rcpt_275107e2dfe9245b475b0b3e_d28c0d206177dbf8",
       "mode": "live",
       "reason_codes": [
         "display_mismatch"
@@ -172,7 +172,7 @@
     },
     {
       "attack": "invented job id never submitted",
-      "attester_artifact_hash": "40addcbef18b106487edde179953588f42b456a1ee598a1fcecd007f6cf9b96e",
+      "attester_artifact_hash": "e9bb803540f56ceab8faaac915b9f6e72dd8d64fed7d1c6126b9c75ea1e9365e",
       "case": "missing-evidence",
       "execution_match": "UNKNOWN",
       "extra": {
@@ -188,7 +188,7 @@
         "execution_match": "UNKNOWN",
         "verdict": "UNVERIFIABLE"
       },
-      "job_id": "okf_rcpt_invented_9001b5cd5884",
+      "job_id": "okf_rcpt_invented_763bcdb5bace",
       "mode": "live",
       "reason_codes": [
         "job_missing"
@@ -198,7 +198,7 @@
     },
     {
       "attack": "approved SQL with period_end=2026-02-28; agent claims 515",
-      "attester_artifact_hash": "40addcbef18b106487edde179953588f42b456a1ee598a1fcecd007f6cf9b96e",
+      "attester_artifact_hash": "e9bb803540f56ceab8faaac915b9f6e72dd8d64fed7d1c6126b9c75ea1e9365e",
       "case": "parameter-substitution",
       "execution_match": "MISMATCH",
       "extra": {},
@@ -206,7 +206,7 @@
         "execution_match": "MISMATCH",
         "verdict": "REJECTED"
       },
-      "job_id": "okf_rcpt_66baf16a7f87a98447c091c0_846bd10b7828f052",
+      "job_id": "okf_rcpt_ea7c594888323267687eeb59_bb586b67f838fc54",
       "mode": "live",
       "reason_codes": [
         "parameter_mismatch"
@@ -216,7 +216,7 @@
     },
     {
       "attack": "same receipt consumed twice",
-      "attester_artifact_hash": "40addcbef18b106487edde179953588f42b456a1ee598a1fcecd007f6cf9b96e",
+      "attester_artifact_hash": "e9bb803540f56ceab8faaac915b9f6e72dd8d64fed7d1c6126b9c75ea1e9365e",
       "case": "replay",
       "execution_match": "UNKNOWN",
       "extra": {
@@ -226,7 +226,7 @@
         "execution_match": "UNKNOWN",
         "verdict": "REJECTED"
       },
-      "job_id": "okf_rcpt_e2d4cf7c450423ef97c7695a_7d1944925dfbd7a8",
+      "job_id": "okf_rcpt_873d137eade00c0478c05f7d_4eebedc3a7b58064",
       "mode": "live",
       "reason_codes": [
         "request_consumed"
@@ -236,7 +236,7 @@
     },
     {
       "attack": "product-cost-only formula; agent claims 600",
-      "attester_artifact_hash": "40addcbef18b106487edde179953588f42b456a1ee598a1fcecd007f6cf9b96e",
+      "attester_artifact_hash": "e9bb803540f56ceab8faaac915b9f6e72dd8d64fed7d1c6126b9c75ea1e9365e",
       "case": "sql-substitution",
       "execution_match": "MISMATCH",
       "extra": {},
@@ -244,7 +244,7 @@
         "execution_match": "MISMATCH",
         "verdict": "REJECTED"
       },
-      "job_id": "okf_rcpt_1846969acb332c5664aa5e44_c9257a7d39304ef6",
+      "job_id": "okf_rcpt_a6ce6fa5e670f3bd64e0e26a_4565af8a4a732cbc",
       "mode": "live",
       "reason_codes": [
         "sql_mismatch"
@@ -254,7 +254,7 @@
     },
     {
       "attack": "stored receipt job_id mutated after sealing",
-      "attester_artifact_hash": "40addcbef18b106487edde179953588f42b456a1ee598a1fcecd007f6cf9b96e",
+      "attester_artifact_hash": "e9bb803540f56ceab8faaac915b9f6e72dd8d64fed7d1c6126b9c75ea1e9365e",
       "case": "tamper",
       "execution_match": "UNKNOWN",
       "extra": {
@@ -264,7 +264,7 @@
         "execution_match": "MATCH",
         "verdict": "VERIFIED"
       },
-      "job_id": "okf_rcpt_18e8728307948cae98aa6477_e1cbc5255a31a443",
+      "job_id": "okf_rcpt_f9f96b30f560aab28abea438_de4fdbe8bb583b60",
       "mode": "live",
       "reason_codes": [
         "receipt_integrity_failed"
@@ -273,7 +273,8 @@
       "verdict": "REJECTED"
     }
   ],
-  "generated_at_head": "post-0a13be0 (P2 #5b fix)",
+  "generated_at": "2026-09-06T01:33:30.026453+00:00",
+  "generated_at_head": "c121c44690cc34275b3963a70644786a1e23b6c4",
   "generated_from": "run.py --case ... [--live]",
   "synthetic_fixture": true
 }

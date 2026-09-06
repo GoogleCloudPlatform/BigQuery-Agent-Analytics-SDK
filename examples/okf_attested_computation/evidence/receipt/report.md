@@ -32,10 +32,11 @@ time (P2 #5b), addressed in `72f798e`. Astra then found a remaining clock
 construction race (P2 #5c): sampling the caller timestamp and constructing
 the clock in different seconds offset all subsequent checks. The default
 now reads absolute wall time without rebasing to the caller timestamp.
-Every row is covered by hermetic tests. The existing `cases.json` and
-`live_cases.json` records were regenerated at `72f798e`; they are historical
-evidence until the P2 #5c live pass is recorded. Earlier heads' CLI evidence
-was not retained separately.
+Every row is covered by hermetic tests. `cases.json` and `live_cases.json`
+were regenerated on the P2 #5c code commit `c121c44`: fourteen CLI records
+(seven hermetic, seven live) carry its attester artifact hash, and all
+seven live acceptance records have fresh timestamps. Earlier heads' CLI
+evidence was not retained separately.
 
 | # | Finding | Fix | Test |
 |---|---|---|---|
@@ -53,12 +54,21 @@ Also: committed evidence now uses `user:owner` / `sa:okf-receipt-restricted`
 aliases (exact topology retained privately); the live suite redacts on
 write. The verifier docstring no longer claims "no query methods".
 
-Post-fix results: hermetic 101 receipt tests + 18 observer tests pass;
+Initial fix-pass results: hermetic 101 receipt tests + 18 observer tests pass;
 live suite 7/7 (64.8 s); CLI live cases approved → exit 0, six attack
 cases → exit 2 with no number. One earlier live rerun hit a transient
 "project does not have the reservation in the data region" error on three
 jobs while no reservation existed in the project; the immediate rerun
 passed and the error is recorded here rather than hidden.
+
+P2 #5c validation: **119 receipt + 18 observer = 137 hermetic tests passed**;
+the separately enabled live suite passed **7/7 in 68.12 s**, with a durable
+`exit=0`. All fourteen CLI cases were rerun: approved releases, substitutions
+and tamper reject, missing evidence stays UNVERIFIABLE, and replay rejects
+the second consumption. The CLI construction regression first failed on
+`72f798e` (expired value released), then passed with `request_expired`, no
+value/display and nonce intact; its before-deadline rollover still releases.
+The code/test commit was pushed before this live evidence pass.
 
 ## Authority chain (measured)
 

@@ -17,21 +17,21 @@
     "fresh_process_verify": {
       "eah": "c802629862f2e56ccee72543037513e0b19fa80f3b2288968d1172ab65bb636c",
       "execution_match": "MATCH",
-      "rc": "2b396fa7428b260550cb39fbe2c6a05c45bcfd39514f80bc84255c2e7e438f1e",
+      "rc": "3bc34d55cb52f29cb1724b41c26ddeb34c6cbac3bdbcf140d304052e289a612f",
       "reason_codes": [],
       "verdict": "VERIFIED"
     },
     "job": {
       "cache_hit": false,
-      "created": "2026-09-06T01:09:35.511000+00:00",
-      "job_id": "okf_rcpt_8169039a1190aefffce4c10d_66dbe0b2c7794e0d",
-      "slot_millis": 40,
+      "created": "2026-09-06T01:31:32.446000+00:00",
+      "job_id": "okf_rcpt_79e2c4842095e1b07fd40bec_b54fb7bb4c94e21d",
+      "slot_millis": 46,
       "state": "DONE",
       "total_bytes_billed": 73400320,
       "total_bytes_processed": 591,
       "user_email": "user:owner"
     },
-    "recorded_at": "2026-09-06T01:09:42.239089+00:00"
+    "recorded_at": "2026-09-06T01:31:38.834783+00:00"
   },
   {
     "case": "R2_sql_substitution",
@@ -45,15 +45,15 @@
     },
     "job": {
       "cache_hit": false,
-      "created": "2026-09-06T01:09:42.477000+00:00",
-      "job_id": "okf_rcpt_9defd7d4648ec4c52d502d8c_cf6daafef076dc9d",
-      "slot_millis": 35,
+      "created": "2026-09-06T01:31:39.086000+00:00",
+      "job_id": "okf_rcpt_4664bc700205d81ab4608606_a1c4a76537c9aacc",
+      "slot_millis": 43,
       "state": "DONE",
       "total_bytes_billed": 73400320,
       "total_bytes_processed": 495,
       "user_email": "user:owner"
     },
-    "recorded_at": "2026-09-06T01:09:44.366533+00:00",
+    "recorded_at": "2026-09-06T01:31:40.951669+00:00",
     "wrong_job_actual_value": "600"
   },
   {
@@ -69,15 +69,15 @@
     },
     "job": {
       "cache_hit": false,
-      "created": "2026-09-06T01:09:44.565000+00:00",
-      "job_id": "okf_rcpt_d7912541b2e71ef9317dd610_eb62d6dba0f4cfa8",
-      "slot_millis": 60,
+      "created": "2026-09-06T01:31:41.211000+00:00",
+      "job_id": "okf_rcpt_f39f04adb33ab9b43829d0cf_9f3430b9b71e0ac5",
+      "slot_millis": 43,
       "state": "DONE",
       "total_bytes_billed": 73400320,
       "total_bytes_processed": 591,
       "user_email": "user:owner"
     },
-    "recorded_at": "2026-09-06T01:09:46.239493+00:00"
+    "recorded_at": "2026-09-06T01:31:43.032015+00:00"
   },
   {
     "case": "R4_display_substitution",
@@ -115,15 +115,15 @@
     },
     "job": {
       "cache_hit": false,
-      "created": "2026-09-06T01:09:46.874000+00:00",
-      "job_id": "okf_rcpt_43f635eac9f16f386da8dba2_0a55b81f3938f1e1",
-      "slot_millis": 40,
+      "created": "2026-09-06T01:31:43.734000+00:00",
+      "job_id": "okf_rcpt_51c0c17adbf0e37669a42aa9_4e5aacff348a85dc",
+      "slot_millis": 52,
       "state": "DONE",
       "total_bytes_billed": 73400320,
       "total_bytes_processed": 591,
       "user_email": "user:owner"
     },
-    "recorded_at": "2026-09-06T01:09:51.307666+00:00"
+    "recorded_at": "2026-09-06T01:31:48.410389+00:00"
   },
   {
     "case": "R5_missing_evidence",
@@ -143,7 +143,7 @@
       "released": false,
       "verdict": "UNVERIFIABLE"
     },
-    "recorded_at": "2026-09-06T01:09:53.126864+00:00"
+    "recorded_at": "2026-09-06T01:31:50.636490+00:00"
   },
   {
     "case": "R8_identity_spoof",
@@ -155,19 +155,19 @@
       "released": false,
       "verdict": "REJECTED"
     },
-    "granted_at": "2026-09-06T01:09:55.052864+00:00",
+    "granted_at": "2026-09-06T01:31:52.461149+00:00",
     "job": {
       "cache_hit": false,
-      "created": "2026-09-06T01:09:55.865000+00:00",
-      "job_id": "okf_rcpt_504542cc2b3cc451c7f9cc91_3d5739e106d4b1f4",
-      "slot_millis": 50,
+      "created": "2026-09-06T01:31:53.306000+00:00",
+      "job_id": "okf_rcpt_00141d2169c52ff8480f397e_787fa708c617784b",
+      "slot_millis": 36,
       "state": "DONE",
       "total_bytes_billed": 73400320,
       "total_bytes_processed": 591,
       "user_email": "sa:okf-receipt-restricted"
     },
     "label_claimed_requester": "user:owner",
-    "recorded_at": "2026-09-06T01:09:56.975688+00:00"
+    "recorded_at": "2026-09-06T01:31:54.394203+00:00"
   },
   {
     "case": "R9_revocation_output_denial",
@@ -181,15 +181,15 @@
     },
     "job": {
       "cache_hit": false,
-      "created": "2026-09-06T01:10:01.168000+00:00",
-      "job_id": "okf_rcpt_67b588dc5d0d975563d6f6ac_20c6aa3cc47be356",
-      "slot_millis": 67,
+      "created": "2026-09-06T01:31:58.338000+00:00",
+      "job_id": "okf_rcpt_f13e6fafae88ea6e67612ca7_b12aec57c802f629",
+      "slot_millis": 44,
       "state": "DONE",
       "total_bytes_billed": 73400320,
       "total_bytes_processed": 591,
       "user_email": "sa:okf-receipt-restricted"
     },
-    "recorded_at": "2026-09-06T01:10:29.569590+00:00",
+    "recorded_at": "2026-09-06T01:32:35.494989+00:00",
     "restricted_principal": "sa:okf-receipt-restricted",
     "restricted_reads_user_job": {
       "execution_match": "UNKNOWN",
@@ -200,10 +200,10 @@
       "verdict": "REJECTED"
     },
     "timeline": {
-      "allowed_probe_at": 1788657000,
-      "denied_probe_at": 1788657028,
-      "granted_at": "2026-09-06T01:09:59.952627+00:00",
-      "revoked_at": "2026-09-06T01:10:06.759075+00:00"
+      "allowed_probe_at": 1788658317,
+      "denied_probe_at": 1788658353,
+      "granted_at": "2026-09-06T01:31:57.051206+00:00",
+      "revoked_at": "2026-09-06T01:32:02.163219+00:00"
     },
     "verify_before_revocation": {
       "execution_match": "MATCH",
