@@ -26,9 +26,12 @@ compensate for the graph spike.
 Astra requested changes on `67889b0` (one P1, six P2); Opus filed three
 overlapping findings. Six were closed in `05fc445`; Astra's re-review
 found P2 #5 only partially fixed (the consumer still judged expiry against
-its entry timestamp after remote reads). The residual is closed in the
-follow-up commit below. Every row is covered by hermetic tests; the live
-suite and the seven CLI live cases were rerun after each pass.
+its entry timestamp after remote reads); `6407dcf` closed that, and a
+second re-review found the default clock still truncated fractional wall
+time (P2 #5b), closed in the commit after `0a13be0`. Every row is covered
+by hermetic tests. `cases.json` and `live_cases.json` are regenerated at
+the current head (attester artifact hash recorded per record); earlier
+heads' CLI evidence was not retained separately.
 
 | # | Finding | Fix | Test |
 |---|---|---|---|
@@ -37,6 +40,7 @@ suite and the seven CLI live cases were rerun after each pass.
 | P2 | no hard cost ceiling | `HARD_MAX_BYTES_BILLED = 1 GiB`; a dry run above it refuses submission; the cap is `min(1 GiB, max(100 MiB, 4×dry-run))` | `test_executor_enforces_hard_cost_ceiling` |
 | P2 | README marked transient-API and full R6/R7 rows as live | table now labels those rows hermetic only | n/a |
 | P2 #5 | CLI captured the clock before approval and reused it; consumer then judged expiry only against its entry `now`, so a request expiring during `getQueryResults` / access probe still released | `run.py` reads the clock fresh per call; `contracts.trusted_clock` (injectable, entry-relative, never backwards) is re-sampled by the verifier after the result read and by the consumer after reads, probes and rendering; `Registry.try_consume` re-checks the deadline **inside** the `BEGIN IMMEDIATE` transaction and returns `expired` without inserting | `test_p2_5_expiry_crossed_during_consumer_reads_blocks_release` (result read / source probe / output probe), `test_p2_5_verifier_rechecks_expiry_after_result_read`, `test_p2_5_consumption_transaction_enforces_deadline`, `test_p2_5_release_still_works_just_inside_deadline`; Astra's `probes.py` `prior_5` now records REJECTED, no value, nonce unconsumed |
+| P2 #5b | default `trusted_clock` computed `int(now) + int(elapsed)`, so fractional wall time lost alignment with the absolute deadline: entry wall 1299.75 (`now` 1299), read ends 1300.25, clock still 1299 → released after deadline 1300 | default clock is fractional and wall-aligned: anchor `now` to the whole second of entry, add the exact wall time elapsed since that second boundary, never run backwards; `Registry.try_consume` compares the fractional sample with the deadline (no integer cast); injected clocks unchanged | `test_p2_5b_fractional_deadline_crossing_blocks_on_default_clock` (result read / source probe / output probe / render, production clock with `time.time` patched), `test_p2_5b_fractional_deadline_crossing_blocks_through_cli_helper` (Astra's actual `run._issue_then_consume` boundary), `test_p2_5b_fractional_just_inside_deadline_still_releases` (liveness), `test_p2_5b_default_clock_is_wall_aligned_and_fractional`; Astra's `rereview-0a13be0/probes.py` fractional stages now record REJECTED / no value / nonce unconsumed |
 | P2 | a failed display claim overwrote the sealed VERIFIED receipt | the sealed receipt records the evidence verdict only; the claim is bound at return/consume time; an authentic VERIFIED receipt is never downgraded, an UNVERIFIABLE one may be upgraded, a record failing integrity is kept as tamper evidence | `test_wrong_claim_does_not_overwrite_verified_receipt`, `test_verify_can_upgrade_unverifiable_but_never_downgrade_verified`; live R4 now runs all three wrong claims and then releases the honest one |
 | P2 | rendering ran after `consume_once` | render first; a render failure returns `UNVERIFIABLE render_failed` with the nonce intact | `test_render_failure_does_not_spend_nonce` |
 

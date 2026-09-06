@@ -161,8 +161,8 @@ class Registry:
       try:
         self._conn.execute("BEGIN IMMEDIATE")
         if deadline is not None:
-          sample = int(clock()) if clock is not None else int(time.time())
-          if sample >= deadline:
+          sample = float(clock()) if clock is not None else time.time()
+          if sample >= float(deadline):
             self._conn.execute("ROLLBACK")
             return "expired"
         cur = self._conn.execute(

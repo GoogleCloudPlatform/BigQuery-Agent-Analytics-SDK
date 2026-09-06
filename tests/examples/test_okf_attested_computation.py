@@ -1423,3 +1423,144 @@ def test_p2_5_release_still_works_just_inside_deadline(
   out = _consume(request_, receipt, slow, registry, keys, now=1298, clock=clock)
   assert out["verdict"] == "VERIFIED" and "display" in out, out
   assert clock() == 1299
+
+
+# -- Astra P2 #5b: fractional wall time on the PRODUCTION default clock -------
+#
+# ``run._now()`` truncates the entry wall time to an int, so a consumer that
+# enters at wall 1299.75 (``now`` 1299) and finishes its reads at 1300.25 has
+# crossed the absolute deadline 1300 even though the integer elapsed time is
+# zero. These tests patch ``time.time`` and use no injected clock.
+
+from unittest import mock  # noqa: E402
+
+
+def _fractional_world(tmp_path):
+  world = run_mod.World(False, tmp_path / "keys", tmp_path / "registry.sqlite")
+  with mock.patch("time.time", return_value=1000.0):
+    req = world.approve(JAN)
+    handle = execute_mod.execute(req, world.pub, world.caller(), world.registry)
+    sealed = verify_mod.verify(
+        req["request_id"],
+        handle["receipt_id"],
+        GOOD,
+        world.evidence(),
+        world.registry,
+        world.registry,
+        1000,
+        keys=world.keys,
+    )
+  assert sealed["verdict"] == "VERIFIED"
+  assert req["expires_at"] == 1300
+  return world, req, handle
+
+
+@pytest.mark.parametrize(
+    "stage", ["get_query_results", "probe_sources", "probe_output", "render"]
+)
+def test_p2_5b_fractional_deadline_crossing_blocks_on_default_clock(
+    tmp_path, stage
+):
+  world, req, handle = _fractional_world(tmp_path)
+  wall = [1299.75]
+  ev = world.evidence()
+  target = contracts if stage == "render" else ev
+  method = "money_display" if stage == "render" else stage
+  original = getattr(target, method)
+
+  def delayed(*args, **kwargs):
+    wall[0] = 1300.25
+    return original(*args, **kwargs)
+
+  with (
+      mock.patch("time.time", side_effect=lambda: wall[0]),
+      mock.patch.object(target, method, side_effect=delayed),
+  ):
+    out = consume_mod.consume(
+        req["request_id"],
+        handle["receipt_id"],
+        GOOD,
+        ev,
+        world.registry,
+        world.registry,
+        int(wall[0]),
+        keys=world.keys,
+    )
+  assert out["verdict"] == "REJECTED" and out["reason_codes"] == [
+      "request_expired"
+  ], out
+  assert "value" not in out and "display" not in out
+  assert not world.registry.is_consumed(req["request_id"])
+  world.registry.close()
+
+
+def test_p2_5b_fractional_deadline_crossing_blocks_through_cli_helper(tmp_path):
+  world, req, handle = _fractional_world(tmp_path)
+  wall = [1299.75]
+  count = [0]
+  factory = world.evidence
+
+  def evidence_factory(mode="full"):
+    count[0] += 1
+    ev = factory(mode)
+    if count[0] == 2:  # the consumer's evidence client
+      reader = ev.get_query_results
+
+      def slow(*args):
+        wall[0] = 1300.25
+        return reader(*args)
+
+      ev.get_query_results = slow
+    return ev
+
+  with (
+      mock.patch("time.time", side_effect=lambda: wall[0]),
+      mock.patch.object(world, "evidence", side_effect=evidence_factory),
+  ):
+    issued, out = run_mod._issue_then_consume(world, req, handle, GOOD)
+  assert issued["verdict"] == "VERIFIED"
+  assert out["verdict"] == "REJECTED" and out["reason_codes"] == [
+      "request_expired"
+  ], out
+  assert "value" not in out and "display" not in out
+  assert not world.registry.is_consumed(req["request_id"])
+  world.registry.close()
+
+
+def test_p2_5b_fractional_just_inside_deadline_still_releases(tmp_path):
+  """Liveness guard: 1299.10 -> 1299.60 stays before 1300 and releases."""
+  world, req, handle = _fractional_world(tmp_path)
+  wall = [1299.10]
+  ev = world.evidence()
+  reader = ev.get_query_results
+
+  def slow(*args):
+    wall[0] = 1299.60
+    return reader(*args)
+
+  ev.get_query_results = slow
+  with mock.patch("time.time", side_effect=lambda: wall[0]):
+    out = consume_mod.consume(
+        req["request_id"],
+        handle["receipt_id"],
+        GOOD,
+        ev,
+        world.registry,
+        world.registry,
+        int(wall[0]),
+        keys=world.keys,
+    )
+  assert out["verdict"] == "VERIFIED" and "display" in out, out
+  assert world.registry.is_consumed(req["request_id"])
+  world.registry.close()
+
+
+def test_p2_5b_default_clock_is_wall_aligned_and_fractional():
+  wall = [1299.75]
+  with mock.patch("time.time", side_effect=lambda: wall[0]):
+    clock = contracts.trusted_clock(1299)
+    assert clock() == pytest.approx(1299.75)
+    wall[0] = 1300.25
+    assert clock() == pytest.approx(1300.25)
+    wall[0] = 1200.0  # wall clock stepped backwards: never runs backwards
+    assert clock() == pytest.approx(1300.25)
