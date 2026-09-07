@@ -14,15 +14,15 @@
 # limitations under the License.
 """One-command local Grafana for BigQuery Agent Analytics.
 
-    python3 grafana/run_local.py --project MY_PROJECT --dataset MY_DATASET
+    python3 dashboards/grafana/run_local.py --project MY_PROJECT --dataset MY_DATASET
 
-does everything the manual setup chain in grafana/README.md does: downloads
+does everything the manual setup chain in dashboards/grafana/README.md does: downloads
 a pinned Grafana, installs the pinned BigQuery datasource plugin, provisions
 the datasource (Application Default Credentials by default, --sa-key for the
 documented JWT path), writes a copy of bqaa-dashboard.json with the six
 constant variables filled in, and launches bound to 127.0.0.1 with the
 plugin preinstaller disabled. `--stop` tears it down. Everything generated
-lives under grafana/.local/ and is disposable; the committed dashboard and
+lives under dashboards/grafana/.local/ and is disposable; the committed dashboard and
 example files are never modified.
 
 Requires only the Python standard library. Views (`adk_*`) are created via
@@ -180,13 +180,13 @@ def render_datasource_yaml(
   With no key: `gce` authentication, which the plugin resolves through
   Application Default Credentials when Grafana runs off-GCE — no
   service-account key needed for local evaluation. With a key: the JWT path
-  documented in grafana/README.md, with the private key as a real YAML
+  documented in dashboards/grafana/README.md, with the private key as a real YAML
   block scalar (never literal \\n escapes).
 
   `processingLocation` is omitted by default so the plugin selects the job
   location automatically; hard-coding a multi-region breaks datasets that
   live anywhere else. `MaxBytesBilled` preserves the per-query cost cap
-  from grafana/datasource.example.yaml.
+  from dashboards/grafana/datasource.example.yaml.
   """
   header = (
       "apiVersion: 1\n"
@@ -324,7 +324,7 @@ def pick_dist(system: str | None = None, machine: str | None = None) -> str:
     raise ValueError(
         f"unsupported platform {system}/{machine}: this launcher covers"
         " macOS and Linux on amd64/arm64; on other platforms follow the"
-        " manual steps in grafana/README.md."
+        " manual steps in dashboards/grafana/README.md."
     )
   return f"{system}-{arch}"
 
@@ -657,7 +657,7 @@ def main(argv: list[str] | None = None) -> int:
       "--max-bytes-billed",
       default=DEFAULT_MAX_BYTES_BILLED,
       help="per-query BigQuery cost cap in bytes (default 100000000, matching"
-      " grafana/datasource.example.yaml)",
+      " dashboards/grafana/datasource.example.yaml)",
   )
   parser.add_argument(
       "--sa-key",

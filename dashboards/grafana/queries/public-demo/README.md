@@ -1,7 +1,7 @@
 # Public Demo Panel Queries
 
 The `.sql` files here are the **canonical source of truth** for every panel in
-`grafana/bqaa-public-demo.json` — one file per panel, embedded as a copy in the
+`dashboards/grafana/bqaa-public-demo.json` — one file per panel, embedded as a copy in the
 dashboard JSON.
 
 > **Edit the query here first, then paste it into the matching panel in

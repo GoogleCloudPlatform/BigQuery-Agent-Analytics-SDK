@@ -171,7 +171,7 @@ from a signed-in, non-owner, out-of-domain account (anonymous HTTP cannot
 observe either). While the template is unavailable, the
 `tools/hydrate_dashboard.py` preflight below still validates the table — but
 its creation URL copies the same template, so it is not an outage workaround;
-the [Grafana dashboard](../../grafana/) and the Looker Agent Analytics block
+the [Grafana dashboard](../../dashboards/grafana/) and the Looker Agent Analytics block
 (below) remain available.
 
 Looker Studio report parameters are intentionally not used for these values:

@@ -1,7 +1,7 @@
 # Grafana Panel Queries: Source of Truth
 
 The `.sql` files in this directory are the **canonical source of truth** for
-every panel and query template variable in `grafana/bqaa-dashboard.json`.
+every panel and query template variable in `dashboards/grafana/bqaa-dashboard.json`.
 The dashboard JSON embeds a copy of each query (Grafana has no "include SQL
 from file" mechanism), so:
 

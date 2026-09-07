@@ -22,7 +22,7 @@ import sys
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNNER = ROOT / "grafana" / "run_local.py"
+RUNNER = ROOT / "dashboards" / "grafana" / "run_local.py"
 
 
 def _load_runner():
@@ -83,7 +83,9 @@ def test_prices_rejected(value):
 
 
 def _real_dashboard():
-  return json.loads((ROOT / "grafana" / "bqaa-dashboard.json").read_text())
+  return json.loads(
+      (ROOT / "dashboards" / "grafana" / "bqaa-dashboard.json").read_text()
+  )
 
 
 def test_patch_dashboard_fills_all_six_constants():

@@ -11,10 +11,10 @@ import sys
 from typing import Any, NamedTuple
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-DASHBOARD_PATH = REPOSITORY_ROOT / "grafana" / "bqaa-dashboard.json"
-QUERIES_DIRECTORY = REPOSITORY_ROOT / "grafana" / "queries"
+DASHBOARD_PATH = REPOSITORY_ROOT / "dashboards" / "grafana" / "bqaa-dashboard.json"
+QUERIES_DIRECTORY = REPOSITORY_ROOT / "dashboards" / "grafana" / "queries"
 PUBLIC_DEMO_DASHBOARD_PATH = (
-    REPOSITORY_ROOT / "grafana" / "bqaa-public-demo.json"
+    REPOSITORY_ROOT / "dashboards" / "grafana" / "bqaa-public-demo.json"
 )
 PUBLIC_DEMO_QUERIES_DIRECTORY = QUERIES_DIRECTORY / "public-demo"
 

@@ -3,7 +3,7 @@
 # OPTIONAL — only for self-managed Grafana (Docker, k8s, bare metal).
 # On Grafana Cloud, add the data source through the UI instead
 # (Connections -> Data sources -> Add data source -> "Google BigQuery");
-# see grafana/README.md.
+# see dashboards/grafana/README.md.
 #
 # Usage (self-managed):
 #   1. Install the plugin:  grafana-cli plugins install grafana-bigquery-datasource
