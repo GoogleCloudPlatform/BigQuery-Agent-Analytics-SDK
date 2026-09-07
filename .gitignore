@@ -43,3 +43,4 @@ dashboards/grafana/.local/
 # Service-account credentials (never commit downloaded JSON keys).
 grafana/*.json
 dashboards/grafana/*.json
+dashboards/streamlit/*.json
