@@ -175,7 +175,7 @@ def test_datasource_yaml_jwt_uses_block_scalar(tmp_path):
       rendered
   )
   # Real line breaks under a block scalar, never literal \n escapes
-  # (grafana/README.md calls this out explicitly).
+  # (dashboards/grafana/README.md calls this out explicitly).
   assert "privateKey: |" in rendered
   assert "        -----BEGIN PRIVATE KEY-----\n        AAAA\n" in rendered
   assert "\\n" not in rendered

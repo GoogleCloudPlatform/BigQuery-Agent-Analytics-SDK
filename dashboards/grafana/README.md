@@ -2,7 +2,7 @@
 
 Visualize BQAA telemetry straight from BigQuery in Grafana.
 Works on the free tier of Grafana Cloud. It runs alongside the
-[`dashboard_v2/`](../dashboard_v2) React app rather than replacing it — both
+[`dashboard_v2/`](../../dashboard_v2) React app rather than replacing it — both
 read the same data.
 
 ```

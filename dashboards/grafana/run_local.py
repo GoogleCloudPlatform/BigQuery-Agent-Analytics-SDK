@@ -64,7 +64,7 @@ PLUGIN_ID = "grafana-bigquery-datasource"
 PLUGIN_VERSION = "3.3.1"
 DASHBOARD_UID = "bqaa-dashboard"
 DATASOURCE_UID = "bqaa-bigquery"
-# Matches grafana/datasource.example.yaml: a per-query BigQuery cost cap of
+# Matches dashboards/grafana/datasource.example.yaml: a per-query BigQuery cost cap of
 # 100 MB billed. The key spelling is significant (see the example file).
 DEFAULT_MAX_BYTES_BILLED = "100000000"
 
@@ -78,7 +78,7 @@ VIEW_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 # ("us-central1", "asia-northeast1").
 LOCATION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,31}$")
 # The two price constants are interpolated into panel arithmetic
-# (grafana/README.md warns a Textbox there is an injection risk), so only a
+# (dashboards/grafana/README.md warns a Textbox there is an injection risk), so only a
 # strict decimal literal is accepted. Same reasoning for the bytes cap.
 PRICE_RE = re.compile(r"^\d{1,9}(\.\d{1,9})?$")
 BYTES_RE = re.compile(r"^[1-9]\d{0,17}$")
@@ -108,7 +108,7 @@ def require_price(label: str, value: str) -> str:
   if not PRICE_RE.fullmatch(value):
     raise ValueError(
         f"{label} {value!r} must be a plain decimal like 1.25 (it is"
-        " interpolated into panel arithmetic; see grafana/README.md)."
+        " interpolated into panel arithmetic; see dashboards/grafana/README.md)."
     )
   return value
 
