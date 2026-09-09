@@ -12,32 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Locator and compatibility adapter for the SDK evolution engine.
+"""Locator for the SDK evolution engine.
 
-The engine is ``scripts/skill_evolution.py``. It is looked up in order:
+The engine is ``scripts/skill_evolution.py``, baked into the image from
+the SDK checkout ``deploy.sh`` runs in. It is looked up in order:
 
 1. ``SDK_SCRIPTS_DIR`` (set to ``/app/scripts`` in the container image),
 2. ``/app/scripts`` (container default),
 3. ``<repo>/scripts`` relative to this file (development checkout).
 
-``evolve_skill_compat`` feature-detects the engine's ``evolve_skill``
-keyword arguments via ``inspect.signature`` and silently-but-loudly
-(INFO log) drops the ones the resolved engine does not support. This
-lets the same component run against today's engine and automatically
-pick up newer keyword arguments (e.g. ``error_analyst_fn`` /
-``incumbent_score`` from the agentic-analyst engine work) once they
-land — no component change needed.
-
-Semantic consequence worth knowing: on an engine WITHOUT
-``incumbent_score``, the engine re-scores the incumbent skill through
-``score_fn`` itself, roughly doubling scoring cost per evolution run.
-Acceptable, but budget for it.
+Callers use the resolved module's ``evolve_skill`` directly: image and
+engine ship together, so the host-hook keyword arguments
+(``error_analyst_fn``, ``incumbent_score``, ``analyst_timeout_s``) are
+always present.
 """
 
 from __future__ import annotations
 
 import importlib.util
-import inspect
 import logging
 import os
 import sys
@@ -102,38 +94,3 @@ def load_engine(force_reload: bool = False) -> types.ModuleType:
   logger.info("Loaded evolution engine from %s", path)
   _engine = module
   return module
-
-
-def supported_kwargs() -> set[str]:
-  """Keyword parameters accepted by the resolved engine's evolve_skill."""
-  engine = load_engine()
-  signature = inspect.signature(engine.evolve_skill)
-  if any(
-      p.kind is inspect.Parameter.VAR_KEYWORD
-      for p in signature.parameters.values()
-  ):
-    return set()  # empty sentinel: engine takes **kwargs, pass everything
-  return set(signature.parameters)
-
-
-def evolve_skill_compat(*args, **kwargs):
-  """Call the engine's evolve_skill, dropping unsupported kwargs.
-
-  Positional arguments pass through untouched. Keyword arguments not in
-  the resolved engine's signature are dropped with an INFO log naming
-  each one — the single compatibility choke point for every evolve/
-  coevolve/bottleneck path in this package.
-  """
-  engine = load_engine()
-  supported = supported_kwargs()
-  if supported:
-    dropped = sorted(k for k in kwargs if k not in supported)
-    if dropped:
-      logger.info(
-          "Engine at %s does not support kwargs %s — dropping them"
-          " (upgrade scripts/skill_evolution.py to use them).",
-          engine.__file__,
-          dropped,
-      )
-    kwargs = {k: v for k, v in kwargs.items() if k in supported}
-  return engine.evolve_skill(*args, **kwargs)

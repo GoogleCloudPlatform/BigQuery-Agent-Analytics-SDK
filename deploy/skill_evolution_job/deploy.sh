@@ -106,7 +106,6 @@ GCS_BUCKET=""
 BASE_BRANCH="main"
 TASK_TIMEOUT="14400"
 EXTRA_REQUIREMENTS=""
-SCRIPTS_DIR=""
 SINGLE_SA=false
 SMOKE=false
 DOWN=false
@@ -157,13 +156,6 @@ Optional:
   --task-timeout SECONDS     Cloud Run task timeout (default: 14400).
   --extra-requirements FILE  Extra pip requirements appended to the image
                              (dependencies your EVOLUTION_HOOKS adapter needs).
-  --scripts-dir DIR          Bake the engine + report scripts from this
-                             directory instead of this checkout's
-                             scripts/ (e.g. another SDK branch whose
-                             skill_evolution.py supports agentic error
-                             analysts and the incumbent guard). Must
-                             contain skill_evolution.py,
-                             quality_report.py, eval/eval_config.json.
   --single-sa               Use one combined service account for
                              both the job runtime and the scheduler
                              caller. Default: two SAs (least
@@ -210,7 +202,6 @@ while [[ $# -gt 0 ]]; do
     --base-branch)      require_arg "$1" "${2-}"; BASE_BRANCH="$2"; shift 2 ;;
     --task-timeout)     require_arg "$1" "${2-}"; TASK_TIMEOUT="$2"; shift 2 ;;
     --extra-requirements) require_arg "$1" "${2-}"; EXTRA_REQUIREMENTS="$2"; shift 2 ;;
-    --scripts-dir)      require_arg "$1" "${2-}"; SCRIPTS_DIR="$2"; shift 2 ;;
     --single-sa)        SINGLE_SA=true; shift ;;
     --smoke)            SMOKE=true; shift ;;
     --down)             DOWN=true; shift ;;
@@ -302,29 +293,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # repo root (where ``scripts/`` lives) is two dirs up.
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-# Engine + report scripts baked into the image. Default: this
-# checkout's scripts/. --scripts-dir points at another SDK checkout's
-# scripts/ (a branch whose engine has capabilities this one lacks, e.g.
-# agentic error analysts / incumbent guard) so the image is
-# reproducible from flags instead of from files copied over by hand.
-SCRIPTS_SRC="${SCRIPTS_DIR:-${REPO_ROOT}/scripts}"
-SCRIPTS_SRC="$(cd "$SCRIPTS_SRC" 2>/dev/null && pwd)" || {
-  if [[ -n "$SCRIPTS_DIR" ]]; then
-    echo "Error: --scripts-dir is not a directory: ${SCRIPTS_DIR}" >&2
-  else
-    echo "Error: ${REPO_ROOT}/scripts not found — run this script from a full SDK checkout, or point --scripts-dir at one." >&2
-  fi
+# Engine + report scripts baked into the image, always from this
+# checkout's scripts/: the image and the engine it runs ship together.
+SCRIPTS_SRC="$(cd "${REPO_ROOT}/scripts" 2>/dev/null && pwd)" || {
+  echo "Error: ${REPO_ROOT}/scripts not found — run this script from a full SDK checkout." >&2
   exit 1
 }
 for staged in skill_evolution.py quality_report.py eval/eval_config.json; do
   if [[ ! -f "${SCRIPTS_SRC}/${staged}" ]]; then
-    echo "Error: expected ${staged} in ${SCRIPTS_SRC} — run this script from a full SDK checkout, or point --scripts-dir at one." >&2
+    echo "Error: expected ${staged} in ${SCRIPTS_SRC} — run this script from a full SDK checkout." >&2
     exit 1
   fi
 done
-if [[ -n "$SCRIPTS_DIR" ]]; then
-  echo "==> engine + report scripts from --scripts-dir: ${SCRIPTS_SRC}"
-fi
 
 STAGING=""
 _cleanup() {

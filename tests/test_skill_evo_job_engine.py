@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for skill_evolution_job.engine (locator + compat adapter)."""
+"""Tests for skill_evolution_job.engine (locator) and the engine call."""
 
-import logging
+import inspect
+import json
 import os
 import sys
 import textwrap
@@ -29,64 +30,23 @@ if _JOB_DIR not in sys.path:
 from skill_evolution_job import engine
 from skill_evolution_job import evolve
 
-# evolve_skill as on upstream main today (no error_analyst_fn /
-# incumbent_score / analyst_timeout_s).
-_UPSTREAM_ENGINE = textwrap.dedent(
+# Stand-in engine for the locator tests: only the name matters.
+_STUB_ENGINE = textwrap.dedent(
     """
-    def evolve_skill(
-        report_path,
-        skill_path,
-        output_path=None,
-        *,
-        model="gemini-2.5-pro",
-        project=None,
-        location=None,
-        max_workers=8,
-        max_success_samples=5,
-        candidates=1,
-        max_chars=0,
-        analyst_mode="single",
-        score_fn=None,
-        min_improvement=0.0,
-        tools=None,
-        artifacts_dir=None,
-        version_label=None,
-        client=None,
-    ):
-      return {"received": sorted(k for k in locals() if k != "client")}
+    def evolve_skill(report, current_skill, **kwargs):
+      return current_skill
     """
 )
 
-# evolve_skill with the agentic-analyst extensions (#395).
-_FORK_ENGINE = textwrap.dedent(
+# Stand-in engine that records the keyword arguments it was called with.
+_RECORDING_ENGINE = textwrap.dedent(
     """
-    def evolve_skill(
-        report_path,
-        skill_path,
-        output_path=None,
-        *,
-        model="gemini-2.5-pro",
-        project=None,
-        location=None,
-        max_workers=8,
-        max_success_samples=5,
-        candidates=1,
-        max_chars=0,
-        analyst_mode="single",
-        score_fn=None,
-        min_improvement=0.0,
-        tools=None,
-        artifacts_dir=None,
-        version_label=None,
-        client=None,
-        error_analyst_fn=None,
-        incumbent_score=None,
-        analyst_timeout_s=600,
-    ):
-      return {
-          "received": sorted(k for k in locals() if k != "client"),
-          "incumbent_score": incumbent_score,
-      }
+    CALLS = []
+
+
+    def evolve_skill(report, current_skill, **kwargs):
+      CALLS.append(kwargs)
+      return current_skill
     """
 )
 
@@ -94,6 +54,7 @@ _FORK_ENGINE = textwrap.dedent(
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
   monkeypatch.delenv("SDK_SCRIPTS_DIR", raising=False)
+  monkeypatch.delenv("ANALYST_TIMEOUT_S", raising=False)
   engine.reset_cache()
   yield
   engine.reset_cache()
@@ -106,7 +67,7 @@ def _install_fake_engine(tmp_path, source, monkeypatch):
 
 
 def test_locator_prefers_sdk_scripts_dir(tmp_path, monkeypatch):
-  _install_fake_engine(tmp_path, _UPSTREAM_ENGINE, monkeypatch)
+  _install_fake_engine(tmp_path, _STUB_ENGINE, monkeypatch)
   assert engine.engine_path() == str(tmp_path / "skill_evolution.py")
 
 
@@ -127,11 +88,23 @@ def test_locator_error_lists_searched_paths(tmp_path, monkeypatch):
     engine.engine_path()
 
 
-def test_real_engine_import_smoke():
+def test_load_engine_caches(tmp_path, monkeypatch):
+  _install_fake_engine(tmp_path, _STUB_ENGINE, monkeypatch)
+  first = engine.load_engine()
+  assert engine.load_engine() is first
+  assert engine.load_engine(force_reload=True) is not first
+
+
+def test_real_engine_keyword_contract():
+  """The engine baked into the image must accept every kwarg we pass.
+
+  There is no feature detection any more: the image stages this
+  checkout's scripts/, so a kwarg going missing here is a build break,
+  not something to degrade around at runtime.
+  """
   module = engine.load_engine()
   assert callable(module.evolve_skill)
-  # Baseline kwargs the component relies on must exist upstream.
-  supported = engine.supported_kwargs()
+  supported = set(inspect.signature(module.evolve_skill).parameters)
   for kwarg in (
       "score_fn",
       "min_improvement",
@@ -141,52 +114,41 @@ def test_real_engine_import_smoke():
       "artifacts_dir",
       "version_label",
       "client",
+      "error_analyst_fn",
+      "incumbent_score",
+      "analyst_timeout_s",
   ):
     assert kwarg in supported, f"engine lost kwarg {kwarg}"
 
 
-def test_compat_drops_unsupported_kwargs_with_log(
-    tmp_path, monkeypatch, caplog
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [(None, 600.0), ("30", 30.0), ("0", None)],
+)
+def test_evolve_passes_analyst_timeout_to_engine(
+    tmp_path, monkeypatch, env_value, expected
 ):
-  _install_fake_engine(tmp_path, _UPSTREAM_ENGINE, monkeypatch)
-  with caplog.at_level(logging.INFO, logger="skill_evolution_job.engine"):
-    result = engine.evolve_skill_compat(
-        "report.json",
-        "SKILL.md",
-        candidates=3,
-        error_analyst_fn=lambda: None,
-        incumbent_score=42.0,
-        analyst_timeout_s=60,
-    )
-  assert "error_analyst_fn" not in result["received"]
-  assert "candidates" in result["received"]
-  dropped_logs = [r for r in caplog.records if "dropping" in r.getMessage()]
-  assert len(dropped_logs) == 1
-  message = dropped_logs[0].getMessage()
-  for name in ("analyst_timeout_s", "error_analyst_fn", "incumbent_score"):
-    assert name in message
+  _install_fake_engine(tmp_path, _RECORDING_ENGINE, monkeypatch)
+  if env_value is not None:
+    monkeypatch.setenv("ANALYST_TIMEOUT_S", env_value)
+  monkeypatch.delenv("EVOLUTION_CANDIDATES", raising=False)
+  monkeypatch.delenv("EVOLUTION_MAX_ANALYSTS", raising=False)
+  monkeypatch.setattr(evolve, "_vertex_client", lambda: object())
+  monkeypatch.setattr(evolve, "_derive_toolbox", lambda *_: None)
+  monkeypatch.setattr(evolve, "_agent_for_skill_dir", lambda *_: None)
+  monkeypatch.setattr(evolve, "_resolve_error_analyst", lambda *_: None)
 
+  skill_dir = tmp_path / "skill"
+  skill_dir.mkdir()
+  (skill_dir / "SKILL.md").write_text("---\nname: example\n---\nAnswer.\n")
+  report = tmp_path / "report.json"
+  report.write_text(
+      json.dumps({"summary": {"meaningful_rate": 95}, "sessions": []})
+  )
 
-def test_compat_passes_all_kwargs_on_fork_engine(tmp_path, monkeypatch, caplog):
-  _install_fake_engine(tmp_path, _FORK_ENGINE, monkeypatch)
-  with caplog.at_level(logging.INFO, logger="skill_evolution_job.engine"):
-    result = engine.evolve_skill_compat(
-        "report.json",
-        "SKILL.md",
-        candidates=3,
-        error_analyst_fn=lambda: None,
-        incumbent_score=42.0,
-    )
-  assert "error_analyst_fn" in result["received"]
-  assert result["incumbent_score"] == 42.0
-  assert not [r for r in caplog.records if "dropping" in r.getMessage()]
+  evolve.evolve(str(report), str(skill_dir))
 
-
-def test_load_engine_caches(tmp_path, monkeypatch):
-  _install_fake_engine(tmp_path, _UPSTREAM_ENGINE, monkeypatch)
-  first = engine.load_engine()
-  assert engine.load_engine() is first
-  assert engine.load_engine(force_reload=True) is not first
+  assert engine.load_engine().CALLS[-1]["analyst_timeout_s"] == expected
 
 
 # ---------------------------------------------------------------------------
