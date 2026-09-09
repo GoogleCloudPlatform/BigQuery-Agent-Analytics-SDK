@@ -6,7 +6,7 @@ from collections.abc import Sequence
 import dataclasses
 import datetime as dt
 import re
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import pandas as pd
 
@@ -321,12 +321,14 @@ class QueryResult(NamedTuple):
     df: Result DataFrame containing query rows.
     error: Error message if query failed, or None.
     bytes_processed: Number of bytes processed by the query job.
+    bytes_billed: Number of bytes billed by the query job.
     cache_hit: Whether the query result was served from BigQuery cache.
   """
 
   df: pd.DataFrame
   error: str | None = None
   bytes_processed: int = 0
+  bytes_billed: int = 0
   cache_hit: bool = False
 
 
@@ -342,7 +344,7 @@ class Context:
     theme: Active color theme.
     price_in: Price in USD per 1M input tokens.
     price_out: Price in USD per 1M output tokens.
-    scan_log: Log of query executions, bytes processed, and cache hit status.
+    scan_log: Log of query executions, bytes billed/processed, and cache hit status.
   """
 
   refs: TableRefs
@@ -352,6 +354,6 @@ class Context:
   theme: Theme
   price_in: float
   price_out: float
-  scan_log: list[tuple[str, int, bool]] = dataclasses.field(
+  scan_log: list[tuple[Any, ...]] = dataclasses.field(
       default_factory=list
   )

@@ -785,9 +785,12 @@ def _run_query_cached(
   ) as exc:  # pragma: no cover - driver/dependency errors.
     raise RuntimeError(str(exc)) from exc
 
+  bytes_billed = 0 if job.cache_hit else int(job.total_bytes_billed or 0)
+  bytes_processed = int(job.total_bytes_processed or 0)
   return (
       df,
-      int(job.total_bytes_processed or 0),
+      bytes_processed,
+      bytes_billed,
       bool(job.cache_hit),
       run_id,
   )
@@ -815,27 +818,33 @@ def run_query(
     QueryResult containing the resulting dataframe and execution metadata.
   """
   try:
-    df, bytes_processed, cache_hit, run_id = _run_query_cached(
+    raw = _run_query_cached(
         sql, filters, project, max_bytes
     )
+    if len(raw) == 5:
+      df, bytes_processed, bytes_billed, cache_hit, run_id = raw
+    else:
+      df, bytes_processed, cache_hit, run_id = raw
+      bytes_billed = 0 if cache_hit else bytes_processed
   except Exception as exc:
     return QueryResult(
         df=pd.DataFrame(),
         error=str(exc),
         bytes_processed=0,
+        bytes_billed=0,
         cache_hit=False,
     )
 
   with _RUN_ID_LOCK:
     if run_id in _SEEN_RUN_IDS:
-      return QueryResult(df, None, 0, True)
+      return QueryResult(df, None, 0, 0, True)
     if len(_SEEN_RUN_IDS) >= _MAX_SEEN_RUN_IDS:
       evict_count = max(1, _MAX_SEEN_RUN_IDS // 4)
       for _ in range(evict_count):
         _SEEN_RUN_IDS.pop()
     _SEEN_RUN_IDS.add(run_id)
 
-  return QueryResult(df, None, bytes_processed, cache_hit)
+  return QueryResult(df, None, bytes_processed, bytes_billed, cache_hit)
 
 
 def fetch(sql: str, ctx: Context, label: str) -> QueryResult:
@@ -855,7 +864,9 @@ def fetch(sql: str, ctx: Context, label: str) -> QueryResult:
       ctx.refs.project,
       ctx.max_bytes,
   )
-  ctx.scan_log.append((label, result.bytes_processed, result.cache_hit))
+  ctx.scan_log.append(
+      (label, result.bytes_billed, result.bytes_processed, result.cache_hit)
+  )
   if result.error:
     st.error(f"**{label}** — {result.error}")
   return result

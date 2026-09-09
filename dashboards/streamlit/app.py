@@ -9,14 +9,22 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+_DASHBOARD_DIR = Path(__file__).resolve().parent
+load_dotenv(_DASHBOARD_DIR / ".env")
 load_dotenv()
+
+_sa_creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+if _sa_creds and not os.path.isabs(_sa_creds):
+  _candidate = _DASHBOARD_DIR / _sa_creds
+  if _candidate.exists():
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(_candidate)
 
 import pandas as pd
 import streamlit as st
 
-_DASHBOARD_DIR = str(Path(__file__).resolve().parent)
-if _DASHBOARD_DIR not in sys.path:
-  sys.path.insert(0, _DASHBOARD_DIR)
+_DASHBOARD_DIR_STR = str(_DASHBOARD_DIR)
+if _DASHBOARD_DIR_STR not in sys.path:
+  sys.path.insert(0, _DASHBOARD_DIR_STR)
 
 from charts import (
   active_theme,
@@ -77,18 +85,39 @@ _FILTER_WIDGETS = (
 )
 
 
-def _prune_selection(key: str, options: Sequence[str]) -> None:
-  """Drops selected values that the current options no longer offer.
+def _merge_widget_options(key: str, options: Sequence[str]) -> list[str]:
+  """Ensures currently selected and custom values are preserved in widget options.
+
+  If an option was selected by the user, we retain it in the widget's option
+  list even if a narrowed time window or the 1,000-option cap omitted it. This
+  prevents selected filters from being discarded and silently reverting to ALL.
 
   Args:
     key: Streamlit session_state key.
-    options: Current valid options sequence.
+    options: Current valid options sequence from BigQuery.
+
+  Returns:
+    List of options containing fetched options plus any active selections.
   """
-  current = st.session_state.get(key)
-  if not current:
-    return
-  available = set(options)
-  st.session_state[key] = [v for v in current if v in available]
+  current = st.session_state.get(key, [])
+  if not isinstance(current, (list, tuple)):
+    current = [current] if current else []
+  seen = set(options)
+  result = list(options)
+  for item in current:
+    if item and item not in seen:
+      seen.add(item)
+      result.append(item)
+  return result
+
+
+def _prune_selection(key: str, options: Sequence[str]) -> None:
+  """Retains selected values in options to preserve active filter scope.
+
+  Deprecated: active selections are now preserved in the widget option set
+  rather than discarded, preventing filter scope explosion.
+  """
+  pass
 
 
 def sidebar_connection() -> tuple[TableRefs | None, int]:
@@ -108,6 +137,7 @@ def sidebar_connection() -> tuple[TableRefs | None, int]:
   env_dataset = os.environ.get("BQ_DATASET_ID", "")
   env_table = os.environ.get("BQ_TABLE_ID", "") or DEFAULT_TABLE_ID
   env_prefix = os.environ.get("BQ_VIEW_PREFIX", DEFAULT_VIEW_PREFIX)
+
 
   st.sidebar.subheader("BigQuery source")
 
@@ -171,7 +201,7 @@ def sidebar_window() -> Window:
 
 def sidebar_filters(
     options: dict[str, list[str]],
-    prune: bool = True,
+    prune: bool = False,
 ) -> tuple[Filters, float, float]:
   """Renders the filter and pricing form in the sidebar.
 
@@ -180,29 +210,32 @@ def sidebar_filters(
 
   Args:
     options: Map of filter kinds to available option string lists.
-    prune: Whether to drop selected values no longer offered in options.
+    prune: Legacy parameter retained for compatibility; active selections are
+      now preserved in the widget options to prevent filter scope explosion.
 
   Returns:
     A tuple of (Filters instance, price_in float, price_out float).
   """
   st.sidebar.subheader("Filters")
-  # Prune before the widgets render: a narrowed time range can retire an
-  # option that is still selected, and a multiselect whose stored value
-  # is not in its options is an error rather than a silent drop.
-  if prune:
-    for key, kind in _FILTER_WIDGETS:
-      _prune_selection(key, options.get(kind, []))
 
   with st.sidebar.form("filters"):
     agents = st.multiselect(
-        "Agent", options=options.get("agent", []), key="flt_agent"
+        "Agent",
+        options=_merge_widget_options("flt_agent", options.get("agent", [])),
+        key="flt_agent",
+        accept_new_options=True,
     )
     user_ids = st.multiselect(
-        "User", options=options.get("user_id", []), key="flt_user_id"
+        "User",
+        options=_merge_widget_options("flt_user_id", options.get("user_id", [])),
+        key="flt_user_id",
+        accept_new_options=True,
     )
     event_types = st.multiselect(
         "Event type",
-        options=options.get("event_type", []),
+        options=_merge_widget_options(
+            "flt_event_type", options.get("event_type", [])
+        ),
         key="flt_event_type",
         help=(
             "Honored by Events over time, Events by agent, Recent sessions"
@@ -212,8 +245,11 @@ def sidebar_filters(
     )
     session_ids = st.multiselect(
         "Session",
-        options=options.get("session_id", []),
+        options=_merge_widget_options(
+            "flt_session_id", options.get("session_id", [])
+        ),
         key="flt_session_id",
+        accept_new_options=True,
     )
     st.caption("An empty selection means all values.")
     st.divider()
@@ -572,14 +608,47 @@ def footer(ctx: Context) -> None:
   """
   if not ctx.scan_log:
     return
-  total = sum(size for _, size, hit in ctx.scan_log if not hit)
-  cached = sum(1 for _, _, hit in ctx.scan_log if hit)
+  total_billed = 0
+  total_processed = 0
+  cached = 0
+  for entry in ctx.scan_log:
+    if len(entry) == 4:
+      _, billed, processed, hit = entry
+    else:
+      _, billed, hit = entry
+      processed = billed
+    if hit:
+      cached += 1
+    else:
+      total_billed += billed
+      total_processed += processed
+
   st.divider()
+  if total_billed == 0 and cached > 0:
+    billed_processed = (
+        f"{humanize_bytes(total_billed)} billed"
+        f" ({humanize_bytes(total_processed)} processed — billing cost saved via cache)"
+    )
+  else:
+    billed_processed = (
+        f"{humanize_bytes(total_billed)} billed"
+        f" ({humanize_bytes(total_processed)} processed)"
+    )
+  cache_note = (
+      f"{cached} served from cache ($0 billed)"
+      if cached > 0
+      else f"{cached} served from cache"
+  )
   st.caption(
-      f"{len(ctx.scan_log)} queries this run · {humanize_bytes(total)}"
-      f" billed · {cached} served from cache · per-query cap"
-      f" {humanize_bytes(ctx.max_bytes)} · results cached for"
-      f" {CACHE_TTL_SECONDS // 60} min"
+      f"{len(ctx.scan_log)} queries this run · {billed_processed} ·"
+      f" {cache_note} ·"
+      f" per-query cap {humanize_bytes(ctx.max_bytes)} ·"
+      f" results cached for {CACHE_TTL_SECONDS // 60} min"
+  )
+  st.caption(
+      "BigQuery bills a 10 MB minimum per query under on-demand pricing, while"
+      " queries running on compute/capacity reservations incur no per-byte"
+      " charges."
   )
 
 
