@@ -18,13 +18,13 @@ on:
   push:
     branches: [main]
     paths:
-      - "grafana/**"
+      - "dashboards/grafana/**"
       - "scripts/check_grafana_queries_sync.py"
       - ".github/workflows/grafana-sync-check.yml"
   pull_request:
     branches: [main]
     paths:
-      - "grafana/**"
+      - "dashboards/grafana/**"
       - "scripts/check_grafana_queries_sync.py"
       - ".github/workflows/grafana-sync-check.yml"
 

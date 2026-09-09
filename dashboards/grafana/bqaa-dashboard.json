@@ -1,7 +1,7 @@
 {
   "title": "BigQuery Agent Analytics",
   "uid": "bqaa-dashboard",
-  "description": "Interactive dashboard for the BigQuery Agent Analytics SDK. Panels query the raw agent_events table and the typed ViewManager views (adk_* by default). Panel SQL is maintained in grafana/queries/*.sql \u2014 treat those files as the source of truth.",
+  "description": "Interactive dashboard for the BigQuery Agent Analytics SDK. Panels query the raw agent_events table and the typed ViewManager views (adk_* by default). Panel SQL is maintained in dashboards/grafana/queries/*.sql — treat those files as the source of truth.",
   "tags": [
     "bqaa",
     "bigquery",
@@ -444,7 +444,7 @@
         "x": 12,
         "y": 1
       },
-      "description": "Share of events counted as errors: event_type ending in _ERROR, or a non-NULL error_message, or UPPER(status) = 'ERROR'. See grafana/queries/README.md. Ignores the Event Type filter: the four Overview stats share one query that stays unfiltered so the error rate keeps its global context.",
+      "description": "Share of events counted as errors: event_type ending in _ERROR, or a non-NULL error_message, or UPPER(status) = 'ERROR'. See dashboards/grafana/queries/README.md. Ignores the Event Type filter: the four Overview stats share one query that stays unfiltered so the error rate keeps its global context.",
       "datasource": {
         "type": "datasource",
         "uid": "-- Dashboard --"

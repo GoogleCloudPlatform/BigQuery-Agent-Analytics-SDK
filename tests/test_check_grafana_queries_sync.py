@@ -35,7 +35,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECK_SCRIPT = ROOT / "scripts" / "check_grafana_queries_sync.py"
-PUBLIC_DEMO_QUERIES = ROOT / "grafana" / "queries" / "public-demo"
+PUBLIC_DEMO_QUERIES = (
+    ROOT / "dashboards" / "grafana" / "queries" / "public-demo"
+)
 
 
 def _load_check():
@@ -216,7 +218,7 @@ def test_or_true_mutant_is_not_caught_today():
 
   Such a query is unbounded and must still fail review. If a future change
   makes the lint reject it, replace this test with one asserting rejection and
-  update the CI-scope note in `grafana/queries/public-demo/README.md`.
+  update the CI-scope note in `dashboards/grafana/queries/public-demo/README.md`.
   """
 
   assert _lint(OR_TRUE_MUTANT, "mutant_or_true.sql") == 0

@@ -11,10 +11,12 @@ import sys
 from typing import Any, NamedTuple
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-DASHBOARD_PATH = REPOSITORY_ROOT / "grafana" / "bqaa-dashboard.json"
-QUERIES_DIRECTORY = REPOSITORY_ROOT / "grafana" / "queries"
+DASHBOARD_PATH = (
+    REPOSITORY_ROOT / "dashboards" / "grafana" / "bqaa-dashboard.json"
+)
+QUERIES_DIRECTORY = REPOSITORY_ROOT / "dashboards" / "grafana" / "queries"
 PUBLIC_DEMO_DASHBOARD_PATH = (
-    REPOSITORY_ROOT / "grafana" / "bqaa-public-demo.json"
+    REPOSITORY_ROOT / "dashboards" / "grafana" / "bqaa-public-demo.json"
 )
 PUBLIC_DEMO_QUERIES_DIRECTORY = QUERIES_DIRECTORY / "public-demo"
 
@@ -533,7 +535,7 @@ def check_dashboard_sync(
 
 
 def check_main_dashboard() -> int:
-  """Check the interactive dashboard against grafana/queries/*.sql.
+  """Check the interactive dashboard against dashboards/grafana/queries/*.sql.
 
   On top of the shared sync, the interactive build owns the template variables:
   their SQL must match its canonical file, and the panels that reuse another
@@ -672,7 +674,7 @@ def check_main_dashboard() -> int:
 
 
 def check_public_demo_dashboard() -> int:
-  """Check the public demo build against grafana/queries/public-demo/*.sql.
+  """Check the public demo build against dashboards/grafana/queries/public-demo/*.sql.
 
   The public build is shared with anonymous viewers, so on top of the same
   bidirectional SQL sync its queries must satisfy the public SQL policy, its
@@ -780,8 +782,8 @@ def main() -> int:
   Validates the integrity and synchronization of the Grafana dashboard queries.
 
   This CI script strictly enforces these key conditions, for the interactive
-  dashboard against grafana/queries/ and for the public demo build against
-  grafana/queries/public-demo/:
+  dashboard against dashboards/grafana/queries/ and for the public demo build against
+  dashboards/grafana/queries/public-demo/:
   1. Drift Prevention: The 'rawSql' inside the JSON dashboard exactly matches
      the canonical '.sql' files in the queries directory (printing unified diffs on failure).
   2. Unmapped File Detection: Every '.sql' file in the queries directory is

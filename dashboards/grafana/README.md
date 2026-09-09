@@ -2,7 +2,7 @@
 
 Visualize BQAA telemetry straight from BigQuery in Grafana.
 Works on the free tier of Grafana Cloud. It runs alongside the
-[`dashboard_v2/`](../dashboard_v2) React app rather than replacing it — both
+[`dashboard_v2/`](../../dashboard_v2) React app rather than replacing it — both
 read the same data.
 
 ```
@@ -26,7 +26,7 @@ AI Agent app ──SDK──▶ BigQuery agent_events ──ViewManager──▶
 On macOS or Linux with `gcloud auth application-default login` already run:
 
 ```bash
-python3 grafana/run_local.py --project YOUR_PROJECT --dataset YOUR_DATASET
+python3 dashboards/grafana/run_local.py --project YOUR_PROJECT --dataset YOUR_DATASET
 ```
 
 That downloads a pinned Grafana (cached and checksum-verified after the
@@ -41,7 +41,7 @@ work by default — the job location is selected automatically; pass
 `--processing-location EU` (or a region) to pin it. `--sa-key key.json`
 switches to the JWT auth documented below and writes the credential file
 with `0600` permissions; `--stop` tears it down; everything generated lives
-in the disposable, gitignored `grafana/.local/`. Production setups should
+in the disposable, gitignored `dashboards/grafana/.local/`. Production setups should
 still follow the full steps below with a scoped service account.
 
 > **Known pitfalls if you run Grafana your own way instead:**
@@ -77,7 +77,7 @@ still follow the full steps below with a scoped service account.
 3. **Keys → Add Key → Create new key → JSON**, and download it.
 
 > **Keep the key out of the repo.** `.gitignore` only covers new `*.json`
-> files inside `grafana/`. A key saved anywhere else can be committed by
+> files inside `dashboards/grafana/`. A key saved anywhere else can be committed by
 > accident.
 
 ### 3. Prepare the data
@@ -138,7 +138,7 @@ form with literal `\n` escapes.
 
 ```bash
 # Docker
-cp grafana/datasource.example.yaml grafana/datasource.yaml
+cp dashboards/grafana/datasource.example.yaml dashboards/grafana/datasource.yaml
 docker run -d -p 3000:3000 \
   -e "GF_INSTALL_PLUGINS=grafana-bigquery-datasource" \
   -v /path/to/your/datasource.yaml:/etc/grafana/provisioning/datasources/datasource.yaml \
@@ -267,7 +267,7 @@ every panel's SQL:
 sed -e 's/YOUR_PROJECT_ID/my-gcp-project/g' \
     -e 's/YOUR_DATASET_ID/my_demo_dataset/g' \
     -e 's/agent_events/my_demo_table/g' \
-    grafana/bqaa-public-demo.json > grafana/bqaa-public-demo.ready.json
+    dashboards/grafana/bqaa-public-demo.json > dashboards/grafana/bqaa-public-demo.ready.json
 ```
 
 The third substitution only matters if your events table is not named
