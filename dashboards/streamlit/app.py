@@ -635,12 +635,7 @@ def footer(ctx: Context) -> None:
   total_billed = 0
   total_processed = 0
   cached = 0
-  for entry in ctx.scan_log:
-    if len(entry) == 4:
-      _, billed, processed, hit = entry
-    else:
-      _, billed, hit = entry
-      processed = billed
+  for _, billed, processed, hit in ctx.scan_log:
     if hit:
       cached += 1
     else:

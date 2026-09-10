@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 import subprocess
 import sys
@@ -25,8 +26,6 @@ def run_check_with_patch(query_filename, patched_sql):
       side_effect=mock_get_query,
   ):
     # We also need to capture stderr to check the diff
-    import io
-
     stderr_capture = io.StringIO()
     with patch("sys.stderr", stderr_capture):
       with pytest.raises(SystemExit) as exc_info:
@@ -35,8 +34,6 @@ def run_check_with_patch(query_filename, patched_sql):
 
 
 def test_baseline_check():
-  import io
-
   stderr_capture = io.StringIO()
   stdout_capture = io.StringIO()
   with patch("sys.stderr", stderr_capture), patch("sys.stdout", stdout_capture):
@@ -66,13 +63,9 @@ def test_missing_filter():
   original_sql = check_streamlit_queries_sync.get_streamlit_query(
       "events_over_time.sql"
   )
-  # Remove @session_ids filter
   altered_sql = original_sql.replace(
-      "AND ('___ALL___' IN UNNEST(@session_ids) OR e.session_id IN UNNEST(@session_ids))",
-      "",
-  )
-  altered_sql = original_sql.replace(
-      "AND ('___ALL___' IN UNNEST(@session_ids) OR session_id IN UNNEST(@session_ids))",
+      "AND ('___ALL___' IN UNNEST(@session_ids) OR session_id IN"
+      " UNNEST(@session_ids))",
       "",
   )
   code, stderr = run_check_with_patch("events_over_time.sql", altered_sql)

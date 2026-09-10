@@ -729,7 +729,7 @@ def _run_query_cached(
     filters: Filters,
     project: str,
     max_bytes: int,
-) -> tuple[pd.DataFrame, int, bool, int]:
+) -> tuple[pd.DataFrame, int, int, bool, int]:
   """Runs the BigQuery job, cached by Streamlit across reruns.
 
   Args:
@@ -739,7 +739,7 @@ def _run_query_cached(
     max_bytes: Maximum allowed bytes billed.
 
   Returns:
-    Tuple of (dataframe, bytes_processed, cache_hit, run_id).
+    Tuple of (dataframe, bytes_processed, bytes_billed, cache_hit, run_id).
   """
   global _NEXT_RUN_ID
   with _RUN_ID_LOCK:
@@ -818,12 +818,9 @@ def run_query(
     QueryResult containing the resulting dataframe and execution metadata.
   """
   try:
-    raw = _run_query_cached(sql, filters, project, max_bytes)
-    if len(raw) == 5:
-      df, bytes_processed, bytes_billed, cache_hit, run_id = raw
-    else:
-      df, bytes_processed, cache_hit, run_id = raw
-      bytes_billed = 0 if cache_hit else bytes_processed
+    df, bytes_processed, bytes_billed, cache_hit, run_id = _run_query_cached(
+        sql, filters, project, max_bytes
+    )
   except Exception as exc:
     return QueryResult(
         df=pd.DataFrame(),

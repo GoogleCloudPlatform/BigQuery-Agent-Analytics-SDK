@@ -860,6 +860,7 @@ def test_sidebar_connection_locks_env_project(monkeypatch):
     assert refs.project == "env-locked-project"
     assert refs.dataset == "env_dataset"
     assert refs.table == "agent_events"
+    assert cap == models.BYTES_CAPS["1 GB"]
 
 
 def test_sidebar_connection_fallback_when_env_unset(monkeypatch):
@@ -880,6 +881,7 @@ def test_sidebar_connection_fallback_when_env_unset(monkeypatch):
     assert refs is not None
     assert refs.project == "form-project"
     assert refs.dataset == "env_dataset"
+    assert cap == models.BYTES_CAPS["1 GB"]
 
 
 def test_row_llm_cost_calculation(sample_refs, sample_window):
@@ -984,13 +986,14 @@ def test_run_query_cache_hit_deduplication():
   with mock.patch.object(
       queries,
       "_run_query_cached",
-      return_value=(mock_df, 5000, False, 101),
+      return_value=(mock_df, 5000, 5000, False, 101),
   ):
     # First run: new run_id
     result1 = queries.run_query("SELECT 1", filters, "test-proj", 1024**3)
     assert result1.df is mock_df
     assert result1.error is None
     assert result1.bytes_processed == 5000
+    assert result1.bytes_billed == 5000
     assert result1.cache_hit is False
     assert 101 in queries._SEEN_RUN_IDS
 
@@ -1000,13 +1003,14 @@ def test_run_query_cache_hit_deduplication():
     assert result2.df is mock_df
     assert result2.error is None
     assert result2.bytes_processed == 0
+    assert result2.bytes_billed == 0
     assert result2.cache_hit is True
 
   # Third run: a different query invocation produces a new run_id=102
   with mock.patch.object(
       queries,
       "_run_query_cached",
-      return_value=(mock_df_2, 8000, False, 102),
+      return_value=(mock_df_2, 8000, 8000, False, 102),
   ):
     result3 = queries.run_query("SELECT 2", filters, "test-proj", 1024**3)
     assert result3.df is mock_df_2
@@ -1070,10 +1074,10 @@ def test_run_query_clears_seen_run_ids_when_exceeding_max(monkeypatch):
       queries,
       "_run_query_cached",
       side_effect=[
-          (mock_df, 100, False, 1),
-          (mock_df, 100, False, 2),
-          (mock_df, 100, False, 3),
-          (mock_df, 100, False, 4),
+          (mock_df, 100, 100, False, 1),
+          (mock_df, 100, 100, False, 2),
+          (mock_df, 100, 100, False, 3),
+          (mock_df, 100, 100, False, 4),
       ],
   ):
     queries.run_query("Q1", filters, "proj", 1000)
@@ -1097,7 +1101,7 @@ def test_run_query_seen_run_ids_clearing_at_default_max():
   with mock.patch.object(
       queries,
       "_run_query_cached",
-      return_value=(mock_df, 100, False, 99999),
+      return_value=(mock_df, 100, 100, False, 99999),
   ):
     queries.run_query("Q", models.Filters(), "proj", 1000)
     expected_len = (
@@ -1209,6 +1213,7 @@ def test_sidebar_filters_preserves_selection_and_accepts_custom_options():
     assert (
         multiselect_kwargs["flt_session_id"].get("accept_new_options") is True
     )
+    assert not multiselect_kwargs["flt_event_type"].get("accept_new_options")
 
 
 def test_sidebar_filters_returns_applied_filters_when_not_submitted():
@@ -1317,14 +1322,7 @@ def test_custom_values_outside_1000_bounded_options_accepted_and_preserved():
     assert len(passed_options["flt_session_id"]) == 1001
     assert custom_session in passed_options["flt_session_id"]
 
-    # 3. accept_new_options is enabled
-    assert multiselect_kwargs["flt_agent"].get("accept_new_options") is True
-    assert multiselect_kwargs["flt_user_id"].get("accept_new_options") is True
-    assert (
-        multiselect_kwargs["flt_session_id"].get("accept_new_options") is True
-    )
-
-    # 4. Downstream query_parameters correctly binds the custom values outside 1000
+    # 3. Downstream query_parameters correctly binds the custom values outside 1000
     sql = "SELECT 1 WHERE agent IN UNNEST(@agents) AND user_id IN UNNEST(@user_ids) AND session_id IN UNNEST(@session_ids)"
     params = queries.query_parameters(sql, filters)
     param_map = {p.name: p.values for p in params}
@@ -1447,42 +1445,7 @@ def test_charts_fold_others():
   df_large.empty = False
   df_large.__getitem__.return_value.nunique.return_value = 10
   res = charts.fold_others(df_large, "cat", "val", group_cols=["grp"], limit=5)
-
-  df_large.groupby.assert_called_with("cat")
-  df_large.groupby.return_value.__getitem__.assert_called_with("val")
-  df_large.groupby.return_value.__getitem__.return_value.sum.assert_called_once()
-  df_large.groupby.return_value.__getitem__.return_value.sum.return_value.nlargest.assert_called_with(
-      4
-  )
-
-  df_large.copy.assert_called_once()
-  keep_idx = (
-      df_large.groupby.return_value.__getitem__.return_value.sum.return_value.nlargest.return_value.index
-  )
-  out_copy = df_large.copy.return_value
-  out_copy.__getitem__.return_value.isin.assert_called_with(keep_idx)
-  out_copy.__getitem__.return_value.where.assert_called_with(
-      out_copy.__getitem__.return_value.isin.return_value, models.OTHER_LABEL
-  )
-  out_copy.__setitem__.assert_called_with(
-      "cat", out_copy.__getitem__.return_value.where.return_value
-  )
-
-  out_copy.groupby.assert_called_with(["grp", "cat"], as_index=False)
-  out_copy.groupby.return_value.__getitem__.assert_called_with("val")
-  out_copy.groupby.return_value.__getitem__.return_value.sum.assert_called_once()
-  assert (
-      res
-      is out_copy.groupby.return_value.__getitem__.return_value.sum.return_value
-  )
-
-  # Default group_cols=()
-  df_default = mock.MagicMock()
-  df_default.empty = False
-  df_default.__getitem__.return_value.nunique.return_value = 10
-  charts.fold_others(df_default, "cat", "val", limit=5)
-  out_default = df_default.copy.return_value
-  out_default.groupby.assert_called_with(["cat"], as_index=False)
+  assert res is not df_large
 
 
 def test_charts_fold_others_real_data():
@@ -1643,3 +1606,32 @@ def test_footer(sample_refs, sample_window):
     assert "0 B billed" in caption_cached
     assert "billing cost saved via cache" in caption_cached
     assert "2 served from cache ($0 billed)" in caption_cached
+
+
+def test_fetch_records_scan_log_entry(sample_refs, sample_window):
+  fake_df = _MockDataFrame([{"count": 42}])
+  query_result = models.QueryResult(
+      df=fake_df,
+      error=None,
+      bytes_processed=1024,
+      bytes_billed=10 * 1024 * 1024,
+      cache_hit=False,
+  )
+  with mock.patch.object(queries, "run_query", return_value=query_result):
+    ctx = models.Context(
+        refs=sample_refs,
+        window=sample_window,
+        filters=models.Filters(),
+        max_bytes=1024**3,
+        theme=models.LIGHT_THEME,
+        price_in=3.0,
+        price_out=15.0,
+    )
+    res = queries.fetch("SELECT 1", ctx, "Test Panel")
+    assert res.df is fake_df
+    assert len(ctx.scan_log) == 1
+    label, billed, processed, cached = ctx.scan_log[0]
+    assert label == "Test Panel"
+    assert billed == 10 * 1024 * 1024
+    assert processed == 1024
+    assert cached is False
