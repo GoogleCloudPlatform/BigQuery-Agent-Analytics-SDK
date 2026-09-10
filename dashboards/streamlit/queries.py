@@ -83,7 +83,7 @@ def _scope(alias: str = "", *, event_type: bool = False) -> str:
   """Renders the filter clauses shared by nearly every panel.
 
   ``event_type`` defaults off because two exemptions in
-  ``grafana/queries/README.md`` apply to most panels: a view-backed query
+  ``dashboards/grafana/queries/README.md`` apply to most panels: a view-backed query
   is already scoped to one event type, and an error count must stay
   unscoped or it reports zero errors whenever some other type is picked.
 
@@ -818,9 +818,7 @@ def run_query(
     QueryResult containing the resulting dataframe and execution metadata.
   """
   try:
-    raw = _run_query_cached(
-        sql, filters, project, max_bytes
-    )
+    raw = _run_query_cached(sql, filters, project, max_bytes)
     if len(raw) == 5:
       df, bytes_processed, bytes_billed, cache_hit, run_id = raw
     else:

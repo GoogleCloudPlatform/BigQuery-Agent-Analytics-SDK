@@ -14,7 +14,7 @@ import pandas as pd
 # Constants                                                            #
 # ------------------------------------------------------------------ #
 
-# Sentinel that means "no filter applied", matching grafana/queries. The
+# Sentinel that means "no filter applied", matching dashboards/grafana/queries. The
 # clause `('___ALL___' IN UNNEST(@agents) OR agent IN UNNEST(@agents))`
 # is injection-safe and cannot crash on an empty array the way an
 # `IN ()` list would.
@@ -354,6 +354,4 @@ class Context:
   theme: Theme
   price_in: float
   price_out: float
-  scan_log: list[tuple[Any, ...]] = dataclasses.field(
-      default_factory=list
-  )
+  scan_log: list[tuple[Any, ...]] = dataclasses.field(default_factory=list)

@@ -26,54 +26,47 @@ _DASHBOARD_DIR_STR = str(_DASHBOARD_DIR)
 if _DASHBOARD_DIR_STR not in sys.path:
   sys.path.insert(0, _DASHBOARD_DIR_STR)
 
-from charts import (
-  active_theme,
-  grouped_bars,
-  lines,
-  panel,
-  ranked_bars,
-  stacked_bars,
-)
-
-from models import (
-  as_filter_values,
-  BYTES_CAPS,
-  CACHE_TTL_SECONDS,
-  Context,
-  DEFAULT_BYTES_CAP,
-  DEFAULT_TABLE_ID,
-  DEFAULT_VIEW_PREFIX,
-  Filters,
-  humanize_bytes,
-  make_window,
-  RECENT_SESSIONS_LIMIT,
-  TableRefs,
-  TIME_RANGES,
-  TOOL_ERRORS_LIMIT,
-  TOP_ERRORS_LIMIT,
-  TRACE_DETAIL_LIMIT,
-  validate_refs,
-  Window,
-)
-
-from queries import (
-  build_errors_over_time_sql,
-  build_events_by_agent_sql,
-  build_events_over_time_sql,
-  build_llm_calls_total_sql,
-  build_llm_latency_percentiles_sql,
-  build_llm_tokens_over_time_sql,
-  build_overview_totals_sql,
-  build_recent_sessions_sql,
-  build_tokens_by_model_sql,
-  build_tool_errors_sql,
-  build_tool_latency_sql,
-  build_tool_usage_sql,
-  build_top_errors_sql,
-  build_trace_detail_sql,
-  fetch,
-  load_filter_options,
-)
+from charts import active_theme
+from charts import grouped_bars
+from charts import lines
+from charts import panel
+from charts import ranked_bars
+from charts import stacked_bars
+from models import ALL_SENTINEL
+from models import as_filter_values
+from models import BYTES_CAPS
+from models import CACHE_TTL_SECONDS
+from models import Context
+from models import DEFAULT_BYTES_CAP
+from models import DEFAULT_TABLE_ID
+from models import DEFAULT_VIEW_PREFIX
+from models import Filters
+from models import humanize_bytes
+from models import make_window
+from models import RECENT_SESSIONS_LIMIT
+from models import TableRefs
+from models import TIME_RANGES
+from models import TOOL_ERRORS_LIMIT
+from models import TOP_ERRORS_LIMIT
+from models import TRACE_DETAIL_LIMIT
+from models import validate_refs
+from models import Window
+from queries import build_errors_over_time_sql
+from queries import build_events_by_agent_sql
+from queries import build_events_over_time_sql
+from queries import build_llm_calls_total_sql
+from queries import build_llm_latency_percentiles_sql
+from queries import build_llm_tokens_over_time_sql
+from queries import build_overview_totals_sql
+from queries import build_recent_sessions_sql
+from queries import build_tokens_by_model_sql
+from queries import build_tool_errors_sql
+from queries import build_tool_latency_sql
+from queries import build_tool_usage_sql
+from queries import build_top_errors_sql
+from queries import build_trace_detail_sql
+from queries import fetch
+from queries import load_filter_options
 
 APP_TITLE = "BigQuery Agent Analytics"
 
@@ -85,39 +78,62 @@ _FILTER_WIDGETS = (
 )
 
 
-def _merge_widget_options(key: str, options: Sequence[str]) -> list[str]:
-  """Ensures currently selected and custom values are preserved in widget options.
+def _seed_options(
+    key: str, options: Sequence[str], applied_values: Sequence[str]
+) -> list[str]:
+  """Ensures applied and in-progress selections stay valid widget options.
 
-  If an option was selected by the user, we retain it in the widget's option
-  list even if a narrowed time window or the 1,000-option cap omitted it. This
-  prevents selected filters from being discarded and silently reverting to ALL.
+  Retention is anchored on ``applied_values`` — the last-*applied* Filters,
+  held in ``st.session_state["applied_filters"]`` — not solely on
+  ``st.session_state[key]``, the widget's own Streamlit-managed value. A
+  selection surviving only in ``st.session_state[key]`` is lost the moment
+  Streamlit treats the widget as newly created (a ``key=`` rename, a fresh
+  session, ...): a brand-new widget has no prior value to merge. Anchoring
+  on ``applied_filters`` — a plain session_state entry the widget machinery
+  never rewrites — means the selection survives that identity change. The
+  widget's own key is still merged in too, so an in-progress, not-yet-applied
+  edit is not clobbered while the form is open.
 
   Args:
-    key: Streamlit session_state key.
+    key: Streamlit session_state key for the widget's own pending value.
     options: Current valid options sequence from BigQuery.
+    applied_values: The filter's last-applied selection, or (ALL_SENTINEL,)
+      if unset.
 
   Returns:
-    List of options containing fetched options plus any active selections.
+    List of options containing fetched options plus any applied or
+    in-progress selections.
   """
+  seen = set(options)
+  result = list(options)
+
+  def _extend(values: Sequence[str]) -> None:
+    for item in values:
+      if item and item != ALL_SENTINEL and item not in seen:
+        seen.add(item)
+        result.append(item)
+
+  _extend(applied_values)
   current = st.session_state.get(key, [])
   if not isinstance(current, (list, tuple)):
     current = [current] if current else []
-  seen = set(options)
-  result = list(options)
-  for item in current:
-    if item and item not in seen:
-      seen.add(item)
-      result.append(item)
+  _extend(current)
   return result
 
 
-def _prune_selection(key: str, options: Sequence[str]) -> None:
-  """Retains selected values in options to preserve active filter scope.
+def _default_for(applied_values: Sequence[str]) -> list[str]:
+  """Converts an applied Filters field into a multiselect ``default=``.
 
-  Deprecated: active selections are now preserved in the widget option set
-  rather than discarded, preventing filter scope explosion.
+  Args:
+    applied_values: The filter's last-applied selection, e.g.
+      ``Filters().agents``.
+
+  Returns:
+    An empty list for the "all values" sentinel, else the applied values.
   """
-  pass
+  return (
+      [] if tuple(applied_values) == (ALL_SENTINEL,) else list(applied_values)
+  )
 
 
 def sidebar_connection() -> tuple[TableRefs | None, int]:
@@ -137,7 +153,6 @@ def sidebar_connection() -> tuple[TableRefs | None, int]:
   env_dataset = os.environ.get("BQ_DATASET_ID", "")
   env_table = os.environ.get("BQ_TABLE_ID", "") or DEFAULT_TABLE_ID
   env_prefix = os.environ.get("BQ_VIEW_PREFIX", DEFAULT_VIEW_PREFIX)
-
 
   st.sidebar.subheader("BigQuery source")
 
@@ -201,7 +216,6 @@ def sidebar_window() -> Window:
 
 def sidebar_filters(
     options: dict[str, list[str]],
-    prune: bool = False,
 ) -> tuple[Filters, float, float]:
   """Renders the filter and pricing form in the sidebar.
 
@@ -210,44 +224,51 @@ def sidebar_filters(
 
   Args:
     options: Map of filter kinds to available option string lists.
-    prune: Legacy parameter retained for compatibility; active selections are
-      now preserved in the widget options to prevent filter scope explosion.
 
   Returns:
     A tuple of (Filters instance, price_in float, price_out float).
   """
   st.sidebar.subheader("Filters")
+  applied: Filters = st.session_state.setdefault("applied_filters", Filters())
 
   with st.sidebar.form("filters"):
     agents = st.multiselect(
         "Agent",
-        options=_merge_widget_options("flt_agent", options.get("agent", [])),
+        options=_seed_options(
+            "flt_agent", options.get("agent", []), applied.agents
+        ),
+        default=_default_for(applied.agents),
         key="flt_agent",
         accept_new_options=True,
     )
     user_ids = st.multiselect(
         "User",
-        options=_merge_widget_options("flt_user_id", options.get("user_id", [])),
+        options=_seed_options(
+            "flt_user_id", options.get("user_id", []), applied.user_ids
+        ),
+        default=_default_for(applied.user_ids),
         key="flt_user_id",
         accept_new_options=True,
     )
     event_types = st.multiselect(
         "Event type",
-        options=_merge_widget_options(
-            "flt_event_type", options.get("event_type", [])
+        options=_seed_options(
+            "flt_event_type", options.get("event_type", []), applied.event_types
         ),
+        default=_default_for(applied.event_types),
         key="flt_event_type",
         help=(
             "Honored by Events over time, Events by agent, Recent sessions"
             " and Trace detail. Error panels and view-backed panels are"
-            " exempt — see grafana/queries/README.md."
+            " exempt — see dashboards/grafana/queries/README.md."
         ),
     )
     session_ids = st.multiselect(
         "Session",
-        options=_merge_widget_options(
-            "flt_session_id", options.get("session_id", [])
+        options=_seed_options(
+            "flt_session_id", options.get("session_id", []), applied.session_ids
         ),
+        default=_default_for(applied.session_ids),
         key="flt_session_id",
         accept_new_options=True,
     )
@@ -270,15 +291,18 @@ def sidebar_filters(
         format="%.4f",
         key="flt_price_out",
     )
-    st.form_submit_button("Apply filters", width="stretch")
+    submitted = st.form_submit_button("Apply filters", width="stretch")
 
-  filters = Filters(
-      agents=as_filter_values(agents),
-      user_ids=as_filter_values(user_ids),
-      event_types=as_filter_values(event_types),
-      session_ids=as_filter_values(session_ids),
-  )
-  return filters, float(price_in), float(price_out)
+  if submitted:
+    applied = Filters(
+        agents=as_filter_values(agents),
+        user_ids=as_filter_values(user_ids),
+        event_types=as_filter_values(event_types),
+        session_ids=as_filter_values(session_ids),
+    )
+    st.session_state["applied_filters"] = applied
+
+  return applied, float(price_in), float(price_out)
 
 
 def _metric(column: Any, label: str, value: str, help_text: str = "") -> None:
@@ -682,12 +706,10 @@ def main() -> None:
   options, result = load_filter_options(probe)
   if result.error is None and options:
     st.session_state["_filter_options"] = options
-    prune = True
   else:
     options = st.session_state.get("_filter_options", {})
-    prune = False
 
-  filters, price_in, price_out = sidebar_filters(options, prune=prune)
+  filters, price_in, price_out = sidebar_filters(options)
 
   ctx = Context(
       refs=refs,

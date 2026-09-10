@@ -55,7 +55,7 @@ bq-agent-sdk views create-all \
   --table-id YOUR_TABLE
 ```
 
-> **Note:** Views default to the `adk_` prefix. If you specify a custom prefix with `--view-prefix`, set `BQ_VIEW_PREFIX` in `.env` (or in the dashboard sidebar) to match.
+> **Note:** Views default to the `adk_` prefix. If you specify a custom prefix with `--prefix`, set `BQ_VIEW_PREFIX` in `.env` (or in the dashboard sidebar) to match.
 
 ---
 
