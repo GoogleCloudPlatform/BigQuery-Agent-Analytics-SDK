@@ -18,6 +18,10 @@ if _sa_creds and not os.path.isabs(_sa_creds):
   _candidate = _DASHBOARD_DIR / _sa_creds
   if _candidate.exists():
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(_candidate)
+  elif (_DASHBOARD_DIR.parent.parent / _sa_creds).exists():
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(
+        _DASHBOARD_DIR.parent.parent / _sa_creds
+    )
 
 import pandas as pd
 import streamlit as st
@@ -145,6 +149,9 @@ def sidebar_connection() -> tuple[TableRefs | None, int]:
   overridable when ``BQ_PROJECT_ID`` is set. It is a form so that
   changing multiple configuration settings costs one rerun rather than five.
 
+  ``_connect_attempted`` latches in session state once the Connect button is
+  clicked, persisting for the session until a valid connection or reset.
+
   Returns:
     A tuple containing validated TableRefs (or None if invalid) and the
     selected byte cap limit.
@@ -179,13 +186,16 @@ def sidebar_connection() -> tuple[TableRefs | None, int]:
             " query that would exceed it rather than billing for it."
         ),
     )
-    st.form_submit_button("Connect", width="stretch")
+    connected = st.form_submit_button("Connect", width="stretch")
+    if connected:
+      st.session_state["_connect_attempted"] = True
 
   if env_project:
     project = env_project
   refs, errors = validate_refs(project, dataset, table, prefix)
-  for message in errors:
-    st.sidebar.error(message)
+  if st.session_state.get("_connect_attempted") or bool(dataset):
+    for message in errors:
+      st.sidebar.error(message)
   return refs, BYTES_CAPS[cap_label]
 
 
@@ -214,6 +224,43 @@ def sidebar_window() -> Window:
   return window
 
 
+def reset_filters() -> None:
+  """Resets applied and widget filter states to defaults.
+
+  Pricing inputs (flt_price_in, flt_price_out) are intentionally preserved
+  across connection changes.
+  """
+  st.session_state["applied_filters"] = Filters()
+  st.session_state.pop("_filter_options", None)
+  for key, _ in _FILTER_WIDGETS:
+    st.session_state.pop(key, None)
+  st.session_state.pop("_selected_session_id", None)
+
+
+def _pending(key: str) -> list[str]:
+  """Reads one filter widget's submitted value out of session_state."""
+  value = st.session_state.get(key, [])
+  if not isinstance(value, (list, tuple)):
+    return [str(value)] if value else []
+  return [str(item) for item in value]
+
+
+def _commit_filters() -> None:
+  """Promotes the submitted widget values into applied_filters.
+
+  Runs as the Apply button's on_click callback.
+  """
+  applied = Filters(
+      agents=as_filter_values(_pending("flt_agent")),
+      user_ids=as_filter_values(_pending("flt_user_id")),
+      event_types=as_filter_values(_pending("flt_event_type")),
+      session_ids=as_filter_values(_pending("flt_session_id")),
+  )
+  st.session_state["applied_filters"] = applied
+  for key, kind in _FILTER_WIDGETS:
+    st.session_state[key] = _default_for(getattr(applied, f"{kind}s"))
+
+
 def sidebar_filters(
     options: dict[str, list[str]],
 ) -> tuple[Filters, float, float]:
@@ -231,31 +278,33 @@ def sidebar_filters(
   st.sidebar.subheader("Filters")
   applied: Filters = st.session_state.setdefault("applied_filters", Filters())
 
+  for key, kind in _FILTER_WIDGETS:
+    field = f"{kind}s"
+    if key not in st.session_state:
+      st.session_state[key] = _default_for(getattr(applied, field))
+
   with st.sidebar.form("filters"):
-    agents = st.multiselect(
+    st.multiselect(
         "Agent",
         options=_seed_options(
             "flt_agent", options.get("agent", []), applied.agents
         ),
-        default=_default_for(applied.agents),
         key="flt_agent",
         accept_new_options=True,
     )
-    user_ids = st.multiselect(
+    st.multiselect(
         "User",
         options=_seed_options(
             "flt_user_id", options.get("user_id", []), applied.user_ids
         ),
-        default=_default_for(applied.user_ids),
         key="flt_user_id",
         accept_new_options=True,
     )
-    event_types = st.multiselect(
+    st.multiselect(
         "Event type",
         options=_seed_options(
             "flt_event_type", options.get("event_type", []), applied.event_types
         ),
-        default=_default_for(applied.event_types),
         key="flt_event_type",
         help=(
             "Honored by Events over time, Events by agent, Recent sessions"
@@ -263,12 +312,11 @@ def sidebar_filters(
             " exempt — see dashboards/grafana/queries/README.md."
         ),
     )
-    session_ids = st.multiselect(
+    st.multiselect(
         "Session",
         options=_seed_options(
             "flt_session_id", options.get("session_id", []), applied.session_ids
         ),
-        default=_default_for(applied.session_ids),
         key="flt_session_id",
         accept_new_options=True,
     )
@@ -278,7 +326,7 @@ def sidebar_filters(
     price_in = st.number_input(
         "USD per 1M input tokens",
         min_value=0.0,
-        value=3.0,
+        value=1.25,
         step=0.25,
         format="%.4f",
         key="flt_price_in",
@@ -286,23 +334,16 @@ def sidebar_filters(
     price_out = st.number_input(
         "USD per 1M output tokens",
         min_value=0.0,
-        value=15.0,
+        value=5.00,
         step=0.25,
         format="%.4f",
         key="flt_price_out",
     )
-    submitted = st.form_submit_button("Apply filters", width="stretch")
-
-  if submitted:
-    applied = Filters(
-        agents=as_filter_values(agents),
-        user_ids=as_filter_values(user_ids),
-        event_types=as_filter_values(event_types),
-        session_ids=as_filter_values(session_ids),
+    st.form_submit_button(
+        "Apply filters", width="stretch", on_click=_commit_filters
     )
-    st.session_state["applied_filters"] = applied
 
-  return applied, float(price_in), float(price_out)
+  return st.session_state["applied_filters"], float(price_in), float(price_out)
 
 
 def _metric(column: Any, label: str, value: str, help_text: str = "") -> None:
@@ -348,7 +389,7 @@ def row_overview(ctx: Context) -> None:
     _metric(
         cols[3],
         "Avg LLM latency",
-        "—" if pd.isna(latency) else f"{float(latency):,.0f} ms",
+        "—" if pd.isna(latency) else f"{round(float(latency) + 1e-9):,.0f} ms",
     )
 
   left, right = st.columns(2)
@@ -602,7 +643,15 @@ def row_sessions(ctx: Context) -> None:
     return
   # A selectbox rather than a text input: one committed choice per rerun,
   # so the trace query runs once instead of on every keystroke.
-  chosen = st.selectbox("Session", options=ids, index=0)
+  # If a previously chosen session exists and is still in ids, maintain its selection.
+  # `_selected_session_id` must remain a non-widget key (stored in session_state,
+  # not passed as key="...") so that dynamically computed default_idx does not
+  # conflict with Streamlit's internal widget key state tracking or raise
+  # StreamlitAPIException when session options change between queries.
+  prev_chosen = st.session_state.get("_selected_session_id")
+  default_idx = ids.index(prev_chosen) if prev_chosen in ids else 0
+  chosen = st.selectbox("Session", options=ids, index=default_idx)
+  st.session_state["_selected_session_id"] = chosen
   # Pin the trace to one session without disturbing the shared filters.
   # `replace` carries the same `scan_log` list over, so this query is
   # still counted once in the footer.
@@ -685,6 +734,11 @@ def main() -> None:
     )
     st.stop()
 
+  prev_refs = st.session_state.get("_last_refs")
+  if prev_refs is not None and prev_refs != refs:
+    reset_filters()
+  st.session_state["_last_refs"] = refs
+
   window = sidebar_window()
 
   # Options are read unfiltered, so the sidebar can be drawn before any
@@ -736,6 +790,7 @@ __all__ = [
     "APP_TITLE",
     "footer",
     "main",
+    "reset_filters",
     "row_llm",
     "row_overview",
     "row_sessions",

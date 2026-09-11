@@ -721,6 +721,69 @@ _MAX_SEEN_RUN_IDS = 10_000
 _NEXT_RUN_ID = 0
 _SEEN_RUN_IDS: set[int] = set()
 _RUN_ID_LOCK = threading.Lock()
+_JOB_RELOAD_TIMEOUT_SECONDS = 10
+
+
+class QueryExecutionError(RuntimeError):
+  """Raised when query execution or result download fails.
+
+  Preserves byte scan and billing statistics if available from the BigQuery job.
+  """
+
+  def __init__(
+      self,
+      message: str,
+      bytes_processed: int = 0,
+      bytes_billed: int = 0,
+      cache_hit: bool = False,
+  ) -> None:
+    super().__init__(message)
+    self.bytes_processed = bytes_processed
+    self.bytes_billed = bytes_billed
+    self.cache_hit = cache_hit
+
+
+def _extract_job_stats(
+    job: bigquery.QueryJob | None,
+) -> tuple[int, int, bool] | None:
+  """Extracts byte scan and billing statistics from a QueryJob if available."""
+  if job is None:
+    return None
+  try:
+    total_processed = getattr(job, "total_bytes_processed", None)
+    ended = getattr(job, "ended", None)
+    if total_processed is None:
+      try:
+        job.reload(timeout=_JOB_RELOAD_TIMEOUT_SECONDS)
+      except Exception:
+        pass
+      else:
+        total_processed = getattr(job, "total_bytes_processed", None)
+        ended = getattr(job, "ended", None)
+    if total_processed is not None or ended is not None:
+      cache_hit = bool(getattr(job, "cache_hit", False))
+      bytes_billed = (
+          0 if cache_hit else int(getattr(job, "total_bytes_billed", 0) or 0)
+      )
+      bytes_processed = int(total_processed or 0)
+      return bytes_processed, bytes_billed, cache_hit
+  except Exception:
+    return None
+  return None
+
+
+def _query_failure(msg: str, job: bigquery.QueryJob | None) -> RuntimeError:
+  """Builds a QueryExecutionError or RuntimeError preserving job statistics."""
+  stats = _extract_job_stats(job)
+  if stats is not None:
+    bytes_processed, bytes_billed, cache_hit = stats
+    return QueryExecutionError(
+        msg,
+        bytes_processed=bytes_processed,
+        bytes_billed=bytes_billed,
+        cache_hit=cache_hit,
+    )
+  return RuntimeError(msg)
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False, max_entries=256)
@@ -768,6 +831,7 @@ def _run_query_cached(
         " the time range or raise the cap in the sidebar."
     )
 
+  job = None
   try:
     job = client.query(
         sql,
@@ -775,15 +839,9 @@ def _run_query_cached(
     )
     df = job.to_dataframe()
   except (gexc.GoogleAPICallError, gauth_exc.DefaultCredentialsError) as exc:
-    raise RuntimeError(_explain(exc)) from exc
-  except (
-      gexc.RetryError,
-      ValueError,
-      TypeError,
-      RuntimeError,
-      OSError,
-  ) as exc:  # pragma: no cover - driver/dependency errors.
-    raise RuntimeError(str(exc)) from exc
+    raise _query_failure(_explain(exc), job) from exc
+  except Exception as exc:
+    raise _query_failure(str(exc), job) from exc
 
   bytes_billed = 0 if job.cache_hit else int(job.total_bytes_billed or 0)
   bytes_processed = int(job.total_bytes_processed or 0)
@@ -822,12 +880,18 @@ def run_query(
         sql, filters, project, max_bytes
     )
   except Exception as exc:
+    if isinstance(exc, QueryExecutionError):
+      bytes_processed = int(exc.bytes_processed)
+      bytes_billed = int(exc.bytes_billed)
+      cache_hit = bool(exc.cache_hit)
+    else:
+      bytes_processed, bytes_billed, cache_hit = 0, 0, False
     return QueryResult(
         df=pd.DataFrame(),
         error=str(exc),
-        bytes_processed=0,
-        bytes_billed=0,
-        cache_hit=False,
+        bytes_processed=bytes_processed,
+        bytes_billed=bytes_billed,
+        cache_hit=cache_hit,
     )
 
   with _RUN_ID_LOCK:
@@ -835,8 +899,8 @@ def run_query(
       return QueryResult(df, None, 0, 0, True)
     if len(_SEEN_RUN_IDS) >= _MAX_SEEN_RUN_IDS:
       evict_count = max(1, _MAX_SEEN_RUN_IDS // 4)
-      for _ in range(evict_count):
-        _SEEN_RUN_IDS.pop()
+      for stale in sorted(_SEEN_RUN_IDS)[:evict_count]:
+        _SEEN_RUN_IDS.discard(stale)
     _SEEN_RUN_IDS.add(run_id)
 
   return QueryResult(df, None, bytes_processed, bytes_billed, cache_hit)
@@ -853,12 +917,13 @@ def fetch(sql: str, ctx: Context, label: str) -> QueryResult:
   Returns:
     QueryResult of the execution.
   """
-  result = run_query(
-      sql,
-      ctx.filters,
-      ctx.refs.project,
-      ctx.max_bytes,
-  )
+  with st.spinner(f"Loading {label}..."):
+    result = run_query(
+        sql,
+        ctx.filters,
+        ctx.refs.project,
+        ctx.max_bytes,
+    )
   ctx.scan_log.append(
       (label, result.bytes_billed, result.bytes_processed, result.cache_hit)
   )

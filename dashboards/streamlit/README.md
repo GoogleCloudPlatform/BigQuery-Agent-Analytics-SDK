@@ -66,3 +66,13 @@ Launch the Streamlit dashboard:
 ```bash
 streamlit run dashboards/streamlit/app.py
 ```
+
+---
+
+## 5. Sidebar Controls
+
+The sidebar provides runtime controls and guardrails for query execution:
+
+* **Time range selector**: Snaps query execution to discrete sliding windows (e.g., Last 15 minutes, Last 24 hours, Last 7 days, Last 30 days) with bucketed intervals.
+* **Per-query scan cap guardrail (`maximum_bytes_billed`)**: Sets a strict byte limit on every BigQuery job. A free dry-run preflight validates query scan size before execution, preventing queries from running if they exceed the selected cap rather than billing for unexpected costs.
+* **Token pricing defaults**: Configures input and output token rates for estimated cost calculations (defaults to \$1.25 / 1M input tokens and \$5.00 / 1M output tokens). Note that costs are derived from token counts rather than recorded billing telemetry.

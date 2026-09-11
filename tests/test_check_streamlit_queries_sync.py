@@ -175,6 +175,70 @@ def test_normalize_query_detects_swapped_timestamp_bounds():
   assert "Expected start timestamp literal" in str(exc_info.value)
 
 
+def test_normalize_query_detects_reordered_select_columns():
+  sql_a = """
+  SELECT
+    col_a,
+    col_b
+  FROM `project.dataset.events`
+  WHERE timestamp >= TIMESTAMP "2024-12-31 12:00:00+00:00"
+    AND timestamp < TIMESTAMP "2025-01-01 12:00:00+00:00"
+  """
+  sql_b = """
+  SELECT
+    col_b,
+    col_a
+  FROM `project.dataset.events`
+  WHERE timestamp >= TIMESTAMP "2024-12-31 12:00:00+00:00"
+    AND timestamp < TIMESTAMP "2025-01-01 12:00:00+00:00"
+  """
+  norm_a = check_streamlit_queries_sync.normalize_query(sql_a, "dummy.sql")
+  norm_b = check_streamlit_queries_sync.normalize_query(sql_b, "dummy.sql")
+  assert norm_a != norm_b
+
+
+def test_normalize_query_detects_removed_select_column():
+  sql_full = """
+  SELECT
+    col_a,
+    col_b
+  FROM `project.dataset.events`
+  WHERE timestamp >= TIMESTAMP "2024-12-31 12:00:00+00:00"
+    AND timestamp < TIMESTAMP "2025-01-01 12:00:00+00:00"
+  """
+  sql_missing = """
+  SELECT
+    col_a
+  FROM `project.dataset.events`
+  WHERE timestamp >= TIMESTAMP "2024-12-31 12:00:00+00:00"
+    AND timestamp < TIMESTAMP "2025-01-01 12:00:00+00:00"
+  """
+  norm_full = check_streamlit_queries_sync.normalize_query(
+      sql_full, "dummy.sql"
+  )
+  norm_missing = check_streamlit_queries_sync.normalize_query(
+      sql_missing, "dummy.sql"
+  )
+  assert norm_full != norm_missing
+
+
+def test_main_missing_canonical_query_file():
+  stderr_capture = io.StringIO()
+  with (
+      patch.dict(
+          check_streamlit_queries_sync.CANONICAL_QUERIES,
+          {"missing_query.sql": lambda refs, window: "SELECT 1"},
+      ),
+      patch("sys.stderr", stderr_capture),
+  ):
+    with pytest.raises(SystemExit) as exc_info:
+      check_streamlit_queries_sync.main()
+    assert exc_info.value.code != 0
+    assert (
+        "Missing canonical query missing_query.sql" in stderr_capture.getvalue()
+    )
+
+
 def test_check_unmapped_canonical_queries(tmp_path):
   (tmp_path / "overview_totals.sql").write_text("SELECT 1")
   (tmp_path / "estimated_cost.sql").write_text("SELECT 1")
@@ -224,3 +288,181 @@ def test_string_literal_depth_tracking():
   clauses = check_streamlit_queries_sync.split_top_level(sql, r"\s+WHERE\s+")
   assert len(clauses) == 2
   assert "value with (parens)" in clauses[1]
+
+
+def test_timestamp_bounds_quote_tolerance():
+  window = check_streamlit_queries_sync.DEFAULT_WINDOW
+  sql_single = """
+  SELECT tool_name, COUNT(*) AS invocations
+  FROM `project.dataset.adk_tool_starts`
+  WHERE timestamp >= TIMESTAMP '2024-12-31 12:00:00+00:00'
+    AND timestamp < TIMESTAMP '2025-01-01 12:00:00+00:00'
+  GROUP BY tool_name
+  ORDER BY invocations DESC
+  """
+  sql_double = """
+  SELECT tool_name, COUNT(*) AS invocations
+  FROM `project.dataset.adk_tool_starts`
+  WHERE timestamp >= TIMESTAMP "2024-12-31 12:00:00+00:00"
+    AND timestamp < TIMESTAMP "2025-01-01 12:00:00+00:00"
+  GROUP BY tool_name
+  ORDER BY invocations DESC
+  """
+  check_streamlit_queries_sync.assert_timestamp_bounds(sql_single, window)
+  check_streamlit_queries_sync.assert_timestamp_bounds(sql_double, window)
+  assert check_streamlit_queries_sync.normalize_time_filters(
+      sql_single
+  ) == check_streamlit_queries_sync.normalize_time_filters(sql_double)
+
+
+def test_assert_streamlit_query_ifnull_tolerance():
+  window = check_streamlit_queries_sync.DEFAULT_WINDOW
+  sql_variants = [
+      """
+      SELECT IFNULL(tool_name, 'unknown') AS tool_name, COUNT(*) AS invocations
+      FROM `project.dataset.adk_tool_starts`
+      WHERE timestamp >= TIMESTAMP "2024-12-31 12:00:00+00:00"
+        AND timestamp < TIMESTAMP "2025-01-01 12:00:00+00:00"
+      GROUP BY tool_name
+      """,
+      """
+      SELECT IFNULL(  tool_name  ,  "unknown"  ) AS tool_name, COUNT(*) AS invocations
+      FROM `project.dataset.adk_tool_starts`
+      WHERE timestamp >= TIMESTAMP '2024-12-31 12:00:00+00:00'
+        AND timestamp < TIMESTAMP '2025-01-01 12:00:00+00:00'
+      GROUP BY tool_name
+      """,
+  ]
+  for sql in sql_variants:
+    check_streamlit_queries_sync.assert_streamlit_query(
+        "tool_usage.sql", sql, window
+    )
+
+
+def test_llm_calls_total_missing_token_columns():
+  window = check_streamlit_queries_sync.DEFAULT_WINDOW
+  original_sql = check_streamlit_queries_sync.get_streamlit_query(
+      "llm_calls_total.sql"
+  )
+
+  # Test missing prompt_tokens
+  bad_sql_prompt = original_sql.replace(
+      "IFNULL(SUM(usage_prompt_tokens), 0) AS prompt_tokens,", ""
+  )
+  with pytest.raises(
+      AssertionError, match="missing required token column usage_prompt_tokens"
+  ):
+    check_streamlit_queries_sync.assert_streamlit_query(
+        "llm_calls_total.sql", bad_sql_prompt, window
+    )
+
+  code, stderr = run_check_with_patch("llm_calls_total.sql", bad_sql_prompt)
+  assert code == 1
+  assert (
+      "missing required token column usage_prompt_tokens as prompt_tokens"
+      in stderr
+  )
+
+  # Test missing completion_tokens
+  bad_sql_completion = original_sql.replace(
+      "IFNULL(SUM(usage_completion_tokens), 0) AS completion_tokens,", ""
+  )
+  with pytest.raises(
+      AssertionError,
+      match="missing required token column usage_completion_tokens",
+  ):
+    check_streamlit_queries_sync.assert_streamlit_query(
+        "llm_calls_total.sql", bad_sql_completion, window
+    )
+
+  # Test missing total_tokens
+  bad_sql_total = original_sql.replace(
+      "IFNULL(SUM(usage_total_tokens), 0) AS total_tokens", ""
+  )
+  with pytest.raises(
+      AssertionError, match="missing required token column usage_total_tokens"
+  ):
+    check_streamlit_queries_sync.assert_streamlit_query(
+        "llm_calls_total.sql", bad_sql_total, window
+    )
+
+
+def test_llm_calls_total_whitespace_variants_normalize():
+  """Whitespace variants in llm_calls_total.sql normalize cleanly."""
+  window = check_streamlit_queries_sync.DEFAULT_WINDOW
+  grafana_sql = (
+      check_streamlit_queries_sync.QUERIES_DIRECTORY / "llm_calls_total.sql"
+  ).read_text(encoding="utf-8")
+
+  whitespace_variant_sql = """
+  SELECT
+    COUNT(DISTINCT CONCAT(trace_id, '|', span_id))
+      + COUNTIF(trace_id IS NULL OR span_id IS NULL) AS llm_calls ,
+    IFNULL (  SUM (  usage_prompt_tokens  )  ,  0  )   AS   prompt_tokens  ,
+    IFNULL( SUM( usage_completion_tokens ) , 0 ) AS completion_tokens ,
+    IFNULL  (  SUM  (  usage_total_tokens  )  ,  0  )  AS  total_tokens
+  FROM `project.dataset.adk_llm_responses`
+  WHERE timestamp >= TIMESTAMP "2024-12-31 12:00:00+00:00"
+    AND timestamp < TIMESTAMP "2025-01-01 12:00:00+00:00"
+    AND ('___ALL___' IN UNNEST(@agents) OR agent IN UNNEST(@agents))
+    AND ('___ALL___' IN UNNEST(@user_ids) OR user_id IN UNNEST(@user_ids))
+    AND ('___ALL___' IN UNNEST(@session_ids) OR session_id IN UNNEST(@session_ids))
+  HAVING COUNT(*) > 0
+  """
+
+  check_streamlit_queries_sync.assert_streamlit_query(
+      "llm_calls_total.sql", whitespace_variant_sql, window
+  )
+  norm_grafana = check_streamlit_queries_sync.normalize_query(
+      grafana_sql, "llm_calls_total.sql", window
+  )
+  norm_variant = check_streamlit_queries_sync.normalize_query(
+      whitespace_variant_sql, "llm_calls_total.sql", window
+  )
+  assert norm_variant == norm_grafana
+
+
+def test_single_quote_timestamp_bounds():
+  window = check_streamlit_queries_sync.DEFAULT_WINDOW
+  sql = """
+  SELECT tool_name
+  FROM `project.dataset.adk_tool_starts`
+  WHERE timestamp >= TIMESTAMP '2024-12-31 12:00:00+00:00'
+    AND timestamp < TIMESTAMP '2025-01-01 12:00:00+00:00'
+  """
+  # Valid single-quote bounds pass
+  check_streamlit_queries_sync.assert_timestamp_bounds(sql, window)
+
+  # Invalid start timestamp with single quote fails
+  bad_sql = sql.replace("2024-12-31", "2024-12-30")
+  with pytest.raises(AssertionError, match="Expected start timestamp literal"):
+    check_streamlit_queries_sync.assert_timestamp_bounds(bad_sql, window)
+
+
+def test_select_columns_renamed_or_reordered():
+  window = check_streamlit_queries_sync.DEFAULT_WINDOW
+  original_sql = check_streamlit_queries_sync.get_streamlit_query(
+      "tool_usage.sql"
+  )
+
+  # Renamed select column is detected as drift
+  renamed_sql = original_sql.replace("AS invocations", "AS call_count")
+  code, stderr = run_check_with_patch("tool_usage.sql", renamed_sql)
+  assert code == 1
+  assert "has drifted from Grafana" in stderr
+  assert "call_count" in stderr
+
+  # Reordered select columns are normalized consistently by custom_clause_split
+  sql_1 = """
+  SELECT
+    col_a,
+    col_b
+  FROM `project.dataset.events`
+  WHERE timestamp >= TIMESTAMP "2024-12-31 12:00:00+00:00"
+    AND timestamp < TIMESTAMP "2025-01-01 12:00:00+00:00"
+  """
+  norm_1 = check_streamlit_queries_sync.normalize_query(
+      sql_1, "dummy.sql", window
+  )
+  assert "col_a" in norm_1
+  assert "col_b" in norm_1

@@ -65,6 +65,21 @@ QUERY_LIMITS = {
     "trace_detail.sql": models.TRACE_DETAIL_LIMIT,
 }
 
+LLM_CALLS_TOKEN_COLUMNS = {
+    "usage_prompt_tokens": (
+        "prompt_tokens",
+        r"IFNULL\s*\(\s*SUM\s*\(\s*usage_prompt_tokens\s*\)\s*,\s*0\s*\)\s+AS\s+prompt_tokens\b",
+    ),
+    "usage_completion_tokens": (
+        "completion_tokens",
+        r"IFNULL\s*\(\s*SUM\s*\(\s*usage_completion_tokens\s*\)\s*,\s*0\s*\)\s+AS\s+completion_tokens\b",
+    ),
+    "usage_total_tokens": (
+        "total_tokens",
+        r"IFNULL\s*\(\s*SUM\s*\(\s*usage_total_tokens\s*\)\s*,\s*0\s*\)\s+AS\s+total_tokens\b",
+    ),
+}
+
 EXEMPT_CANONICAL_QUERIES = {
     "estimated_cost.sql": "Priced in Python UI",
     "var_agent.sql": "Filter options handled by build_filter_options_sql",
@@ -87,6 +102,13 @@ def check_unmapped_canonical_queries(
     directory: Path, mapped_files: set[str]
 ) -> int:
   """Fail if the queries directory holds .sql files not mapped or exempted."""
+  if not directory.exists() or not directory.is_dir():
+    print(
+        f"ERROR: canonical queries directory not found: {directory}",
+        file=sys.stderr,
+    )
+    return 1
+
   try:
     sql_files = {path.name for path in directory.glob("*.sql")}
   except OSError as error:
@@ -155,7 +177,7 @@ def check_unmapped_streamlit_builders() -> int:
 def assert_timestamp_bounds(sql: str, window: models.Window) -> None:
   """Assert that timestamp bounds strictly match window.start and window.end with proper operators."""
   matches = re.findall(
-      r'([a-zA-Z0-9_.]+)\s*(>=|<=|>|<|=)\s*TIMESTAMP\s*"([^"]+)"',
+      r'([a-zA-Z0-9_.]+)\s*(>=|<=|>|<|=)\s*TIMESTAMP\s*(?:"([^"]+)"|\'([^\']+)\')',
       sql,
   )
   if not matches:
@@ -171,7 +193,8 @@ def assert_timestamp_bounds(sql: str, window: models.Window) -> None:
   start_cols = []
   end_cols = []
 
-  for col, op, ts_literal in matches:
+  for col, op, ts_double, ts_single in matches:
+    ts_literal = ts_double or ts_single
     if op == ">=":
       assert (
           ts_literal == expected_start
@@ -199,7 +222,7 @@ def assert_streamlit_query(
 ) -> None:
   """Validate that Streamlit query has required bounds and adaptations."""
   matches = re.findall(
-      r'([a-zA-Z0-9_.]+)\s*(>=|<=|>|<|=)\s*TIMESTAMP\s*"([^"]+)"',
+      r'([a-zA-Z0-9_.]+)\s*(>=|<=|>|<|=)\s*TIMESTAMP\s*(?:"([^"]+)"|\'([^\']+)\')',
       sql,
   )
   assert (
@@ -207,8 +230,18 @@ def assert_streamlit_query(
   ), f"Streamlit query {filename} is missing timestamp bounds"
   assert_timestamp_bounds(sql, window)
 
+  if filename == "llm_calls_total.sql":
+    for col, (alias, pattern) in LLM_CALLS_TOKEN_COLUMNS.items():
+      assert re.search(pattern, sql), (
+          f"Streamlit query {filename} missing required token column {col} as"
+          f" {alias}"
+      )
+
   if filename in ("tool_usage.sql", "tool_latency.sql"):
-    assert "IFNULL(tool_name, 'unknown')" in sql, (
+    assert re.search(
+        r"IFNULL\s*\(\s*tool_name\s*,\s*['\"]unknown['\"]\s*\)",
+        sql,
+    ), (
         f"Streamlit query {filename} expected to contain"
         " IFNULL(tool_name, 'unknown')"
     )
@@ -231,10 +264,18 @@ def normalize_whitespace_and_parens(sql: str) -> str:
 
 
 def normalize_time_filters(sql: str) -> str:
-  sql = re.sub(r'\bAND\s+([a-zA-Z0-9_.]+)\s*<\s*TIMESTAMP\s*"[^"]+"', "", sql)
-  sql = re.sub(r'([a-zA-Z0-9_.]+)\s*<\s*TIMESTAMP\s*"[^"]+"\s+AND\b', "", sql)
   sql = re.sub(
-      r'([a-zA-Z0-9_.]+)\s*>=\s*TIMESTAMP\s*"[^"]+"',
+      r'\bAND\s+([a-zA-Z0-9_.]+)\s*<\s*TIMESTAMP\s*(?:"([^"]+)"|\'([^\']+)\')',
+      "",
+      sql,
+  )
+  sql = re.sub(
+      r'([a-zA-Z0-9_.]+)\s*<\s*TIMESTAMP\s*(?:"([^"]+)"|\'([^\']+)\')\s+AND\b',
+      "",
+      sql,
+  )
+  sql = re.sub(
+      r'([a-zA-Z0-9_.]+)\s*>=\s*TIMESTAMP\s*(?:"([^"]+)"|\'([^\']+)\')',
       r"$__timeFilter(\1)",
       sql,
   )
@@ -285,25 +326,20 @@ def normalize_params_and_refs(sql: str) -> str:
 
 def framework_adaptations(sql: str, filename: str) -> str:
   if filename in ("tool_usage.sql", "tool_latency.sql"):
-    sql = sql.replace("IFNULL(tool_name, 'unknown') AS tool_name", "tool_name")
-    sql = sql.replace("IFNULL(tool_name, 'unknown')", "tool_name")
+    sql = re.sub(
+        r"IFNULL\s*\(\s*tool_name\s*,\s*['\"]unknown['\"]\s*\)\s+AS\s+tool_name",
+        "tool_name",
+        sql,
+    )
+    sql = re.sub(
+        r"IFNULL\s*\(\s*tool_name\s*,\s*['\"]unknown['\"]\s*\)",
+        "tool_name",
+        sql,
+    )
 
   if filename == "llm_calls_total.sql":
-    sql = re.sub(
-        r",\s*IFNULL\(SUM\(usage_prompt_tokens\),\s*0\)\s*AS\s*prompt_tokens",
-        "",
-        sql,
-    )
-    sql = re.sub(
-        r",\s*IFNULL\(SUM\(usage_completion_tokens\),\s*0\)\s*AS\s*completion_tokens",
-        "",
-        sql,
-    )
-    sql = re.sub(
-        r",\s*IFNULL\(SUM\(usage_total_tokens\),\s*0\)\s*AS\s*total_tokens",
-        "",
-        sql,
-    )
+    for _, (_, pattern) in LLM_CALLS_TOKEN_COLUMNS.items():
+      sql = re.sub(rf"\s*,\s*{pattern}", "", sql)
 
   return sql
 
@@ -524,6 +560,13 @@ def get_streamlit_query(
 
 
 def main():
+  if not QUERIES_DIRECTORY.exists():
+    print(
+        f"ERROR: Canonical queries directory not found at {QUERIES_DIRECTORY}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
   errors = 0
   errors += check_unmapped_canonical_queries(
       QUERIES_DIRECTORY, set(CANONICAL_QUERIES.keys())
@@ -553,8 +596,16 @@ def main():
       errors += 1
       continue
 
-    norm_grafana = normalize_query(grafana_sql, filename, window)
-    norm_streamlit = normalize_query(streamlit_sql, filename, window)
+    try:
+      norm_grafana = normalize_query(grafana_sql, filename, window)
+      norm_streamlit = normalize_query(streamlit_sql, filename, window)
+    except AssertionError as error:
+      print(
+          f"ERROR: Normalizing {filename} failed assertion: {error}",
+          file=sys.stderr,
+      )
+      errors += 1
+      continue
 
     if norm_grafana != norm_streamlit:
       print(

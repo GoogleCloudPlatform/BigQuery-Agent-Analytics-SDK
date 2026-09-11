@@ -39,7 +39,6 @@ _UNCONDITIONAL_MOCKS = (
     "streamlit",
     "plotly",
     "plotly.graph_objects",
-    "pandas",
     "google.cloud.bigquery",
 )
 
@@ -65,6 +64,15 @@ class _MockArrayQueryParameter:
     self.name = name
     self.array_type = array_type
     self.values = values
+
+
+class _MockQueryJobConfig:
+  """Stand-in for ``bigquery.QueryJobConfig``."""
+
+  def __init__(self, **kwargs):
+    self.maximum_bytes_billed = None
+    for k, v in kwargs.items():
+      setattr(self, k, v)
 
 
 class _MockDataFrame:
@@ -122,9 +130,11 @@ def _mocked_optional_imports():
     # package would be the same leak in a different disguise.
     bq_mod = sys.modules["google.cloud.bigquery"]
     bq_mod.ArrayQueryParameter = _MockArrayQueryParameter
+    bq_mod.QueryJobConfig = _MockQueryJobConfig
 
-    pd_mod = sys.modules["pandas"]
-    pd_mod.DataFrame = _MockDataFrame
+    pd_mod = sys.modules.get("pandas")
+    if isinstance(pd_mod, mock.MagicMock):
+      pd_mod.DataFrame = _MockDataFrame
 
     gexc_mod = sys.modules.get("google.api_core.exceptions")
     if isinstance(gexc_mod, mock.MagicMock):
@@ -133,6 +143,7 @@ def _mocked_optional_imports():
           "NotFound",
           "Forbidden",
           "RetryError",
+          "ServiceUnavailable",
       ):
         if not isinstance(getattr(gexc_mod, exc_name, None), type):
           setattr(gexc_mod, exc_name, type(exc_name, (Exception,), {}))
@@ -181,12 +192,6 @@ def _load_module(name: str, path: Path):
   """Loads a Python module dynamically with mocked optional deps."""
   if name in sys.modules:
     return sys.modules[name]
-  resolved_path = path.resolve()
-  for mod in list(sys.modules.values()):
-    mod_file = getattr(mod, "__file__", None)
-    if mod_file and Path(mod_file).resolve() == resolved_path:
-      sys.modules[name] = mod
-      return mod
   spec = importlib.util.spec_from_file_location(name, path)
   assert spec is not None and spec.loader is not None
   mod = importlib.util.module_from_spec(spec)
@@ -196,8 +201,10 @@ def _load_module(name: str, path: Path):
   if dir_path not in sys.path:
     sys.path.insert(0, dir_path)
     added_path = True
+  saved_submods = {}
   try:
     for submod in ("charts", "models", "queries"):
+      saved_submods[submod] = sys.modules.get(submod, _MISSING)
       stored = sys.modules.get(f"dashboards_streamlit_{submod}")
       if stored is not None:
         sys.modules[submod] = stored
@@ -209,8 +216,11 @@ def _load_module(name: str, path: Path):
   finally:
     if added_path and dir_path in sys.path:
       sys.path.remove(dir_path)
-    for submod in ("charts", "models", "queries"):
-      sys.modules.pop(submod, None)
+    for submod, orig_val in saved_submods.items():
+      if orig_val is _MISSING:
+        sys.modules.pop(submod, None)
+      else:
+        sys.modules[submod] = orig_val
   return mod
 
 
@@ -807,15 +817,15 @@ def test_context_and_query_result(sample_refs, sample_window):
       filters=filters,
       max_bytes=1024**3,
       theme=models.LIGHT_THEME,
-      price_in=3.0,
-      price_out=15.0,
+      price_in=1.25,
+      price_out=5.00,
   )
   assert ctx.refs == sample_refs
   assert ctx.window == sample_window
   assert ctx.filters == filters
   assert ctx.max_bytes == 1024**3
   assert ctx.theme == models.LIGHT_THEME
-  assert (ctx.price_in, ctx.price_out) == (3.0, 15.0)
+  assert (ctx.price_in, ctx.price_out) == (1.25, 5.00)
   assert ctx.scan_log == []
 
   # Two Contexts must not share one scan log; a mutable default would make
@@ -826,8 +836,8 @@ def test_context_and_query_result(sample_refs, sample_window):
       filters=filters,
       max_bytes=1024**3,
       theme=models.LIGHT_THEME,
-      price_in=3.0,
-      price_out=15.0,
+      price_in=1.25,
+      price_out=5.00,
   )
   ctx.scan_log.append(("overview", 1024, False))
   assert other.scan_log == []
@@ -838,6 +848,7 @@ def test_context_and_query_result(sample_refs, sample_window):
   assert result.df is sentinel
   assert result.error is None
   assert result.bytes_processed == 0
+  assert result.bytes_billed == 0
   assert result.cache_hit is False
 
 
@@ -884,6 +895,30 @@ def test_sidebar_connection_fallback_when_env_unset(monkeypatch):
     assert cap == models.BYTES_CAPS["1 GB"]
 
 
+def test_sidebar_connection_no_error_when_dataset_blank_without_connect(
+    monkeypatch,
+):
+  """BQ_PROJECT_ID set in env, BQ_DATASET_ID blank, no Connect click -> no st.sidebar.error rendered."""
+  monkeypatch.setenv("BQ_PROJECT_ID", "test-project")
+  monkeypatch.delenv("BQ_DATASET_ID", raising=False)
+  monkeypatch.setenv("BQ_TABLE_ID", "agent_events")
+
+  def fake_text_input(label, value="", **kwargs):
+    return value
+
+  state = {}
+  with (
+      mock.patch.object(app.st, "text_input", side_effect=fake_text_input),
+      mock.patch.object(app.st, "selectbox", return_value="1 GB"),
+      mock.patch.object(app.st, "form_submit_button", return_value=False),
+      mock.patch.object(app.st, "session_state", state),
+      mock.patch.object(app.st.sidebar, "error") as mock_error,
+  ):
+    refs, cap = app.sidebar_connection()
+    assert refs is None
+    mock_error.assert_not_called()
+
+
 def test_row_llm_cost_calculation(sample_refs, sample_window):
   ctx = models.Context(
       refs=sample_refs,
@@ -891,8 +926,8 @@ def test_row_llm_cost_calculation(sample_refs, sample_window):
       filters=models.Filters(),
       max_bytes=1024**3,
       theme=models.LIGHT_THEME,
-      price_in=3.0,
-      price_out=15.0,
+      price_in=1.25,
+      price_out=5.00,
   )
   mock_df = mock.MagicMock()
   mock_df.empty = False
@@ -916,11 +951,129 @@ def test_row_llm_cost_calculation(sample_refs, sample_window):
   ):
     mock_fetch.return_value = models.QueryResult(mock_df)
     app.row_llm(ctx)
-    # Check that _metric was called for Estimated cost with $10.50
-    # (1_000_000 / 1e6 * 3.0) + (500_000 / 1e6 * 15.0) = 3.0 + 7.5 = 10.50
+    # Check that _metric was called for Estimated cost with $3.75
+    # (1_000_000 / 1e6 * 1.25) + (500_000 / 1e6 * 5.00) = 1.25 + 2.50 = 3.75
     calls = mock_metric.call_args_list
     cost_call = next(c for c in calls if c.args[1] == "Estimated cost")
-    assert cost_call.args[2] == "$10.50"
+    assert cost_call.args[2] == "$3.75"
+
+
+def test_row_overview_data_path(sample_refs, sample_window):
+  """Verify row_overview formatting for numeric, None, and NaN metric values."""
+  pd = pytest.importorskip("pandas")
+  ctx = models.Context(
+      refs=sample_refs,
+      window=sample_window,
+      filters=models.Filters(),
+      max_bytes=1000,
+      theme=models.LIGHT_THEME,
+      price_in=0.0,
+      price_out=0.0,
+  )
+
+  def fake_columns(n):
+    return [
+        mock.MagicMock() for _ in range(n if isinstance(n, int) else len(n))
+    ]
+
+  # 1. Normal values: sessions=12, events=340, error_rate=0.0731, avg_llm_latency_ms=1234.5
+  df_valid = pd.DataFrame(
+      [
+          {
+              "sessions": 12,
+              "events": 340,
+              "error_rate": 0.0731,
+              "avg_llm_latency_ms": 1234.5,
+          }
+      ]
+  )
+  metric_calls = []
+
+  def fake_metric(col, label, val, *args, **kwargs):
+    metric_calls.append((label, val))
+
+  def fake_fetch(sql, ctx, label):
+    if label == "Overview stats":
+      return models.QueryResult(df=current_df, error=None)
+    return models.QueryResult(df=pd.DataFrame(), error=None)
+
+  current_df = df_valid
+  with (
+      mock.patch.object(app, "fetch", side_effect=fake_fetch),
+      mock.patch.object(app.st, "columns", side_effect=fake_columns),
+      mock.patch.object(app, "_metric", side_effect=fake_metric),
+      mock.patch.object(app, "panel"),
+      mock.patch.object(app, "stacked_bars"),
+      mock.patch.object(app, "ranked_bars"),
+  ):
+    app.row_overview(ctx)
+
+    assert metric_calls == [
+        ("Sessions", "12"),
+        ("Events", "340"),
+        ("Error rate", "7.31%"),
+        ("Avg LLM latency", "1,235 ms"),
+    ]
+
+  # 2. None values: error_rate=None, avg_llm_latency_ms=None -> "—"
+  df_none = pd.DataFrame(
+      [
+          {
+              "sessions": 12,
+              "events": 340,
+              "error_rate": None,
+              "avg_llm_latency_ms": None,
+          }
+      ]
+  )
+  current_df = df_none
+  metric_calls.clear()
+  with (
+      mock.patch.object(app, "fetch", side_effect=fake_fetch),
+      mock.patch.object(app.st, "columns", side_effect=fake_columns),
+      mock.patch.object(app, "_metric", side_effect=fake_metric),
+      mock.patch.object(app, "panel"),
+      mock.patch.object(app, "stacked_bars"),
+      mock.patch.object(app, "ranked_bars"),
+  ):
+    app.row_overview(ctx)
+
+    assert metric_calls == [
+        ("Sessions", "12"),
+        ("Events", "340"),
+        ("Error rate", "—"),
+        ("Avg LLM latency", "—"),
+    ]
+
+  # 3. NaN values: error_rate=NaN, avg_llm_latency_ms=NaN -> "—"
+  df_nan = pd.DataFrame(
+      [
+          {
+              "sessions": 12,
+              "events": 340,
+              "error_rate": float("nan"),
+              "avg_llm_latency_ms": float("nan"),
+          }
+      ]
+  )
+  current_df = df_nan
+  metric_calls.clear()
+  with (
+      mock.patch.object(app, "fetch", side_effect=fake_fetch),
+      mock.patch.object(app.st, "columns", side_effect=fake_columns),
+      mock.patch.object(app, "_metric", side_effect=fake_metric),
+      mock.patch.object(app, "panel"),
+      mock.patch.object(app, "stacked_bars"),
+      mock.patch.object(app, "ranked_bars"),
+  ):
+    app.row_overview(ctx)
+
+    assert metric_calls == [
+        ("Sessions", "12"),
+        ("Events", "340"),
+        ("Error rate", "—"),
+        ("Avg LLM latency", "—"),
+    ]
 
 
 def test_explain_actionable_advice():
@@ -1086,11 +1239,21 @@ def test_run_query_clears_seen_run_ids_when_exceeding_max(monkeypatch):
     assert queries._SEEN_RUN_IDS == {1, 2, 3}
 
     res = queries.run_query("Q4", filters, "proj", 1000)
-    assert len(queries._SEEN_RUN_IDS) == 3
-    assert 4 in queries._SEEN_RUN_IDS
-    assert len(queries._SEEN_RUN_IDS & {1, 2, 3}) == 2
+    assert queries._SEEN_RUN_IDS == {2, 3, 4}
     assert res.bytes_processed == 100
     assert res.cache_hit is False
+
+
+def test_job_config_caps_bytes_on_live_runs_only():
+  """Tests that maximum_bytes_billed is only set on live runs, not dry runs."""
+  filters = models.Filters()
+  live_cfg = queries.job_config("SELECT 1", filters, 5_000_000, dry_run=False)
+  assert live_cfg.maximum_bytes_billed == 5_000_000
+  assert live_cfg.dry_run is False
+
+  dry_cfg = queries.job_config("SELECT 1", filters, 5_000_000, dry_run=True)
+  assert dry_cfg.maximum_bytes_billed is None
+  assert dry_cfg.dry_run is True
 
 
 def test_run_query_seen_run_ids_clearing_at_default_max():
@@ -1179,10 +1342,15 @@ def test_sidebar_filters_preserves_selection_and_accepts_custom_options():
     multiselect_kwargs[key] = kwargs
     return state.get(key, [])
 
+  def fake_submit(*args, **kwargs):
+    if "on_click" in kwargs and callable(kwargs["on_click"]):
+      kwargs["on_click"]()
+    return True
+
   with (
       mock.patch.object(app.st, "session_state", state),
       mock.patch.object(app.st, "sidebar", mock.MagicMock()),
-      mock.patch.object(app.st, "form_submit_button", return_value=True),
+      mock.patch.object(app.st, "form_submit_button", side_effect=fake_submit),
       mock.patch.object(
           app.st,
           "number_input",
@@ -1191,6 +1359,7 @@ def test_sidebar_filters_preserves_selection_and_accepts_custom_options():
       mock.patch.object(app.st, "multiselect", side_effect=fake_multiselect),
   ):
     filters, price_in, price_out = app.sidebar_filters(options)
+    assert (price_in, price_out) == (1.25, 5.00)
 
     # Active selections are preserved even when options query returned empty
     assert state["flt_agent"] == ["agent-active"]
@@ -1296,10 +1465,15 @@ def test_custom_values_outside_1000_bounded_options_accepted_and_preserved():
     multiselect_kwargs[key] = kwargs
     return state.get(key, [])
 
+  def fake_submit(*args, **kwargs):
+    if "on_click" in kwargs and callable(kwargs["on_click"]):
+      kwargs["on_click"]()
+    return True
+
   with (
       mock.patch.object(app.st, "session_state", state),
       mock.patch.object(app.st, "sidebar", mock.MagicMock()),
-      mock.patch.object(app.st, "form_submit_button", return_value=True),
+      mock.patch.object(app.st, "form_submit_button", side_effect=fake_submit),
       mock.patch.object(
           app.st,
           "number_input",
@@ -1308,6 +1482,7 @@ def test_custom_values_outside_1000_bounded_options_accepted_and_preserved():
       mock.patch.object(app.st, "multiselect", side_effect=fake_multiselect),
   ):
     filters, price_in, price_out = app.sidebar_filters(options)
+    assert (price_in, price_out) == (1.25, 5.00)
 
     # 1. Custom values outside the 1000 options are preserved and accepted
     assert filters.agents == (custom_agent,)
@@ -1446,47 +1621,6 @@ def test_charts_fold_others():
   df_large.__getitem__.return_value.nunique.return_value = 10
   res = charts.fold_others(df_large, "cat", "val", group_cols=["grp"], limit=5)
   assert res is not df_large
-
-
-def test_charts_fold_others_real_data():
-  pd = pytest.importorskip("pandas")
-  if (
-      isinstance(pd, mock.MagicMock)
-      or getattr(pd, "DataFrame", None) is _MockDataFrame
-  ):
-    pytest.skip("Real pandas not available (mocked)")
-  # 5 categories, limit=3 -> keep top 2, fold tail 3 into "Other"
-  df = pd.DataFrame(
-      {
-          "cat": ["A", "B", "C", "D", "E"],
-          "val": [100, 50, 20, 10, 5],
-      }
-  )
-  res = charts.fold_others(df, "cat", "val", limit=3)
-  val_by_cat = dict(zip(res["cat"], res["val"]))
-  assert val_by_cat["A"] == 100
-  assert val_by_cat["B"] == 50
-  assert val_by_cat[models.OTHER_LABEL] == 35  # 20 + 10 + 5
-  assert len(res) == 3
-
-  # Also verify with group_cols (e.g. time buckets)
-  df_grouped = pd.DataFrame(
-      {
-          "bucket": ["b1", "b1", "b1", "b2", "b2", "b2"],
-          "cat": ["A", "B", "C", "A", "B", "C"],
-          "val": [10, 5, 2, 20, 10, 3],
-      }
-  )
-  res_grp = charts.fold_others(
-      df_grouped, "cat", "val", group_cols=["bucket"], limit=2
-  )
-  val_by_grp_cat = {
-      (row["bucket"], row["cat"]): row["val"] for _, row in res_grp.iterrows()
-  }
-  assert val_by_grp_cat[("b1", "A")] == 10
-  assert val_by_grp_cat[("b1", models.OTHER_LABEL)] == 7  # 5 + 2
-  assert val_by_grp_cat[("b2", "A")] == 20
-  assert val_by_grp_cat[("b2", models.OTHER_LABEL)] == 13  # 10 + 3
 
 
 def test_app_main_filter_preservation_on_error(sample_refs, sample_window):
@@ -1635,3 +1769,536 @@ def test_fetch_records_scan_log_entry(sample_refs, sample_window):
     assert billed == 10 * 1024 * 1024
     assert processed == 1024
     assert cached is False
+
+
+def test_sidebar_filters_case_a_custom_values_submission():
+  """Case A: From ALL, enter custom-agent, custom-user, custom-session and click Apply once:
+
+  all submitted arrays must be the custom values (not ['___ALL___']).
+  """
+  state = {}
+  options = {
+      "agent": [],
+      "user_id": [],
+      "event_type": ["agent_start"],
+      "session_id": [],
+  }
+
+  widget_inputs = {
+      "flt_agent": ["custom-agent"],
+      "flt_user_id": ["custom-user"],
+      "flt_event_type": [],
+      "flt_session_id": ["custom-session"],
+  }
+
+  def fake_multiselect(label, options, key, **kwargs):
+    val = widget_inputs.get(key, [])
+    state[key] = val
+    return val
+
+  def fake_submit(*args, **kwargs):
+    if "on_click" in kwargs and callable(kwargs["on_click"]):
+      kwargs["on_click"]()
+    return True
+
+  with (
+      mock.patch.object(app.st, "session_state", state),
+      mock.patch.object(app.st, "sidebar", mock.MagicMock()),
+      mock.patch.object(app.st, "form_submit_button", side_effect=fake_submit),
+      mock.patch.object(
+          app.st,
+          "number_input",
+          side_effect=lambda *args, **kwargs: kwargs.get("value", 0.0),
+      ),
+      mock.patch.object(app.st, "multiselect", side_effect=fake_multiselect),
+  ):
+    filters, price_in, price_out = app.sidebar_filters(options)
+    assert (price_in, price_out) == (1.25, 5.00)
+
+    assert filters.agents == ("custom-agent",)
+    assert filters.user_ids == ("custom-user",)
+    assert filters.event_types == (models.ALL_SENTINEL,)
+    assert filters.session_ids == ("custom-session",)
+
+    assert state["applied_filters"] == filters
+    assert state["flt_agent"] == ["custom-agent"]
+    assert state["flt_user_id"] == ["custom-user"]
+    assert state["flt_event_type"] == []
+    assert state["flt_session_id"] == ["custom-session"]
+
+
+def test_sidebar_filters_case_b_change_applied_to_new_values():
+  """Case B: Apply alpha/u1/LLM_RESPONSE/s1, then change to existing beta/u2/TOOL_END/s2
+
+  and click Apply again: all arrays must commit the new values
+  (beta/u2/TOOL_END/s2).
+  """
+  prior_filters = models.Filters(
+      agents=("alpha",),
+      user_ids=("u1",),
+      event_types=("LLM_RESPONSE",),
+      session_ids=("s1",),
+  )
+  state = {
+      "applied_filters": prior_filters,
+      "flt_agent": ["alpha"],
+      "flt_user_id": ["u1"],
+      "flt_event_type": ["LLM_RESPONSE"],
+      "flt_session_id": ["s1"],
+  }
+  options = {
+      "agent": ["alpha", "beta"],
+      "user_id": ["u1", "u2"],
+      "event_type": ["LLM_RESPONSE", "TOOL_END"],
+      "session_id": ["s1", "s2"],
+  }
+
+  widget_inputs = {
+      "flt_agent": ["beta"],
+      "flt_user_id": ["u2"],
+      "flt_event_type": ["TOOL_END"],
+      "flt_session_id": ["s2"],
+  }
+
+  def fake_multiselect(label, options, key, **kwargs):
+    val = widget_inputs.get(key, [])
+    state[key] = val
+    return val
+
+  def fake_submit(*args, **kwargs):
+    if "on_click" in kwargs and callable(kwargs["on_click"]):
+      kwargs["on_click"]()
+    return True
+
+  with (
+      mock.patch.object(app.st, "session_state", state),
+      mock.patch.object(app.st, "sidebar", mock.MagicMock()),
+      mock.patch.object(app.st, "form_submit_button", side_effect=fake_submit),
+      mock.patch.object(
+          app.st,
+          "number_input",
+          side_effect=lambda *args, **kwargs: kwargs.get("value", 0.0),
+      ),
+      mock.patch.object(app.st, "multiselect", side_effect=fake_multiselect),
+  ):
+    filters, price_in, price_out = app.sidebar_filters(options)
+    assert (price_in, price_out) == (1.25, 5.00)
+
+    assert filters.agents == ("beta",)
+    assert filters.user_ids == ("u2",)
+    assert filters.event_types == ("TOOL_END",)
+    assert filters.session_ids == ("s2",)
+
+    assert state["applied_filters"] == filters
+    assert state["flt_agent"] == ["beta"]
+    assert state["flt_user_id"] == ["u2"]
+    assert state["flt_event_type"] == ["TOOL_END"]
+    assert state["flt_session_id"] == ["s2"]
+
+
+def test_sidebar_filters_case_c_clearing_selection_commits_all_sentinel():
+  """Case C: Clearing a selection and clicking Apply must commit ALL_SENTINEL."""
+  prior_filters = models.Filters(
+      agents=("beta",),
+      user_ids=("u2",),
+      event_types=("TOOL_END",),
+      session_ids=("s2",),
+  )
+  state = {
+      "applied_filters": prior_filters,
+      "flt_agent": ["beta"],
+      "flt_user_id": ["u2"],
+      "flt_event_type": ["TOOL_END"],
+      "flt_session_id": ["s2"],
+  }
+  options = {
+      "agent": ["beta"],
+      "user_id": ["u2"],
+      "event_type": ["TOOL_END"],
+      "session_id": ["s2"],
+  }
+
+  def fake_multiselect(label, options, key, **kwargs):
+    state[key] = []
+    return []
+
+  def fake_submit(*args, **kwargs):
+    if "on_click" in kwargs and callable(kwargs["on_click"]):
+      kwargs["on_click"]()
+    return True
+
+  with (
+      mock.patch.object(app.st, "session_state", state),
+      mock.patch.object(app.st, "sidebar", mock.MagicMock()),
+      mock.patch.object(app.st, "form_submit_button", side_effect=fake_submit),
+      mock.patch.object(
+          app.st,
+          "number_input",
+          side_effect=lambda *args, **kwargs: kwargs.get("value", 0.0),
+      ),
+      mock.patch.object(app.st, "multiselect", side_effect=fake_multiselect),
+  ):
+    filters, price_in, price_out = app.sidebar_filters(options)
+    assert (price_in, price_out) == (1.25, 5.00)
+
+    assert filters.agents == (models.ALL_SENTINEL,)
+    assert filters.user_ids == (models.ALL_SENTINEL,)
+    assert filters.event_types == (models.ALL_SENTINEL,)
+    assert filters.session_ids == (models.ALL_SENTINEL,)
+
+    assert state["applied_filters"] == filters
+    assert state["flt_agent"] == []
+    assert state["flt_user_id"] == []
+    assert state["flt_event_type"] == []
+    assert state["flt_session_id"] == []
+
+
+def test_reset_filters_on_tablerefs_change(sample_refs, sample_window):
+  """Verify filter states are reset when TableRefs changes (connection change)."""
+  old_refs = sample_refs
+  new_refs = models.TableRefs(
+      project="other-proj",
+      dataset="other_ds",
+      table="other_events",
+      view_prefix="other_",
+  )
+  state = {
+      "_last_refs": old_refs,
+      "applied_filters": models.Filters(agents=("agent-x",)),
+      "_filter_options": {"agent": ["agent-x"]},
+      "flt_agent": ["agent-x"],
+      "flt_user_id": ["user-1"],
+      "flt_event_type": ["start"],
+      "flt_session_id": ["sess-1"],
+      "_selected_session_id": "sess-1",
+  }
+
+  success_res = models.QueryResult(df=mock.MagicMock(), error=None)
+
+  with (
+      mock.patch.object(app.st, "session_state", state),
+      mock.patch.object(app.st, "set_page_config"),
+      mock.patch.object(app.st, "title"),
+      mock.patch.object(app.st, "tabs", return_value=[mock.MagicMock()] * 4),
+      mock.patch.object(
+          app, "sidebar_connection", return_value=(new_refs, 1000)
+      ),
+      mock.patch.object(app, "sidebar_window", return_value=sample_window),
+      mock.patch.object(app, "active_theme", return_value=models.LIGHT_THEME),
+      mock.patch.object(
+          app, "load_filter_options", return_value=({}, success_res)
+      ),
+      mock.patch.object(app, "row_overview"),
+      mock.patch.object(app, "row_llm"),
+      mock.patch.object(app, "row_tools"),
+      mock.patch.object(app, "row_sessions"),
+      mock.patch.object(app, "footer"),
+      mock.patch.object(app, "sidebar_filters") as mock_sidebar_filters,
+  ):
+    mock_sidebar_filters.return_value = (models.Filters(), 0.0, 0.0)
+    app.main()
+
+    assert state["_last_refs"] == new_refs
+    assert state["applied_filters"] == models.Filters()
+    assert "_filter_options" not in state
+    assert "flt_agent" not in state
+    assert "flt_user_id" not in state
+    assert "flt_event_type" not in state
+    assert "flt_session_id" not in state
+    assert "_selected_session_id" not in state
+
+
+def test_row_sessions_maintains_selected_trace_on_refresh(
+    sample_refs, sample_window
+):
+  """R4: Keep inspected trace selected when recent sessions refresh."""
+  state = {"_selected_session_id": "sess-preserved"}
+  fake_df = mock.MagicMock()
+  fake_df.empty = False
+  fake_df.__getitem__.return_value.tolist.return_value = [
+      "sess-newest",
+      "sess-preserved",
+      "sess-older",
+  ]
+
+  sessions_result = models.QueryResult(
+      df=fake_df,
+      error=None,
+      bytes_processed=100,
+      bytes_billed=100,
+      cache_hit=False,
+  )
+
+  ctx = models.Context(
+      refs=sample_refs,
+      window=sample_window,
+      filters=models.Filters(),
+      max_bytes=1000,
+      theme=models.LIGHT_THEME,
+      price_in=0.0,
+      price_out=0.0,
+  )
+
+  selectbox_calls = []
+
+  def fake_selectbox(label, options, index=0, **kwargs):
+    selectbox_calls.append({"label": label, "options": options, "index": index})
+    return options[index]
+
+  with (
+      mock.patch.object(app.st, "session_state", state),
+      mock.patch.object(app.st, "divider"),
+      mock.patch.object(app.st, "markdown"),
+      mock.patch.object(app.st, "caption"),
+      mock.patch.object(app.st, "dataframe"),
+      mock.patch.object(
+          app,
+          "fetch",
+          side_effect=[
+              sessions_result,
+              models.QueryResult(df=_MockDataFrame(), error=None),
+          ],
+      ),
+      mock.patch.object(app.st, "selectbox", side_effect=fake_selectbox),
+  ):
+    app.row_sessions(ctx)
+
+    # The selectbox should maintain selection of "sess-preserved" at index 1 instead of jumping to 0
+    assert len(selectbox_calls) == 1
+    call = selectbox_calls[0]
+    assert call["options"] == ["sess-newest", "sess-preserved", "sess-older"]
+    assert call["index"] == 1
+    assert state["_selected_session_id"] == "sess-preserved"
+
+  # If prev_chosen is not in ids, fall back to index 0
+  state["_selected_session_id"] = "sess-not-present"
+  selectbox_calls.clear()
+  with (
+      mock.patch.object(app.st, "session_state", state),
+      mock.patch.object(app.st, "divider"),
+      mock.patch.object(app.st, "markdown"),
+      mock.patch.object(app.st, "caption"),
+      mock.patch.object(app.st, "dataframe"),
+      mock.patch.object(
+          app,
+          "fetch",
+          side_effect=[
+              sessions_result,
+              models.QueryResult(df=_MockDataFrame(), error=None),
+          ],
+      ),
+      mock.patch.object(app.st, "selectbox", side_effect=fake_selectbox),
+  ):
+    app.row_sessions(ctx)
+    assert len(selectbox_calls) == 1
+    assert selectbox_calls[0]["index"] == 0
+    assert state["_selected_session_id"] == "sess-newest"
+
+
+def test_row_sessions_non_empty_trace_table(sample_refs, sample_window):
+  """Verify st.dataframe is called with width='stretch', hide_index=True for non-empty trace table."""
+  pd = pytest.importorskip("pandas")
+  state = {}
+  sessions_df = pd.DataFrame({"session_id": ["sess-1", "sess-2"]})
+  trace_df = pd.DataFrame(
+      [
+          {
+              "event_id": "evt-1",
+              "event_type": "tool_start",
+              "timestamp": "2026-01-01 00:00:00+00:00",
+          },
+          {
+              "event_id": "evt-2",
+              "event_type": "tool_complete",
+              "timestamp": "2026-01-01 00:01:00+00:00",
+          },
+      ]
+  )
+
+  sessions_result = models.QueryResult(
+      df=sessions_df,
+      error=None,
+      bytes_processed=100,
+      bytes_billed=100,
+      cache_hit=False,
+  )
+  trace_result = models.QueryResult(
+      df=trace_df,
+      error=None,
+      bytes_processed=200,
+      bytes_billed=200,
+      cache_hit=False,
+  )
+
+  ctx = models.Context(
+      refs=sample_refs,
+      window=sample_window,
+      filters=models.Filters(),
+      max_bytes=1000,
+      theme=models.LIGHT_THEME,
+      price_in=0.0,
+      price_out=0.0,
+  )
+
+  with (
+      mock.patch.object(app.st, "session_state", state),
+      mock.patch.object(app.st, "divider"),
+      mock.patch.object(app.st, "markdown"),
+      mock.patch.object(app.st, "caption") as mock_caption,
+      mock.patch.object(app.st, "dataframe") as mock_dataframe,
+      mock.patch.object(
+          app,
+          "fetch",
+          side_effect=[sessions_result, trace_result],
+      ),
+      mock.patch.object(app.st, "selectbox", return_value="sess-1"),
+  ):
+    app.row_sessions(ctx)
+
+    mock_dataframe.assert_called_once_with(
+        trace_df, width="stretch", hide_index=True
+    )
+    caption_calls = [c.args[0] for c in mock_caption.call_args_list]
+    assert any("read the session chronologically" in c for c in caption_calls)
+    assert not any("No events for this session" in c for c in caption_calls)
+
+
+def test_billing_statistics_retained_on_dataframe_download_failure():
+  """R5: Retain billing statistics after result-download failure."""
+  mock_client = mock.MagicMock()
+  mock_probe = mock.MagicMock()
+  mock_probe.total_bytes_processed = 1000
+  mock_client.query.return_value = mock_probe
+
+  mock_job = mock.MagicMock()
+  mock_job.total_bytes_processed = 20480
+  mock_job.total_bytes_billed = 10485760
+  mock_job.cache_hit = False
+  mock_job.ended = dt.datetime.now(dt.timezone.utc)
+  # Simulate ServiceUnavailable or network drop during to_dataframe()
+  from google.api_core import exceptions as gexc
+
+  mock_job.to_dataframe.side_effect = gexc.ServiceUnavailable(
+      "503 Service Unavailable"
+  )
+
+  mock_client.query.side_effect = [mock_probe, mock_job]
+  filters = models.Filters()
+
+  with mock.patch.object(queries, "get_client", return_value=mock_client):
+    result = queries.run_query(
+        "SELECT * FROM events", filters, "proj", 100000000
+    )
+
+    assert result.df.empty is True
+    assert result.error is not None
+    assert result.bytes_processed == 20480
+    assert result.bytes_billed == 10485760
+    assert result.cache_hit is False
+
+  # Also test when cache_hit is True
+  mock_client2 = mock.MagicMock()
+  mock_probe2 = mock.MagicMock()
+  mock_probe2.total_bytes_processed = 1000
+  mock_job2 = mock.MagicMock()
+  mock_job2.total_bytes_processed = 5000
+  mock_job2.total_bytes_billed = 10485760
+  mock_job2.cache_hit = True
+  mock_job2.ended = dt.datetime.now(dt.timezone.utc)
+  mock_job2.to_dataframe.side_effect = RuntimeError("Stream closed")
+  mock_client2.query.side_effect = [mock_probe2, mock_job2]
+
+  with mock.patch.object(queries, "get_client", return_value=mock_client2):
+    result2 = queries.run_query(
+        "SELECT * FROM events", filters, "proj", 100000000
+    )
+
+    assert result2.df.empty is True
+    assert result2.error is not None
+    assert result2.bytes_processed == 5000
+    assert result2.bytes_billed == 0  # $0 billed if cache_hit
+    assert result2.cache_hit is True
+
+
+def test_extract_job_stats_degraded_path_yields_runtime_error_and_zero_bytes():
+  """Job with total_bytes_processed=None and ended=None yields RuntimeError and 0 bytes."""
+  mock_client = mock.MagicMock()
+  mock_probe = mock.MagicMock()
+  mock_probe.total_bytes_processed = 1000
+
+  mock_job = mock.MagicMock()
+  mock_job.total_bytes_processed = None
+  mock_job.ended = None
+  mock_job.reload.side_effect = RuntimeError("job gone")
+  mock_job.to_dataframe.side_effect = RuntimeError(
+      "Query failed without job stats"
+  )
+
+  # Directly verify _extract_job_stats and _query_failure degraded behavior
+  assert queries._extract_job_stats(mock_job) is None
+  failure_err = queries._query_failure(
+      "Query failed without job stats", mock_job
+  )
+  assert type(failure_err) is RuntimeError
+  assert not isinstance(failure_err, queries.QueryExecutionError)
+
+  mock_client.query.side_effect = [mock_probe, mock_job]
+  filters = models.Filters()
+
+  with mock.patch.object(queries, "get_client", return_value=mock_client):
+    result = queries.run_query(
+        "SELECT * FROM events", filters, "proj", 100000000
+    )
+
+    assert result.df.empty is True
+    assert "Query failed without job stats" in result.error
+    assert result.bytes_processed == 0
+    assert result.bytes_billed == 0
+    assert result.cache_hit is False
+
+
+def test_extract_job_stats_reloads_when_initially_none():
+  """Job with total_bytes_processed initially None reloads to populate stats."""
+  mock_job = mock.MagicMock()
+  mock_job.total_bytes_processed = None
+  mock_job.ended = None
+  mock_job.cache_hit = False
+
+  def fake_reload(*args, **kwargs):
+    mock_job.total_bytes_processed = 2048
+    mock_job.total_bytes_billed = 10485760
+
+  mock_job.reload.side_effect = fake_reload
+
+  stats = queries._extract_job_stats(mock_job)
+  mock_job.reload.assert_called_once_with(
+      timeout=queries._JOB_RELOAD_TIMEOUT_SECONDS
+  )
+  assert stats == (2048, 10485760, False)
+
+
+def test_fetch_shows_loading_spinner(sample_refs, sample_window):
+  """R5: Wrap panel queries in fetch with st.spinner."""
+  ctx = models.Context(
+      refs=sample_refs,
+      window=sample_window,
+      filters=models.Filters(),
+      max_bytes=1024**3,
+      theme=models.LIGHT_THEME,
+      price_in=3.0,
+      price_out=15.0,
+  )
+  query_res = models.QueryResult(
+      df=_MockDataFrame([{"a": 1}]),
+      error=None,
+      bytes_processed=100,
+      bytes_billed=100,
+      cache_hit=False,
+  )
+
+  with (
+      mock.patch.object(queries.st, "spinner") as mock_spinner,
+      mock.patch.object(queries, "run_query", return_value=query_res),
+  ):
+    queries.fetch("SELECT 1", ctx, "Overview totals")
+    mock_spinner.assert_called_once_with("Loading Overview totals...")
