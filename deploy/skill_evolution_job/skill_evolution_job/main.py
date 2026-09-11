@@ -160,10 +160,9 @@ def run_test() -> None:
 
   print("--- Engine ---")
   path = engine.engine_path()
-  engine.load_engine()
-  supported = sorted(engine.supported_kwargs())
+  module = engine.load_engine()
   print(f"  engine: {path}")
-  print(f"  evolve_skill kwargs: {supported or ['**kwargs']}")
+  assert callable(module.evolve_skill), f"{path} exposes no evolve_skill"
 
   print("--- Registry ---")
   if config.get_config().agent_registry:

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import math
 import os
 import subprocess
 import tempfile
@@ -82,6 +83,31 @@ def _env_float(name: str) -> float | None:
   except ValueError:
     logger.warning("Ignoring non-numeric %s=%r", name, value)
     return None
+
+
+def _env_timeout(name: str, default: float) -> float | None:
+  """Seconds bound from the environment; ``0`` means "no bound" (None).
+
+  Raises instead of falling back to the default: a timeout the operator
+  asked for and silently did not get is a worse outcome than a job that
+  refuses to start.
+  """
+  value = _env(name)
+  if value is None:
+    return default or None
+  try:
+    seconds = float(value)
+  except ValueError as exc:
+    raise ValueError(
+        f"{name} must be a non-negative number of seconds (0 disables the"
+        f" timeout); got {value!r}"
+    ) from exc
+  if not math.isfinite(seconds) or seconds < 0:
+    raise ValueError(
+        f"{name} must be a non-negative number of seconds (0 disables the"
+        f" timeout); got {value!r}"
+    )
+  return seconds or None
 
 
 def evolution_max_rounds(value: int | None = None) -> int:
@@ -138,6 +164,7 @@ class JobConfig:
   evolution_target_agents: str | None
   evolution_order: str | None
   evolution_toolbox: str | None  # inline text, or @/path/to/file
+  analyst_timeout_s: float | None  # per-analyst bound; None = unbounded
 
   # --- Host hooks --------------------------------------------------------
   evolution_hooks: str | None  # import path of a hooks module
@@ -187,6 +214,7 @@ def get_config() -> JobConfig:
       evolution_target_agents=_env("EVOLUTION_TARGET_AGENTS"),
       evolution_order=_env("EVOLUTION_ORDER"),
       evolution_toolbox=_env("EVOLUTION_TOOLBOX"),
+      analyst_timeout_s=_env_timeout("ANALYST_TIMEOUT_S", 600.0),
       evolution_hooks=_env("EVOLUTION_HOOKS"),
       traffic_cmd=_env("TRAFFIC_CMD"),
       score_cmd=_env("SCORE_CMD"),

@@ -24,8 +24,7 @@ arXiv:2603.01145; references in the SDK module).
 This module supplies only what the job adds around it:
 - the Vertex client built from the job's env (PROJECT_ID, MODEL_LOCATION),
 - the host's agentic error analyst, plugged in through the
-  ``error_analyst`` hook and wired only when the resolved engine accepts
-  ``error_analyst_fn``,
+  ``error_analyst`` hook,
 - run knobs (EVOLUTION_MAX_ANALYSTS stride sampling,
   EVOLUTION_CANDIDATES binding, rate-based candidate auto-count),
 - the flat ``candidate_N.md`` layout in candidates_dir and the
@@ -330,10 +329,8 @@ def _flatten_candidates(candidates_dir: str) -> None:
 def _resolve_error_analyst(agentic: bool):
   """The engine's ``error_analyst_fn``, or None with a logged reason.
 
-  Two gates: the host must configure an ``error_analyst`` hook, and the
-  resolved engine must accept ``error_analyst_fn``.
-  ``evolve_skill_compat`` would drop the kwarg on an older engine
-  anyway — checking here buys a clear log line instead of a silent drop.
+  One gate: the host must configure an ``error_analyst`` hook. Without
+  one the engine runs its built-in single-pass analysts.
   """
   if not agentic:
     return None
@@ -342,15 +339,6 @@ def _resolve_error_analyst(agentic: bool):
   if analyst_fn is None:
     logger.info(
         "Single-pass error analysts: %s",
-        reason,
-    )
-    return None
-
-  supported = engine.supported_kwargs()
-  if supported and "error_analyst_fn" not in supported:
-    logger.info(
-        "Engine predates error_analyst_fn; ignoring the configured"
-        " error_analyst hook (%s) and using single-pass analysts.",
         reason,
     )
     return None
@@ -396,8 +384,8 @@ def evolve(
       analyst_mode: "both" (default), "error-only", or "success-only".
       agentic: Use agentic error analysts with tool access (default True,
           per Trace2Skill finding that agentic outperforms single-pass).
-          Requires an ``error_analyst`` hook and an engine that accepts
-          ``error_analyst_fn``; falls back to single-pass otherwise.
+          Requires an ``error_analyst`` hook; falls back to single-pass
+          without one.
       artifacts_dir: Where the engine writes patches/candidates/prevalence/
           selection artifacts. Defaults to candidates_dir.
       score_fn: Optional ``(skill_content) -> float`` for candidate
@@ -407,6 +395,11 @@ def evolve(
           current skill is always measured on that same evaluation set;
           an unrelated production-report baseline is never used.
       min_improvement: Margin a candidate must clear over the incumbent.
+
+  The per-analyst timeout comes from ``ANALYST_TIMEOUT_S`` (default 600s,
+  ``0`` = unbounded): an analyst — including a host ``error_analyst``
+  hook that hangs on its own tool calls — cannot stall the fleet past the
+  Cloud Run task timeout.
 
   Returns:
       The evolved SKILL.md content, or the unchanged current skill when
@@ -483,7 +476,7 @@ def evolve(
     # and its measured score remains the deployed outcome's record.
     _record_evolved_score(candidates_dir, incumbent_score)
 
-  selected = engine.evolve_skill_compat(
+  selected = _engine().evolve_skill(
       report,
       current_skill,
       model=model_id,
@@ -497,6 +490,7 @@ def evolve(
       incumbent_score=incumbent_score,
       tools=toolbox,
       error_analyst_fn=error_analyst_fn,
+      analyst_timeout_s=config.get_config().analyst_timeout_s,
       artifacts_dir=artifacts_dir or candidates_dir,
       version_label=_version_label(current_skill),
       client=client,
