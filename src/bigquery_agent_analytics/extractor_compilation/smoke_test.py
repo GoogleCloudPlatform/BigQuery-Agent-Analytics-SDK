@@ -317,6 +317,10 @@ def run_smoke_test_in_subprocess(
   each event in *events*. ``subprocess.run(..., timeout=...)`` caps
   wallclock; ``resource.setrlimit(RLIMIT_AS, ...)`` caps virtual
   memory in the child (POSIX-only; quietly best-effort elsewhere).
+  The cap is *memory_limit_mb* of headroom above the child's
+  address space after it imports the trusted SDK harness, so the
+  budget applies to the candidate extractor rather than to
+  whichever optional native dependencies the environment installed.
   Per-event outcomes come back as a pickled list; the parent runs
   the #76 validator on the merged graph so ``ResolvedGraph`` never
   crosses the process boundary.

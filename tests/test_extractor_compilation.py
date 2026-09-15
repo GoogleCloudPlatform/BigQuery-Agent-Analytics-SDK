@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import sys
 import tempfile
 import uuid
 
@@ -1124,6 +1125,104 @@ class TestSmokeTest:
           resolved_graph=None,
           memory_limit_mb=-1,
       )
+
+  def test_memory_limit_is_headroom_above_import_baseline(self, monkeypatch):
+    """The child caps address space at *baseline + memory_limit_mb*.
+    An absolute cap let the trusted SDK import footprint (pandas /
+    pyarrow / numpy pulled in via google-cloud-bigquery when
+    installed) exhaust the budget before the extractor even loaded,
+    surfacing as ``SubprocessFailure: MemoryError``."""
+    resource = pytest.importorskip("resource")
+    from bigquery_agent_analytics.extractor_compilation import subprocess_runner
+
+    calls = []
+    monkeypatch.setattr(
+        subprocess_runner,
+        "_current_address_space_bytes",
+        lambda: 700 * 1024 * 1024,
+    )
+    monkeypatch.setattr(
+        resource, "setrlimit", lambda which, limits: calls.append(limits)
+    )
+    subprocess_runner._set_memory_limit(512)
+    expected = (700 + 512) * 1024 * 1024
+    assert calls == [(expected, expected)]
+
+  def test_memory_limit_absolute_when_baseline_unknown(self, monkeypatch):
+    resource = pytest.importorskip("resource")
+    from bigquery_agent_analytics.extractor_compilation import subprocess_runner
+
+    calls = []
+    monkeypatch.setattr(
+        subprocess_runner, "_current_address_space_bytes", lambda: None
+    )
+    monkeypatch.setattr(
+        resource, "setrlimit", lambda which, limits: calls.append(limits)
+    )
+    subprocess_runner._set_memory_limit(512)
+    assert calls == [(512 * 1024 * 1024, 512 * 1024 * 1024)]
+
+  @pytest.mark.skipif(
+      not sys.platform.startswith("linux"),
+      reason="RLIMIT_AS is only enforced on Linux",
+  )
+  def test_subprocess_small_memory_limit_clears_import_baseline(
+      self, tmp_path: pathlib.Path
+  ):
+    """A 64 MB budget is far below the child's post-import address
+    space on any Linux environment. It must still run a clean
+    extractor, because the budget is headroom for the extractor,
+    not for the SDK harness imports."""
+    from bigquery_agent_analytics.extractor_compilation import run_smoke_test_in_subprocess
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    source_path = tmp_path / "bka_small_cap.py"
+    source_path.write_text(BKA_DECISION_SOURCE, encoding="utf-8")
+
+    report = run_smoke_test_in_subprocess(
+        source_path,
+        module_name="bka_small_cap",
+        function_name="extract_bka_decision_event_compiled",
+        events=_sample_bka_events(),
+        spec=None,
+        resolved_graph=_bka_resolved_spec(),
+        memory_limit_mb=64,
+    )
+    assert (
+        report.ok is True
+    ), f"failures: exc={report.exceptions} val={report.validation_failures}"
+
+  @pytest.mark.skipif(
+      not sys.platform.startswith("linux"),
+      reason="RLIMIT_AS is only enforced on Linux",
+  )
+  def test_subprocess_memory_limit_still_enforced(self, tmp_path: pathlib.Path):
+    """Headroom is still a real cap: an extractor allocating well
+    past its budget surfaces a per-event ``MemoryError``."""
+    from bigquery_agent_analytics.extractor_compilation import run_smoke_test_in_subprocess
+
+    source_path = tmp_path / "allocates.py"
+    source_path.write_text(
+        "from bigquery_agent_analytics.structured_extraction import (\n"
+        "    StructuredExtractionResult,\n"
+        ")\n"
+        "def f(event, spec):\n"
+        "    bytearray(1024 * 1024 * 1024)\n"
+        "    return StructuredExtractionResult()\n",
+        encoding="utf-8",
+    )
+    report = run_smoke_test_in_subprocess(
+        source_path,
+        module_name="allocates",
+        function_name="f",
+        events=[{"event_type": "x"}],
+        spec=None,
+        resolved_graph=None,
+        memory_limit_mb=128,
+    )
+    assert report.ok is False
+    assert report.events_with_exception == 1
+    assert any("MemoryError" in e for e in report.exceptions)
 
   def test_malformed_extraction_result_internals_caught(self):
     """``isinstance(result, StructuredExtractionResult)`` doesn't
