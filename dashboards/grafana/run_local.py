@@ -492,8 +492,10 @@ def install_plugin(home: Path, plugins_dir: Path) -> None:
     return
   cached = plugins_dir / PLUGIN_ID
   if cached.exists():
-    print(f"cached plugin does not match the {PLUGIN_VERSION} pin;"
-          " reinstalling.")
+    print(
+        f"cached plugin does not match the {PLUGIN_VERSION} pin;"
+        " reinstalling."
+    )
     shutil.rmtree(cached)
   subprocess.run(
       build_plugin_install_command(home, plugins_dir), check=True, cwd=home
@@ -753,8 +755,13 @@ def main(argv: list[str] | None = None) -> int:
   workdir.mkdir(parents=True, exist_ok=True)
   provisioning = workdir / "provisioning"
   dashboards_dir = workdir / "dashboards"
-  for sub in (provisioning / "datasources", provisioning / "dashboards",
-              dashboards_dir, workdir / "data", workdir / "plugins"):
+  for sub in (
+      provisioning / "datasources",
+      provisioning / "dashboards",
+      dashboards_dir,
+      workdir / "data",
+      workdir / "plugins",
+  ):
     sub.mkdir(parents=True, exist_ok=True)
 
   sa_key = load_service_account_key(args.sa_key) if args.sa_key else None
@@ -764,9 +771,7 @@ def main(argv: list[str] | None = None) -> int:
       processing_location=location,
       max_bytes_billed=max_bytes,
   )
-  write_private(
-      provisioning / "datasources" / "bigquery.yaml", datasource_yaml
-  )
+  write_private(provisioning / "datasources" / "bigquery.yaml", datasource_yaml)
   (provisioning / "dashboards" / "bqaa.yaml").write_text(
       render_dashboards_yaml(dashboards_dir)
   )
@@ -816,13 +821,15 @@ def main(argv: list[str] | None = None) -> int:
     )
   probe = _probe_process(process.pid)
   (workdir / "grafana.pid").write_text(
-      json.dumps({
-          "pid": process.pid,
-          "home": str(home),
-          "exe": str(home / "bin" / "grafana"),
-          "start": probe[0] if probe else "",
-          "port": args.port,
-      })
+      json.dumps(
+          {
+              "pid": process.pid,
+              "home": str(home),
+              "exe": str(home / "bin" / "grafana"),
+              "start": probe[0] if probe else "",
+              "port": args.port,
+          }
+      )
   )
 
   deadline = time.monotonic() + 90

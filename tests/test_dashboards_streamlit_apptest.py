@@ -23,7 +23,6 @@ DASHBOARDS_DIR = (
 if str(DASHBOARDS_DIR) not in sys.path:
   sys.path.insert(0, str(DASHBOARDS_DIR))
 
-import app
 import models
 import queries
 
@@ -37,11 +36,13 @@ def _app_test() -> AppTest:
 @pytest.fixture(autouse=True)
 def mock_env(monkeypatch: pytest.MonkeyPatch):
   """Seeds standard BigQuery connection environment variables."""
-  monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+  monkeypatch.setenv("BQAA_DASHBOARD_SKIP_DOTENV", "1")
+  monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
   monkeypatch.setenv("BQ_PROJECT_ID", "test-project")
   monkeypatch.setenv("BQ_DATASET_ID", "test_dataset")
   monkeypatch.setenv("BQ_TABLE_ID", "events")
   monkeypatch.setenv("BQ_VIEW_PREFIX", "adk_")
+  monkeypatch.setenv("STREAMLIT_LAZY_TABS", "false")
 
 
 @pytest.fixture
@@ -66,14 +67,7 @@ def mock_queries():
           "load_filter_options",
           return_value=(filter_options, query_res),
       ),
-      mock.patch.object(
-          app,
-          "load_filter_options",
-          return_value=(filter_options, query_res),
-          create=True,
-      ),
       mock.patch.object(queries, "fetch", return_value=query_res),
-      mock.patch.object(app, "fetch", return_value=query_res, create=True),
   ):
     yield
 
@@ -202,11 +196,7 @@ def test_session_selectbox_preservation():
       mock.patch.object(
           queries, "load_filter_options", return_value=({}, sess_res1)
       ),
-      mock.patch.object(
-          app, "load_filter_options", return_value=({}, sess_res1), create=True
-      ),
       mock.patch.object(queries, "fetch", side_effect=fake_fetch),
-      mock.patch.object(app, "fetch", side_effect=fake_fetch, create=True),
   ):
     at = _app_test()
     at.run()
@@ -258,14 +248,7 @@ def test_connection_change_resets_filters():
           "load_filter_options",
           return_value=(filter_options, query_res),
       ),
-      mock.patch.object(
-          app,
-          "load_filter_options",
-          return_value=(filter_options, query_res),
-          create=True,
-      ),
       mock.patch.object(queries, "fetch", side_effect=fake_fetch),
-      mock.patch.object(app, "fetch", side_effect=fake_fetch, create=True),
   ):
     at = _app_test()
     at.run()
@@ -314,13 +297,16 @@ def test_run_query_cached_keys_on_every_argument():
 
       # Initial run: live execution (dry run probe + execution query)
       res1 = queries._run_query_cached(sql_1, filters_1, project_1, max_bytes_1)
+      assert len(res1) == 7
+      assert res1[4] is True
+      assert res1[5] is True
       assert mock_client.query.call_count == 2
-      run_id1 = res1[4]
+      run_id1 = res1[-1]
 
       # Identical arguments: served from cache (no extra query calls, same run_id)
       res2 = queries._run_query_cached(sql_1, filters_1, project_1, max_bytes_1)
       assert mock_client.query.call_count == 2
-      assert res2[4] == run_id1
+      assert res2[-1] == run_id1
 
       # 1. Change sql: results in cache miss / live execution
       sql_2 = "SELECT 2"
@@ -328,7 +314,7 @@ def test_run_query_cached_keys_on_every_argument():
           sql_2, filters_1, project_1, max_bytes_1
       )
       assert mock_client.query.call_count == 4
-      assert res_sql[4] != run_id1
+      assert res_sql[-1] != run_id1
 
       # 2. Change filters: results in cache miss / live execution
       filters_2 = models.Filters(agents=("agent-2",))
@@ -336,7 +322,7 @@ def test_run_query_cached_keys_on_every_argument():
           sql_1, filters_2, project_1, max_bytes_1
       )
       assert mock_client.query.call_count == 6
-      assert res_flt[4] != run_id1
+      assert res_flt[-1] != run_id1
 
       # 3. Change project_id: results in cache miss / live execution
       project_2 = "proj-2"
@@ -344,7 +330,7 @@ def test_run_query_cached_keys_on_every_argument():
           sql_1, filters_1, project_2, max_bytes_1
       )
       assert mock_client.query.call_count == 8
-      assert res_prj[4] != run_id1
+      assert res_prj[-1] != run_id1
 
       # 4. Change maximum_bytes_billed: results in cache miss / live execution
       max_bytes_2 = 2_000_000
@@ -352,14 +338,14 @@ def test_run_query_cached_keys_on_every_argument():
           sql_1, filters_1, project_1, max_bytes_2
       )
       assert mock_client.query.call_count == 10
-      assert res_bytes[4] != run_id1
+      assert res_bytes[-1] != run_id1
 
       # Calling with identical arguments again is served from cache
       res_cached = queries._run_query_cached(
           sql_1, filters_1, project_1, max_bytes_2
       )
       assert mock_client.query.call_count == 10
-      assert res_cached[4] == res_bytes[4]
+      assert res_cached[-1] == res_bytes[-1]
   finally:
     queries._run_query_cached.clear()
 
@@ -437,11 +423,7 @@ def test_filter_widget_options_change_preserves_applied_filters():
 
   with (
       mock.patch.object(queries, "load_filter_options", side_effect=fake_load),
-      mock.patch.object(
-          app, "load_filter_options", side_effect=fake_load, create=True
-      ),
       mock.patch.object(queries, "fetch", return_value=query_res),
-      mock.patch.object(app, "fetch", return_value=query_res, create=True),
   ):
     at = _app_test()
     at.run()
@@ -488,3 +470,59 @@ def test_filter_widget_options_change_preserves_applied_filters():
     assert "agent-e" in ms_agent_grown.options
     assert "agent-a" in ms_agent_grown.options
     assert ms_agent_grown.value == ["agent-a"]
+
+
+def test_lazy_tabs_toggle(monkeypatch: pytest.MonkeyPatch):
+  """Verify STREAMLIT_LAZY_TABS toggle uses segmented control navigation and only renders active tab."""
+  monkeypatch.setenv("STREAMLIT_LAZY_TABS", "true")
+  filter_options = {"agent": ["agent-a"]}
+  query_res = models.QueryResult(
+      df=pd.DataFrame(),
+      error=None,
+      bytes_processed=0,
+      bytes_billed=0,
+      cache_hit=True,
+  )
+  recent_sessions_res = models.QueryResult(
+      df=pd.DataFrame({"session_id": ["sess-1"]}),
+      error=None,
+      bytes_processed=0,
+      bytes_billed=0,
+      cache_hit=True,
+  )
+
+  def fake_fetch(sql, ctx, label):
+    if label == "Recent sessions":
+      return recent_sessions_res
+    return query_res
+
+  with (
+      mock.patch.object(
+          queries,
+          "load_filter_options",
+          return_value=(filter_options, query_res),
+      ),
+      mock.patch.object(queries, "fetch", side_effect=fake_fetch),
+  ):
+    at = _app_test()
+    at.run()
+    assert not at.exception
+
+    # Segmented control is rendered for lazy tabs navigation
+    controls = [c for c in at.segmented_control if c.label == "Dashboard"]
+    assert len(controls) == 1
+    assert controls[0].options == [
+        "Overview",
+        "LLM & FinOps",
+        "Tools & Execution",
+        "Sessions & Traces",
+    ]
+    assert controls[0].value == "Overview"
+
+    # In Overview tab, Session selectbox is not rendered
+    assert not any(s.label == "Session" for s in at.selectbox)
+
+    # Switch to Sessions & Traces tab
+    controls[0].set_value("Sessions & Traces").run()
+    assert not at.exception
+    assert any(s.label == "Session" for s in at.selectbox)

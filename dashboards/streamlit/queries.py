@@ -19,12 +19,14 @@ if _DASHBOARD_DIR not in sys.path:
   sys.path.insert(0, _DASHBOARD_DIR)
 
 from models import ALL_SENTINEL
+from models import CACHE_MAX_ENTRIES
 from models import CACHE_TTL_SECONDS
 from models import Context
 from models import FILTER_OPTIONS_LIMIT
 from models import Filters
 from models import humanize_bytes
 from models import QueryResult
+from models import ScanEntry
 from models import TableRefs
 from models import TOP_ERRORS_LIMIT
 from models import Window
@@ -721,7 +723,7 @@ _MAX_SEEN_RUN_IDS = 10_000
 _NEXT_RUN_ID = 0
 _SEEN_RUN_IDS: set[int] = set()
 _RUN_ID_LOCK = threading.Lock()
-_JOB_RELOAD_TIMEOUT_SECONDS = 10
+_JOB_RELOAD_TIMEOUT_SECONDS = 5
 
 
 class QueryExecutionError(RuntimeError):
@@ -736,37 +738,72 @@ class QueryExecutionError(RuntimeError):
       bytes_processed: int = 0,
       bytes_billed: int = 0,
       cache_hit: bool = False,
+      bytes_processed_known: bool = False,
+      bytes_billed_known: bool = False,
   ) -> None:
     super().__init__(message)
     self.bytes_processed = bytes_processed
     self.bytes_billed = bytes_billed
     self.cache_hit = cache_hit
+    self.bytes_processed_known = bytes_processed_known
+    self.bytes_billed_known = bytes_billed_known
+
+  @property
+  def stats_known(self) -> bool:
+    return self.bytes_processed_known and self.bytes_billed_known
 
 
 def _extract_job_stats(
     job: bigquery.QueryJob | None,
-) -> tuple[int, int, bool] | None:
-  """Extracts byte scan and billing statistics from a QueryJob if available."""
+) -> tuple[int, int, bool, bool, bool] | None:
+  """Extracts byte scan and billing statistics from a QueryJob if available.
+
+  Returns:
+    (bytes_processed, bytes_billed, cache_hit, bytes_processed_known,
+    bytes_billed_known)
+  """
   if job is None:
     return None
   try:
     total_processed = getattr(job, "total_bytes_processed", None)
+    total_billed = getattr(job, "total_bytes_billed", None)
     ended = getattr(job, "ended", None)
-    if total_processed is None:
+    if total_processed is None or total_billed is None:
+      # job.reload() fetches metadata only ($0 cost) on the completed job;
+      # if it fails, stats remain unpopulated for that cache entry's TTL.
       try:
         job.reload(timeout=_JOB_RELOAD_TIMEOUT_SECONDS)
       except Exception:
         pass
       else:
         total_processed = getattr(job, "total_bytes_processed", None)
+        total_billed = getattr(job, "total_bytes_billed", None)
         ended = getattr(job, "ended", None)
-    if total_processed is not None or ended is not None:
+
+    if (
+        total_processed is not None
+        or total_billed is not None
+        or ended is not None
+    ):
       cache_hit = bool(getattr(job, "cache_hit", False))
-      bytes_billed = (
-          0 if cache_hit else int(getattr(job, "total_bytes_billed", 0) or 0)
-      )
+      processed_known = total_processed is not None
       bytes_processed = int(total_processed or 0)
-      return bytes_processed, bytes_billed, cache_hit
+      if cache_hit:
+        bytes_billed = 0
+        billed_known = True
+      elif total_billed is not None:
+        bytes_billed = int(total_billed)
+        billed_known = True
+      else:
+        bytes_billed = 0
+        billed_known = False
+      return (
+          bytes_processed,
+          bytes_billed,
+          cache_hit,
+          processed_known,
+          billed_known,
+      )
   except Exception:
     return None
   return None
@@ -776,23 +813,27 @@ def _query_failure(msg: str, job: bigquery.QueryJob | None) -> RuntimeError:
   """Builds a QueryExecutionError or RuntimeError preserving job statistics."""
   stats = _extract_job_stats(job)
   if stats is not None:
-    bytes_processed, bytes_billed, cache_hit = stats
+    bytes_proc, bytes_bill, hit, proc_known, bill_known = stats
     return QueryExecutionError(
         msg,
-        bytes_processed=bytes_processed,
-        bytes_billed=bytes_billed,
-        cache_hit=cache_hit,
+        bytes_processed=bytes_proc,
+        bytes_billed=bytes_bill,
+        cache_hit=hit,
+        bytes_processed_known=proc_known,
+        bytes_billed_known=bill_known,
     )
   return RuntimeError(msg)
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False, max_entries=256)
+@st.cache_data(
+    ttl=CACHE_TTL_SECONDS, show_spinner=False, max_entries=CACHE_MAX_ENTRIES
+)
 def _run_query_cached(
     sql: str,
     filters: Filters,
     project: str,
     max_bytes: int,
-) -> tuple[pd.DataFrame, int, int, bool, int]:
+) -> tuple[pd.DataFrame, int, int, bool, bool, bool, int]:
   """Runs the BigQuery job, cached by Streamlit across reruns.
 
   Args:
@@ -802,7 +843,8 @@ def _run_query_cached(
     max_bytes: Maximum allowed bytes billed.
 
   Returns:
-    Tuple of (dataframe, bytes_processed, bytes_billed, cache_hit, run_id).
+    Tuple of (dataframe, bytes_processed, bytes_billed, cache_hit, proc_known,
+    bill_known, run_id).
   """
   global _NEXT_RUN_ID
   with _RUN_ID_LOCK:
@@ -822,13 +864,25 @@ def _run_query_cached(
     )
     estimate = int(probe.total_bytes_processed or 0)
   except (gexc.GoogleAPICallError, gauth_exc.DefaultCredentialsError) as exc:
-    raise RuntimeError(_explain(exc)) from exc
+    raise QueryExecutionError(
+        _explain(exc),
+        bytes_processed=0,
+        bytes_billed=0,
+        cache_hit=False,
+        bytes_processed_known=True,
+        bytes_billed_known=True,
+    ) from exc
 
   if estimate > max_bytes:
-    raise RuntimeError(
+    raise QueryExecutionError(
         f"Guardrail: this query would scan {humanize_bytes(estimate)},"
         f" above the {humanize_bytes(max_bytes)} per-query cap. Narrow"
-        " the time range or raise the cap in the sidebar."
+        " the time range or raise the cap in the sidebar.",
+        bytes_processed=0,
+        bytes_billed=0,
+        cache_hit=False,
+        bytes_processed_known=True,
+        bytes_billed_known=True,
     )
 
   job = None
@@ -837,19 +891,40 @@ def _run_query_cached(
         sql,
         job_config=job_config(sql, filters, max_bytes),
     )
-    df = job.to_dataframe()
+    df = job.to_dataframe(create_bqstorage_client=False)
   except (gexc.GoogleAPICallError, gauth_exc.DefaultCredentialsError) as exc:
     raise _query_failure(_explain(exc), job) from exc
   except Exception as exc:
     raise _query_failure(str(exc), job) from exc
 
-  bytes_billed = 0 if job.cache_hit else int(job.total_bytes_billed or 0)
+  if job.total_bytes_billed is None or job.total_bytes_processed is None:
+    # job.reload() fetches metadata only ($0 cost) on the completed job;
+    # if it fails, stats remain unpopulated for that cache entry's TTL.
+    try:
+      job.reload(timeout=_JOB_RELOAD_TIMEOUT_SECONDS)
+    except Exception:
+      pass
+
+  cache_hit = bool(job.cache_hit)
+  proc_known = job.total_bytes_processed is not None
   bytes_processed = int(job.total_bytes_processed or 0)
+  if cache_hit:
+    bytes_billed = 0
+    bill_known = True
+  elif job.total_bytes_billed is not None:
+    bytes_billed = int(job.total_bytes_billed)
+    bill_known = True
+  else:
+    bytes_billed = 0
+    bill_known = False
+
   return (
       df,
       bytes_processed,
       bytes_billed,
-      bool(job.cache_hit),
+      cache_hit,
+      proc_known,
+      bill_known,
       run_id,
   )
 
@@ -876,34 +951,61 @@ def run_query(
     QueryResult containing the resulting dataframe and execution metadata.
   """
   try:
-    df, bytes_processed, bytes_billed, cache_hit, run_id = _run_query_cached(
-        sql, filters, project, max_bytes
-    )
+    (
+        df,
+        bytes_processed,
+        bytes_billed,
+        cache_hit,
+        proc_known,
+        bill_known,
+        run_id,
+    ) = _run_query_cached(sql, filters, project, max_bytes)
   except Exception as exc:
     if isinstance(exc, QueryExecutionError):
       bytes_processed = int(exc.bytes_processed)
       bytes_billed = int(exc.bytes_billed)
       cache_hit = bool(exc.cache_hit)
+      proc_known = bool(exc.bytes_processed_known)
+      bill_known = bool(exc.bytes_billed_known)
     else:
       bytes_processed, bytes_billed, cache_hit = 0, 0, False
+      proc_known, bill_known = False, False
     return QueryResult(
         df=pd.DataFrame(),
         error=str(exc),
         bytes_processed=bytes_processed,
         bytes_billed=bytes_billed,
         cache_hit=cache_hit,
+        bytes_processed_known=proc_known,
+        bytes_billed_known=bill_known,
     )
 
   with _RUN_ID_LOCK:
     if run_id in _SEEN_RUN_IDS:
-      return QueryResult(df, None, 0, 0, True)
+      return QueryResult(
+          df,
+          None,
+          bytes_processed,
+          0,
+          True,
+          bytes_processed_known=proc_known,
+          bytes_billed_known=True,
+      )
     if len(_SEEN_RUN_IDS) >= _MAX_SEEN_RUN_IDS:
       evict_count = max(1, _MAX_SEEN_RUN_IDS // 4)
       for stale in sorted(_SEEN_RUN_IDS)[:evict_count]:
         _SEEN_RUN_IDS.discard(stale)
     _SEEN_RUN_IDS.add(run_id)
 
-  return QueryResult(df, None, bytes_processed, bytes_billed, cache_hit)
+  return QueryResult(
+      df,
+      None,
+      bytes_processed,
+      bytes_billed,
+      cache_hit,
+      bytes_processed_known=proc_known,
+      bytes_billed_known=bill_known,
+  )
 
 
 def fetch(sql: str, ctx: Context, label: str) -> QueryResult:
@@ -925,7 +1027,14 @@ def fetch(sql: str, ctx: Context, label: str) -> QueryResult:
         ctx.max_bytes,
     )
   ctx.scan_log.append(
-      (label, result.bytes_billed, result.bytes_processed, result.cache_hit)
+      ScanEntry(
+          label=label,
+          bytes_billed=result.bytes_billed or 0,
+          bytes_processed=result.bytes_processed or 0,
+          cache_hit=result.cache_hit,
+          bytes_billed_known=result.bytes_billed_known,
+          bytes_processed_known=result.bytes_processed_known,
+      )
   )
   if result.error:
     st.error(f"**{label}** — {result.error}")

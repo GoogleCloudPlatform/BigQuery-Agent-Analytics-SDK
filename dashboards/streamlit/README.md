@@ -6,10 +6,10 @@ Interactive dashboard for monitoring, diagnosing, and evaluating AI agent traces
 
 ## 1. Install
 
-Install dependencies with the `dashboards` extra:
+Install dependencies with the `streamlit` extra:
 
 ```bash
-pip install '.[streamlit]'
+pip install -e '.[streamlit]'
 ```
 
 ---
@@ -31,6 +31,7 @@ Parameters configured in `dashboards/streamlit/.env`:
 | `BQ_DATASET_ID`                  | BigQuery dataset containing agent events | `agent_analytics`                  |
 | `BQ_TABLE_ID`                    | Raw agent events table                   | `agent_events`                     |
 | `BQ_VIEW_PREFIX`                 | Prefix for typed analytical views        | `adk_`                             |
+| `STREAMLIT_LAZY_TABS`            | Only query data for active tab           | `true`                             |
 
 ---
 
@@ -61,11 +62,27 @@ bq-agent-sdk views create-all \
 
 ## 4. Run
 
-Launch the Streamlit dashboard:
+Run from the dashboard directory (recommended, automatically applies `.streamlit/config.toml`):
 
 ```bash
-streamlit run dashboards/streamlit/app.py
+cd dashboards/streamlit
+streamlit run app.py
 ```
+
+Or run from the repository root with explicit localhost binding:
+
+```bash
+streamlit run dashboards/streamlit/app.py --server.address 127.0.0.1
+```
+
+### Deployment & Access Control
+
+> **Note:**
+> * `.streamlit/config.toml` configures loopback binding (`127.0.0.1`), headless mode, and disables telemetry when running from `dashboards/streamlit/`.
+> * When launching from the repository root, pass `--server.address 127.0.0.1` to ensure the dashboard binds only to localhost.
+> * If remote access is needed, front it with an authenticating reverse proxy or IAP.
+> * Every viewer shares the server's BigQuery identity.
+> * The per-query scan cap is configurable in the sidebar.
 
 ---
 
@@ -73,6 +90,7 @@ streamlit run dashboards/streamlit/app.py
 
 The sidebar provides runtime controls and guardrails for query execution:
 
-* **Time range selector**: Snaps query execution to discrete sliding windows (e.g., Last 15 minutes, Last 24 hours, Last 7 days, Last 30 days) with bucketed intervals.
+* **Time range selector**: Snaps query execution to discrete sliding windows (Last 1 hour, Last 6 hours, Last 24 hours, Last 3 days, Last 7 days, Last 30 days) with bucketed intervals.
 * **Per-query scan cap guardrail (`maximum_bytes_billed`)**: Sets a strict byte limit on every BigQuery job. A free dry-run preflight validates query scan size before execution, preventing queries from running if they exceed the selected cap rather than billing for unexpected costs.
 * **Token pricing defaults**: Configures input and output token rates for estimated cost calculations (defaults to \$1.25 / 1M input tokens and \$5.00 / 1M output tokens). Note that costs are derived from token counts rather than recorded billing telemetry.
+* **Streaming Buffer Scans**: In scenarios where on-demand compute pricing is used and the queried data reside in BigQuery's streaming buffer, BigQuery does not charge for bytes scanned from the streaming buffer.

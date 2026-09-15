@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 import dataclasses
 import datetime as dt
+import math
 import re
 from typing import Any, NamedTuple
 
@@ -27,9 +28,9 @@ OTHER_LABEL = "Other"
 
 # Identifier grammars. Neither pattern admits a backtick, so a validated
 # identifier is safe to interpolate into a backtick-quoted table path.
-_PROJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-_.:]{0,62}$")
-_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,1024}$")
-_PREFIX_RE = re.compile(r"^[A-Za-z0-9_]{0,1024}$")
+_PROJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-_.:]{0,62}\Z")
+_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,1024}\Z")
+_PREFIX_RE = re.compile(r"^[A-Za-z0-9_]{0,1024}\Z")
 
 TIME_RANGES: dict[str, dt.timedelta] = {
     "Last 1 hour": dt.timedelta(hours=1),
@@ -58,6 +59,7 @@ DEFAULT_BYTES_CAP = "1 GB"
 # therefore the cache key — would never repeat and every widget change
 # would re-bill every panel.
 CACHE_TTL_SECONDS = 300
+CACHE_MAX_ENTRIES = 256
 
 # Rows returned by the detail tables, matching the Grafana caps.
 RECENT_SESSIONS_LIMIT = 250
@@ -195,17 +197,21 @@ def validate_refs(
     failed) and a list of error description strings.
   """
   errors: list[str] = []
-  if not _PROJECT_RE.match(project or ""):
+  proj = (project or "").strip()
+  ds = (dataset or "").strip()
+  tbl = (table or "").strip()
+  prefix = (view_prefix or "").strip()
+  if not _PROJECT_RE.match(proj):
     errors.append(f"Invalid project ID: {project!r}")
-  if not _NAME_RE.match(dataset or ""):
+  if not _NAME_RE.match(ds):
     errors.append(f"Invalid dataset ID: {dataset!r}")
-  if not _NAME_RE.match(table or ""):
+  if not _NAME_RE.match(tbl):
     errors.append(f"Invalid table ID: {table!r}")
-  if not _PREFIX_RE.match(view_prefix or ""):
+  if not _PREFIX_RE.match(prefix):
     errors.append(f"Invalid view prefix: {view_prefix!r}")
   if errors:
     return None, errors
-  return TableRefs(project, dataset, table, view_prefix), []
+  return TableRefs(proj, ds, tbl, prefix), []
 
 
 class Filters(NamedTuple):
@@ -270,7 +276,9 @@ class Window:
 
 
 def snap(moment: dt.datetime, seconds: int = CACHE_TTL_SECONDS) -> dt.datetime:
-  """Floors ``moment`` to a multiple of ``seconds`` past the hour.
+  """Floors ``moment`` to a multiple of ``seconds``.
+
+  Naive datetimes are normalized as UTC. Non-UTC datetimes are converted to UTC.
 
   Args:
     moment: The datetime object to snap.
@@ -279,9 +287,15 @@ def snap(moment: dt.datetime, seconds: int = CACHE_TTL_SECONDS) -> dt.datetime:
   Returns:
     The snapped UTC datetime without microseconds.
   """
-  floored = moment.replace(microsecond=0)
-  drop = (floored.minute * 60 + floored.second) % seconds
-  return floored - dt.timedelta(seconds=drop)
+  if moment.tzinfo is None:
+    moment = moment.replace(tzinfo=dt.timezone.utc)
+  else:
+    moment = moment.astimezone(dt.timezone.utc)
+  if seconds <= 0:
+    return moment.replace(microsecond=0)
+  epoch = math.floor(moment.timestamp())
+  snapped_epoch = (epoch // seconds) * seconds
+  return dt.datetime.fromtimestamp(snapped_epoch, tz=dt.timezone.utc)
 
 
 def make_window(span: dt.timedelta, now: dt.datetime | None = None) -> Window:
@@ -323,6 +337,8 @@ class QueryResult(NamedTuple):
     bytes_processed: Number of bytes processed by the query job.
     bytes_billed: Number of bytes billed by the query job.
     cache_hit: Whether the query result was served from BigQuery cache.
+    bytes_processed_known: Whether byte scan statistics are known.
+    bytes_billed_known: Whether billing statistics are known.
   """
 
   df: pd.DataFrame
@@ -330,6 +346,32 @@ class QueryResult(NamedTuple):
   bytes_processed: int = 0
   bytes_billed: int = 0
   cache_hit: bool = False
+  bytes_processed_known: bool = True
+  bytes_billed_known: bool = True
+
+  @property
+  def stats_known(self) -> bool:
+    return self.bytes_processed_known and self.bytes_billed_known
+
+
+class ScanEntry(NamedTuple):
+  """Log entry recording an executed query and its scan/billing metrics.
+
+  Attributes:
+    label: Human-readable label for the query.
+    bytes_billed: Number of bytes billed for the query.
+    bytes_processed: Number of bytes processed for the query.
+    cache_hit: Whether the query result was served from BigQuery cache.
+    bytes_billed_known: Whether billing statistics are known.
+    bytes_processed_known: Whether byte scan statistics are known.
+  """
+
+  label: str
+  bytes_billed: int
+  bytes_processed: int
+  cache_hit: bool
+  bytes_billed_known: bool
+  bytes_processed_known: bool
 
 
 @dataclasses.dataclass
@@ -354,4 +396,4 @@ class Context:
   theme: Theme
   price_in: float
   price_out: float
-  scan_log: list[tuple[Any, ...]] = dataclasses.field(default_factory=list)
+  scan_log: list[ScanEntry] = dataclasses.field(default_factory=list)

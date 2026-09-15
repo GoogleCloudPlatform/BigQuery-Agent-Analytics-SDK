@@ -60,7 +60,7 @@ improvement = [
   "python-dotenv>=1.0.0",
 ]
 streamlit = [
-  "streamlit>=1.49.0",
+  "streamlit>=1.63.0",
   "plotly>=6.0.0",
   "db-dtypes>=1.3.0",
   "pandas>=2.0.0",

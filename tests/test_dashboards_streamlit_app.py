@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import importlib.util
+import os
 from pathlib import Path
 import sys
 from unittest import mock
@@ -241,7 +242,8 @@ def _load_streamlit_queries():
 
 def _load_streamlit_app():
   """Loads dashboards/streamlit/app.py dynamically with mocked optional deps."""
-  return _load_module("dashboards_streamlit_app", APP_PATH)
+  with mock.patch.dict(os.environ, {"BQAA_DASHBOARD_SKIP_DOTENV": "1"}):
+    return _load_module("dashboards_streamlit_app", APP_PATH)
 
 
 models = _load_streamlit_models()
@@ -251,12 +253,28 @@ app = _load_streamlit_app()
 
 
 @pytest.fixture(autouse=True)
+def _isolate_test_env(monkeypatch: pytest.MonkeyPatch):
+  monkeypatch.setenv("BQAA_DASHBOARD_SKIP_DOTENV", "1")
+
+
+@pytest.fixture(autouse=True)
 def _reset_queries_state():
   try:
     yield
   finally:
     queries._SEEN_RUN_IDS.clear()
     queries._NEXT_RUN_ID = 0
+
+
+@pytest.fixture(autouse=True)
+def _pin_eager_tabs(monkeypatch: pytest.MonkeyPatch):
+  monkeypatch.setenv("STREAMLIT_LAZY_TABS", "false")
+  orig = app._LAZY_TABS
+  app._LAZY_TABS = False
+  try:
+    yield
+  finally:
+    app._LAZY_TABS = orig
 
 
 @pytest.fixture
@@ -367,9 +385,20 @@ def test_validate_refs_invalid_identifiers():
   assert refs is None
   assert any("Invalid table ID" in e for e in errors)
 
-  # Invalid view prefix
+  refs, errors = models.validate_refs(
+      "proj", "dataset`inject", "table", "prefix_"
+  )
+  assert refs is None
+  assert any("Invalid dataset ID" in e for e in errors)
+
   refs, errors = models.validate_refs(
       "proj", "dataset", "table", "invalid-prefix"
+  )
+  assert refs is None
+  assert any("Invalid view prefix" in e for e in errors)
+
+  refs, errors = models.validate_refs(
+      "proj", "dataset", "table", "prefix`inject"
   )
   assert refs is None
   assert any("Invalid view prefix" in e for e in errors)
@@ -378,6 +407,33 @@ def test_validate_refs_invalid_identifiers():
   refs, errors = models.validate_refs("", "", "", "bad-prefix")
   assert refs is None
   assert len(errors) == 4
+
+
+def test_validate_refs_trailing_newlines_and_sanitization():
+  """Assert regexes reject trailing newlines and validate_refs sanitizes or rejects them."""
+  # Direct regex matching rejects trailing newlines due to \Z anchoring
+  assert not models._PROJECT_RE.match("proj\n")
+  assert not models._NAME_RE.match("ds\n")
+  assert not models._NAME_RE.match("tbl\n")
+  assert not models._PREFIX_RE.match("adk_\n")
+
+  # validate_refs strips inputs at boundary, sanitizing them into valid TableRefs
+  refs, errors = models.validate_refs("proj\n", "ds\n", "tbl\n", "adk_\n")
+  assert errors == []
+  assert refs is not None
+  assert refs.project == "proj"
+  assert refs.dataset == "ds"
+  assert refs.table == "tbl"
+  assert refs.view_prefix == "adk_"
+  assert "\n" not in refs.events
+  assert "\n" not in refs.view("llm")
+
+  # Internal unstrippable newlines cannot be sanitized by strip and must be rejected
+  refs_bad, errors_bad = models.validate_refs(
+      "proj\nextra", "ds\nextra", "tbl\nextra", "adk_\nextra"
+  )
+  assert refs_bad is None
+  assert len(errors_bad) == 4
 
 
 def test_time_bounds_and_window_intervals():
@@ -422,6 +478,9 @@ def test_snap_and_make_window():
   moment = dt.datetime(2026, 9, 1, 12, 34, 56, 789000, tzinfo=dt.timezone.utc)
   snapped = models.snap(moment, seconds=300)
   assert snapped == dt.datetime(2026, 9, 1, 12, 30, 0, tzinfo=dt.timezone.utc)
+  assert models.snap(moment) == dt.datetime(
+      2026, 9, 1, 12, 30, 0, tzinfo=dt.timezone.utc
+  )
 
   window = models.make_window(dt.timedelta(hours=1), now=moment)
   assert window.end == dt.datetime(
@@ -429,6 +488,42 @@ def test_snap_and_make_window():
   )
   assert window.start == dt.datetime(
       2026, 9, 1, 11, 30, 0, tzinfo=dt.timezone.utc
+  )
+
+  # Non-positive seconds does not raise ZeroDivisionError
+  assert models.snap(moment, seconds=0) == moment.replace(microsecond=0)
+  assert models.snap(moment, seconds=-10) == moment.replace(microsecond=0)
+
+  # Naive input is normalized to UTC and returns aware UTC
+  naive_moment = dt.datetime(2026, 9, 1, 12, 34, 56, 789000)
+  naive_snapped = models.snap(naive_moment, seconds=300)
+  assert naive_snapped == dt.datetime(
+      2026, 9, 1, 12, 30, 0, tzinfo=dt.timezone.utc
+  )
+  assert naive_snapped.tzinfo == dt.timezone.utc
+  assert models.snap(naive_moment, seconds=0) == dt.datetime(
+      2026, 9, 1, 12, 34, 56, tzinfo=dt.timezone.utc
+  )
+
+  # Aware input with timezone offset is converted to UTC
+  # UTC+2 at 14:34:56 is 12:34:56 UTC
+  offset_tz = dt.timezone(dt.timedelta(hours=2))
+  aware_offset = dt.datetime(2026, 9, 1, 14, 34, 56, 789000, tzinfo=offset_tz)
+  aware_snapped = models.snap(aware_offset, seconds=300)
+  assert aware_snapped == dt.datetime(
+      2026, 9, 1, 12, 30, 0, tzinfo=dt.timezone.utc
+  )
+  assert aware_snapped.tzinfo == dt.timezone.utc
+  assert models.snap(aware_offset, seconds=0) == dt.datetime(
+      2026, 9, 1, 12, 34, 56, tzinfo=dt.timezone.utc
+  )
+
+  # Snapping with interval > 3600 (e.g. 2 hours) aligns across hour boundaries
+  m1 = dt.datetime(2026, 9, 1, 12, 59, 0, tzinfo=dt.timezone.utc)
+  m2 = dt.datetime(2026, 9, 1, 13, 1, 0, tzinfo=dt.timezone.utc)
+  assert models.snap(m1, seconds=7200) == models.snap(m2, seconds=7200)
+  assert models.snap(m1, seconds=7200) == dt.datetime(
+      2026, 9, 1, 12, 0, 0, tzinfo=dt.timezone.utc
   )
 
 
@@ -839,7 +934,16 @@ def test_context_and_query_result(sample_refs, sample_window):
       price_in=1.25,
       price_out=5.00,
   )
-  ctx.scan_log.append(("overview", 1024, False))
+  ctx.scan_log.append(
+      models.ScanEntry(
+          label="overview",
+          bytes_billed=1024,
+          bytes_processed=1024,
+          cache_hit=False,
+          bytes_billed_known=True,
+          bytes_processed_known=True,
+      )
+  )
   assert other.scan_log == []
 
   # A QueryResult defaults to "succeeded, nothing scanned, not cached".
@@ -850,12 +954,16 @@ def test_context_and_query_result(sample_refs, sample_window):
   assert result.bytes_processed == 0
   assert result.bytes_billed == 0
   assert result.cache_hit is False
+  assert result.bytes_processed_known is True
+  assert result.bytes_billed_known is True
+  assert result.stats_known is True
 
 
 def test_sidebar_connection_locks_env_project(monkeypatch):
   monkeypatch.setenv("BQ_PROJECT_ID", "env-locked-project")
   monkeypatch.setenv("BQ_DATASET_ID", "env_dataset")
   monkeypatch.setenv("BQ_TABLE_ID", "agent_events")
+  monkeypatch.setenv("BQ_VIEW_PREFIX", "adk_")
 
   def fake_text_input(label, value="", **kwargs):
     if label == "Project ID":
@@ -878,6 +986,7 @@ def test_sidebar_connection_fallback_when_env_unset(monkeypatch):
   monkeypatch.delenv("BQ_PROJECT_ID", raising=False)
   monkeypatch.setenv("BQ_DATASET_ID", "env_dataset")
   monkeypatch.setenv("BQ_TABLE_ID", "agent_events")
+  monkeypatch.setenv("BQ_VIEW_PREFIX", "adk_")
 
   def fake_text_input(label, value="", **kwargs):
     if label == "Project ID":
@@ -1124,6 +1233,9 @@ def test_run_query_default_credentials_error():
     assert "No auth creds" in result.error
     assert "gcloud auth application-default login" in result.error
     assert result.bytes_processed == 0
+    assert result.bytes_billed == 0
+    assert result.bytes_processed_known is True
+    assert result.bytes_billed_known is True
     assert result.cache_hit is False
 
 
@@ -1139,7 +1251,7 @@ def test_run_query_cache_hit_deduplication():
   with mock.patch.object(
       queries,
       "_run_query_cached",
-      return_value=(mock_df, 5000, 5000, False, 101),
+      return_value=(mock_df, 5000, 5000, False, True, True, 101),
   ):
     # First run: new run_id
     result1 = queries.run_query("SELECT 1", filters, "test-proj", 1024**3)
@@ -1148,6 +1260,9 @@ def test_run_query_cache_hit_deduplication():
     assert result1.bytes_processed == 5000
     assert result1.bytes_billed == 5000
     assert result1.cache_hit is False
+    assert result1.bytes_processed_known is True
+    assert result1.bytes_billed_known is True
+    assert result1.stats_known is True
     assert 101 in queries._SEEN_RUN_IDS
 
     # Second run: cached result from @st.cache_data returns the same
@@ -1155,21 +1270,27 @@ def test_run_query_cache_hit_deduplication():
     result2 = queries.run_query("SELECT 1", filters, "test-proj", 1024**3)
     assert result2.df is mock_df
     assert result2.error is None
-    assert result2.bytes_processed == 0
+    assert result2.bytes_processed == 5000
     assert result2.bytes_billed == 0
     assert result2.cache_hit is True
+    assert result2.bytes_processed_known is True
+    assert result2.bytes_billed_known is True
+    assert result2.stats_known is True
 
   # Third run: a different query invocation produces a new run_id=102
   with mock.patch.object(
       queries,
       "_run_query_cached",
-      return_value=(mock_df_2, 8000, 8000, False, 102),
+      return_value=(mock_df_2, 8000, 8000, False, True, True, 102),
   ):
     result3 = queries.run_query("SELECT 2", filters, "test-proj", 1024**3)
     assert result3.df is mock_df_2
     assert result3.error is None
     assert result3.bytes_processed == 8000
     assert result3.cache_hit is False
+    assert result3.bytes_processed_known is True
+    assert result3.bytes_billed_known is True
+    assert result3.stats_known is True
     assert 102 in queries._SEEN_RUN_IDS
 
 
@@ -1195,9 +1316,12 @@ def test_run_query_cached_guardrail_and_execution():
     assert res.error is not None
     assert "Guardrail: this query would scan" in res.error
     assert res.bytes_processed == 0
+    assert res.bytes_billed == 0
+    assert res.bytes_processed_known is True
+    assert res.bytes_billed_known is True
     assert res.cache_hit is False
 
-    # Normal query within max_bytes: returns 4-tuple on success
+    # Normal query within max_bytes: returns 7-tuple on success
     mock_probe.total_bytes_processed = 500
     mock_job = mock.MagicMock()
     mock_job.total_bytes_processed = 500
@@ -1207,14 +1331,120 @@ def test_run_query_cached_guardrail_and_execution():
     mock_job.to_dataframe.return_value = expected_df
     mock_client.query.side_effect = [mock_probe, mock_job]
 
-    df, bytes_proc, bytes_billed, hit, run_id = queries._run_query_cached(
-        "SELECT 1", filters, "proj", 1000
+    df, bytes_proc, bytes_billed, hit, proc_known, bill_known, run_id = (
+        queries._run_query_cached("SELECT 1", filters, "proj", 1000)
     )
     assert df is expected_df
     assert bytes_proc == 500
     assert bytes_billed == 10_485_760
     assert hit is False
+    assert proc_known is True
+    assert bill_known is True
     assert isinstance(run_id, int)
+
+
+def test_run_query_guardrail_and_dry_run_known_zero():
+  """Verifies that when guardrail trips or dry run fails, run_query returns QueryResult with known zero bytes."""
+  mock_client = mock.MagicMock()
+  mock_probe = mock.MagicMock()
+  filters = models.Filters()
+
+  # 1. Guardrail trip (estimate > max_bytes)
+  mock_probe.total_bytes_processed = 5000
+  mock_client.query.return_value = mock_probe
+
+  with mock.patch.object(queries, "get_client", return_value=mock_client):
+    with pytest.raises(queries.QueryExecutionError) as exc_info:
+      queries._run_query_cached(
+          "SELECT * FROM big_table", filters, "proj", 1000
+      )
+    assert "Guardrail: this query would scan" in str(exc_info.value)
+    assert exc_info.value.bytes_processed == 0
+    assert exc_info.value.bytes_billed == 0
+    assert exc_info.value.bytes_processed_known is True
+    assert exc_info.value.bytes_billed_known is True
+
+    result_guardrail = queries.run_query(
+        "SELECT * FROM big_table", filters, "proj", 1000
+    )
+    assert result_guardrail.df.empty is True
+    assert result_guardrail.error is not None
+    assert "Guardrail: this query would scan" in result_guardrail.error
+    assert result_guardrail.bytes_processed == 0
+    assert result_guardrail.bytes_billed == 0
+    assert result_guardrail.bytes_processed_known is True
+    assert result_guardrail.bytes_billed_known is True
+    assert result_guardrail.cache_hit is False
+
+  # 2. Dry run / API failure
+  api_err = queries.gexc.GoogleAPICallError("Dry run failed: access denied")
+  mock_client.query.side_effect = api_err
+
+  with mock.patch.object(queries, "get_client", return_value=mock_client):
+    with pytest.raises(queries.QueryExecutionError) as exc_info:
+      queries._run_query_cached(
+          "SELECT * FROM big_table", filters, "proj", 1000
+      )
+    assert exc_info.value.bytes_processed == 0
+    assert exc_info.value.bytes_billed == 0
+    assert exc_info.value.bytes_processed_known is True
+    assert exc_info.value.bytes_billed_known is True
+
+    result_dry_run = queries.run_query(
+        "SELECT * FROM big_table", filters, "proj", 1000
+    )
+    assert result_dry_run.df.empty is True
+    assert result_dry_run.error is not None
+    assert result_dry_run.bytes_processed == 0
+    assert result_dry_run.bytes_billed == 0
+    assert result_dry_run.bytes_processed_known is True
+    assert result_dry_run.bytes_billed_known is True
+    assert result_dry_run.cache_hit is False
+
+
+def test_run_query_success_with_unavailable_billing_stats():
+  """Verifies successful query with total_bytes_billed None preserves proc_known=True, bill_known=False."""
+  mock_client = mock.MagicMock()
+  mock_probe = mock.MagicMock()
+  mock_probe.total_bytes_processed = 500
+  mock_job = mock.MagicMock()
+  mock_job.total_bytes_processed = 500
+  mock_job.total_bytes_billed = None
+  mock_job.cache_hit = False
+  mock_job.reload.side_effect = RuntimeError("Reload failed")
+  expected_df = mock.MagicMock()
+  expected_df.empty = False
+  mock_job.to_dataframe.return_value = expected_df
+  mock_client.query.side_effect = [mock_probe, mock_job]
+
+  filters = models.Filters()
+  with mock.patch.object(queries, "get_client", return_value=mock_client):
+    result = queries.run_query("SELECT 1", filters, "proj", 1000)
+    assert result.df is expected_df
+    assert result.error is None
+    assert result.bytes_processed == 500
+    assert result.bytes_billed == 0
+    assert result.cache_hit is False
+    assert result.bytes_processed_known is True
+    assert result.bytes_billed_known is False
+    assert result.stats_known is False
+
+  # Deduplicated rerun marks bytes_billed_known=True ($0 billed is known locally)
+  with mock.patch.object(
+      queries,
+      "_run_query_cached",
+      return_value=(expected_df, 500, 0, False, True, False, 101),
+  ):
+    queries._SEEN_RUN_IDS.add(101)
+    res_dedup = queries.run_query("SELECT 1", filters, "proj", 1000)
+    assert res_dedup.df is expected_df
+    assert res_dedup.error is None
+    assert res_dedup.bytes_processed == 500
+    assert res_dedup.bytes_billed == 0
+    assert res_dedup.cache_hit is True
+    assert res_dedup.bytes_processed_known is True
+    assert res_dedup.bytes_billed_known is True
+    assert res_dedup.stats_known is True
 
 
 def test_run_query_clears_seen_run_ids_when_exceeding_max(monkeypatch):
@@ -1227,10 +1457,10 @@ def test_run_query_clears_seen_run_ids_when_exceeding_max(monkeypatch):
       queries,
       "_run_query_cached",
       side_effect=[
-          (mock_df, 100, 100, False, 1),
-          (mock_df, 100, 100, False, 2),
-          (mock_df, 100, 100, False, 3),
-          (mock_df, 100, 100, False, 4),
+          (mock_df, 100, 100, False, True, True, 1),
+          (mock_df, 100, 100, False, True, True, 2),
+          (mock_df, 100, 100, False, True, True, 3),
+          (mock_df, 100, 100, False, True, True, 4),
       ],
   ):
     queries.run_query("Q1", filters, "proj", 1000)
@@ -1264,7 +1494,7 @@ def test_run_query_seen_run_ids_clearing_at_default_max():
   with mock.patch.object(
       queries,
       "_run_query_cached",
-      return_value=(mock_df, 100, 100, False, 99999),
+      return_value=(mock_df, 100, 100, False, True, True, 99999),
   ):
     queries.run_query("Q", models.Filters(), "proj", 1000)
     expected_len = (
@@ -1639,7 +1869,7 @@ def test_app_main_filter_preservation_on_error(sample_refs, sample_window):
       ),
       mock.patch.object(app, "sidebar_window", return_value=sample_window),
       mock.patch.object(app, "active_theme", return_value=models.LIGHT_THEME),
-      mock.patch.object(app, "row_overview"),
+      mock.patch.object(app, "row_overview") as mock_row_overview,
       mock.patch.object(app, "row_llm"),
       mock.patch.object(app, "row_tools"),
       mock.patch.object(app, "row_sessions"),
@@ -1655,6 +1885,7 @@ def test_app_main_filter_preservation_on_error(sample_refs, sample_window):
       app.main()
       assert state["_filter_options"] == initial_options
       mock_sidebar_filters.assert_called_with(initial_options)
+      assert mock_row_overview.call_count == 1
 
     # Second run encounters error: stashed options retrieved
     mock_sidebar_filters.reset_mock()
@@ -1664,6 +1895,7 @@ def test_app_main_filter_preservation_on_error(sample_refs, sample_window):
       app.main()
       assert state["_filter_options"] == initial_options
       mock_sidebar_filters.assert_called_with(initial_options)
+      assert mock_row_overview.call_count == 2
 
     # Third run: query succeeds with empty options (e.g. empty time range)
     # -> stashed options preserved
@@ -1674,6 +1906,7 @@ def test_app_main_filter_preservation_on_error(sample_refs, sample_window):
       app.main()
       assert state["_filter_options"] == initial_options
       mock_sidebar_filters.assert_called_with(initial_options)
+      assert mock_row_overview.call_count == 3
 
 
 def test_footer(sample_refs, sample_window):
@@ -1700,15 +1933,16 @@ def test_footer(sample_refs, sample_window):
     # processed total, cache count, per-query cap, and TTL text.
     # Cached queries must be excluded from billed and processed totals.
     ctx.scan_log = [
-        ("q1", 10_485_760, 1024, False),
-        ("q2", 0, 2048, True),
-        ("q3", 10_485_760, 4096, False),
+        models.ScanEntry("q1", 10_485_760, 1024, False, True, True),
+        models.ScanEntry("q2", 0, 2048, True, True, True),
+        models.ScanEntry("q3", 10_485_760, 4096, False, True, True),
     ]
     app.footer(ctx)
     mock_divider.assert_called_once()
-    assert mock_caption.call_count == 2
+    assert mock_caption.call_count == 3
     caption_text = mock_caption.call_args_list[0][0][0]
     caption_note = mock_caption.call_args_list[1][0][0]
+    caption_latency_note = mock_caption.call_args_list[2][0][0]
     # Assert billed and processed totals mathematically exclude cached query bytes
     billed_bytes = 10_485_760 + 10_485_760
     processed_bytes = 1024 + 4096
@@ -1718,9 +1952,18 @@ def test_footer(sample_refs, sample_window):
     )
     assert "10 MB minimum" in caption_note
     assert "compute/capacity reservations" in caption_note
+    assert "metadata delivery latency" in caption_latency_note
+    assert "billing telemetry" in caption_latency_note
+    assert (
+        "unrecorded queries are excluded from the totals"
+        in caption_latency_note
+    )
     # Assert query counts and cache hit text
     assert "3 queries this run" in caption_text
-    assert "1 served from cache" in caption_text
+    assert (
+        f"1 served from cache ({models.humanize_bytes(2048)} scan avoided via cache)"
+        in caption_text
+    )
     # Assert per-query cap and TTL text
     assert (
         f"per-query cap {models.humanize_bytes(ctx.max_bytes)}" in caption_text
@@ -1730,16 +1973,176 @@ def test_footer(sample_refs, sample_window):
         in caption_text
     )
 
-    # Assert 100% cache hit run makes clear that $0 billed is saved cost
+    # Assert 100% cache hit run reports factual cached count without "savings" promises
     ctx.scan_log = [
-        ("q1", 0, 1024, True),
-        ("q2", 0, 2048, True),
+        models.ScanEntry("q1", 0, 1024, True, True, True),
+        models.ScanEntry("q2", 0, 2048, True, True, True),
     ]
     app.footer(ctx)
-    caption_cached = mock_caption.call_args_list[-2][0][0]
-    assert "0 B billed" in caption_cached
-    assert "billing cost saved via cache" in caption_cached
-    assert "2 served from cache ($0 billed)" in caption_cached
+    caption_cached = mock_caption.call_args_list[-3][0][0]
+    assert "0 B billed (0 B processed)" in caption_cached
+    assert (
+        f"2 served from cache ({models.humanize_bytes(1024 + 2048)} scan avoided via cache)"
+        in caption_cached
+    )
+    assert "billing cost saved via cache" not in caption_cached
+    assert "$0 billed" not in caption_cached
+
+    # Assert queries with unknown billing data are counted separately
+    ctx.scan_log = [
+        models.ScanEntry("q1", 10_485_760, 1024, False, True, True),
+        models.ScanEntry("q2", 0, 0, False, False, False),
+        models.ScanEntry("q3", 0, 2048, True, True, True),
+    ]
+    app.footer(ctx)
+    caption_unknown = mock_caption.call_args_list[-3][0][0]
+    assert "3 queries this run" in caption_unknown
+    assert (
+        f"{models.humanize_bytes(10_485_760)} billed ({models.humanize_bytes(1024)} processed)"
+        in caption_unknown
+    )
+    assert (
+        f"1 served from cache ({models.humanize_bytes(2048)} scan avoided via cache)"
+        in caption_unknown
+    )
+    assert "1 with unavailable billing data" in caption_unknown
+
+    # Assert entry with independent availability accumulates processed bytes when known
+    ctx.scan_log = [
+        models.ScanEntry("q1", 10_485_760, 1024, False, True, True),
+        models.ScanEntry(
+            "q2", 0, 512, False, False, True
+        ),  # billed unknown, processed known
+        models.ScanEntry("q3", 0, 2048, True, True, True),
+    ]
+    app.footer(ctx)
+    caption_independent = mock_caption.call_args_list[-3][0][0]
+    assert "3 queries this run" in caption_independent
+    assert (
+        f"{models.humanize_bytes(10_485_760)} billed ({models.humanize_bytes(1024 + 512)} processed)"
+        in caption_independent
+    )
+    assert "1 with unavailable billing data" in caption_independent
+
+    # Assert entry with unavailable scan data reports correctly
+    ctx.scan_log = [
+        models.ScanEntry(
+            "q1",
+            10_485_760,
+            0,
+            False,
+            True,
+            False,
+        ),  # billed known, processed unknown
+    ]
+    app.footer(ctx)
+    caption_proc_unknown = mock_caption.call_args_list[-3][0][0]
+    assert "1 with unavailable scan data" in caption_proc_unknown
+
+    # Assert run with no cached queries omits cache clause
+    ctx.scan_log = [
+        models.ScanEntry("q1", 10_485_760, 1024, False, True, True),
+    ]
+    app.footer(ctx)
+    caption_no_cache = mock_caption.call_args_list[-3][0][0]
+    assert "served from cache" not in caption_no_cache
+
+    # Assert cached query with unrecorded scan size renders with ≥ and note
+    ctx.scan_log = [
+        models.ScanEntry("q1", 0, 1024 * 1024, True, True, True),
+        models.ScanEntry("q2", 0, 0, True, True, False),
+    ]
+    app.footer(ctx)
+    caption_unrec = mock_caption.call_args_list[-3][0][0]
+    assert (
+        "2 served from cache (≥ 1.0 MB scan avoided via cache; 1 query scan size unrecorded)"
+        in caption_unrec
+    )
+    assert "with unavailable scan data" not in caption_unrec
+
+
+def test_footer_guardrail_queries(sample_refs, sample_window):
+  """Verifies footer displays 0 B billed (0 B processed) on guardrail queries without unavailable telemetry notes."""
+  ctx = models.Context(
+      refs=sample_refs,
+      window=sample_window,
+      filters=models.Filters(),
+      max_bytes=1024**3,
+      theme=models.LIGHT_THEME,
+      price_in=3.0,
+      price_out=15.0,
+      scan_log=[
+          models.ScanEntry(
+              label="guardrail_query_1",
+              bytes_billed=0,
+              bytes_processed=0,
+              cache_hit=False,
+              bytes_billed_known=True,
+              bytes_processed_known=True,
+          ),
+          models.ScanEntry(
+              label="guardrail_query_2",
+              bytes_billed=0,
+              bytes_processed=0,
+              cache_hit=False,
+              bytes_billed_known=True,
+              bytes_processed_known=True,
+          ),
+      ],
+  )
+  with (
+      mock.patch.object(app.st, "caption") as mock_caption,
+      mock.patch.object(app.st, "divider") as mock_divider,
+  ):
+    app.footer(ctx)
+    mock_divider.assert_called_once()
+    assert mock_caption.call_count == 3
+    caption_text = mock_caption.call_args_list[0][0][0]
+    assert "2 queries this run" in caption_text
+    assert "0 B billed (0 B processed)" in caption_text
+    assert "unavailable billing data" not in caption_text
+    assert "unavailable scan data" not in caption_text
+
+  # Also test integrated flow where load_query triggers guardrail trip and writes to ctx.scan_log
+  mock_client = mock.MagicMock()
+  mock_probe = mock.MagicMock()
+  mock_probe.total_bytes_processed = 5000
+  mock_client.query.return_value = mock_probe
+
+  ctx_live = models.Context(
+      refs=sample_refs,
+      window=sample_window,
+      filters=models.Filters(),
+      max_bytes=1000,
+      theme=models.LIGHT_THEME,
+      price_in=3.0,
+      price_out=15.0,
+      scan_log=[],
+  )
+  with (
+      mock.patch.object(queries, "get_client", return_value=mock_client),
+      mock.patch.object(queries.st, "spinner"),
+      mock.patch.object(queries.st, "error"),
+  ):
+    res = queries.fetch("SELECT 1", ctx_live, "guardrail_label")
+    assert res.error is not None
+    assert "Guardrail:" in res.error
+    assert len(ctx_live.scan_log) == 1
+    assert ctx_live.scan_log[0].bytes_billed == 0
+    assert ctx_live.scan_log[0].bytes_processed == 0
+    assert ctx_live.scan_log[0].bytes_billed_known is True
+    assert ctx_live.scan_log[0].bytes_processed_known is True
+
+  with (
+      mock.patch.object(app.st, "caption") as mock_caption,
+      mock.patch.object(app.st, "divider"),
+  ):
+    app.footer(ctx_live)
+    caption_text = mock_caption.call_args_list[0][0][0]
+    assert "1 queries this run" in caption_text
+    assert "0 B billed (0 B processed)" in caption_text
+    assert "unavailable billing data" not in caption_text
+    assert "unavailable scan data" not in caption_text
 
 
 def test_fetch_records_scan_log_entry(sample_refs, sample_window):
@@ -1750,6 +2153,8 @@ def test_fetch_records_scan_log_entry(sample_refs, sample_window):
       bytes_processed=1024,
       bytes_billed=10 * 1024 * 1024,
       cache_hit=False,
+      bytes_processed_known=True,
+      bytes_billed_known=True,
   )
   with mock.patch.object(queries, "run_query", return_value=query_result):
     ctx = models.Context(
@@ -1764,11 +2169,14 @@ def test_fetch_records_scan_log_entry(sample_refs, sample_window):
     res = queries.fetch("SELECT 1", ctx, "Test Panel")
     assert res.df is fake_df
     assert len(ctx.scan_log) == 1
-    label, billed, processed, cached = ctx.scan_log[0]
-    assert label == "Test Panel"
-    assert billed == 10 * 1024 * 1024
-    assert processed == 1024
-    assert cached is False
+    entry = ctx.scan_log[0]
+    assert isinstance(entry, models.ScanEntry)
+    assert entry.label == "Test Panel"
+    assert entry.bytes_billed == 10 * 1024 * 1024
+    assert entry.bytes_processed == 1024
+    assert entry.cache_hit is False
+    assert entry.bytes_billed_known is True
+    assert entry.bytes_processed_known is True
 
 
 def test_sidebar_filters_case_a_custom_values_submission():
@@ -1988,7 +2396,7 @@ def test_reset_filters_on_tablerefs_change(sample_refs, sample_window):
       mock.patch.object(
           app, "load_filter_options", return_value=({}, success_res)
       ),
-      mock.patch.object(app, "row_overview"),
+      mock.patch.object(app, "row_overview") as mock_row_overview,
       mock.patch.object(app, "row_llm"),
       mock.patch.object(app, "row_tools"),
       mock.patch.object(app, "row_sessions"),
@@ -1998,6 +2406,7 @@ def test_reset_filters_on_tablerefs_change(sample_refs, sample_window):
     mock_sidebar_filters.return_value = (models.Filters(), 0.0, 0.0)
     app.main()
 
+    mock_row_overview.assert_called_once()
     assert state["_last_refs"] == new_refs
     assert state["applied_filters"] == models.Filters()
     assert "_filter_options" not in state
@@ -2006,6 +2415,69 @@ def test_reset_filters_on_tablerefs_change(sample_refs, sample_window):
     assert "flt_event_type" not in state
     assert "flt_session_id" not in state
     assert "_selected_session_id" not in state
+
+
+def test_app_main_lazy_tabs_dispatch(sample_refs, sample_window):
+  """Verify lazy tabs mode uses st.segmented_control and dispatches to each row function."""
+  state = {}
+  success_res = models.QueryResult(df=mock.MagicMock(), error=None)
+  for tab_choice, expected_fn in [
+      ("Overview", "row_overview"),
+      ("LLM & FinOps", "row_llm"),
+      ("Tools & Execution", "row_tools"),
+      ("Sessions & Traces", "row_sessions"),
+      (None, "row_overview"),
+  ]:
+    with (
+        mock.patch.object(app, "_LAZY_TABS", True),
+        mock.patch.object(app.st, "session_state", state),
+        mock.patch.object(app.st, "set_page_config"),
+        mock.patch.object(app.st, "title"),
+        mock.patch.object(
+            app.st, "segmented_control", return_value=tab_choice
+        ) as mock_seg,
+        mock.patch.object(
+            app, "sidebar_connection", return_value=(sample_refs, 1000)
+        ),
+        mock.patch.object(app, "sidebar_window", return_value=sample_window),
+        mock.patch.object(app, "active_theme", return_value=models.LIGHT_THEME),
+        mock.patch.object(
+            app, "load_filter_options", return_value=({}, success_res)
+        ),
+        mock.patch.object(app, "row_overview") as m_overview,
+        mock.patch.object(app, "row_llm") as m_llm,
+        mock.patch.object(app, "row_tools") as m_tools,
+        mock.patch.object(app, "row_sessions") as m_sessions,
+        mock.patch.object(app, "footer"),
+        mock.patch.object(
+            app, "sidebar_filters", return_value=(models.Filters(), 0.0, 0.0)
+        ),
+    ):
+      app.main()
+      mock_seg.assert_called_once_with(
+          "Dashboard",
+          [
+              "Overview",
+              "LLM & FinOps",
+              "Tools & Execution",
+              "Sessions & Traces",
+          ],
+          default="Overview",
+          label_visibility="collapsed",
+          required=True,
+          key="_active_tab",
+      )
+      fn_map = {
+          "row_overview": m_overview,
+          "row_llm": m_llm,
+          "row_tools": m_tools,
+          "row_sessions": m_sessions,
+      }
+      for name, mock_fn in fn_map.items():
+        if name == expected_fn:
+          mock_fn.assert_called_once()
+        else:
+          mock_fn.assert_not_called()
 
 
 def test_row_sessions_maintains_selected_trace_on_refresh(
@@ -2195,6 +2667,9 @@ def test_billing_statistics_retained_on_dataframe_download_failure():
     assert result.bytes_processed == 20480
     assert result.bytes_billed == 10485760
     assert result.cache_hit is False
+    assert result.bytes_processed_known is True
+    assert result.bytes_billed_known is True
+    assert result.stats_known is True
 
   # Also test when cache_hit is True
   mock_client2 = mock.MagicMock()
@@ -2218,6 +2693,9 @@ def test_billing_statistics_retained_on_dataframe_download_failure():
     assert result2.bytes_processed == 5000
     assert result2.bytes_billed == 0  # $0 billed if cache_hit
     assert result2.cache_hit is True
+    assert result2.bytes_processed_known is True
+    assert result2.bytes_billed_known is True
+    assert result2.stats_known is True
 
 
 def test_extract_job_stats_degraded_path_yields_runtime_error_and_zero_bytes():
@@ -2228,6 +2706,7 @@ def test_extract_job_stats_degraded_path_yields_runtime_error_and_zero_bytes():
 
   mock_job = mock.MagicMock()
   mock_job.total_bytes_processed = None
+  mock_job.total_bytes_billed = None
   mock_job.ended = None
   mock_job.reload.side_effect = RuntimeError("job gone")
   mock_job.to_dataframe.side_effect = RuntimeError(
@@ -2255,6 +2734,9 @@ def test_extract_job_stats_degraded_path_yields_runtime_error_and_zero_bytes():
     assert result.bytes_processed == 0
     assert result.bytes_billed == 0
     assert result.cache_hit is False
+    assert result.bytes_processed_known is False
+    assert result.bytes_billed_known is False
+    assert result.stats_known is False
 
 
 def test_extract_job_stats_reloads_when_initially_none():
@@ -2274,7 +2756,48 @@ def test_extract_job_stats_reloads_when_initially_none():
   mock_job.reload.assert_called_once_with(
       timeout=queries._JOB_RELOAD_TIMEOUT_SECONDS
   )
-  assert stats == (2048, 10485760, False)
+  assert stats == (2048, 10485760, False, True, True)
+
+
+def test_extract_job_stats_reloads_when_total_bytes_billed_is_none():
+  """Job with total_bytes_processed populated but total_bytes_billed None reloads."""
+  mock_job = mock.MagicMock()
+  mock_job.total_bytes_processed = 2048
+  mock_job.total_bytes_billed = None
+  mock_job.ended = dt.datetime.now(dt.timezone.utc)
+  mock_job.cache_hit = False
+
+  def fake_reload(*args, **kwargs):
+    mock_job.total_bytes_billed = 10485760
+
+  mock_job.reload.side_effect = fake_reload
+
+  stats = queries._extract_job_stats(mock_job)
+  mock_job.reload.assert_called_once_with(
+      timeout=queries._JOB_RELOAD_TIMEOUT_SECONDS
+  )
+  assert stats == (2048, 10485760, False, True, True)
+
+
+def test_extract_job_stats_billed_remains_none_marks_stats_unknown():
+  """If total_bytes_billed remains None after reload, stats_known is False."""
+  mock_job = mock.MagicMock()
+  mock_job.total_bytes_processed = 2048
+  mock_job.total_bytes_billed = None
+  mock_job.ended = dt.datetime.now(dt.timezone.utc)
+  mock_job.cache_hit = False
+  mock_job.reload.side_effect = RuntimeError("reload failed")
+
+  stats = queries._extract_job_stats(mock_job)
+  assert stats == (2048, 0, False, True, False)
+
+  err = queries._query_failure("Failed to fetch", mock_job)
+  assert isinstance(err, queries.QueryExecutionError)
+  assert err.bytes_processed_known is True
+  assert err.bytes_billed_known is False
+  assert err.stats_known is False
+  assert err.bytes_billed == 0
+  assert err.bytes_processed == 2048
 
 
 def test_fetch_shows_loading_spinner(sample_refs, sample_window):

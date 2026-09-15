@@ -69,3 +69,8 @@ jobs:
             tests/test_check_streamlit_queries_sync.py \
             tests/test_dashboards_streamlit_charts.py \
             tests/test_dashboards_streamlit_apptest.py
+
+      - name: Verify minimum Streamlit floor dependency
+        run: |
+          pip install "streamlit==1.63.0"
+          pytest --tb=short -q tests/test_dashboards_streamlit_apptest.py

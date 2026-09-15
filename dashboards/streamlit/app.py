@@ -10,8 +10,11 @@ from typing import Any
 from dotenv import load_dotenv
 
 _DASHBOARD_DIR = Path(__file__).resolve().parent
-load_dotenv(_DASHBOARD_DIR / ".env")
-load_dotenv()
+if not os.environ.get("BQAA_DASHBOARD_SKIP_DOTENV"):
+  load_dotenv(_DASHBOARD_DIR / ".env")
+  load_dotenv()
+
+_LAZY_TABS = os.environ.get("STREAMLIT_LAZY_TABS", "true").lower() == "true"
 
 _sa_creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 if _sa_creds and not os.path.isabs(_sa_creds):
@@ -48,6 +51,7 @@ from models import Filters
 from models import humanize_bytes
 from models import make_window
 from models import RECENT_SESSIONS_LIMIT
+from models import ScanEntry
 from models import TableRefs
 from models import TIME_RANGES
 from models import TOOL_ERRORS_LIMIT
@@ -683,40 +687,66 @@ def footer(ctx: Context) -> None:
     return
   total_billed = 0
   total_processed = 0
-  cached = 0
-  for _, billed, processed, hit in ctx.scan_log:
+  cached_count = 0
+  cached_processed = 0
+  unknown_billed_count = 0
+  unknown_fresh_scan_count = 0
+  unknown_cached_scan_count = 0
+
+  for entry in ctx.scan_log:
+    label, billed, processed, hit, billed_known, processed_known = entry
+
     if hit:
-      cached += 1
+      cached_count += 1
+      if processed_known:
+        cached_processed += processed
+      else:
+        unknown_cached_scan_count += 1
     else:
-      total_billed += billed
-      total_processed += processed
+      if billed_known:
+        total_billed += billed
+      else:
+        unknown_billed_count += 1
+
+      if processed_known:
+        total_processed += processed
+      else:
+        unknown_fresh_scan_count += 1
+
+  caption = (
+      f"{len(ctx.scan_log)} queries this run · "
+      f"{humanize_bytes(total_billed)} billed ({humanize_bytes(total_processed)} processed)"
+  )
+  if cached_count > 0:
+    if unknown_cached_scan_count > 0:
+      noun = "query" if unknown_cached_scan_count == 1 else "queries"
+      caption += (
+          f" · {cached_count} served from cache (≥ {humanize_bytes(cached_processed)} scan avoided via cache;"
+          f" {unknown_cached_scan_count} {noun} scan size unrecorded)"
+      )
+    else:
+      caption += f" · {cached_count} served from cache ({humanize_bytes(cached_processed)} scan avoided via cache)"
+
+  if unknown_billed_count > 0:
+    caption += f" · {unknown_billed_count} with unavailable billing data"
+  if unknown_fresh_scan_count > 0:
+    caption += f" · {unknown_fresh_scan_count} with unavailable scan data"
+
+  caption += (
+      f" · per-query cap {humanize_bytes(ctx.max_bytes)} · "
+      f"results cached for {CACHE_TTL_SECONDS // 60} min"
+  )
 
   st.divider()
-  if total_billed == 0 and cached > 0:
-    billed_processed = (
-        f"{humanize_bytes(total_billed)} billed"
-        f" ({humanize_bytes(total_processed)} processed — billing cost saved via cache)"
-    )
-  else:
-    billed_processed = (
-        f"{humanize_bytes(total_billed)} billed"
-        f" ({humanize_bytes(total_processed)} processed)"
-    )
-  cache_note = (
-      f"{cached} served from cache ($0 billed)"
-      if cached > 0
-      else f"{cached} served from cache"
+  st.caption(caption)
+  st.caption(
+      "10 MB minimum per on-demand query; compute/capacity reservations incur"
+      " no per-byte charges."
   )
   st.caption(
-      f"{len(ctx.scan_log)} queries this run · {billed_processed} ·"
-      f" {cache_note} ·"
-      f" per-query cap {humanize_bytes(ctx.max_bytes)} ·"
-      f" results cached for {CACHE_TTL_SECONDS // 60} min"
-  )
-  st.caption(
-      "BigQuery bills a 10 MB minimum per query under on-demand pricing, while"
-      " queries running on compute/capacity reservations incur no per-byte"
-      " charges."
+      "Due to metadata delivery latency, queries can occasionally succeed"
+      " before BigQuery finalizes billing telemetry; unrecorded queries are"
+      " excluded from the totals and noted above."
   )
 
 
@@ -771,23 +801,42 @@ def main() -> None:
       scan_log=probe.scan_log,
   )
 
-  overview, llm, tools, sessions = st.tabs(
-      ["Overview", "LLM & FinOps", "Tools & Execution", "Sessions & Traces"]
-  )
-  with overview:
-    row_overview(ctx)
-  with llm:
-    row_llm(ctx)
-  with tools:
-    row_tools(ctx)
-  with sessions:
-    row_sessions(ctx)
+  if _LAZY_TABS:
+    tab = st.segmented_control(
+        "Dashboard",
+        ["Overview", "LLM & FinOps", "Tools & Execution", "Sessions & Traces"],
+        default="Overview",
+        label_visibility="collapsed",
+        required=True,
+        key="_active_tab",
+    )
+    if tab == "Overview" or tab is None:
+      row_overview(ctx)
+    elif tab == "LLM & FinOps":
+      row_llm(ctx)
+    elif tab == "Tools & Execution":
+      row_tools(ctx)
+    elif tab == "Sessions & Traces":
+      row_sessions(ctx)
+  else:
+    overview, llm, tools, sessions = st.tabs(
+        ["Overview", "LLM & FinOps", "Tools & Execution", "Sessions & Traces"]
+    )
+    with overview:
+      row_overview(ctx)
+    with llm:
+      row_llm(ctx)
+    with tools:
+      row_tools(ctx)
+    with sessions:
+      row_sessions(ctx)
 
   footer(ctx)
 
 
 __all__ = [
     "APP_TITLE",
+    "_LAZY_TABS",
     "footer",
     "main",
     "reset_filters",
