@@ -304,10 +304,12 @@ def test_config_defaults(monkeypatch):
       "EVOLUTION_MODE",
       "GITHUB_BASE_BRANCH",
       "EVOLUTION_PUBLISH",
+      "ANALYST_TIMEOUT_S",
   ):
     monkeypatch.delenv(var, raising=False)
   cfg = config.get_config()
   assert cfg.eval_time_period == "7d"
+  assert cfg.analyst_timeout_s == 600.0
   assert cfg.min_sessions == 20
   assert cfg.gate_policy == "skip"
   assert cfg.evolution_mode == "evolve"
@@ -328,6 +330,25 @@ def test_config_env_overrides(monkeypatch):
   assert cfg.evolution_publish is True
   assert cfg.min_sessions == 5
   assert cfg.quality_threshold == 0.9
+
+
+def test_analyst_timeout_zero_disables_the_bound(monkeypatch):
+  monkeypatch.setenv("ANALYST_TIMEOUT_S", "0")
+  assert config.get_config().analyst_timeout_s is None
+
+
+def test_analyst_timeout_accepts_fractional_seconds(monkeypatch):
+  monkeypatch.setenv("ANALYST_TIMEOUT_S", "12.5")
+  assert config.get_config().analyst_timeout_s == 12.5
+
+
+@pytest.mark.parametrize("value", ["-1", "abc", "nan", "inf"])
+def test_analyst_timeout_rejects_bad_values(monkeypatch, value):
+  # A timeout that was asked for and silently not applied is worse than
+  # a job that refuses to start.
+  monkeypatch.setenv("ANALYST_TIMEOUT_S", value)
+  with pytest.raises(ValueError, match="ANALYST_TIMEOUT_S"):
+    config.get_config()
 
 
 def test_mask_tokens(monkeypatch):

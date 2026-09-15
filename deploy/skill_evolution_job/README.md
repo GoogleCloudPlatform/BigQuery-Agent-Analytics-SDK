@@ -28,15 +28,13 @@ It imports the same `scripts/skill_evolution.py` and `scripts/quality_report.py`
 that ship in this repo (staged into the image by `deploy.sh`), so engine
 improvements land in the job by rebuilding the image.
 
-The job feature-detects the engine it was given: `error_analyst` /
-`toolbox` hooks (agentic analysts) and the incumbent-guarded candidate
-selection need an engine whose `evolve_skill` accepts `error_analyst_fn`,
-`tools` and `incumbent_score`. On an engine without them the job logs
-which keyword it dropped and falls back to single-pass analysts and
-engine-side (size-based) selection. To bake a different engine than this
-checkout's, point `deploy.sh --scripts-dir` at another SDK checkout's
-`scripts/` directory; the image is then reproducible from the flag rather
-than from files copied over by hand.
+Because the image and the engine ship together, the job can rely on the
+engine's host-integration contract: the `error_analyst` / `toolbox` hooks
+(agentic analysts), the incumbent-guarded candidate selection, and the
+per-analyst timeout are always available. What still degrades gracefully
+is the *host* side — with no `error_analyst` hook configured the engine
+runs its built-in single-pass analysts, and with no `score` hook it falls
+back to size-based candidate selection.
 
 ## Quick start (PR mode — recommended)
 
@@ -145,7 +143,7 @@ define any subset of:
 | `score` | `score(candidate_path, skill_dir, run_dir) -> dict` | Score one candidate `SKILL.md` with your own agent + eval set; must return `{"meaningful_rate": <0-100>, ...}` |
 | `gate` | `gate(run_dir, version, agent) -> (bool \| None, str)` | Pre-publish acceptance check (e.g. run your test suite against the evolved skill); only an explicit `False` blocks the PR — `None` means inconclusive and proceeds |
 | `toolbox` | `toolbox(agent) -> str` | Text description of the agent's tools, injected into analyst prompts |
-| `error_analyst` | `error_analyst(client, model, session, skill, tools)` | Custom per-failure analyst (only used when the engine supports `error_analyst_fn`; see `--scripts-dir` above) |
+| `error_analyst` | `error_analyst(client, model, session, skill, tools)` | Custom per-failure analyst (e.g. an agentic investigator with tool access); each call is bounded by `ANALYST_TIMEOUT_S` |
 | `publish` | `publish(skill_dir, run_dir)` | Push the accepted skill to a registry/deployment target after the PR |
 
 The publish gate runs in the host checkout after the selected snapshot is
@@ -249,6 +247,7 @@ Tuning (all optional):
 | `EVOLUTION_CANDIDATES` | auto | Binding candidate count: both evolution tools use this value over the orchestrating agent’s request |
 | `EVOLUTION_MAX_ROUNDS` | `2` | Binding per-agent round cap, an integer from `0` to `2`; `0` disables evolution. Both evolution tools refuse rounds past this cap |
 | `EVOLUTION_TOOLBOX` | — | Toolbox text (literal or `@/path/to/file`) |
+| `ANALYST_TIMEOUT_S` | `600` | Per-analyst wall-clock bound, in seconds; `0` = unbounded. A timed-out analyst counts as a failure and hands its slot to the next one, so one hung `error_analyst` hook cannot stall the fleet into the Cloud Run task timeout. A malformed or negative value fails the run rather than silently reverting to the default |
 | `GATE_POLICY` | `skip` | `require` = missing/failing gate blocks the PR |
 | `EVOLUTION_PUBLISH` | `false` | Gates **real** PR/issue creation. `false` = local previews only (`pr_preview.md` / issue file in the run dir), even with `GITHUB_REPO` set. `deploy.sh` sets it to `true` when both `--github-repo` and `--gh-secret` are wired |
 | `GIT_USER_NAME` / `GIT_USER_EMAIL` | `skill-evolution-job` | Commit identity on evolution branches |

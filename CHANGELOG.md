@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`ANALYST_TIMEOUT_S` for the scheduled skill-evolution job** — the job
+  now binds the engine's per-analyst timeout (default `600` seconds, `0`
+  disables it) and passes it to `evolve_skill`, so one hung analyst —
+  typically a host `error_analyst` hook stuck on its own tool calls —
+  hands its slot to the next queued analyst instead of stalling the
+  fleet into the Cloud Run task timeout. A malformed or negative value
+  fails the run rather than silently reverting to the default.
+
+### Changed
+
+- **The skill-evolution job stops feature-detecting its engine** — the
+  image bakes `scripts/` from the checkout `deploy.sh` runs in, so the
+  engine always carries the #395 host hooks. `engine.supported_kwargs` /
+  `engine.evolve_skill_compat` and the secondary `error_analyst` gate in
+  `evolve.py` are gone (callers use the engine's `evolve_skill`
+  directly), and `deploy.sh --scripts-dir`, which existed to bake a
+  different branch's engine, is removed. Host hooks still degrade
+  gracefully: no `error_analyst` hook means single-pass analysts, no
+  `score` hook means size-based candidate selection.
+
 ## [0.5.2] - 2026-09-05
 
 ### Release highlights

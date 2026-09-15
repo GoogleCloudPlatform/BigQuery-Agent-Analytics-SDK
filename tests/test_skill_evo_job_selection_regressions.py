@@ -111,19 +111,21 @@ def _run(mode, scenario, monkeypatch, hook):
 
 @pytest.mark.parametrize("mode", ["single", "coevolve"])
 @pytest.mark.parametrize("candidate_rate", [80, 95])
-@pytest.mark.parametrize("older_engine_contract", [False, True])
+@pytest.mark.parametrize("engine_rescores_incumbent", [False, True])
 def test_same_eval_baseline_and_single_candidate_score_record(
-    scenario, monkeypatch, mode, candidate_rate, older_engine_contract
+    scenario, monkeypatch, mode, candidate_rate, engine_rescores_incumbent
 ):
   module, skill_dir, _, run_dir = scenario
-  if older_engine_contract:
-    # Older engines drop incumbent_score and call score_fn(V0) themselves.
-    # The real engine follows that same path when this argument is absent.
-    def older_compat(*args, **kwargs):
-      kwargs.pop("incumbent_score", None)
-      return module.evolve_skill(*args, **kwargs)
+  if engine_rescores_incumbent:
+    # Without a pre-measured incumbent_score the engine calls score_fn(V0)
+    # itself; the recorded baseline must come out the same either way.
+    measured = module.evolve_skill
 
-    monkeypatch.setattr(engine, "evolve_skill_compat", older_compat)
+    def rescoring_engine(*args, **kwargs):
+      kwargs.pop("incumbent_score", None)
+      return measured(*args, **kwargs)
+
+    monkeypatch.setattr(module, "evolve_skill", rescoring_engine)
   calls = []
 
   def score(candidate, live_dir, _run_dir):
