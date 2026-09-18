@@ -828,9 +828,13 @@ class TestQuickStartSnippetsRun:
             "bigquery_agent_analytics.client.make_bq_client",
             return_value=MagicMock(),
         ),
-        patch.object(Client, "_verify_schema", return_value=None),
-        patch.object(Client, "list_traces", return_value=traces) as listed,
-        patch.object(Client, "insights", return_value=report),
+        patch.object(Client, "_verify_schema", autospec=True),
+        # autospec keeps the public signatures, so a snippet that passes an
+        # argument the SDK rejects fails here instead of passing a mock.
+        patch.object(
+            Client, "list_traces", autospec=True, return_value=traces
+        ) as listed,
+        patch.object(Client, "insights", autospec=True, return_value=report),
     ):
       out = io.StringIO()
       with contextlib.redirect_stdout(out):
@@ -841,7 +845,9 @@ class TestQuickStartSnippetsRun:
   def test_snippet_asks_for_one_trace(self, name):
     listed, _ = self._run(self.SNIPPETS[name](), traces=[])
     listed.assert_called_once()
-    (filters,) = listed.call_args.args
+    # autospec passes the bound instance through as the first argument.
+    (client, filters) = listed.call_args.args
+    assert isinstance(client, Client)
     assert isinstance(filters, TraceFilter)
     assert filters.limit == 1
 
@@ -854,6 +860,20 @@ class TestQuickStartSnippetsRun:
     trace = MagicMock()
     _, _ = self._run(self.SNIPPETS[name](), traces=[trace])
     trace.render.assert_called_once_with()
+
+  def test_mocks_keep_the_public_signatures(self):
+    """API drift in a snippet must fail here, not pass against a mock.
+
+    The docs test guards the literal ``insights(max_sessions=`` spelling;
+    this guards the behaviour, so a spacing variant the literal check
+    misses still trips over the real signature.
+    """
+    snippet = _init_quick_start().replace(
+        "client.insights()", "client.insights(max_sessions = 50)"
+    )
+    assert "max_sessions = 50" in snippet
+    with pytest.raises(TypeError):
+      self._run(snippet, traces=[])
 
 
 # ================================================================== #
