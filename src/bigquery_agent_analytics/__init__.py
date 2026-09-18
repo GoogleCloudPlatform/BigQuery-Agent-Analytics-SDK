@@ -29,11 +29,12 @@ stored in BigQuery, including:
 
 Quick start::
 
-    from bigquery_agent_analytics import Client
+    from bigquery_agent_analytics import Client, TraceFilter
 
     client = Client(project_id="my-project", dataset_id="analytics")
-    trace = client.get_trace("trace-123")
-    trace.render()
+    traces = client.list_traces(TraceFilter(limit=1))
+    if traces:
+        traces[0].render()
 
     # Generate insights report
     report = client.insights(max_sessions=50)

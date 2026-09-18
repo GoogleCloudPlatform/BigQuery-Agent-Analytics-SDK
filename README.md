@@ -99,13 +99,16 @@ from bigquery_agent_analytics import Client, TraceFilter
 client = Client(
   project_id="my-project",
   dataset_id="analytics",
-  table_id="my_table",
-  location="my-location",
+  # table_id defaults to "agent_events", the table the ADK exporter writes.
+  # location defaults to the BigQuery client's own; pass one such as "US"
+  # only if your dataset lives elsewhere.
 )
 
 traces = client.list_traces(TraceFilter(limit=1))
 if traces:
   traces[0].render()
+else:
+  print("No traces found. Check that agent events have been ingested.")
 ```
 
 ### Export traces to LangSmith
