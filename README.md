@@ -94,7 +94,7 @@ pip install bigquery-agent-analytics[langsmith]
 ## Quick Start
 
 ```python
-from bigquery_agent_analytics import Client
+from bigquery_agent_analytics import Client, TraceFilter
 
 client = Client(
   project_id="my-project",
@@ -103,11 +103,9 @@ client = Client(
   location="my-location",
 )
 
-traces = client.list_traces()
-if traces is not None:
-  trace_id = traces[0].trace_id
-  trace = client.get_trace(trace_id)
-  trace.render()
+traces = client.list_traces(TraceFilter(limit=1))
+if traces:
+  traces[0].render()
 ```
 
 ### Export traces to LangSmith
