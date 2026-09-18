@@ -33,9 +33,13 @@ Covers:
 """
 
 import asyncio
+import contextlib
 from datetime import datetime
 from datetime import timezone
 import inspect
+import io
+import re
+import textwrap
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -544,10 +548,14 @@ class TestSemanticDrift:
 class TestGetTraceDocsUseTraceId:
   """Verify docs reference trace_id not session_id."""
 
-  def test_readme_uses_trace_id(self):
+  def test_readme_quick_start_discovers_a_trace(self):
+    """README's Quick Start lists a real trace rather than a made-up id."""
     with open("README.md") as f:
       content = f.read()
-    assert 'get_trace("trace-' in content
+    assert "list_traces(TraceFilter(limit=1))" in content
+    assert "traces[0].render()" in content
+    # Neither kind of fabricated identifier belongs in the quick start.
+    assert 'get_trace("trace-' not in content
     assert 'get_trace("session-' not in content
 
   def test_sdk_md_uses_trace_id(self):
@@ -759,10 +767,15 @@ class TestGetSessionTrace:
 class TestDocsConsistency:
   """Static checks for documentation accuracy."""
 
-  def test_init_py_quick_start_uses_trace_id(self):
+  def test_init_py_quick_start_discovers_a_trace(self):
+    """The package docstring mirrors README's discover-and-render sample."""
     with open("src/bigquery_agent_analytics/__init__.py") as f:
       content = f.read()
-    assert 'get_trace("trace-' in content
+    assert "list_traces(TraceFilter(limit=1))" in content
+    assert 'get_trace("trace-' not in content
+    assert 'get_trace("session-' not in content
+    # max_sessions belongs to InsightsConfig; Client.insights() takes config.
+    assert "insights(max_sessions=" not in content
 
   def test_client_module_docstring_uses_trace_id(self):
     with open("src/bigquery_agent_analytics/client.py") as f:
@@ -779,6 +792,88 @@ class TestDocsConsistency:
         bq_client=mock_bq,
     )
     assert client.table_id == "agent_events"
+
+
+_README_QUICK_START = re.compile(r"## Quick Start\n\n```python\n(.*?)```", re.S)
+_INIT_QUICK_START = re.compile(r"Quick start::\n\n((?:(?:    [^\n]*)?\n)+)")
+
+
+def _readme_quick_start():
+  with open("README.md") as f:
+    return _README_QUICK_START.search(f.read()).group(1)
+
+
+def _init_quick_start():
+  with open("src/bigquery_agent_analytics/__init__.py") as f:
+    return textwrap.dedent(_INIT_QUICK_START.search(f.read()).group(1))
+
+
+class TestQuickStartSnippetsRun:
+  """The documented quick starts run exactly as written.
+
+  Cloud I/O is mocked at the SDK boundary so the tests exercise the real
+  imports, the real Client constructor and the real control flow of each
+  snippet, on both an empty table and a populated one. This catches API
+  drift in the docs without pinning them to a fabricated trace id.
+  """
+
+  SNIPPETS = {"readme": _readme_quick_start, "init": _init_quick_start}
+
+  @staticmethod
+  def _run(snippet, traces):
+    report = MagicMock()
+    report.summary.return_value = "insights summary"
+    with (
+        patch(
+            "bigquery_agent_analytics.client.make_bq_client",
+            return_value=MagicMock(),
+        ),
+        patch.object(Client, "_verify_schema", autospec=True),
+        # autospec keeps the public signatures, so a snippet that passes an
+        # argument the SDK rejects fails here instead of passing a mock.
+        patch.object(
+            Client, "list_traces", autospec=True, return_value=traces
+        ) as listed,
+        patch.object(Client, "insights", autospec=True, return_value=report),
+    ):
+      out = io.StringIO()
+      with contextlib.redirect_stdout(out):
+        exec(compile(snippet, "<quick start>", "exec"), {})
+    return listed, out.getvalue()
+
+  @pytest.mark.parametrize("name", sorted(SNIPPETS))
+  def test_snippet_asks_for_one_trace(self, name):
+    listed, _ = self._run(self.SNIPPETS[name](), traces=[])
+    listed.assert_called_once()
+    # autospec passes the bound instance through as the first argument.
+    (client, filters) = listed.call_args.args
+    assert isinstance(client, Client)
+    assert isinstance(filters, TraceFilter)
+    assert filters.limit == 1
+
+  def test_readme_reports_an_empty_table(self):
+    _, out = self._run(_readme_quick_start(), traces=[])
+    assert "No traces found" in out
+
+  @pytest.mark.parametrize("name", sorted(SNIPPETS))
+  def test_snippet_renders_the_first_trace(self, name):
+    trace = MagicMock()
+    _, _ = self._run(self.SNIPPETS[name](), traces=[trace])
+    trace.render.assert_called_once_with()
+
+  def test_mocks_keep_the_public_signatures(self):
+    """API drift in a snippet must fail here, not pass against a mock.
+
+    The docs test guards the literal ``insights(max_sessions=`` spelling;
+    this guards the behaviour, so a spacing variant the literal check
+    misses still trips over the real signature.
+    """
+    snippet = _init_quick_start().replace(
+        "client.insights()", "client.insights(max_sessions = 50)"
+    )
+    assert "max_sessions = 50" in snippet
+    with pytest.raises(TypeError):
+      self._run(snippet, traces=[])
 
 
 # ================================================================== #
