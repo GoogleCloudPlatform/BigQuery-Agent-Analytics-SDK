@@ -36,8 +36,9 @@ Quick start::
     if traces:
         traces[0].render()
 
-    # Generate insights report
-    report = client.insights(max_sessions=50)
+    # Generate an insights report over up to 50 sessions (the default;
+    # pass config=InsightsConfig(max_sessions=...) to change it).
+    report = client.insights()
     print(report.summary())
 """
 
