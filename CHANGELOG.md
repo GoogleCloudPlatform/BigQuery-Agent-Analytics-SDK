@@ -29,6 +29,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gracefully: no `error_analyst` hook means single-pass analysts, no
   `score` hook means size-based candidate selection.
 
+### Fixed
+
+- **README onboarding and `EventsTableNotFoundError` (#485)** — the
+  Prerequisites link to the retired `contributing/extensions` exporter
+  (404) is replaced by a "How this fits together" block naming both
+  producers (the ADK plugin and the LangChain/LangGraph callback) and this
+  SDK as the consumer; the Quick Start passes `table_id="agent_events"`
+  and `location="US"` explicitly instead of assuming the defaults. Reads
+  in `get_trace()` and `list_traces()` that hit a missing table now raise
+  `EventsTableNotFoundError` (a `NotFound` subclass, exported at the
+  package top level) naming the fully qualified table and the location and
+  saying which constructor arguments to check, and the schema-verification
+  warning names the table, the exception type and the same fix, so the
+  swallowed warning is no longer the only signal.
+
 ## [0.5.2] - 2026-09-05
 
 ### Release highlights

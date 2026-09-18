@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+from google.api_core import exceptions as gcp_exceptions
 import pytest
 
 from bigquery_agent_analytics.categorical_evaluator import _resolved_selector_key
@@ -29,6 +30,7 @@ from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluation
 from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricCategory
 from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricDefinition
 from bigquery_agent_analytics.client import Client
+from bigquery_agent_analytics.client import EventsTableNotFoundError
 from bigquery_agent_analytics.evaluators import EvaluationReport
 from bigquery_agent_analytics.evaluators import SystemEvaluator
 from bigquery_agent_analytics.trace import AmbiguousSessionError
@@ -2639,3 +2641,73 @@ class TestPerformanceEvaluatorClient:
         isinstance(call.kwargs["trace"], Trace)
         for call in mock_eval.await_args_list
     )
+
+
+class TestEventsTableNotFound:
+  """Issue #485: a wrong table_id or location must say so.
+
+  BigQuery answers a read against a table that does not exist as
+  configured with a bare NotFound. Before this, the only earlier signal
+  was the swallowed schema-verification warning, which reads like an
+  auth problem. The typed error names the table and the location and
+  says which constructor arguments to check.
+  """
+
+  @staticmethod
+  def _client_whose_queries_are_not_found(**kwargs):
+    mock_bq = _mock_bq_client()
+    mock_bq.query.side_effect = gcp_exceptions.NotFound(
+        "Not found: Table proj:ds.agent_events was not found in location US"
+    )
+    return Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+        **kwargs,
+    )
+
+  def test_get_trace_names_table_and_location(self):
+    client = self._client_whose_queries_are_not_found(location="US")
+    with pytest.raises(EventsTableNotFoundError) as excinfo:
+      client.get_trace("trace-1")
+    message = str(excinfo.value)
+    assert "proj.ds.agent_events" in message
+    assert "location=US" in message
+    assert "table_id=" in message and "location=" in message
+
+  def test_list_traces_names_table_and_location(self):
+    client = self._client_whose_queries_are_not_found()
+    with pytest.raises(EventsTableNotFoundError) as excinfo:
+      client.list_traces(TraceFilter(limit=1))
+    message = str(excinfo.value)
+    assert "proj.ds.agent_events" in message
+    assert "client default" in message
+
+  def test_typed_error_is_still_a_not_found(self):
+    """Callers already catching NotFound keep working."""
+    client = self._client_whose_queries_are_not_found()
+    with pytest.raises(gcp_exceptions.NotFound):
+      client.get_trace("trace-1")
+
+  def test_other_errors_pass_through_unchanged(self):
+    mock_bq = _mock_bq_client()
+    mock_bq.query.side_effect = gcp_exceptions.Forbidden("no access")
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(gcp_exceptions.Forbidden):
+      client.get_trace("trace-1")
+
+  def test_schema_warning_names_the_table_and_the_fix(self, caplog):
+    mock_bq = _mock_bq_client()
+    mock_bq.query.side_effect = RuntimeError("metadata server unreachable")
+    with caplog.at_level("WARNING", logger="bigquery_agent_analytics"):
+      Client(project_id="proj", dataset_id="ds", bq_client=mock_bq)
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "proj.ds.agent_events" in text
+    assert "RuntimeError" in text
+    assert "table_id=" in text and "location=" in text

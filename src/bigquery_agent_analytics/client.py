@@ -55,6 +55,7 @@ import logging
 import time
 from typing import Any, Optional
 
+from google.api_core import exceptions as gcp_exceptions
 from google.cloud import bigquery
 
 from ._telemetry import LabeledBigQueryClient
@@ -478,6 +479,28 @@ def _run_sync(coro):
 # ------------------------------------------------------------------ #
 
 
+class EventsTableNotFoundError(gcp_exceptions.NotFound):
+  """The configured events table could not be read (issue #485).
+
+  Raised in place of ``google.api_core.exceptions.NotFound`` when a read
+  fails because ``project.dataset.table`` does not exist as configured.
+  That is almost always a ``table_id`` or ``location`` that does not
+  match what the producer wrote, so the message names both and says
+  what to pass. It is still a ``NotFound``, so existing handlers that
+  catch that keep working.
+  """
+
+  def __init__(self, table_ref: str, location: Optional[str], cause: Exception):
+    self.table_ref = table_ref
+    self.location = location
+    where = f"location={location}" if location else "location=client default"
+    super().__init__(
+        f"Events table {table_ref} was not found ({where}). Pass table_id="
+        " and location= to Client() matching the table your producer"
+        f" writes; see SDK.md section 1. Underlying error: {cause}"
+    )
+
+
 class Client:
   """BigQuery Agent Analytics SDK client.
 
@@ -640,9 +663,21 @@ class Client:
       raise
     except Exception as e:
       logger.warning(
-          "Schema verification failed: %s. Continuing without verification.",
+          "Schema verification failed for %s (%s: %s). Continuing without"
+          " verification. If reads then fail with NotFound, check that"
+          " table_id= and location= on Client() match the table your"
+          " producer writes.",
+          self._table_ref,
+          type(e).__name__,
           e,
       )
+
+  def _read_rows(self, query: str, job_config: bigquery.QueryJobConfig) -> list:
+    """Runs a read, naming the table and location if it is not found."""
+    try:
+      return list(self.bq_client.query(query, job_config=job_config).result())
+    except gcp_exceptions.NotFound as e:
+      raise EventsTableNotFoundError(self._table_ref, self.location, e) from e
 
   def _detect_table(self) -> str:
     """Auto-detects the events table name.
@@ -942,7 +977,7 @@ class Client:
     )
     job_config = with_sdk_labels(job_config, feature="trace-read")
 
-    results = list(self.bq_client.query(query, job_config=job_config).result())
+    results = self._read_rows(query, job_config)
 
     if not results:
       raise ValueError(f"No events found for trace_id={trace_id}")
@@ -2026,9 +2061,7 @@ class Client:
       ]
       job_config = bigquery.QueryJobConfig(query_parameters=attempt_params)
       job_config = with_sdk_labels(job_config, feature=feature)
-      results = list(
-          self.bq_client.query(query, job_config=job_config).result()
-      )
+      results = self._read_rows(query, job_config)
       traces = _build_traces_from_rows(
           results,
           max_traces=limit,

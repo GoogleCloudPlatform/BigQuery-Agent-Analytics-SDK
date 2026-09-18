@@ -96,6 +96,7 @@ __all__.extend(
 # --- SDK Client & Core ---
 try:
   from .client import Client
+  from .client import EventsTableNotFoundError
   from .evaluators import LLMAsJudge
   from .feedback import AnalysisConfig
   from .feedback import DriftReport
@@ -120,6 +121,7 @@ try:
   __all__.extend(
       [
           "Client",
+          "EventsTableNotFoundError",
           "Trace",
           "Span",
           "ContentPart",
