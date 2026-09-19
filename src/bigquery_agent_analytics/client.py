@@ -483,21 +483,30 @@ class EventsTableNotFoundError(gcp_exceptions.NotFound):
   """The configured events table could not be read (issue #485).
 
   Raised in place of ``google.api_core.exceptions.NotFound`` when a read
-  fails because ``project.dataset.table`` does not exist as configured.
-  That is almost always a ``table_id`` or ``location`` that does not
-  match what the producer wrote, so the message names both and says
-  what to pass. It is still a ``NotFound``, so existing handlers that
-  catch that keep working.
+  fails because BigQuery reports the queried table or its dataset as
+  missing. That is almost always a ``table_id`` or ``location`` that
+  does not match what the producer wrote, so the message names the
+  table that was actually queried (evaluation paths can override the
+  constructor's) and the location, and says what to pass. It is still a
+  ``NotFound`` and carries the original ``errors``, ``details``,
+  ``response`` and error info, so existing handlers keep both their
+  ``except`` match and the fields they read. Other ``NotFound`` errors,
+  such as a missing job or a job-location mismatch, are not translated.
   """
 
   def __init__(self, table_ref: str, location: Optional[str], cause: Exception):
     self.table_ref = table_ref
     self.location = location
     where = f"location={location}" if location else "location=client default"
+    api_error = isinstance(cause, gcp_exceptions.GoogleAPICallError)
     super().__init__(
         f"Events table {table_ref} was not found ({where}). Pass table_id="
         " and location= to Client() matching the table your producer"
-        f" writes; see SDK.md section 1. Underlying error: {cause}"
+        f" writes; see SDK.md section 1. Underlying error: {cause}",
+        errors=cause.errors if api_error else (),
+        details=cause.details if api_error else (),
+        response=getattr(cause, "response", None),
+        error_info=getattr(cause, "_error_info", None),
     )
 
 
@@ -672,12 +681,47 @@ class Client:
           e,
       )
 
-  def _read_rows(self, query: str, job_config: bigquery.QueryJobConfig) -> list:
-    """Runs a read, naming the table and location if it is not found."""
+  def _read_rows(
+      self,
+      query: str,
+      job_config: bigquery.QueryJobConfig,
+      *,
+      table: Optional[str] = None,
+  ) -> list:
+    """Runs a read, naming the table and location if it is not found.
+
+    ``table`` is the events table the query actually reads when a caller
+    overrides the constructor's (``dataset=`` on the evaluation paths).
+    Only a ``NotFound`` that names that table or its dataset is
+    translated; a missing job or a job-location mismatch is also a
+    ``NotFound`` and is re-raised untouched.
+    """
+    table = table or self.table_id
     try:
       return list(self.bq_client.query(query, job_config=job_config).result())
     except gcp_exceptions.NotFound as e:
-      raise EventsTableNotFoundError(self._table_ref, self.location, e) from e
+      if not self._not_found_names_source(e, table):
+        raise
+      table_ref = f"{self.project_id}.{self.dataset_id}.{table}"
+      raise EventsTableNotFoundError(table_ref, self.location, e) from e
+
+  def _not_found_names_source(
+      self, error: gcp_exceptions.NotFound, table: str
+  ) -> bool:
+    """Whether a NotFound is about the queried table or its dataset.
+
+    BigQuery spells the resource as ``Table project:dataset.table`` or
+    ``Dataset project:dataset`` in the message; the dotted form is
+    accepted too.
+    """
+    message = str(error).lower()
+    for sep in (":", "."):
+      dataset_ref = f"{self.project_id}{sep}{self.dataset_id}".lower()
+      if f"table {dataset_ref}.{table}".lower() in message:
+        return True
+      if f"dataset {dataset_ref}" in message:
+        return True
+    return False
 
   def _detect_table(self) -> str:
     """Auto-detects the events table name.
@@ -2061,7 +2105,7 @@ class Client:
       ]
       job_config = bigquery.QueryJobConfig(query_parameters=attempt_params)
       job_config = with_sdk_labels(job_config, feature=feature)
-      results = self._read_rows(query, job_config)
+      results = self._read_rows(query, job_config, table=table)
       traces = _build_traces_from_rows(
           results,
           max_traces=limit,
