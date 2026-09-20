@@ -2794,3 +2794,63 @@ class TestEventsTableNotFound:
     assert "proj.ds.agent_events" in text
     assert "RuntimeError" in text
     assert "table_id=" in text and "location=" in text
+
+  def test_table_prefix_collision_is_not_translated(self):
+    """A longer table name that shares a prefix must not be treated as
+    the configured source (e.g. agent_events_archive vs agent_events)."""
+    mock_bq = _mock_bq_client()
+    original = gcp_exceptions.NotFound(
+        "Not found: Table proj:ds.agent_events_archive was not found"
+        " in location US"
+    )
+    mock_bq.query.side_effect = original
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        table_id="agent_events",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(gcp_exceptions.NotFound) as excinfo:
+      client.list_traces(TraceFilter(limit=1))
+    assert excinfo.value is original
+    assert not isinstance(excinfo.value, EventsTableNotFoundError)
+
+  def test_dataset_prefix_collision_is_not_translated(self):
+    """A longer dataset name that shares a prefix must not be treated
+    as the configured dataset (e.g. ds_archive vs ds)."""
+    mock_bq = _mock_bq_client()
+    original = gcp_exceptions.NotFound(
+        "Not found: Dataset proj:ds_archive was not found in location US"
+    )
+    mock_bq.query.side_effect = original
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(gcp_exceptions.NotFound) as excinfo:
+      client.get_trace("trace-1")
+    assert excinfo.value is original
+    assert not isinstance(excinfo.value, EventsTableNotFoundError)
+
+  def test_case_distinct_table_name_is_not_translated(self):
+    """Case-sensitive datasets can hold both agent_events and
+    AGENT_EVENTS; lowercasing must not conflate them."""
+    mock_bq = _mock_bq_client()
+    original = gcp_exceptions.NotFound(
+        "Not found: Table proj:ds.AGENT_EVENTS was not found in location US"
+    )
+    mock_bq.query.side_effect = original
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        table_id="agent_events",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(gcp_exceptions.NotFound) as excinfo:
+      client.list_traces(TraceFilter(limit=1))
+    assert excinfo.value is original
+    assert not isinstance(excinfo.value, EventsTableNotFoundError)

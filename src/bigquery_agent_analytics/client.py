@@ -52,6 +52,7 @@ from datetime import datetime
 from datetime import timezone
 import json
 import logging
+import re
 import time
 from typing import Any, Optional
 
@@ -712,14 +713,32 @@ class Client:
 
     BigQuery spells the resource as ``Table project:dataset.table`` or
     ``Dataset project:dataset`` in the message; the dotted form is
-    accepted too.
+    accepted too. Compare complete resource tokens (not substrings)
+    and respect identifier case so prefix collisions and case-distinct
+    names are not misclassified.
     """
-    message = str(error).lower()
-    for sep in (":", "."):
-      dataset_ref = f"{self.project_id}{sep}{self.dataset_id}".lower()
-      if f"table {dataset_ref}.{table}".lower() in message:
+    message = str(error)
+    expected_tables = {
+        f"{self.project_id}:{self.dataset_id}.{table}",
+        f"{self.project_id}.{self.dataset_id}.{table}",
+    }
+    expected_datasets = {
+        f"{self.project_id}:{self.dataset_id}",
+        f"{self.project_id}.{self.dataset_id}",
+    }
+    # Capture the complete resource token after Table/Dataset; stop at
+    # whitespace or common trailing punctuation in BQ error text.
+    for match in re.finditer(
+        r"(?i)(?:^|[\s])Table\s+([^\s,;]+)", message
+    ):
+      token = match.group(1).rstrip(".)]")
+      if token in expected_tables:
         return True
-      if f"dataset {dataset_ref}" in message:
+    for match in re.finditer(
+        r"(?i)(?:^|[\s])Dataset\s+([^\s,;]+)", message
+    ):
+      token = match.group(1).rstrip(".)]")
+      if token in expected_datasets:
         return True
     return False
 
