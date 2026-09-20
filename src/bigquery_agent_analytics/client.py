@@ -728,15 +728,11 @@ class Client:
     }
     # Capture the complete resource token after Table/Dataset; stop at
     # whitespace or common trailing punctuation in BQ error text.
-    for match in re.finditer(
-        r"(?i)(?:^|[\s])Table\s+([^\s,;]+)", message
-    ):
+    for match in re.finditer(r"(?i)(?:^|[\s])Table\s+([^\s,;]+)", message):
       token = match.group(1).rstrip(".)]")
       if token in expected_tables:
         return True
-    for match in re.finditer(
-        r"(?i)(?:^|[\s])Dataset\s+([^\s,;]+)", message
-    ):
+    for match in re.finditer(r"(?i)(?:^|[\s])Dataset\s+([^\s,;]+)", message):
       token = match.group(1).rstrip(".)]")
       if token in expected_datasets:
         return True
