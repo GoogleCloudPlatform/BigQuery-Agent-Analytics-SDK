@@ -60,12 +60,23 @@ regressions — all through BigQuery SQL or Python.
   pipeline is required. See [docs/sdk_usage_tracking.md](docs/sdk_usage_tracking.md)
   for the label schema and ready-to-run tracking queries.
 
+## How this fits together
+
+Two kinds of components share one `agent_events` table:
+
+- **Producers write it.** The ADK
+  [`BigQueryAgentAnalyticsPlugin`](https://adk.dev/observability/bigquery-agent-analytics/)
+  and the LangChain / LangGraph
+  [`BigQueryCallbackHandler`](https://docs.langchain.com/oss/python/integrations/callbacks/google_bigquery)
+  emit the same schema and can write to the same table side by side.
+- **This SDK consumes it.** Everything here is read-only over that table:
+  trace reconstruction, evaluation, insights, the context graph.
+
 ## Prerequisites
 
 - Python 3.10+
 - A Google Cloud project with BigQuery enabled
-- Agent traces stored in BigQuery via the
-  [ADK BigQuery Trace Exporter](https://github.com/google/adk-python/tree/main/contributing/extensions/bigquery_trace_exporter)
+- Agent traces already written to BigQuery by one of the producers above
 
 ## Installation
 
@@ -99,9 +110,8 @@ from bigquery_agent_analytics import Client, TraceFilter
 client = Client(
   project_id="my-project",
   dataset_id="analytics",
-  # table_id defaults to "agent_events", the table the ADK exporter writes.
-  # location defaults to the BigQuery client's own; pass one such as "US"
-  # only if your dataset lives elsewhere.
+  table_id="agent_events",  # the table your producer writes (this is the default)
+  location="US",  # your dataset's location; omit to use the BigQuery client default
 )
 
 traces = client.list_traces(TraceFilter(limit=1))
@@ -110,6 +120,10 @@ if traces:
 else:
   print("No traces found. Check that agent events have been ingested.")
 ```
+
+If the table or location does not match what your producer wrote, reads raise
+`EventsTableNotFoundError`, whose message names both and says what to pass. It
+is a `google.api_core.exceptions.NotFound`, so existing handlers still catch it.
 
 ### Export traces to LangSmith
 

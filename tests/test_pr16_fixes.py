@@ -950,3 +950,35 @@ class TestMemoryServiceLLMResponse:
     assert "'LLM_RESPONSE'" in query
     assert "'AGENT_COMPLETED'" in query
     assert "'USER_MESSAGE_RECEIVED'" in query
+
+
+class TestReadmeOnboarding:
+  """Issue #485: the README must get a new user to a first render."""
+
+  @staticmethod
+  def _readme():
+    with open("README.md") as f:
+      return f.read()
+
+  def test_prerequisites_link_is_not_the_dead_exporter_url(self):
+    assert (
+        "contributing/extensions/bigquery_trace_exporter" not in self._readme()
+    )
+
+  def test_readme_names_both_producers_and_this_consumer(self):
+    content = self._readme()
+    assert "## How this fits together" in content
+    assert "https://adk.dev/observability/bigquery-agent-analytics/" in content
+    assert (
+        "https://docs.langchain.com/oss/python/integrations/callbacks/google_bigquery"
+        in content
+    )
+
+  def test_quick_start_passes_table_id_and_location_explicitly(self):
+    snippet = _readme_quick_start()
+    assert 'table_id="agent_events"' in snippet
+    assert 'location="US"' in snippet
+    assert "my_table" not in snippet and "my-location" not in snippet
+
+  def test_quick_start_points_at_the_typed_not_found_error(self):
+    assert "EventsTableNotFoundError" in self._readme()

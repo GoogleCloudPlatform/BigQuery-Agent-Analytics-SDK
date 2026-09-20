@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+from google.api_core import exceptions as gcp_exceptions
 import pytest
 
 from bigquery_agent_analytics.categorical_evaluator import _resolved_selector_key
@@ -29,8 +30,10 @@ from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluation
 from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricCategory
 from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricDefinition
 from bigquery_agent_analytics.client import Client
+from bigquery_agent_analytics.client import EventsTableNotFoundError
 from bigquery_agent_analytics.evaluators import EvaluationReport
 from bigquery_agent_analytics.evaluators import SystemEvaluator
+from bigquery_agent_analytics.performance_evaluator import PerformanceEvaluator
 from bigquery_agent_analytics.trace import AmbiguousSessionError
 from bigquery_agent_analytics.trace import ResolvedTraceSelector
 from bigquery_agent_analytics.trace import Span
@@ -2639,3 +2642,258 @@ class TestPerformanceEvaluatorClient:
         isinstance(call.kwargs["trace"], Trace)
         for call in mock_eval.await_args_list
     )
+
+
+class TestEventsTableNotFound:
+  """Issue #485: a wrong table_id or location must say so.
+
+  BigQuery answers a read against a table that does not exist as
+  configured with a bare NotFound. Before this, the only earlier signal
+  was the swallowed schema-verification warning, which reads like an
+  auth problem. The typed error names the table and the location and
+  says which constructor arguments to check.
+  """
+
+  @staticmethod
+  def _client_whose_queries_are_not_found(**kwargs):
+    mock_bq = _mock_bq_client()
+    mock_bq.query.side_effect = gcp_exceptions.NotFound(
+        "Not found: Table proj:ds.agent_events was not found in location US"
+    )
+    return Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+        **kwargs,
+    )
+
+  def test_get_trace_names_table_and_location(self):
+    client = self._client_whose_queries_are_not_found(location="US")
+    with pytest.raises(EventsTableNotFoundError) as excinfo:
+      client.get_trace("trace-1")
+    message = str(excinfo.value)
+    assert "proj.ds.agent_events" in message
+    assert "location=US" in message
+    assert "table_id=" in message and "location=" in message
+
+  def test_list_traces_names_table_and_location(self):
+    client = self._client_whose_queries_are_not_found()
+    with pytest.raises(EventsTableNotFoundError) as excinfo:
+      client.list_traces(TraceFilter(limit=1))
+    message = str(excinfo.value)
+    assert "proj.ds.agent_events" in message
+    assert "client default" in message
+
+  def test_typed_error_is_still_a_not_found(self):
+    """Callers already catching NotFound keep working."""
+    client = self._client_whose_queries_are_not_found()
+    with pytest.raises(gcp_exceptions.NotFound):
+      client.get_trace("trace-1")
+
+  def test_other_errors_pass_through_unchanged(self):
+    mock_bq = _mock_bq_client()
+    mock_bq.query.side_effect = gcp_exceptions.Forbidden("no access")
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(gcp_exceptions.Forbidden):
+      client.get_trace("trace-1")
+
+  def test_override_table_is_the_one_named(self):
+    """Evaluation paths may read a different table than the constructor's.
+
+    The diagnostic must name the table that was actually queried, or it
+    sends the user to change a constructor argument that is not the
+    problem.
+    """
+    mock_bq = _mock_bq_client()
+    mock_bq.query.side_effect = gcp_exceptions.NotFound(
+        "Not found: Table proj:ds.golden_events was not found in location US"
+    )
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(EventsTableNotFoundError) as excinfo:
+      client.evaluate(PerformanceEvaluator(), dataset="golden_events")
+    message = str(excinfo.value)
+    assert "proj.ds.golden_events" in message
+    assert "proj.ds.agent_events" not in message
+    assert excinfo.value.table_ref == "proj.ds.golden_events"
+
+  def test_job_not_found_is_not_translated(self):
+    """BigQuery also answers NotFound for a missing job or a job-location
+    mismatch; those are not a missing events table and must pass through
+    as the original exception."""
+    mock_bq = _mock_bq_client()
+    original = gcp_exceptions.NotFound("Not found: Job proj:US.query_job_123")
+    mock_bq.query.side_effect = original
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(gcp_exceptions.NotFound) as excinfo:
+      client.list_traces(TraceFilter(limit=1))
+    assert excinfo.value is original
+    assert not isinstance(excinfo.value, EventsTableNotFoundError)
+
+  def test_missing_dataset_is_translated(self):
+    mock_bq = _mock_bq_client()
+    mock_bq.query.side_effect = gcp_exceptions.NotFound(
+        "Not found: Dataset proj:ds was not found in location US"
+    )
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(EventsTableNotFoundError):
+      client.get_trace("trace-1")
+
+  def test_structured_metadata_is_preserved(self):
+    """Handlers that read NotFound.errors/details/response keep their data."""
+    mock_bq = _mock_bq_client()
+    response = MagicMock(name="http_response")
+    original = gcp_exceptions.NotFound(
+        "Not found: Table proj:ds.agent_events was not found in location US",
+        errors=[{"reason": "notFound", "message": "Not found: Table"}],
+        details=["detail-1"],
+        response=response,
+    )
+    mock_bq.query.side_effect = original
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(EventsTableNotFoundError) as excinfo:
+      client.get_trace("trace-1")
+    wrapped = excinfo.value
+    assert wrapped.errors == original.errors
+    assert wrapped.details == original.details
+    assert wrapped.response is response
+    assert wrapped.code == original.code
+    assert wrapped.__cause__ is original
+
+  def test_schema_warning_names_the_table_and_the_fix(self, caplog):
+    mock_bq = _mock_bq_client()
+    mock_bq.query.side_effect = RuntimeError("metadata server unreachable")
+    with caplog.at_level("WARNING", logger="bigquery_agent_analytics"):
+      Client(project_id="proj", dataset_id="ds", bq_client=mock_bq)
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "proj.ds.agent_events" in text
+    assert "RuntimeError" in text
+    assert "table_id=" in text and "location=" in text
+
+  def test_table_prefix_collision_is_not_translated(self):
+    """A longer table name that shares a prefix must not be treated as
+    the configured source (e.g. agent_events_archive vs agent_events)."""
+    mock_bq = _mock_bq_client()
+    original = gcp_exceptions.NotFound(
+        "Not found: Table proj:ds.agent_events_archive was not found"
+        " in location US"
+    )
+    mock_bq.query.side_effect = original
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        table_id="agent_events",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(gcp_exceptions.NotFound) as excinfo:
+      client.list_traces(TraceFilter(limit=1))
+    assert excinfo.value is original
+    assert not isinstance(excinfo.value, EventsTableNotFoundError)
+
+  def test_dataset_prefix_collision_is_not_translated(self):
+    """A longer dataset name that shares a prefix must not be treated
+    as the configured dataset (e.g. ds_archive vs ds)."""
+    mock_bq = _mock_bq_client()
+    original = gcp_exceptions.NotFound(
+        "Not found: Dataset proj:ds_archive was not found in location US"
+    )
+    mock_bq.query.side_effect = original
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(gcp_exceptions.NotFound) as excinfo:
+      client.get_trace("trace-1")
+    assert excinfo.value is original
+    assert not isinstance(excinfo.value, EventsTableNotFoundError)
+
+  def test_case_distinct_table_name_is_not_translated(self):
+    """Case-sensitive datasets can hold both agent_events and
+    AGENT_EVENTS; lowercasing must not conflate them."""
+    mock_bq = _mock_bq_client()
+    original = gcp_exceptions.NotFound(
+        "Not found: Table proj:ds.AGENT_EVENTS was not found in location US"
+    )
+    mock_bq.query.side_effect = original
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        table_id="agent_events",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(gcp_exceptions.NotFound) as excinfo:
+      client.list_traces(TraceFilter(limit=1))
+    assert excinfo.value is original
+    assert not isinstance(excinfo.value, EventsTableNotFoundError)
+
+  def test_table_name_with_spaces_suffix_is_not_translated(self):
+    """A table name that shares a prefix then a space must not be
+    treated as the configured source (e.g. 'agent_events archive'
+    vs agent_events). BigQuery permits spaces in table names."""
+    mock_bq = _mock_bq_client()
+    original = gcp_exceptions.NotFound(
+        "Not found: Table proj:ds.agent_events archive was not found"
+        " in location US"
+    )
+    mock_bq.query.side_effect = original
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        table_id="agent_events",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(gcp_exceptions.NotFound) as excinfo:
+      client.list_traces(TraceFilter(limit=1))
+    assert excinfo.value is original
+    assert not isinstance(excinfo.value, EventsTableNotFoundError)
+
+  def test_table_name_with_spaces_exact_is_translated(self):
+    """When the configured table_id itself contains spaces, an exact
+    missing-table NotFound must still become EventsTableNotFoundError."""
+    mock_bq = _mock_bq_client()
+    mock_bq.query.side_effect = gcp_exceptions.NotFound(
+        "Not found: Table proj:ds.agent_events archive was not found"
+        " in location US"
+    )
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        table_id="agent_events archive",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(EventsTableNotFoundError) as excinfo:
+      client.list_traces(TraceFilter(limit=1))
+    message = str(excinfo.value)
+    assert "proj.ds.agent_events archive" in message
+    assert "table_id=" in message
