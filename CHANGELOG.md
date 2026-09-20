@@ -7,36 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-20
+
+### Release highlights
+
+A small patch release. In the wheel: reads against a missing events table
+now fail with `EventsTableNotFoundError`, a `NotFound` subclass that names
+the table, the location and the `Client()` arguments to check (#485); the
+extractor-compilation smoke gate measures its memory budget above the SDK's
+own import footprint instead of failing before the candidate loads (#480);
+new `streamlit` / `dashboards` extras install what the Streamlit dashboard
+needs (#480); and `ViewManager` gains an empty-but-tested cross-event view
+registry so ADK 2.0 analytical views can deploy beside per-event views
+(#210). Around the wheel: a Streamlit agent-analytics dashboard joins
+Grafana under a consolidated `dashboards/` directory (#480, #481), the
+scheduled skill-evolution job gains a per-analyst timeout (#483), the
+README onboarding path is corrected (#484, #485), an OKF Attested
+Computation receipt spike lands under `examples/` (#479), and three demos
+decouple the agent `MODEL_NAME` from a separate `JUDGE_MODEL` for SDK-side
+grading (#471). No public API is removed or renamed.
+
 ### Added
 
-- **Cross-event view deployment path on `ViewManager`** — a second
-  registry, `_CROSS_EVENT_VIEW_DEFS`, sits next to `_EVENT_VIEW_DEFS` for
-  analytical views that span several event types. `create_all_views()`
+- **Cross-event view deployment path on `ViewManager` (#210 / #489)** — a
+  second registry, `_CROSS_EVENT_VIEW_DEFS`, sits next to `_EVENT_VIEW_DEFS`
+  for analytical views that span several event types. `create_all_views()`
   and `bq-agent-sdk views create-all` deploy per-event views and then
   cross-event views in one invocation; `create_view()` / `get_view_sql()`
   / `views create` accept a key from either registry. The registry ships
   empty (the ADK 2.0 consumer views register into it as they land), so
-  the deployed set and per-event SQL are unchanged (#210).
+  the deployed set and per-event SQL are unchanged.
 
-- **`ANALYST_TIMEOUT_S` for the scheduled skill-evolution job** — the job
-  now binds the engine's per-analyst timeout (default `600` seconds, `0`
-  disables it) and passes it to `evolve_skill`, so one hung analyst —
-  typically a host `error_analyst` hook stuck on its own tool calls —
-  hands its slot to the next queued analyst instead of stalling the
-  fleet into the Cloud Run task timeout. A malformed or negative value
-  fails the run rather than silently reverting to the default.
+- **`streamlit` and `dashboards` extras (#480)** —
+  `pip install 'bigquery-agent-analytics[streamlit]'` pulls the Streamlit
+  dashboard's dependencies (`streamlit>=1.63.0`, `plotly>=6.0.0`,
+  `db-dtypes`, `pandas`, `python-dotenv`); `dashboards` is an alias for it,
+  and the `all` extra now includes `dashboards`. The dashboard code itself
+  lives in the repo, not the wheel (see *Dashboards* below).
 
 ### Changed
 
-- **The skill-evolution job stops feature-detecting its engine** — the
-  image bakes `scripts/` from the checkout `deploy.sh` runs in, so the
-  engine always carries the #395 host hooks. `engine.supported_kwargs` /
-  `engine.evolve_skill_compat` and the secondary `error_analyst` gate in
-  `evolve.py` are gone (callers use the engine's `evolve_skill`
-  directly), and `deploy.sh --scripts-dir`, which existed to bake a
-  different branch's engine, is removed. Host hooks still degrade
-  gracefully: no `error_analyst` hook means single-pass analysts, no
-  `score` hook means size-based candidate selection.
+- **Package quick-start docstring (#484)** — the `bigquery_agent_analytics`
+  module docstring now lists a trace with
+  `client.list_traces(TraceFilter(limit=1))` instead of assuming a known
+  trace id, and calls `client.insights()` with its default of 50 sessions
+  (pass `config=InsightsConfig(max_sessions=...)` to change it). README
+  Quick Start updated to match.
 
 ### Fixed
 
@@ -52,6 +68,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saying which constructor arguments to check, and the schema-verification
   warning names the table, the exception type and the same fix, so the
   swallowed warning is no longer the only signal.
+- **Extractor smoke-gate memory cap counts the candidate, not the SDK
+  (#480)** — `run_smoke_test_in_subprocess(memory_limit_mb=...)` applied
+  `RLIMIT_AS` as an absolute ceiling before the child imported the trusted
+  SDK harness, so in environments where `google-cloud-bigquery` pulls in
+  pandas / pyarrow / numpy the import baseline alone could exhaust the
+  budget and fail the gate with `MemoryError` before the candidate
+  extractor loaded. The child now imports the harness first and applies
+  `memory_limit_mb` as headroom above its current address space (read from
+  `/proc/self/statm` on Linux, where `RLIMIT_AS` is enforced); when the
+  baseline cannot be read it falls back to the previous absolute cap.
+
+### Dashboards (repo side, not in the wheel)
+
+- **Streamlit agent analytics dashboard (#480)** — `dashboards/streamlit/`
+  is a Python-native alternative to the Grafana dashboard, backed by the
+  same typed views and filter semantics, with scan-cap guardrails and query
+  caching. Install with the `streamlit` extra and configure through
+  `dashboards/streamlit/.env`. `scripts/check_streamlit_queries_sync.py`
+  guards its queries against drift.
+- **Grafana moves under `dashboards/` (#481)** — `grafana/` is now
+  `dashboards/grafana/` (dashboard JSON, queries and `run_local.py`), and
+  `scripts/check_grafana_queries_sync.py` follows it. Update any local
+  scripts or bookmarks that pointed at the old top-level path.
+
+### Deploy (repo side, not in the wheel)
+
+- **`ANALYST_TIMEOUT_S` for the scheduled skill-evolution job** — the job
+  now binds the engine's per-analyst timeout (default `600` seconds, `0`
+  disables it) and passes it to `evolve_skill`, so one hung analyst —
+  typically a host `error_analyst` hook stuck on its own tool calls —
+  hands its slot to the next queued analyst instead of stalling the
+  fleet into the Cloud Run task timeout. A malformed or negative value
+  fails the run rather than silently reverting to the default.
+- **The skill-evolution job stops feature-detecting its engine** — the
+  image bakes `scripts/` from the checkout `deploy.sh` runs in, so the
+  engine always carries the #395 host hooks. `engine.supported_kwargs` /
+  `engine.evolve_skill_compat` and the secondary `error_analyst` gate in
+  `evolve.py` are gone (callers use the engine's `evolve_skill`
+  directly), and `deploy.sh --scripts-dir`, which existed to bake a
+  different branch's engine, is removed. Host hooks still degrade
+  gracefully: no `error_analyst` hook means single-pass analysts, no
+  `score` hook means size-based candidate selection.
+
+### Examples
+
+- **Judge model decoupled from agent `MODEL_NAME` (#471 / #488)** —
+  `examples/e2e_demo.py`, `examples/context_graph_adcp_demo.ipynb`, and
+  `examples/nba_agent_trace_analysis_notebook.ipynb` now take a separate
+  env-overridable `JUDGE_MODEL` for all SDK-side LLM usage (`Client`
+  endpoint, `ContextGraphConfig` endpoint, `LLMAsJudge` model,
+  `PerformanceEvaluator` `llm_judge_model`) while `LlmAgent(model=MODEL_NAME)`
+  is unchanged. Startup output prints both roles. `examples/README.md`
+  documents that the judge is independent of the agent by default and names
+  the silent SDK fallback (`gemini-2.5-flash`).
+
+- **OKF result-bound receipt spike (#479)** —
+  `examples/okf_attested_computation/`: one OKF v0.2 §10 Attested
+  Computation is approved by a trusted broker, executed under the caller's
+  own BigQuery delegation, and independently verified by a separate code
+  path before a deterministic consumer releases the number. Spike,
+  example-only, synthetic fixture; not a production receipt service. The
+  #474 observer (`examples/okf_bqaa_adapter`) is untouched.
+
+### Documentation
+
+- **README onboarding (#484, #485)** — the Prerequisites section gains a
+  "How this fits together" block naming both producers and this SDK as the
+  consumer, and the Quick Start passes `table_id` and `location`
+  explicitly; see the *Fixed* entry above for the matching error.
 
 ## [0.5.2] - 2026-09-05
 
