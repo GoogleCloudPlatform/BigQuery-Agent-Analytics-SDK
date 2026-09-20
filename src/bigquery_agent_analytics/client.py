@@ -713,9 +713,12 @@ class Client:
 
     BigQuery spells the resource as ``Table project:dataset.table`` or
     ``Dataset project:dataset`` in the message; the dotted form is
-    accepted too. Compare complete resource tokens (not substrings)
-    and respect identifier case so prefix collisions and case-distinct
-    names are not misclassified.
+    accepted too. Prefer capturing the full resource after Table/Dataset
+    until the BQ terminator `` was not found`` so spaces inside
+    identifiers are preserved. Compare with exact equality (case-
+    preserving) so prefix collisions, space-suffix collisions, and
+    case-distinct names are not misclassified. Ambiguous formats
+    without the terminator are not translated.
     """
     message = str(error)
     expected_tables = {
@@ -726,13 +729,16 @@ class Client:
         f"{self.project_id}:{self.dataset_id}",
         f"{self.project_id}.{self.dataset_id}",
     }
-    # Capture the complete resource token after Table/Dataset; stop at
-    # whitespace or common trailing punctuation in BQ error text.
-    for match in re.finditer(r"(?i)(?:^|[\s])Table\s+([^\s,;]+)", message):
+    # Capture through the BQ terminator so spaces in identifiers survive.
+    for match in re.finditer(
+        r"(?i)(?:^|[\s])Table\s+(.+?)\s+was\s+not\s+found", message
+    ):
       token = match.group(1).rstrip(".)]")
       if token in expected_tables:
         return True
-    for match in re.finditer(r"(?i)(?:^|[\s])Dataset\s+([^\s,;]+)", message):
+    for match in re.finditer(
+        r"(?i)(?:^|[\s])Dataset\s+(.+?)\s+was\s+not\s+found", message
+    ):
       token = match.group(1).rstrip(".)]")
       if token in expected_datasets:
         return True

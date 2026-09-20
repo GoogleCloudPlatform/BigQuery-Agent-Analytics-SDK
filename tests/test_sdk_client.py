@@ -2854,3 +2854,46 @@ class TestEventsTableNotFound:
       client.list_traces(TraceFilter(limit=1))
     assert excinfo.value is original
     assert not isinstance(excinfo.value, EventsTableNotFoundError)
+
+  def test_table_name_with_spaces_suffix_is_not_translated(self):
+    """A table name that shares a prefix then a space must not be
+    treated as the configured source (e.g. 'agent_events archive'
+    vs agent_events). BigQuery permits spaces in table names."""
+    mock_bq = _mock_bq_client()
+    original = gcp_exceptions.NotFound(
+        "Not found: Table proj:ds.agent_events archive was not found"
+        " in location US"
+    )
+    mock_bq.query.side_effect = original
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        table_id="agent_events",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(gcp_exceptions.NotFound) as excinfo:
+      client.list_traces(TraceFilter(limit=1))
+    assert excinfo.value is original
+    assert not isinstance(excinfo.value, EventsTableNotFoundError)
+
+  def test_table_name_with_spaces_exact_is_translated(self):
+    """When the configured table_id itself contains spaces, an exact
+    missing-table NotFound must still become EventsTableNotFoundError."""
+    mock_bq = _mock_bq_client()
+    mock_bq.query.side_effect = gcp_exceptions.NotFound(
+        "Not found: Table proj:ds.agent_events archive was not found"
+        " in location US"
+    )
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        table_id="agent_events archive",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(EventsTableNotFoundError) as excinfo:
+      client.list_traces(TraceFilter(limit=1))
+    message = str(excinfo.value)
+    assert "proj.ds.agent_events archive" in message
+    assert "table_id=" in message
