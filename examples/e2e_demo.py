@@ -23,6 +23,8 @@ Demonstrates the full lifecycle:
 
 Usage:
     export GOOGLE_CLOUD_PROJECT="test-project-0728-467323"
+    export MODEL_NAME="gemini-3-flash-preview"   # agent model (optional)
+    export JUDGE_MODEL="gemini-2.5-flash"        # judge model (optional, independent)
     python BigQuery-Agent-Analytics-SDK/examples/e2e_demo.py
 """
 
@@ -71,6 +73,12 @@ PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "test-project-0728-467323")
 DATASET_ID = os.environ.get("BQ_DATASET", "agent_analytics")
 TABLE_ID = os.environ.get("BQ_TABLE", "agent_events")
 MODEL_NAME = os.environ.get("MODEL_NAME", "gemini-3-flash-preview")
+# Judge model is intentionally independent of the agent model above: the agent
+# runs on MODEL_NAME while all SDK-side LLM usage (Client AI.GENERATE
+# endpoint, LLM-as-judge evaluators) runs on JUDGE_MODEL. When JUDGE_MODEL is
+# unset, the SDK silently falls back to its built-in default
+# ("gemini-2.5-flash") wherever no explicit model/endpoint is passed.
+JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "gemini-2.5-flash")
 GCP_LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
 LOCATION = "US"
 APP_NAME = "e2e_demo"
@@ -435,7 +443,7 @@ async def phase2_evaluate(
       dataset_id=DATASET_ID,
       table_id=TABLE_ID,
       location=LOCATION,
-      endpoint=MODEL_NAME,
+      endpoint=JUDGE_MODEL,
   )
 
   # ---- 2a. Trace retrieval & visualisation -------------------------- #
@@ -484,6 +492,7 @@ async def phase2_evaluate(
         project_id=PROJECT_ID,
         dataset_id=DATASET_ID,
         table_id=TABLE_ID,
+        llm_judge_model=JUDGE_MODEL,
     )
     report = await asyncio.to_thread(
         client.evaluate, evaluator=judge, filters=trace_filter
@@ -499,6 +508,7 @@ async def phase2_evaluate(
         project_id=PROJECT_ID,
         dataset_id=DATASET_ID,
         table_id=TABLE_ID,
+        llm_judge_model=JUDGE_MODEL,
     )
     # Tokyo trip (session index 1) should have called all four tools
     result = await evaluator.evaluate_session(
@@ -537,7 +547,7 @@ async def phase3_insights(session_ids: list[str]) -> None:
       dataset_id=DATASET_ID,
       table_id=TABLE_ID,
       location=LOCATION,
-      endpoint=MODEL_NAME,
+      endpoint=JUDGE_MODEL,
   )
 
   try:
@@ -580,7 +590,8 @@ async def main() -> None:
   print(f"  Project  : {PROJECT_ID}")
   print(f"  Dataset  : {DATASET_ID}")
   print(f"  Table    : {TABLE_ID}")
-  print(f"  Model    : {MODEL_NAME}")
+  print(f"  Agent model : {MODEL_NAME}")
+  print(f"  Judge model : {JUDGE_MODEL}")
   print(f"  Location : {LOCATION}")
   print()
 
