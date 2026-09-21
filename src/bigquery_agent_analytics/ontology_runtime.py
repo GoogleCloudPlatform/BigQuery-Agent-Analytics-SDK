@@ -1159,21 +1159,6 @@ class OntologyRuntime:
 # ------------------------------------------------------------------ #
 
 
-def _first_string_value(raw: Any) -> Optional[str]:
-  """Return the first string from an annotation value (scalar
-  or list). ``None`` for missing / empty / non-string content."""
-  if raw is None:
-    return None
-  if isinstance(raw, list):
-    for v in raw:
-      if isinstance(v, str):
-        return v
-    return None
-  if isinstance(raw, str):
-    return raw
-  return None
-
-
 def _all_string_values(raw: Any) -> tuple[str, ...]:
   """Return every string from an annotation value, scalar or
   list. Empty tuple for missing / non-string content."""

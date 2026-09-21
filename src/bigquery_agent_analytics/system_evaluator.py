@@ -37,8 +37,6 @@ from typing import Any, Callable, Optional
 from pydantic import BaseModel
 from pydantic import Field
 
-from bigquery_agent_analytics import udf_kernels
-
 from .utils import _parse_json_from_text
 from .utils import strip_markdown_fences
 

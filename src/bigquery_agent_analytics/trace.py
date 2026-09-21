@@ -35,7 +35,6 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from enum import Enum
-import functools
 import json
 import logging
 import re

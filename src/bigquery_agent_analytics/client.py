@@ -72,7 +72,6 @@ from .categorical_evaluator import build_ai_classify_query
 from .categorical_evaluator import build_ai_generate_query
 from .categorical_evaluator import build_categorical_prompt
 from .categorical_evaluator import build_categorical_report
-from .categorical_evaluator import CATEGORICAL_AI_GENERATE_QUERY
 from .categorical_evaluator import CATEGORICAL_RESULTS_DDL
 from .categorical_evaluator import CATEGORICAL_RESULTS_MIGRATIONS
 from .categorical_evaluator import CATEGORICAL_TRANSCRIPT_QUERY

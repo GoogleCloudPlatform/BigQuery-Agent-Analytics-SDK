@@ -44,3 +44,9 @@ dashboards/grafana/.local/
 grafana/*.json
 dashboards/grafana/*.json
 dashboards/streamlit/*.json
+
+# SDLC working notes (intent / spec / plan) live outside this repo.
+# Basename patterns match at any depth; CI "Format check" also enforces this.
+intent.md
+plan.md
+spec.md
