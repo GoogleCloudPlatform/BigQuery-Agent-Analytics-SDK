@@ -1813,7 +1813,7 @@ def ontology_showcase_gql(
 
 views_app = typer.Typer(
     name="views",
-    help="Manage per-event-type BigQuery views.",
+    help="Manage per-event-type and cross-event BigQuery views.",
     add_completion=False,
 )
 app.add_typer(views_app, name="views")
@@ -1852,7 +1852,7 @@ def views_create_all(
         help="Output format: json|text|table.",
     ),
 ) -> None:
-  """Create views for all supported event types."""
+  """Create all per-event-type views and all cross-event views."""
   try:
     vm = _build_view_manager(project_id, dataset_id, table_id, prefix)
     result = vm.create_all_views()
@@ -1864,7 +1864,9 @@ def views_create_all(
 
 @views_app.command("create")
 def views_create(
-    event_type: str = typer.Argument(help="Event type to create a view for."),
+    event_type: str = typer.Argument(
+        help="Event type, or cross-event view key, to create a view for."
+    ),
     project_id: str = typer.Option(
         ..., envvar="BQ_AGENT_PROJECT", help=_PROJECT_HELP
     ),
@@ -1879,7 +1881,7 @@ def views_create(
         help="Output format: json|text|table.",
     ),
 ) -> None:
-  """Create a view for a single event type."""
+  """Create a single per-event-type or cross-event view."""
   try:
     vm = _build_view_manager(project_id, dataset_id, table_id, prefix)
     vm.create_view(event_type)

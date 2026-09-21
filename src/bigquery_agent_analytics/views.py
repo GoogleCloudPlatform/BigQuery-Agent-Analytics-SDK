@@ -20,6 +20,11 @@ columns.  Every view retains the standard identity headers:
 ``timestamp``, ``event_type``, ``agent``, ``session_id``,
 ``invocation_id``.
 
+``ViewManager`` also deploys cross-event analytical views — views that
+span several event types — from a second registry,
+``_CROSS_EVENT_VIEW_DEFS``.  Both registries share one manager, one
+``create_all_views()`` call and one ``views`` CLI path (#210).
+
 Example usage::
 
     from bigquery_agent_analytics.views import ViewManager
@@ -29,7 +34,7 @@ Example usage::
         dataset_id="analytics",
         table_id="agent_events",
     )
-    vm.create_all_views()              # create all per-event views
+    vm.create_all_views()              # per-event + cross-event views
     vm.create_view("LLM_REQUEST")      # create a single view
     print(vm.get_view_sql("TOOL_STARTING"))  # inspect SQL without creating
 """
@@ -306,6 +311,32 @@ _EVENT_VIEW_DEFS: dict[str, tuple[str, str]] = {
 }
 
 # ------------------------------------------------------------------ #
+# Cross-event view definitions                                         #
+# ------------------------------------------------------------------ #
+# Analytical views that span several event types, so they cannot be
+# expressed as "standard headers + extra columns WHERE event_type = X".
+# Each entry maps a view key to a tuple of (view_suffix, query_sql).
+# ``query_sql`` is the full SELECT body and is rendered with
+# ``str.format``, so literal braces must be doubled.  Placeholders:
+#
+#   {project}, {dataset}  the manager's project and dataset
+#   {table}               the source events table
+#   {view_prefix}         the manager's view prefix, for reading a
+#                         per-event view, e.g.
+#                         `{project}.{dataset}.{view_prefix}tool_starts`
+#
+# Keys share ``create_all_views()``'s result dict with the event types
+# above and suffixes share their BigQuery namespace, so neither may
+# collide with ``_EVENT_VIEW_DEFS``.  Entries deploy in insertion order,
+# after every per-event view; a view that reads another cross-event
+# view must come after it.
+#
+# Empty for now: this is the deployment plumbing (#210).  The six
+# consumer views land in #212-#217.
+
+_CROSS_EVENT_VIEW_DEFS: dict[str, tuple[str, str]] = {}
+
+# ------------------------------------------------------------------ #
 # View Template                                                        #
 # ------------------------------------------------------------------ #
 
@@ -341,13 +372,64 @@ def _build_view_sql(
   )
 
 
+_CROSS_EVENT_VIEW_SQL_TEMPLATE = """\
+CREATE OR REPLACE VIEW `{project}.{dataset}.{view_name}` AS
+{query}
+"""
+
+
+def _build_cross_event_view_sql(
+    project: str,
+    dataset: str,
+    table: str,
+    view_prefix: str,
+    view_name: str,
+    query_sql: str,
+) -> str:
+  """Builds the CREATE OR REPLACE VIEW SQL for one cross-event view."""
+  query = query_sql.format(
+      project=project,
+      dataset=dataset,
+      table=table,
+      view_prefix=view_prefix,
+  )
+  return _CROSS_EVENT_VIEW_SQL_TEMPLATE.format(
+      project=project,
+      dataset=dataset,
+      view_name=view_name,
+      query=query,
+  )
+
+
+def _check_view_registries() -> None:
+  """Raises ValueError if the two registries collide.
+
+  A shared key would overwrite an entry in ``create_all_views()``'s
+  result; a shared suffix would make one view replace the other.
+  """
+  shared_keys = sorted(set(_CROSS_EVENT_VIEW_DEFS) & set(_EVENT_VIEW_DEFS))
+  if shared_keys:
+    raise ValueError(
+        f"Cross-event view keys collide with event types: {shared_keys}"
+    )
+  suffixes = [suffix for suffix, _ in _EVENT_VIEW_DEFS.values()]
+  suffixes += [suffix for suffix, _ in _CROSS_EVENT_VIEW_DEFS.values()]
+  shared_suffixes = sorted({s for s in suffixes if suffixes.count(s) > 1})
+  if shared_suffixes:
+    raise ValueError(f"View suffixes are not unique: {shared_suffixes}")
+
+
 # ------------------------------------------------------------------ #
 # ViewManager                                                          #
 # ------------------------------------------------------------------ #
 
 
 class ViewManager:
-  """Manages per-event-type BigQuery views over the agent events table.
+  """Manages BigQuery views over the agent events table.
+
+  Deploys the per-event-type views (``_EVENT_VIEW_DEFS``) and the
+  cross-event analytical views (``_CROSS_EVENT_VIEW_DEFS``).  Methods
+  that take an ``event_type`` accept a key from either registry.
 
   Args:
       project_id: Google Cloud project ID.
@@ -395,16 +477,25 @@ class ViewManager:
     """Returns the list of event types with view definitions."""
     return sorted(_EVENT_VIEW_DEFS.keys())
 
+  @property
+  def available_cross_event_views(self) -> list[str]:
+    """Returns the list of cross-event view keys."""
+    return sorted(_CROSS_EVENT_VIEW_DEFS.keys())
+
   def get_view_name(self, event_type: str) -> str:
-    """Returns the fully-qualified view name for an event type."""
-    suffix = _EVENT_VIEW_DEFS[event_type][0]
+    """Returns the prefixed view name for an event type or cross-event key."""
+    if event_type in _CROSS_EVENT_VIEW_DEFS:
+      suffix = _CROSS_EVENT_VIEW_DEFS[event_type][0]
+    else:
+      suffix = _EVENT_VIEW_DEFS[event_type][0]
     return f"{self.view_prefix}{suffix}"
 
   def get_view_sql(self, event_type: str) -> str:
-    """Returns the SQL for a single event-type view.
+    """Returns the SQL for a single view.
 
     Args:
-        event_type: One of the supported event type strings.
+        event_type: One of the supported event type strings, or a
+            cross-event view key.
 
     Returns:
         The CREATE OR REPLACE VIEW SQL statement.
@@ -412,10 +503,21 @@ class ViewManager:
     Raises:
         KeyError: If the event_type is not recognized.
     """
+    if event_type in _CROSS_EVENT_VIEW_DEFS:
+      suffix, query_sql = _CROSS_EVENT_VIEW_DEFS[event_type]
+      return _build_cross_event_view_sql(
+          project=self.project_id,
+          dataset=self.dataset_id,
+          table=self.table_id,
+          view_prefix=self.view_prefix,
+          view_name=f"{self.view_prefix}{suffix}",
+          query_sql=query_sql,
+      )
     if event_type not in _EVENT_VIEW_DEFS:
       raise KeyError(
           f"Unknown event_type '{event_type}'. "
-          f"Available: {self.available_event_types}"
+          f"Available: {self.available_event_types}. "
+          f"Cross-event views: {self.available_cross_event_views}"
       )
     suffix, extra_columns = _EVENT_VIEW_DEFS[event_type]
     view_name = f"{self.view_prefix}{suffix}"
@@ -429,10 +531,11 @@ class ViewManager:
     )
 
   def create_view(self, event_type: str) -> None:
-    """Creates (or replaces) the view for one event type.
+    """Creates (or replaces) one view.
 
     Args:
-        event_type: The event type to create a view for.
+        event_type: The event type, or cross-event view key, to create
+            a view for.
     """
     sql = self.get_view_sql(event_type)
     view_name = self.get_view_name(event_type)
@@ -444,13 +547,20 @@ class ViewManager:
     logger.info("View %s created successfully.", view_name)
 
   def create_all_views(self) -> dict[str, str]:
-    """Creates views for all supported event types.
+    """Creates all per-event-type views, then all cross-event views.
+
+    Per-event views go first because cross-event views may read them.
 
     Returns:
-        A dict mapping event_type to view name for each created view.
+        A dict mapping event_type (or cross-event view key) to view
+        name for each created view.
+
+    Raises:
+        ValueError: If the two view registries collide.
     """
+    _check_view_registries()
     created = {}
-    for event_type in _EVENT_VIEW_DEFS:
+    for event_type in [*_EVENT_VIEW_DEFS, *_CROSS_EVENT_VIEW_DEFS]:
       try:
         self.create_view(event_type)
         created[event_type] = self.get_view_name(event_type)
