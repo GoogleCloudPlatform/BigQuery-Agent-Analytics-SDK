@@ -1064,7 +1064,7 @@ Typer-based CLI exposing SDK functionality for CI/CD pipelines, cron jobs, and a
 | `insights` | Generate multi-stage analysis reports |
 | `drift` | Compare production traces against golden datasets |
 | `distribution` | Analyze question distribution patterns |
-| `views create-all` | Create per-event-type BigQuery views |
+| `views create-all` | Create per-event-type and cross-event BigQuery views |
 | `ontology-build` | Run the full ontology graph pipeline |
 | `ontology-showcase-gql` | Generate GQL traversal queries from spec |
 

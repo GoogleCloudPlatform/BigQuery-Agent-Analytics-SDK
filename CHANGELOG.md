@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cross-event view deployment path on `ViewManager`** — a second
+  registry, `_CROSS_EVENT_VIEW_DEFS`, sits next to `_EVENT_VIEW_DEFS` for
+  analytical views that span several event types. `create_all_views()`
+  and `bq-agent-sdk views create-all` deploy per-event views and then
+  cross-event views in one invocation; `create_view()` / `get_view_sql()`
+  / `views create` accept a key from either registry. The registry ships
+  empty (the ADK 2.0 consumer views register into it as they land), so
+  the deployed set and per-event SQL are unchanged (#210).
+
 - **`ANALYST_TIMEOUT_S` for the scheduled skill-evolution job** — the job
   now binds the engine's per-analyst timeout (default `600` seconds, `0`
   disables it) and passes it to `evolve_skill`, so one hung analyst —

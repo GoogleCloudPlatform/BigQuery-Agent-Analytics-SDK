@@ -1374,7 +1374,7 @@ print(ALL_KNOWN_EVENT_TYPES)
 
 ## 15. BigQuery View Management
 
-`ViewManager` creates per-event-type BigQuery views that unnest the generic `agent_events` table into typed columns. Each view retains standard identity headers (`timestamp`, `agent`, `session_id`, etc.).
+`ViewManager` creates per-event-type BigQuery views that unnest the generic `agent_events` table into typed columns. Each view retains standard identity headers (`timestamp`, `agent`, `session_id`, etc.). It also deploys [cross-event views](#cross-event-views) that span several event types.
 
 ```python
 from bigquery_agent_analytics import ViewManager
@@ -1385,7 +1385,7 @@ vm = ViewManager(
     table_id="agent_events",
 )
 
-# Create all per-event-type views at once
+# Create all per-event-type and cross-event views at once
 vm.create_all_views()
 
 # Or create a single view
@@ -1413,6 +1413,68 @@ on the resume row that pairs with a `TOOL_PAUSED`; on ordinary (non-long-running
 tool completions they are **null**. `pause_orphan` is reserved for the pause
 registry and stays null until that ships — treat a null `pause_orphan` as
 "not yet determined", not as "not an orphan".
+
+#### Cross-event views
+
+Some analytical views span several event types — pairing a `TOOL_PAUSED` with
+its resuming `TOOL_COMPLETED`, or chaining `AGENT_TRANSFER` rows — so they do
+not fit the per-event shape of "standard headers plus typed columns, filtered
+to one `event_type`". `ViewManager` deploys them from a second registry,
+`_CROSS_EVENT_VIEW_DEFS`, next to the per-event `_EVENT_VIEW_DEFS`. There is
+still one manager and one deployment path:
+
+```python
+# Per-event-type views first, then cross-event views, in one call.
+created = vm.create_all_views()
+# {"LLM_REQUEST": "adk_llm_requests", ..., "<cross_event_key>": "adk_<suffix>"}
+
+vm.available_cross_event_views          # keys in the cross-event registry
+vm.create_view("<cross_event_key>")     # single view, same method
+print(vm.get_view_sql("<cross_event_key>"))
+```
+
+```bash
+# Same combined set, one invocation.
+bq-agent-sdk views create-all --project-id=my-project --dataset-id=analytics
+
+# A single view — event type or cross-event key.
+bq-agent-sdk views create <cross_event_key> \
+  --project-id=my-project --dataset-id=analytics
+```
+
+The cross-event registry ships **empty**: this is the deployment plumbing, and
+the ADK 2.0 consumer views (`workflow_invocations`, `agent_transfer_chains`,
+`branch_fanout`, `long_running_tool_durations`, `compaction_windows`,
+`scope_cardinality`) register into it as they land. Until then
+`create_all_views()` and `views create-all` deploy exactly the per-event set,
+with unchanged SQL.
+
+A registry entry maps a view key to `(view_suffix, query_sql)`. `query_sql` is
+the full `SELECT` body, rendered with `str.format` (double any literal braces)
+with `{project}`, `{dataset}`, `{table}` (the events table) and
+`{view_prefix}`, so a cross-event view can read either the events table or a
+per-event view such as `` `{project}.{dataset}.{view_prefix}tool_starts` ``.
+Deployment rules:
+
+- Per-event views are created first, then cross-event views in registry order.
+  A cross-event view that reads another must be registered after it.
+- Keys must not collide with event types and suffixes must be unique across
+  both registries; `create_all_views()` raises `ValueError` before issuing any
+  query otherwise.
+- A view that fails to create is logged and left out of the returned dict; the
+  remaining views still deploy (same as per-event views).
+
+**Design decision — extend `ViewManager` rather than add an
+`AnalyticsViewManager`.** The tradeoff was consistency versus separation. A
+sibling manager would keep the per-event class narrowly scoped, but every
+caller that wants "all the views" — `create_all_views()`, `views create-all`,
+setup scripts — would then have to know about and invoke two managers, and the
+two could drift in prefixing, client/telemetry labelling and error handling.
+Cross-event views also depend on the per-event views' names and prefix, which a
+single manager already owns, so deployment order is enforced in one place.
+Extending `ViewManager` keeps one constructor, one `create_all_views()` and one
+CLI path; the separation that matters — the two view *shapes* — is preserved by
+keeping two registries with two SQL builders.
 
 ---
 
