@@ -28,7 +28,6 @@ from typing import Any
 from bigquery_agent_analytics import EvaluationReport
 from bigquery_agent_analytics import serialize
 from bigquery_agent_analytics import SystemEvaluator
-from bigquery_agent_analytics import udf_kernels
 
 STREAMING_EVALUATOR_PROFILE = "streaming_observability_v1"
 STREAMING_PROCESSOR_NAME = STREAMING_EVALUATOR_PROFILE

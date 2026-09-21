@@ -49,9 +49,7 @@ import json
 import logging
 from typing import Optional
 
-from .resolved_spec import ResolvedEntity
 from .resolved_spec import ResolvedGraph
-from .resolved_spec import ResolvedRelationship
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -90,42 +88,6 @@ def _bq_schema_type(yaml_type: str) -> str:
 # ------------------------------------------------------------------ #
 # Schema compilation                                                   #
 # ------------------------------------------------------------------ #
-
-
-def _compile_entity_schema(entity: ResolvedEntity) -> dict:
-  """Build the JSON Schema object for a single entity type."""
-  props: dict = {
-      "entity_name": {"type": "STRING"},
-  }
-  for prop in entity.properties:
-    props[prop.column] = {"type": _bq_schema_type(prop.sdk_type)}
-  return {
-      "type": "OBJECT",
-      "properties": props,
-  }
-
-
-def _compile_relationship_schema(rel: ResolvedRelationship) -> dict:
-  """Build the JSON Schema object for a single relationship type."""
-  props: dict = {
-      "relationship_name": {"type": "STRING"},
-      "from_entity_name": {"type": "STRING"},
-      "to_entity_name": {"type": "STRING"},
-      "from_keys": {
-          "type": "OBJECT",
-          "properties": {},
-      },
-      "to_keys": {
-          "type": "OBJECT",
-          "properties": {},
-      },
-  }
-  for prop in rel.properties:
-    props[prop.column] = {"type": _bq_schema_type(prop.sdk_type)}
-  return {
-      "type": "OBJECT",
-      "properties": props,
-  }
 
 
 def compile_output_schema(
