@@ -3,6 +3,11 @@
 This directory contains notebooks, SQL scripts, Python demos, and reference
 artifacts that demonstrate SDK capabilities.
 
+Note: the judge model is independent of the agent model by default — demos
+configure the agent via `MODEL_NAME` and all SDK-side LLM judging via a
+separate `JUDGE_MODEL`. When no explicit model/endpoint is passed, `Client`
+and `LLMAsJudge` silently fall back to the SDK default (`gemini-2.5-flash`).
+
 ## Notebooks
 
 | Notebook | Description |
