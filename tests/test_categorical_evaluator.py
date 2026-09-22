@@ -19,6 +19,7 @@ from datetime import datetime
 from datetime import timezone
 import json
 from unittest.mock import AsyncMock
+from unittest.mock import call
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -2168,6 +2169,12 @@ class TestFinishReasonLogging:
 class TestRetryFailedSessions:
   """Tests for _retry_failed_sessions on the Client."""
 
+  @pytest.fixture
+  def retry_sleep(self):
+    """Record backoff without waiting or patching the shared time module."""
+    with patch("bigquery_agent_analytics.client.time") as mock_time:
+      yield mock_time.sleep
+
   def _make_client(self):
     """Build a Client with a mocked BQ client."""
     from bigquery_agent_analytics.client import Client
@@ -2182,7 +2189,7 @@ class TestRetryFailedSessions:
         bq_client=mock_bq,
     )
 
-  def test_retry_replaces_null_sessions(self):
+  def test_retry_replaces_null_sessions(self, retry_sleep):
     """NULL sessions should be replaced by successful API retries."""
     client = self._make_client()
     config = _make_config()
@@ -2207,17 +2214,19 @@ class TestRetryFailedSessions:
     with patch(
         "bigquery_agent_analytics.client.classify_sessions_via_api",
         new=AsyncMock(return_value=[good_result]),
-    ):
+    ) as mock_api:
       results = client._retry_failed_sessions(
           transcripts,
           config,
           "gemini-2.5-flash",
-          max_retries=1,
+          max_retries=3,
       )
 
     assert len(results) == 1
     assert results[0].session_id == "s1"
     assert results[0].metrics[0].category == "positive"
+    assert mock_api.await_count == 1
+    retry_sleep.assert_not_called()
 
   def test_identity_bound_retry_forwards_context_by_internal_key(self):
     """Two reused session ids cannot overwrite each other during retry."""
@@ -2284,7 +2293,7 @@ class TestRetryFailedSessions:
         "bob",
     ]
 
-  def test_retry_exhausts_attempts(self):
+  def test_retry_exhausts_attempts(self, retry_sleep):
     """Sessions that keep failing should exhaust all retry attempts."""
     client = self._make_client()
     config = _make_config()
@@ -2320,8 +2329,9 @@ class TestRetryFailedSessions:
 
     assert len(results) == 0
     assert mock_api.await_count == 3
+    assert retry_sleep.call_args_list == [call(1), call(2)]
 
-  def test_retry_handles_api_exception(self):
+  def test_retry_handles_api_exception(self, retry_sleep):
     """API exceptions during retry should not crash."""
     client = self._make_client()
     config = _make_config()
@@ -2330,7 +2340,7 @@ class TestRetryFailedSessions:
     with patch(
         "bigquery_agent_analytics.client.classify_sessions_via_api",
         new=AsyncMock(side_effect=RuntimeError("API down")),
-    ):
+    ) as mock_api:
       results = client._retry_failed_sessions(
           transcripts,
           config,
@@ -2339,6 +2349,8 @@ class TestRetryFailedSessions:
       )
 
     assert len(results) == 0
+    assert mock_api.await_count == 2
+    retry_sleep.assert_called_once_with(1)
 
   def test_context_retry_redacts_raw_response_from_logs(self):
     client = self._make_client()
