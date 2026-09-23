@@ -303,19 +303,31 @@ def run_smoke_test(
 # legitimately returns may be resolved; anything else raises
 # ``pickle.UnpicklingError`` and fails closed into a harness
 # failure report.
-_SAFE_UNPICKLE_GLOBALS: frozenset[tuple[str, str]] = frozenset({
-    (
-        "bigquery_agent_analytics.structured_extraction",
-        "StructuredExtractionResult",
-    ),
-    (
-        "bigquery_agent_analytics.structured_extraction",
-        "ExtractorException",
-    ),
-    ("bigquery_agent_analytics.extracted_models", "ExtractedNode"),
-    ("bigquery_agent_analytics.extracted_models", "ExtractedEdge"),
-    ("bigquery_agent_analytics.extracted_models", "ExtractedProperty"),
-})
+_SAFE_UNPICKLE_GLOBALS: frozenset[tuple[str, str]] = frozenset(
+    {
+        (
+            "bigquery_agent_analytics.structured_extraction",
+            "StructuredExtractionResult",
+        ),
+        (
+            "bigquery_agent_analytics.structured_extraction",
+            "ExtractorException",
+        ),
+        ("bigquery_agent_analytics.extracted_models", "ExtractedNode"),
+        ("bigquery_agent_analytics.extracted_models", "ExtractedEdge"),
+        ("bigquery_agent_analytics.extracted_models", "ExtractedProperty"),
+        # Inert stdlib value types that ``ExtractedProperty.value`` may
+        # legitimately carry (datetime pickles its tzinfo as
+        # ``timezone`` + ``timedelta``).
+        ("datetime", "datetime"),
+        ("datetime", "date"),
+        ("datetime", "time"),
+        ("datetime", "timedelta"),
+        ("datetime", "timezone"),
+        ("decimal", "Decimal"),
+        ("builtins", "bytearray"),
+    }
+)
 
 
 class _RestrictedUnpickler(pickle.Unpickler):
@@ -436,7 +448,7 @@ def run_smoke_test_in_subprocess(
 
   try:
     parsed = _restricted_loads(proc_result.stdout)
-  except (pickle.UnpicklingError, EOFError, AttributeError, TypeError):
+  except Exception:  # noqa: BLE001 — hostile/corrupt stdout fails closed
     return _harness_failure_report(
         events, proc_result.stdout, proc_result.stderr, min_nonempty_results
     )
