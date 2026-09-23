@@ -1302,6 +1302,139 @@ class TestSmokeTest:
     ), f"failures: exc={report.exceptions} val={report.validation_failures}"
     assert report.events_with_nonempty_result == 2
 
+  def test_restricted_loads_accepts_sdk_results(self):
+    """The child legitimately returns SDK result/model instances;
+    the restricted unpickler must decode those unchanged."""
+    import pickle
+
+    from bigquery_agent_analytics.extractor_compilation.smoke_test import _restricted_loads
+    from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+    payload = pickle.dumps(("ok", [("result", StructuredExtractionResult())]))
+    parsed = _restricted_loads(payload)
+    assert parsed[0] == "ok"
+    assert isinstance(parsed[1][0][1], StructuredExtractionResult)
+
+  def test_restricted_loads_accepts_stdlib_property_values(self):
+    """``ExtractedProperty.value`` is ``Any``; inert stdlib value
+    types (datetime/date/time/timedelta/Decimal/bytearray) must
+    still round-trip through the restricted unpickler."""
+    import datetime
+    import decimal
+    import pickle
+
+    from bigquery_agent_analytics.extracted_models import ExtractedNode
+    from bigquery_agent_analytics.extracted_models import ExtractedProperty
+    from bigquery_agent_analytics.extractor_compilation.smoke_test import _restricted_loads
+    from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+    values = {
+        "ts": datetime.datetime(
+            2026, 9, 23, 12, 30, tzinfo=datetime.timezone.utc
+        ),
+        "naive_ts": datetime.datetime(2026, 9, 23, 12, 30),
+        "day": datetime.date(2026, 9, 23),
+        "clock": datetime.time(12, 30),
+        "elapsed": datetime.timedelta(seconds=90),
+        "amount": decimal.Decimal("12.34"),
+        "blob": bytearray(b"\x00\x01"),
+    }
+    node = ExtractedNode(
+        node_id="n1",
+        entity_name="Decision",
+        properties=[
+            ExtractedProperty(name=k, value=v) for k, v in values.items()
+        ],
+    )
+    result = StructuredExtractionResult(nodes=[node])
+    # The child writes with ``pickle.dumps``' default protocol.
+    for protocol in (pickle.DEFAULT_PROTOCOL, pickle.HIGHEST_PROTOCOL):
+      payload = pickle.dumps(("ok", [("result", result)]), protocol=protocol)
+      parsed = _restricted_loads(payload)
+      got = parsed[1][0][1].nodes[0].properties
+      assert {p.name: p.value for p in got} == values
+
+  def test_restricted_loads_blocks_os_system_gadget(self):
+    """A pickled ``(os.system, ...)`` gadget — the classic
+    ``__reduce__`` escape — must raise instead of resolving."""
+    import os
+    import pickle
+
+    from bigquery_agent_analytics.extractor_compilation.smoke_test import _restricted_loads
+
+    payload = pickle.dumps(("touched", (os.system, ("true",))))
+    with pytest.raises(pickle.UnpicklingError):
+      _restricted_loads(payload)
+
+  def test_subprocess_reduce_gadget_cannot_escape_to_parent(
+      self, tmp_path: pathlib.Path
+  ):
+    """A compiled extractor returning an object with a hostile
+    ``__reduce__`` (``os.system``) used to execute in the parent
+    when the parent unpickled child stdout — escaping the
+    subprocess isolation. The restricted unpickler fails closed:
+    no marker file appears and the report is a harness failure."""
+    from bigquery_agent_analytics.extractor_compilation import run_smoke_test_in_subprocess
+
+    marker = tmp_path / "PWNED"
+    source_path = tmp_path / "evil.py"
+    source_path.write_text(
+        "import os\n"
+        "from bigquery_agent_analytics.structured_extraction import (\n"
+        "    StructuredExtractionResult,\n"
+        ")\n"
+        f"_MARKER = {str(marker)!r}\n"
+        "class EvilResult(StructuredExtractionResult):\n"
+        "  def __reduce__(self):\n"
+        '    return (os.system, ("touch " + _MARKER,))\n'
+        "def f(event, spec):\n"
+        "  return EvilResult()\n",
+        encoding="utf-8",
+    )
+    report = run_smoke_test_in_subprocess(
+        source_path,
+        module_name="evilgadget",
+        function_name="f",
+        events=[{"event_type": "x"}],
+        spec=None,
+        resolved_graph=None,
+        memory_limit_mb=None,
+    )
+    assert not marker.exists()
+    assert report.ok is False
+    assert any(
+        "untrusted child output rejected" in e for e in report.exceptions
+    )
+
+  def test_corrupt_stdout_value_error_fails_closed(self):
+    """Malformed child stdout that makes the unpickler raise
+    ``ValueError`` (not ``UnpicklingError``) must become a harness
+    failure report instead of escaping to the caller."""
+    import subprocess
+    from unittest import mock
+
+    from bigquery_agent_analytics.extractor_compilation import run_smoke_test_in_subprocess
+
+    corrupt = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=b"\x80\x05I1x\n.", stderr=b""
+    )
+    with mock.patch(
+        "bigquery_agent_analytics.extractor_compilation.smoke_test"
+        ".subprocess.run",
+        return_value=corrupt,
+    ):
+      report = run_smoke_test_in_subprocess(
+          pathlib.Path("unused.py"),
+          module_name="corrupt",
+          function_name="f",
+          events=[{"event_type": "x"}],
+          spec=None,
+          resolved_graph=None,
+          memory_limit_mb=None,
+      )
+    assert report.ok is False
+    assert all(e.startswith("SubprocessFailure") for e in report.exceptions)
+
   def test_min_nonempty_results_zero_allows_empty(self):
     """Callers can opt out of the non-empty floor for tests that
     deliberately exercise the empty-result path."""

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib.util
+import io
 import os
 import pathlib
 import pickle
@@ -293,6 +294,59 @@ def run_smoke_test(
   )
 
 
+# Child-to-parent pickle allowlist. The subprocess child executes
+# untrusted compiled-extractor code, so every byte it prints to
+# stdout is attacker-controlled. ``pickle.loads`` on those bytes
+# would run an attacker ``__reduce__`` gadget (e.g. ``(os.system,
+# ...)``) in the parent, escaping the subprocess isolation (timeout
+# + memory cap). Only the SDK result/model classes the child
+# legitimately returns may be resolved; anything else raises
+# ``pickle.UnpicklingError`` and fails closed into a harness
+# failure report.
+_SAFE_UNPICKLE_GLOBALS: frozenset[tuple[str, str]] = frozenset(
+    {
+        (
+            "bigquery_agent_analytics.structured_extraction",
+            "StructuredExtractionResult",
+        ),
+        (
+            "bigquery_agent_analytics.structured_extraction",
+            "ExtractorException",
+        ),
+        ("bigquery_agent_analytics.extracted_models", "ExtractedNode"),
+        ("bigquery_agent_analytics.extracted_models", "ExtractedEdge"),
+        ("bigquery_agent_analytics.extracted_models", "ExtractedProperty"),
+        # Inert stdlib value types that ``ExtractedProperty.value`` may
+        # legitimately carry (datetime pickles its tzinfo as
+        # ``timezone`` + ``timedelta``).
+        ("datetime", "datetime"),
+        ("datetime", "date"),
+        ("datetime", "time"),
+        ("datetime", "timedelta"),
+        ("datetime", "timezone"),
+        ("decimal", "Decimal"),
+        ("builtins", "bytearray"),
+    }
+)
+
+
+class _RestrictedUnpickler(pickle.Unpickler):
+  """Unpickler that resolves only :data:`_SAFE_UNPICKLE_GLOBALS`."""
+
+  def find_class(self, module: str, name: str):
+    if (module, name) in _SAFE_UNPICKLE_GLOBALS:
+      return super().find_class(module, name)
+    raise pickle.UnpicklingError(
+        f"blocked GLOBAL {module}.{name}: child output may only "
+        "contain SDK result/model classes"
+    )
+
+
+def _restricted_loads(data: bytes):
+  """Unpickle child stdout, blocking non-SDK GLOBALs (fail closed)."""
+  return _RestrictedUnpickler(io.BytesIO(data)).load()
+
+
 _SUBPROCESS_RUNNER_MODULE = (
     "bigquery_agent_analytics.extractor_compilation.subprocess_runner"
 )
@@ -321,9 +375,12 @@ def run_smoke_test_in_subprocess(
   address space after it imports the trusted SDK harness, so the
   budget applies to the candidate extractor rather than to
   whichever optional native dependencies the environment installed.
-  Per-event outcomes come back as a pickled list; the parent runs
-  the #76 validator on the merged graph so ``ResolvedGraph`` never
-  crosses the process boundary.
+  Per-event outcomes come back as pickled SDK result objects,
+  decoded with a restricted unpickler that only resolves those
+  classes — a hostile ``__reduce__`` gadget from the compiled
+  extractor (e.g. ``os.system``) fails closed instead of executing
+  in the parent. The parent runs the #76 validator on the merged
+  graph so ``ResolvedGraph`` never crosses the process boundary.
 
   ``timeout_seconds=0`` or negative disables the wallclock cap (not
   recommended; only useful for tests of this wrapper itself).
@@ -390,8 +447,8 @@ def run_smoke_test_in_subprocess(
     )
 
   try:
-    parsed = pickle.loads(proc_result.stdout)
-  except (pickle.UnpicklingError, EOFError, AttributeError, TypeError):
+    parsed = _restricted_loads(proc_result.stdout)
+  except Exception:  # noqa: BLE001 — hostile/corrupt stdout fails closed
     return _harness_failure_report(
         events, proc_result.stdout, proc_result.stderr, min_nonempty_results
     )
@@ -561,11 +618,16 @@ def _harness_failure_report(
   the underlying ``MemoryError``."""
   detail = ""
   try:
-    parsed = pickle.loads(stdout) if stdout else None
+    parsed = _restricted_loads(stdout) if stdout else None
     if isinstance(parsed, tuple) and parsed[:1] == ("harness_error",):
       detail = (
           ": ".join(str(p) for p in parsed[1:3]) if len(parsed) >= 3 else ""
       )
+  except pickle.UnpicklingError as e:
+    # Rejected GLOBAL (e.g. a hostile ``__reduce__`` gadget from the
+    # compiled extractor). Surface the block so operators can tell
+    # an attack from a crash; truncated below with all details.
+    detail = f"untrusted child output rejected ({e})"
   except BaseException:  # noqa: BLE001 — best-effort
     detail = ""
   if not detail:
