@@ -1032,16 +1032,18 @@ The insights pipeline generates seven specialized analysis sections:
 
 ```python
 # Task areas: what users are asking about
-task_section = report.get_section("task_areas")
+task_section = report.get_section("Task Areas")
 print(task_section.content)
 
 # Friction analysis: where users get stuck
-friction = report.get_section("friction_analysis")
+friction = report.get_section("Friction Analysis")
 print(friction.content)
 
-# Available sections:
-# - task_areas, interaction_patterns, what_works_well,
-# - friction_analysis, tool_usage, suggestions, trends
+# Available section titles (get_section matches them
+# case-insensitively):
+# - Task Areas, Interaction Patterns, What Works Well,
+# - Friction Analysis, Tool Usage Patterns, Improvement
+#   Suggestions, Trends & Anomalies
 ```
 
 ### Access Session-Level Facets
@@ -1108,7 +1110,8 @@ results = await memory.search_memory(
 )
 
 for entry in results.memories:
-    print(f"  {entry.key}: {entry.value[:100]}...")
+    for part in entry.content.parts:
+        print(f"  {part.text[:100]}...")
 ```
 
 ### User Profile Building
@@ -1360,7 +1363,7 @@ for span in trace.spans:
         print(f"Error: {span.error_message}")
 
 # Extract final response text from a span
-text = extract_response_text(span.content, span.event_type)
+text = extract_response_text(span.content)
 
 # Reuse the canonical SQL predicate for error detection
 query = f"SELECT * FROM events WHERE {ERROR_SQL_PREDICATE}"
