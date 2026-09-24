@@ -283,7 +283,7 @@ with a runnable ADK agent.
 | [Scheduled Deploy Runbook](docs/guides/scheduled-context-graph-deploy.md) | Keep the context graph fresh on a Cloud Run + Cloud Scheduler cron |
 | [Design Documents](docs/README.md) | Architecture decisions and design rationale |
 | [Examples](examples/README.md) | Notebooks, SQL scripts, and demos |
-| [Deployment Guides](deploy/README.md) | Four deployment surfaces for Google Cloud |
+| [Deployment Guides](deploy/README.md) | Six deployment surfaces for Google Cloud |
 
 ## Architecture
 
