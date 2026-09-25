@@ -145,7 +145,7 @@ question is one `GRAPH_TABLE` traversal:
 ```sql
 SELECT request, considered, score, outcome
 FROM GRAPH_TABLE (
-  agent_decisions.agent_decisions_graph
+  agent_analytics_demo.agent_decisions_graph
   MATCH
     (req:DecisionRequest) -[:evaluatesOption]-> (opt:DecisionOption),
     (req)                 -[:resultedIn]->      (out:DecisionOutcome)
