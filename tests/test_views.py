@@ -18,6 +18,7 @@ from unittest import mock
 
 import pytest
 
+from bigquery_agent_analytics.views import _CROSS_EVENT_VIEW_DEFS
 from bigquery_agent_analytics.views import _EVENT_VIEW_DEFS
 from bigquery_agent_analytics.views import ViewManager
 
@@ -171,8 +172,9 @@ class TestViewManager:
 
   def test_create_all_views(self, vm):
     created = vm.create_all_views()
-    assert len(created) == len(_EVENT_VIEW_DEFS)
-    assert vm.bq_client.query.call_count == len(_EVENT_VIEW_DEFS)
+    expected = {**_EVENT_VIEW_DEFS, **_CROSS_EVENT_VIEW_DEFS}
+    assert set(created) == set(expected)
+    assert vm.bq_client.query.call_count == len(expected)
 
   def test_create_all_views_handles_errors(self, vm):
     vm.bq_client.query.side_effect = Exception("BQ error")

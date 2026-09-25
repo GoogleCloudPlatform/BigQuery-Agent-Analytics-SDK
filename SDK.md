@@ -1429,11 +1429,11 @@ still one manager and one deployment path:
 ```python
 # Per-event-type views first, then cross-event views, in one call.
 created = vm.create_all_views()
-# {"LLM_REQUEST": "adk_llm_requests", ..., "<cross_event_key>": "adk_<suffix>"}
+# {"LLM_REQUEST": "adk_llm_requests", ..., "compaction_windows": "adk_compaction_windows"}
 
 vm.available_cross_event_views          # keys in the cross-event registry
-vm.create_view("<cross_event_key>")     # single view, same method
-print(vm.get_view_sql("<cross_event_key>"))
+vm.create_view("compaction_windows")   # single view, same method
+print(vm.get_view_sql("compaction_windows"))
 ```
 
 ```bash
@@ -1441,16 +1441,37 @@ print(vm.get_view_sql("<cross_event_key>"))
 bq-agent-sdk views create-all --project-id=my-project --dataset-id=analytics
 
 # A single view — event type or cross-event key.
-bq-agent-sdk views create <cross_event_key> \
+bq-agent-sdk views create compaction_windows \
   --project-id=my-project --dataset-id=analytics
 ```
 
-The cross-event registry ships **empty**: this is the deployment plumbing, and
-the ADK 2.0 consumer views (`workflow_invocations`, `agent_transfer_chains`,
-`branch_fanout`, `long_running_tool_durations`, `compaction_windows`,
-`scope_cardinality`) register into it as they land. Until then
-`create_all_views()` and `views create-all` deploy exactly the per-event set,
-with unchanged SQL.
+The cross-event registry includes `compaction_windows` (#216). Both
+`create_all_views()` and `views create-all` deploy it after the per-event views.
+The other ADK 2.0 consumer views (`workflow_invocations`, `agent_transfer_chains`,
+`branch_fanout`, `long_running_tool_durations`, `scope_cardinality`) register as
+they land. Existing per-event SQL is unchanged.
+
+`adk_compaction_windows` (or `<view_prefix>compaction_windows`) reads
+`EVENT_COMPACTION` rows directly from the configured events table and exposes:
+
+| Columns | Type | Meaning |
+|---|---|---|
+| `app_name`, `user_id`, `session_id`, `invocation_id` | STRING | Full telemetry identity; `app_name` comes from `attributes.adk.app_name` |
+| `start_ts`, `end_ts` | TIMESTAMP | Compacted range, converted from epoch seconds at microsecond precision |
+| `start_seconds`, `end_seconds` | FLOAT64 | Source boundaries retained for diagnostics |
+
+There is one row per distinct identity and pair of source boundaries. Repeated
+copies of the same window collapse; disjoint or overlapping windows remain
+separate, including across applications or users sharing session IDs. Equal
+start and end boundaries are retained. This view identifies context-compaction
+ranges, not token savings or the number of affected events.
+
+Legacy rows without `attributes.adk.app_name`, and rows with null or empty
+identity fields, are excluded. Missing, non-numeric, non-finite, out-of-range,
+or reversed boundaries are excluded without failing the query. Conversion
+uses safe multiplication/casts and `SAFE.TIMESTAMP_MICROS`, preserving
+sub-second windows such as `1.234` to `1.235` seconds. The existing
+`adk_event_compactions` per-event view remains available unchanged.
 
 A registry entry maps a view key to `(view_suffix, query_sql)`. `query_sql` is
 the full `SELECT` body, rendered with `str.format` (double any literal braces)
