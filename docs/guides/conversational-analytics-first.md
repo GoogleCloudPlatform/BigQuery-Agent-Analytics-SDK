@@ -45,7 +45,7 @@ produce a realistic corpus and materialize it:
 
 ```bash
 export PROJECT_ID="your-project-id"
-export DATASET="agent_decisions"   # the dataset from the codelab setup
+export DATASET="agent_analytics_demo"   # the dataset from the codelab setup
 
 # 1. Seed ~100 realistic decision sessions (deterministic with --seed).
 bqaa seed-events \
@@ -54,11 +54,13 @@ bqaa seed-events \
 
 # 2. Materialize the decision graph from the events. The materializer reads
 #    the deployed graph's definition back from INFORMATION_SCHEMA.PROPERTY_GRAPHS.
-#    --lookback-hours 80 covers the corpus's 72-hour spread so every completed
-#    session is captured.
+#    The guide-specific state key starts independently of the codelab checkpoint.
+#    On its first run, --lookback-hours 80 spans the corpus's 72-hour spread;
+#    later runs resume from this guide's checkpoint with overlap, capped at 80 hours.
 bqaa context-graph \
     --project-id "$PROJECT_ID" --dataset-id "$DATASET" \
     --graph agent_decisions_graph \
+    --state-key-suffix conversational-analytics-first \
     --lookback-hours 80
 ```
 
@@ -145,7 +147,7 @@ question is one `GRAPH_TABLE` traversal:
 ```sql
 SELECT request, considered, score, outcome
 FROM GRAPH_TABLE (
-  agent_decisions.agent_decisions_graph
+  agent_analytics_demo.agent_decisions_graph
   MATCH
     (req:DecisionRequest) -[:evaluatesOption]-> (opt:DecisionOption),
     (req)                 -[:resultedIn]->      (out:DecisionOutcome)
