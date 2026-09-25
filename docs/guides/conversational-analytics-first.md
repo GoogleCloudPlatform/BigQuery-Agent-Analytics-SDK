@@ -54,11 +54,13 @@ bqaa seed-events \
 
 # 2. Materialize the decision graph from the events. The materializer reads
 #    the deployed graph's definition back from INFORMATION_SCHEMA.PROPERTY_GRAPHS.
-#    --lookback-hours 80 covers the corpus's 72-hour spread so every completed
-#    session is captured.
+#    The guide-specific state key starts independently of the codelab checkpoint.
+#    On its first run, --lookback-hours 80 spans the corpus's 72-hour spread;
+#    later runs resume from this guide's checkpoint with overlap, capped at 80 hours.
 bqaa context-graph \
     --project-id "$PROJECT_ID" --dataset-id "$DATASET" \
     --graph agent_decisions_graph \
+    --state-key-suffix conversational-analytics-first \
     --lookback-hours 80
 ```
 
