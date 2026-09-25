@@ -2337,7 +2337,7 @@ pipeline.
 | `sdk` | constant `bigquery-agent-analytics` |
 | `sdk_version` | package version, BQ-safe (e.g. `0-4-0`) |
 | `sdk_surface` | `python` \| `cli` \| `remote-function` \| `langsmith-export` |
-| `sdk_feature` | `trace-read` \| `eval-code` \| `eval-llm-judge` \| `eval-categorical` \| `insights` \| `drift` \| `memory` \| `context-graph` \| `ontology-build` \| `ontology-gql` \| `views` \| `ai-ml` \| `feedback` \| `langsmith-export` |
+| `sdk_feature` | `trace-read` \| `eval-code` \| `eval-llm-judge` \| `eval-categorical` \| `eval-performance` \| `evalbench-import` \| `evalbench-score` \| `evalbench-failed-sessions` \| `evalbench-native-import` \| `insights` \| `drift` \| `memory` \| `context-graph` \| `ontology-build` \| `ontology-gql` \| `views` \| `ai-ml` \| `feedback` \| `langsmith-export` |
 | `sdk_ai_function` | set only on AI/ML invocations: `ai-generate` \| `ai-embed` \| `ai-classify` \| `ai-forecast` \| `ai-detect-anomalies` \| `ml-generate-text` \| `ml-generate-embedding` \| `ml-detect-anomalies` \| `ml-forecast` |
 
 All labels also apply to load jobs submitted by the SDK (e.g. the
