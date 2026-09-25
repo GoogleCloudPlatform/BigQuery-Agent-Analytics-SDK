@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Compaction windows view (#216)** - `ViewManager` and the `views` CLI
+  deploy `compaction_windows` alongside the per-event views. It exposes
+  distinct ranges per full telemetry identity, preserves fractional epoch
+  seconds at microsecond precision, and excludes incomplete identities and
+  invalid boundaries.
+
 ## [0.5.3] - 2026-09-20
 
 ### Release highlights

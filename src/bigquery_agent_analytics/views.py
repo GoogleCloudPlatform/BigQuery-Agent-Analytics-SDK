@@ -331,10 +331,53 @@ _EVENT_VIEW_DEFS: dict[str, tuple[str, str]] = {
 # after every per-event view; a view that reads another cross-event
 # view must come after it.
 #
-# Empty for now: this is the deployment plumbing (#210).  The six
-# consumer views land in #212-#217.
+# The consumer views register here as they land (#212-#217).
 
-_CROSS_EVENT_VIEW_DEFS: dict[str, tuple[str, str]] = {}
+_CROSS_EVENT_VIEW_DEFS: dict[str, tuple[str, str]] = {
+    "compaction_windows": (
+        "compaction_windows",
+        """\
+WITH parsed AS (
+  SELECT
+    NULLIF(JSON_VALUE(attributes, '$.adk.app_name'), '') AS app_name,
+    NULLIF(user_id, '') AS user_id,
+    NULLIF(session_id, '') AS session_id,
+    NULLIF(invocation_id, '') AS invocation_id,
+    SAFE_CAST(JSON_VALUE(content, '$.start_timestamp') AS FLOAT64) AS start_seconds,
+    SAFE_CAST(JSON_VALUE(content, '$.end_timestamp') AS FLOAT64) AS end_seconds
+  FROM `{project}.{dataset}.{table}`
+  WHERE event_type = 'EVENT_COMPACTION'
+), converted AS (
+  SELECT
+    *,
+    SAFE.TIMESTAMP_MICROS(
+      SAFE_CAST(SAFE_MULTIPLY(start_seconds, 1000000) AS INT64)
+    ) AS start_ts,
+    SAFE.TIMESTAMP_MICROS(
+      SAFE_CAST(SAFE_MULTIPLY(end_seconds, 1000000) AS INT64)
+    ) AS end_ts
+  FROM parsed
+)
+SELECT DISTINCT
+  app_name,
+  user_id,
+  session_id,
+  invocation_id,
+  start_ts,
+  end_ts,
+  start_seconds,
+  end_seconds
+FROM converted
+WHERE app_name IS NOT NULL
+  AND user_id IS NOT NULL
+  AND session_id IS NOT NULL
+  AND invocation_id IS NOT NULL
+  AND start_ts IS NOT NULL
+  AND end_ts IS NOT NULL
+  AND end_seconds >= start_seconds
+""",
+    ),
+}
 
 # ------------------------------------------------------------------ #
 # View Template                                                        #

@@ -185,8 +185,9 @@ class TestCreateAllViews:
     assert created[_FAKE_NAME] == "adk_fake_session_rollups"
     for event_type in _EVENT_VIEW_DEFS:
       assert created[event_type] == vm.get_view_name(event_type)
-    assert len(created) == len(_EVENT_VIEW_DEFS) + 1
-    assert vm.bq_client.query.call_count == len(_EVENT_VIEW_DEFS) + 1
+    expected = {**_EVENT_VIEW_DEFS, **_CROSS_EVENT_VIEW_DEFS}
+    assert set(created) == set(expected)
+    assert vm.bq_client.query.call_count == len(expected)
 
   def test_cross_event_views_are_created_after_per_event_views(
       self, vm, fake_cross_event_def
@@ -194,10 +195,10 @@ class TestCreateAllViews:
     """Cross-event SQL may read per-event views, so those deploy first."""
     created = vm.create_all_views()
 
-    assert list(created) == list(_EVENT_VIEW_DEFS) + [_FAKE_NAME]
+    expected = [*_EVENT_VIEW_DEFS, *_CROSS_EVENT_VIEW_DEFS]
+    assert list(created) == expected
     issued = [call[0][0] for call in vm.bq_client.query.call_args_list]
-    assert issued[:-1] == [vm.get_view_sql(et) for et in _EVENT_VIEW_DEFS]
-    assert issued[-1] == vm.get_view_sql(_FAKE_NAME)
+    assert issued == [vm.get_view_sql(key) for key in expected]
 
   def test_cross_event_failure_does_not_drop_per_event_views(
       self, vm, fake_cross_event_def
@@ -211,7 +212,8 @@ class TestCreateAllViews:
     created = vm.create_all_views()
 
     assert _FAKE_NAME not in created
-    assert set(created) == set(_EVENT_VIEW_DEFS)
+    expected = set(_EVENT_VIEW_DEFS) | set(_CROSS_EVENT_VIEW_DEFS)
+    assert set(created) == expected - {_FAKE_NAME}
 
   def test_empty_cross_event_registry_matches_per_event_only(self, vm):
     with mock.patch.dict(_CROSS_EVENT_VIEW_DEFS, clear=True):
@@ -241,9 +243,10 @@ class TestCli:
     parsed = json.loads(result.output)
     assert parsed[_FAKE_NAME] == "adk_fake_session_rollups"
     assert parsed["LLM_REQUEST"] == "adk_llm_requests"
-    assert len(parsed) == len(_EVENT_VIEW_DEFS) + 1
+    expected = {**_EVENT_VIEW_DEFS, **_CROSS_EVENT_VIEW_DEFS}
+    assert set(parsed) == set(expected)
     issued = [call[0][0] for call in bq_client.query.call_args_list]
-    assert len(issued) == len(_EVENT_VIEW_DEFS) + 1
+    assert len(issued) == len(expected)
     assert "`proj.ds.adk_fake_session_rollups`" in issued[-1]
 
   def test_views_create_single_cross_event_view(
