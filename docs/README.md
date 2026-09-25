@@ -58,7 +58,7 @@ deployed property graph.
 | [ontology/ontology.md](ontology/ontology.md) | Ontology core design — logical ontology spec |
 | [ontology/binding.md](ontology/binding.md) | Binding design — attaching ontology to physical tables |
 | [ontology/compilation.md](ontology/compilation.md) | Compilation — resolving ontology + binding into backend DDL |
-| [ontology/cli.md](ontology/cli.md) | CLI design for the `gm` tool (validate, compile, import-owl) |
+| [ontology/cli.md](ontology/cli.md) | CLI design for the `gm` tool (validate, compile, scaffold, import-owl) |
 | [ontology/owl-import.md](ontology/owl-import.md) | OWL import — converting OWL ontologies to YAML format |
 | [ontology/ontology-build.md](ontology/ontology-build.md) | `bq-agent-sdk ontology-build` orchestrator + `--skip-property-graph` reference |
 | [ontology/binding-validation.md](ontology/binding-validation.md) | `bq-agent-sdk binding-validate` pre-flight + `ontology-build --validate-binding[-strict]` reference |

@@ -45,7 +45,7 @@ produce a realistic corpus and materialize it:
 
 ```bash
 export PROJECT_ID="your-project-id"
-export DATASET="agent_decisions"   # the dataset from the codelab setup
+export DATASET="agent_analytics_demo"   # the dataset from the codelab setup
 
 # 1. Seed ~100 realistic decision sessions (deterministic with --seed).
 bqaa seed-events \
