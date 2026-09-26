@@ -37,9 +37,6 @@ from typing import Any, Callable, Optional
 from pydantic import BaseModel
 from pydantic import Field
 
-from .utils import _parse_json_from_text
-from .utils import strip_markdown_fences
-
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 
