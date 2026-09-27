@@ -1028,11 +1028,17 @@ def test_configurator_loads_in_a_real_browser():
 
 
 def test_browser_smoke_negative_fixtures_are_detected():
-  # The five negative fixtures — including nonzero-exit-after-healthy-DOM
-  # and the delayed error that only the live marker reflects (the 5 s
-  # virtual-time budget is the observation window) — must be enforced by
-  # the required Test checks, not only by the optional standalone smoke
-  # job: a reintroduced false-pass path has to turn a REQUIRED check red.
+  # The self-test's negative fixtures — including
+  # nonzero-exit-after-healthy-DOM, the delayed error that only the live
+  # marker reflects (the 5 s virtual-time budget is the observation
+  # window), and the server-startup fixtures (a non-bind failure must not
+  # be retried, a pinned port must stay single-attempt, an alive-but-
+  # unready child must fail immediately) — must be enforced by the
+  # required Test checks, not only by the optional standalone smoke job:
+  # a reintroduced false-pass or masked-failure path has to turn a
+  # REQUIRED check red. The self-test also proves the positive side: a
+  # real bind collision on the first attempt is retried on a fresh port
+  # and the whole check still passes.
   disposition = _browser_gate_disposition(
       _chrome_available(), bool(os.environ.get("CI"))
   )
