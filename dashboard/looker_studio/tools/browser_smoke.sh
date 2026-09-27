@@ -31,8 +31,9 @@
 #                                 bind conflict, and an alive-but-unready
 #                                 server. The positive fixture must PASS: a
 #                                 real bind collision on the first attempt
-#                                 is retried on a fresh port, with exactly
-#                                 two server spawns.
+#                                 is retried on fresh ports to success,
+#                                 with two to five server spawns and one
+#                                 retry line per spawn past the first.
 #
 # Every browser-level fixture except the missing-initialization one
 # satisfies the full healthy baseline (#448): the runtime
@@ -90,7 +91,8 @@ find_chrome() {
 
 # ---------------------------------------------------------------------------
 # Self-test: every negative fixture below must make the main check FAIL;
-# the positive retry fixture must make it PASS with exactly one retry.
+# the positive retry fixture must make it PASS with the first attempt's
+# bind collision retried to success.
 # ---------------------------------------------------------------------------
 if [ "${1:-}" = "--self-test" ]; then
   CHROME="$(find_chrome)"
@@ -394,8 +396,13 @@ SHIM
   #     holds the drawn port with genuine listeners, so the first
   #     http.server dies with an authentic "Address already in use". The
   #     check must positively identify the bind conflict, retry on a fresh
-  #     port, and still pass — with exactly two server spawns (one
-  #     collision, one recovery) and exactly one retry line on stderr.
+  #     port, and still pass. The recovery draws are random too, so a
+  #     later attempt may hit a genuine second collision and correctly
+  #     retry again within the five-attempt cap: assert 2-5 spawns with
+  #     one retry line per spawn past the first — the first attempt
+  #     collided, every retry logged its line, the final spawn served —
+  #     instead of exact counts that a real environmental collision on a
+  #     recovery draw would break.
   #     NOTE: the real interpreter is resolved BEFORE the PATH override
   #     below: bash applies prefix assignments left to right, so expanding
   #     "$(command -v python3)" inside the PATH-prefixed command would
@@ -414,11 +421,11 @@ SHIM
     fail "self-test 10 FAILED: a bind collision on the first attempt was not retried to success"
   fi
   COLLIDE_SPAWNS="$(grep -c '' "$COLLIDE_COUNT" || true)"
-  [ "$COLLIDE_SPAWNS" = "2" ] ||
-    fail "self-test 10 FAILED: expected exactly 2 server spawns (collision + recovery), got $COLLIDE_SPAWNS"
+  [ "$COLLIDE_SPAWNS" -ge 2 ] && [ "$COLLIDE_SPAWNS" -le 5 ] ||
+    fail "self-test 10 FAILED: expected 2-5 server spawns (first collision, then recovery draws within the five-attempt cap), got $COLLIDE_SPAWNS"
   RETRY_LINES="$(grep -c 'already in use; retrying on a fresh port' "$COLLIDE_ERR" || true)"
-  [ "$RETRY_LINES" = "1" ] ||
-    fail "self-test 10 FAILED: the retry must log exactly one stderr line (got $RETRY_LINES)"
+  [ "$RETRY_LINES" -eq "$((COLLIDE_SPAWNS - 1))" ] ||
+    fail "self-test 10 FAILED: retry lines must equal server spawns minus one (spawns: $COLLIDE_SPAWNS, retry lines: $RETRY_LINES)"
   echo "self-test 10 OK: bind collision on attempt 1 is retried on a fresh port and passes"
 
   # 11. A NON-BIND startup failure on the first attempt — the masking
