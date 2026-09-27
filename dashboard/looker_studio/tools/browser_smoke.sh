@@ -353,24 +353,42 @@ EOF
 
 # The server must provably be OURS: readiness is a nonce round-trip, not a
 # sleep, so an occupied port (our bind fails, a stranger answers) is caught.
+# One random draw is not enough: the pick range overlaps the runner's
+# ephemeral port span, and a single collision red-fails an otherwise-green
+# CI run (main @ 1908eb0, run 35760370644: port 37368). Draw up to five
+# candidates — every attempt still proves ownership via the nonce, and an
+# explicitly pinned SMOKE_PORT stays single-attempt so the occupied-port
+# negative fixture keeps failing exactly as it must.
 NONCE="smoke-nonce-$$-$RANDOM"
 echo "$NONCE" > "$SITE/$NONCE.txt"
-PORT="${SMOKE_PORT:-$((20000 + RANDOM % 20000))}"
-python3 -m http.server "$PORT" --directory "$SITE" >/dev/null 2>&1 &
-SERVER_PID=$!
-disown "$SERVER_PID" 2>/dev/null || true
-
+ATTEMPTS=5
+if [ -n "${SMOKE_PORT:-}" ]; then
+  ATTEMPTS=1
+fi
 READY=""
-for _ in $(seq 1 20); do
-  BODY="$(curl -fsS --max-time 2 "http://127.0.0.1:$PORT/$NONCE.txt" 2>/dev/null || true)"
-  if [ "$BODY" = "$NONCE" ]; then
-    READY=1
+PORT=""
+for _ in $(seq 1 "$ATTEMPTS"); do
+  PORT="${SMOKE_PORT:-$((20000 + RANDOM % 20000))}"
+  python3 -m http.server "$PORT" --directory "$SITE" >/dev/null 2>&1 &
+  SERVER_PID=$!
+  disown "$SERVER_PID" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    BODY="$(curl -fsS --max-time 2 "http://127.0.0.1:$PORT/$NONCE.txt" 2>/dev/null || true)"
+    if [ "$BODY" = "$NONCE" ]; then
+      READY=1
+      break
+    fi
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+      break
+    fi
+    sleep 0.5
+  done
+  if [ -n "$READY" ]; then
     break
   fi
-  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    break
-  fi
-  sleep 0.5
+  kill "$SERVER_PID" 2>/dev/null || true
+  wait "$SERVER_PID" 2>/dev/null || true
+  SERVER_PID=""
 done
 [ -n "$READY" ] || fail "server did not become ready on port $PORT (occupied by another process, or failed to start)"
 
