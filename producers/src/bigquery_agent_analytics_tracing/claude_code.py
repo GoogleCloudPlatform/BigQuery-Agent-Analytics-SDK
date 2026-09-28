@@ -57,6 +57,7 @@ import traceback
 from typing import Any, Iterator
 
 from ._utils import deterministic_span
+from ._utils import ensure_private_dir
 from ._utils import hex_id
 from ._utils import iso_timestamp
 from ._utils import log_to_file
@@ -171,11 +172,11 @@ class _LockedJSONStore:
 
   def __init__(self, path: Path):
     self.path = path
-    self.path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(self.path.parent)
 
   @contextlib.contextmanager
   def transaction(self) -> Iterator[dict[str, Any]]:
-    fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR, 0o600)
+    fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
       fcntl.flock(fd, fcntl.LOCK_EX)
       try:
@@ -224,8 +225,7 @@ class StateStore:
         "".join(ch for ch in key if ch.isalnum() or ch in "._-") or "default"
     )
     self.key = safe_key
-    self.root = Path(root).expanduser()
-    self.root.mkdir(parents=True, exist_ok=True)
+    self.root = ensure_private_dir(root)
     self._session_store = _LockedJSONStore(self.root / f"state_{safe_key}.json")
     self._cache: dict[str, Any] = self._session_store.read()
 

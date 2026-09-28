@@ -33,13 +33,13 @@ from datetime import datetime
 import fcntl
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import time
 from typing import Any
 import uuid
 
+from ._utils import ensure_private_dir
 from ._utils import hex_id
 from ._utils import iso_timestamp
 from ._utils import log_to_file
@@ -103,10 +103,9 @@ def _ensure_drainer(config: BQAAConfig) -> None:
   ``PYTHONPATH`` to the vendored package root before the hook fires, or use
   a plugin-side wrapper script that performs the ``sys.path`` insert.
   """
-  spool = Path(config.spool_dir).expanduser()
-  spool.mkdir(parents=True, exist_ok=True)
+  spool = ensure_private_dir(config.spool_dir)
   pidfile = spool / ".drainer.pid"
-  fd = os.open(str(pidfile), os.O_CREAT | os.O_RDWR, 0o600)
+  fd = os.open(str(pidfile), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
   try:
     try:
       fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -387,8 +386,7 @@ class BigQueryAgentAnalyticsLogger:
     self._spool(bq_row)
 
   def _spool(self, bq_row: dict[str, Any]) -> None:
-    spool = Path(self.config.spool_dir).expanduser()
-    spool.mkdir(parents=True, exist_ok=True)
+    spool = ensure_private_dir(self.config.spool_dir)
     envelope = {
         "config": {
             "project_id": self.config.project_id,
@@ -404,9 +402,9 @@ class BigQueryAgentAnalyticsLogger:
     name = f"event-{time.time_ns()}-{os.getpid()}-{uuid.uuid4().hex[:8]}.json"
     path = spool / name
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(
-        json.dumps(envelope, sort_keys=True, default=str), encoding="utf-8"
-    )
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+      handle.write(json.dumps(envelope, sort_keys=True, default=str))
     os.replace(tmp, path)
     _ensure_drainer(self.config)
 

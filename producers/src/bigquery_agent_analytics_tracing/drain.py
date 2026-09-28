@@ -61,7 +61,8 @@ from typing import Any, Iterator
 # plugin behavior and keeps the channel safe if the host agent forks us.
 os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "1")
 
-from ._utils import log_to_file  # noqa: E402  (after env tweak)
+from ._utils import ensure_private_dir  # noqa: E402  (after env tweak)
+from ._utils import log_to_file  # noqa: E402
 from ._writer_identity import DEFAULT_WRITER_LABEL  # noqa: E402
 from .config import BQAAConfig  # noqa: E402
 from .schema import bq_schema  # noqa: E402
@@ -85,8 +86,8 @@ class _Envelope:
 @contextlib.contextmanager
 def _try_acquire_pidfile(pidfile: Path) -> Iterator[int | None]:
   """Acquire the drainer pidfile non-blockingly. Yields None if held."""
-  pidfile.parent.mkdir(parents=True, exist_ok=True)
-  fd = os.open(str(pidfile), os.O_CREAT | os.O_RDWR, 0o600)
+  ensure_private_dir(pidfile.parent)
+  fd = os.open(str(pidfile), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
   try:
     try:
       fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -169,8 +170,7 @@ def _group_envelopes(
 
 
 def _quarantine(path: Path, reason: str) -> None:
-  dead = path.parent / "dead-letter"
-  dead.mkdir(parents=True, exist_ok=True)
+  dead = ensure_private_dir(path.parent / "dead-letter")
   target = dead / f"{path.stem}.{reason}.json"
   try:
     os.replace(path, target)
@@ -605,7 +605,8 @@ async def _drain_group_async(
 
 
 async def _drain_once(config: BQAAConfig, use_storage_api: bool) -> int:
-  spool = Path(config.spool_dir).expanduser()
+  # Re-checked every pass: the drainer outlives the check in ``_run``.
+  spool = ensure_private_dir(config.spool_dir)
   pending = _list_pending(spool)
   if not pending:
     return 0
@@ -634,8 +635,7 @@ async def _drain_once(config: BQAAConfig, use_storage_api: bool) -> int:
 
 
 async def _run(config: BQAAConfig) -> None:
-  spool = Path(config.spool_dir).expanduser()
-  spool.mkdir(parents=True, exist_ok=True)
+  spool = ensure_private_dir(config.spool_dir)
   pidfile = spool / ".drainer.pid"
   use_storage_api = _storage_write_available()
   with _try_acquire_pidfile(pidfile) as fd:

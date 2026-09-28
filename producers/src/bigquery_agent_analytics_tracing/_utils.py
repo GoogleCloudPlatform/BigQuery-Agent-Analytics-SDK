@@ -26,6 +26,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import time
 from typing import Any, Iterator, TYPE_CHECKING
 import uuid
@@ -138,6 +139,56 @@ def safe_json_loads(value: str | None, default: Any) -> Any:
     return default
 
 
+def _require_trusted_chain(directory: Path) -> None:
+  """Raise unless ``directory`` and all its parents belong to root or us.
+
+  A directory owned by another user lets that user rename our entries
+  away and put their own in place.
+  """
+  uid = os.geteuid()
+  real = Path(os.path.realpath(directory))
+  for current in (real, *real.parents):
+    owner = os.stat(current).st_uid
+    if owner not in (0, uid):
+      raise PermissionError(
+          f"Refusing BQAA tracing path under {current}: it is owned by uid"
+          f" {owner}."
+      )
+
+
+def ensure_private_dir(path: str | os.PathLike[str]) -> Path:
+  """Create ``path`` owner-only (0o700), or verify an existing one.
+
+  Spool and state files carry prompts, responses and tool I/O, and the
+  drainer uploads every envelope it finds with this user's credentials.
+  A directory that another local user pre-created or can swap (e.g. a
+  fixed name under a shared /tmp) is refused instead of silently reused.
+  """
+  directory = Path(path).expanduser()
+  missing = []
+  current = directory
+  while not os.path.lexists(current):
+    missing.append(current)
+    current = current.parent
+  for component in reversed(missing):
+    try:
+      os.mkdir(component, 0o700)
+    except FileExistsError:
+      pass
+  uid = os.geteuid()
+  info = os.lstat(directory)
+  if not stat.S_ISDIR(info.st_mode):
+    problem = "is a symlink or not a directory"
+  elif info.st_uid != uid:
+    problem = f"is owned by uid {info.st_uid}, not {uid}"
+  elif info.st_mode & stat.S_IWOTH:
+    problem = "is writable by other users"
+  else:
+    _require_trusted_chain(directory.parent)
+    return directory
+  raise PermissionError(f"Refusing BQAA tracing dir {directory}: it {problem}.")
+
+
 @contextlib.contextmanager
 def file_lock(path: Path, mode: int = fcntl.LOCK_EX) -> Iterator[int]:
   """Open a lockfile exclusively. Blocks until the lock is acquired."""
@@ -158,11 +209,21 @@ def log_to_file(config: "BQAAConfig", message: str) -> None:
 
   The drainer and the spool writer share this — debugging signal lives in
   one place, and a broken log path never crashes the agent's hot path.
+  The default log lives in the state dir and gets the same private-dir
+  check (so a refused dir never receives the refusal message); elsewhere
+  its directory must not belong to another user. New logs are owner-only.
   """
   if not config.log_file:
     return
   try:
-    with open(config.log_file, "a", encoding="utf-8") as handle:
+    path = Path(config.log_file).expanduser()
+    in_state_dir = path.parent == Path(config.state_dir).expanduser()
+    if in_state_dir or not path.parent.is_dir():
+      ensure_private_dir(path.parent)
+    else:
+      _require_trusted_chain(path.parent)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as handle:
       handle.write(f"[{iso_timestamp()}] {message}\n")
-  except OSError:
+  except (OSError, RuntimeError):  # RuntimeError: "~" with no home dir.
     pass

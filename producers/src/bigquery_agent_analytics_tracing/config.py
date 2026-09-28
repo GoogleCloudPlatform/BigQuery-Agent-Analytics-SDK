@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import tempfile
 
 from ._writer_identity import DEFAULT_WRITER_LABEL
 
@@ -37,14 +38,19 @@ BQAA_EVENT_TYPES = frozenset(
     }
 )
 
-DEFAULT_SPOOL_DIR = "/tmp/bqaa-agent-tracing/spool"
-DEFAULT_STATE_DIR = "/tmp/bqaa-agent-tracing"
+# Per-user, owner-only base for spool/state/log. Fixed names in the shared
+# /tmp let other local users pre-create or read them; see
+# ``_utils.ensure_private_dir``.
+DEFAULT_STATE_DIR = os.path.join(
+    tempfile.gettempdir(), f"bqaa-agent-tracing-{os.getuid()}"
+)
+DEFAULT_SPOOL_DIR = os.path.join(DEFAULT_STATE_DIR, "spool")
 DEFAULT_TRANSCRIPT_MAX_BYTES = 256 * 1024  # 256 KB streamed cap per stop event.
 DEFAULT_STATE_TTL_HOURS = 24
 DEFAULT_DRAIN_IDLE_SECONDS = 8.0
 DEFAULT_DRAIN_BATCH_SIZE = 50
 DEFAULT_DRAIN_POLL_SECONDS = 0.5
-DEFAULT_LOG_FILE = "/tmp/bqaa-agent-tracing.log"
+DEFAULT_LOG_FILE = os.path.join(DEFAULT_STATE_DIR, "bqaa-agent-tracing.log")
 
 
 def _env_bool(name: str, default: bool) -> bool:
