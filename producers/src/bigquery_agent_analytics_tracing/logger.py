@@ -103,9 +103,8 @@ def _ensure_drainer(config: BQAAConfig) -> None:
   ``PYTHONPATH`` to the vendored package root before the hook fires, or use
   a plugin-side wrapper script that performs the ``sys.path`` insert.
   """
-  spool = ensure_private_dir(config.spool_dir)
-  pidfile = spool / ".drainer.pid"
-  fd = os.open(str(pidfile), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+  with ensure_private_dir(config.spool_dir) as spool:
+    fd = spool.open(".drainer.pid", os.O_CREAT | os.O_RDWR)
   try:
     try:
       fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -386,7 +385,6 @@ class BigQueryAgentAnalyticsLogger:
     self._spool(bq_row)
 
   def _spool(self, bq_row: dict[str, Any]) -> None:
-    spool = ensure_private_dir(self.config.spool_dir)
     envelope = {
         "config": {
             "project_id": self.config.project_id,
@@ -400,12 +398,11 @@ class BigQueryAgentAnalyticsLogger:
         "row": bq_row,
     }
     name = f"event-{time.time_ns()}-{os.getpid()}-{uuid.uuid4().hex[:8]}.json"
-    path = spool / name
-    tmp = path.with_suffix(".json.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-      handle.write(json.dumps(envelope, sort_keys=True, default=str))
-    os.replace(tmp, path)
+    with ensure_private_dir(self.config.spool_dir) as spool:
+      fd = spool.open(f"{name}.tmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+      with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(envelope, sort_keys=True, default=str))
+      spool.replace(f"{name}.tmp", name)
     _ensure_drainer(self.config)
 
   def _direct_insert(self, bq_row: dict[str, Any]) -> None:

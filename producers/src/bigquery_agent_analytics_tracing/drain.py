@@ -48,6 +48,7 @@ import asyncio
 import contextlib
 from dataclasses import dataclass
 import fcntl
+import fnmatch
 import json
 import os
 from pathlib import Path
@@ -63,6 +64,7 @@ os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "1")
 
 from ._utils import ensure_private_dir  # noqa: E402  (after env tweak)
 from ._utils import log_to_file  # noqa: E402
+from ._utils import PrivateDir  # noqa: E402
 from ._writer_identity import DEFAULT_WRITER_LABEL  # noqa: E402
 from .config import BQAAConfig  # noqa: E402
 from .schema import bq_schema  # noqa: E402
@@ -83,11 +85,23 @@ class _Envelope:
   row: dict[str, Any]
 
 
+class _SkippedEnvelope(Exception):
+  """A spooled entry that is not a regular file we own.
+
+  Left in place and never uploaded: its destination, which the drainer
+  would write to with this user's credentials, cannot be trusted.
+  """
+
+
+# Entries already reported as skipped: each is logged once per drainer.
+_reported_skips: set[str] = set()
+
+
 @contextlib.contextmanager
 def _try_acquire_pidfile(pidfile: Path) -> Iterator[int | None]:
   """Acquire the drainer pidfile non-blockingly. Yields None if held."""
-  ensure_private_dir(pidfile.parent)
-  fd = os.open(str(pidfile), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+  with ensure_private_dir(pidfile.parent) as directory:
+    fd = directory.open(pidfile.name, os.O_CREAT | os.O_RDWR)
   try:
     try:
       fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -114,27 +128,33 @@ def _try_acquire_pidfile(pidfile: Path) -> Iterator[int | None]:
       pass
 
 
-def _list_pending(spool: Path) -> list[Path]:
-  if not spool.exists():
-    return []
-  return sorted(p for p in spool.glob("event-*.json") if p.is_file())
+def _list_pending(spool: PrivateDir) -> list[str]:
+  """Envelope names, oldest first. ``_read_envelope`` vets each one."""
+  names = spool.names()
+  return sorted(n for n in names if fnmatch.fnmatchcase(n, "event-*.json"))
 
 
-def _read_envelope(path: Path) -> _Envelope | None:
+def _read_envelope(spool: PrivateDir, name: str) -> _Envelope | None:
+  """Parse one envelope; None if it vanished or was corrupt (dead-lettered).
+
+  Raises ``_SkippedEnvelope`` unless it is a regular file that we own.
+  """
   try:
-    raw = path.read_text(encoding="utf-8")
+    fd = spool.open(name, os.O_RDONLY)
+    with os.fdopen(fd, encoding="utf-8") as handle:
+      raw = handle.read()
   except FileNotFoundError:
     return None
-  except OSError:
-    return None
+  except OSError as exc:  # A symlink, or not a regular file of ours.
+    raise _SkippedEnvelope(f"{spool.path / name}: {exc}") from exc
   try:
     data = json.loads(raw)
   except json.JSONDecodeError:
     # Corrupt spool entry — dead-letter and move on.
-    _quarantine(path, reason="corrupt-json")
+    _quarantine(spool, name, reason="corrupt-json")
     return None
   return _Envelope(
-      path=path,
+      path=spool.path / name,
       config_dict=data.get("config") or {},
       row=data.get("row") or {},
   )
@@ -169,15 +189,14 @@ def _group_envelopes(
   return grouped
 
 
-def _quarantine(path: Path, reason: str) -> None:
-  dead = ensure_private_dir(path.parent / "dead-letter")
-  target = dead / f"{path.stem}.{reason}.json"
-  try:
-    os.replace(path, target)
-  except FileNotFoundError:
-    pass
-  except OSError:
-    pass
+def _quarantine(spool: PrivateDir, name: str, reason: str) -> None:
+  with spool.subdir("dead-letter") as dead:
+    try:
+      spool.replace(name, f"{Path(name).stem}.{reason}.json", dead)
+    except FileNotFoundError:
+      pass
+    except OSError:
+      pass
 
 
 # ---------------------------------------------------------------------------
@@ -541,6 +560,7 @@ async def _drain_group_async(
     retry: _RetryConfig,
     config: BQAAConfig,
     use_storage_api: bool,
+    spool: PrivateDir,
 ) -> None:
   (
       project,
@@ -553,7 +573,7 @@ async def _drain_group_async(
   ) = key
   if not project or not dataset or not table:
     for env in envelopes:
-      _quarantine(env.path, reason="missing-config")
+      _quarantine(spool, env.path.name, reason="missing-config")
     return
 
   rows = [env.row for env in envelopes]
@@ -596,47 +616,53 @@ async def _drain_group_async(
   if success:
     for env in envelopes:
       try:
-        env.path.unlink()
+        spool.unlink(env.path.name)
       except FileNotFoundError:
         pass
   else:
     for env in envelopes:
-      _quarantine(env.path, reason="write-failed")
+      _quarantine(spool, env.path.name, reason="write-failed")
 
 
 async def _drain_once(config: BQAAConfig, use_storage_api: bool) -> int:
   # Re-checked every pass: the drainer outlives the check in ``_run``.
-  spool = ensure_private_dir(config.spool_dir)
-  pending = _list_pending(spool)
-  if not pending:
-    return 0
-  envelopes: list[_Envelope] = []
-  for path in pending[: max(1, config.drain_batch_size)]:
-    env = _read_envelope(path)
-    if env is not None:
-      envelopes.append(env)
-  if not envelopes:
-    return 0
-  grouped = _group_envelopes(envelopes)
-  retry = _RetryConfig()
-  await asyncio.gather(
-      *(
-          _drain_group_async(
-              key=key,
-              envelopes=batch,
-              retry=retry,
-              config=config,
-              use_storage_api=use_storage_api,
-          )
-          for key, batch in grouped.items()
-      )
-  )
-  return len(envelopes)
+  # Everything below goes through the checked descriptor.
+  with ensure_private_dir(config.spool_dir) as spool:
+    envelopes: list[_Envelope] = []
+    for name in _list_pending(spool):
+      if len(envelopes) >= max(1, config.drain_batch_size):
+        break
+      try:
+        env = _read_envelope(spool, name)
+      except _SkippedEnvelope as skipped:
+        if str(skipped) not in _reported_skips:
+          _reported_skips.add(str(skipped))
+          log_to_file(config, f"DRAINER skipped {skipped}")
+        continue
+      if env is not None:
+        envelopes.append(env)
+    if not envelopes:
+      return 0
+    grouped = _group_envelopes(envelopes)
+    retry = _RetryConfig()
+    await asyncio.gather(
+        *(
+            _drain_group_async(
+                key=key,
+                envelopes=batch,
+                retry=retry,
+                config=config,
+                use_storage_api=use_storage_api,
+                spool=spool,
+            )
+            for key, batch in grouped.items()
+        )
+    )
+    return len(envelopes)
 
 
 async def _run(config: BQAAConfig) -> None:
-  spool = ensure_private_dir(config.spool_dir)
-  pidfile = spool / ".drainer.pid"
+  pidfile = Path(config.spool_dir).expanduser() / ".drainer.pid"
   use_storage_api = _storage_write_available()
   with _try_acquire_pidfile(pidfile) as fd:
     if fd is None:

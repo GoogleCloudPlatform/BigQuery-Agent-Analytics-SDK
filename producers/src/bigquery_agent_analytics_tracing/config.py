@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import getpass
 import os
 import tempfile
 
@@ -38,11 +39,26 @@ BQAA_EVENT_TYPES = frozenset(
     }
 )
 
+
+def _user_tag() -> str:
+  """Tells users' default dirs apart: the uid, else the login name."""
+  getuid = getattr(os, "getuid", None)  # POSIX only.
+  if getuid is not None:
+    return str(getuid())
+  try:
+    name = getpass.getuser()
+  except Exception:  # OSError; ImportError/KeyError before Python 3.13.
+    name = ""
+  tag = "".join(ch for ch in name if ch.isalnum() or ch in "._-")
+  # Never a constant shared by users: with no name, stay per process.
+  return tag or f"pid{os.getpid()}"
+
+
 # Per-user, owner-only base for spool/state/log. Fixed names in the shared
 # /tmp let other local users pre-create or read them; see
 # ``_utils.ensure_private_dir``.
 DEFAULT_STATE_DIR = os.path.join(
-    tempfile.gettempdir(), f"bqaa-agent-tracing-{os.getuid()}"
+    tempfile.gettempdir(), f"bqaa-agent-tracing-{_user_tag()}"
 )
 DEFAULT_SPOOL_DIR = os.path.join(DEFAULT_STATE_DIR, "spool")
 DEFAULT_TRANSCRIPT_MAX_BYTES = 256 * 1024  # 256 KB streamed cap per stop event.

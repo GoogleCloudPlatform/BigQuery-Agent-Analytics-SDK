@@ -19,6 +19,7 @@ by the gated smoke tests, not this file.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 import subprocess
@@ -26,7 +27,10 @@ import sys
 
 import pytest
 
+from bigquery_agent_analytics_tracing._utils import ensure_private_dir
 from bigquery_agent_analytics_tracing._writer_identity import DEFAULT_WRITER_LABEL
+from bigquery_agent_analytics_tracing.config import BQAAConfig
+from bigquery_agent_analytics_tracing.drain import _drain_once
 from bigquery_agent_analytics_tracing.drain import _Envelope
 from bigquery_agent_analytics_tracing.drain import _group_envelopes
 from bigquery_agent_analytics_tracing.drain import _list_pending
@@ -44,31 +48,40 @@ def _write_envelope(spool: Path, name: str, config: dict, row: dict) -> Path:
 
 
 def test_list_pending_returns_only_event_files(tmp_path):
-  spool = tmp_path / "spool"
-  spool.mkdir()
-  (spool / "event-1.json").write_text("{}")
-  (spool / "event-2.json").write_text("{}")
-  (spool / "other.json").write_text("{}")
-  (spool / ".drainer.pid").write_text("123")
+  with ensure_private_dir(tmp_path / "spool") as spool:
+    (spool.path / "event-1.json").write_text("{}")
+    (spool.path / "event-2.json").write_text("{}")
+    (spool.path / "other.json").write_text("{}")
+    (spool.path / ".drainer.pid").write_text("123")
 
-  pending = _list_pending(spool)
+    pending = _list_pending(spool)
 
-  assert [p.name for p in pending] == ["event-1.json", "event-2.json"]
+  assert pending == ["event-1.json", "event-2.json"]
 
 
-def test_list_pending_returns_empty_when_spool_absent(tmp_path):
-  assert _list_pending(tmp_path / "missing") == []
+def test_drain_once_creates_an_absent_spool_and_finds_nothing(tmp_path):
+  spool = tmp_path / "missing"
+  config = BQAAConfig(
+      project_id="p",
+      dataset="d",
+      spool_dir=str(spool),
+      log_file=str(tmp_path / "bqaa.log"),
+  )
+
+  assert asyncio.run(_drain_once(config, use_storage_api=False)) == 0
+  assert spool.is_dir()
 
 
 def test_read_envelope_parses_valid_json(tmp_path):
-  path = _write_envelope(
-      tmp_path / "spool",
-      "event-ok.json",
-      config={"project_id": "p", "dataset": "d", "table": "t"},
-      row={"event_type": "STATE_DELTA"},
-  )
+  with ensure_private_dir(tmp_path / "spool") as spool:
+    _write_envelope(
+        spool.path,
+        "event-ok.json",
+        config={"project_id": "p", "dataset": "d", "table": "t"},
+        row={"event_type": "STATE_DELTA"},
+    )
 
-  envelope = _read_envelope(path)
+    envelope = _read_envelope(spool, "event-ok.json")
 
   assert envelope is not None
   assert envelope.config_dict["project_id"] == "p"
@@ -76,16 +89,16 @@ def test_read_envelope_parses_valid_json(tmp_path):
 
 
 def test_read_envelope_quarantines_corrupt_json(tmp_path):
-  spool = tmp_path / "spool"
-  spool.mkdir()
-  corrupt = spool / "event-bad.json"
-  corrupt.write_text("not json {{{")
+  with ensure_private_dir(tmp_path / "spool") as spool:
+    corrupt = spool.path / "event-bad.json"
+    corrupt.write_text("not json {{{")
 
-  result = _read_envelope(corrupt)
+    result = _read_envelope(spool, "event-bad.json")
 
   assert result is None
   assert not corrupt.exists()
-  dead = list((spool / "dead-letter").glob("event-bad.corrupt-json.json"))
+  dead_letter = tmp_path / "spool" / "dead-letter"
+  dead = list(dead_letter.glob("event-bad.corrupt-json.json"))
   assert len(dead) == 1
 
 
@@ -282,8 +295,9 @@ def test_row_to_arrow_dict_serializes_structured_part_attributes():
     not Path("/tmp").exists(), reason="POSIX-only spool path test"
 )
 def test_envelope_dataclass_round_trip(tmp_path):
+  spool = ensure_private_dir(tmp_path / "spool")
   path = _write_envelope(
-      tmp_path / "spool",
+      spool.path,
       "event-rt.json",
       config={
           "project_id": "p",
@@ -301,7 +315,8 @@ def test_envelope_dataclass_round_trip(tmp_path):
       },
   )
 
-  envelope = _read_envelope(path)
+  envelope = _read_envelope(spool, "event-rt.json")
+  spool.close()
 
   assert envelope is not None
   assert envelope.path == path
