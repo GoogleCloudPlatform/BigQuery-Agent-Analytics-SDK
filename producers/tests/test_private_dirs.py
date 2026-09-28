@@ -40,6 +40,7 @@ import tempfile
 
 import pytest
 
+from bigquery_agent_analytics_tracing import _utils
 from bigquery_agent_analytics_tracing import claude_code
 from bigquery_agent_analytics_tracing import drain
 from bigquery_agent_analytics_tracing import logger as logger_module
@@ -709,6 +710,66 @@ def test_hard_linked_log_in_a_dir_of_ours_still_works(tmp_path):
   _log_one_row(_explicit_log_config(tmp_path, log))
 
   assert "secret" in log.read_text()
+
+
+def test_explicit_log_stays_in_the_dir_checked_before_a_swap(
+    tmp_path, monkeypatch
+):
+  # Right after our log dir passes its check, another user renames it
+  # away and puts in its place a symlink to a dir of theirs that holds a
+  # hard link to one of our files.
+  shared = _emptydir(tmp_path)
+  logs = shared / "logs"
+  logs.mkdir(mode=0o700)
+  victim = _victim_file(tmp_path)
+  attacker_tree = tmp_path / "attacker-tree"
+  attacker_tree.mkdir()
+  os.link(victim, attacker_tree / "bqaa.log")
+  real_check = _utils._check_dir
+  swapped = []
+
+  def check_then_swap(info, path):
+    real_check(info, path)
+    if path == logs and not swapped:
+      logs.rename(shared / "logs.saved")
+      logs.symlink_to(attacker_tree, target_is_directory=True)
+      swapped.append(logs)
+
+  monkeypatch.setattr(_utils, "_check_dir", check_then_swap)
+
+  log_to_file(_explicit_log_config(tmp_path, logs / "bqaa.log"), "secret")
+
+  assert swapped
+  assert victim.read_text() == "export KEEP=1\n"
+  assert "secret" in (shared / "logs.saved" / "bqaa.log").read_text()
+
+
+@pytest.mark.parametrize("foreign", ["dir", "parent"])
+def test_explicit_log_refuses_a_dir_or_parent_owned_by_another_user(
+    tmp_path, monkeypatch, foreign
+):
+  logs = tmp_path / "parent" / "logs"
+  logs.mkdir(parents=True)
+  owned = logs if foreign == "dir" else logs.parent
+  _pretend_owned_by(monkeypatch, owned, os.getuid() + 1)
+
+  log_to_file(_explicit_log_config(tmp_path, logs / "bqaa.log"), "secret")
+
+  assert list(logs.iterdir()) == []
+
+
+def test_explicit_log_in_a_symlinked_dir_still_works(tmp_path):
+  # Like /tmp on macOS, a symlink to /private/tmp.
+  logs = tmp_path / "logs"
+  logs.mkdir(mode=0o700)
+  (tmp_path / "link").symlink_to(logs, target_is_directory=True)
+
+  log_to_file(
+      _explicit_log_config(tmp_path, tmp_path / "link" / "bqaa.log"),
+      "to-symlinked-dir",
+  )
+
+  assert "to-symlinked-dir" in (logs / "bqaa.log").read_text()
 
 
 def test_explicit_log_refuses_a_fifo(tmp_path, monkeypatch):

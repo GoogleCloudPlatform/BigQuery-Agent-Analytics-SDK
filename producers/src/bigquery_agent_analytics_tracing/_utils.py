@@ -412,6 +412,41 @@ def file_lock(path: Path, mode: int = fcntl.LOCK_EX) -> Iterator[int]:
 _STREAM_ALIASES = frozenset({"/dev/stdout", "/dev/stderr"})
 
 
+def _check_log_dir(info: os.stat_result, path: Path) -> bool:
+  """Raise unless ``info`` may hold our log; return whether others own it."""
+  euid = _euid()
+  if euid is not None and info.st_uid not in (0, euid):
+    raise PermissionError(
+        f"Refusing BQAA tracing dir {path}: it is owned by uid {info.st_uid}."
+    )
+  shared = info.st_uid != euid  # Root's, such as /tmp or /dev.
+  if not shared:
+    _check_dir(info, path)
+  return shared
+
+
+def _open_in_log_dir(path: Path, flags: int) -> tuple[int, bool]:
+  """Open ``path`` relative to its existing dir, checked on a descriptor.
+
+  Returns the new descriptor and whether others own the dir. Renaming or
+  replacing the dir after the check, as another user may in a non-sticky
+  shared parent, cannot redirect the open. Symlinks leading to the dir
+  are still followed (``/tmp`` is one on macOS); the name never is.
+  """
+  directory = path.parent
+  if not _dir_fd_supported():  # Best effort, by path.
+    _require_trusted_chain(directory)
+    shared = _check_log_dir(os.stat(directory), directory)
+    return _open_nofollow(path, flags, 0o600), shared
+  dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | _flag("O_CLOEXEC"))
+  try:
+    shared = _check_log_dir(os.fstat(dir_fd), directory)
+    _require_trusted_parents(dir_fd, directory)
+    return _open_nofollow(path.name, flags, 0o600, dir_fd=dir_fd), shared
+  finally:
+    os.close(dir_fd)
+
+
 def _open_log(config: "BQAAConfig") -> int:
   """Open ``config.log_file`` for appending; raise if it is unsafe.
 
@@ -419,7 +454,8 @@ def _open_log(config: "BQAAConfig") -> int:
   check (so a refused dir never receives the refusal message), as does a
   log whose dir does not exist yet. An existing dir must not belong to
   another user and, if it is ours, must be private; otherwise it is a
-  shared dir such as /tmp. The log itself must be a character device
+  shared dir such as /tmp. The log is opened relative to the descriptor
+  that dir was checked on. The log itself must be a character device
   (e.g. /dev/null or a terminal) or a regular file of ours, never reached
   through a symlink and, in a shared dir, with no other hard link. One
   that others can read is made owner-only.
@@ -434,12 +470,7 @@ def _open_log(config: "BQAAConfig") -> int:
     with ensure_private_dir(path.parent) as directory:
       fd = directory.open(path.name, append | os.O_CREAT)
   else:
-    _require_trusted_chain(path.parent)
-    parent = os.stat(path.parent)
-    shared = parent.st_uid != _euid()
-    if not shared:
-      _check_dir(parent, path.parent)
-    fd = _open_nofollow(path, append | os.O_CREAT, 0o600)
+    fd, shared = _open_in_log_dir(path, append | os.O_CREAT)
   try:
     info = os.fstat(fd)
     if stat.S_ISCHR(info.st_mode):
