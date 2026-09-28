@@ -51,15 +51,18 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 import time
 import traceback
 from typing import Any, Iterator
 
 from ._utils import deterministic_span
+from ._utils import ensure_private_dir
 from ._utils import hex_id
 from ._utils import iso_timestamp
 from ._utils import log_to_file
+from ._utils import PrivateDir
 from ._utils import safe_json_loads
 from ._utils import timestamp_ms
 from ._utils import to_jsonable
@@ -169,13 +172,13 @@ def _line_count(path: str) -> int:
 class _LockedJSONStore:
   """Atomic read-modify-write JSON store guarded by ``fcntl.flock``."""
 
-  def __init__(self, path: Path):
-    self.path = path
-    self.path.parent.mkdir(parents=True, exist_ok=True)
+  def __init__(self, directory: PrivateDir, name: str):
+    self.directory = directory
+    self.name = name
 
   @contextlib.contextmanager
   def transaction(self) -> Iterator[dict[str, Any]]:
-    fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR, 0o600)
+    fd = self.directory.open(self.name, os.O_CREAT | os.O_RDWR)
     try:
       fcntl.flock(fd, fcntl.LOCK_EX)
       try:
@@ -198,14 +201,14 @@ class _LockedJSONStore:
         pass
 
   def read(self) -> dict[str, Any]:
-    if not self.path.exists():
+    if not self.directory.exists(self.name):
       return {}
     with self.transaction() as state:
       return dict(state)
 
   def remove(self) -> None:
     try:
-      self.path.unlink()
+      self.directory.unlink(self.name)
     except FileNotFoundError:
       pass
 
@@ -216,7 +219,8 @@ class StateStore:
   Session-scoped fields live in ``state_<session>.json``. Per-tool
   sub-state lives in ``tool_<session>_<tool_use_id>.json`` so concurrent
   ``PreToolUse`` fires for parallel tools do not clobber each other's
-  ``start_ms`` / ``span_id``.
+  ``start_ms`` / ``span_id``. Files are used through the state dir checked
+  on construction (see ``ensure_private_dir``), for the store's lifetime.
   """
 
   def __init__(self, key: str, root: str = DEFAULT_STATE_DIR):
@@ -224,9 +228,9 @@ class StateStore:
         "".join(ch for ch in key if ch.isalnum() or ch in "._-") or "default"
     )
     self.key = safe_key
-    self.root = Path(root).expanduser()
-    self.root.mkdir(parents=True, exist_ok=True)
-    self._session_store = _LockedJSONStore(self.root / f"state_{safe_key}.json")
+    self._dir = ensure_private_dir(root)
+    self.root = self._dir.path
+    self._session_store = _LockedJSONStore(self._dir, f"state_{safe_key}.json")
     self._cache: dict[str, Any] = self._session_store.read()
 
   def get(self, key: str, default: Any = None) -> Any:
@@ -248,36 +252,30 @@ class StateStore:
 
   def remove(self) -> None:
     self._session_store.remove()
-    for path in self.root.glob(f"tool_{self.key}_*.json"):
-      try:
-        path.unlink()
-      except FileNotFoundError:
-        pass
+    prefix = f"tool_{self.key}_"
+    for name in self._dir.names():
+      if name.startswith(prefix) and name.endswith(".json"):
+        _LockedJSONStore(self._dir, name).remove()
 
   # -- Per-tool sub-state ---------------------------------------------------
 
-  def _tool_path(self, tool_use_id: str) -> Path:
+  def _tool_store(self, tool_use_id: str) -> _LockedJSONStore:
     safe = (
         "".join(ch for ch in tool_use_id if ch.isalnum() or ch in "._-")
         or "unknown"
     )
-    return self.root / f"tool_{self.key}_{safe}.json"
+    return _LockedJSONStore(self._dir, f"tool_{self.key}_{safe}.json")
 
   def set_tool(self, tool_use_id: str, value: dict[str, Any]) -> None:
-    store = _LockedJSONStore(self._tool_path(tool_use_id))
-    with store.transaction() as state:
+    with self._tool_store(tool_use_id).transaction() as state:
       state.clear()
       state.update(value)
 
   def pop_tool(self, tool_use_id: str) -> dict[str, Any]:
-    path = self._tool_path(tool_use_id)
-    store = _LockedJSONStore(path)
+    store = self._tool_store(tool_use_id)
     with store.transaction() as state:
       value = dict(state)
-    try:
-      path.unlink()
-    except FileNotFoundError:
-      pass
+    store.remove()
     return value
 
 
@@ -293,24 +291,22 @@ def cleanup_stale_state(root: str | Path, ttl_hours: float) -> int:
     return 0
   cutoff = time.time() - ttl_hours * 3600
   removed = 0
-  for path in base.iterdir():
-    if not path.is_file():
-      continue
-    name = path.name
-    if not (
-        name.startswith("state_") or name.startswith("tool_")
-    ) or not name.endswith(".json"):
-      continue
-    try:
-      mtime = path.stat().st_mtime
-    except FileNotFoundError:
-      continue
-    if mtime < cutoff:
+  with ensure_private_dir(base) as directory:
+    for name in directory.names():
+      if not (
+          name.startswith("state_") or name.startswith("tool_")
+      ) or not name.endswith(".json"):
+        continue
       try:
-        path.unlink()
-        removed += 1
+        info = directory.lstat(name)
       except FileNotFoundError:
-        pass
+        continue
+      if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+        try:
+          directory.unlink(name)
+          removed += 1
+        except FileNotFoundError:
+          pass
   return removed
 
 
