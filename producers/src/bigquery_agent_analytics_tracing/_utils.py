@@ -438,7 +438,11 @@ def _open_in_log_dir(path: Path, flags: int) -> tuple[int, bool]:
     _require_trusted_chain(directory)
     shared = _check_log_dir(os.stat(directory), directory)
     return _open_nofollow(path, flags, 0o600), shared
-  dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | _flag("O_CLOEXEC"))
+  # Looking the log up by name needs only search permission on the dir,
+  # so a dir of ours that we can write and search but not list (0300)
+  # must work: open it search-only (O_SEARCH, or O_PATH on Linux).
+  lookup = _flag("O_SEARCH") or _flag("O_PATH") or os.O_RDONLY
+  dir_fd = os.open(directory, lookup | os.O_DIRECTORY | _flag("O_CLOEXEC"))
   try:
     shared = _check_log_dir(os.fstat(dir_fd), directory)
     _require_trusted_parents(dir_fd, directory)

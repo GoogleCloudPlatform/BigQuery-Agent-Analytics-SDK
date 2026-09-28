@@ -772,6 +772,45 @@ def test_explicit_log_in_a_symlinked_dir_still_works(tmp_path):
   assert "to-symlinked-dir" in (logs / "bqaa.log").read_text()
 
 
+@pytest.mark.parametrize("mode", [0o300, 0o100], ids=oct)
+def test_explicit_log_in_a_dir_we_can_search_but_not_list_still_works(
+    tmp_path, mode
+):
+  # Appending to a known name needs only search permission on its dir,
+  # so a private dir of ours without read permission must still work.
+  logs = tmp_path / "logs"
+  logs.mkdir(mode=0o700)
+  log = logs / "bqaa.log"
+  log.write_text("earlier line\n")
+  log.chmod(0o600)
+  logs.chmod(mode)
+  try:
+    with log.open("a") as handle:  # An ordinary append works here.
+      handle.write("ordinary append\n")
+    log_to_file(_explicit_log_config(tmp_path, log), "producer append")
+  finally:
+    logs.chmod(0o700)
+
+  text = log.read_text()
+  assert text.startswith("earlier line\nordinary append\n")
+  assert "producer append" in text
+  assert _mode(log) == 0o600
+
+
+def test_explicit_log_without_search_only_open_flags_still_works(
+    tmp_path, monkeypatch
+):
+  # Without O_SEARCH or O_PATH, the dir is opened for reading.
+  for name in ("O_SEARCH", "O_PATH"):
+    monkeypatch.delattr(os, name, raising=False)
+  logs = tmp_path / "logs"
+  logs.mkdir(mode=0o700)
+
+  log_to_file(_explicit_log_config(tmp_path, logs / "bqaa.log"), "no-search")
+
+  assert "no-search" in (logs / "bqaa.log").read_text()
+
+
 def test_explicit_log_refuses_a_fifo(tmp_path, monkeypatch):
   shared = _shared_tmp(tmp_path, monkeypatch)
   log = shared / "bqaa-agent-tracing.log"
