@@ -14,25 +14,37 @@
 #
 # Usage:
 #   browser_smoke.sh              run the check against ../docs
-#   browser_smoke.sh --self-test  run the negative fixtures and require each
-#                                 to fail: an immediate console error, an
+#   browser_smoke.sh --self-test  run the fixtures and require each stated
+#                                 outcome. The negative fixtures must each
+#                                 FAIL: an immediate console error, an
 #                                 occupied port, a failing browser binary, a
 #                                 browser that writes healthy DOM then exits
 #                                 nonzero, a console error delayed past the
 #                                 marker's creation, a page that never
-#                                 writes the app-initialized marker, and a
-#                                 page whose live field value is mutated
-#                                 without a serialized value attribute, a
-#                                 delayed live-value mutation after marker
-#                                 creation, and a decoy zero-error element
-#                                 beside a marker recording a real error
+#                                 writes the app-initialized marker, a page
+#                                 whose live field value is mutated without
+#                                 a serialized value attribute, a delayed
+#                                 live-value mutation after marker creation,
+#                                 a decoy zero-error element beside a marker
+#                                 recording a real error, a non-bind server
+#                                 startup failure, a pinned port under a
+#                                 bind conflict, and an alive-but-unready
+#                                 server. The positive fixture must PASS: a
+#                                 real bind collision on the first attempt
+#                                 is retried on fresh ports to success,
+#                                 with two to five server spawns and one
+#                                 retry line per spawn past the first.
 #
-# Every fixture except the missing-initialization one satisfies the full
-# healthy baseline (#448): the runtime data-bqaa-app-initialized marker (set
-# by script, never static), an aria-disabled action, and no aria-invalid
-# anywhere — so each fixture's injected fault is the sole reason it fails.
+# Every browser-level fixture except the missing-initialization one
+# satisfies the full healthy baseline (#448): the runtime
+# data-bqaa-app-initialized marker (set by script, never static), an
+# aria-disabled action, and no aria-invalid anywhere — so each fixture's
+# injected fault is the sole reason it fails. The server-startup fixtures
+# inject their fault before any page is loaded.
 #
-# Env: CHROME_BIN, SMOKE_PORT, SMOKE_DOCS_DIR override discovery.
+# Env: CHROME_BIN, SMOKE_PORT, SMOKE_DOCS_DIR override discovery. A pinned
+# SMOKE_PORT disables the port retry (exactly one attempt on that port),
+# so the occupied-port negative fixture keeps failing as it must.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -43,8 +55,16 @@ SERVER_PID=""
 CHROME_PID=""
 
 cleanup() {
-  if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null || true; fi
-  if [ -n "$CHROME_PID" ]; then kill "$CHROME_PID" 2>/dev/null || true; fi
+  # Kill AND reap: waiting after the kill collects the child so bash never
+  # prints a stray "Terminated" job report at exit, and no zombie is left.
+  if [ -n "$SERVER_PID" ]; then
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+  fi
+  if [ -n "$CHROME_PID" ]; then
+    kill "$CHROME_PID" 2>/dev/null || true
+    wait "$CHROME_PID" 2>/dev/null || true
+  fi
   rm -rf "$OUT_DIR"
 }
 trap cleanup EXIT
@@ -70,7 +90,9 @@ find_chrome() {
 }
 
 # ---------------------------------------------------------------------------
-# Self-test: every fixture below must make the main check FAIL.
+# Self-test: every negative fixture below must make the main check FAIL;
+# the positive retry fixture must make it PASS with the first attempt's
+# bind collision retried to success.
 # ---------------------------------------------------------------------------
 if [ "${1:-}" = "--self-test" ]; then
   CHROME="$(find_chrome)"
@@ -100,6 +122,8 @@ HTML
 
   # 2. An occupied port serving the WRONG tree: the check must notice it
   #    does not own the port instead of validating a stranger's content.
+  #    A pinned port stays single-attempt with the pre-retry diagnostic,
+  #    so this fixture also pins that wording byte-for-byte.
   DECOY="$OUT_DIR/decoy"
   mkdir -p "$DECOY"
   cp "$DOCS_DIR/index.html" "$DECOY/index.html" 2>/dev/null || echo "<body></body>" > "$DECOY/index.html"
@@ -108,12 +132,15 @@ HTML
   DECOY_PID=$!
   disown "$DECOY_PID" 2>/dev/null || true
   sleep 1
-  if SMOKE_PORT="$BUSY_PORT" "$SCRIPT_PATH" >/dev/null 2>&1; then
+  PINNED_ERR="$OUT_DIR/fixture2-stderr.txt"
+  if SMOKE_PORT="$BUSY_PORT" "$SCRIPT_PATH" >/dev/null 2>"$PINNED_ERR"; then
     kill "$DECOY_PID" 2>/dev/null || true
     fail "self-test 2 FAILED: an occupied port was treated as our server"
   fi
   kill "$DECOY_PID" 2>/dev/null || true
-  echo "self-test 2 OK: occupied/stale port is detected"
+  grep -Fq "server did not become ready on port $BUSY_PORT (occupied by another process, or failed to start)" "$PINNED_ERR" ||
+    fail "self-test 2 FAILED: the pinned-port diagnostic text changed"
+  echo "self-test 2 OK: occupied/stale port is detected (diagnostic unchanged)"
 
   # 3. A browser binary that exits nonzero without producing output.
   if CHROME_BIN="/bin/false" "$SCRIPT_PATH" >/dev/null 2>&1; then
@@ -260,7 +287,223 @@ HTML
   fi
   echo "self-test 9 OK: decoy zero-error element cannot mask the marker"
 
-  echo "browser smoke self-test OK: all negative fixtures fail as required"
+  # Test-only python3 shim shared by the server-startup fixtures below: it
+  # counts http.server spawns (SMOKE_SHIM_COUNTER) and, on the FIRST
+  # spawn only, injects the deterministic startup failure named by
+  # SMOKE_SHIM_MODE. Every other invocation passes through to the real
+  # interpreter untouched, so instrumentation and later attempts run the
+  # real code paths — and a retry-happy regression would be fed by the
+  # shim's SECOND spawn, which serves normally.
+  make_shim() {
+    mkdir -p "$1"
+    cat > "$1/python3" <<'SHIM'
+#!/usr/bin/env bash
+# Injects a deterministic first-spawn server failure for the smoke
+# self-test; everything else passes through to the real python3.
+set -u
+REAL="${SMOKE_SHIM_REAL:?SMOKE_SHIM_REAL must name the real python3}"
+MODE="${SMOKE_SHIM_MODE:-}"
+COUNTER="${SMOKE_SHIM_COUNTER:-}"
+if [ "$REAL" = "$0" ]; then
+  echo "shim: SMOKE_SHIM_REAL must not name the shim itself" >&2
+  exit 9
+fi
+if [ "${1:-}" = "-m" ] && [ "${2:-}" = "http.server" ] && [ "${4:-}" = "--directory" ]; then
+  SPAWNS=1
+  if [ -n "$COUNTER" ]; then
+    printf 'spawn\n' >> "$COUNTER"
+    SPAWNS="$(grep -c '' "$COUNTER" || true)"
+  fi
+  if [ -n "$MODE" ] && [ "$SPAWNS" = "1" ]; then
+    case "$MODE" in
+      collide-first)
+        # Really occupy the port first, then start the real server on it:
+        # the server dies with a genuine EADDRINUSE ("Address already in
+        # use") on its own bind attempt — the exact failure the retry loop
+        # must positively identify before it may retry.
+        "$REAL" - "$3" "$5" <<'PYEOF'
+import socket
+import subprocess
+import sys
+
+port = int(sys.argv[1])
+directory = sys.argv[2]
+# SO_REUSEADDR lets the holders bind even over a port sitting in TIME_WAIT
+# (Linux ephemeral range overlaps the draw range), so the collision is
+# always injected; an ACTIVE listener still blocks the real server's bind
+# on both Linux and macOS, which is what makes the failure deterministic.
+holders = []
+for family, address in (
+    (socket.AF_INET, "0.0.0.0"),
+    (socket.AF_INET6, "::"),
+):
+  try:
+    holder = socket.socket(family, socket.SOCK_STREAM)
+    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if family == socket.AF_INET6 and hasattr(socket, "IPV6_V6ONLY"):
+      holder.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+    holder.bind((address, port))
+    holder.listen(1)
+    holders.append(holder)
+  except OSError:
+    # Already taken by an active socket: the real server started below
+    # hits that live listener and reports the same genuine EADDRINUSE.
+    pass
+try:
+  server = subprocess.run(
+      [
+          sys.executable,
+          "-m",
+          "http.server",
+          str(port),
+          "--directory",
+          directory,
+      ],
+      timeout=30,
+  )
+except subprocess.TimeoutExpired:
+  print("shim: held-port server run timed out", file=sys.stderr)
+  sys.exit(9)
+sys.exit(server.returncode)
+PYEOF
+        exit $?
+        ;;
+      nonbind-first)
+        # A real class of intermittent startup failure that a fresh port
+        # can never cure: any retry would only mask it.
+        echo "shim: synthetic non-bind startup failure (server module import exploded)" >&2
+        exit 7
+        ;;
+      alive-unready-first)
+        # Binds nothing, stays alive, never answers the readiness nonce:
+        # the readiness-timeout-with-a-live-child case.
+        echo "shim: alive but never serving the readiness nonce" >&2
+        exec sleep 30
+        ;;
+      *)
+        echo "shim: unknown SMOKE_SHIM_MODE '$MODE'" >&2
+        exit 9
+        ;;
+    esac
+  fi
+fi
+exec "$REAL" "$@"
+SHIM
+    chmod +x "$1/python3"
+  }
+
+  # 10. (positive) A REAL bind collision on the first attempt: the shim
+  #     holds the drawn port with genuine listeners, so the first
+  #     http.server dies with an authentic "Address already in use". The
+  #     check must positively identify the bind conflict, retry on a fresh
+  #     port, and still pass. The recovery draws are random too, so a
+  #     later attempt may hit a genuine second collision and correctly
+  #     retry again within the five-attempt cap: assert 2-5 spawns with
+  #     one retry line per spawn past the first — the first attempt
+  #     collided, every retry logged its line, the final spawn served —
+  #     instead of exact counts that a real environmental collision on a
+  #     recovery draw would break.
+  #     NOTE: the real interpreter is resolved BEFORE the PATH override
+  #     below: bash applies prefix assignments left to right, so expanding
+  #     "$(command -v python3)" inside the PATH-prefixed command would
+  #     resolve to the shim itself.
+  REAL_PY="$(command -v python3)"
+  make_shim "$OUT_DIR/shim-collide"
+  COLLIDE_COUNT="$OUT_DIR/collide-spawns.txt"
+  COLLIDE_ERR="$OUT_DIR/fixture10-stderr.txt"
+  : > "$COLLIDE_COUNT"
+  if ! PATH="$OUT_DIR/shim-collide:$PATH" \
+       SMOKE_SHIM_REAL="$REAL_PY" \
+       SMOKE_SHIM_MODE=collide-first \
+       SMOKE_SHIM_COUNTER="$COLLIDE_COUNT" \
+       SMOKE_DOCS_DIR="$DOCS_DIR" \
+       "$SCRIPT_PATH" >/dev/null 2>"$COLLIDE_ERR"; then
+    fail "self-test 10 FAILED: a bind collision on the first attempt was not retried to success"
+  fi
+  COLLIDE_SPAWNS="$(grep -c '' "$COLLIDE_COUNT" || true)"
+  [ "$COLLIDE_SPAWNS" -ge 2 ] && [ "$COLLIDE_SPAWNS" -le 5 ] ||
+    fail "self-test 10 FAILED: expected 2-5 server spawns (first collision, then recovery draws within the five-attempt cap), got $COLLIDE_SPAWNS"
+  RETRY_LINES="$(grep -c 'already in use; retrying on a fresh port' "$COLLIDE_ERR" || true)"
+  [ "$RETRY_LINES" -eq "$((COLLIDE_SPAWNS - 1))" ] ||
+    fail "self-test 10 FAILED: retry lines must equal server spawns minus one (spawns: $COLLIDE_SPAWNS, retry lines: $RETRY_LINES)"
+  echo "self-test 10 OK: bind collision on attempt 1 is retried on a fresh port and passes"
+
+  # 11. A NON-BIND startup failure on the first attempt — the masking
+  #     regression this fixture exists for: a retry-everything loop would
+  #     swallow the failure and pass on the shim's second, healthy spawn.
+  #     The check must fail ON the first attempt (exactly one server
+  #     spawn), and the diagnostic must carry the captured server output.
+  make_shim "$OUT_DIR/shim-nonbind"
+  NONBIND_COUNT="$OUT_DIR/nonbind-spawns.txt"
+  NONBIND_ERR="$OUT_DIR/fixture11-stderr.txt"
+  : > "$NONBIND_COUNT"
+  if PATH="$OUT_DIR/shim-nonbind:$PATH" \
+     SMOKE_SHIM_REAL="$REAL_PY" \
+     SMOKE_SHIM_MODE=nonbind-first \
+     SMOKE_SHIM_COUNTER="$NONBIND_COUNT" \
+     SMOKE_DOCS_DIR="$DOCS_DIR" \
+     "$SCRIPT_PATH" >/dev/null 2>"$NONBIND_ERR"; then
+    fail "self-test 11 FAILED: a non-bind server startup failure was masked by a retry"
+  fi
+  NONBIND_SPAWNS="$(grep -c '' "$NONBIND_COUNT" || true)"
+  [ "$NONBIND_SPAWNS" = "1" ] ||
+    fail "self-test 11 FAILED: a non-bind failure must fail on attempt 1 with no retry (server spawns: $NONBIND_SPAWNS)"
+  grep -Fq "synthetic non-bind startup failure" "$NONBIND_ERR" ||
+    fail "self-test 11 FAILED: the diagnostic must include the captured server output"
+  echo "self-test 11 OK: non-bind startup failure fails on attempt 1, no retry, output surfaced"
+
+  # 12. A pinned SMOKE_PORT stays single-attempt even under a positively
+  #     identified bind conflict: the shim would happily serve on a second
+  #     spawn, so any retry would be caught by the spawn counter, and the
+  #     diagnostic must stay byte-identical to the pre-retry wording. The
+  #     docs are the console-error fixture so even a buggy retry that
+  #     reached the browser would still fail the check.
+  make_shim "$OUT_DIR/shim-pinned"
+  PIN_PORT=$((30000 + RANDOM % 10000))
+  PIN_COUNT="$OUT_DIR/pinned-spawns.txt"
+  PIN_ERR="$OUT_DIR/fixture12-stderr.txt"
+  : > "$PIN_COUNT"
+  if PATH="$OUT_DIR/shim-pinned:$PATH" \
+     SMOKE_SHIM_REAL="$REAL_PY" \
+     SMOKE_SHIM_MODE=collide-first \
+     SMOKE_SHIM_COUNTER="$PIN_COUNT" \
+     SMOKE_DOCS_DIR="$FIXTURE" \
+     SMOKE_PORT="$PIN_PORT" \
+     "$SCRIPT_PATH" >/dev/null 2>"$PIN_ERR"; then
+    fail "self-test 12 FAILED: a pinned occupied port passed"
+  fi
+  PIN_SPAWNS="$(grep -c '' "$PIN_COUNT" || true)"
+  [ "$PIN_SPAWNS" = "1" ] ||
+    fail "self-test 12 FAILED: a pinned port must stay single-attempt (server spawns: $PIN_SPAWNS)"
+  grep -Fq "server did not become ready on port $PIN_PORT (occupied by another process, or failed to start)" "$PIN_ERR" ||
+    fail "self-test 12 FAILED: the pinned-port diagnostic text changed"
+  echo "self-test 12 OK: pinned port stays single-attempt with the unchanged diagnostic"
+
+  # 13. A server that stays alive but never answers the readiness nonce:
+  #     a readiness timeout with a LIVE child must fail immediately — a
+  #     retry on a fresh port could only mask a real startup hang. The
+  #     shim would serve normally on a second spawn, so the spawn counter
+  #     catches any retry.
+  make_shim "$OUT_DIR/shim-alive"
+  ALIVE_COUNT="$OUT_DIR/alive-spawns.txt"
+  ALIVE_ERR="$OUT_DIR/fixture13-stderr.txt"
+  : > "$ALIVE_COUNT"
+  if PATH="$OUT_DIR/shim-alive:$PATH" \
+     SMOKE_SHIM_REAL="$REAL_PY" \
+     SMOKE_SHIM_MODE=alive-unready-first \
+     SMOKE_SHIM_COUNTER="$ALIVE_COUNT" \
+     SMOKE_DOCS_DIR="$FIXTURE" \
+     "$SCRIPT_PATH" >/dev/null 2>"$ALIVE_ERR"; then
+    fail "self-test 13 FAILED: an alive-but-unready server passed"
+  fi
+  ALIVE_SPAWNS="$(grep -c '' "$ALIVE_COUNT" || true)"
+  [ "$ALIVE_SPAWNS" = "1" ] ||
+    fail "self-test 13 FAILED: an alive-but-unready child must fail immediately with no retry (server spawns: $ALIVE_SPAWNS)"
+  grep -Fq "alive but never serving the readiness nonce" "$ALIVE_ERR" ||
+    fail "self-test 13 FAILED: the diagnostic must include the captured server output"
+  echo "self-test 13 OK: readiness timeout with a live child fails immediately, no retry"
+
+  echo "browser smoke self-test OK: every negative fixture fails as required, and the bind-collision retry recovers"
   exit 0
 fi
 
@@ -353,24 +596,82 @@ EOF
 
 # The server must provably be OURS: readiness is a nonce round-trip, not a
 # sleep, so an occupied port (our bind fails, a stranger answers) is caught.
+# One random draw is not enough: the pick range overlaps the runner's
+# ephemeral port span, and a single collision red-fails an otherwise-green
+# CI run (main @ 1908eb0, run 35760370644: port 37368). Draw up to five
+# candidates — every attempt still proves ownership via the nonce, and an
+# explicitly pinned SMOKE_PORT stays single-attempt so the occupied-port
+# negative fixture keeps failing exactly as it must.
+#
+# A retry is admissible for exactly ONE failure: a bind conflict,
+# positively identified from the dead child's own captured output
+# (EADDRINUSE / "Address already in use") — the only failure a fresh port
+# can cure. Every other failure — a non-bind exit, a readiness timeout
+# with the child still alive, or anything unidentified — fails the check
+# immediately on that attempt with the captured server output in the
+# diagnostic, so an intermittent real startup failure can never be masked
+# by a later lucky spawn.
 NONCE="smoke-nonce-$$-$RANDOM"
 echo "$NONCE" > "$SITE/$NONCE.txt"
-PORT="${SMOKE_PORT:-$((20000 + RANDOM % 20000))}"
-python3 -m http.server "$PORT" --directory "$SITE" >/dev/null 2>&1 &
-SERVER_PID=$!
-disown "$SERVER_PID" 2>/dev/null || true
+ATTEMPTS=5
+if [ -n "${SMOKE_PORT:-}" ]; then
+  ATTEMPTS=1
+fi
+
+# Last lines of one attempt's captured server output, flattened, so a
+# fail-fast diagnostic carries the child's own error, not a generic one.
+server_output_snippet() {
+  if [ ! -s "$1" ]; then
+    echo "(no server output captured)"
+    return
+  fi
+  tail -n 5 "$1" | tr '\n' ' '
+}
 
 READY=""
-for _ in $(seq 1 20); do
-  BODY="$(curl -fsS --max-time 2 "http://127.0.0.1:$PORT/$NONCE.txt" 2>/dev/null || true)"
-  if [ "$BODY" = "$NONCE" ]; then
-    READY=1
+PORT=""
+for ATTEMPT in $(seq 1 "$ATTEMPTS"); do
+  PORT="${SMOKE_PORT:-$((20000 + RANDOM % 20000))}"
+  SERVER_LOG="$OUT_DIR/server-attempt-$ATTEMPT.log"
+  python3 -m http.server "$PORT" --directory "$SITE" >"$SERVER_LOG" 2>&1 &
+  SERVER_PID=$!
+  for _ in $(seq 1 20); do
+    BODY="$(curl -fsS --max-time 2 "http://127.0.0.1:$PORT/$NONCE.txt" 2>/dev/null || true)"
+    if [ "$BODY" = "$NONCE" ]; then
+      READY=1
+      break
+    fi
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+      break
+    fi
+    sleep 0.5
+  done
+  if [ -n "$READY" ]; then
     break
   fi
-  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    break
+  if kill -0 "$SERVER_PID" 2>/dev/null; then
+    # Alive but never served the nonce: the port is ours, the server just
+    # never answered. A fresh port cannot cure that — fail now, before a
+    # retry could mask a real startup hang.
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+    SERVER_PID=""
+    fail "server did not become ready on port $PORT (server still running, never answered the readiness nonce); server output: $(server_output_snippet "$SERVER_LOG")"
   fi
-  sleep 0.5
+  # The child is dead: reap its real exit status and classify it by the
+  # captured output of THIS attempt.
+  wait "$SERVER_PID" && SERVER_STATUS=0 || SERVER_STATUS=$?
+  SERVER_PID=""
+  if grep -Eq 'EADDRINUSE|Address already in use' "$SERVER_LOG"; then
+    # Positively identified bind conflict: the one retryable failure.
+    if [ "$ATTEMPT" -lt "$ATTEMPTS" ]; then
+      echo "browser smoke: attempt $ATTEMPT/$ATTEMPTS: port $PORT already in use; retrying on a fresh port" >&2
+      continue
+    fi
+    fail "server did not become ready on port $PORT (occupied by another process, or failed to start)"
+  fi
+  # Any other death is a real startup failure: surface it from this attempt.
+  fail "server exited with status $SERVER_STATUS on port $PORT (attempt $ATTEMPT of $ATTEMPTS); server output: $(server_output_snippet "$SERVER_LOG")"
 done
 [ -n "$READY" ] || fail "server did not become ready on port $PORT (occupied by another process, or failed to start)"
 
