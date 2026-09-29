@@ -62,18 +62,21 @@ tests and hash locks are tidied (#490, #491, #497, #500).
 - **Unreferenced private helpers and incidental imports (#490, #496)** —
   #490 deletes unreferenced private helpers and unused imports from seven
   `src/` modules (59 lines), and #496 drops two unused imports from
-  `system_evaluator.py`. Behavior is unchanged. Names that were only
-  reachable as incidental module attributes are gone:
+  `system_evaluator.py`. Supported behavior is unchanged, but module
+  attributes that existed only as incidental imports are gone:
   `client.CATEGORICAL_AI_GENERATE_QUERY` (import it from
   `categorical_evaluator`), `system_evaluator.strip_markdown_fences`
   (still exported from `utils` and `evaluators`),
-  `system_evaluator.udf_kernels` and `_streaming_evaluation.udf_kernels`
-  (import `bigquery_agent_analytics.udf_kernels`), and
+  `system_evaluator._parse_json_from_text` (a private helper that stays
+  in `utils`), `system_evaluator.udf_kernels` and
+  `_streaming_evaluation.udf_kernels` (import
+  `bigquery_agent_analytics.udf_kernels`),
   `ontology_schema_compiler.ResolvedEntity` / `ResolvedRelationship`
-  (defined in `resolved_spec`), along with the private helpers
-  `_compile_entity_schema`, `_compile_relationship_schema`,
-  `_first_string_value` and `system_evaluator._parse_json_from_text`.
-  None of them was exported from the package or documented.
+  (defined in `resolved_spec`), `insights.dc_field` (use
+  `dataclasses.field`) and `trace.functools`. The deleted private
+  helpers are `ontology_schema_compiler._compile_entity_schema`,
+  `_compile_relationship_schema` and `ontology_runtime._first_string_value`.
+  None of these names was exported from the package or documented.
 
 ### Tracing producer (released separately, not in this wheel)
 
@@ -85,23 +88,26 @@ tests and hash locks are tidied (#490, #491, #497, #500).
   0700 (`<user>` is the numeric uid; without `os.getuid`, a sanitized
   login name, else a per-process tag) instead of the shared
   `/tmp/bqaa-agent-tracing/` and `/tmp/bqaa-agent-tracing.log`. Spool
-  and state files are created with mode 0600 and opened relative to the
-  checked directory with `O_NOFOLLOW`. Compatibility:
+  and state files are created with mode 0600 and, where the platform
+  supports it, opened relative to the checked directory with
+  `O_NOFOLLOW`. Compatibility:
   - Spool, state and dead-letter directories, default or set through
     `BQAA_SPOOL_DIR` / `BQAA_STATE_DIR`, are refused if they are a
     symlink, are owned by another user, are group- or world-writable
-    (fix with `chmod g-w`), or sit under a parent owned by another
-    non-root user. A shared directory such as `/tmp` itself is refused.
+    (for a directory you own, remove both write bits with
+    `chmod go-w`), or sit under a parent owned by another non-root
+    user. A shared directory such as `/tmp` itself is refused.
   - An explicit `BQAA_LOG_FILE` must be a regular file you own or a
     character device; `/dev/stdout`, `/dev/stderr`, `/dev/null` and
     terminals keep working. Its directory and every physical parent
     must be owned by root or by you, and a directory of yours must not
     be group- or world-writable; a missing directory is created with
-    mode 0700. Symlinks leading to the directory are still followed,
-    but a symlink at the log file name is refused, and in a root-owned
-    shared directory such as `/tmp` a log with other hard links is
-    refused. An existing log with group or other permission bits is
-    changed to mode 0600.
+    mode 0700. Symlinks leading to an existing log directory outside
+    the state directory are still followed (a log inside the state
+    directory gets the spool and state rules above), but a symlink at
+    the log file name is refused, and in a root-owned shared directory
+    such as `/tmp` a log with other hard links is refused. An existing
+    log with group or other permission bits is changed to mode 0600.
   - Refusals fail closed. The drainer exits 1 without draining when its
     spool directory is refused. Hooks swallow the error and return 0;
     they try to log it, but a refused log path drops log lines silently,
@@ -114,7 +120,10 @@ tests and hash locks are tidied (#490, #491, #497, #500).
     before deleting it. Explicit `BQAA_*` paths keep working when they
     pass the checks above.
   - Where a platform lacks descriptor-relative calls or `O_NOFOLLOW`,
-    the same checks run by path as a best effort.
+    the checks run by path as a best effort; without `os.geteuid`, the
+    ownership and permission-mode checks are skipped, and tightening an
+    existing log's mode needs `os.fchmod`. None of this adds Windows
+    support: the producer still imports `fcntl`.
   - The Claude Code plugin's vendored copy (`plugins/claude_code_dist`)
     is unchanged; it picks this up at the next tracing release sync.
 
