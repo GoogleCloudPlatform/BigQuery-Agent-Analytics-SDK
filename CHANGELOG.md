@@ -7,13 +7,161 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-09-29
+
+### Release highlights
+
+A small patch release. In the wheel: a `compaction_windows` cross-event
+view deploys beside the per-event views (#216 / #494); the
+extractor-compilation smoke test decodes its child process's pickled
+output through an allowlist, so compiled-extractor code can no longer
+run code in the parent (#492); and unreferenced private helpers and
+imports are removed (#490, #496). No public API is removed or renamed,
+and the wheel's dependencies are unchanged. Around the wheel: the
+separately released tracing producer keeps its spool, state and log
+private to the user, with compatibility notes below (#499); SDK docs
+and examples are corrected against the code (#493, #495); and CI,
+tests and hash locks are tidied (#490, #491, #497, #500).
+
 ### Added
 
-- **Compaction windows view (#216)** - `ViewManager` and the `views` CLI
-  deploy `compaction_windows` alongside the per-event views. It exposes
-  distinct ranges per full telemetry identity, preserves fractional epoch
-  seconds at microsecond precision, and excludes incomplete identities and
-  invalid boundaries.
+- **Compaction windows view (#216 / #494)** — `ViewManager` and the
+  `views` CLI deploy `compaction_windows` (`adk_compaction_windows` by
+  default, `<view_prefix>compaction_windows` otherwise) from the
+  cross-event registry: `create_all_views()` and
+  `bq-agent-sdk views create-all` now create it after the per-event
+  views, and `bq-agent-sdk views create compaction_windows` creates it
+  alone. It returns one row per distinct compaction range for each full
+  telemetry identity (`app_name`, `user_id`, `session_id`,
+  `invocation_id`), keeps fractional epoch seconds at microsecond
+  precision, and excludes incomplete identities and invalid boundaries.
+  Per-event view SQL is unchanged. Known limitation: the view exposes no
+  event `timestamp` column, so a query through it scans the whole events
+  table (no partition pruning) and fails on a table that sets
+  `require_partition_filter`.
+
+### Security
+
+- **Smoke-test harness unpickles child output against an allowlist
+  (#492)** — `run_smoke_test_in_subprocess` decodes the child process's
+  pickled result with a restricted unpickler that admits only the SDK's
+  extraction result and model classes (`StructuredExtractionResult`,
+  `ExtractorException`, `ExtractedNode`, `ExtractedEdge`,
+  `ExtractedProperty`) plus a few inert standard-library value types
+  (`datetime`, `date`, `time`, `timedelta`, `timezone`, `Decimal`,
+  `bytearray`). A `__reduce__` gadget in untrusted compiled-extractor
+  code can no longer run in the parent process: any other global fails
+  closed and is reported as a smoke-test harness failure. An extractor
+  whose `ExtractedProperty.value` holds another type that pickle looks
+  up by name, such as a custom class instance or a `uuid.UUID`, now
+  fails the gate the same way; `str`, `int`, `float`, `bool`, `None`,
+  lists, dicts and sets are unaffected.
+
+### Removed
+
+- **Unreferenced private helpers and incidental imports (#490, #496)** —
+  #490 deletes unreferenced private helpers and unused imports from seven
+  `src/` modules (59 lines), and #496 drops two unused imports from
+  `system_evaluator.py`. Supported behavior is unchanged, but module
+  attributes that existed only as incidental imports are gone:
+  `client.CATEGORICAL_AI_GENERATE_QUERY` (import it from
+  `categorical_evaluator`), `system_evaluator.strip_markdown_fences`
+  (still exported from `utils` and `evaluators`),
+  `system_evaluator._parse_json_from_text` (a private helper that stays
+  in `utils`), `system_evaluator.udf_kernels` and
+  `_streaming_evaluation.udf_kernels` (import
+  `bigquery_agent_analytics.udf_kernels`),
+  `ontology_schema_compiler.ResolvedEntity` / `ResolvedRelationship`
+  (defined in `resolved_spec`), `insights.dc_field` (use
+  `dataclasses.field`) and `trace.functools`. The deleted private
+  helpers are `ontology_schema_compiler._compile_entity_schema`,
+  `_compile_relationship_schema` and `ontology_runtime._first_string_value`.
+  None of these names was exported from the package or documented.
+
+### Tracing producer (released separately, not in this wheel)
+
+- **Spool, state and log are private to the user (#499)** — this changes
+  `bigquery-agent-analytics-tracing` under `producers/`, which ships on
+  `tracing-vX.Y.Z` tags; no tracing release includes it yet. The spool,
+  state and log now default to a per-user
+  `<tempdir>/bqaa-agent-tracing-<user>/` directory created with mode
+  0700 (`<user>` is the numeric uid; without `os.getuid`, a sanitized
+  login name, else a per-process tag) instead of the shared
+  `/tmp/bqaa-agent-tracing/` and `/tmp/bqaa-agent-tracing.log`. Spool
+  and state files are created with mode 0600 and, where the platform
+  supports it, opened relative to the checked directory with
+  `O_NOFOLLOW`. Compatibility:
+  - Spool, state and dead-letter directories, default or set through
+    `BQAA_SPOOL_DIR` / `BQAA_STATE_DIR`, are refused if they are a
+    symlink, are owned by another user, are group- or world-writable
+    (for a directory you own, remove both write bits with
+    `chmod go-w`), or sit under a parent owned by another non-root
+    user. A shared directory such as `/tmp` itself is refused.
+  - An explicit `BQAA_LOG_FILE` must be a regular file you own or a
+    character device; `/dev/stdout`, `/dev/stderr`, `/dev/null` and
+    terminals keep working. Its directory and every physical parent
+    must be owned by root or by you, and a directory of yours must not
+    be group- or world-writable; a missing directory is created with
+    mode 0700. Symlinks leading to an existing log directory outside
+    the state directory are still followed (a log inside the state
+    directory gets the spool and state rules above), but a symlink at
+    the log file name is refused, and in a root-owned shared directory
+    such as `/tmp` a log with other hard links is refused. An existing
+    log with group or other permission bits is changed to mode 0600.
+  - Refusals fail closed. The drainer exits 1 without draining when its
+    spool directory is refused. Hooks swallow the error and return 0;
+    they try to log it, but a refused log path drops log lines silently,
+    so nothing is recorded when the refused directory also holds the log
+    (the default layout).
+  - The drainer uploads only spool entries that are regular files you
+    own; anything else is left in place and logged once per drainer run.
+  - The old `/tmp` paths are no longer the defaults and queued rows are
+    not migrated: drain or copy any rows you need from the old spool
+    before deleting it. Explicit `BQAA_*` paths keep working when they
+    pass the checks above.
+  - Where a platform lacks descriptor-relative calls or `O_NOFOLLOW`,
+    the checks run by path as a best effort; without `os.geteuid`, the
+    ownership and permission-mode checks are skipped, and tightening an
+    existing log's mode needs `os.fchmod`. None of this adds Windows
+    support: the producer still imports `fcntl`.
+  - The Claude Code plugin's vendored copy (`plugins/claude_code_dist`)
+    is unchanged; it picks this up at the next tracing release sync.
+
+### Documentation
+
+- **SDK docs and examples match the code (#493, #495)** — `SDK.md` and
+  the example snippets call `get_section()` with section titles, stop
+  reading `.key` / `.value` from `search_memory()` entries, and pass
+  `extract_response_text()` its single argument. The README counts six
+  deployment surfaces, the periodic-materialization README documents the
+  shipped `--backfill` mode, and the `sdk_feature` label lists name all
+  19 values, including `eval-performance` and the four EvalBench labels.
+  The conversational-analytics guide points at its codelab's
+  `agent_analytics_demo` dataset with its own checkpoint key, and the
+  docs index links the `gm scaffold` design page.
+
+### CI and tests (repo side, not in the wheel)
+
+- **Checked-in SDLC working notes are rejected (#490)** — six committed
+  `intent.md` / `plan.md` / `spec.md` files are deleted, `.gitignore`
+  lists those names, and the CI Format check fails if one is committed
+  again.
+- **Categorical retry tests stop sleeping (#491)** — two tests record the
+  backoff instead of waiting it out, saving about four seconds per
+  Python version in the CI matrix. Production retry code is unchanged.
+- **Browser smoke test retries its server port (#497)** — the Looker
+  Studio configurator's `browser_smoke.sh` tries up to five random
+  ports, each verified with a nonce, instead of failing on the first
+  collision. Runs pinned with `SMOKE_PORT` still make one attempt.
+
+### Build locks (repo side, not in the wheel)
+
+- **Hash locks regenerated (#500)** —
+  `deploy/otlp_receiver/pip-tools.lock`,
+  `deploy/otlp_receiver/requirements.lock` and
+  `producers/build-requirements.lock` are replaced with CI's
+  `regen-locks.sh` output to clear upstream PyPI drift. No `.in`,
+  `pyproject.toml`, Dockerfile or script changes.
 
 ## [0.5.3] - 2026-09-20
 
