@@ -268,12 +268,21 @@ def test_non_compaction_events_are_excluded(run_view):
 
 def test_partition_limitation_is_documented(run_view):
   """The view has no event ``timestamp`` column, so it cannot prune
-  partitions; SDK.md must say so until the view exposes one."""
+  partitions; its SDK.md section must say so, and point to the
+  per-event view, until the view exposes one."""
   (row,) = run_view([_event()])
   assert "timestamp" not in row
   sdk_md = os.path.join(os.path.dirname(__file__), os.pardir, "SDK.md")
   with open(sdk_md, encoding="utf-8") as f:
-    assert "`require_partition_filter`" in f.read()
+    doc = f.read()
+  # A renamed heading raises ValueError instead of widening the search.
+  start = doc.index("#### Cross-event views")
+  section = doc[start : doc.index("\n## ", start)]
+  assert any(
+      "require_partition_filter" in paragraph
+      and "adk_event_compactions" in paragraph
+      for paragraph in section.split("\n\n")
+  )
 
 
 def test_custom_source_prefix_and_cli_deployment():
