@@ -1473,6 +1473,13 @@ uses safe multiplication/casts and `SAFE.TIMESTAMP_MICROS`, preserving
 sub-second windows such as `1.234` to `1.235` seconds. The existing
 `adk_event_compactions` per-event view remains available unchanged.
 
+Known limitation: the view exposes no event `timestamp` column, so a query
+through it reads every partition of the events table (no partition pruning)
+and fails on a table that sets `require_partition_filter`. For time-bounded
+queries, the `adk_event_compactions` per-event view keeps the `timestamp`
+header, but it is not a drop-in replacement: it does not deduplicate windows
+or skip malformed boundaries, and it has `agent` rather than `app_name`.
+
 A registry entry maps a view key to `(view_suffix, query_sql)`. `query_sql` is
 the full `SELECT` body, rendered with `str.format` (double any literal braces)
 with `{project}`, `{dataset}`, `{table}` (the events table) and
