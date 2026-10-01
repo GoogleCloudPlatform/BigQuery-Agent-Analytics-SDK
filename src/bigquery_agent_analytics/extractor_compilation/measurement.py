@@ -49,7 +49,6 @@ import pathlib
 from typing import Any, Callable, Optional
 import uuid
 
-from .compiler import CompileResult
 from .manifest import Manifest
 from .plan_resolver import LLMClient
 from .retry_loop import AttemptRecord

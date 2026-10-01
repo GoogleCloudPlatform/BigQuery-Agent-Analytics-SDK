@@ -58,7 +58,6 @@ from ._fingerprint import compile_id
 from ._fingerprint import fingerprint_model
 from .binding_models import Binding
 from .binding_models import EntityBinding
-from .binding_models import PropertyBinding
 from .binding_models import RelationshipBinding
 from .concept_index import build_rows
 from .concept_index import ConceptIndexRow

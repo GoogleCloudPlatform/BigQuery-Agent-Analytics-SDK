@@ -194,8 +194,6 @@ def _load_spec_from_args(
   Separated (--ontology + --binding) is the primary path.
   Combined (--spec-path) is a deprecated fallback.
   """
-  from .resolved_spec import ResolvedGraph
-
   has_any_separated = ontology_path is not None or binding_path is not None
   has_combined = spec_path is not None
 

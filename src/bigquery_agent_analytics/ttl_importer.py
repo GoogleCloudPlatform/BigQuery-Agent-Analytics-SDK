@@ -54,7 +54,6 @@ try:
   from rdflib import OWL
   from rdflib import RDF
   from rdflib import RDFS
-  from rdflib import XSD
   from rdflib.namespace import SKOS
 
   _RDFLIB_AVAILABLE = True

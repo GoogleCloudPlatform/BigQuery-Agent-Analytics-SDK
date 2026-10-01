@@ -37,12 +37,9 @@ Example usage::
 
 from __future__ import annotations
 
-import asyncio
 from collections import Counter
-from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
-import json
 import logging
 from typing import Any, Optional
 

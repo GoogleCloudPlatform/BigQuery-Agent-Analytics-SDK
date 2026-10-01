@@ -72,7 +72,7 @@ PR 4b.2.2.c.2 layers the retry-prompt builder +
 
 from __future__ import annotations
 
-from typing import Any, Union
+from typing import Union
 
 from .ast_validator import AstReport
 from .compiler import CompileResult
