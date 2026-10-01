@@ -31,9 +31,6 @@ Example usage::
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from dataclasses import field
-import json
 import logging
 from typing import Any, Optional
 
@@ -688,8 +685,6 @@ async def compute_question_distribution(
   Returns:
       QuestionDistribution with categorized results.
   """
-  from google.cloud import bigquery
-
   loop = asyncio.get_event_loop()
 
   if config.mode == "frequently_asked":

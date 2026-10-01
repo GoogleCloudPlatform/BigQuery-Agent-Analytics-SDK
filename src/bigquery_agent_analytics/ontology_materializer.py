@@ -76,7 +76,6 @@ def _ensure_resolved(spec):
   return resolve_from_graph_spec(spec)
 
 
-from .resolved_spec import ResolvedProperty
 from .resolved_spec import ResolvedRelationship
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)

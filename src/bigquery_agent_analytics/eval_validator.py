@@ -33,7 +33,6 @@ Example usage::
 from __future__ import annotations
 
 from dataclasses import dataclass
-from dataclasses import field
 import logging
 
 from .eval_suite import EvalSuite
