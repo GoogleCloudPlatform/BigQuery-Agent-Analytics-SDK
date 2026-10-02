@@ -25,6 +25,7 @@ Live BigQuery integration is covered separately (a follow-up).
 from __future__ import annotations
 
 import datetime as _dt
+import os
 import pathlib
 import subprocess
 from unittest import mock
@@ -3392,7 +3393,7 @@ class TestDeployScriptExtractionModeBoundary:
         result.returncode == 0
     ), f"deploy script has a shell syntax error: {result.stderr}"
 
-  def test_compiled_only_now_accepted_by_validator(self):
+  def test_compiled_only_now_accepted_by_validator(self, tmp_path):
     """``--extraction-mode=compiled-only`` must pass the
     validator block (i.e., reach gcloud / actual deploy work
     before failing). The earlier ``B2``-era reject ("compiled-only
@@ -3401,9 +3402,26 @@ class TestDeployScriptExtractionModeBoundary:
     script = self._deploy_script_path()
     if not script.exists():
       pytest.skip("deploy script not present in this checkout")
-    # We don't have gcloud / a real GCP project in the test env,
-    # so the script will fail later — but it must NOT fail with
-    # the validator's compiled-only reject message.
+    # Past the validator the script's first external commands are
+    # the ``python3`` IAM preflight (which pip-installs
+    # google-cloud-bigquery into a temp venv when it's missing)
+    # and ``bq`` calls against the real project. Shadow them, plus
+    # ``gcloud``, on PATH so the run stays offline: the preflight
+    # passes and the first ``bq`` call fails fast. The script must
+    # still NOT fail with the validator's compiled-only reject.
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    fail_fast = "echo 'stub: no GCP calls in unit tests' >&2; exit 1"
+    for name, body in (
+        ("python3", "exit 0"),
+        ("bq", fail_fast),
+        ("gcloud", fail_fast),
+    ):
+      stub = stub_bin / name
+      stub.write_text(f"#!/bin/sh\n{body}\n")
+      stub.chmod(0o755)
+    path = os.environ.get("PATH", os.defpath)
+    env = {**os.environ, "PATH": f"{stub_bin}{os.pathsep}{path}"}
     result = subprocess.run(
         [
             "bash",
@@ -3424,6 +3442,7 @@ class TestDeployScriptExtractionModeBoundary:
         capture_output=True,
         text=True,
         timeout=30,
+        env=env,
     )
     msg = result.stdout + result.stderr
     assert "is not yet supported" not in msg, (
@@ -3433,6 +3452,9 @@ class TestDeployScriptExtractionModeBoundary:
     assert (
         "--extraction-mode must be 'ai-fallback' or 'compiled-only'" not in msg
     )
+    # Positive check: the run cleared the validator and reached
+    # the first deploy step, where the ``bq`` stub stops it.
+    assert "==> ensuring graph dataset exists: p:g" in msg, msg
 
   def test_invalid_extraction_mode_value_rejected(self):
     """Operator typo path (``compiled_only`` with underscore, etc.)
