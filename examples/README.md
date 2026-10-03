@@ -12,6 +12,7 @@ and `LLMAsJudge` silently fall back to the SDK default (`gemini-2.5-flash`).
 
 | Notebook | Description |
 |----------|-------------|
+| [bqca_prompt_response_logging_customer_notebook.ipynb](bqca_prompt_response_logging_customer_notebook.ipynb) | End-to-end starter playbook for evaluating BigQuery Conversational Analytics (BQCA) Prompt & Response logs (`gemini-3.5-flash` default BQML AI endpoint): compatibility view setup, `doctor()` health check, question categorization, semantic drift detection, golden Q&A grading, customer sentiment, latency/token FinOps, and error/refusal diagnostics. Companion guide: [BQCA Customer Manual](../docs/guides/bqca-prompt-response-logging-manual.md) ([Open in Colab](https://colab.research.google.com/github/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/bqca_prompt_response_logging_customer_notebook.ipynb)). |
 | [dashboard_v2.ipynb](dashboard_v2.ipynb) | Observability dashboard (2-layer SQL, no SDK dependency) |
 | [dashboard_v2_bigframes.ipynb](dashboard_v2_bigframes.ipynb) | BigFrames companion for Dashboard V2 |
 | [e2e_notebook_demo.ipynb](e2e_notebook_demo.ipynb) | End-to-end SDK workflow |
