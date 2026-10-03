@@ -372,22 +372,26 @@ SCHEDULER_SA_EMAIL="${SCHEDULER_SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
 _retry_iam() {
   local attempts=0
   local max=20
+  # A private mktemp file, not a fixed /tmp name another local user can
+  # predict from the PID and pre-create (or point at one of our files).
+  local err_file
+  err_file="$(mktemp -t bqaa-iam-err-XXXXXXXX)" || return 1
   while [[ $attempts -lt $max ]]; do
-    if "$@" >/dev/null 2>/tmp/_iam_err.$$; then
-      rm -f /tmp/_iam_err.$$
+    if "$@" >/dev/null 2>"$err_file"; then
+      rm -f "$err_file"
       return 0
     fi
-    if ! grep -qE "(does not exist|Service account)" /tmp/_iam_err.$$; then
-      cat /tmp/_iam_err.$$ >&2
-      rm -f /tmp/_iam_err.$$
+    if ! grep -qE "(does not exist|Service account)" "$err_file"; then
+      cat "$err_file" >&2
+      rm -f "$err_file"
       return 1
     fi
     sleep 3
     attempts=$((attempts + 1))
   done
   echo "Error: IAM grant did not succeed after ${max} retries" >&2
-  cat /tmp/_iam_err.$$ >&2
-  rm -f /tmp/_iam_err.$$
+  cat "$err_file" >&2
+  rm -f "$err_file"
   return 1
 }
 
