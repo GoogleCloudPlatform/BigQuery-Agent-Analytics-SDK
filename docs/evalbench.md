@@ -471,11 +471,12 @@ listing is interchangeable with `classify_sessions()` output.
 
 ### Drill-down without mixing versions
 
-Published rows use the version-specific identity
-`evalbench-import:{job_id}:{import_version}:{scenario_id}` for both
-`session_id` and `trace_id`, so a `Client` pointed at the mirror table
-resolves one version by construction — there is no other version under
-that identity to merge:
+Rows converted from EvalBench source tables use the version-specific
+identity `evalbench-import:{job_id}:{import_version}:{scenario_id}` for
+both `session_id` and `trace_id`, so for those imports a `Client`
+pointed at the mirror table resolves one version by construction.
+Native `agent_events` imports (#463) keep the real ADK ids, so the
+selector also pins `import_version` (below):
 
 ```python
 from bigquery_agent_analytics import Client
@@ -543,10 +544,10 @@ converted imports, whose versioned session ids are already unique per
 version, but load-bearing for native `agent_events` imports (#463), where
 retained versions share the real ADK session ids; without it the
 evaluation would widen to every retained version of those sessions.
-`trace_filter()` refuses an
-empty session set because `TraceFilter` treats "no `session_ids`" as
-unfiltered, which would silently widen the evaluation to every retained
-version of the job. `Client.evaluate` itself is unchanged.
+`trace_filter()` refuses an empty session set (`ValueError`, nothing to
+score) instead of returning a filter with no `session_ids`, which
+`TraceFilter` would treat as no session filter at all. `Client.evaluate`
+itself is unchanged.
 
 ## CLI
 
