@@ -14,6 +14,7 @@
 
 """Tests for the SDK trace module."""
 
+import dataclasses
 from datetime import datetime
 from datetime import timezone
 import json
@@ -972,6 +973,241 @@ class TestSpanNewFields:
     span = Span.from_bigquery_row(row)
     assert span.latency_ms == 200
     assert span.time_to_first_token_ms is None
+
+
+class TestSpanOtelCorrelation:
+  """Tests for the #312 correlation fields on Span.
+
+  ``otel_span_id`` / ``otel_trace_id`` come from ``attributes.otel``
+  (written only with ``enable_otel_correlation=True``) and
+  ``source_event_id`` from ``attributes.adk.source_event_id`` or the
+  legacy ``attributes.source_event_id``.  Columns projected by the
+  per-event views take precedence over the raw ``attributes`` JSON.
+  """
+
+  _OTEL_SPAN_ID = "00f067aa0ba902b7"
+  _OTEL_TRACE_ID = "4bf92f3577b34da6a3ce929d0e0e4736"
+
+  def _row(self, **overrides):
+    row = {
+        "event_type": "LLM_REQUEST",
+        "agent": "agent",
+        "timestamp": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        "content": None,
+        "attributes": None,
+        "trace_id": self._OTEL_TRACE_ID,
+        "span_id": "bqaa-span-1",
+        "parent_span_id": "bqaa-agent-1",
+        "status": "OK",
+    }
+    row.update(overrides)
+    return row
+
+  def _attributes(self):
+    return {
+        "model": "gemini-2.5-flash",
+        "otel": {
+            "span_id": self._OTEL_SPAN_ID,
+            "trace_id": self._OTEL_TRACE_ID,
+        },
+        "adk": {"source_event_id": "evt-123"},
+    }
+
+  def test_attributes_json_string(self):
+    row = self._row(attributes=json.dumps(self._attributes()))
+    span = Span.from_bigquery_row(row)
+    assert span.otel_span_id == self._OTEL_SPAN_ID
+    assert span.otel_trace_id == self._OTEL_TRACE_ID
+    assert span.source_event_id == "evt-123"
+    # The raw attributes are still exposed unchanged.
+    assert span.attributes == self._attributes()
+
+  def test_attributes_dict(self):
+    span = Span.from_bigquery_row(self._row(attributes=self._attributes()))
+    assert span.otel_span_id == self._OTEL_SPAN_ID
+    assert span.otel_trace_id == self._OTEL_TRACE_ID
+    assert span.source_event_id == "evt-123"
+
+  def test_top_level_view_columns_take_precedence(self):
+    row = self._row(
+        attributes=self._attributes(),
+        otel_span_id="aaaaaaaaaaaaaaaa",
+        otel_trace_id="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        source_event_id="evt-from-view",
+    )
+    span = Span.from_bigquery_row(row)
+    assert span.otel_span_id == "aaaaaaaaaaaaaaaa"
+    assert span.otel_trace_id == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    assert span.source_event_id == "evt-from-view"
+
+  def test_top_level_view_columns_without_attributes(self):
+    """A per-event view row carries the columns but no ``attributes``."""
+    row = self._row(
+        otel_span_id=self._OTEL_SPAN_ID, otel_trace_id=self._OTEL_TRACE_ID
+    )
+    del row["attributes"]
+    span = Span.from_bigquery_row(row)
+    assert span.otel_span_id == self._OTEL_SPAN_ID
+    assert span.otel_trace_id == self._OTEL_TRACE_ID
+    assert span.source_event_id is None
+    assert span.attributes == {}
+
+  def test_null_view_columns_fall_back_to_attributes(self):
+    row = self._row(
+        attributes=self._attributes(),
+        otel_span_id=None,
+        otel_trace_id=None,
+        source_event_id=None,
+    )
+    span = Span.from_bigquery_row(row)
+    assert span.otel_span_id == self._OTEL_SPAN_ID
+    assert span.otel_trace_id == self._OTEL_TRACE_ID
+    assert span.source_event_id == "evt-123"
+
+  @pytest.mark.parametrize(
+      "attributes",
+      [
+          None,
+          "{}",
+          {"model": "gemini-2.5-flash"},
+          json.dumps({"adk": {"app_name": "app"}}),
+      ],
+  )
+  def test_attributes_without_otel_leave_fields_none(self, attributes):
+    """Rows written with ``enable_otel_correlation=False`` (the default)."""
+    span = Span.from_bigquery_row(self._row(attributes=attributes))
+    assert span.otel_span_id is None
+    assert span.otel_trace_id is None
+    assert span.source_event_id is None
+    # The BQAA execution-tree IDs are untouched.
+    assert span.span_id == "bqaa-span-1"
+    assert span.parent_span_id == "bqaa-agent-1"
+    assert span.trace_id == self._OTEL_TRACE_ID
+
+  def test_legacy_top_level_source_event_id(self):
+    row = self._row(
+        event_type="AGENT_RESPONSE",
+        attributes=json.dumps({"source_event_id": "evt-legacy"}),
+    )
+    span = Span.from_bigquery_row(row)
+    assert span.source_event_id == "evt-legacy"
+    assert span.otel_span_id is None
+
+  def test_adk_source_event_id_wins_over_legacy_key(self):
+    row = self._row(
+        attributes={
+            "source_event_id": "evt-legacy",
+            "adk": {"source_event_id": "evt-adk"},
+        }
+    )
+    assert Span.from_bigquery_row(row).source_event_id == "evt-adk"
+
+  @pytest.mark.parametrize(
+      "attributes",
+      [
+          {"otel": "not-an-object", "adk": ["not", "an", "object"]},
+          {"otel": None, "adk": None},
+          "[1, 2, 3]",
+          "not json",
+      ],
+  )
+  def test_malformed_attributes_do_not_raise(self, attributes):
+    span = Span.from_bigquery_row(self._row(attributes=attributes))
+    assert span.otel_span_id is None
+    assert span.otel_trace_id is None
+    assert span.source_event_id is None
+
+  def test_build_span_tree_links_by_bqaa_ids_and_keeps_otel_ids(self):
+    """The tree stays keyed on ``span_id`` / ``parent_span_id``.
+
+    The event-queue row's ``otel_span_id`` is the invocation's OTel span,
+    but its BQAA parent is the agent row, so it must nest under the agent.
+    """
+    root_otel = "1111111111111111"
+    agent_id = "a" * 16
+
+    def span(event_type, span_id, parent_span_id, otel_span_id, **attrs):
+      attributes = {
+          "otel": {"span_id": otel_span_id, "trace_id": self._OTEL_TRACE_ID},
+          **attrs,
+      }
+      return Span.from_bigquery_row(
+          self._row(
+              event_type=event_type,
+              span_id=span_id,
+              parent_span_id=parent_span_id,
+              attributes=attributes,
+          )
+      )
+
+    invocation = span("INVOCATION_STARTING", root_otel, None, root_otel)
+    agent = span("AGENT_STARTING", agent_id, root_otel, "2222222222222222")
+    llm = span("LLM_REQUEST", "b" * 16, agent_id, "3333333333333333")
+    state = span(
+        "STATE_DELTA",
+        "c" * 16,
+        agent_id,
+        root_otel,
+        adk={"source_event_id": "evt-state"},
+    )
+
+    roots = trace_module._build_span_tree([invocation, agent, llm, state])
+
+    assert roots == [invocation]
+    assert invocation.children == [agent]
+    assert agent.children == [llm, state]
+    assert llm.children == []
+    assert state.children == []
+    assert [s.otel_span_id for s in (invocation, agent, llm, state)] == [
+        root_otel,
+        "2222222222222222",
+        "3333333333333333",
+        root_otel,
+    ]
+    assert state.source_event_id == "evt-state"
+    assert {s.otel_trace_id for s in (invocation, agent, llm, state)} == {
+        self._OTEL_TRACE_ID
+    }
+
+  def test_new_fields_are_appended_after_existing_fields(self):
+    names = [f.name for f in dataclasses.fields(Span)]
+    assert names[-4:] == [
+        "time_to_first_token_ms",
+        "otel_span_id",
+        "otel_trace_id",
+        "source_event_id",
+    ]
+
+  def test_positional_construction_still_works(self):
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    span = Span(
+        "LLM_RESPONSE",
+        "agent",
+        ts,
+        {"response": "hi"},
+        {"model": "m"},
+        "span-1",
+        "parent-1",
+        12.5,
+        "OK",
+        None,
+        [],
+        [],
+        "sess-1",
+        "inv-1",
+        "user-1",
+        "trace-1",
+        3.0,
+    )
+    assert span.span_id == "span-1"
+    assert span.parent_span_id == "parent-1"
+    assert span.latency_ms == 12.5
+    assert span.session_id == "sess-1"
+    assert span.trace_id == "trace-1"
+    assert span.time_to_first_token_ms == 3.0
+    assert span.otel_span_id is None
+    assert span.otel_trace_id is None
+    assert span.source_event_id is None
 
 
 class TestHITLAndStateDeltaLabelSummary:

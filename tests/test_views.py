@@ -14,12 +14,16 @@
 
 """Tests for the ViewManager and event-specific view generation."""
 
+import logging
+import re
 from unittest import mock
 
 import pytest
 
 from bigquery_agent_analytics.views import _CROSS_EVENT_VIEW_DEFS
 from bigquery_agent_analytics.views import _EVENT_VIEW_DEFS
+from bigquery_agent_analytics.views import _OTEL_CORRELATION_COLUMNS
+from bigquery_agent_analytics.views import _STANDARD_HEADERS
 from bigquery_agent_analytics.views import ViewManager
 
 PROJECT = "test-project"
@@ -311,3 +315,242 @@ class TestA2AInteractionView:
         "span_id",
     ]:
       assert header in sql
+
+
+_OTEL_SPAN_COLUMN = "JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id"
+_OTEL_TRACE_COLUMN = (
+    "JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id"
+)
+
+# Per-event views whose own typed columns read ``attributes``.
+_ATTRIBUTE_READERS = frozenset(
+    {
+        "LLM_REQUEST",
+        "LLM_RESPONSE",
+        "TOOL_COMPLETED",
+        "STATE_DELTA",
+        "A2A_INTERACTION",
+        "TOOL_PAUSED",
+    }
+)
+_ATTRIBUTE_FREE = sorted(set(_EVENT_VIEW_DEFS) - _ATTRIBUTE_READERS)
+_HEADER_ONLY = sorted(
+    et for et, (_, extra) in _EVENT_VIEW_DEFS.items() if not extra
+)
+
+
+def _reads(sql, column):
+  return re.search(rf"\b{column}\b", sql) is not None
+
+
+@pytest.fixture
+def denied_vm():
+  return ViewManager(
+      project_id=PROJECT,
+      dataset_id=DATASET,
+      table_id=TABLE,
+      bq_client=mock.MagicMock(),
+      denied_columns=("attributes",),
+  )
+
+
+class TestOtelCorrelationColumns:
+  """Per-event views project ``attributes.otel`` by default (#312)."""
+
+  @pytest.mark.parametrize("event_type", sorted(_EVENT_VIEW_DEFS))
+  def test_every_per_event_view_projects_otel_columns(self, vm, event_type):
+    sql = vm.get_view_sql(event_type)
+    assert sql.count(_OTEL_SPAN_COLUMN) == 1
+    assert sql.count(_OTEL_TRACE_COLUMN) == 1
+
+  @pytest.mark.parametrize("event_type", sorted(_EVENT_VIEW_DEFS))
+  def test_otel_columns_sit_between_headers_and_typed_columns(
+      self, vm, event_type
+  ):
+    sql = vm.get_view_sql(event_type)
+    _, extra_columns = _EVENT_VIEW_DEFS[event_type]
+    expected = f"{_STANDARD_HEADERS},\n{_OTEL_CORRELATION_COLUMNS}"
+    if extra_columns:
+      expected += f",\n{extra_columns}"
+    assert f"SELECT\n{expected}\nFROM " in sql
+
+  @pytest.mark.parametrize("event_type", _HEADER_ONLY)
+  def test_header_only_views_have_no_trailing_comma(self, vm, event_type):
+    lines = vm.get_view_sql(event_type).split("\n")
+    from_idx = next(i for i, line in enumerate(lines) if "FROM" in line)
+    assert lines[from_idx - 1] == f"  {_OTEL_TRACE_COLUMN}"
+
+  def test_standard_headers_stay_denylist_safe(self):
+    """The shared headers must not read any projectable payload column."""
+    for column in ("attributes", "content", "content_parts", "latency_ms"):
+      assert not _reads(_STANDARD_HEADERS, column)
+    assert "otel" not in _STANDARD_HEADERS
+    assert _STANDARD_HEADERS.endswith("is_truncated")
+
+  def test_source_event_id_is_not_a_shared_column(self, vm):
+    assert "source_event_id" not in _STANDARD_HEADERS
+    assert "source_event_id" not in _OTEL_CORRELATION_COLUMNS
+    for event_type in _EVENT_VIEW_DEFS:
+      assert vm.get_view_sql(event_type).count("AS source_event_id") <= 1
+
+  def test_cross_event_views_get_no_otel_columns(self, vm):
+    for key in _CROSS_EVENT_VIEW_DEFS:
+      assert "otel" not in vm.get_view_sql(key)
+
+
+class TestDeniedColumns:
+  """``denied_columns`` mirrors the producer's ``payload_column_denylist``."""
+
+  def test_attribute_readers_match_registry(self):
+    readers = {
+        et
+        for et, (_, extra) in _EVENT_VIEW_DEFS.items()
+        if _reads(extra, "attributes")
+    }
+    assert readers == _ATTRIBUTE_READERS
+    # 25 per-event views: 6 read attributes, 19 do not.
+    assert len(_ATTRIBUTE_FREE) == 19
+
+  def test_create_all_views_deploys_only_attribute_free_views(
+      self, denied_vm, caplog
+  ):
+    with caplog.at_level(logging.WARNING):
+      created = denied_vm.create_all_views()
+    assert sorted(created) == _ATTRIBUTE_FREE
+    issued = [c.args[0] for c in denied_vm.bq_client.query.call_args_list]
+    assert len(issued) == len(_ATTRIBUTE_FREE)
+    for sql in issued:
+      assert not _reads(sql, "attributes")
+      assert "otel_" not in sql
+    skipped = {
+        r.args[0]
+        for r in caplog.records
+        if r.levelno == logging.WARNING and r.msg.startswith("Skipping view")
+    }
+    # compaction_windows reads attributes.adk.app_name, so it is skipped too.
+    assert skipped == _ATTRIBUTE_READERS | {"compaction_windows"}
+
+  @pytest.mark.parametrize("event_type", _ATTRIBUTE_FREE)
+  def test_denied_sql_only_drops_the_otel_columns(
+      self, vm, denied_vm, event_type
+  ):
+    default_sql = vm.get_view_sql(event_type)
+    denied_sql = denied_vm.get_view_sql(event_type)
+    assert denied_sql == default_sql.replace(
+        f",\n{_OTEL_CORRELATION_COLUMNS}", "", 1
+    )
+    assert not _reads(denied_sql, "attributes")
+
+  @pytest.mark.parametrize("event_type", sorted(_ATTRIBUTE_READERS))
+  def test_create_view_rejects_attribute_readers_before_querying(
+      self, denied_vm, event_type
+  ):
+    with pytest.raises(ValueError, match="reads denied column"):
+      denied_vm.create_view(event_type)
+    denied_vm.bq_client.query.assert_not_called()
+
+  @pytest.mark.parametrize("event_type", sorted(_ATTRIBUTE_READERS))
+  def test_get_view_sql_still_renders_attribute_readers(
+      self, denied_vm, event_type
+  ):
+    sql = denied_vm.get_view_sql(event_type)
+    assert f"WHERE event_type = '{event_type}'" in sql
+    assert "otel_" not in sql
+
+  def test_create_view_attribute_free_view(self, denied_vm):
+    denied_vm.create_view("TOOL_STARTING")
+    denied_vm.bq_client.query.assert_called_once()
+    sql = denied_vm.bq_client.query.call_args[0][0]
+    assert "AS tool_name" in sql
+    assert not _reads(sql, "attributes")
+
+  def test_compaction_windows_sql_unchanged(self, vm, denied_vm):
+    assert denied_vm.get_view_sql("compaction_windows") == vm.get_view_sql(
+        "compaction_windows"
+    )
+    with pytest.raises(ValueError, match="reads denied column"):
+      denied_vm.create_view("compaction_windows")
+
+  @pytest.mark.parametrize("column", ["content", "latency_ms", "content_parts"])
+  def test_other_denied_columns_skip_their_readers(self, column):
+    vm = ViewManager(
+        project_id=PROJECT,
+        dataset_id=DATASET,
+        bq_client=mock.MagicMock(),
+        denied_columns=[column],
+    )
+    created = vm.create_all_views()
+    expected = {
+        key
+        for key, (_, sql) in {
+            **_EVENT_VIEW_DEFS,
+            **_CROSS_EVENT_VIEW_DEFS,
+        }.items()
+        if not _reads(sql, column)
+    }
+    assert set(created) == expected
+    # attributes is still present, so the OTel columns stay.
+    for event_type in set(created) & set(_EVENT_VIEW_DEFS):
+      assert _OTEL_SPAN_COLUMN in vm.get_view_sql(event_type)
+
+  @pytest.mark.parametrize(
+      "column, skipped, kept",
+      [
+          ("content", ["TOOL_STARTING", "AGENT_TRANSFER"], ["LLM_ERROR"]),
+          ("latency_ms", ["LLM_ERROR", "AGENT_COMPLETED"], ["TOOL_STARTING"]),
+          ("content_parts", [], sorted(_EVENT_VIEW_DEFS)),
+      ],
+  )
+  def test_denial_examples(self, column, skipped, kept):
+    vm = ViewManager(
+        project_id=PROJECT,
+        dataset_id=DATASET,
+        bq_client=mock.MagicMock(),
+        denied_columns={column},
+    )
+    created = vm.create_all_views()
+    for event_type in skipped:
+      assert event_type not in created
+    for event_type in kept:
+      assert event_type in created
+    assert "USER_MESSAGE_RECEIVED" in created
+
+  def test_default_denies_nothing(self, vm):
+    assert vm.denied_columns == frozenset()
+    assert set(vm.create_all_views()) == set(_EVENT_VIEW_DEFS) | set(
+        _CROSS_EVENT_VIEW_DEFS
+    )
+
+  @pytest.mark.parametrize("value", [None, (), []])
+  def test_empty_values_deny_nothing(self, value):
+    vm = ViewManager(PROJECT, DATASET, denied_columns=value)
+    assert vm.denied_columns == frozenset()
+    assert _OTEL_SPAN_COLUMN in vm.get_view_sql("USER_MESSAGE_RECEIVED")
+
+  @pytest.mark.parametrize(
+      "value",
+      [
+          ["attributes"],
+          ("attributes",),
+          {"attributes"},
+          frozenset({"attributes"}),
+      ],
+  )
+  def test_accepts_any_collection(self, value):
+    vm = ViewManager(PROJECT, DATASET, denied_columns=value)
+    assert vm.denied_columns == frozenset({"attributes"})
+
+  def test_denied_columns_is_keyword_only(self):
+    with pytest.raises(TypeError):
+      ViewManager(PROJECT, DATASET, TABLE, "adk_", None, ("attributes",))
+
+  def test_rejects_bare_string(self):
+    with pytest.raises(TypeError, match="not a string"):
+      ViewManager(PROJECT, DATASET, denied_columns="attributes")
+
+  @pytest.mark.parametrize(
+      "column", ["trace_id", "span_id", "timestamp", "event_id", "Attributes"]
+  )
+  def test_rejects_non_projectable_columns(self, column):
+    with pytest.raises(ValueError, match="projectable payload columns"):
+      ViewManager(PROJECT, DATASET, denied_columns=[column])

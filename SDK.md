@@ -158,6 +158,213 @@ traces = client.list_traces(
 )
 ```
 
+### Trace & Span Correlation (`trace_id`, `span_id`, `attributes.otel.span_id`, `attributes.adk.source_event_id`)
+
+Rows written by the ADK `BigQueryAgentAnalyticsPlugin` carry three layers of
+correlation identifiers:
+
+| Layer | Where to read it | What it identifies |
+|---|---|---|
+| 1. Trace and execution tree | `trace_id`, `span_id`, `parent_span_id` (columns and `Span` fields) | `trace_id` is the OpenTelemetry trace ID whenever the run has an active span, so it matches Cloud Trace. `span_id` / `parent_span_id` are the plugin's own execution tree: they link rows of the events table to each other and drive `Trace` (for example `trace.render()`). They are **not** OpenTelemetry span IDs; only the root invocation row may reuse the active span ID. |
+| 2. OpenTelemetry span | `attributes.otel.span_id` / `attributes.otel.trace_id`; the `otel_span_id` / `otel_trace_id` [view columns](#otel-correlation-columns-and-denied_columns) and `Span` fields | The OpenTelemetry span that was active when the row was written. Recorded only when the plugin runs with `enable_otel_correlation=True`. A best-effort join key into Cloud Trace or an `otel_spans` table, not a foreign key: spans dropped by head sampling are never exported. |
+| 3. Source event | `attributes.adk.source_event_id` (and the legacy `attributes.source_event_id` on `AGENT_RESPONSE` rows); the `Span.source_event_id` field | The ADK `Event.id` behind a row written from the event stream. ADK 2.0 `invoke_node` spans list the IDs of the events their node yielded in the span attribute `gcp.vertex.agent.associated_event_ids`. |
+
+#### Producer configuration
+
+Three `BigQueryLoggerConfig` options of the ADK plugin control these layers.
+All three require `google-adk>=2.4.0`; their defaults keep the earlier
+behavior.
+
+| Option | Default | Effect |
+|---|---|---|
+| `enable_otel_correlation` | `False` | When `True`, each row records the active OpenTelemetry span context in `attributes.otel.span_id` (16 hex digits) and `attributes.otel.trace_id` (32 hex digits). A row written while no valid span is active gets no `attributes.otel`. The plugin does not create spans of its own. |
+| `custom_metadata_allowlist` | `None` | Keys of `Event.custom_metadata` to copy into `attributes.custom_metadata`: exact keys, or prefixes ending in `*` (for example `"a2a:*"`). `None` or empty keeps only the built-in `a2a:*` capture. |
+| `payload_column_denylist` | `None` | Payload columns to leave out of the events table. Only `content`, `content_parts`, `attributes` and `latency_ms` are accepted; any other name raises `ValueError`. Denying `attributes` removes layers 2 and 3 (`attributes.otel`, `attributes.adk`) as well as `attributes.custom_metadata`, and combining it with a non-empty `custom_metadata_allowlist` raises `ValueError`. |
+
+```python
+from google.adk.plugins.bigquery_agent_analytics_plugin import BigQueryAgentAnalyticsPlugin
+from google.adk.plugins.bigquery_agent_analytics_plugin import BigQueryLoggerConfig
+
+plugin = BigQueryAgentAnalyticsPlugin(
+    project_id="my-project",
+    dataset_id="my_dataset",
+    config=BigQueryLoggerConfig(enable_otel_correlation=True),
+)
+```
+
+Span-level joins also need the spans themselves, exported to Cloud Trace or to
+an `otel_spans` table (for example by the
+[OTLP receiver](docs/otlp_receiver_design.md)).
+
+#### Reading correlation IDs in the SDK
+
+`Span` exposes layers 2 and 3 as `otel_span_id`, `otel_trace_id` and
+`source_event_id`. `Span.from_bigquery_row()` takes them from same-named
+columns when the row has them (for example a row read from a per-event view)
+and otherwise from `attributes`. They are `None` on rows that do not record
+them, such as rows written with `enable_otel_correlation=False` or by an older
+plugin. The span tree is still built from `span_id` / `parent_span_id` alone.
+
+```python
+trace = client.get_trace("trace-abc-123")
+for span in trace.spans:
+    print(span.event_type, span.span_id, span.otel_span_id, span.source_event_id)
+```
+
+#### Which OpenTelemetry span a row records
+
+`attributes.otel.span_id` is the span that was active when the plugin callback
+ran. The table describes google-adk 2.11, where the plugin's 14 callbacks fall
+into six groups. Older releases write fewer event types:
+`on_agent_error_callback` and `on_run_error_callback` (`AGENT_ERROR`,
+`INVOCATION_ERROR`) arrived in 2.5.0, `AGENT_RESPONSE` rows from
+`after_tool_callback` (`final_response_tool_names`) in 2.6.0, and
+`NODE_OUTPUT` / `NODE_ERROR` in 2.7.0.
+
+| Plugin callback(s) | `event_type`(s) | Active OpenTelemetry span | Fidelity |
+|---|---|---|---|
+| `on_user_message_callback` | `USER_MESSAGE_RECEIVED`, `HITL_*_REQUEST_COMPLETED`, resume-side `TOOL_COMPLETED` | The runner's root span: `invocation` under ADK telemetry schema v1 (the default), `invoke_workflow {root agent name}` under schema v2 (the default on Agent Engine; `ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN` pins either). Under schema v2 a `Workflow` root opens no runner span, so the row records the caller's span, if any. | Exact, except for a `Workflow` root under schema v2; the row's `span_id` may equal it too |
+| `before_run_callback`, `after_run_callback`, `on_run_error_callback` | `INVOCATION_STARTING`, `INVOCATION_COMPLETED`, `INVOCATION_ERROR` | The runner's root span: `invocation` under ADK telemetry schema v1 (the default), `invoke_workflow {root agent name}` under schema v2 (the default on Agent Engine; `ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN` pins either). Under schema v2 a `Workflow` root opens no runner span, so the row records the caller's span, if any. | Exact, except for a `Workflow` root under schema v2; the row's `span_id` may equal it too |
+| `before_agent_callback`, `after_agent_callback`, `on_agent_error_callback` | `AGENT_STARTING`, `AGENT_COMPLETED`, `AGENT_ERROR` | `invoke_agent {agent_name}` | Exact; the row's `span_id` is a plugin-only ID |
+| `before_model_callback`, `after_model_callback`, `on_model_error_callback` | `LLM_REQUEST`, `LLM_RESPONSE` (streaming partials and final), `LLM_ERROR` | `call_llm` (parent of `generate_content {model}`) as of google-adk 2.11. ADK's telemetry schema migration plans to remove `call_llm`; re-check this row after that change. | Exact; one ID for the request, every partial and the final response or error |
+| `before_tool_callback`, `after_tool_callback`, `on_tool_error_callback` | `TOOL_STARTING`, `TOOL_COMPLETED`, `TOOL_ERROR`, `AGENT_RESPONSE` (tools in `final_response_tool_names`) | `execute_tool {tool_name}`; for a tool used as a node in a `Workflow` (google-adk 2.11 runs these callbacks there too), the node's `invoke_node {node_name}` span | Exact; distinct for each parallel tool call |
+| `on_event_callback` | `STATE_DELTA`, `NODE_OUTPUT`, `NODE_ERROR`, `AGENT_TRANSFER`, `EVENT_COMPACTION`, `AGENT_STATE_CHECKPOINT`, `TOOL_PAUSED`, `HITL_*_REQUEST`, `A2A_INTERACTION`, `AGENT_RESPONSE` | The runner's root span, as in the rows above: the runner writes these rows outside the span of the node that produced the event | Coarse; for events yielded by function nodes or other nodes that are neither agents nor workflows, join on `source_event_id` instead (second recipe below) |
+
+#### Join recipes for an `otel_spans` table
+
+Both recipes read an `otel_spans` table with the OTLP receiver's schema
+(`timestamp`, `end_timestamp`, `trace_id`, `span_id`, `span_name`,
+`span_attributes`, ...). Set the `@trace_id`, `@start_ts` and `@end_ts` query
+parameters. Both tables are partitioned on `timestamp`, so each CTE filters on
+the constant `@start_ts` / `@end_ts` bounds, which prune partitions and satisfy
+`require_partition_filter`. The ±1 hour window in the join condition refers to
+the other table, so it narrows the matches but prunes nothing.
+
+Rows from the synchronous callbacks join directly on
+`attributes.otel.span_id`. Use a `LEFT JOIN`, since unsampled spans are missing
+from `otel_spans`:
+
+```sql
+-- Direct join: a row written inside a model, tool, agent or invocation
+-- callback carries the OTel span that encloses that callback.
+WITH events AS (
+  SELECT
+    timestamp,
+    event_id,
+    event_type,
+    agent,
+    trace_id,
+    span_id,
+    parent_span_id,
+    JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id
+  FROM `my-project.my_dataset.agent_events`
+  WHERE timestamp BETWEEN @start_ts AND @end_ts
+    AND trace_id = @trace_id
+),
+spans AS (
+  -- Constant bounds prune otel_spans partitions before the join.
+  SELECT timestamp, end_timestamp, trace_id, span_id, span_name, span_attributes
+  FROM `my-project.my_dataset.otel_spans`
+  WHERE timestamp BETWEEN @start_ts AND @end_ts
+    AND trace_id = @trace_id
+)
+SELECT
+  e.timestamp,
+  e.event_id,
+  e.event_type,
+  e.agent,
+  e.span_id AS bqaa_span_id,
+  e.parent_span_id AS bqaa_parent_span_id,
+  e.otel_span_id,
+  s.span_name AS otel_span_name,
+  TIMESTAMP_DIFF(s.end_timestamp, s.timestamp, MILLISECOND) AS otel_span_ms,
+  s.span_attributes
+FROM events AS e
+-- LEFT JOIN: spans dropped by head sampling are absent from otel_spans.
+LEFT JOIN spans AS s
+  ON s.trace_id = e.trace_id
+  AND s.span_id = e.otel_span_id
+  AND s.timestamp BETWEEN TIMESTAMP_SUB(e.timestamp, INTERVAL 1 HOUR)
+                      AND TIMESTAMP_ADD(e.timestamp, INTERVAL 1 HOUR)
+ORDER BY e.timestamp;
+```
+
+Rows written by `on_event_callback` carry at most the runner's root span in
+`attributes.otel`. For an event yielded by an ADK 2.0 function node or other
+node that is neither an agent nor a workflow, match the row's source event ID
+against the `gcp.vertex.agent.associated_event_ids` attribute of that node's
+`invoke_node` span instead:
+
+```sql
+-- Event-queue join: rows written by on_event_callback carry at most the
+-- runner's root span in attributes.otel, so match their source event ID
+-- against the ADK node span that emitted the event instead.
+WITH events AS (
+  SELECT
+    timestamp,
+    event_id,
+    event_type,
+    agent,
+    trace_id,
+    JSON_VALUE(attributes, '$.adk.source_event_id') AS source_event_id
+  FROM `my-project.my_dataset.agent_events`
+  WHERE timestamp BETWEEN @start_ts AND @end_ts
+    AND trace_id = @trace_id
+    AND JSON_VALUE(attributes, '$.adk.source_event_id') IS NOT NULL
+),
+spans AS (
+  -- Constant bounds prune otel_spans partitions before the join.
+  SELECT timestamp, trace_id, span_id, span_name, span_attributes
+  FROM `my-project.my_dataset.otel_spans`
+  WHERE timestamp BETWEEN @start_ts AND @end_ts
+    AND trace_id = @trace_id
+)
+SELECT
+  e.timestamp,
+  e.event_id,
+  e.event_type,
+  e.agent,
+  e.source_event_id,
+  s.span_id AS node_otel_span_id,
+  s.span_name AS node_otel_span_name
+FROM events AS e
+JOIN spans AS s
+  ON s.trace_id = e.trace_id
+  AND s.timestamp BETWEEN TIMESTAMP_SUB(e.timestamp, INTERVAL 1 HOUR)
+                      AND TIMESTAMP_ADD(e.timestamp, INTERVAL 1 HOUR)
+  AND e.source_event_id IN UNNEST(
+    JSON_VALUE_ARRAY(
+      s.span_attributes, '$."gcp.vertex.agent.associated_event_ids"'
+    )
+  )
+ORDER BY e.timestamp;
+```
+
+These joins are best-effort:
+
+- Rows written before `enable_otel_correlation` was turned on, or by
+  `google-adk<2.4.0`, have no `attributes.otel` and never match the first
+  recipe. `attributes.adk.source_event_id` does not depend on that option.
+- The second recipe finds only events that an ADK 2.0 function node or other
+  node that is neither an agent nor a workflow yields itself; `NODE_ERROR` rows
+  and events a `Workflow` emits never match. Agents, including an
+  `LlmAgent` root, list their events on no span (`invoke_agent` spans carry no
+  `gcp.vertex.agent.associated_event_ids`), so their rows have no match;
+  narrow those by `trace_id` and time instead.
+- Before google-adk 2.8.0, a root agent that is not an `LlmAgent` (for
+  example a `SequentialAgent`) runs on the runner's classic path, where
+  `on_event_callback` rows record the span that was active where the agent
+  yielded the event, such as an `invoke_agent` span, instead of the runner's
+  root span.
+- A span that starts before `@start_ts`, such as a long root span, is
+  filtered out of `spans`. Subtract a margin from `@start_ts` in that CTE; a
+  constant expression still prunes partitions. The join condition compares
+  the span's start `timestamp` with the row's, so a row written more than an
+  hour after its span started finds no match: for runs longer than an hour,
+  widen the ±1 hour window along with that margin.
+- Never join on the top-level `span_id`: apart from the root invocation row it
+  is a plugin-only ID with no counterpart in Cloud Trace.
+
 ---
 
 ## 3. Deterministic System Metrics
@@ -1417,6 +1624,56 @@ tool completions they are **null**. `pause_orphan` is reserved for the pause
 registry and stays null until that ships — treat a null `pause_orphan` as
 "not yet determined", not as "not an orphan".
 
+#### OTel correlation columns and `denied_columns`
+
+Every per-event view also projects `otel_span_id` and `otel_trace_id`, right
+after the standard headers, from `attributes.otel` (see
+[Trace & Span Correlation](#trace--span-correlation-trace_id-span_id-attributesotelspan_id-attributesadksource_event_id)).
+Both are `NULL` on rows written without `enable_otel_correlation=True`.
+
+If the plugin writes the events table with `payload_column_denylist`, pass the
+same column names as `denied_columns` so the views read only columns that
+exist:
+
+```python
+vm = ViewManager(
+    project_id="my-project",
+    dataset_id="analytics",
+    denied_columns=["attributes"],  # same list as payload_column_denylist
+)
+created = vm.create_all_views()
+```
+
+- Denying `attributes` drops `otel_span_id` / `otel_trace_id` from every
+  per-event view.
+- A view whose own SQL reads a denied column is skipped by
+  `create_all_views()` with a warning and left out of the returned dict, and
+  `create_view()` raises `ValueError` for it without issuing a query;
+  `get_view_sql()` still returns its SQL. With `denied_columns=["attributes"]`
+  that skips the `LLM_REQUEST`, `LLM_RESPONSE`, `TOOL_COMPLETED`,
+  `STATE_DELTA`, `A2A_INTERACTION` and `TOOL_PAUSED` views and the
+  `compaction_windows` cross-event view; the other 19 per-event views deploy.
+- `denied_columns` is keyword-only and accepts only `content`,
+  `content_parts`, `attributes` and `latency_ms`, matched exactly as the plugin
+  matches them: any other name raises `ValueError`, and a bare string raises
+  `TypeError`.
+- `bq-agent-sdk views create-all` and `views create` take the same names as a
+  repeatable `--denied-column` flag and validate them the same way:
+
+  ```bash
+  bq-agent-sdk views create-all --project-id=my-project --dataset-id=analytics \
+    --denied-column=attributes
+  ```
+
+- `Client` read methods such as `get_trace()` select `content`,
+  `content_parts`, `attributes` and `latency_ms` by name, so they fail on an
+  events table written with `payload_column_denylist`; `denied_columns` applies
+  only to the views.
+
+The plugin's own views (`BigQueryLoggerConfig(create_views=True)`) handle a
+denylist differently: they drop only the derived columns that read a denied
+column instead of skipping the view.
+
 #### Cross-event views
 
 Some analytical views span several event types — pairing a `TOOL_PAUSED` with
@@ -2156,6 +2413,10 @@ bq-agent-sdk categorical-views --project-id=P --dataset-id=D --prefix=adk_
 
 ```bash
 bq-agent-sdk views create-all --project-id=P --dataset-id=D --prefix=adk_
+
+# Events table written with payload_column_denylist=["attributes"]
+# (repeat --denied-column for more columns; views create takes it too)
+bq-agent-sdk views create-all --project-id=P --dataset-id=D --denied-column=attributes
 ```
 
 #### `views create` — Create a Single View

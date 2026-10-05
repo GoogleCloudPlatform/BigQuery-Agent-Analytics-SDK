@@ -18,6 +18,7 @@ from datetime import datetime
 from datetime import timezone
 import json
 import os
+import re
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -1727,6 +1728,161 @@ class TestViews:
         ],
     )
     assert result.exit_code == 2
+
+  @patch("bigquery_agent_analytics.views.ViewManager")
+  def test_views_create_all_passes_denied_columns(self, mock_vm_cls):
+    mock_vm_cls.return_value.create_all_views.return_value = {}
+
+    result = runner.invoke(
+        app,
+        [
+            "views",
+            "create-all",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--denied-column=attributes",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_vm_cls.assert_called_once()
+    assert mock_vm_cls.call_args.kwargs["denied_columns"] == ("attributes",)
+
+  @patch("bigquery_agent_analytics.views.ViewManager")
+  def test_views_create_passes_repeated_denied_columns(self, mock_vm_cls):
+    result = runner.invoke(
+        app,
+        [
+            "views",
+            "create",
+            "TOOL_STARTING",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--denied-column=attributes",
+            "--denied-column=content",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert mock_vm_cls.call_args.kwargs["denied_columns"] == (
+        "attributes",
+        "content",
+    )
+    mock_vm_cls.return_value.create_view.assert_called_once_with(
+        "TOOL_STARTING"
+    )
+
+  @pytest.mark.parametrize(
+      "args",
+      [
+          ["views", "create-all"],
+          ["views", "create", "LLM_REQUEST"],
+      ],
+  )
+  @patch("bigquery_agent_analytics.views.ViewManager")
+  def test_views_denied_columns_default_empty(self, mock_vm_cls, args):
+    mock_vm_cls.return_value.create_all_views.return_value = {}
+
+    result = runner.invoke(app, [*args, "--project-id=proj", "--dataset-id=ds"])
+    assert result.exit_code == 0, result.output
+    assert mock_vm_cls.call_args.kwargs["denied_columns"] == ()
+
+  @pytest.mark.parametrize("column", ["bogus", "Attributes", "trace_id"])
+  @pytest.mark.parametrize(
+      "args",
+      [
+          ["views", "create-all"],
+          ["views", "create", "TOOL_STARTING"],
+      ],
+  )
+  @patch("bigquery_agent_analytics.views.make_bq_client")
+  def test_views_reject_invalid_denied_column(
+      self, mock_make_client, args, column
+  ):
+    """Same rule as ViewManager(denied_columns=...): exact projectable names."""
+    result = runner.invoke(
+        app,
+        [
+            *args,
+            "--project-id=proj",
+            "--dataset-id=ds",
+            f"--denied-column={column}",
+        ],
+    )
+    assert result.exit_code == 2
+    combined = (result.stderr or "") + (result.output or "")
+    assert "Invalid --denied-column" in combined
+    assert repr(column) in combined
+    # The error lists the accepted names.
+    for accepted in ("attributes", "content", "content_parts", "latency_ms"):
+      assert repr(accepted) in combined
+    mock_make_client.assert_not_called()
+
+  @patch("bigquery_agent_analytics.views.make_bq_client")
+  def test_views_create_all_denied_attributes_end_to_end(
+      self, mock_make_client
+  ):
+    """With the real ViewManager, no issued statement reads attributes."""
+    from bigquery_agent_analytics.views import _EVENT_VIEW_DEFS
+
+    client = MagicMock()
+    mock_make_client.return_value = client
+
+    result = runner.invoke(
+        app,
+        [
+            "views",
+            "create-all",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--denied-column=attributes",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    created = json.loads(result.stdout)
+    assert len([key for key in created if key in _EVENT_VIEW_DEFS]) == 19
+    assert "TOOL_STARTING" in created
+    for skipped in ("LLM_REQUEST", "STATE_DELTA", "compaction_windows"):
+      assert skipped not in created
+    statements = [c.args[0] for c in client.query.call_args_list]
+    assert len(statements) == len(created)
+    for sql in statements:
+      assert not re.search(r"\battributes\b", sql)
+
+  @patch("bigquery_agent_analytics.views.make_bq_client")
+  def test_views_create_rejects_view_reading_denied_column(
+      self, mock_make_client
+  ):
+    result = runner.invoke(
+        app,
+        [
+            "views",
+            "create",
+            "LLM_REQUEST",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--denied-column=attributes",
+        ],
+    )
+    assert result.exit_code == 2
+    combined = (result.stderr or "") + (result.output or "")
+    assert "reads denied column(s) ['attributes']" in combined
+    mock_make_client.assert_not_called()
+
+  def test_views_denied_column_help_names_the_plugin_option(self):
+    from typer.main import get_command
+
+    views_group = get_command(app).commands["views"]
+    for name in ("create-all", "create"):
+      (param,) = [
+          p
+          for p in views_group.commands[name].params
+          if p.name == "denied_columns"
+      ]
+      assert param.opts == ["--denied-column"]
+      assert param.multiple
+      assert (
+          "for tables written with"
+          " BigQueryLoggerConfig(payload_column_denylist=[...])" in param.help
+      )
 
 
 # ------------------------------------------------------------------ #
