@@ -277,6 +277,7 @@ with a runnable ADK agent.
 | Resource | Description |
 |----------|-------------|
 | [SDK Feature Reference](SDK.md) | Complete API walkthrough with working code examples |
+| [BQCA Prompt & Response Logging Manual](docs/guides/bqca-prompt-response-logging-manual.md) | Self-hosting setup, capability matrix, customization, and self-debugging guide for the [BQCA Customer Starter Notebook](examples/bqca_prompt_response_logging_customer_notebook.ipynb) ([Open in Colab](https://colab.research.google.com/github/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/bqca_prompt_response_logging_customer_notebook.ipynb)) |
 | [Looker Studio Dashboard](dashboard/looker_studio/README.md) | Published 37-chart BQAA observability template with project/dataset/table configurator |
 | [Dashboard User Manual](dashboard/looker_studio/USER_MANUAL.md) | End-user guide to the Looker Studio dashboard: setup in three steps, page guide, sharing, troubleshooting |
 | [Agent Context Graph Codelab](docs/codelabs/periodic_materialization.md) | Extract decision traces from your agent's context graph, end to end (~35 min) |
