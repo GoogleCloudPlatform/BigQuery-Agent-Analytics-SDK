@@ -350,6 +350,7 @@ def _build_scope_context(spec=None):
 # Golden matching now lives in the SDK core (extracted from this script);
 # these aliases keep this module's public/test surface stable.
 from bigquery_agent_analytics.golden_matching import DEFAULT_GOLDEN_THRESHOLD as _DEFAULT_GOLDEN_THRESHOLD  # noqa: E402
+from bigquery_agent_analytics.golden_matching import embed_texts as _embed_texts  # noqa: E402
 from bigquery_agent_analytics.golden_matching import EMBEDDING_MODEL  # noqa: E402,F401
 from bigquery_agent_analytics.golden_matching import match_golden_qa  # noqa: E402
 
