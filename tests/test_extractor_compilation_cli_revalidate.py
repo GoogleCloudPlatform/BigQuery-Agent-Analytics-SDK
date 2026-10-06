@@ -347,26 +347,6 @@ class TestCliEndToEnd:
 
 class TestCliUsageErrors:
 
-  def _common_args(
-      self,
-      tmp_path: pathlib.Path,
-      *,
-      bundles_root: pathlib.Path | None = None,
-      events_path: pathlib.Path | None = None,
-      ref_module: str = "_bqaa_cli_test_ref_missing",
-      report_out: pathlib.Path | None = None,
-  ) -> list[str]:
-    return [
-        "--bundles-root",
-        str(bundles_root or tmp_path / "bundles"),
-        "--events-jsonl",
-        str(events_path or tmp_path / "events.jsonl"),
-        "--reference-extractors-module",
-        ref_module,
-        "--report-out",
-        str(report_out or tmp_path / "report.json"),
-    ]
-
   def test_missing_events_file(
       self, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture
   ):
