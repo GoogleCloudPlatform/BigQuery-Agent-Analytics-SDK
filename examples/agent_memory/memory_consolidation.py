@@ -27,12 +27,19 @@ sessions into long-term memory with SQL that runs where the rows are:
   asked for) into the *embeddings* table. Later sessions rank past tasks
   by ``ML.DISTANCE`` to the new request.
 
-Each step skips messages it has already processed (by span id), so a pass
-can be re-run safely. The ``AI.GENERATE`` and ``AI.EMBED`` steps are
-``SELECT`` jobs that append to their table rather than ``MERGE``
-statements: in the recorded run, a ``MERGE`` whose source called
-``AI.GENERATE`` stalled in its output stage for over ten minutes, while
-the same ``SELECT`` took five seconds. Preferences are not extracted here:
+Both functions report each row's outcome in a ``status`` column, empty on
+success. A message counts as processed only once a step has a successful
+row for it: an extraction with an empty status, or an embedding with an
+empty status and a non-empty vector. A failed attempt stays in its table
+with its status, and the next pass tries that message again. Everything
+that reads these tables takes the first successful row per message, and
+items are keyed by span and position, so a retry never duplicates memory
+and a pass can be re-run safely. The pass totals count the messages still
+failing. The ``AI.GENERATE`` and ``AI.EMBED`` steps are ``SELECT`` jobs
+that append to their table rather than ``MERGE`` statements: in the
+recorded run, a ``MERGE`` whose source called ``AI.GENERATE`` stalled in
+its output stage for over ten minutes, while the same ``SELECT`` took five
+seconds. Preferences are not extracted here:
 the agent saves those itself as ADK ``user:`` state, which the plugin logs
 as ``STATE_DELTA`` rows.
 """
@@ -41,6 +48,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import datetime
+import textwrap
 from typing import Any, Iterable
 
 import memory_layers
@@ -137,11 +145,19 @@ CREATE TABLE IF NOT EXISTS `{embeddings}` (
   task STRING,
   embedding ARRAY<FLOAT64>,
   model STRING,
-  embedded_at TIMESTAMP
-)"""
+  embedded_at TIMESTAMP,
+  status STRING
+);
+ALTER TABLE `{embeddings}` ADD COLUMN IF NOT EXISTS status STRING"""
 
-# The user messages of the given sessions not yet processed into `{done}`.
-# Rows are delivered at least once, so duplicates of a span are dropped.
+# When a row of a step's table means its message is processed.
+EXTRACTED = "COALESCE(status, '') = ''"
+EMBEDDED = "COALESCE(status, '') = '' AND ARRAY_LENGTH(embedding) > 0"
+
+# The user messages of the given sessions with no successful row in
+# `{done}` yet; `{processed}` says which rows succeeded. Rows are delivered
+# at least once, so duplicates of a span are dropped. A message with no text
+# cannot succeed, so it is not tried.
 _NEW_MESSAGES = """\
 SELECT
   e.span_id,
@@ -158,9 +174,17 @@ SELECT
 FROM `{events}` AS e
 WHERE e.event_type = 'USER_MESSAGE_RECEIVED'
   AND e.session_id IN UNNEST(@session_ids)
-  AND JSON_VALUE(e.content, '$.text_summary') IS NOT NULL
-  AND e.span_id NOT IN (SELECT span_id FROM `{done}`)
+  AND TRIM(COALESCE(JSON_VALUE(e.content, '$.text_summary'), '')) != ''
+  AND e.span_id NOT IN (SELECT span_id FROM `{done}` WHERE {processed})
 QUALIFY ROW_NUMBER() OVER (PARTITION BY e.span_id ORDER BY e.timestamp) = 1"""
+
+# The first successful row per message of the given sessions in `{table}`.
+_SUCCEEDED = """\
+SELECT *
+FROM `{table}`
+WHERE session_id IN UNNEST(@session_ids)
+  AND {processed}
+QUALIFY ROW_NUMBER() OVER (PARTITION BY span_id ORDER BY {at}) = 1"""
 
 _EXTRACT = """\
 SELECT
@@ -223,9 +247,10 @@ USING (
     CAST(NULL AS STRING) AS statement,
     x.model,
     x.extracted_at
-  FROM `{extractions}` AS x, UNNEST(x.entities) AS entity WITH OFFSET AS i
-  WHERE x.session_id IN UNNEST(@session_ids)
-    AND TRIM(COALESCE(entity.name, '')) != ''
+  FROM (
+{extracted}
+  ) AS x, UNNEST(x.entities) AS entity WITH OFFSET AS i
+  WHERE TRIM(COALESCE(entity.name, '')) != ''
   UNION ALL
   SELECT
     CONCAT(x.span_id, ':fact:', CAST(i AS STRING)),
@@ -246,9 +271,10 @@ USING (
     TRIM(fact.statement),
     x.model,
     x.extracted_at
-  FROM `{extractions}` AS x, UNNEST(x.facts) AS fact WITH OFFSET AS i
-  WHERE x.session_id IN UNNEST(@session_ids)
-    AND TRIM(COALESCE(fact.subject, '')) != ''
+  FROM (
+{extracted}
+  ) AS x, UNNEST(x.facts) AS fact WITH OFFSET AS i
+  WHERE TRIM(COALESCE(fact.subject, '')) != ''
     AND TRIM(COALESCE(fact.object, '')) != ''
 ) AS s
 ON t.item_id = s.item_id
@@ -272,10 +298,16 @@ SELECT
   n.observed_at,
   n.sim_date,
   n.message AS task,
-  AI.EMBED(n.message, endpoint => '{embedding_endpoint}').result AS embedding,
+  n.out.result AS embedding,
   '{embedding_endpoint}' AS model,
-  CURRENT_TIMESTAMP() AS embedded_at
-FROM ({new_messages}) AS n"""
+  CURRENT_TIMESTAMP() AS embedded_at,
+  n.out.status
+FROM (
+  SELECT
+    m.*,
+    AI.EMBED(m.message, endpoint => '{embedding_endpoint}') AS out
+  FROM ({new_messages}) AS m
+) AS n"""
 
 _LOAD_ITEMS = """\
 SELECT
@@ -299,30 +331,55 @@ _SIMILAR_TASKS = """\
 WITH request AS (
   SELECT AI.EMBED(@query, endpoint => '{embedding_endpoint}').result
     AS embedding
+),
+tasks AS (
+  SELECT invocation_id, session_id, task, embedding
+  FROM `{embeddings}`
+  WHERE user_id = @user_id
+    AND session_id != @session_id
+    AND {embedded}
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY span_id ORDER BY embedded_at) = 1
 )
 SELECT
   t.invocation_id,
   t.session_id,
   t.task,
   1 - ML.DISTANCE(t.embedding, request.embedding, 'COSINE') AS similarity
-FROM `{embeddings}` AS t
+FROM tasks AS t
 CROSS JOIN request
-WHERE t.user_id = @user_id
-  AND t.session_id != @session_id
-  AND ARRAY_LENGTH(t.embedding) > 0
 ORDER BY similarity DESC
 LIMIT @top_k"""
 
+# Totals for the given sessions: messages tried, those whose extraction or
+# embedding has not succeeded yet, items from the successful extractions,
+# and the tokens of every attempt.
 _USAGE = """\
+WITH attempts AS (
+  SELECT * FROM `{extractions}` WHERE session_id IN UNNEST(@session_ids)
+),
+extracted AS (
+{extracted}
+),
+embedding_attempts AS (
+  SELECT span_id FROM `{embeddings}` WHERE session_id IN UNNEST(@session_ids)
+),
+embedded AS (
+{embedded}
+)
 SELECT
-  COUNT(*) AS messages,
-  COUNTIF(status != '') AS failed,
-  SUM(ARRAY_LENGTH(entities)) AS entities,
-  SUM(ARRAY_LENGTH(facts)) AS facts,
-  SUM(prompt_tokens) AS prompt_tokens,
-  SUM(output_tokens) AS output_tokens
-FROM `{extractions}`
-WHERE session_id IN UNNEST(@session_ids)"""
+  (SELECT COUNT(DISTINCT span_id) FROM attempts) AS messages,
+  (
+    SELECT COUNT(DISTINCT span_id) FROM attempts
+    WHERE span_id NOT IN (SELECT span_id FROM extracted)
+  ) AS failed,
+  (SELECT SUM(ARRAY_LENGTH(entities)) FROM extracted) AS entities,
+  (SELECT SUM(ARRAY_LENGTH(facts)) FROM extracted) AS facts,
+  (SELECT SUM(prompt_tokens) FROM attempts) AS prompt_tokens,
+  (SELECT SUM(output_tokens) FROM attempts) AS output_tokens,
+  (
+    SELECT COUNT(DISTINCT span_id) FROM embedding_attempts
+    WHERE span_id NOT IN (SELECT span_id FROM embedded)
+  ) AS embeddings_failed"""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -355,19 +412,32 @@ def create_tables_sql(tables: MemoryTables) -> str:
   )
 
 
+def _new_messages(tables: MemoryTables, done: str, processed: str) -> str:
+  return _NEW_MESSAGES.format(
+      events=tables.events, done=done, processed=processed
+  )
+
+
+def _succeeded(table: str, processed: str, at: str, indent: int) -> str:
+  sql = _SUCCEEDED.format(table=table, processed=processed, at=at)
+  return textwrap.indent(sql, " " * indent)
+
+
 def extract_sql(tables: MemoryTables, endpoint: str = DEFAULT_ENDPOINT) -> str:
   """Extraction rows for the new messages; appended to ``extractions``."""
   return _EXTRACT.format(
       endpoint=endpoint,
       output_schema=_OUTPUT_SCHEMA,
-      new_messages=_NEW_MESSAGES.format(
-          events=tables.events, done=tables.extractions
-      ),
+      new_messages=_new_messages(tables, tables.extractions, EXTRACTED),
   )
 
 
 def items_sql(tables: MemoryTables) -> str:
-  return _ITEMS.format(items=tables.items, extractions=tables.extractions)
+  """Merges the entities and facts of successful extractions into items."""
+  return _ITEMS.format(
+      items=tables.items,
+      extracted=_succeeded(tables.extractions, EXTRACTED, "extracted_at", 4),
+  )
 
 
 def embed_sql(
@@ -377,9 +447,7 @@ def embed_sql(
   """Embedding rows for the new messages; appended to ``embeddings``."""
   return _EMBED.format(
       embedding_endpoint=embedding_endpoint,
-      new_messages=_NEW_MESSAGES.format(
-          events=tables.events, done=tables.embeddings
-      ),
+      new_messages=_new_messages(tables, tables.embeddings, EMBEDDED),
   )
 
 
@@ -388,13 +456,20 @@ def similar_tasks_sql(
     embedding_endpoint: str = DEFAULT_EMBEDDING_ENDPOINT,
 ) -> str:
   return _SIMILAR_TASKS.format(
-      embeddings=tables.embeddings, embedding_endpoint=embedding_endpoint
+      embeddings=tables.embeddings,
+      embedding_endpoint=embedding_endpoint,
+      embedded=EMBEDDED,
   )
 
 
 def usage_sql(tables: MemoryTables) -> str:
-  """Extraction totals (messages, failures, items, tokens) for sessions."""
-  return _USAGE.format(extractions=tables.extractions)
+  """Totals for sessions: messages, failures, items and tokens."""
+  return _USAGE.format(
+      extractions=tables.extractions,
+      embeddings=tables.embeddings,
+      extracted=_succeeded(tables.extractions, EXTRACTED, "extracted_at", 2),
+      embedded=_succeeded(tables.embeddings, EMBEDDED, "embedded_at", 2),
+  )
 
 
 def _job_config(destination: str = "", **params: Any) -> Any:
@@ -438,8 +513,11 @@ def consolidate(
 ) -> dict[str, Any]:
   """Extracts entities and facts and embeds the tasks of these sessions.
 
-  Returns what each statement did: rows inserted, bytes billed and job ids,
-  plus the extraction totals for the sessions.
+  Only messages without a successful row are sent to the models, so a
+  message that failed in an earlier pass is tried again. Returns what each
+  statement did (rows inserted, bytes billed and job ids) and the totals
+  for the sessions: messages, those whose extraction or embedding has not
+  succeeded yet (``failed``, ``embeddings_failed``), items and tokens.
   """
   ids = sorted(set(session_ids))
   steps = {}

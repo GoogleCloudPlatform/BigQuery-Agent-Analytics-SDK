@@ -1417,6 +1417,40 @@ def test_a_tool_that_reports_an_error_counts_as_a_failed_call(fixture):
   ) in context
 
 
+def test_a_tool_reported_error_fails_the_trace_like_an_error_row(fixture):
+  # One failure rule: a result that reports {"status": "error"} makes the
+  # trace "answered with errors", lists its message, and keeps the trace
+  # out of the successful ones that recall learns from.
+  rows = copy.deepcopy(fixture.rows)
+  _row(rows, "sp-103-tool-2", "TOOL_COMPLETED")["content"]["result"] = {
+      "status": "error",
+      "message": "Unrecognized name: cuisine",
+  }
+  reasoning = memory_layers.load_user_memory(_client(rows), "u-ana").reasoning
+  scores = {"inv-101": 0.7, "inv-103": 0.9}
+
+  trace = reasoning.get_trace_with_steps("inv-103")
+  answered = [t.trace_id for t in reasoning.list_traces(success_only=True)]
+  others = [t.trace_id for t in reasoning.list_traces(success_only=False)]
+  similar = reasoning.get_similar_traces(
+      "anything", scores=scores, threshold=0.5
+  )
+  every = reasoning.get_similar_traces(
+      "anything", scores=scores, threshold=0.5, success_only=False
+  )
+
+  assert trace.outcome is not None  # the agent still answered
+  assert (trace.outcome_status, trace.errors, trace.success) == (
+      "answered_with_errors",
+      ("Unrecognized name: cuisine",),
+      False,
+  )
+  assert trace.metrics["tool_errors"] == 1
+  assert ("inv-103" in answered, "inv-103" in others) == (False, True)
+  assert [s.trace.trace_id for s in similar] == ["inv-101"]
+  assert [s.trace.trace_id for s in every] == ["inv-103", "inv-101"]
+
+
 def test_similar_traces_can_be_ranked_by_given_scores(ana):
   similar = ana.reasoning.get_similar_traces(
       "anything", scores={"inv-101": 0.62, "inv-103": 0.91}, threshold=0.6

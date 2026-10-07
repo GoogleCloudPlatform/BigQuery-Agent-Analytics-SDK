@@ -105,7 +105,7 @@ flowchart LR
   `output_schema` (entities with a type; facts as subject, predicate and
   object), and through `AI.EMBED`. The results go to
   `analyst_memory_items` and `analyst_task_embeddings`, keyed to the span of
-  each message.
+  each message. A message whose row failed is tried again the next night.
 - **What recall returns.** Saved preferences (latest version), facts and
   entities, similar past tasks ranked by embedding with the SQL that
   answered them (a `reuse:` line), and tool calls that failed before. Every
@@ -216,8 +216,9 @@ HTML and JavaScript with no dependencies. They read `viz/data/memory_export.json
   sentences; and each preference with its versions, a replaced one struck
   through. Every item opens the session it came from.
 - **Reasoning:** one waterfall per turn: each model call, the tool calls it
-  asked for, and how the turn ended. A failed tool call shows in the status
-  color with an icon and a label.
+  asked for, and how the turn ended. A failed tool call, including a query
+  `run_sql` returned as an error, shows in the status color with an icon and
+  a label.
 - **What the agent read:** the memory `recall_memory` returned in the
   selected session.
 
@@ -265,8 +266,15 @@ same key starts a new version and closes the previous one, so the history
 and `as_of` reads need no separate supersede call.
 
 - **Facts, entities and embeddings:** written by the consolidation pass, in
-  BigQuery, from rows the plugin already logged. Each step skips messages it
-  has processed, so a pass can be re-run.
+  BigQuery, from rows the plugin already logged. `AI.GENERATE` and
+  `AI.EMBED` report each row's outcome in a `status` column. A message
+  counts as processed only once it has a successful row: an extraction with
+  an empty status, or an embedding with an empty status and a non-empty
+  vector. A failed attempt stays in its table with its status, the pass
+  totals count the messages still failing, and the next pass tries those
+  messages again. Items are keyed by span and position, and readers take
+  the first successful row of each message, so re-running a pass never
+  duplicates memory.
 
 In neo4j-agent-memory the application records reasoning itself. Its docs
 say "Always pair a started trace with a matching `complete_trace` call." Here
@@ -287,9 +295,18 @@ row was actually recorded; a stream that stopped part-way, for example, is
 | `INITIATED_BY` / `TOUCHED` edges | `session_id` / `span_id` on every item | The source row |
 
 How `outcome_status` is derived:
-- `answered`: the invocation's last model call completed with text and no tool calls, and no error rows were recorded.
-- `answered_with_errors`: the same final answer, but at least one error row was recorded.
+- `answered`: the invocation's last model call completed with text and no tool calls, and no row failed.
+- `answered_with_errors`: the same final answer, but at least one row failed. The trace's `errors` lists why.
 - `unanswered`: there is no recorded final answer. The invocation is still running, a stream stopped part-way, or it failed.
+
+A row fails when it is an error row (an `*_ERROR` event, an error message or
+status `ERROR`), or when it is a `TOOL_COMPLETED` row whose result reports
+`{"status": "error"}`, the way `run_sql` returns bad SQL to the model. This
+one rule, `memory_layers.row_error()`, sets each tool call's status, the
+trace's `errors` and outcome, and the color of each tool bar in the web
+view. So a turn that recovered from a failed query is answered with errors,
+and `list_traces(success_only=True)` and `get_similar_traces()` leave it
+out.
 
 What counts as a completed model call:
 - **Streaming.** A streamed model call writes several `LLM_RESPONSE` rows on one span. They are read as one call, and partial text never counts as an answer.

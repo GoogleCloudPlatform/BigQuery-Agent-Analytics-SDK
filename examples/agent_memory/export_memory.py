@@ -93,7 +93,10 @@ def _timeline(spans: list[Span]) -> list[dict[str, Any]]:
 
   A streamed model call is one row, from its request to its last response
   row. Its status is ``success`` when a terminal response was recorded,
-  ``incomplete`` when only fragments were, and ``error`` when it failed.
+  ``incomplete`` when only fragments were, and ``error`` when it failed. A
+  tool call is ``error`` when its completion fails by
+  ``memory_layers.row_error`` (an error row, or a result that reports
+  ``{"status": "error"}``), the rule tool calls and trace outcomes use.
   """
   start = spans[0].timestamp
 
@@ -157,11 +160,12 @@ def _timeline(spans: list[Span]) -> list[dict[str, Any]]:
             "span_id": span.span_id,
         }
         entries.append((index, row))
-      failed = span.event_type == "TOOL_ERROR" or span.is_error
+      # The same failure rule as tool calls and trace outcomes.
+      error = memory_layers.row_error(span)
       row["end_ms"] = offset(span.timestamp)
-      row["status"] = "error" if failed else "success"
+      row["status"] = "error" if error is not None else "success"
       row["detail"] = (
-          span.error_message if failed else _short(span.content.get("result"))
+          error if error is not None else _short(span.content.get("result"))
       )
   entries.sort(key=lambda entry: entry[0])
   return [row for _, row in entries]

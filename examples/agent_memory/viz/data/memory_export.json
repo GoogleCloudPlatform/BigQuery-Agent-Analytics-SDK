@@ -2,7 +2,7 @@
  "schema": "bqaa-agent-memory-viz/2",
  "label": "Recorded live run: TheLook analyst week",
  "source": "<project>.bqaa_agent_memory_demo.analyst_events",
- "exported_at": "2026-10-07T09:55:54.760Z",
+ "exported_at": "2026-10-07T11:39:20.119Z",
  "run": {
   "model": "gemini-3.8-flash",
   "run_tag": "20261007t0834",
@@ -10719,13 +10719,15 @@
      "sql_queries": 8,
      "sql_errors": 1,
      "outcome": "### Repeat Purchase Rate (June 2026 Cohort)\n\n| Metric | All Orders | Excluding Cancelled |\n| :--- | :--- | :--- |\n| **First-time buyers (June 2026)** | 2,223 | 2,073 |\n| **Repeat buyers within 90 days** | 460 | 369 |\n| **Repeat purchase rate** | **20.69%** | **17.80%** |\n\n*Definitions, filters & dates:* First-time buyers whose initial order was placed between `2026-06-01 00:00:00 UTC` and `2026-07-01 00:00:00 UTC`, measuring subsequent orders placed within 90 days (`created_at <= TIMESTAMP_ADD(first_order_date, INTERVAL 90 DAY)`) through `2026-10-01`.",
-     "outcome_status": "answered",
+     "outcome_status": "answered_with_errors",
      "started_at": "2026-10-07T08:38:36.587Z",
      "completed_at": "2026-10-07T08:39:46.288Z",
      "latency_ms": 69701.013,
      "llm_calls": 12,
      "total_tokens": 44608,
-     "errors": [],
+     "errors": [
+      "Column name user_id is ambiguous at [19:19]"
+     ],
      "outcome_span_id": "c2daca0fd0974e1a",
      "steps": [
       {
@@ -11120,9 +11122,9 @@
        "label": "run_sql",
        "start_ms": 45276.298,
        "end_ms": 45539.19,
-       "status": "success",
+       "status": "error",
        "span_id": "642fe623c7024f4c",
-       "detail": "{\"message\": \"Column name user_id is ambiguous at [19:19]\", \"status\": \"error\"}"
+       "detail": "Column name user_id is ambiguous at [19:19]"
       },
       {
        "kind": "model",
@@ -11549,13 +11551,15 @@
      "sql_queries": 5,
      "sql_errors": 1,
      "outcome": "**Search** brings the most repeat buyers among your customer segment (aged 18–34), accounting for roughly 70% of all repeat buyers.\n\n### Repeat Buyers by Traffic Source (Ages 18–34)\n\n| Traffic Source | Total Buyers | Repeat Buyers (All-Time) | Repeat Rate (All-Time) | Repeat Buyers (≤ 90 Days) | 90-Day Repeat Rate |\n| :--- | :--- | :--- | :--- | :--- | :--- |\n| **Search** | 15,961 | **5,979** | 37.5% | **1,492** | 9.3% |\n| **Organic** | 3,354 | **1,271** | 37.9% | **319** | 9.5% |\n| **Facebook** | 1,338 | **477** | 35.7% | **109** | 8.1% |\n| **Email** | 1,180 | **449** | 38.1% | **100** | 8.5% |\n| **Display** | 878 | **329** | 37.5% | **75** | 8.5% |\n| **Total** | **22,711** | **8,505** | **37.4%** | **2,095** | **9.2%** |\n\n*Definitions, filters and dates:* Customers aged 18–34 with orders placed up to 2026-10-05; repeat buyers are defined as customers placing $\\ge 2$ orders (all-time and within 90 days of their first order).",
-     "outcome_status": "answered",
+     "outcome_status": "answered_with_errors",
      "started_at": "2026-10-07T08:58:11.207Z",
      "completed_at": "2026-10-07T08:59:16.327Z",
      "latency_ms": 65120.379,
      "llm_calls": 10,
      "total_tokens": 57372,
-     "errors": [],
+     "errors": [
+      "Aggregate function MIN not allowed in WHERE clause at [17:29]"
+     ],
      "outcome_span_id": "a21eced7ff5548d9",
      "steps": [
       {
@@ -11813,9 +11817,9 @@
        "label": "run_sql",
        "start_ms": 15730.738,
        "end_ms": 15987.641,
-       "status": "success",
+       "status": "error",
        "span_id": "2871ce7060a24f41",
-       "detail": "{\"message\": \"Aggregate function MIN not allowed in WHERE clause at [17:29]\", \"status\": \"error\"}"
+       "detail": "Aggregate function MIN not allowed in WHERE clause at [17:29]"
       },
       {
        "kind": "model",
@@ -14312,7 +14316,7 @@
     "session_id": "an-20261007t0834-d5-raj-1-ctl",
     "trace_id": "e-ba86e314-06d7-41c6-9546-a4d071d86836",
     "answer": "### Fiscal Q3-to-Date Numbers (Aug 1 – Oct 7, 2026)\n\n| Metric | EUR (€) | USD ($) |\n|:---|---:|---:|\n| **Net Revenue** | **€656,112.90** | $762,921.98 |\n| **Net Revenue Orders** (Shipped / Complete) | **9,130** | 9,130 |\n| **Total Orders Placed** (All statuses) | 16,744 | 16,744 |\n| **Net Items Sold** | 12,740 | 12,740 |\n\n#### Monthly Breakdown\n\n| Period | Net Revenue (EUR) | Net Revenue (USD) | Net Orders | Total Orders | Net Items |\n|:---|---:|---:|---:|---:|---:|\n| **August 2026** | €218,980.73 | $254,628.75 | 3,010 | 5,536 | 4,306 |\n| **September 2026** | €260,894.36 | $303,365.54 | 3,526 | 6,489 | 4,973 |\n| **October 1–7, 2026 (MTD)** | €176,237.81 | $204,927.69 | 2,733 | 4,971 | 3,461 |\n\nDefinitions & filters: Net revenue is the sum of `sale_price` in `order_items` for items with `status IN ('Shipped', 'Complete')` created between `2026-08-01` and `2026-10-07 23:59:59` UTC, converted at `0.86 EUR/USD` based on the February 1 fiscal calendar.",
-    "outcome_status": "answered",
+    "outcome_status": "answered_with_errors",
     "tool_calls": [
      "run_sql",
      "run_sql",
@@ -14533,7 +14537,7 @@
     "session_id": "an-20261007t0834-d5-tom-1-ctl",
     "trace_id": "e-eab9b938-bdba-404f-9f36-9f5b0ba8af7d",
     "answer": "### Units Sold Yesterday (October 6, 2026)\n\n#### By Category\n| Category | Net Units Sold | Gross Units Ordered |\n| :--- | :---: | :---: |\n| **Outerwear & Coats** | 50 | 70 |\n| **Active** | 33 | 45 |\n| **Total** | **83** | **115** |\n\n#### By Watch Brand\n| Brand | Outerwear & Coats | Active | Total Net Units | Gross Units |\n| :--- | :---: | :---: | :---: | :---: |\n| **Columbia** | 4 | 2 | **6** | 9 |\n| **The North Face** | 1 | 0 | **1** | 1 |\n| **Total Watch Brands** | **5** | **2** | **7** | **10** |\n\n**Definitions, filters, and dates:** Net units sold include order statuses `Complete`, `Shipped`, and `Processing` (excluding `Cancelled` and `Returned`); filtered to `department = 'Men'`, categories `Outerwear & Coats` and `Active`, and watch brands `Columbia` and `The North Face` for `created_at` on `2026-10-06`.",
-    "outcome_status": "answered",
+    "outcome_status": "answered_with_errors",
     "tool_calls": [
      "run_sql",
      "run_sql",

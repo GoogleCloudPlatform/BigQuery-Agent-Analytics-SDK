@@ -45,10 +45,10 @@ export, so this is not an invoice figure):
 | `live_run.json` | The run record written by `analyst_agent.py`: days, analysts, every session with its transcript (user turns, tool calls, tool errors, replies, seconds), the before/after pairs, each nightly pass, per-session row counts from a `GROUP BY` over the table, and token usage |
 | `demo_output_maya.chen.txt`, `demo_output_lena.okafor.txt` | Output of `agent_memory_demo.py --memory-tables analyst_` for the two sessions the video follows (Maya's Monday question, Lena's Tuesday one). They were read after the run, so they include the whole week; what `recall_memory` returned at the time is in the export (`traces[].recall`) |
 | [`../viz/data/memory_export.json`](../viz/data/memory_export.json) | Output of `export_memory.py --memory-tables analyst_ --run-record live_run.json`, with the project shown as `<project>` |
-| [`demo.mp4`](demo.mp4) | Narrated walkthrough of the web view on that export: 1 min 41 s, 1280×800 H.264 with an AAC voiceover (macOS `say`, voice Samantha), 16 burned-in captions, 4.4 MB. Recorded with `viz/record_demo.py --narration` |
+| [`demo.mp4`](demo.mp4) | Narrated walkthrough of the web view on that export: 1 min 41 s, 1280×800 H.264 with an AAC voiceover (macOS `say`, voice Samantha), 16 burned-in captions, 4.4 MB. Recorded with `viz/record_demo.py --narration`, from the export made at 09:55 UTC; see the note below on the later export |
 | [`narration.md`](narration.md) | The voiceover script: one section per scene, one bullet per spoken line and caption |
 | [`demo.srt`](demo.srt) | The captions, timed to the voiceover, exactly as burned into `demo.mp4` |
-| [`../viz/screenshot.png`](../viz/screenshot.png) | Screenshot of the web view on that export |
+| [`../viz/screenshot.png`](../viz/screenshot.png) | Screenshot of the web view, taken with the video |
 
 ## What happened
 
@@ -87,6 +87,16 @@ agent treats as today and the plugin logs with every row
   the runs without memory. After the run, `run_sql`'s exception handling was
   narrowed to BigQuery API errors and timeouts; it would have returned the
   same five errors.
+- **The export was made again after a review fix.** A tool result that
+  reports `{"status": "error"}` now fails the trace as well as the tool
+  call (see `memory_layers.row_error`). Regenerated from the same rows at
+  11:39 UTC, the export changed in four places only. Priya's Day 1 and Day 3
+  turns, which each recovered from a failed query, are now answered with
+  errors, with the failed `run_sql` bars marked. Raj's and Tom's runs
+  without memory are now answered with errors too. The fourth change is the
+  export time. No scene of `demo.mp4` shows those traces or labels. The
+  header's export time (09:55 UTC in the video and screenshot) is the only
+  on-screen difference, so the video was not recorded again.
 - **What the agent knew when.** Each session's recall read only what was in
   BigQuery at that moment: preferences right away; facts, entities and
   similar past tasks after the previous night's pass.

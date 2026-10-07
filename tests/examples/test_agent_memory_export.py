@@ -157,6 +157,39 @@ def test_trace_timeline_places_model_turns_and_tool_calls(ana):
   assert trace["errors"] == [HOTEL_TIMEOUT]
 
 
+def test_a_tool_reported_error_is_a_failed_bar_and_a_trace_error(fixture):
+  # The timeline, the tool call and the trace use the same failure rule.
+  rows = copy.deepcopy(fixture.rows)
+  _row(rows, "sp-103-tool-2", "TOOL_COMPLETED")["content"]["result"] = {
+      "status": "error",
+      "message": "Unrecognized name: cuisine",
+  }
+
+  export = export_memory.build_user_export(_memory(rows))
+
+  trace = next(t for t in export["traces"] if t["trace_id"] == "inv-103")
+  (bar,) = [r for r in trace["timeline"] if r["span_id"] == "sp-103-tool-2"]
+  (call,) = [
+      c
+      for step in trace["steps"]
+      for c in step["tool_calls"]
+      if c["span_id"] == "sp-103-tool-2"
+  ]
+  assert (bar["kind"], bar["status"], bar["detail"]) == (
+      "tool",
+      "error",
+      "Unrecognized name: cuisine",
+  )
+  assert (call["status"], call["error"]) == (
+      "error",
+      "Unrecognized name: cuisine",
+  )
+  assert (trace["outcome_status"], trace["errors"]) == (
+      "answered_with_errors",
+      ["Unrecognized name: cuisine"],
+  )
+
+
 def test_trace_steps_carry_tool_calls_with_short_results(ana):
   trace = next(t for t in ana["traces"] if t["trace_id"] == "inv-101")
 
@@ -787,6 +820,19 @@ def test_the_committed_export_matches_the_committed_run_record():
   assert export["run"]["totals"]["rows"] == sum(
       r["row_count"] for r in record["row_counts"]
   )
+  # Each tool bar has its call's status, and an answered trace with a
+  # failed call is "answered with errors".
+  for user in export["users"]:
+    for trace in user["traces"]:
+      calls = [c for step in trace["steps"] for c in step["tool_calls"]]
+      bars = {r["span_id"]: r for r in trace["timeline"] if r["kind"] == "tool"}
+      assert {c["span_id"]: c["status"] for c in calls} == {
+          span: bar["status"] for span, bar in bars.items()
+      }
+      failed = [c["error"] for c in calls if c["status"] == "error"]
+      assert all(error in trace["errors"] for error in failed)
+      if failed and trace["outcome_status"] != "unanswered":
+        assert trace["outcome_status"] == "answered_with_errors"
   # Flagged exactly when the run without memory read the memory dataset.
   for pair in export["comparisons"]:
     assert pair["control_read_memory"] == bool(

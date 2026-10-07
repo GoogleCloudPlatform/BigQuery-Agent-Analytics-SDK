@@ -240,8 +240,9 @@ class ExtractedEntity:
 class ToolCall:
   """A tool call: ``TOOL_STARTING`` paired with its completion or error.
 
-  A completion whose result is a dict with ``"status": "error"`` (a tool
-  that reports a failure instead of raising) counts as an error too.
+  Its status follows ``row_error``: a completion whose result is a dict
+  with ``"status": "error"`` (a tool that reports a failure instead of
+  raising) counts as an error too.
   """
 
   tool_name: str
@@ -296,9 +297,11 @@ class ReasoningTrace:
   when that call completed (a terminal response row was recorded) with text
   and no tool calls. The status is derived from the logged rows, not
   declared by the application: ``answered`` means such a final answer and
-  no error rows, ``answered_with_errors`` a final answer after at least one
-  error row, and ``unanswered`` no recorded final answer (still running, an
-  interrupted stream, or a failure). ``outcome_span_id`` is the span of the
+  no failed row, ``answered_with_errors`` a final answer after at least one
+  failed row, and ``unanswered`` no recorded final answer (still running, an
+  interrupted stream, or a failure). A row fails as ``row_error`` says: an
+  error row, or a tool result that reports ``{"status": "error"}``.
+  ``errors`` lists their messages. ``outcome_span_id`` is the span of the
   model call that produced the answer.
   """
 
@@ -368,6 +371,34 @@ def _ordered_spans(trace: Trace) -> list[Span]:
 def _user_text(span: Span) -> Optional[str]:
   text = span.content.get("text_summary") or span.content.get("text")
   return text if isinstance(text, str) and text else None
+
+
+def tool_result_error(result: Any) -> Optional[str]:
+  """The message of a tool result that reports a failure, else None.
+
+  A tool can return ``{"status": "error", "message": ...}`` instead of
+  raising; the analyst agent's ``run_sql`` does this for bad SQL, so the
+  model can fix the query and try again.
+  """
+  if isinstance(result, dict) and result.get("status") == "error":
+    return str(result.get("message") or "the tool reported an error")
+  return None
+
+
+def row_error(span: Span) -> Optional[str]:
+  """Why a row records a failure, or None if it does not.
+
+  The one failure rule for tool calls, trace errors and outcomes, and the
+  export's timeline. An error row (``Span.is_error``: an ``*_ERROR`` event,
+  an error message or status ``ERROR``) fails with its error message, and a
+  ``TOOL_COMPLETED`` row fails when its result reports an error
+  (``tool_result_error``).
+  """
+  if span.is_error:
+    return span.error_message or span.event_type
+  if span.event_type == "TOOL_COMPLETED":
+    return tool_result_error(span.content.get("result"))
+  return None
 
 
 def _parts_at(
@@ -652,20 +683,14 @@ def _tool_call(session_id: str, start: Optional[Span], end: Span) -> ToolCall:
   start_content = start.content if start is not None else {}
   tool = end.content.get("tool") or start_content.get("tool") or "unknown"
   arguments = start_content.get("args") or end.content.get("args") or {}
-  failed = end.event_type == "TOOL_ERROR" or end.is_error
-  result = None if failed else end.content.get("result")
-  reported = isinstance(result, dict) and result.get("status") == "error"
-  if failed:
-    error = end.error_message or "tool error"
-  elif reported:
-    error = str(result.get("message") or "the tool reported an error")
-  else:
-    error = None
+  error = row_error(end)
+  # An error row has no result; a result that reports an error is kept.
+  result = None if end.is_error else end.content.get("result")
   return ToolCall(
       tool_name=tool,
       arguments=dict(arguments),
       result=result,
-      status="error" if failed or reported else "success",
+      status="error" if error is not None else "success",
       duration_ms=end.latency_ms,
       error=error,
       session_id=session_id,
@@ -765,7 +790,7 @@ def _reasoning_trace(
       )
       for i, draft in enumerate(drafts, start=1)
   )
-  errors = tuple(s.error_message or s.event_type for s in spans if s.is_error)
+  errors = tuple(e for e in map(row_error, spans) if e is not None)
   if outcome is None:
     status = UNANSWERED
   elif errors:

@@ -27,6 +27,7 @@ from datetime import datetime
 from datetime import timezone
 import decimal
 from pathlib import Path
+import re
 import sys
 from types import SimpleNamespace
 
@@ -410,12 +411,19 @@ def test_extraction_reads_new_user_messages_once_with_ai_generate():
   assert "FROM `p.d.analyst_events` AS e" in sql
   assert "e.event_type = 'USER_MESSAGE_RECEIVED'" in sql
   assert "e.session_id IN UNNEST(@session_ids)" in sql
-  # Messages already processed are skipped, and duplicates are dropped.
+  # Messages with a successful extraction are skipped (a failed one is
+  # tried again), messages without text are not tried, and duplicates of
+  # a row are dropped.
   assert (
-      "e.span_id NOT IN (SELECT span_id FROM `p.d.analyst_memory_extractions`)"
+      "e.span_id NOT IN (SELECT span_id FROM `p.d.analyst_memory_extractions`"
+      " WHERE COALESCE(status, '') = '')"
+  ) in sql
+  assert (
+      "AND TRIM(COALESCE(JSON_VALUE(e.content, '$.text_summary'), '')) != ''"
       in sql
   )
   assert "QUALIFY ROW_NUMBER() OVER (PARTITION BY e.span_id" in sql
+  assert "m.out.status," in sql
   assert "AI.GENERATE(" in sql and "endpoint => 'gemini-x'" in sql
   assert "output_schema => 'entities ARRAY<STRUCT<name STRING" in sql
   assert "@instructions" in sql
@@ -425,14 +433,36 @@ def test_items_and_embeddings_merge_on_their_keys():
   items = memory_consolidation.items_sql(TABLES)
   embed = memory_consolidation.embed_sql(TABLES, "embed-x")
 
-  assert items.count("x.session_id IN UNNEST(@session_ids)") == 2
+  # Items come from the first successful extraction of each message only.
+  first_success = (
+      "    FROM `p.d.analyst_memory_extractions`\n"
+      "    WHERE session_id IN UNNEST(@session_ids)\n"
+      "      AND COALESCE(status, '') = ''\n"
+      "    QUALIFY ROW_NUMBER() OVER (PARTITION BY span_id ORDER BY"
+      " extracted_at) = 1\n"
+  )
+  assert items.count(first_success) == 2
   assert "CONCAT(x.span_id, ':fact:', CAST(i AS STRING))" in items
   assert "ON t.item_id = s.item_id" in items
   assert embed.startswith("SELECT\n  n.span_id,")
-  assert "AI.EMBED(n.message, endpoint => 'embed-x')" in embed
+  # AI.EMBED's status is kept, and only a successful, non-empty embedding
+  # marks a message as done.
+  assert "AI.EMBED(m.message, endpoint => 'embed-x') AS out" in embed
+  assert "n.out.result AS embedding," in embed
+  assert embed.count("n.out.status") == 1
   assert (
-      "e.span_id NOT IN (SELECT span_id FROM `p.d.analyst_task_embeddings`)"
-      in embed
+      "e.span_id NOT IN (SELECT span_id FROM `p.d.analyst_task_embeddings`"
+      " WHERE COALESCE(status, '') = '' AND ARRAY_LENGTH(embedding) > 0)"
+  ) in embed
+
+
+def test_tables_record_each_embedding_status_also_in_older_tables():
+  sql = memory_consolidation.create_tables_sql(TABLES)
+
+  assert "  embedded_at TIMESTAMP,\n  status STRING\n);" in sql
+  assert sql.rstrip().endswith(
+      "ALTER TABLE `p.d.analyst_task_embeddings` ADD COLUMN IF NOT EXISTS"
+      " status STRING"
   )
 
 
@@ -441,8 +471,14 @@ def test_similar_tasks_rank_this_users_other_sessions_by_cosine():
 
   assert "AI.EMBED(@query, endpoint => 'embed-x')" in sql
   assert "1 - ML.DISTANCE(t.embedding, request.embedding, 'COSINE')" in sql
-  assert "t.user_id = @user_id" in sql
-  assert "t.session_id != @session_id" in sql
+  assert "WHERE user_id = @user_id" in sql
+  assert "AND session_id != @session_id" in sql
+  # Only the first successful embedding of each past task is ranked.
+  assert "AND COALESCE(status, '') = '' AND ARRAY_LENGTH(embedding) > 0" in sql
+  assert (
+      "QUALIFY ROW_NUMBER() OVER (PARTITION BY span_id ORDER BY embedded_at)"
+      " = 1"
+  ) in sql
   assert sql.rstrip().endswith("LIMIT @top_k")
 
 
@@ -484,7 +520,7 @@ class _ConsolidateBigQuery:
     number = len(self.calls)
     if sql.startswith("MERGE"):
       return _ConsolidationJob(number, dml=4)
-    if sql.startswith("SELECT\n  COUNT(*) AS messages"):
+    if sql == memory_consolidation.usage_sql(TABLES):
       return _ConsolidationJob(
           number, rows=[{"messages": 2, "failed": 0, "facts": 3}]
       )
@@ -502,7 +538,7 @@ def test_consolidate_appends_extractions_and_embeddings_and_merges_items():
   assert extract == memory_consolidation.extract_sql(TABLES)
   assert items.startswith("MERGE `p.d.analyst_memory_items` AS t")
   assert embed == memory_consolidation.embed_sql(TABLES)
-  assert usage.startswith("SELECT\n  COUNT(*) AS messages")
+  assert usage == memory_consolidation.usage_sql(TABLES)
   assert (x_config.destination.table_id, x_config.write_disposition) == (
       "analyst_memory_extractions",
       "WRITE_APPEND",
@@ -533,6 +569,298 @@ def test_consolidate_appends_extractions_and_embeddings_and_merges_items():
       },
   }
   assert out["extraction"] == {"messages": 2, "failed": 0, "facts": 3}
+
+
+# What the consolidation SQL may filter rows on, and what each condition
+# means for a row of this in-memory warehouse.
+_CONDITIONS = {
+    "session_id IN UNNEST(@session_ids)": lambda row, ids: (
+        row["session_id"] in ids
+    ),
+    "COALESCE(status, '') = ''": lambda row, ids: not row["status"],
+    "ARRAY_LENGTH(embedding) > 0": lambda row, ids: bool(row["embedding"]),
+}
+_FIRST_PER_SPAN = re.compile(
+    r"\s*QUALIFY ROW_NUMBER\(\) OVER \(PARTITION BY span_id ORDER BY (\w+)\)"
+    r" = 1"
+)
+QUOTA = "RESOURCE_EXHAUSTED: quota exceeded"
+
+
+def _where(sql, start):
+  """The conditions of the WHERE clause at ``start``, and where it ends.
+
+  The clause ends at QUALIFY, at a parenthesis it did not open, or at the
+  end. A condition this warehouse does not know fails the test.
+  """
+  depth, end = 0, len(sql)
+  for i in range(start, len(sql)):
+    if sql[i] == "(":
+      depth += 1
+    elif sql[i] == ")":
+      if depth == 0:
+        end = i
+        break
+      depth -= 1
+    elif depth == 0 and sql.startswith("QUALIFY", i):
+      end = i
+      break
+  conditions = re.split(r"\s+AND\s+", " ".join(sql[start:end].split()))
+  unknown = [c for c in conditions if c not in _CONDITIONS]
+  if unknown:
+    raise NotImplementedError(f"unknown conditions {unknown}")
+  return conditions, end
+
+
+class _Warehouse:
+  """Runs consolidation passes on rows in memory, failing closed.
+
+  It accepts only the statements memory_consolidation builds. What a
+  statement skips as already processed, and which rows it reads, come from
+  the WHERE conditions and QUALIFY of that SQL, so changing what counts as
+  processed changes what this warehouse does. AI.GENERATE and AI.EMBED
+  answer from a script; for the spans in ``failing`` they return no
+  result and a status, as BigQuery does for a failed row.
+  """
+
+  OUTPUT = {
+      "sp-ok": ("Jeans", "Maya Chen leads Jeans."),
+      "sp-flaky": ("Dresses", "Maya Chen leads Dresses."),
+      "sp-other": ("Swim", "Maya Chen tracks Swim."),
+  }
+
+  def __init__(self, tables):
+    self.tables = tables
+    self.messages = [
+        {"span_id": span, "session_id": session, "text": f"About {span}."}
+        for span, session in (
+            ("sp-ok", "s-1"),
+            ("sp-flaky", "s-1"),
+            ("sp-other", "s-2"),
+        )
+    ]
+    self.extractions, self.items, self.embeddings = [], [], []
+    self.failing = set()
+    self.sent = []  # (function, span id) of each AI call
+    self.clock = 0
+
+  def query(self, sql, job_config=None):
+    ids = set(_params(job_config).get("session_ids") or ())
+    number = len(self.sent) + self.clock
+    if sql == memory_consolidation.extract_sql(self.tables):
+      assert job_config.destination.table_id == "analyst_memory_extractions"
+      rows = [self._generate(m) for m in self._new(sql, self.extractions, ids)]
+      self.extractions += rows
+      return _ConsolidationJob(number, rows=rows)
+    if sql == memory_consolidation.items_sql(self.tables):
+      source = self._read(sql, self.tables.extractions, first=True)
+      inserted = self._merge_items(source(self.extractions, ids))
+      return _ConsolidationJob(number, dml=inserted)
+    if sql == memory_consolidation.embed_sql(self.tables):
+      assert job_config.destination.table_id == "analyst_task_embeddings"
+      rows = [self._embed(m) for m in self._new(sql, self.embeddings, ids)]
+      self.embeddings += rows
+      return _ConsolidationJob(number, rows=rows)
+    if sql == memory_consolidation.usage_sql(self.tables):
+      return _ConsolidationJob(number, rows=[self._usage(sql, ids)])
+    raise NotImplementedError(sql[:60])
+
+  def _new(self, sql, done_rows, ids):
+    """The messages of ``ids`` that the statement's NOT IN skips none of."""
+    table = (
+        self.tables.extractions
+        if done_rows is self.extractions
+        else self.tables.embeddings
+    )
+    marker = f"NOT IN (SELECT span_id FROM `{table}`"
+    at = sql.index(marker) + len(marker)
+    conditions = []
+    if sql.startswith(" WHERE ", at):
+      conditions, _ = _where(sql, at + len(" WHERE "))
+    done = {
+        row["span_id"]
+        for row in done_rows
+        if all(_CONDITIONS[c](row, ids) for c in conditions)
+    }
+    return [
+        m
+        for m in self.messages
+        if m["session_id"] in ids and m["span_id"] not in done
+    ]
+
+  def _read(self, sql, table, *, first):
+    """How the statement reads ``table``, as a row filter.
+
+    ``first`` picks the reads that keep the first row of each span (a
+    QUALIFY) over the reads of every matching row. All reads of the kind
+    must filter alike, as the two UNION branches of the items MERGE do.
+    """
+    specs = set()
+    for match in re.finditer(rf"FROM `{re.escape(table)}`\s+WHERE ", sql):
+      conditions, end = _where(sql, match.end())
+      order = _FIRST_PER_SPAN.match(sql, end)
+      if bool(order) == first:
+        specs.add((tuple(conditions), order.group(1) if order else None))
+    (spec,) = specs
+    conditions, order = spec
+
+    def read(rows, ids):
+      kept = [
+          r for r in rows if all(_CONDITIONS[c](r, ids) for c in conditions)
+      ]
+      if order is None:
+        return kept
+      firsts = {}
+      for row in sorted(kept, key=lambda r: r[order]):
+        firsts.setdefault(row["span_id"], row)
+      return list(firsts.values())
+
+    return read
+
+  def _generate(self, message):
+    span = message["span_id"]
+    self.sent.append(("AI.GENERATE", span))
+    self.clock += 1
+    row = {
+        "span_id": span,
+        "session_id": message["session_id"],
+        "extracted_at": self.clock,
+        "prompt_tokens": 100,
+    }
+    if span in self.failing:
+      return dict(row, entities=None, facts=None, status=QUOTA, output_tokens=0)
+    name, statement = self.OUTPUT[span]
+    return dict(
+        row,
+        entities=[{"name": name, "type": "PRODUCT_CATEGORY"}],
+        facts=[
+            {"subject": "Maya Chen", "object": name, "statement": statement}
+        ],
+        status="",
+        output_tokens=20,
+    )
+
+  def _embed(self, message):
+    span = message["span_id"]
+    self.sent.append(("AI.EMBED", span))
+    self.clock += 1
+    failed = span in self.failing
+    return {
+        "span_id": span,
+        "session_id": message["session_id"],
+        "embedded_at": self.clock,
+        "embedding": [] if failed else [0.1, 0.2, 0.3],
+        "status": QUOTA if failed else "",
+    }
+
+  def _merge_items(self, extractions):
+    """MERGE ... WHEN NOT MATCHED THEN INSERT, keyed by item_id."""
+    existing = {item["item_id"] for item in self.items}
+    inserted = 0
+    for x in extractions:
+      new = [
+          (f"{x['span_id']}:entity:{i}", e) for i, e in enumerate(x["entities"])
+      ]
+      new += [(f"{x['span_id']}:fact:{i}", f) for i, f in enumerate(x["facts"])]
+      for item_id, value in new:
+        if item_id not in existing:
+          existing.add(item_id)
+          self.items.append({"item_id": item_id, **value})
+          inserted += 1
+    return inserted
+
+  def _usage(self, sql, ids):
+    """The totals statement: attempts and first successes of each table."""
+    attempts = self._read(sql, self.tables.extractions, first=False)
+    extracted = self._read(sql, self.tables.extractions, first=True)
+    embedded = self._read(sql, self.tables.embeddings, first=True)
+    tried = attempts(self.extractions, ids)
+    done = extracted(self.extractions, ids)
+    embedding_spans = {
+        r["span_id"] for r in self.embeddings if r["session_id"] in ids
+    }
+    return {
+        "messages": len({r["span_id"] for r in tried}),
+        "failed": len(
+            {r["span_id"] for r in tried} - {r["span_id"] for r in done}
+        ),
+        "entities": sum(len(r["entities"]) for r in done),
+        "facts": sum(len(r["facts"]) for r in done),
+        "prompt_tokens": sum(r["prompt_tokens"] for r in tried),
+        "output_tokens": sum(r["output_tokens"] for r in tried),
+        "embeddings_failed": len(
+            embedding_spans
+            - {r["span_id"] for r in embedded(self.embeddings, ids)}
+        ),
+    }
+
+
+def test_a_failed_extraction_or_embedding_is_tried_again_by_the_next_pass():
+  warehouse = _Warehouse(TABLES)
+
+  # Pass 1: both AI calls fail for one message. The failed rows are kept,
+  # with their status, and give no memory.
+  warehouse.failing = {"sp-flaky"}
+  first = memory_consolidation.consolidate(warehouse, TABLES, ["s-1"])
+
+  assert [(r["span_id"], r["status"]) for r in warehouse.extractions] == [
+      ("sp-ok", ""),
+      ("sp-flaky", QUOTA),
+  ]
+  assert [
+      (r["span_id"], r["status"], len(r["embedding"]))
+      for r in warehouse.embeddings
+  ] == [("sp-ok", "", 3), ("sp-flaky", QUOTA, 0)]
+  assert sorted(item["item_id"] for item in warehouse.items) == [
+      "sp-ok:entity:0",
+      "sp-ok:fact:0",
+  ]
+  assert first["extraction"] == {
+      "messages": 2,
+      "failed": 1,
+      "entities": 1,
+      "facts": 1,
+      "prompt_tokens": 200,
+      "output_tokens": 20,
+      "embeddings_failed": 1,
+  }
+
+  # Pass 2: the quota is back. Only the failed message is sent again, and
+  # the other message's memory is not duplicated.
+  warehouse.failing.clear()
+  warehouse.sent.clear()
+  second = memory_consolidation.consolidate(warehouse, TABLES, ["s-1"])
+
+  assert warehouse.sent == [
+      ("AI.GENERATE", "sp-flaky"),
+      ("AI.EMBED", "sp-flaky"),
+  ]
+  assert sorted(item["item_id"] for item in warehouse.items) == [
+      "sp-flaky:entity:0",
+      "sp-flaky:fact:0",
+      "sp-ok:entity:0",
+      "sp-ok:fact:0",
+  ]
+  assert second["steps"]["items"]["rows_inserted"] == 2
+  assert second["extraction"] == {
+      "messages": 2,
+      "failed": 0,
+      "entities": 2,
+      "facts": 2,
+      "prompt_tokens": 300,
+      "output_tokens": 40,
+      "embeddings_failed": 0,
+  }
+
+  # Pass 3: nothing is left to do, and the other session was never read.
+  warehouse.sent.clear()
+  items = list(warehouse.items)
+  third = memory_consolidation.consolidate(warehouse, TABLES, ["s-1"])
+
+  assert warehouse.sent == []
+  assert warehouse.items == items
+  assert third["steps"]["items"]["rows_inserted"] == 0
+  assert "sp-other" not in {r["span_id"] for r in warehouse.extractions}
 
 
 def test_items_from_rows_builds_facts_and_entities_with_their_source():
