@@ -1,0 +1,1945 @@
+{
+ "description": "SYNTHETIC agent_events rows for examples/agent_memory. Shaped like the rows the ADK BigQueryAgentAnalyticsPlugin writes (all 16 columns the SDK reads; content/attributes payload keys as emitted by the plugin), but generated for this demo, not exported from a live run. JSON columns are stored as decoded objects, the way the BigQuery client returns them.",
+ "now": "2026-10-06T16:00:00.000Z",
+ "rows": [
+  {
+   "timestamp": "2026-09-28T17:00:00.000Z",
+   "event_type": "INVOCATION_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-inv",
+   "parent_span_id": null,
+   "content": null,
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-09-28T17:00:00.100Z",
+   "event_type": "USER_MESSAGE_RECEIVED",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-inv",
+   "parent_span_id": null,
+   "content": {
+    "text_summary": "I'm vegetarian and I prefer window seats. Find me a flight from SFO to Tokyo on Oct 12."
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-09-28T17:00:00.200Z",
+   "event_type": "AGENT_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-agent",
+   "parent_span_id": "sp-101-inv",
+   "content": {
+    "text_summary": "You are a trip planning assistant. Remember user preferences with save_preference."
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-09-28T17:00:00.300Z",
+   "event_type": "LLM_REQUEST",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-llm-1",
+   "parent_span_id": "sp-101-agent",
+   "content": {
+    "prompt": [
+     {
+      "role": "user",
+      "content": "I'm vegetarian and I prefer window seats. Find me a flight from SFO to Tokyo on Oct 12."
+     }
+    ]
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model": "gemini-2.5-flash"
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-09-28T17:00:01.400Z",
+   "event_type": "LLM_RESPONSE",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-llm-1",
+   "parent_span_id": "sp-101-agent",
+   "content": {
+    "response": "text: 'Noted. Saving your preferences first.' | call: save_preference | call: save_preference",
+    "usage": {
+     "prompt": 412,
+     "completion": 38,
+     "total": 450
+    }
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
+   },
+   "latency_ms": {
+    "total_ms": 1100,
+    "time_to_first_token_ms": 550
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-09-28T17:00:01.500Z",
+   "event_type": "TOOL_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-tool-1",
+   "parent_span_id": "sp-101-agent",
+   "content": {
+    "tool": "save_preference",
+    "args": {
+     "key": "diet",
+     "value": "vegetarian"
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-09-28T17:00:01.530Z",
+   "event_type": "TOOL_COMPLETED",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-tool-1",
+   "parent_span_id": "sp-101-agent",
+   "content": {
+    "tool": "save_preference",
+    "result": {
+     "status": "saved",
+     "key": "diet"
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": {
+    "total_ms": 30
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-09-28T17:00:01.550Z",
+   "event_type": "TOOL_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-tool-2",
+   "parent_span_id": "sp-101-agent",
+   "content": {
+    "tool": "save_preference",
+    "args": {
+     "key": "seat",
+     "value": "window"
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-09-28T17:00:01.580Z",
+   "event_type": "TOOL_COMPLETED",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-tool-2",
+   "parent_span_id": "sp-101-agent",
+   "content": {
+    "tool": "save_preference",
+    "result": {
+     "status": "saved",
+     "key": "seat"
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": {
+    "total_ms": 30
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-09-28T17:00:01.600Z",
+   "event_type": "STATE_DELTA",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-agent",
+   "parent_span_id": "sp-101-inv",
+   "content": null,
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "state_delta": {
+     "user:diet": "vegetarian",
+     "user:seat": "window"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-09-28T17:00:01.680Z",
+   "event_type": "LLM_REQUEST",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-llm-2",
+   "parent_span_id": "sp-101-agent",
+   "content": {
+    "prompt": [
+     {
+      "role": "user",
+      "content": "I'm vegetarian and I prefer window seats. Find me a flight from SFO to Tokyo on Oct 12."
+     }
+    ]
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model": "gemini-2.5-flash"
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-09-28T17:00:02.480Z",
+   "event_type": "LLM_RESPONSE",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-llm-2",
+   "parent_span_id": "sp-101-agent",
+   "content": {
+    "response": "call: search_flights",
+    "usage": {
+     "prompt": 468,
+     "completion": 21,
+     "total": 489
+    }
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
+   },
+   "latency_ms": {
+    "total_ms": 800,
+    "time_to_first_token_ms": 400
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-09-28T17:00:02.580Z",
+   "event_type": "TOOL_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-tool-3",
+   "parent_span_id": "sp-101-agent",
+   "content": {
+    "tool": "search_flights",
+    "args": {
+     "origin": "SFO",
+     "destination": "Tokyo",
+     "date": "2026-10-12",
+     "seat": "window"
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-09-28T17:00:03.220Z",
+   "event_type": "TOOL_COMPLETED",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-tool-3",
+   "parent_span_id": "sp-101-agent",
+   "content": {
+    "tool": "search_flights",
+    "result": {
+     "flights": [
+      {
+       "flight": "DM101",
+       "departs": "11:05",
+       "window_seats": 12
+      },
+      {
+       "flight": "DM205",
+       "departs": "16:40",
+       "window_seats": 3
+      }
+     ]
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": {
+    "total_ms": 640
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-09-28T17:00:03.280Z",
+   "event_type": "LLM_REQUEST",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-llm-3",
+   "parent_span_id": "sp-101-agent",
+   "content": {
+    "prompt": [
+     {
+      "role": "user",
+      "content": "I'm vegetarian and I prefer window seats. Find me a flight from SFO to Tokyo on Oct 12."
+     }
+    ]
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model": "gemini-2.5-flash"
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-09-28T17:00:04.480Z",
+   "event_type": "LLM_RESPONSE",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-llm-3",
+   "parent_span_id": "sp-101-agent",
+   "content": {
+    "response": "text: 'Saved: vegetarian, window seat. DM101 leaves SFO at 11:05 on Oct 12 with 12 window seats left.'",
+    "usage": {
+     "prompt": 540,
+     "completion": 33,
+     "total": 573
+    }
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
+   },
+   "latency_ms": {
+    "total_ms": 1200,
+    "time_to_first_token_ms": 600
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-09-28T17:00:04.580Z",
+   "event_type": "AGENT_COMPLETED",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-agent",
+   "parent_span_id": "sp-101-inv",
+   "content": null,
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": {
+    "total_ms": 4380
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-09-28T17:00:04.680Z",
+   "event_type": "INVOCATION_COMPLETED",
+   "agent": "trip_planner",
+   "session_id": "s-101",
+   "invocation_id": "inv-101",
+   "user_id": "u-ana",
+   "trace_id": "t-101",
+   "span_id": "sp-101-inv",
+   "parent_span_id": null,
+   "content": null,
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": {
+    "total_ms": 4680
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-01T09:30:00.000Z",
+   "event_type": "INVOCATION_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-102",
+   "invocation_id": "inv-102",
+   "user_id": "u-ana",
+   "trace_id": "t-102",
+   "span_id": "sp-102-inv",
+   "parent_span_id": null,
+   "content": null,
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-01T09:30:00.100Z",
+   "event_type": "USER_MESSAGE_RECEIVED",
+   "agent": "trip_planner",
+   "session_id": "s-102",
+   "invocation_id": "inv-102",
+   "user_id": "u-ana",
+   "trace_id": "t-102",
+   "span_id": "sp-102-inv",
+   "parent_span_id": null,
+   "content": {
+    "text_summary": "Book a hotel in Kyoto near Kyoto Station for Oct 14 to 16."
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-01T09:30:00.200Z",
+   "event_type": "AGENT_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-102",
+   "invocation_id": "inv-102",
+   "user_id": "u-ana",
+   "trace_id": "t-102",
+   "span_id": "sp-102-agent",
+   "parent_span_id": "sp-102-inv",
+   "content": {
+    "text_summary": "You are a trip planning assistant. Remember user preferences with save_preference."
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-01T09:30:00.300Z",
+   "event_type": "LLM_REQUEST",
+   "agent": "trip_planner",
+   "session_id": "s-102",
+   "invocation_id": "inv-102",
+   "user_id": "u-ana",
+   "trace_id": "t-102",
+   "span_id": "sp-102-llm-1",
+   "parent_span_id": "sp-102-agent",
+   "content": {
+    "prompt": [
+     {
+      "role": "user",
+      "content": "Book a hotel in Kyoto near Kyoto Station for Oct 14 to 16."
+     }
+    ]
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model": "gemini-2.5-flash"
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-01T09:30:01.200Z",
+   "event_type": "LLM_RESPONSE",
+   "agent": "trip_planner",
+   "session_id": "s-102",
+   "invocation_id": "inv-102",
+   "user_id": "u-ana",
+   "trace_id": "t-102",
+   "span_id": "sp-102-llm-1",
+   "parent_span_id": "sp-102-agent",
+   "content": {
+    "response": "call: search_hotels",
+    "usage": {
+     "prompt": 430,
+     "completion": 25,
+     "total": 455
+    }
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
+   },
+   "latency_ms": {
+    "total_ms": 900,
+    "time_to_first_token_ms": 450
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-01T09:30:01.300Z",
+   "event_type": "TOOL_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-102",
+   "invocation_id": "inv-102",
+   "user_id": "u-ana",
+   "trace_id": "t-102",
+   "span_id": "sp-102-tool-1",
+   "parent_span_id": "sp-102-agent",
+   "content": {
+    "tool": "search_hotels",
+    "args": {
+     "city": "Kyoto",
+     "near": "Kyoto Station",
+     "check_in": "2026-10-14",
+     "check_out": "2026-10-16"
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-01T09:30:06.303Z",
+   "event_type": "TOOL_ERROR",
+   "agent": "trip_planner",
+   "session_id": "s-102",
+   "invocation_id": "inv-102",
+   "user_id": "u-ana",
+   "trace_id": "t-102",
+   "span_id": "sp-102-tool-1",
+   "parent_span_id": "sp-102-agent",
+   "content": {
+    "tool": "search_hotels",
+    "args": {
+     "city": "Kyoto",
+     "near": "Kyoto Station",
+     "check_in": "2026-10-14",
+     "check_out": "2026-10-16"
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": {
+    "total_ms": 5003
+   },
+   "status": "ERROR",
+   "error_message": "TimeoutError: hotel inventory API did not respond within 5000 ms",
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-01T09:30:06.403Z",
+   "event_type": "LLM_REQUEST",
+   "agent": "trip_planner",
+   "session_id": "s-102",
+   "invocation_id": "inv-102",
+   "user_id": "u-ana",
+   "trace_id": "t-102",
+   "span_id": "sp-102-llm-2",
+   "parent_span_id": "sp-102-agent",
+   "content": {
+    "prompt": [
+     {
+      "role": "user",
+      "content": "Book a hotel in Kyoto near Kyoto Station for Oct 14 to 16."
+     }
+    ]
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model": "gemini-2.5-flash"
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-01T09:30:07.103Z",
+   "event_type": "LLM_RESPONSE",
+   "agent": "trip_planner",
+   "session_id": "s-102",
+   "invocation_id": "inv-102",
+   "user_id": "u-ana",
+   "trace_id": "t-102",
+   "span_id": "sp-102-llm-2",
+   "parent_span_id": "sp-102-agent",
+   "content": {
+    "response": "call: search_hotels",
+    "usage": {
+     "prompt": 470,
+     "completion": 25,
+     "total": 495
+    }
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
+   },
+   "latency_ms": {
+    "total_ms": 700,
+    "time_to_first_token_ms": 350
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-01T09:30:07.203Z",
+   "event_type": "TOOL_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-102",
+   "invocation_id": "inv-102",
+   "user_id": "u-ana",
+   "trace_id": "t-102",
+   "span_id": "sp-102-tool-2",
+   "parent_span_id": "sp-102-agent",
+   "content": {
+    "tool": "search_hotels",
+    "args": {
+     "city": "Kyoto",
+     "near": "Kyoto Station",
+     "check_in": "2026-10-14",
+     "check_out": "2026-10-16"
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-01T09:30:08.023Z",
+   "event_type": "TOOL_COMPLETED",
+   "agent": "trip_planner",
+   "session_id": "s-102",
+   "invocation_id": "inv-102",
+   "user_id": "u-ana",
+   "trace_id": "t-102",
+   "span_id": "sp-102-tool-2",
+   "parent_span_id": "sp-102-agent",
+   "content": {
+    "tool": "search_hotels",
+    "result": {
+     "hotels": [
+      {
+       "name": "Sakura Station Hotel",
+       "distance_m": 150,
+       "price_per_night_usd": 180
+      }
+     ]
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": {
+    "total_ms": 820
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-01T09:30:08.043Z",
+   "event_type": "STATE_DELTA",
+   "agent": "trip_planner",
+   "session_id": "s-102",
+   "invocation_id": "inv-102",
+   "user_id": "u-ana",
+   "trace_id": "t-102",
+   "span_id": "sp-102-agent",
+   "parent_span_id": "sp-102-inv",
+   "content": null,
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "state_delta": {
+     "last_hotel_search": "Kyoto"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-01T09:30:08.123Z",
+   "event_type": "LLM_REQUEST",
+   "agent": "trip_planner",
+   "session_id": "s-102",
+   "invocation_id": "inv-102",
+   "user_id": "u-ana",
+   "trace_id": "t-102",
+   "span_id": "sp-102-llm-3",
+   "parent_span_id": "sp-102-agent",
+   "content": {
+    "prompt": [
+     {
+      "role": "user",
+      "content": "Book a hotel in Kyoto near Kyoto Station for Oct 14 to 16."
+     }
+    ]
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model": "gemini-2.5-flash"
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-01T09:30:09.123Z",
+   "event_type": "LLM_RESPONSE",
+   "agent": "trip_planner",
+   "session_id": "s-102",
+   "invocation_id": "inv-102",
+   "user_id": "u-ana",
+   "trace_id": "t-102",
+   "span_id": "sp-102-llm-3",
+   "parent_span_id": "sp-102-agent",
+   "content": {
+    "response": "text: 'Sakura Station Hotel is 150 m from Kyoto Station at $180 per night. Shall I book it?'",
+    "usage": {
+     "prompt": 560,
+     "completion": 30,
+     "total": 590
+    }
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
+   },
+   "latency_ms": {
+    "total_ms": 1000,
+    "time_to_first_token_ms": 500
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-01T09:30:09.223Z",
+   "event_type": "AGENT_COMPLETED",
+   "agent": "trip_planner",
+   "session_id": "s-102",
+   "invocation_id": "inv-102",
+   "user_id": "u-ana",
+   "trace_id": "t-102",
+   "span_id": "sp-102-agent",
+   "parent_span_id": "sp-102-inv",
+   "content": null,
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": {
+    "total_ms": 9023
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-01T09:30:09.323Z",
+   "event_type": "INVOCATION_COMPLETED",
+   "agent": "trip_planner",
+   "session_id": "s-102",
+   "invocation_id": "inv-102",
+   "user_id": "u-ana",
+   "trace_id": "t-102",
+   "span_id": "sp-102-inv",
+   "parent_span_id": null,
+   "content": null,
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": {
+    "total_ms": 9323
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-04T18:00:00.000Z",
+   "event_type": "INVOCATION_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-103",
+   "invocation_id": "inv-103",
+   "user_id": "u-ana",
+   "trace_id": "t-103",
+   "span_id": "sp-103-inv",
+   "parent_span_id": null,
+   "content": null,
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-04T18:00:00.100Z",
+   "event_type": "USER_MESSAGE_RECEIVED",
+   "agent": "trip_planner",
+   "session_id": "s-103",
+   "invocation_id": "inv-103",
+   "user_id": "u-ana",
+   "trace_id": "t-103",
+   "span_id": "sp-103-inv",
+   "parent_span_id": null,
+   "content": {
+    "text_summary": "I eat fish now, so update my diet to pescatarian. Find a restaurant in Kyoto for dinner on Oct 15."
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-04T18:00:00.200Z",
+   "event_type": "AGENT_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-103",
+   "invocation_id": "inv-103",
+   "user_id": "u-ana",
+   "trace_id": "t-103",
+   "span_id": "sp-103-agent",
+   "parent_span_id": "sp-103-inv",
+   "content": {
+    "text_summary": "You are a trip planning assistant. Remember user preferences with save_preference."
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-04T18:00:00.300Z",
+   "event_type": "LLM_REQUEST",
+   "agent": "trip_planner",
+   "session_id": "s-103",
+   "invocation_id": "inv-103",
+   "user_id": "u-ana",
+   "trace_id": "t-103",
+   "span_id": "sp-103-llm-1",
+   "parent_span_id": "sp-103-agent",
+   "content": {
+    "prompt": [
+     {
+      "role": "user",
+      "content": "I eat fish now, so update my diet to pescatarian. Find a restaurant in Kyoto for dinner on Oct 15."
+     }
+    ]
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model": "gemini-2.5-flash"
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-04T18:00:01.300Z",
+   "event_type": "LLM_RESPONSE",
+   "agent": "trip_planner",
+   "session_id": "s-103",
+   "invocation_id": "inv-103",
+   "user_id": "u-ana",
+   "trace_id": "t-103",
+   "span_id": "sp-103-llm-1",
+   "parent_span_id": "sp-103-agent",
+   "content": {
+    "response": "call: save_preference | call: find_restaurants",
+    "usage": {
+     "prompt": 520,
+     "completion": 30,
+     "total": 550
+    }
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
+   },
+   "latency_ms": {
+    "total_ms": 1000,
+    "time_to_first_token_ms": 500
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-04T18:00:01.400Z",
+   "event_type": "TOOL_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-103",
+   "invocation_id": "inv-103",
+   "user_id": "u-ana",
+   "trace_id": "t-103",
+   "span_id": "sp-103-tool-1",
+   "parent_span_id": "sp-103-agent",
+   "content": {
+    "tool": "save_preference",
+    "args": {
+     "key": "diet",
+     "value": "pescatarian"
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-04T18:00:01.425Z",
+   "event_type": "TOOL_COMPLETED",
+   "agent": "trip_planner",
+   "session_id": "s-103",
+   "invocation_id": "inv-103",
+   "user_id": "u-ana",
+   "trace_id": "t-103",
+   "span_id": "sp-103-tool-1",
+   "parent_span_id": "sp-103-agent",
+   "content": {
+    "tool": "save_preference",
+    "result": {
+     "status": "saved",
+     "key": "diet"
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": {
+    "total_ms": 25
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-04T18:00:01.445Z",
+   "event_type": "STATE_DELTA",
+   "agent": "trip_planner",
+   "session_id": "s-103",
+   "invocation_id": "inv-103",
+   "user_id": "u-ana",
+   "trace_id": "t-103",
+   "span_id": "sp-103-agent",
+   "parent_span_id": "sp-103-inv",
+   "content": null,
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "state_delta": {
+     "user:diet": "pescatarian"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-04T18:00:01.475Z",
+   "event_type": "TOOL_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-103",
+   "invocation_id": "inv-103",
+   "user_id": "u-ana",
+   "trace_id": "t-103",
+   "span_id": "sp-103-tool-2",
+   "parent_span_id": "sp-103-agent",
+   "content": {
+    "tool": "find_restaurants",
+    "args": {
+     "city": "Kyoto",
+     "cuisine": "seafood",
+     "diet": "pescatarian",
+     "date": "2026-10-15",
+     "party_size": 1
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-04T18:00:01.885Z",
+   "event_type": "TOOL_COMPLETED",
+   "agent": "trip_planner",
+   "session_id": "s-103",
+   "invocation_id": "inv-103",
+   "user_id": "u-ana",
+   "trace_id": "t-103",
+   "span_id": "sp-103-tool-2",
+   "parent_span_id": "sp-103-agent",
+   "content": {
+    "tool": "find_restaurants",
+    "result": {
+     "restaurants": [
+      {
+       "name": "Kamo Grill",
+       "diet_fit": "pescatarian"
+      },
+      {
+       "name": "Pontocho Table",
+       "diet_fit": "vegetarian"
+      }
+     ]
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": {
+    "total_ms": 410
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-04T18:00:01.985Z",
+   "event_type": "LLM_REQUEST",
+   "agent": "trip_planner",
+   "session_id": "s-103",
+   "invocation_id": "inv-103",
+   "user_id": "u-ana",
+   "trace_id": "t-103",
+   "span_id": "sp-103-llm-2",
+   "parent_span_id": "sp-103-agent",
+   "content": {
+    "prompt": [
+     {
+      "role": "user",
+      "content": "I eat fish now, so update my diet to pescatarian. Find a restaurant in Kyoto for dinner on Oct 15."
+     }
+    ]
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model": "gemini-2.5-flash"
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-04T18:00:03.085Z",
+   "event_type": "LLM_RESPONSE",
+   "agent": "trip_planner",
+   "session_id": "s-103",
+   "invocation_id": "inv-103",
+   "user_id": "u-ana",
+   "trace_id": "t-103",
+   "span_id": "sp-103-llm-2",
+   "parent_span_id": "sp-103-agent",
+   "content": {
+    "response": "text: 'Updated your diet to pescatarian. Kamo Grill in Kyoto has pescatarian dinner options on Oct 15.'",
+    "usage": {
+     "prompt": 610,
+     "completion": 28,
+     "total": 638
+    }
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
+   },
+   "latency_ms": {
+    "total_ms": 1100,
+    "time_to_first_token_ms": 550
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-04T18:00:03.185Z",
+   "event_type": "AGENT_COMPLETED",
+   "agent": "trip_planner",
+   "session_id": "s-103",
+   "invocation_id": "inv-103",
+   "user_id": "u-ana",
+   "trace_id": "t-103",
+   "span_id": "sp-103-agent",
+   "parent_span_id": "sp-103-inv",
+   "content": null,
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": {
+    "total_ms": 2985
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-04T18:00:03.285Z",
+   "event_type": "INVOCATION_COMPLETED",
+   "agent": "trip_planner",
+   "session_id": "s-103",
+   "invocation_id": "inv-103",
+   "user_id": "u-ana",
+   "trace_id": "t-103",
+   "span_id": "sp-103-inv",
+   "parent_span_id": null,
+   "content": null,
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": {
+    "total_ms": 3285
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-06T15:59:50.000Z",
+   "event_type": "INVOCATION_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-104",
+   "invocation_id": "inv-104",
+   "user_id": "u-ana",
+   "trace_id": "t-104",
+   "span_id": "sp-104-inv",
+   "parent_span_id": null,
+   "content": null,
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-06T15:59:50.100Z",
+   "event_type": "USER_MESSAGE_RECEIVED",
+   "agent": "trip_planner",
+   "session_id": "s-104",
+   "invocation_id": "inv-104",
+   "user_id": "u-ana",
+   "trace_id": "t-104",
+   "span_id": "sp-104-inv",
+   "parent_span_id": null,
+   "content": {
+    "text_summary": "Find a restaurant in Osaka for dinner that fits my diet."
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-06T15:59:50.200Z",
+   "event_type": "AGENT_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-104",
+   "invocation_id": "inv-104",
+   "user_id": "u-ana",
+   "trace_id": "t-104",
+   "span_id": "sp-104-agent",
+   "parent_span_id": "sp-104-inv",
+   "content": {
+    "text_summary": "You are a trip planning assistant. Remember user preferences with save_preference."
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-02T12:00:00.000Z",
+   "event_type": "INVOCATION_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-201",
+   "invocation_id": "inv-201",
+   "user_id": "u-ben",
+   "trace_id": "t-201",
+   "span_id": "sp-201-inv",
+   "parent_span_id": null,
+   "content": null,
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-02T12:00:00.100Z",
+   "event_type": "USER_MESSAGE_RECEIVED",
+   "agent": "trip_planner",
+   "session_id": "s-201",
+   "invocation_id": "inv-201",
+   "user_id": "u-ben",
+   "trace_id": "t-201",
+   "span_id": "sp-201-inv",
+   "parent_span_id": null,
+   "content": {
+    "text_summary": "I'm vegan. Find a restaurant in Osaka for dinner that fits my diet."
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-02T12:00:00.200Z",
+   "event_type": "AGENT_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-201",
+   "invocation_id": "inv-201",
+   "user_id": "u-ben",
+   "trace_id": "t-201",
+   "span_id": "sp-201-agent",
+   "parent_span_id": "sp-201-inv",
+   "content": {
+    "text_summary": "You are a trip planning assistant. Remember user preferences with save_preference."
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-02T12:00:00.300Z",
+   "event_type": "LLM_REQUEST",
+   "agent": "trip_planner",
+   "session_id": "s-201",
+   "invocation_id": "inv-201",
+   "user_id": "u-ben",
+   "trace_id": "t-201",
+   "span_id": "sp-201-llm-1",
+   "parent_span_id": "sp-201-agent",
+   "content": {
+    "prompt": [
+     {
+      "role": "user",
+      "content": "I'm vegan. Find a restaurant in Osaka for dinner that fits my diet."
+     }
+    ]
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model": "gemini-2.5-flash"
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-02T12:00:01.200Z",
+   "event_type": "LLM_RESPONSE",
+   "agent": "trip_planner",
+   "session_id": "s-201",
+   "invocation_id": "inv-201",
+   "user_id": "u-ben",
+   "trace_id": "t-201",
+   "span_id": "sp-201-llm-1",
+   "parent_span_id": "sp-201-agent",
+   "content": {
+    "response": "call: save_preference | call: find_restaurants",
+    "usage": {
+     "prompt": 500,
+     "completion": 30,
+     "total": 530
+    }
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
+   },
+   "latency_ms": {
+    "total_ms": 900,
+    "time_to_first_token_ms": 450
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-02T12:00:01.300Z",
+   "event_type": "TOOL_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-201",
+   "invocation_id": "inv-201",
+   "user_id": "u-ben",
+   "trace_id": "t-201",
+   "span_id": "sp-201-tool-1",
+   "parent_span_id": "sp-201-agent",
+   "content": {
+    "tool": "save_preference",
+    "args": {
+     "key": "diet",
+     "value": "vegan"
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-02T12:00:01.325Z",
+   "event_type": "TOOL_COMPLETED",
+   "agent": "trip_planner",
+   "session_id": "s-201",
+   "invocation_id": "inv-201",
+   "user_id": "u-ben",
+   "trace_id": "t-201",
+   "span_id": "sp-201-tool-1",
+   "parent_span_id": "sp-201-agent",
+   "content": {
+    "tool": "save_preference",
+    "result": {
+     "status": "saved",
+     "key": "diet"
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": {
+    "total_ms": 25
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-02T12:00:01.345Z",
+   "event_type": "STATE_DELTA",
+   "agent": "trip_planner",
+   "session_id": "s-201",
+   "invocation_id": "inv-201",
+   "user_id": "u-ben",
+   "trace_id": "t-201",
+   "span_id": "sp-201-agent",
+   "parent_span_id": "sp-201-inv",
+   "content": null,
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "state_delta": {
+     "user:diet": "vegan"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-02T12:00:01.375Z",
+   "event_type": "TOOL_STARTING",
+   "agent": "trip_planner",
+   "session_id": "s-201",
+   "invocation_id": "inv-201",
+   "user_id": "u-ben",
+   "trace_id": "t-201",
+   "span_id": "sp-201-tool-2",
+   "parent_span_id": "sp-201-agent",
+   "content": {
+    "tool": "find_restaurants",
+    "args": {
+     "city": "Osaka",
+     "cuisine": "any",
+     "diet": "vegan",
+     "date": "2026-10-02",
+     "party_size": 1
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-02T12:00:01.755Z",
+   "event_type": "TOOL_COMPLETED",
+   "agent": "trip_planner",
+   "session_id": "s-201",
+   "invocation_id": "inv-201",
+   "user_id": "u-ben",
+   "trace_id": "t-201",
+   "span_id": "sp-201-tool-2",
+   "parent_span_id": "sp-201-agent",
+   "content": {
+    "tool": "find_restaurants",
+    "result": {
+     "restaurants": [
+      {
+       "name": "Dotonbori Greens",
+       "diet_fit": "vegan"
+      }
+     ]
+    },
+    "tool_origin": "LOCAL"
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": {
+    "total_ms": 380
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-02T12:00:01.855Z",
+   "event_type": "LLM_REQUEST",
+   "agent": "trip_planner",
+   "session_id": "s-201",
+   "invocation_id": "inv-201",
+   "user_id": "u-ben",
+   "trace_id": "t-201",
+   "span_id": "sp-201-llm-2",
+   "parent_span_id": "sp-201-agent",
+   "content": {
+    "prompt": [
+     {
+      "role": "user",
+      "content": "I'm vegan. Find a restaurant in Osaka for dinner that fits my diet."
+     }
+    ]
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model": "gemini-2.5-flash"
+   },
+   "latency_ms": null,
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-02T12:00:02.755Z",
+   "event_type": "LLM_RESPONSE",
+   "agent": "trip_planner",
+   "session_id": "s-201",
+   "invocation_id": "inv-201",
+   "user_id": "u-ben",
+   "trace_id": "t-201",
+   "span_id": "sp-201-llm-2",
+   "parent_span_id": "sp-201-agent",
+   "content": {
+    "response": "text: 'Dotonbori Greens in Osaka serves a vegan dinner menu.'",
+    "usage": {
+     "prompt": 580,
+     "completion": 20,
+     "total": 600
+    }
+   },
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    },
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
+   },
+   "latency_ms": {
+    "total_ms": 900,
+    "time_to_first_token_ms": 450
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-02T12:00:02.855Z",
+   "event_type": "AGENT_COMPLETED",
+   "agent": "trip_planner",
+   "session_id": "s-201",
+   "invocation_id": "inv-201",
+   "user_id": "u-ben",
+   "trace_id": "t-201",
+   "span_id": "sp-201-agent",
+   "parent_span_id": "sp-201-inv",
+   "content": null,
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": {
+    "total_ms": 2655
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  },
+  {
+   "timestamp": "2026-10-02T12:00:02.955Z",
+   "event_type": "INVOCATION_COMPLETED",
+   "agent": "trip_planner",
+   "session_id": "s-201",
+   "invocation_id": "inv-201",
+   "user_id": "u-ben",
+   "trace_id": "t-201",
+   "span_id": "sp-201-inv",
+   "parent_span_id": null,
+   "content": null,
+   "content_parts": [],
+   "attributes": {
+    "root_agent_name": "trip_planner",
+    "adk": {
+     "app_name": "trip_planner"
+    }
+   },
+   "latency_ms": {
+    "total_ms": 2955
+   },
+   "status": "OK",
+   "error_message": null,
+   "is_truncated": false
+  }
+ ]
+}
