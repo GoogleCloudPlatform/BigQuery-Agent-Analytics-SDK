@@ -45,6 +45,10 @@
 # Env: CHROME_BIN, SMOKE_PORT, SMOKE_DOCS_DIR override discovery. A pinned
 # SMOKE_PORT disables the port retry (exactly one attempt on that port),
 # so the occupied-port negative fixture keeps failing as it must.
+# SMOKE_READY_POLLS is the readiness budget per server attempt: that many
+# nonce polls, 0.5 s apart (default 20, about 10 s). The self-test lowers
+# it only for the alive-but-unready fixture, whose expected outcome is the
+# budget running out.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -73,6 +77,13 @@ fail() {
   echo "browser smoke: $*" >&2
   exit 1
 }
+
+READY_POLLS="${SMOKE_READY_POLLS:-20}"
+case "$READY_POLLS" in
+  *[!0-9]* | 0*)
+    fail "SMOKE_READY_POLLS must be a positive integer, got '$READY_POLLS'"
+    ;;
+esac
 
 find_chrome() {
   if [ -n "${CHROME_BIN:-}" ]; then
@@ -483,7 +494,11 @@ SHIM
   #     a readiness timeout with a LIVE child must fail immediately — a
   #     retry on a fresh port could only mask a real startup hang. The
   #     shim would serve normally on a second spawn, so the spawn counter
-  #     catches any retry.
+  #     catches any retry. The expected outcome is the budget running
+  #     out, and the code after the poll loop is the same for any budget,
+  #     so a 4-poll budget (about 2 s) replaces the default 20 (about
+  #     10 s). The shim logs its line and execs sleep within milliseconds
+  #     of the spawn, well inside 2 s.
   make_shim "$OUT_DIR/shim-alive"
   ALIVE_COUNT="$OUT_DIR/alive-spawns.txt"
   ALIVE_ERR="$OUT_DIR/fixture13-stderr.txt"
@@ -493,6 +508,7 @@ SHIM
      SMOKE_SHIM_MODE=alive-unready-first \
      SMOKE_SHIM_COUNTER="$ALIVE_COUNT" \
      SMOKE_DOCS_DIR="$FIXTURE" \
+     SMOKE_READY_POLLS=4 \
      "$SCRIPT_PATH" >/dev/null 2>"$ALIVE_ERR"; then
     fail "self-test 13 FAILED: an alive-but-unready server passed"
   fi
@@ -635,7 +651,7 @@ for ATTEMPT in $(seq 1 "$ATTEMPTS"); do
   SERVER_LOG="$OUT_DIR/server-attempt-$ATTEMPT.log"
   python3 -m http.server "$PORT" --directory "$SITE" >"$SERVER_LOG" 2>&1 &
   SERVER_PID=$!
-  for _ in $(seq 1 20); do
+  for _ in $(seq 1 "$READY_POLLS"); do
     BODY="$(curl -fsS --max-time 2 "http://127.0.0.1:$PORT/$NONCE.txt" 2>/dev/null || true)"
     if [ "$BODY" = "$NONCE" ]; then
       READY=1
