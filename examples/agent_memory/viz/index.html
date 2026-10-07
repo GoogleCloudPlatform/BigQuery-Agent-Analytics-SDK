@@ -92,110 +92,86 @@
   h1, h2, h3, p { margin: 0; }
   button { font: inherit; color: inherit; }
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-  .sr-only {
-    position: absolute; width: 1px; height: 1px; overflow: hidden;
-    clip: rect(0 0 0 0); white-space: nowrap;
-  }
+  code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
   /* Masthead: title on the left, run facts on the right. */
   .masthead {
     display: flex; flex-wrap: wrap; align-items: flex-end;
     justify-content: space-between; gap: 16px 48px;
-    padding: 28px 32px 20px;
+    padding: 24px 32px 18px;
     background: var(--surface);
     border-bottom: 1px solid var(--hair);
   }
   .masthead h1 {
-    font-size: 30px; line-height: 1.15; font-weight: 680;
+    font-size: 28px; line-height: 1.15; font-weight: 680;
     letter-spacing: -0.01em;
   }
-  .lede { margin-top: 8px; max-width: 64ch; color: var(--ink-2); }
+  .lede { margin-top: 8px; max-width: 66ch; color: var(--ink-2); }
   .run-facts {
     display: grid; grid-template-columns: auto auto; gap: 2px 14px;
     margin: 0; font-size: 12.5px;
   }
   .run-facts dt { color: var(--muted); }
-  .run-facts dd { margin: 0; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .run-facts dd { margin: 0; color: var(--ink); }
 
-  /* One filter row above everything it scopes. */
-  .filters {
-    display: flex; align-items: center; gap: 12px;
-    padding: 12px 32px;
-    border-bottom: 1px solid var(--hair);
-    background: var(--surface);
-  }
-  .filter-label { color: var(--ink-2); font-size: 13px; }
-  .segmented { display: inline-flex; border: 1px solid var(--hair); border-radius: 8px; padding: 2px; }
-  .segmented button {
-    border: 0; background: none; padding: 4px 14px; border-radius: 6px;
-    cursor: pointer; color: var(--ink-2);
-  }
-  .segmented button[aria-checked="true"] {
-    background: var(--wash); color: var(--ink); font-weight: 600;
-  }
-  .filter-note { margin-left: auto; color: var(--muted); font-size: 12.5px; }
-
-  .layout {
-    display: grid;
-    grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
-    align-items: start;
-  }
-  @media (max-width: 960px) { .layout { grid-template-columns: 1fr; } }
-
-  /* Left rail: sessions and the selected conversation. */
-  .rail {
-    border-right: 1px solid var(--hair);
-    background: var(--surface);
-    min-height: calc(100vh - 140px);
-    padding: 20px 0 32px;
-  }
-  .rail h2, .panel h2 { font-size: 16px; font-weight: 640; }
-  .rail > h2, .rail > .hint { padding: 0 20px; }
-  .hint { margin-top: 4px; color: var(--ink-2); font-size: 13px; max-width: 70ch; }
-  .session-list { list-style: none; margin: 14px 0 0; padding: 0; }
-  .session-list li + li { border-top: 1px solid var(--hair); }
-  .session-btn {
-    display: grid; grid-template-columns: 22px 1fr; gap: 2px 10px;
-    width: 100%; padding: 10px 20px; text-align: left;
-    border: 0; background: none; cursor: pointer;
-  }
-  .session-btn:hover { background: var(--page); }
-  .session-btn[aria-current="true"] { background: var(--wash); }
-  .session-dot {
-    grid-row: span 2; align-self: center; width: 22px; height: 22px;
-    border-radius: 50%; background: var(--session); color: #fff;
-    font-size: 11.5px; font-weight: 650; display: grid; place-items: center;
-  }
-  .session-title { font-weight: 600; font-size: 13.5px; }
-  .session-meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-  .session-preview {
-    grid-column: 2; color: var(--ink-2); font-size: 13px;
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
-  }
-
-  .conversation { margin-top: 20px; padding: 16px 20px 0; border-top: 1px solid var(--hair); }
-  .conversation h3 { font-size: 14px; font-weight: 640; }
-  .conversation .hint { margin-bottom: 12px; }
-  .messages { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
-  .msg { max-width: 92%; padding: 8px 12px; border-radius: 12px; font-size: 13.5px; }
-  .msg.user { justify-self: end; background: var(--wash); border-bottom-right-radius: 4px; }
-  .msg.assistant { justify-self: start; background: var(--page); border-bottom-left-radius: 4px; }
-  .msg-role { display: block; color: var(--muted); font-size: 11.5px; margin-bottom: 2px; }
-
-  /* Main column panels, separated by hairlines rather than cards. */
-  .panel { padding: 20px 32px 24px; border-bottom: 1px solid var(--hair); background: var(--surface); }
-  .panel + .panel { border-top: 0; }
+  /* Panels, separated by hairlines rather than cards. */
+  .panel { padding: 18px 32px 22px; border-bottom: 1px solid var(--hair); background: var(--surface); }
+  .panel h2 { font-size: 16px; font-weight: 640; }
   .panel-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px 24px; }
-  .panel-head > div { max-width: 78ch; }
+  .panel-head > div { max-width: 82ch; }
+  .hint { margin-top: 4px; color: var(--ink-2); font-size: 13px; max-width: 82ch; }
   .table-toggle {
     border: 1px solid var(--hair); background: var(--surface); border-radius: 6px;
     padding: 3px 10px; font-size: 12.5px; color: var(--ink-2); cursor: pointer;
   }
   .table-toggle[aria-pressed="true"] { background: var(--wash); color: var(--ink); }
-  .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 14px 0 6px; font-size: 12.5px; color: var(--ink-2); }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 12px 0 6px; font-size: 12.5px; color: var(--ink-2); }
   .legend-item { display: inline-flex; align-items: center; gap: 6px; }
   .legend svg { overflow: visible; }
 
+  .segmented { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--hair); border-radius: 8px; padding: 2px; gap: 2px; }
+  .segmented button {
+    border: 0; background: none; padding: 4px 12px; border-radius: 6px;
+    cursor: pointer; color: var(--ink-2); font-size: 13px;
+  }
+  .segmented button[aria-checked="true"], .segmented button[aria-selected="true"] {
+    background: var(--wash); color: var(--ink); font-weight: 600;
+  }
+
+  /* Before / after. */
+  .compare-tabs { margin-top: 12px; }
+  .compare-question {
+    margin: 14px 0 12px; font-size: 15px; font-weight: 600; max-width: 90ch;
+  }
+  .compare-question .who { display: block; font-size: 12px; font-weight: 500; color: var(--muted); }
+  .compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 960px) { .compare-grid { grid-template-columns: 1fr; } }
+  .compare-side { border: 1px solid var(--hair); border-radius: 10px; padding: 12px 16px 14px; background: var(--page); min-width: 0; }
+  .compare-side h3 { font-size: 13.5px; font-weight: 650; display: flex; align-items: center; gap: 8px; }
+  .compare-side h3 .tag { font-size: 11.5px; font-weight: 600; padding: 1px 8px; border-radius: 999px; background: var(--surface); border: 1px solid var(--hair); color: var(--ink-2); }
+  .compare-side.with h3 .tag { border-color: var(--session); color: var(--session); }
+  .stat-row { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 6px 0 8px; font-size: 12.5px; color: var(--ink-2); }
+  .stat-row strong { color: var(--ink); font-weight: 650; }
+  .recalled { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 8px; font-size: 12.5px; color: var(--ink-2); }
+  .chip {
+    border: 1px solid var(--hair); background: var(--surface); border-radius: 999px;
+    padding: 1px 10px; font-size: 12px; cursor: pointer; color: var(--ink);
+  }
+  .chip:hover { background: var(--wash); }
+
+  /* Answers written as Markdown by the model. */
+  .md { font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+  .md > * + * { margin-top: 6px; }
+  .md ul, .md ol { margin: 0; padding-left: 20px; }
+  .md .md-h { font-weight: 650; }
+  .md hr { border: 0; border-top: 1px solid var(--hair); }
+  .md table { border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow-wrap: normal; }
+  .md th, .md td { padding: 3px 8px; border-bottom: 1px solid var(--hair); text-align: left; vertical-align: top; }
+  .md th { color: var(--ink-2); font-weight: 600; white-space: normal; min-width: 5ch; vertical-align: bottom; }
+  .md td.num, .md th.num { text-align: right; }
+  .md-scroll { overflow-x: auto; }
+
+  /* The week: analysts by day. */
   .figure { margin: 0; overflow-x: auto; }
   .figure svg { display: block; width: 100%; overflow: visible; }
   .node { cursor: pointer; }
@@ -203,7 +179,72 @@
   .node:focus-visible .node-hit { stroke: var(--focus); stroke-width: 2; }
   .dimmed { opacity: 0.22; }
 
-  .trace { padding: 14px 0 6px; }
+  .filters {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+    padding: 12px 32px; border-bottom: 1px solid var(--hair); background: var(--surface);
+    position: sticky; top: 0; z-index: 5;
+  }
+  .filter-label { color: var(--ink-2); font-size: 13px; }
+  .filter-note { margin-left: auto; color: var(--muted); font-size: 12.5px; }
+
+  .layout {
+    display: grid;
+    grid-template-columns: minmax(280px, 330px) minmax(0, 1fr);
+    align-items: start;
+  }
+  @media (max-width: 960px) { .layout { grid-template-columns: 1fr; } }
+
+  /* Left rail: sessions by day and the selected conversation. */
+  .rail {
+    border-right: 1px solid var(--hair); background: var(--surface);
+    min-height: calc(100vh - 140px); padding: 18px 0 32px;
+  }
+  .rail > h2, .rail > .hint { padding: 0 20px; }
+  .rail h2 { font-size: 16px; font-weight: 640; }
+  .day-head { padding: 12px 20px 4px; color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  .session-list { list-style: none; margin: 0; padding: 0; }
+  .session-btn {
+    display: grid; grid-template-columns: 22px 1fr; gap: 2px 10px;
+    width: 100%; padding: 8px 20px; text-align: left;
+    border: 0; background: none; cursor: pointer;
+  }
+  .session-btn:hover { background: var(--page); }
+  .session-btn[aria-current="true"] { background: var(--wash); }
+  .session-dot {
+    grid-row: span 2; align-self: center; width: 22px; height: 22px;
+    border-radius: 50%; background: var(--session); color: #fff;
+    font-size: 11px; font-weight: 650; display: grid; place-items: center;
+  }
+  .session-meta { color: var(--muted); font-size: 12px; }
+  .session-preview {
+    grid-column: 2; color: var(--ink); font-size: 13px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+
+  .conversation { margin-top: 16px; padding: 14px 20px 0; border-top: 1px solid var(--hair); }
+  .conversation h3 { font-size: 14px; font-weight: 640; }
+  .conversation .hint { margin-bottom: 10px; }
+  .messages { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+  .msg { max-width: 96%; padding: 8px 12px; border-radius: 12px; font-size: 13px; min-width: 0; }
+  .msg.user { justify-self: end; background: var(--wash); border-bottom-right-radius: 4px; }
+  .msg.assistant { justify-self: start; background: var(--page); border-bottom-left-radius: 4px; }
+  .msg-role { display: block; color: var(--muted); font-size: 11.5px; margin-bottom: 2px; }
+
+  /* Long-term memory: graph, facts and preferences. */
+  .memory-lists { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 28px; margin-top: 6px; }
+  @media (max-width: 1100px) { .memory-lists { grid-template-columns: 1fr; } }
+  .memory-lists h3 { font-size: 13px; font-weight: 650; margin: 4px 0 6px; color: var(--ink); }
+  .item-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+  .item-list li { font-size: 13px; display: grid; grid-template-columns: 54px 1fr; gap: 8px; align-items: baseline; }
+  .item-list .when { color: var(--muted); font-size: 12px; }
+  .item-list .src { color: var(--muted); font-size: 11.5px; }
+  .item-list button.link { border: 0; background: none; padding: 0; text-align: left; cursor: pointer; color: inherit; }
+  .item-list button.link:hover .stmt { text-decoration: underline; }
+  .pref-versions { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 4px; }
+  .pref-old { color: var(--muted); text-decoration: line-through; }
+  .pref-key { color: var(--ink-2); }
+
+  .trace { padding: 12px 0 6px; }
   .trace + .trace { border-top: 1px solid var(--hair); }
   .trace-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
   .trace-turn { font-weight: 640; }
@@ -211,13 +252,13 @@
   .status-chip .mark { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
   .trace-task { color: var(--ink-2); flex-basis: 100%; }
   .trace-facts { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
-  .trace-outcome { margin: 6px 0 4px; font-size: 13px; color: var(--ink-2); max-width: 90ch; }
-  .trace-outcome strong { color: var(--ink); font-weight: 600; }
+  .trace-outcome { margin: 6px 0 4px; max-width: 100ch; }
+  .trace-outcome > strong { font-size: 12.5px; color: var(--ink-2); }
 
   .context {
-    margin: 12px 0 0; padding: 14px 16px; border: 1px solid var(--hair); border-radius: 8px;
-    background: var(--page); color: var(--ink);
-    font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    margin: 10px 0 0; padding: 12px 14px; border: 1px solid var(--hair); border-radius: 8px;
+    background: var(--page); color: var(--ink); max-height: 520px; overflow: auto;
+    font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     white-space: pre-wrap; word-break: break-word;
   }
 
@@ -230,7 +271,7 @@
   .table-view th { color: var(--ink-2); font-weight: 600; }
 
   .tooltip {
-    position: fixed; z-index: 10; pointer-events: none; max-width: 340px;
+    position: fixed; z-index: 10; pointer-events: none; max-width: 380px;
     padding: 8px 10px; border-radius: 8px; background: var(--surface);
     border: 1px solid var(--hair); color: var(--ink); font-size: 12.5px;
     box-shadow: 0 6px 18px rgba(29, 39, 51, 0.14);
@@ -240,7 +281,6 @@
   .tooltip .tip-source { display: block; margin-top: 4px; color: var(--muted); font-size: 11.5px; }
 
   .notice { margin: 32px; padding: 16px 20px; border: 1px solid var(--hair); border-radius: 8px; background: var(--surface); max-width: 70ch; }
-  .notice code { font-size: 12.5px; }
   footer { padding: 16px 32px 28px; color: var(--muted); font-size: 12.5px; }
 </style>
 </head>
@@ -249,22 +289,53 @@
   <header class="masthead">
     <div>
       <h1>What the agent remembers</h1>
-      <p class="lede">Short-term, long-term and reasoning memory, rebuilt from the
+      <p class="lede" id="lede">Short-term, long-term and reasoning memory, rebuilt from the
         <code>agent_events</code> rows that the ADK BigQuery Agent Analytics plugin wrote.
         Every item points back to the row it came from.</p>
     </div>
     <dl class="run-facts" id="run-facts"></dl>
   </header>
-  <nav class="filters" aria-label="Choose a user">
-    <span class="filter-label" id="user-label">User</span>
+
+  <section class="panel" id="compare-panel" aria-labelledby="compare-h" hidden>
+    <div class="panel-head">
+      <div>
+        <h2 id="compare-h">Same question, with and without memory</h2>
+        <p class="hint">Asked twice on the same day: to the agent with memory, and to the same agent without its memory tools. Both answers are the models' own, from real SQL on the same data.</p>
+      </div>
+    </div>
+    <div class="segmented compare-tabs" role="tablist" aria-label="Choose a question" id="compare-tabs"></div>
+    <p class="compare-question" id="compare-question"></p>
+    <div class="compare-grid">
+      <article class="compare-side without" id="compare-without" aria-label="Without memory"></article>
+      <article class="compare-side with" id="compare-with" aria-label="With memory"></article>
+    </div>
+  </section>
+
+  <section class="panel" id="week-panel" aria-labelledby="week-h">
+    <div class="panel-head">
+      <div>
+        <h2 id="week-h">The week</h2>
+        <p class="hint" id="week-hint">Every session, by analyst and day. The arcs link the selected session to the earlier sessions its memory recall cited. Pick a session to open it.</p>
+      </div>
+      <button type="button" class="table-toggle" id="week-toggle" aria-pressed="false">Table view</button>
+    </div>
+    <div class="legend" id="week-legend"></div>
+    <figure class="figure" id="week-figure">
+      <svg id="week" role="group" aria-labelledby="week-h"></svg>
+    </figure>
+    <div class="table-view" id="week-table" hidden></div>
+  </section>
+
+  <nav class="filters" aria-label="Choose an analyst">
+    <span class="filter-label" id="user-label">Analyst</span>
     <div class="segmented" role="radiogroup" aria-labelledby="user-label" id="user-switch"></div>
     <span class="filter-note" id="filter-note"></span>
   </nav>
   <div class="layout">
     <aside class="rail" aria-labelledby="sessions-h">
       <h2 id="sessions-h">Sessions</h2>
-      <p class="hint">Short-term memory: what was said in each session. Pick one to see its conversation and reasoning.</p>
-      <ol class="session-list" id="session-list"></ol>
+      <p class="hint">Short-term memory: what was said in each session.</p>
+      <div id="session-list"></div>
       <section class="conversation" aria-live="polite">
         <h3 id="conversation-h">Conversation</h3>
         <p class="hint" id="conversation-hint"></p>
@@ -275,15 +346,16 @@
       <section class="panel" aria-labelledby="graph-h">
         <div class="panel-head">
           <div>
-            <h2 id="graph-h">Long-term memory across sessions</h2>
-            <p class="hint">Preferences the agent saved as ADK <code>user:</code> state, and the places it passed to its tools, linked to the sessions that wrote or used them. Time runs left to right.</p>
+            <h2 id="graph-h">Long-term memory</h2>
+            <p class="hint" id="graph-hint">Entities and facts extracted from this analyst's messages, and the preferences the agent saved, each from the row it came from.</p>
           </div>
           <button type="button" class="table-toggle" id="graph-toggle" aria-pressed="false">Table view</button>
         </div>
-        <div class="legend" id="graph-legend"></div>
-        <figure class="figure" id="graph-figure">
-          <svg id="graph" role="group" aria-labelledby="graph-h"></svg>
-        </figure>
+        <div id="graph-figure">
+          <div class="legend" id="graph-legend"></div>
+          <figure class="figure"><svg id="graph" role="group" aria-labelledby="graph-h"></svg></figure>
+          <div class="memory-lists" id="memory-lists"></div>
+        </div>
         <div class="table-view" id="graph-table" hidden></div>
       </section>
       <section class="panel" aria-labelledby="trace-h">
@@ -299,8 +371,8 @@
         <div class="table-view" id="trace-table" hidden></div>
       </section>
       <section class="panel" aria-labelledby="context-h">
-        <h2 id="context-h">What the agent reads next</h2>
-        <p class="hint" id="context-hint">The <code>get_context()</code> block for the latest session: all three layers in one prompt, each line tagged with its source.</p>
+        <h2 id="context-h">What the agent read</h2>
+        <p class="hint" id="context-hint"></p>
         <pre class="context" id="context"></pre>
       </section>
     </main>

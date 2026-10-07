@@ -18,7 +18,7 @@
   'use strict';
 
   const SVG_NS = 'http://www.w3.org/2000/svg';
-  const state = { data: null, user: null, sessionId: null };
+  const state = { data: null, user: null, sessionId: null, compare: 0 };
 
   const OUTCOME = {
     answered: { label: 'Answered', color: 'var(--good)', icon: '✓' },
@@ -38,6 +38,22 @@
       icon: '…',
     },
   };
+  // Entity types read in the graph; color stays at three hues (people,
+  // entities, preferences), so type is carried by shape and caption.
+  const TYPE_LABEL = {
+    PERSON: 'Person',
+    TEAM: 'Team',
+    PRODUCT_CATEGORY: 'Product category',
+    BRAND: 'Brand',
+    DISTRIBUTION_CENTER: 'Distribution center',
+    MARKET: 'Market',
+    TRAFFIC_SOURCE: 'Traffic source',
+    METRIC: 'Metric',
+    EVENT: 'Event',
+  };
+  const TYPE_ORDER = Object.keys(TYPE_LABEL);
+  const MAX_RING = 14; // entities drawn around the analyst
+  const LITERAL_TYPES = new Set(['DATE', 'VALUE', 'TEXT', 'NUMBER', 'TIME', 'DURATION', 'PERCENTAGE', 'MONEY', 'CURRENCY', '']);
 
   // ---------------------------------------------------------------- DOM
 
@@ -89,12 +105,60 @@
     return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`;
   }
 
-  const plural = (n, word) => `${n.toLocaleString('en-US')} ${word}${n === 1 ? '' : 's'}`;
+  const IRREGULAR = { query: 'queries', entity: 'entities' };
+  const plural = (n, word) => {
+    const many = IRREGULAR[word.split(' ').pop()] ? word.replace(/\w+$/, (w) => IRREGULAR[w]) : `${word}s`;
+    return `${n.toLocaleString('en-US')} ${n === 1 ? word : many}`;
+  };
+  // The events table a live export read ("<project>.<dataset>.<table>").
+  const eventsTable = () => {
+    const source = (state.data && state.data.source) || '';
+    return /^[^\s.]+\.[^\s.]+\.[\w-]+$/.test(source) ? source.split('.').pop() : 'agent_events';
+  };
   const shortId = (id) => (id && id.length > 14 ? `${id.slice(0, 12)}…` : id || '');
+  const humanize = (s) => String(s || '').replace(/_/g, ' ');
 
+  // ------------------------------------------------------------- days
+
+  function sessionDay(session) {
+    const st = session.state || {};
+    if (st.sim_day) {
+      return { day: Number(st.sim_day), date: st.sim_date, weekday: st.sim_weekday };
+    }
+    return { day: null, date: (session.created_at || '').slice(0, 10), weekday: null };
+  }
+
+  function dayName(info) {
+    if (!info.date) return '';
+    const d = new Date(`${info.date}T12:00:00Z`);
+    const weekday = (info.weekday || '').slice(0, 3);
+    return `${weekday ? `${weekday} ` : ''}${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+  }
+
+  function dayLabel(info) {
+    return info.day ? `Day ${info.day} · ${dayName(info)}` : dayName(info);
+  }
+
+  function findSession(sessionId) {
+    for (const user of state.data.users) {
+      const session = user.sessions.find((s) => s.session_id === sessionId);
+      if (session) return { user, session };
+    }
+    return null;
+  }
+
+  // "Day 3, session 2" within its analyst's week.
   function sessionLabel(sessionId) {
-    const index = state.user.sessions.findIndex((s) => s.session_id === sessionId);
-    return index < 0 ? sessionId : `Session ${index + 1}`;
+    const found = findSession(sessionId);
+    if (!found) return shortId(sessionId);
+    const info = sessionDay(found.session);
+    const sameDay = found.user.sessions.filter((s) => sessionDay(s).day === info.day && sessionDay(s).date === info.date);
+    const index = sameDay.findIndex((s) => s.session_id === sessionId) + 1;
+    return info.day ? `Day ${info.day}, session ${index}` : `${dayName(info)}, session ${index}`;
+  }
+
+  function userName(user) {
+    return user.name || user.user_id;
   }
 
   // ------------------------------------------------------------ tooltip
@@ -104,9 +168,11 @@
   function showTip(anchor, value, rows, source, event) {
     const tip = tooltip();
     tip.replaceChildren(
-      el('span', { class: 'tip-value', text: value }),
-      ...rows.filter(Boolean).map((row) => el('span', { class: 'tip-row', text: row })),
-      source ? el('span', { class: 'tip-source', text: source }) : null,
+      ...[
+        el('span', { class: 'tip-value', text: value }),
+        ...rows.filter(Boolean).map((row) => el('span', { class: 'tip-row', text: row })),
+        source ? el('span', { class: 'tip-source', text: source }) : null,
+      ].filter(Boolean),
     );
     tip.hidden = false;
     const box = anchor.getBoundingClientRect();
@@ -137,6 +203,100 @@
     node.addEventListener('blur', hideTip);
   }
 
+  function activate(node, action) {
+    node.addEventListener('click', action);
+    node.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        action();
+      }
+    });
+  }
+
+  // -------------------------------------------------------- Markdown-lite
+
+  // Model answers use bold, italics, lists, headings, rules and pipe tables;
+  // render those with DOM nodes only.
+  function inline(text) {
+    const nodes = [];
+    // An escaped character, bold italics, bold, code, or italics (which may
+    // contain bold and escapes).
+    const pattern = /(\\[\\`*_]|\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*|`[^`]+`|\*(?![*\s])(?:\\.|\*\*[^*]+\*\*|[^*\\])+?\*(?!\*))/g;
+    let last = 0;
+    let match;
+    while ((match = pattern.exec(text))) {
+      if (match.index > last) nodes.push(text.slice(last, match.index));
+      const token = match[0];
+      if (token.startsWith('\\')) nodes.push(token.slice(1));
+      else if (token.startsWith('***')) nodes.push(el('strong', {}, el('em', { text: token.slice(3, -3) })));
+      else if (token.startsWith('**')) nodes.push(el('strong', { text: token.slice(2, -2) }));
+      else if (token.startsWith('`')) nodes.push(el('code', { text: token.slice(1, -1) }));
+      else nodes.push(el('em', {}, ...inline(token.slice(1, -1))));
+      last = match.index + token.length;
+    }
+    if (last < text.length) nodes.push(text.slice(last));
+    return nodes;
+  }
+
+  const isRow = (line) => line.trim().startsWith('|');
+  const isItem = (line) => /^\s*([-*]|\d+\.)\s+/.test(line);
+  const isHeading = (line) => /^#{1,6}\s/.test(line.trim());
+  const isRule = (line) => /^\s*([-*_])(\s*\1){2,}\s*$/.test(line);
+
+  function markdownTable(rows) {
+    const cells = (row) => row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+    const header = cells(rows[0]);
+    const rule = rows.length > 1 && cells(rows[1]).every((c) => /^:?-{2,}:?$/.test(c)) ? cells(rows[1]) : null;
+    const align = header.map((_, i) => (rule && /-:$/.test(rule[i] || '') ? 'num' : null));
+    const body = rows.slice(rule ? 2 : 1).map(cells);
+    return el(
+      'div',
+      { class: 'md-scroll' },
+      el(
+        'table',
+        {},
+        el('thead', {}, el('tr', {}, ...header.map((h, i) => el('th', { class: align[i] }, ...inline(h))))),
+        el('tbody', {}, ...body.map((row) => el('tr', {}, ...row.map((c, i) => el('td', { class: align[i] }, ...inline(c)))))),
+      ),
+    );
+  }
+
+  function markdown(text) {
+    const root = el('div', { class: 'md' });
+    const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (!line.trim()) {
+        i += 1;
+      } else if (isRule(line)) {
+        root.append(el('hr'));
+        i += 1;
+      } else if (isRow(line)) {
+        const rows = [];
+        while (i < lines.length && isRow(lines[i])) rows.push(lines[i++]);
+        root.append(markdownTable(rows));
+      } else if (isHeading(line)) {
+        root.append(el('p', { class: 'md-h' }, ...inline(line.trim().replace(/^#+\s*/, ''))));
+        i += 1;
+      } else if (isItem(line)) {
+        const ordered = /^\s*\d+\./.test(line);
+        const list = el(ordered ? 'ol' : 'ul');
+        while (i < lines.length && isItem(lines[i])) {
+          list.append(el('li', {}, ...inline(lines[i++].replace(/^\s*([-*]|\d+\.)\s+/, ''))));
+        }
+        root.append(list);
+      } else {
+        const para = [];
+        while (i < lines.length && lines[i].trim() && !isRow(lines[i]) && !isHeading(lines[i]) && !isItem(lines[i]) && !isRule(lines[i])) {
+          para.push(lines[i++].trim());
+        }
+        root.append(el('p', {}, ...inline(para.join(' '))));
+      }
+    }
+    return root;
+  }
+
   // ---------------------------------------------------------- top level
 
   async function init() {
@@ -152,8 +312,12 @@
     }
     renderRunFacts();
     renderUserSwitch();
-    bindToggle('graph-toggle', ['graph-figure', 'graph-legend'], 'graph-table');
+    bindToggle('graph-toggle', ['graph-figure'], 'graph-table');
     bindToggle('trace-toggle', ['traces', 'trace-legend'], 'trace-table');
+    bindToggle('week-toggle', ['week-figure', 'week-legend'], 'week-table');
+    const compare = Number(params.get('compare'));
+    state.compare = Number.isInteger(compare) && compare >= 0 ? compare : 0;
+    renderComparison();
     const users = state.data.users;
     const user = users.find((u) => u.user_id === params.get('user')) || users[0];
     selectUser(user.user_id, params.get('session'));
@@ -161,6 +325,7 @@
     window.addEventListener('resize', () => {
       clearTimeout(timer);
       timer = setTimeout(() => {
+        renderWeek();
         renderGraph();
         renderTraces();
       }, 150);
@@ -190,16 +355,26 @@
 
   function renderRunFacts() {
     const data = state.data;
-    const rows = data.users.reduce(
-      (sum, u) => sum + u.sessions.reduce((n, s) => n + s.row_count, 0),
-      0,
-    );
-    const facts = [
-      ['Run', data.label],
-      ['Table', data.source],
-      ['Exported', when(data.exported_at)],
-      ['Rows read', `${rows.toLocaleString('en-US')} across ${plural(data.users.length, 'user')}`],
-    ];
+    const run = data.run;
+    const rows = data.users.reduce((sum, u) => sum + u.sessions.reduce((n, s) => n + s.row_count, 0), 0);
+    const facts = [['Run', data.label], ['Table', data.source]];
+    if (run) {
+      const t = run.totals;
+      const days = run.days || [];
+      if (days.length) {
+        facts.push(['Week', `${dayName(days[0])} to ${dayName(days[days.length - 1])}, ${plural(days.length, 'business day')}`]);
+      }
+      facts.push(['Model', run.model]);
+      facts.push(['Sessions', `${plural(t.sessions, 'session')} by ${plural(t.analysts, 'analyst')}, plus ${t.control_sessions} without memory`]);
+      facts.push(['Rows', `${t.rows.toLocaleString('en-US')} in ${eventsTable()}, for all ${plural(t.sessions + t.control_sessions, 'session')}`]);
+      facts.push(['SQL', `${plural(t.sql_queries, 'query')} in the sessions with memory, ${t.sql_errors} failed`]);
+      facts.push(['Memory', `${plural(t.facts, 'fact')}, ${plural(t.entities, 'entity')}, ${plural(t.preference_versions, 'preference version')}`]);
+      document.getElementById('lede').textContent =
+        `A data-analyst agent's week at TheLook, rebuilt from the ${eventsTable()} rows the ADK BigQuery Agent Analytics plugin wrote. Every item points back to the row it came from.`;
+    } else {
+      facts.push(['Rows read', `${rows.toLocaleString('en-US')} across ${plural(data.users.length, 'user')}`]);
+    }
+    facts.push(['Exported', when(data.exported_at)]);
     document.getElementById('run-facts').replaceChildren(
       ...facts.flatMap(([term, value]) => [el('dt', { text: term }), el('dd', { text: value })]),
     );
@@ -217,7 +392,7 @@
           role: 'radio',
           'data-user': user.user_id,
           'aria-checked': 'false',
-          text: user.user_id,
+          text: userName(user),
           onclick: () => selectUser(user.user_id),
         }),
       ),
@@ -232,11 +407,10 @@
       button.setAttribute('aria-checked', String(button.dataset.user === userId));
     }
     document.getElementById('filter-note').textContent =
-      `Loaded with TraceFilter(user_id='${userId}'): no other user's rows are read.`;
+      `Loaded with TraceFilter(user_id='${userId}'): no other analyst's rows are read.`;
     renderSessions();
     renderGraph();
     renderGraphTable();
-    renderContext();
     selectSession(state.sessionId);
   }
 
@@ -250,9 +424,18 @@
       button.setAttribute('aria-current', String(button.dataset.session === sessionId));
     }
     renderConversation();
-    renderGraph();
+    renderWeek();
+    renderWeekTable();
     renderTraces();
     renderTraceTable();
+    renderContext();
+  }
+
+  function openSession(sessionId) {
+    const found = findSession(sessionId);
+    if (!found) return;
+    if (found.user !== state.user) selectUser(found.user.user_id, sessionId);
+    else selectSession(sessionId);
   }
 
   function bindToggle(buttonId, figureIds, tableId) {
@@ -265,47 +448,316 @@
     });
   }
 
+  function table(headers, rows) {
+    return el(
+      'table',
+      {},
+      el('thead', {}, el('tr', {}, ...headers.map((h) => el('th', { scope: 'col', text: h })))),
+      el('tbody', {}, ...rows.map((row) => el('tr', {}, ...row.map((cell) => el('td', { text: cell }))))),
+    );
+  }
+
+  // ------------------------------------------------------ before / after
+
+  function renderComparison() {
+    const list = state.data.comparisons || [];
+    const panel = document.getElementById('compare-panel');
+    panel.hidden = list.length === 0;
+    if (!list.length) return;
+    if (state.compare >= list.length) state.compare = 0;
+    const tabs = document.getElementById('compare-tabs');
+    tabs.replaceChildren(
+      ...list.map((item, i) =>
+        el('button', {
+          type: 'button',
+          role: 'tab',
+          'aria-selected': String(i === state.compare),
+          'data-compare': i,
+          text: `${item.name.split(' ')[0]} · Day ${item.day}${item.control_read_memory ? ' · flawed control' : ''}`,
+          onclick: () => {
+            state.compare = i;
+            renderComparison();
+          },
+        }),
+      ),
+    );
+    const item = list[state.compare];
+    const days = (state.data.run && state.data.run.days) || [];
+    const day = days.find((d) => d.number === item.day);
+    document.getElementById('compare-question').replaceChildren(
+      el('span', { class: 'who', text: `${item.name}, ${day ? dayLabel({ day: day.number, date: day.date, weekday: day.weekday }) : `Day ${item.day}`}` }),
+      `“${item.question}”`,
+    );
+    renderSide(document.getElementById('compare-without'), item.without_memory, false);
+    renderSide(document.getElementById('compare-with'), item.with_memory, true);
+  }
+
+  function renderSide(box, side, withMemory) {
+    if (!side) {
+      box.replaceChildren(el('p', { class: 'hint', text: 'No trace recorded.' }));
+      return;
+    }
+    const stats = [
+      [plural(side.tool_calls.length, 'tool call'), null],
+      [plural(side.sql_queries, 'SQL query'), side.sql_errors ? `${side.sql_errors} failed` : null],
+      [duration(side.latency_ms), null],
+      [plural(side.total_tokens, 'token'), null],
+    ];
+    const reads = side.memory_table_reads || [];
+    const recalled = (side.recalled_sessions || []).map((sid) =>
+      el('button', { type: 'button', class: 'chip', text: sessionLabel(sid), onclick: () => openSession(sid) }),
+    );
+    box.replaceChildren(
+      ...[
+      el(
+        'h3',
+        {},
+        withMemory ? 'With memory' : 'Without memory',
+        el('span', { class: 'tag', text: withMemory ? 'memory tools on' : 'no memory tools' }),
+      ),
+      el(
+        'p',
+        { class: 'stat-row' },
+        ...stats.map(([value, note]) => el('span', {}, el('strong', { text: value }), note ? ` (${note})` : '')),
+      ),
+      withMemory && recalled.length ? el('p', { class: 'recalled' }, 'Recalled from', ...recalled) : null,
+      reads.length
+        ? el(
+          'p',
+          { class: 'flag' },
+          el('strong', { text: 'Not memory-free. ' }),
+          `${plural(reads.length, 'SQL query')} read the memory tables (${reads.map((r) => r.purpose || 'no purpose given').slice(0, 3).join('; ')}${reads.length > 3 ? '; …' : ''}). `
+            + 'This run had no memory tools, but run_sql could still read the dataset that holds memory. run_sql now reads only TheLook.',
+        )
+        : null,
+      side.answer ? markdown(side.answer) : el('p', { class: 'hint', text: 'The turn ended without a text answer.' }),
+      ].filter(Boolean),
+    );
+  }
+
+  // ------------------------------------------------------------ the week
+
+  function weekDays() {
+    const run = state.data.run;
+    if (run && run.days && run.days.length) {
+      return run.days.map((d) => ({ day: d.number, date: d.date, weekday: d.weekday }));
+    }
+    const seen = new Map();
+    for (const user of state.data.users) {
+      for (const s of user.sessions) {
+        const info = sessionDay(s);
+        seen.set(`${info.day}|${info.date}`, info);
+      }
+    }
+    return [...seen.values()].sort((a, b) => (a.date < b.date ? -1 : 1));
+  }
+
+  function renderWeekLegend() {
+    const items = [
+      [(x) => svg('circle', { cx: x, cy: 8, r: 6, fill: 'var(--session)' }), 'Session with memory'],
+      [(x) => svg('circle', { cx: x, cy: 8, r: 5.5, fill: 'var(--surface)', stroke: 'var(--muted)', 'stroke-width': 1.75 }), 'Same question, no memory'],
+      [(x) => svg('path', { d: `M${x - 9} 11 Q${x} 1 ${x + 9} 11`, fill: 'none', stroke: 'var(--muted)', 'stroke-width': 1.5 }), 'Recall cited an earlier session'],
+    ];
+    document.getElementById('week-legend').replaceChildren(
+      ...items.map(([draw, label]) => {
+        const icon = svg('svg', { width: 22, height: 16, viewBox: '0 0 22 16', 'aria-hidden': 'true' });
+        icon.append(draw(11));
+        return el('span', { class: 'legend-item' }, icon, label);
+      }),
+    );
+  }
+
+  function renderWeek() {
+    renderWeekLegend();
+    const root = document.getElementById('week');
+    root.replaceChildren();
+    const users = state.data.users;
+    const days = weekDays();
+    const width = Math.max(640, root.parentElement.clientWidth);
+    const labelW = 130;
+    const rowH = 42;
+    const top = 30 + rowH * 0.7; // room for the first row's arcs
+    const colW = (width - labelW - 8) / Math.max(1, days.length);
+    const height = top + users.length * rowH + 6;
+    root.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    root.setAttribute('height', height);
+
+    const defs = svg('defs');
+    const arrow = svg('marker', { id: 'week-arrow', viewBox: '0 0 10 10', refX: 8, refY: 5, markerWidth: 6, markerHeight: 6, orient: 'auto-start-reverse' });
+    arrow.append(svg('path', { d: 'M0 0 L10 5 L0 10 z', fill: 'var(--muted)' }));
+    defs.append(arrow);
+    root.append(defs);
+
+    days.forEach((info, i) => {
+      const x = labelW + i * colW;
+      root.append(svg('text', { x: x + colW / 2, y: 14, 'text-anchor': 'middle', 'font-size': 12, fill: 'var(--ink-2)', 'font-weight': 600 }, dayLabel(info)));
+      if (i > 0) root.append(svg('line', { x1: x, y1: 24, x2: x, y2: height - 4, stroke: 'var(--grid)' }));
+    });
+    const controls = new Map();
+    for (const item of state.data.comparisons || []) {
+      if (item.without_memory) controls.set(item.with_memory && item.with_memory.session_id, item);
+    }
+
+    const pos = new Map();
+    const arcs = svg('g');
+    const dots = svg('g');
+    root.append(arcs, dots);
+    users.forEach((user, row) => {
+      const y = top + row * rowH + rowH / 2;
+      const current = user === state.user;
+      root.append(
+        svg('text', { x: 0, y, 'dominant-baseline': 'middle', 'font-size': 12.5, fill: current ? 'var(--ink)' : 'var(--ink-2)', 'font-weight': current ? 650 : 500 }, userName(user)),
+      );
+      root.append(svg('line', { x1: labelW, y1: y, x2: width - 8, y2: y, stroke: 'var(--grid)' }));
+      days.forEach((info, col) => {
+        const sessions = user.sessions.filter((s) => {
+          const d = sessionDay(s);
+          return d.day === info.day && d.date === info.date;
+        });
+        const marks = [];
+        for (const s of sessions) {
+          marks.push({ session: s, control: false });
+          if (controls.has(s.session_id)) marks.push({ session: s, control: true, item: controls.get(s.session_id) });
+        }
+        const step = 18;
+        const start = labelW + col * colW + colW / 2 - ((marks.length - 1) * step) / 2;
+        marks.forEach((mark, k) => {
+          const x = start + k * step;
+          if (!mark.control) pos.set(mark.session.session_id, { x, y, user });
+          dots.append(weekDot(mark, x, y, user));
+        });
+      });
+    });
+
+    // Arcs for the selected session: back to each session its recall cited.
+    const selected = state.user.sessions.find((s) => s.session_id === state.sessionId);
+    const from = selected && pos.get(selected.session_id);
+    for (const target of (selected && selected.recalled_sessions) || []) {
+      const to = pos.get(target);
+      if (!from || !to) continue;
+      // The apex of a quadratic arc is half its control lift: keep it in the band.
+      const lift = Math.min(rowH * 0.65, 10 + Math.abs(from.x - to.x) / 12);
+      arcs.append(
+        svg('path', {
+          d: `M${from.x} ${from.y - 7} Q${(from.x + to.x) / 2} ${from.y - 7 - lift * 2} ${to.x} ${to.y - 8}`,
+          fill: 'none',
+          stroke: 'var(--ink-2)',
+          'stroke-width': 1.5,
+          'marker-end': 'url(#week-arrow)',
+        }),
+      );
+    }
+  }
+
+  function weekDot(mark, x, y, user) {
+    const s = mark.session;
+    const selected = !mark.control && s.session_id === state.sessionId;
+    const group = svg('g', { class: 'node', tabindex: 0, role: 'button' });
+    group.dataset.session = mark.control ? `${s.session_id}:control` : s.session_id;
+    group.append(svg('circle', { class: 'node-hit', cx: x, cy: y, r: 12, fill: 'transparent' }));
+    if (selected) group.append(svg('circle', { cx: x, cy: y, r: 10, fill: 'none', stroke: 'var(--session)', 'stroke-width': 1.5 }));
+    group.append(
+      mark.control
+        ? svg('circle', { cx: x, cy: y, r: 5.5, fill: 'var(--surface)', stroke: 'var(--muted)', 'stroke-width': 1.75 })
+        : svg('circle', { cx: x, cy: y, r: 6, fill: 'var(--session)', 'fill-opacity': user === state.user ? 1 : 0.45 }),
+    );
+    const first = s.messages.find((m) => m.role === 'user');
+    const label = mark.control ? `${userName(user)}, ${sessionLabel(s.session_id)}, asked without memory` : `${userName(user)}, ${sessionLabel(s.session_id)}`;
+    group.setAttribute('aria-label', label);
+    bindTip(group, () => [
+      mark.control ? 'Same question, no memory' : sessionLabel(s.session_id),
+      [
+        `${userName(user)}`,
+        first ? `“${first.content.length > 140 ? `${first.content.slice(0, 139)}…` : first.content}”` : null,
+        mark.control
+          ? mark.item.control_read_memory
+            ? 'Answered without memory tools, but its SQL read the memory tables; see the comparison above.'
+            : 'Answered by the agent without memory tools; see the comparison above.'
+          : (s.recalled_sessions || []).length ? `Recall cited ${(s.recalled_sessions || []).map(sessionLabel).join(', ')}` : 'Recall cited no earlier session',
+      ],
+      mark.control ? (mark.item.without_memory || {}).session_id : `${plural(s.row_count, 'row')} in ${eventsTable()}`,
+    ]);
+    activate(group, () => {
+      if (mark.control) {
+        const index = (state.data.comparisons || []).indexOf(mark.item);
+        if (index >= 0) {
+          state.compare = index;
+          renderComparison();
+          document.getElementById('compare-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      } else {
+        openSession(s.session_id);
+      }
+    });
+    return group;
+  }
+
+  function renderWeekTable() {
+    const rows = [];
+    for (const user of state.data.users) {
+      for (const s of user.sessions) {
+        const first = s.messages.find((m) => m.role === 'user');
+        rows.push([
+          userName(user),
+          dayLabel(sessionDay(s)),
+          s.session_id,
+          first ? first.content : '',
+          (s.recalled_sessions || []).map(sessionLabel).join(', '),
+          String(s.row_count),
+        ]);
+      }
+    }
+    document.getElementById('week-table').replaceChildren(
+      table(['Analyst', 'Day', 'Session', 'First message', 'Recall cited', 'Rows'], rows),
+    );
+  }
+
   // ------------------------------------------------- short-term memory
 
   function renderSessions() {
-    const list = document.getElementById('session-list');
-    list.replaceChildren(
-      ...state.user.sessions.map((session, i) => {
-        const first = session.messages.find((m) => m.role === 'user');
-        const turns = state.user.traces.filter((t) => t.session_id === session.session_id).length;
-        return el(
-          'li',
-          {},
-          el(
-            'button',
-            {
-              type: 'button',
-              class: 'session-btn',
-              'data-session': session.session_id,
-              'aria-current': 'false',
-              onclick: () => selectSession(session.session_id),
-            },
-            el('span', { class: 'session-dot', 'aria-hidden': 'true', text: String(i + 1) }),
-            el(
-              'span',
+    const box = document.getElementById('session-list');
+    const groups = new Map();
+    for (const s of state.user.sessions) {
+      const info = sessionDay(s);
+      const key = `${info.day}|${info.date}`;
+      if (!groups.has(key)) groups.set(key, { info, sessions: [] });
+      groups.get(key).sessions.push(s);
+    }
+    box.replaceChildren(
+      ...[...groups.values()].flatMap(({ info, sessions }) => [
+        el('p', { class: 'day-head', text: dayLabel(info) }),
+        el(
+          'ol',
+          { class: 'session-list' },
+          ...sessions.map((session, i) => {
+            const first = session.messages.find((m) => m.role === 'user');
+            const turns = state.user.traces.filter((t) => t.session_id === session.session_id).length;
+            return el(
+              'li',
               {},
-              el('span', { class: 'session-title', text: `Session ${i + 1}` }),
-              ' ',
-              el('span', {
-                class: 'session-meta',
-                text: `${clock(session.created_at)}, ${plural(turns, 'turn')}, ${plural(session.row_count, 'row')}`,
-              }),
-            ),
-            el('span', { class: 'session-preview', text: first ? first.content : '(no user message)' }),
-          ),
-        );
-      }),
+              el(
+                'button',
+                {
+                  type: 'button',
+                  class: 'session-btn',
+                  'data-session': session.session_id,
+                  'aria-current': 'false',
+                  onclick: () => selectSession(session.session_id),
+                },
+                el('span', { class: 'session-dot', 'aria-hidden': 'true', text: String(i + 1) }),
+                el('span', { class: 'session-meta', text: `${clock(session.created_at)} · ${plural(turns, 'turn')} · ${plural(session.row_count, 'row')}` }),
+                el('span', { class: 'session-preview', text: first ? first.content : '(no user message)' }),
+              ),
+            );
+          }),
+        ),
+      ]),
     );
   }
 
   function renderConversation() {
     const session = state.user.sessions.find((s) => s.session_id === state.sessionId);
-    document.getElementById('conversation-h').textContent = `${sessionLabel(state.sessionId)} conversation`;
+    document.getElementById('conversation-h').textContent = `${sessionLabel(state.sessionId)}`;
     document.getElementById('conversation-hint').textContent =
       `${session.session_id}: user messages and the text parts of the model's replies.`;
     document.getElementById('messages').replaceChildren(
@@ -315,9 +767,9 @@
           { class: `msg ${message.role}` },
           el('span', {
             class: 'msg-role',
-            text: `${message.role === 'user' ? 'User' : 'Agent'}${message.complete === false ? ' (reply incomplete: the stream did not finish)' : ''}, ${clock(message.timestamp)}`,
+            text: `${message.role === 'user' ? userName(state.user) : 'Agent'}${message.complete === false ? ' (reply incomplete: the stream did not finish)' : ''}, ${clock(message.timestamp)}`,
           }),
-          message.content,
+          message.role === 'user' ? message.content : markdown(message.content),
         ),
       ),
     );
@@ -325,298 +777,325 @@
 
   // -------------------------------------------------- long-term memory
 
-  function marker(kind, x, y, hollow) {
-    if (kind === 'session') {
-      return svg('circle', { cx: x, cy: y, r: 7, fill: 'var(--session)', stroke: 'var(--surface)', 'stroke-width': 2.5 });
+  function entityKey(name) {
+    return String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  }
+
+  function isSelf(user, name) {
+    const key = entityKey(name);
+    return key === entityKey(user.name) || key === entityKey(user.user_id) || key === 'the speaker' || key === 'the user';
+  }
+
+  // Nodes: the analyst in the middle, entities around. Facts whose object is
+  // a literal (a date, a definition) are listed, not drawn as nodes.
+  function memoryModel(user) {
+    const nodes = new Map();
+    const center = { id: 'self', name: userName(user), type: 'PERSON', mentions: [], facts: [], self: true };
+    const ensure = (name, type) => {
+      if (isSelf(user, name)) return center;
+      const key = entityKey(name);
+      if (!key) return null;
+      if (!nodes.has(key)) nodes.set(key, { id: `e:${key}`, name: String(name).trim(), type: String(type || '').toUpperCase(), mentions: [], facts: [] });
+      const node = nodes.get(key);
+      if (!TYPE_LABEL[node.type] && TYPE_LABEL[String(type || '').toUpperCase()]) node.type = String(type).toUpperCase();
+      return node;
+    };
+    for (const entity of user.entities) {
+      const node = ensure(entity.name, entity.entity_type);
+      if (node) node.mentions.push(...entity.mentions);
     }
-    if (kind === 'pref') {
-      return svg('rect', {
-        x: x - 6, y: y - 6, width: 12, height: 12, rx: 3,
-        fill: hollow ? 'var(--surface)' : 'var(--pref)',
-        stroke: hollow ? 'var(--pref)' : 'var(--surface)',
-        'stroke-width': hollow ? 2 : 2.5,
-      });
+    const edges = [];
+    for (const fact of user.facts) {
+      const subject = ensure(fact.subject, fact.subject_type);
+      if (!subject) continue;
+      subject.facts.push(fact);
+      if (LITERAL_TYPES.has(String(fact.object_type || '').toUpperCase())) continue;
+      const object = ensure(fact.object, fact.object_type);
+      if (!object || object === subject) continue;
+      object.facts.push(fact);
+      edges.push({ from: subject, to: object, fact });
     }
-    return svg('rect', {
-      x: x - 5.5, y: y - 5.5, width: 11, height: 11, rx: 2,
-      transform: `rotate(45 ${x} ${y})`,
-      fill: 'var(--entity)', stroke: 'var(--surface)', 'stroke-width': 2.5,
+    // Keep the ring readable: entities in facts first, then the most
+    // mentioned. The rest stay in the table view.
+    const ranked = [...nodes.values()].sort((a, b) => b.facts.length - a.facts.length || b.mentions.length - a.mentions.length || a.name.localeCompare(b.name));
+    const shown = new Set(ranked.slice(0, MAX_RING).map((n) => n.id));
+    const kept = edges.filter((e) => (e.from.self || shown.has(e.from.id)) && (e.to.self || shown.has(e.to.id)));
+    const linked = new Set(kept.flatMap((e) => [e.from.id, e.to.id]));
+    for (const node of ranked) {
+      if (shown.has(node.id) && !linked.has(node.id)) kept.push({ from: center, to: node, fact: null });
+    }
+    const ring = ranked.filter((n) => shown.has(n.id)).sort((a, b) => {
+      const ta = TYPE_ORDER.indexOf(a.type);
+      const tb = TYPE_ORDER.indexOf(b.type);
+      return (ta < 0 ? 99 : ta) - (tb < 0 ? 99 : tb) || a.name.localeCompare(b.name);
     });
+    return { center, ring, edges: kept, hidden: ranked.length - ring.length };
+  }
+
+  // Splits a long name into lines of at most `width` characters.
+  function wrapLabel(name, width) {
+    const lines = [];
+    for (const word of String(name).split(/\s+/)) {
+      const last = lines[lines.length - 1];
+      if (last !== undefined && `${last} ${word}`.length <= width) lines[lines.length - 1] = `${last} ${word}`;
+      else lines.push(word);
+    }
+    return lines.slice(0, 3);
+  }
+
+  function nodeShape(node, x, y) {
+    if (node.self) {
+      return svg('circle', { cx: x, cy: y, r: 13, fill: 'var(--session)', stroke: 'var(--surface)', 'stroke-width': 2.5 });
+    }
+    if (node.type === 'PERSON' || node.type === 'TEAM') {
+      return svg('circle', { cx: x, cy: y, r: 7, fill: 'var(--session)', stroke: 'var(--surface)', 'stroke-width': 2 });
+    }
+    if (node.type === 'EVENT') {
+      return svg('rect', { x: x - 6, y: y - 6, width: 12, height: 12, rx: 2, transform: `rotate(45 ${x} ${y})`, fill: 'var(--entity)', stroke: 'var(--surface)', 'stroke-width': 2 });
+    }
+    return svg('rect', { x: x - 6.5, y: y - 6.5, width: 13, height: 13, rx: 3.5, fill: 'var(--entity)', stroke: 'var(--surface)', 'stroke-width': 2 });
   }
 
   function renderGraphLegend() {
     const items = [
-      ['session', false, 'Session'],
-      ['pref', false, 'Saved preference (current)'],
-      ['pref', true, 'Replaced preference'],
-      ['entity', false, 'Entity from tool arguments'],
+      [{ self: true }, 'Analyst'],
+      [{ type: 'PERSON' }, 'Person or team'],
+      [{ type: 'BRAND' }, 'Entity (category, brand, place, metric)'],
+      [{ type: 'EVENT' }, 'Event'],
     ];
     document.getElementById('graph-legend').replaceChildren(
-      ...items.map(([kind, hollow, label]) => {
-        const icon = svg('svg', { width: 16, height: 16, viewBox: '0 0 16 16', 'aria-hidden': 'true' });
-        icon.append(marker(kind, 8, 8, hollow));
+      ...items.map(([node, label]) => {
+        const icon = svg('svg', { width: 26, height: 26, viewBox: '0 0 26 26', 'aria-hidden': 'true' });
+        icon.append(nodeShape(node, 13, 13));
         return el('span', { class: 'legend-item' }, icon, label);
       }),
     );
   }
 
   function renderGraph() {
+    renderGraphLegend();
     const root = document.getElementById('graph');
     root.replaceChildren();
-    renderGraphLegend();
     const user = state.user;
-    const sessions = user.sessions;
-    const width = Math.max(560, root.parentElement.clientWidth);
-    const padL = 150;
-    const padR = 200;
-    const xs = new Map();
-    sessions.forEach((session, i) => {
-      const span = width - padL - padR;
-      const x = sessions.length === 1 ? padL + span / 2 : padL + (i * span) / (sessions.length - 1);
-      xs.set(session.session_id, x);
-    });
-
-    const ROW = 30;
-    const prefSlots = new Map();
-    const prefs = user.preferences.map((pref, i) => {
-      const slot = prefSlots.get(pref.session_id) || 0;
-      prefSlots.set(pref.session_id, slot + 1);
-      return { id: `p${i}`, kind: 'pref', pref, slot, x: xs.get(pref.session_id), links: [`s:${pref.session_id}`] };
-    });
-    const entSlots = new Map();
-    const entities = user.entities.map((entity, i) => {
-      const first = entity.mentions[0].session_id;
-      const slot = entSlots.get(first) || 0;
-      entSlots.set(first, slot + 1);
-      const linked = [...new Set(entity.mentions.map((m) => m.session_id))];
-      return { id: `e${i}`, kind: 'entity', entity, slot, x: xs.get(first), links: linked.map((s) => `s:${s}`) };
-    });
-    const prefRows = Math.max(1, ...prefSlots.values());
-    const entRows = Math.max(1, ...entSlots.values());
-    const spineY = 34 + prefRows * ROW + 52;
-    for (const node of prefs) node.y = spineY - 64 - node.slot * ROW;
-    for (const node of entities) node.y = spineY + 64 + node.slot * ROW;
-    const height = spineY + 64 + entRows * ROW + 6;
+    const model = memoryModel(user);
+    const width = Math.max(420, root.parentElement.clientWidth);
+    const count = model.ring.length;
+    // Labels sit outside the ring, so keep room for them on both sides.
+    const radius = Math.max(80, Math.min(width / 2 - 165, 70 + count * 10));
+    const height = Math.max(220, 2 * radius + 96);
+    const cx = width / 2;
+    const cy = height / 2;
     root.setAttribute('viewBox', `0 0 ${width} ${height}`);
     root.setAttribute('height', height);
-
-    const defs = svg('defs');
-    const arrow = svg('marker', {
-      id: 'arrow', viewBox: '0 0 10 10', refX: 9, refY: 5,
-      markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse',
+    model.center.x = cx;
+    model.center.y = cy;
+    model.ring.forEach((node, i) => {
+      const angle = -Math.PI / 2 + (2 * Math.PI * i) / Math.max(1, count);
+      node.angle = angle;
+      node.x = cx + radius * Math.cos(angle);
+      node.y = cy + radius * Math.sin(angle);
     });
-    arrow.append(svg('path', { d: 'M0 0 L10 5 L0 10 z', fill: 'var(--muted)' }));
-    defs.append(arrow);
-    root.append(defs);
 
-    const bandLabel = (y, text) =>
-      root.append(svg('text', { x: 0, y, fill: 'var(--muted)', 'font-size': 12, 'dominant-baseline': 'middle' }, text));
-    bandLabel(prefs.length ? (Math.min(...prefs.map((p) => p.y)) + spineY - 64) / 2 : spineY - 64, 'Saved preferences');
-    bandLabel(spineY, 'Sessions');
-    bandLabel(spineY + 64 + ((entRows - 1) * ROW) / 2, 'Entities');
-
-    const edges = svg('g');
-    const nodesLayer = svg('g');
-    root.append(edges, nodesLayer);
-    const edgeList = [];
-    const addEdge = (a, b, d, extra) => {
-      const path = svg('path', {
-        d, fill: 'none', stroke: 'var(--axis)', 'stroke-width': 1.25, ...extra,
-      });
-      path.dataset.a = a;
-      path.dataset.b = b;
-      edges.append(path);
-      edgeList.push(path);
-    };
-
-    // The spine: sessions in time order.
-    const firstX = xs.get(sessions[0].session_id);
-    const lastX = xs.get(sessions[sessions.length - 1].session_id);
-    edges.append(svg('line', { x1: firstX, y1: spineY, x2: lastX, y2: spineY, stroke: 'var(--axis)', 'stroke-width': 2 }));
-
-    for (const node of prefs) {
-      addEdge(node.id, node.links[0], `M${node.x} ${node.y + 7} L${node.x} ${spineY - 10}`);
-    }
-    for (const node of entities) {
-      for (const link of node.links) {
-        const sx = xs.get(link.slice(2));
-        addEdge(node.id, link, `M${node.x} ${node.y - 8} L${sx} ${spineY + 10}`);
+    const edgeLayer = svg('g');
+    const labelLayer = svg('g');
+    const nodeLayer = svg('g');
+    root.append(edgeLayer, labelLayer, nodeLayer);
+    const edgeEls = [];
+    for (const edge of model.edges) {
+      const fromCenter = edge.from.self || edge.to.self;
+      const path = fromCenter
+        ? svg('line', { x1: edge.from.x, y1: edge.from.y, x2: edge.to.x, y2: edge.to.y })
+        : svg('path', { d: `M${edge.from.x} ${edge.from.y} Q${(edge.from.x + edge.to.x) / 2 + (cx - (edge.from.x + edge.to.x) / 2) * 0.35} ${(edge.from.y + edge.to.y) / 2 + (cy - (edge.from.y + edge.to.y) / 2) * 0.35} ${edge.to.x} ${edge.to.y}`, fill: 'none' });
+      path.setAttribute('stroke', 'var(--axis)');
+      path.setAttribute('stroke-width', edge.fact ? 1.5 : 1);
+      if (!edge.fact) path.setAttribute('stroke-opacity', 0.6);
+      path.dataset.a = edge.from.id;
+      path.dataset.b = edge.to.id;
+      edgeLayer.append(path);
+      edgeEls.push(path);
+      if (edge.fact) {
+        const lx = (edge.from.x + edge.to.x) / 2;
+        const ly = (edge.from.y + edge.to.y) / 2;
+        // Along the spoke, kept upright, so it never crosses a node label.
+        let angle = (Math.atan2(edge.to.y - edge.from.y, edge.to.x - edge.from.x) * 180) / Math.PI;
+        if (angle > 90) angle -= 180;
+        if (angle < -90) angle += 180;
+        const label = svg('text', {
+          x: lx, y: ly - 4, 'text-anchor': 'middle', 'font-size': 10.5, fill: 'var(--ink-2)',
+          stroke: 'var(--surface)', 'stroke-width': 3, 'paint-order': 'stroke',
+          transform: fromCenter ? `rotate(${angle.toFixed(1)} ${lx} ${ly})` : null,
+        }, humanize(edge.fact.predicate));
+        label.dataset.a = edge.from.id;
+        label.dataset.b = edge.to.id;
+        labelLayer.append(label);
+        edgeEls.push(label);
       }
     }
-    const nodeGroups = [];
-    const addNode = (node, label, sublabel, build) => {
-      const group = svg('g', { class: 'node', tabindex: 0, role: 'button', 'aria-label': `${label}${sublabel ? `, ${sublabel}` : ''}` });
+
+    const groups = [];
+    const addNode = (node) => {
+      const group = svg('g', { class: 'node', tabindex: 0, role: 'img' });
       group.dataset.id = node.id;
-      group.append(svg('circle', { class: 'node-hit', cx: node.x, cy: node.y, r: 15, fill: 'transparent' }));
-      group.append(marker(node.kind, node.x, node.y, node.hollow));
-      const text = svg('text', {
-        x: node.x + 13, y: node.y, 'dominant-baseline': 'middle', 'font-size': 13,
-        fill: node.hollow ? 'var(--muted)' : 'var(--ink)',
-        'text-decoration': node.hollow ? 'line-through' : null,
-        'font-weight': node.selected ? 650 : null,
-      }, label);
-      if (sublabel) text.append(svg('tspan', { fill: 'var(--muted)', 'font-size': 11.5, dx: 6 }, sublabel));
-      group.append(text);
-      bindTip(group, build);
+      group.append(svg('circle', { class: 'node-hit', cx: node.x, cy: node.y, r: 14, fill: 'transparent' }));
+      group.append(nodeShape(node, node.x, node.y));
+      const typeLabel = node.self ? 'Analyst' : TYPE_LABEL[node.type] || humanize(node.type).toLowerCase() || 'Entity';
+      if (node.self) {
+        group.append(svg('text', { x: node.x, y: node.y + 30, 'text-anchor': 'middle', 'font-size': 13, 'font-weight': 650, fill: 'var(--ink)', stroke: 'var(--surface)', 'stroke-width': 3, 'paint-order': 'stroke' }, node.name));
+      } else {
+        const cos = Math.cos(node.angle);
+        const anchor = cos > 0.25 ? 'start' : cos < -0.25 ? 'end' : 'middle';
+        const dx = anchor === 'start' ? 12 : anchor === 'end' ? -12 : 0;
+        const dy = anchor === 'middle' ? (Math.sin(node.angle) < 0 ? -16 : 20) : -1;
+        const lines = wrapLabel(node.name, 20);
+        const text = svg('text', { x: node.x + dx, y: node.y + dy, 'text-anchor': anchor, 'font-size': 12.5, fill: 'var(--ink)', stroke: 'var(--surface)', 'stroke-width': 3, 'paint-order': 'stroke' });
+        lines.forEach((line, i) => text.append(svg('tspan', { x: node.x + dx, dy: i ? 14 : 0 }, line)));
+        group.append(text);
+        group.append(svg('text', { x: node.x + dx, y: node.y + dy + 13 + 14 * (lines.length - 1), 'text-anchor': anchor, 'font-size': 10.5, fill: 'var(--muted)' }, `${typeLabel}${node.mentions.length ? ` · ${plural(node.mentions.length, 'mention')}` : ''}`));
+      }
+      const days = [...new Set(node.mentions.map((m) => sessionLabel(m.session_id).split(',')[0]))];
+      group.setAttribute('aria-label', `${node.name}, ${typeLabel}`);
+      bindTip(group, () => [
+        node.name,
+        [
+          typeLabel,
+          ...node.facts.slice(0, 4).map((f) => f.statement || `${f.subject} ${humanize(f.predicate)} ${f.object}`),
+          node.mentions.length ? `Mentioned on ${days.join(', ')}` : null,
+        ],
+        node.mentions.length ? `First from span ${shortId(node.mentions[0].span_id)}` : null,
+      ]);
       group.addEventListener('pointerenter', () => highlight(node.id));
       group.addEventListener('focus', () => highlight(node.id));
       group.addEventListener('pointerleave', () => highlight(null));
       group.addEventListener('blur', () => highlight(null));
-      nodesLayer.append(group);
-      nodeGroups.push(group);
-      return group;
+      nodeLayer.append(group);
+      groups.push(group);
     };
-
-    sessions.forEach((session, i) => {
-      const x = xs.get(session.session_id);
-      const node = { id: `s:${session.session_id}`, kind: 'session', x, y: spineY, selected: session.session_id === state.sessionId };
-      if (node.selected) {
-        nodesLayer.append(svg('circle', { cx: x, cy: spineY, r: 12, fill: 'none', stroke: 'var(--session)', 'stroke-width': 1.5 }));
-      }
-      const turns = user.traces.filter((t) => t.session_id === session.session_id);
-      const group = addNode(node, '', null, () => [
-        `Session ${i + 1}`,
-        [
-          session.session_id,
-          `Started ${when(session.created_at)}`,
-          `${plural(turns.length, 'turn')}, ${plural(session.messages.length, 'message')}`,
-        ],
-        `${plural(session.row_count, 'row')} in agent_events`,
-      ]);
-      group.setAttribute('aria-label', `Session ${i + 1}, started ${clock(session.created_at)}`);
-      group.querySelector('text').remove();
-      // Edges reach a session from above (preferences, vertical) and from
-      // the lower left (entities first seen earlier), so the labels sit in
-      // the two free quadrants on the right.
-      group.append(
-        svg('text', { x: x + 12, y: spineY - 12, 'dominant-baseline': 'middle', 'font-size': 12.5, fill: 'var(--ink)', 'font-weight': node.selected ? 650 : 500 }, `Session ${i + 1}`),
-        svg('text', { x: x + 12, y: spineY + 14, 'dominant-baseline': 'middle', 'font-size': 11, fill: 'var(--muted)' }, clock(session.created_at)),
-      );
-      group.addEventListener('click', () => selectSession(session.session_id));
-      group.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          selectSession(session.session_id);
-        }
-      });
-    });
-
-    for (const node of prefs) {
-      const pref = node.pref;
-      node.hollow = Boolean(pref.valid_until);
-      const replacedBy = prefs.find(
-        (other) => other.pref.category === pref.category && other.pref.valid_from === pref.valid_until,
-      );
-      const replaced = prefs.find(
-        (other) => other.pref.category === pref.category && other.pref.valid_until === pref.valid_from,
-      );
-      node.group = addNode(node, `${pref.category} = ${pref.preference}`, null, () => [
-        `${pref.category} = ${pref.preference}`,
-        [
-          `Saved in ${sessionLabel(pref.session_id)}, ${when(pref.valid_from)}`,
-          replacedBy
-            ? `Replaced by ${replacedBy.pref.preference}, ${when(pref.valid_until)}`
-            : 'Current value',
-          replaced ? `Replaced ${replaced.pref.preference}` : null,
-        ],
-        `STATE_DELTA row, span ${shortId(pref.span_id)}`,
-      ]);
+    model.ring.forEach(addNode);
+    addNode(model.center);
+    if (!model.ring.length) {
+      root.append(svg('text', { x: cx, y: cy + 52, 'text-anchor': 'middle', 'font-size': 12.5, fill: 'var(--muted)' }, 'No extracted entities yet'));
     }
-
-    // Replacements: a short arc from the end of each superseded version's
-    // label to the version that replaced it (measured after layout).
-    for (const node of prefs) {
-      const next = prefs.find(
-        (other) => other.pref.category === node.pref.category && other.pref.valid_from === node.pref.valid_until,
-      );
-      if (!next) continue;
-      const label = node.group.querySelector('text');
-      const startX = label.getBBox().x + label.getBBox().width + 8;
-      const endX = next.x - 12;
-      if (endX - startX < 24) continue;
-      const peak = Math.min(node.y, next.y) - 16;
-      addEdge(
-        node.id,
-        next.id,
-        `M${startX} ${node.y} Q${(startX + endX) / 2} ${peak - 8} ${endX} ${next.y}`,
-        { 'marker-end': 'url(#arrow)', stroke: 'var(--muted)' },
-      );
-      nodesLayer.append(
-        svg('text', {
-          x: (startX + endX) / 2, y: peak - 8, 'text-anchor': 'middle',
-          fill: 'var(--muted)', 'font-size': 11.5,
-        }, `replaced ${when(node.pref.valid_until)}`),
-      );
-    }
-
-    for (const node of entities) {
-      const entity = node.entity;
-      const calls = entity.mentions.length;
-      addNode(node, entity.name, plural(calls, 'call'), () => [
-        entity.name,
-        [
-          `${entity.entity_type}, named in tool arguments`,
-          `${plural(calls, 'tool call')} in ${node.links.map((l) => sessionLabel(l.slice(2))).join(', ')}`,
-          ...entity.mentions.slice(0, 4).map((m) => `${m.tool_name}(${m.argument}=…), ${clock(m.timestamp)}`),
-        ],
-        `TOOL_STARTING rows, first span ${shortId(entity.mentions[0].span_id)}`,
-      ]);
+    if (model.hidden) {
+      root.append(svg('text', { x: width - 4, y: height - 6, 'text-anchor': 'end', 'font-size': 11.5, fill: 'var(--muted)' }, `+${model.hidden} more in the table view`));
     }
 
     function highlight(id) {
       const linked = new Set(id ? [id] : []);
       if (id) {
-        for (const edge of edgeList) {
-          if (edge.dataset.a === id) linked.add(edge.dataset.b);
-          if (edge.dataset.b === id) linked.add(edge.dataset.a);
+        for (const e of edgeEls) {
+          if (e.dataset.a === id) linked.add(e.dataset.b);
+          if (e.dataset.b === id) linked.add(e.dataset.a);
         }
       }
-      for (const edge of edgeList) {
-        const hot = id && (edge.dataset.a === id || edge.dataset.b === id);
-        edge.classList.toggle('dimmed', Boolean(id) && !hot);
-        edge.setAttribute('stroke-width', hot ? 2 : 1.25);
+      for (const e of edgeEls) {
+        const hot = id && (e.dataset.a === id || e.dataset.b === id);
+        e.classList.toggle('dimmed', Boolean(id) && !hot);
       }
-      for (const group of nodeGroups) {
-        group.classList.toggle('dimmed', Boolean(id) && !linked.has(group.dataset.id));
-      }
+      for (const g of groups) g.classList.toggle('dimmed', Boolean(id) && !linked.has(g.dataset.id));
     }
+    renderMemoryLists();
+  }
+
+  function sourceButton(text, sessionId, spanId, extra) {
+    return el(
+      'button',
+      { type: 'button', class: 'link', onclick: () => selectSession(sessionId), title: `Open ${sessionLabel(sessionId)}` },
+      el('span', { class: 'stmt', text }),
+      ' ',
+      el('span', { class: 'src', text: `[${shortId(spanId)}]` }),
+      extra || null,
+    );
+  }
+
+  function renderMemoryLists() {
+    const user = state.user;
+    const facts = [...user.facts];
+    const seen = new Set();
+    const distinct = [];
+    for (const f of facts.reverse()) {
+      const key = [f.subject, f.predicate, f.object].map(entityKey).join('|');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      distinct.push(f);
+    }
+    distinct.reverse();
+    const byCategory = new Map();
+    for (const p of user.preferences) {
+      if (!byCategory.has(p.category)) byCategory.set(p.category, []);
+      byCategory.get(p.category).push(p);
+    }
+    const dayOf = (sessionId) => sessionLabel(sessionId).split(',')[0];
+    document.getElementById('memory-lists').replaceChildren(
+      el(
+        'div',
+        {},
+        el('h3', { text: `Preferences the agent saved (${user.preferences.length} versions)` }),
+        el(
+        'ul',
+        { class: 'item-list' },
+        ...[...byCategory.entries()].map(([category, versions]) =>
+          el(
+            'li',
+            {},
+            el('span', { class: 'when', text: dayOf(versions[versions.length - 1].session_id) }),
+            el(
+              'span',
+              { class: 'pref-versions' },
+              el('span', { class: 'pref-key', text: `${humanize(category)}:` }),
+              ...versions.flatMap((p, i) => {
+                const version = sourceButton(String(p.preference), p.session_id, p.span_id);
+                // A replaced version is struck through; the last one is current.
+                if (p.valid_until) version.querySelector('.stmt').classList.add('pref-old');
+                return i ? [el('span', { class: 'src', text: '→' }), version] : [version];
+              }),
+            ),
+          ),
+        ),
+      ),
+      ),
+      el(
+        'div',
+        {},
+        el('h3', { text: `Facts extracted from the conversations (${distinct.length})` }),
+        distinct.length
+          ? el(
+              'ul',
+              { class: 'item-list' },
+              ...distinct.map((f) =>
+                el('li', {}, el('span', { class: 'when', text: dayOf(f.session_id) }), sourceButton(f.statement || `${f.subject} ${humanize(f.predicate)} ${f.object}`, f.session_id, f.span_id)),
+              ),
+            )
+          : el('p', { class: 'hint', text: 'None yet: facts are extracted after each day.' }),
+      ),
+    );
   }
 
   function renderGraphTable() {
     const user = state.user;
     const rows = [
-      ...user.sessions.map((s, i) => [
-        'Session', `Session ${i + 1} (${s.session_id})`, `Session ${i + 1}`, when(s.created_at), '', `${plural(s.row_count, 'row')}`,
-      ]),
       ...user.preferences.map((p) => [
         'Preference',
         `${p.category} = ${p.preference}`,
         sessionLabel(p.session_id),
-        when(p.valid_from),
-        p.valid_until ? when(p.valid_until) : 'current',
+        p.valid_until ? `replaced ${when(p.valid_until)}` : 'current',
         `STATE_DELTA span ${p.span_id}`,
       ]),
+      ...user.facts.map((f) => [
+        'Fact',
+        f.statement || `${f.subject} ${f.predicate} ${f.object}`,
+        sessionLabel(f.session_id),
+        `${f.subject} → ${humanize(f.predicate)} → ${f.object}`,
+        `USER_MESSAGE_RECEIVED span ${f.span_id}`,
+      ]),
       ...user.entities.map((e) => [
-        `Entity (${e.entity_type})`,
+        `Entity (${TYPE_LABEL[e.entity_type] || e.entity_type})`,
         e.name,
-        [...new Set(e.mentions.map((m) => sessionLabel(m.session_id)))].join(', '),
-        when(e.mentions[0].timestamp),
-        '',
-        `${plural(e.mentions.length, 'TOOL_STARTING row')}`,
+        [...new Set(e.mentions.map((m) => sessionLabel(m.session_id)))].join('; '),
+        plural(e.mentions.length, 'mention'),
+        `span ${e.mentions[0] ? e.mentions[0].span_id : ''}`,
       ]),
     ];
-    document.getElementById('graph-table').replaceChildren(
-      table(['Kind', 'Item', 'Sessions', 'From', 'Until', 'Source rows'], rows),
-    );
-  }
-
-  function table(headers, rows) {
-    return el(
-      'table',
-      {},
-      el('thead', {}, el('tr', {}, ...headers.map((h) => el('th', { scope: 'col', text: h })))),
-      el('tbody', {}, ...rows.map((row) => el('tr', {}, ...row.map((cell) => el('td', { text: cell }))))),
-    );
+    document.getElementById('graph-table').replaceChildren(table(['Kind', 'Item', 'Where', 'Detail', 'Source row'], rows));
   }
 
   // ---------------------------------------------------- reasoning traces
@@ -666,6 +1145,8 @@
   function renderTrace(trace, index) {
     const outcome = OUTCOME[trace.outcome_status] || OUTCOME.unanswered;
     const tools = trace.timeline.filter((r) => r.kind === 'tool').length;
+    const sql = trace.sql_queries ? `, ${plural(trace.sql_queries, 'SQL query')}${trace.sql_errors ? ` (${trace.sql_errors} failed)` : ''}` : '';
+    const recalled = trace.recall ? trace.recall.sessions : [];
     const article = el(
       'article',
       { class: 'trace', 'aria-label': `Turn ${index + 1}` },
@@ -681,33 +1162,34 @@
         ),
         el('span', {
           class: 'trace-facts',
-          text: `${duration(trace.latency_ms)}, ${plural(trace.llm_calls, 'model call')}, ${plural(tools, 'tool call')}, ${plural(trace.total_tokens, 'token')}`,
+          text: `${duration(trace.latency_ms)}, ${plural(trace.llm_calls, 'model call')}, ${plural(tools, 'tool call')}${sql}, ${plural(trace.total_tokens, 'token')}`,
         }),
         el('p', { class: 'trace-task', text: `“${trace.task || ''}”` }),
+        recalled.length
+          ? el('p', { class: 'recalled' }, 'Recall cited', ...recalled.map((sid) => el('button', { type: 'button', class: 'chip', text: sessionLabel(sid), onclick: () => openSession(sid) })))
+          : null,
       ),
     );
     const figure = el('div', { class: 'figure' });
     article.append(figure);
-    article.append(
-      el(
-        'p',
-        { class: 'trace-outcome' },
-        el('strong', { text: trace.outcome ? 'Answer: ' : 'No answer: ' }),
-        trace.outcome || trace.errors[0] || 'the turn ended without a text reply.',
-      ),
-    );
-    // Size against the panel, since the article is not in the DOM yet.
+    const outcomeBox = el('div', { class: 'trace-outcome' }, el('strong', { text: trace.outcome ? 'Answer' : 'No answer' }));
+    outcomeBox.append(trace.outcome ? markdown(trace.outcome) : el('p', { text: trace.errors[0] || 'the turn ended without a text reply.' }));
+    article.append(outcomeBox);
     const width = Math.max(520, document.getElementById('traces').clientWidth);
     figure.append(waterfall(trace, width));
     return article;
   }
 
+  function toolDetail(row) {
+    return row.detail ? (row.detail.length > 260 ? `${row.detail.slice(0, 259)}…` : row.detail) : null;
+  }
+
   function waterfall(trace, width) {
     const rows = trace.timeline;
-    const ROW = 26;
+    const ROW = 24;
     const top = 4;
     const axisH = 24;
-    const labelW = Math.min(260, Math.round(width * 0.34));
+    const labelW = Math.min(250, Math.round(width * 0.3));
     const x0 = labelW + 10;
     const x1 = width - 64;
     const end = Math.max(trace.latency_ms || 0, ...rows.map((r) => (r.end_ms === null ? r.start_ms : r.end_ms)), 1);
@@ -731,7 +1213,6 @@
       const isTool = row.kind === 'tool';
       const status = isTool ? TOOL_STATUS[row.status] || TOOL_STATUS.pending : null;
       const group = svg('g', { tabindex: 0, role: 'img' });
-      // Tree: tool calls hang off the model call that requested them.
       if (isTool && parentY !== null) {
         group.append(svg('path', { d: `M8 ${parentY + 7} L8 ${y} L18 ${y}`, fill: 'none', stroke: 'var(--axis)' }));
       }
@@ -745,9 +1226,9 @@
       const label = isTool ? row.label : `Model: ${row.label}${incomplete ? ' (incomplete)' : ''}`;
       group.append(
         svg('text', {
-          x: labelX + (isTool ? 18 : 0), y, 'dominant-baseline': 'middle', 'font-size': 12.5,
+          x: labelX + (isTool ? 18 : 0), y, 'dominant-baseline': 'middle', 'font-size': 12,
           fill: isTool ? 'var(--ink)' : 'var(--ink-2)', 'font-weight': isTool ? 600 : null,
-        }, label.length > 34 ? `${label.slice(0, 33)}…` : label),
+        }, label.length > 32 ? `${label.slice(0, 31)}…` : label),
       );
       const start = scale(row.start_ms);
       const stop = scale(row.end_ms === null ? row.start_ms : row.end_ms);
@@ -759,7 +1240,7 @@
       }));
       const span = row.end_ms === null ? null : row.end_ms - row.start_ms;
       group.append(svg('text', {
-        x: start + barW + 6, y, 'dominant-baseline': 'middle', 'font-size': 11.5, fill: 'var(--muted)',
+        x: start + barW + 6, y, 'dominant-baseline': 'middle', 'font-size': 11, fill: 'var(--muted)',
       }, row.end_ms === null ? 'no completion row' : duration(span)));
       group.append(svg('rect', { x: 0, y: y - ROW / 2, width, height: ROW, fill: 'transparent' }));
       group.setAttribute('aria-label', `${label}, ${isTool ? status.label : `model call ${row.status}`}, ${duration(span)}`);
@@ -769,7 +1250,7 @@
           isTool
             ? `${row.label} ${status.label}`
             : `Model call (${row.label})${incomplete ? ': no terminal response row, so not an answer' : ''}`,
-          row.detail ? (row.detail.length > 220 ? `${row.detail.slice(0, 219)}…` : row.detail) : null,
+          toolDetail(row),
           `Started ${duration(row.start_ms)} into the turn`,
         ],
         `${isTool ? 'TOOL_*' : 'LLM_*'} rows, span ${shortId(row.span_id)}`,
@@ -806,6 +1287,15 @@
 
   function renderContext() {
     const user = state.user;
+    const trace = user.traces.find((t) => t.session_id === state.sessionId && t.recall);
+    if (trace) {
+      document.getElementById('context-h').textContent = `What the agent read in ${sessionLabel(state.sessionId)}`;
+      document.getElementById('context-hint').textContent =
+        'What recall_memory returned at the start of this turn, read from BigQuery: saved preferences, extracted facts and entities, similar past analyses with the SQL that answered them, and earlier failures. Each line names the session and span it came from.';
+      document.getElementById('context').textContent = trace.recall.text;
+      return;
+    }
+    document.getElementById('context-h').textContent = 'What the agent reads next';
     document.getElementById('context-hint').textContent =
       `The get_context() block for ${sessionLabel(user.current_session_id)}, the latest session: all three layers in one prompt, each line tagged with the session and span of the rows it came from.`;
     document.getElementById('context').textContent = user.context;

@@ -26,7 +26,9 @@ user message, model response, tool call and state change to
   ``USER_MESSAGE_RECEIVED`` rows and the text parts of ``LLM_RESPONSE`` rows;
 * long-term: ADK ``user:``-scoped session state, read from ``STATE_DELTA``
   rows and kept as a version history, plus the entities the agent passed to
-  its tools;
+  its tools. Facts and entities extracted from the conversations by a
+  separate job (``memory_consolidation.py`` runs ``AI.GENERATE`` over the
+  same rows) can be passed in as well;
 * reasoning: one trace per ADK invocation, with a step per model turn, the
   tool calls that turn made, and a derived outcome.
 
@@ -41,7 +43,7 @@ from datetime import datetime
 from datetime import timezone
 import json
 import re
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from bigquery_agent_analytics import Client
 from bigquery_agent_analytics import Span
@@ -73,6 +75,10 @@ _MAX_STEPS = 8192
 # google-adk 2.11 writes these attributes only on a terminal (non-partial)
 # LLM_RESPONSE; streaming fragments carry neither.
 _TERMINAL_MARKERS = ("cache_type", "finish_reason")
+
+# Long outcomes and tool arguments are shortened in get_context().
+_OUTCOME_LIMIT = 400
+_REUSE_LIMIT = 1500
 
 _STOP_WORDS = frozenset(
     {
@@ -133,13 +139,19 @@ class Message:
 
 @dataclasses.dataclass(frozen=True)
 class SessionInfo:
-  """A session with its time range and message count."""
+  """A session with its time range and message count.
+
+  ``state`` is the session-scoped state the plugin logged with the
+  session's first row (``attributes.session_metadata.state``), without the
+  ``user:``, ``app:`` and ``temp:`` keys.
+  """
 
   session_id: str
   created_at: datetime
   updated_at: datetime
   message_count: int
   first_message_preview: Optional[str]
+  state: Mapping[str, Any] = dataclasses.field(default_factory=dict, hash=False)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -161,13 +173,19 @@ class Preference:
 
 @dataclasses.dataclass(frozen=True)
 class EntityMention:
-  """A tool call that received an entity as an argument."""
+  """Where an entity appeared.
 
-  tool_name: str
-  argument: str
+  ``source`` is ``"tool"`` for a tool call that received the entity as an
+  argument (``tool_name`` and ``argument`` say which), or ``"extracted"``
+  for a message it was extracted from.
+  """
+
+  tool_name: Optional[str]
+  argument: Optional[str]
   session_id: str
   span_id: Optional[str]
   timestamp: datetime
+  source: str = "tool"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -188,8 +206,43 @@ class Entity:
 
 
 @dataclasses.dataclass(frozen=True)
+class Fact:
+  """A fact extracted from a message, with the row it came from.
+
+  ``subject``, ``predicate`` and ``object`` hold the relation (for example
+  "Maya Chen", "owns_category", "Jeans"), and ``statement`` the same fact
+  as a sentence.
+  """
+
+  subject: str
+  subject_type: str
+  predicate: str
+  object: str
+  object_type: str
+  statement: str
+  session_id: str
+  span_id: Optional[str]
+  observed_at: datetime
+
+
+@dataclasses.dataclass(frozen=True)
+class ExtractedEntity:
+  """An entity named in a message, as extracted from it."""
+
+  name: str
+  entity_type: str
+  session_id: str
+  span_id: Optional[str]
+  observed_at: datetime
+
+
+@dataclasses.dataclass(frozen=True)
 class ToolCall:
-  """A tool call: ``TOOL_STARTING`` paired with its completion or error."""
+  """A tool call: ``TOOL_STARTING`` paired with its completion or error.
+
+  A completion whose result is a dict with ``"status": "error"`` (a tool
+  that reports a failure instead of raising) counts as an error too.
+  """
 
   tool_name: str
   arguments: dict[str, Any]
@@ -600,13 +653,21 @@ def _tool_call(session_id: str, start: Optional[Span], end: Span) -> ToolCall:
   tool = end.content.get("tool") or start_content.get("tool") or "unknown"
   arguments = start_content.get("args") or end.content.get("args") or {}
   failed = end.event_type == "TOOL_ERROR" or end.is_error
+  result = None if failed else end.content.get("result")
+  reported = isinstance(result, dict) and result.get("status") == "error"
+  if failed:
+    error = end.error_message or "tool error"
+  elif reported:
+    error = str(result.get("message") or "the tool reported an error")
+  else:
+    error = None
   return ToolCall(
       tool_name=tool,
       arguments=dict(arguments),
-      result=None if failed else end.content.get("result"),
-      status="error" if failed else "success",
+      result=result,
+      status="error" if failed or reported else "success",
       duration_ms=end.latency_ms,
-      error=(end.error_message or "tool error") if failed else None,
+      error=error,
       session_id=session_id,
       span_id=end.span_id or (start.span_id if start is not None else None),
       started_at=start.timestamp if start is not None else end.timestamp,
@@ -765,6 +826,24 @@ def lexical_similarity(a: Optional[str], b: Optional[str]) -> float:
   return len(left & right) / len(left | right)
 
 
+def _session_state(spans: list[Span]) -> dict[str, Any]:
+  """Session-scoped state from the first row that logged session metadata."""
+  for span in spans:
+    metadata = span.attributes.get("session_metadata")
+    state = metadata.get("state") if isinstance(metadata, dict) else None
+    if isinstance(state, dict):
+      return {
+          key: value
+          for key, value in state.items()
+          if not key.startswith((USER_STATE_PREFIX, "app:", "temp:"))
+      }
+  return {}
+
+
+def _entity_key(name: str, entity_type: str) -> tuple[str, str]:
+  return (" ".join(name.split()).casefold(), entity_type.strip().upper())
+
+
 def _utc(value: datetime) -> str:
   return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -805,6 +884,7 @@ class ShortTermMemory:
               updated_at=spans[-1].timestamp,
               message_count=len(messages),
               first_message_preview=_preview(first),
+              state=_session_state(spans),
           )
       )
     sessions.sort(key=lambda s: s.updated_at, reverse=True)
@@ -812,13 +892,23 @@ class ShortTermMemory:
 
 
 class LongTermMemory:
-  """User-scoped state with history, and the entities tools acted on."""
+  """User-scoped state with history, entities, and extracted facts."""
 
   def __init__(
-      self, traces: list[Trace], entity_args: Mapping[str, str]
+      self,
+      traces: list[Trace],
+      entity_args: Mapping[str, str],
+      facts: Iterable[Fact] = (),
+      extracted_entities: Iterable[ExtractedEntity] = (),
   ) -> None:
     self._traces = traces
     self._entity_args = dict(entity_args)
+    self._facts = sorted(facts, key=lambda f: f.observed_at)
+    self._extracted = list(extracted_entities)
+
+  def get_facts(self) -> list[Fact]:
+    """Extracted facts, oldest first."""
+    return list(self._facts)
 
   def get_preference_history(self) -> list[Preference]:
     """Every version of every ``user:`` key, oldest first."""
@@ -874,12 +964,15 @@ class LongTermMemory:
     return current
 
   def get_entities(self) -> list[Entity]:
-    """Entities named by the configured tool arguments, most used first.
+    """Entities from tool arguments and extraction, most mentioned first.
 
     The application declares which tool arguments hold entities and their
-    type, e.g. ``{"city": "LOCATION"}``. Only string values are used.
+    type, e.g. ``{"city": "LOCATION"}``; only string values are used.
+    Extracted entities are added with ``source="extracted"``. Names that
+    differ only in case or spacing are one entity, shown as first seen.
     """
     mentions: dict[tuple[str, str], list[EntityMention]] = {}
+    names: dict[tuple[str, str], tuple[str, str]] = {}
     for trace in self._traces:
       for span in _ordered_spans(trace):
         if span.event_type != "TOOL_STARTING":
@@ -890,7 +983,9 @@ class LongTermMemory:
         for argument, entity_type in self._entity_args.items():
           value = args.get(argument)
           if isinstance(value, str) and value.strip():
-            mentions.setdefault((value.strip(), entity_type), []).append(
+            key = _entity_key(value, entity_type)
+            names.setdefault(key, (value.strip(), entity_type))
+            mentions.setdefault(key, []).append(
                 EntityMention(
                     tool_name=span.content.get("tool") or "unknown",
                     argument=argument,
@@ -899,11 +994,24 @@ class LongTermMemory:
                     timestamp=span.timestamp,
                 )
             )
+    for item in sorted(self._extracted, key=lambda e: e.observed_at):
+      if not item.name.strip():
+        continue
+      key = _entity_key(item.name, item.entity_type)
+      names.setdefault(key, (item.name.strip(), item.entity_type.strip()))
+      mentions.setdefault(key, []).append(
+          EntityMention(
+              tool_name=None,
+              argument=None,
+              session_id=item.session_id,
+              span_id=item.span_id,
+              timestamp=item.observed_at,
+              source="extracted",
+          )
+      )
     entities = [
-        Entity(
-            name, entity_type, tuple(sorted(found, key=lambda m: m.timestamp))
-        )
-        for (name, entity_type), found in mentions.items()
+        Entity(*names[key], tuple(sorted(found, key=lambda m: m.timestamp)))
+        for key, found in mentions.items()
     ]
     entities.sort(key=lambda e: e.name)
     entities.sort(key=lambda e: e.last_seen, reverse=True)
@@ -962,13 +1070,24 @@ class ReasoningMemory:
       success_only: bool = True,
       threshold: float = 0.2,
       exclude_session_id: Optional[str] = None,
+      scores: Optional[Mapping[str, float]] = None,
   ) -> list[SimilarTrace]:
-    """Past traces whose task shares words with ``task``, best first."""
+    """Past traces similar to ``task``, best first.
+
+    By default similarity is the word overlap of the two tasks. Pass
+    ``scores`` (trace id to similarity, for example from an embedding
+    search) to rank by those instead; traces without a score are skipped.
+    """
     scored = []
     for rt in self.list_traces(success_only=True if success_only else None):
       if exclude_session_id is not None and rt.session_id == exclude_session_id:
         continue
-      score = lexical_similarity(task, rt.task)
+      if scores is None:
+        score = lexical_similarity(task, rt.task)
+      elif rt.trace_id in scores:
+        score = scores[rt.trace_id]
+      else:
+        continue
       if score >= threshold:
         scored.append(SimilarTrace(rt, score))
     scored.sort(key=lambda s: s.similarity, reverse=True)
@@ -1018,21 +1137,36 @@ class UserMemory:
       traces: list[Trace],
       *,
       entity_args: Optional[Mapping[str, str]] = None,
+      facts: Iterable[Fact] = (),
+      extracted_entities: Iterable[ExtractedEntity] = (),
   ) -> None:
     self.user_id = user_id
     self.traces = list(traces)
     self.short_term = ShortTermMemory(self.traces)
-    self.long_term = LongTermMemory(self.traces, entity_args or {})
+    self.long_term = LongTermMemory(
+        self.traces, entity_args or {}, facts, extracted_entities
+    )
     self.reasoning = ReasoningMemory(self.traces)
 
   def get_context(
-      self, query: str, *, session_id: str, max_items: int = 5
+      self,
+      query: str,
+      *,
+      session_id: str,
+      max_items: int = 5,
+      scores: Optional[Mapping[str, float]] = None,
+      threshold: Optional[float] = None,
+      reuse_tools: Iterable[str] = (),
   ) -> str:
     """A prompt-ready block combining the three layers.
 
     Every line ends with ``[session/span]`` source references (several for
     an entity, the newest ``max_items`` of them) so each fact in the model's
-    context can be traced back to the rows it came from.
+    context can be traced back to the rows it came from. ``scores`` and
+    ``threshold`` go to ``get_similar_traces``. For tools named in
+    ``reuse_tools``, a similar past task also shows its last successful
+    call of such a tool, with the arguments (the SQL that answered, say),
+    so the model can adapt it instead of starting over.
     """
     lines = [f"# Memory for user {self.user_id}", ""]
 
@@ -1065,34 +1199,79 @@ class UserMemory:
       )
     lines += entries or ["- (none)"]
 
-    lines += ["", "## Long-term: entities the agent acted on"]
+    facts = self.long_term.get_facts()
+    if facts:
+      # One line per distinct relation, from its newest source.
+      newest: dict[tuple[str, str, str], Fact] = {}
+      for fact in facts:
+        relation = (fact.subject, fact.predicate, fact.object)
+        newest[tuple(part.casefold() for part in relation)] = fact
+      shown_facts = sorted(newest.values(), key=lambda f: f.observed_at)
+      lines += ["", "## Long-term: facts from earlier conversations"]
+      lines += [
+          f"- {f.statement or f'{f.subject} {f.predicate} {f.object}'}"
+          f" [{f.session_id}/{f.span_id}]"
+          for f in shown_facts[-2 * max_items :]
+      ]
+
+    entities = self.long_term.get_entities()
+    from_tools = all(m.source == "tool" for e in entities for m in e.mentions)
+    lines.append("")
+    lines.append(
+        "## Long-term: entities the agent acted on"
+        if from_tools
+        else "## Long-term: entities from conversations and tool calls"
+    )
     entries = []
-    for entity in self.long_term.get_entities()[:max_items]:
+    for entity in entities[:max_items]:
       shown = entity.mentions[-max_items:]
       older = len(entity.mentions) - len(shown)
       sources = [f"{m.session_id}/{m.span_id}" for m in shown]
       if older:
         sources.insert(0, f"+{older} earlier")
       count = len(entity.mentions)
+      if all(m.source == "tool" for m in entity.mentions):
+        noun = f"tool call{'s' if count != 1 else ''}"
+      else:
+        noun = f"mention{'s' if count != 1 else ''}"
       entries.append(
-          f"- {entity.name} ({entity.entity_type}): {count} tool"
-          f" call{'s' if count != 1 else ''} [{', '.join(sources)}]"
+          f"- {entity.name} ({entity.entity_type}): {count} {noun}"
+          f" [{', '.join(sources)}]"
       )
     lines += entries or ["- (none)"]
 
     lines += ["", "## Reasoning: similar past tasks that succeeded"]
     similar = self.reasoning.get_similar_traces(
-        query, limit=max_items, exclude_session_id=session_id
+        query,
+        limit=max_items,
+        exclude_session_id=session_id,
+        scores=scores,
+        **({} if threshold is None else {"threshold": threshold}),
     )
+    reuse = frozenset(reuse_tools)
     entries = []
     for match in similar:
       rt = match.trace
       tools = ", ".join(dict.fromkeys(c.tool_name for c in rt.tool_calls))
       entries.append(
           f'- {match.similarity:.2f} trace {rt.trace_id}: "{rt.task}" ->'
-          f' {tools or "no tools"} -> "{rt.outcome}"'
+          f' {tools or "no tools"} -> "{_preview(rt.outcome, _OUTCOME_LIMIT)}"'
           f" [{rt.session_id}/{rt.outcome_span_id}]"
       )
+      call = next(
+          (
+              c
+              for c in reversed(rt.tool_calls)
+              if c.tool_name in reuse and c.status == "success"
+          ),
+          None,
+      )
+      if call is not None:
+        args = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)
+        entries.append(
+            f"  reuse: {call.tool_name}({_preview(args, _REUSE_LIMIT)})"
+            f" [{call.session_id}/{call.span_id}]"
+        )
     lines += entries or ["- (none)"]
 
     lines += ["", "## Reasoning: tools that failed before"]
@@ -1115,14 +1294,24 @@ def load_user_memory(
     since: Optional[datetime] = None,
     limit: int = 100,
     entity_args: Optional[Mapping[str, str]] = None,
+    facts: Iterable[Fact] = (),
+    extracted_entities: Iterable[ExtractedEntity] = (),
 ) -> UserMemory:
   """Reads one user's traces with a single ``Client.list_traces`` call.
 
   The ``user_id`` pin is applied in SQL, so other users' rows are never
   fetched. It is a filter, not an access control: restrict who can read
-  the table with BigQuery IAM or row-level security.
+  the table with BigQuery IAM or row-level security. Extracted ``facts``
+  and ``extracted_entities`` are not read here; pass this user's, as loaded
+  by ``memory_consolidation.load_memory_items``.
   """
   traces = client.list_traces(
       TraceFilter(user_id=user_id, start_time=since, limit=limit)
   )
-  return UserMemory(user_id, traces, entity_args=entity_args)
+  return UserMemory(
+      user_id,
+      traces,
+      entity_args=entity_args,
+      facts=facts,
+      extracted_entities=extracted_entities,
+  )

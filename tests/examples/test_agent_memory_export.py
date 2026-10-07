@@ -22,11 +22,13 @@ BigQuery stand-in; expected values are written out from the fixture rows.
 from __future__ import annotations
 
 import copy
+import dataclasses
 from datetime import datetime
 from datetime import timezone
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -131,6 +133,7 @@ def test_user_export_keeps_preference_versions_and_entities(ana):
       "session_id": "s-103",
       "span_id": "sp-103-tool-2",
       "timestamp": "2026-10-04T18:00:01.475Z",
+      "source": "tool",
   }
 
 
@@ -212,7 +215,8 @@ def test_export_is_plain_json_with_a_context_block(fixture, ana):
   )
 
   assert json.loads(json.dumps(export)) == export
-  assert export["schema"] == "bqaa-agent-memory-viz/1"
+  assert export["schema"] == "bqaa-agent-memory-viz/2"
+  assert (export["run"], export["comparisons"]) == (None, [])
   assert ana["context"].startswith("# Memory for user u-ana")
   assert "- diet = pescatarian (since 2026-10-04T18:00:01Z" in ana["context"]
 
@@ -387,3 +391,405 @@ def test_answered_traces_name_the_span_of_their_answer(ana):
       ("inv-103", "sp-103-llm-2"),
       ("inv-104", None),
   ]
+
+
+# ---- recalled memory, session state, facts, comparisons and run totals -----
+
+
+def _with_recall(fixture):
+  """s-103's restaurant search, renamed into a recall that cites s-101/2."""
+  rows = copy.deepcopy(fixture.rows)
+  memory_text = (
+      "# Memory for user u-ana\n"
+      "- diet = vegetarian [s-101/sp-101-agent]\n"
+      "- Kyoto (LOCATION): 2 tool calls [+1 earlier, s-102/sp-102-tool-2]\n"
+      "- dinner on 2026/10/15 [unknown/x]"
+  )
+  for row in rows:
+    if row["span_id"] == "sp-103-tool-2":
+      row["content"]["tool"] = "recall_memory"
+      row["content"]["args"] = {"request": "dinner in Kyoto"}
+      if row["event_type"] == "TOOL_COMPLETED":
+        row["content"]["result"] = {"memory": memory_text}
+  return rows, memory_text
+
+
+def test_traces_carry_the_memory_their_recall_returned(fixture):
+  rows, memory_text = _with_recall(fixture)
+
+  export = export_memory.build_user_export(_memory(rows))
+
+  trace = next(t for t in export["traces"] if t["trace_id"] == "inv-103")
+  session = next(s for s in export["sessions"] if s["session_id"] == "s-103")
+  assert trace["recall"] == {
+      "text": memory_text,
+      "sessions": ["s-101", "s-102"],
+  }
+  assert session["recalled_sessions"] == ["s-101", "s-102"]
+  assert all(
+      t["recall"] is None
+      for t in export["traces"]
+      if t["trace_id"] != "inv-103"
+  )
+
+
+def test_recalled_sessions_keeps_known_earlier_sessions_in_order():
+  text = (
+      "[s-2/sp-1] [+3 earlier, s-1/sp-9, s-2/sp-4] 10/20 [s-3/sp-2]"
+      " [elsewhere/sp-5]"
+  )
+
+  assert export_memory.recalled_sessions(
+      text, {"s-1", "s-2", "s-3"}, current="s-3"
+  ) == ["s-2", "s-1"]
+
+
+def test_traces_count_their_sql_queries_and_failures(fixture):
+  rows = copy.deepcopy(fixture.rows)
+  for row in rows:
+    if row["span_id"] in ("sp-102-tool-1", "sp-102-tool-2"):
+      row["content"]["tool"] = "run_sql"
+
+  export = export_memory.build_user_export(_memory(rows))
+
+  trace = next(t for t in export["traces"] if t["trace_id"] == "inv-102")
+  assert (
+      trace["tool_call_count"],
+      trace["sql_queries"],
+      trace["sql_errors"],
+  ) == (
+      2,
+      2,
+      1,
+  )
+
+
+def test_sessions_export_their_logged_state_and_the_analyst_name(fixture):
+  rows = copy.deepcopy(fixture.rows)
+  for row in rows:
+    if row["session_id"] == "s-102":
+      row["attributes"]["session_metadata"] = {
+          "state": {"sim_day": 2, "analyst_name": "Ana Lima", "user:x": "y"}
+      }
+
+  export = export_memory.build_user_export(_memory(rows))
+
+  states = {s["session_id"]: s["state"] for s in export["sessions"]}
+  assert states["s-102"] == {"sim_day": 2, "analyst_name": "Ana Lima"}
+  assert states["s-101"] == {}
+  assert export["name"] == "Ana Lima"
+
+
+def test_facts_are_exported_with_the_row_they_came_from(fixture):
+  client = Client(
+      project_id="offline-demo",
+      dataset_id="agent_analytics",
+      verify_schema=False,
+      bq_client=offline_bigquery.OfflineBigQueryClient(fixture.rows),
+  )
+  fact = memory_layers.Fact(
+      "Ana",
+      "PERSON",
+      "follows_diet",
+      "pescatarian",
+      "VALUE",
+      "Ana is pescatarian.",
+      "s-103",
+      "sp-103-inv",
+      _at(2026, 10, 4, 18, 0, 0, 100000),
+  )
+  memory = memory_layers.load_user_memory(client, "u-ana", facts=[fact])
+
+  export = export_memory.build_user_export(memory)
+
+  assert export["facts"] == [
+      {
+          "subject": "Ana",
+          "subject_type": "PERSON",
+          "predicate": "follows_diet",
+          "object": "pescatarian",
+          "object_type": "VALUE",
+          "statement": "Ana is pescatarian.",
+          "session_id": "s-103",
+          "span_id": "sp-103-inv",
+          "observed_at": "2026-10-04T18:00:00.100Z",
+      }
+  ]
+
+
+RECORD = {
+    "label": "Recorded live run: TheLook analyst week",
+    "model": "gemini-x",
+    "run_tag": "t",
+    "days": [{"number": 1, "date": "2026-10-01", "weekday": "Thursday"}],
+    "analysts": [
+        {"user_id": "u-ana", "name": "Ana Lima", "role": "r"},
+        {"user_id": "u-ben", "name": "Ben", "role": "r"},
+    ],
+    "sessions": [
+        {
+            "session_id": "s-103",
+            "user_id": "u-ana",
+            "memory": "on",
+            "turns": [{}],
+        },
+        {
+            "session_id": "s-101",
+            "user_id": "u-ana",
+            "memory": "on",
+            "turns": [{}, {}],
+        },
+        {
+            "session_id": "s-201",
+            "user_id": "u-ben",
+            "memory": "off",
+            "turns": [{}],
+        },
+    ],
+    "comparisons": [
+        {
+            "user_id": "u-ana",
+            "day": 1,
+            "question": "Dinner that fits my diet?",
+            "with_memory": "s-103",
+            "without_memory": "s-201",
+        }
+    ],
+    "consolidation": [{"day": 1, "extraction": {"messages": 3, "facts": 2}}],
+    "row_counts": [{"row_count": 20}, {"row_count": 5}],
+    "usage": [{"model_calls": 7}, {"model_calls": 2}],
+}
+
+
+def test_comparisons_summarize_the_first_turn_of_both_sessions(fixture):
+  memories = {
+      "u-ana": _memory(fixture.rows, "u-ana"),
+      "u-ben": _memory(fixture.rows, "u-ben"),
+  }
+
+  (pair,) = export_memory.build_comparisons(
+      RECORD, memories, {"u-ana": "Ana Lima"}
+  )
+
+  assert (pair["name"], pair["day"], pair["question"]) == (
+      "Ana Lima",
+      1,
+      "Dinner that fits my diet?",
+  )
+  assert pair["with_memory"]["session_id"] == "s-103"
+  assert pair["with_memory"]["tool_calls"] == [
+      "save_preference",
+      "find_restaurants",
+  ]
+  assert pair["with_memory"]["answer"].startswith(
+      "Updated your diet to pescatarian."
+  )
+  assert pair["without_memory"]["session_id"] == "s-201"
+  assert pair["without_memory"]["outcome_status"] == "answered"
+  assert (
+      pair["without_memory"]["sql_queries"],
+      pair["with_memory"]["recalled_sessions"],
+  ) == (0, [])
+  assert pair["without_memory"]["memory_table_reads"] == []
+  assert pair["control_read_memory"] is False
+
+
+def test_comparisons_skip_pairs_whose_memory_was_not_loaded(fixture):
+  memories = {"u-ana": _memory(fixture.rows, "u-ana")}
+
+  assert export_memory.build_comparisons(RECORD, memories, {}) == []
+
+
+def _sql_call(sql, purpose):
+  return memory_layers.ToolCall(
+      tool_name="run_sql",
+      arguments={"purpose": purpose, "sql": sql},
+      result=None,
+      status="success",
+      duration_ms=None,
+      error=None,
+      session_id="s-ctl",
+      span_id=f"span-{purpose}",
+      started_at=datetime(2026, 10, 7, tzinfo=timezone.utc),
+  )
+
+
+def test_memory_table_reads_are_the_sql_calls_that_name_the_memory_dataset():
+  dataset = "bqaa_agent_memory_demo"
+  calls = [
+      _sql_call(f"SELECT * FROM `{dataset}.analyst_memory_items`", "items"),
+      _sql_call(
+          f"SELECT * FROM `p.{dataset}.INFORMATION_SCHEMA.TABLES`", "tables"
+      ),
+      _sql_call(
+          "SELECT 1 FROM `bigquery-public-data.thelook_ecommerce.orders`",
+          "orders",
+      ),
+      _sql_call(f"SELECT * FROM `{dataset}_backup.t`", "another dataset"),
+      dataclasses.replace(
+          _sql_call(dataset, "not sql"), tool_name="describe_table"
+      ),
+  ]
+
+  reads = export_memory.memory_table_reads(calls, dataset)
+
+  assert [(r["purpose"], r["span_id"]) for r in reads] == [
+      ("items", "span-items"),
+      ("tables", "span-tables"),
+  ]
+  assert reads[0]["sql"] == f"SELECT * FROM `{dataset}.analyst_memory_items`"
+  assert export_memory.memory_table_reads(calls, None) == []
+
+
+def test_hide_project_rewrites_only_the_project_in_memory_table_reads():
+  sql = "SELECT p.x FROM `my-proj.d.items` p JOIN `my-proj-2.d.t` USING (x)"
+  pairs = [
+      {
+          "with_memory": None,
+          "without_memory": {
+              "memory_table_reads": [{"sql": sql}, {"sql": None}]
+          },
+      }
+  ]
+
+  export_memory.hide_project(pairs, "my-proj")
+
+  assert pairs[0]["without_memory"]["memory_table_reads"] == [
+      {
+          "sql": (
+              "SELECT p.x FROM `<project>.d.items` p JOIN `my-proj-2.d.t`"
+              " USING (x)"
+          )
+      },
+      {"sql": None},
+  ]
+
+
+def test_run_totals_come_from_the_record_and_the_export(fixture, ana):
+  run = export_memory.build_run(RECORD, [ana])
+
+  assert (run["model"], run["days"], run["consolidation"]) == (
+      "gemini-x",
+      RECORD["days"],
+      [{"day": 1, "messages": 3, "facts": 2}],
+  )
+  assert run["totals"] == {
+      "analysts": 2,
+      "sessions": 2,
+      "control_sessions": 1,
+      "turns": 3,
+      "rows": 25,
+      "model_calls": 9,
+      "tool_calls": sum(t["tool_call_count"] for t in ana["traces"]),
+      "sql_queries": 0,
+      "sql_errors": 0,
+      "recalls": 0,
+      "facts": 0,
+      "entities": len(ana["entities"]),
+      "preference_versions": len(ana["preferences"]),
+  }
+
+
+class _LiveFake:
+  """list_traces from the fixture; consolidation reads from canned rows."""
+
+  def __init__(self, rows, items):
+    self._traces = offline_bigquery.OfflineBigQueryClient(rows)
+    self._items = items
+    self.item_queries = []
+
+  def query(self, sql, job_config=None, **kwargs):
+    if "_memory_items`" in sql:
+      self.item_queries.append([p.value for p in job_config.query_parameters])
+      return SimpleNamespace(result=lambda: self._items)
+    return self._traces.query(sql, job_config=job_config, **kwargs)
+
+
+def test_cli_live_reads_extracted_items_and_the_run_record(fixture, tmp_path):
+  record = tmp_path / "live_run.json"
+  record.write_text(json.dumps(RECORD), encoding="utf-8")
+  items = [
+      {
+          "kind": "fact",
+          "session_id": "s-101",
+          "span_id": "sp-101-inv",
+          "observed_at": "2026-09-28T17:00:00Z",
+          "subject": "Ana",
+          "subject_type": "PERSON",
+          "predicate": "follows_diet",
+          "object": "vegetarian",
+          "object_type": "VALUE",
+          "statement": "Ana is vegetarian.",
+      }
+  ]
+  fake = _LiveFake(fixture.rows, items)
+  out = tmp_path / "export.json"
+
+  code = export_memory.main(
+      [
+          "--project-id",
+          "p",
+          "--dataset-id",
+          "d",
+          "--memory-tables",
+          "analyst_",
+          "--run-record",
+          str(record),
+          "--now",
+          "2026-10-06T16:00:00Z",
+          "--out",
+          str(out),
+      ],
+      bq_client=fake,
+  )
+
+  export = json.loads(out.read_text())
+  assert code == 0
+  assert export["label"] == "Recorded live run: TheLook analyst week"
+  assert [u["user_id"] for u in export["users"]] == ["u-ana", "u-ben"]
+  assert [f["statement"] for f in export["users"][0]["facts"]] == [
+      "Ana is vegetarian."
+  ]
+  assert fake.item_queries == [["u-ana"], ["u-ben"], ["u-ben"]]
+  assert len(export["comparisons"]) == 1
+  assert export["run"]["totals"]["facts"] == 2
+
+
+def test_cli_rejects_memory_tables_offline(capsys):
+  with pytest.raises(SystemExit):
+    export_memory.main(["--memory-tables", "analyst_"])
+
+  assert "need --project-id" in capsys.readouterr().err
+
+
+def test_the_committed_export_matches_the_committed_run_record():
+  export = json.loads(
+      (EXAMPLE_DIR / "viz" / "data" / "memory_export.json").read_text("utf-8")
+  )
+  record = json.loads(
+      (EXAMPLE_DIR / "recorded_run" / "live_run.json").read_text("utf-8")
+  )
+  memory_sessions = [s for s in record["sessions"] if s["memory"] == "on"]
+
+  assert export["schema"] == export_memory.SCHEMA
+  assert "test-project" not in json.dumps(export)  # shown as <project>
+  assert [u["user_id"] for u in export["users"]] == [
+      a["user_id"] for a in record["analysts"]
+  ]
+  assert sorted(
+      s["session_id"] for u in export["users"] for s in u["sessions"]
+  ) == sorted(s["session_id"] for s in memory_sessions)
+  assert [
+      (c["with_memory"]["session_id"], c["without_memory"]["session_id"])
+      for c in export["comparisons"]
+  ] == [(c["with_memory"], c["without_memory"]) for c in record["comparisons"]]
+  assert export["run"]["totals"]["sessions"] == len(memory_sessions)
+  assert export["run"]["totals"]["rows"] == sum(
+      r["row_count"] for r in record["row_counts"]
+  )
+  # Flagged exactly when the run without memory read the memory dataset.
+  for pair in export["comparisons"]:
+    assert pair["control_read_memory"] == bool(
+        pair["without_memory"]["memory_table_reads"]
+    )
+    assert pair["with_memory"]["memory_table_reads"] == []

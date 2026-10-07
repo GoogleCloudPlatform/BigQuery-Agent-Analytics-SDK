@@ -3,220 +3,247 @@
 Neo4j Labs' [`neo4j-agent-memory`](https://github.com/neo4j-labs/agent-memory)
 describes agent memory as three layers: short-term (conversations), long-term
 (entities, preferences, facts) and reasoning (recorded steps, tool calls and
-outcomes). This demo reads the same three layers, plus a combined prompt
-context, out of the `agent_events` table that the ADK
-`BigQueryAgentAnalyticsPlugin` writes. It uses only existing SDK APIs:
-`Client.list_traces`, `TraceFilter`, `Trace` and `Span`, plus
-`make_bq_client` in live mode. Tracked in
+outcomes). This demo builds all three, plus a combined prompt context, from
+the `agent_events` table that the ADK `BigQueryAgentAnalyticsPlugin` writes.
+The agent needs no separate memory store:
+- **Conversations and reasoning** are the logged rows themselves, read with
+  `Client.list_traces`.
+- **Preferences** are ADK `user:` state that the agent saves; the plugin logs
+  each change as a `STATE_DELTA` row.
+- **Facts and entities** are extracted from the logged messages by
+  `AI.GENERATE` in BigQuery, each tied to the span of the message it came
+  from.
+- **Similar past tasks** are ranked with `AI.EMBED` and `ML.DISTANCE`.
+
+Tracked in
 [#511](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/511).
 
-> **Two kinds of data.**
-> - **Offline:** the run and the tests replay
->   [`fixtures/agent_events.json`](fixtures/agent_events.json), 65 synthetic
->   rows for two users and five sessions of a trip-planner agent. The rows
->   have all 16 `agent_events` columns the SDK reads, with the payload keys
->   the plugin writes.
-> - **Live:** a real end-to-end run is recorded in
->   [`recorded_run/`](recorded_run/README.md). A live ADK agent on Vertex AI
->   wrote 119 rows to BigQuery, and the demo, the export and the web view below
->   read them back.
+![The web view on the recorded week: the same question answered with and without memory](viz/screenshot.png)
 
-![The web view on the recorded run: sessions, long-term memory across sessions, and the reasoning waterfall](viz/screenshot.png)
+[Watch the narrated walkthrough (`recorded_run/demo.mp4`, 1 min 41 s)](recorded_run/demo.mp4).
+Its captions are burned in and also in
+[`recorded_run/demo.srt`](recorded_run/demo.srt); the voiceover script is
+[`recorded_run/narration.md`](recorded_run/narration.md).
 
-[Watch the 63-second walkthrough (`demo.mp4`)](demo.mp4) of the web view on the
-recorded run.
+## The recorded week
 
-## Run it
+[`analyst_agent.py`](analyst_agent.py) is an ADK data-analyst agent for
+TheLook, the online clothing retailer in the public
+`bigquery-public-data.thelook_ecommerce` dataset (about 125,000 orders). Its
+tools run real, read-only BigQuery SQL. [`analyst_scenario.py`](analyst_scenario.py)
+scripts five business days for six analysts, from merchandising, finance,
+operations, growth, customer insights and category management. They state
+their scope and definitions early in the week, then come back with
+questions that only make sense with memory: "my categories", "the board
+meeting", "the same lead-time check". The questions are scripted; the
+answers, the SQL and every logged row are real.
 
-```bash
-# From the repository root, with the SDK installed (pip install -e .)
-python examples/agent_memory/agent_memory_demo.py
+The recorded run, on 2026-10-07 (details in
+[`recorded_run/`](recorded_run/README.md)):
+- **Volume:** 36 sessions with memory and 6 without, 46 turns, 1,606 rows in
+  `analyst_events`, 220 SQL queries (171 of them in the sessions with
+  memory, 2 of those failed).
+- **Memory:** 23 facts and 62 entity mentions (32 distinct entities)
+  extracted, 19 preference versions saved, 37 `recall_memory` calls.
+- **Cost:** about $2.35, almost all of it Gemini tokens. The whole day on the
+  project, with smoke runs and probes, came to about $2.76.
+
+### Memory changes the answer
+
+Six questions were also put, on the same day, to the same agent without its
+memory tools. Both answers in each pair are the model's own. Only the first
+three pairs are clean comparisons; in the other three, the run without
+memory read the memory tables anyway (below).
+
+| Analyst, day | Question | Without memory | With memory |
+|---|---|---|---|
+| Maya, merchandising, Monday | "How did my categories do last month?" | All 26 categories, men's and women's. 5 tool calls, 35 s | Her two women's categories by her net revenue definition: $39,355.24, up 20.78% on August. 2 tool calls, 22 s |
+| Diego, growth, Wednesday | "How are my markets trending?" | Twelve countries by quarter, led by China. 6 tool calls, 100 s | Brazil and Spain, week by week from Monday, as he asked on Friday. 3 tool calls, 40 s |
+| Priya, customer insights, Wednesday | "What should I bring to the business review?" | A company-wide KPI scorecard. 7 tool calls, 68 s | The 90-day repeat rate of her segment (customers aged 18 to 34) by cohort quarter, against customers 35 and over. 10 tool calls, 156 s |
+| Lena, operations, Tuesday | "Run the same lead-time check for this month so far." | Not a clean control: read the memory tables (2 queries), then gave the same table as with memory. 4 tool calls, 31 s | Recalled her Thursday lead-time SQL and ran it for October 1 to 6: 32.22 hours from order to shipment in Memphis, 30.08 in Chicago. 5 tool calls, 45 s |
+| Raj, FP&A, Wednesday | "What numbers do I need for the board meeting?" | Not a clean control: 10 of its 15 queries read the memory tables and logged rows; the same figures after 623 s and 480,000 tokens | Fiscal Q3 to date (his year starts February 1), in euros at his latest rate: net revenue €656,112.90. 7 tool calls, 74 s |
+| Tom, category management, Wednesday | "Units yesterday for my categories and my watch brands?" | Not a clean control: 8 of its 16 queries read the memory tables and logged rows; the same table as with memory. 16 tool calls, 65 s | Outerwear & Coats 50 and Active 33 net units; Columbia 6 and The North Face 1. 4 tool calls, 33 s |
+
+Memory did not always make the agent faster: Priya's answer took longer
+because her segment needed a cohort analysis.
+
+**Memory is data, so scope the tools.** Three of the six runs without memory
+found the memory anyway. They listed tables and datasets through
+`INFORMATION_SCHEMA`, found `bqaa_agent_memory_demo`, and read its tables
+with `run_sql`: 2, 10 and 8 queries. Raj's and Tom's also read the logged
+rows of the session with memory that had just answered the same question,
+and repeated its numbers. The export flags these pairs
+(`control_read_memory`, set when a run's SQL names the memory dataset), and
+the web view marks them "flawed control". `run_sql` now refuses any table
+outside TheLook's dataset; the dry run lists every table a query reads. A
+re-run of the six questions under that rule (`analyst_agent.py
+--rerun-controls`) stopped after Maya's: that session
+(`an-20261007t0834-d3-maya-2-ctl2`, 32 rows) is in the table but not in the
+run record, which keeps the first-pass controls. In production, run the
+agent's SQL tool as a service account that can read only the business data,
+and protect memory tables like any other table.
+
+### How memory is written and read
+
+```mermaid
+flowchart LR
+  A[Analyst] --> G[ADK agent]
+  G -- every event --> P[BigQueryAgentAnalyticsPlugin]
+  P --> E[(agent_events)]
+  E -- nightly: AI.GENERATE --> F[(facts and entities)]
+  E -- nightly: AI.EMBED --> V[(task embeddings)]
+  E & F & V -- recall_memory --> G
 ```
 
-The offline run needs no credentials or network. `offline_bigquery.py` stands
-in for `google.cloud.bigquery.Client`, and the real `Client.list_traces` code
-path runs on top of it. The stand-in implements exactly one statement: the
-SDK's list-traces query, pinned in the file, with the `user_id`, `start_time`
-and `limit` filters. Any other statement, a changed join, projection,
-ordering or limit, another predicate, or an unexpected query parameter raises
-`NotImplementedError` instead of returning rows a real query would not.
-
-To read a live table written by the plugin (Application Default
-Credentials):
-
-```bash
-python examples/agent_memory/agent_memory_demo.py \
-  --project-id my-project --dataset-id agent_analytics \
-  --user-id USER_ID --session-id CURRENT_SESSION_ID \
-  --entity-arg city=LOCATION --entity-arg customer_id=CUSTOMER
-```
-
-`--entity-arg` names the tool arguments that hold entities. The default
-mapping fits the fixture's trip-planner tools. Other options:
-- `--query`: the task to match against past traces;
-- `--trace-id`: a trace to print in full;
-- `--lookback-days`: how far back to read (default 30);
-- `--table-id`: the events table (default `agent_events`).
-
-An abridged excerpt of the offline output:
-
-```text
-Agent memory from BigQuery Agent Analytics traces
-source : offline fixture (synthetic rows) examples/agent_memory/fixtures/agent_events.json
-user   : u-ana   current session: s-104   now: 2026-10-06T16:00:00Z
-read   : 4 sessions, 4 traces from one Client.list_traces() call
-         TraceFilter(user_id='u-ana', start_time=2026-09-06T16:00:00Z)
-...
-== 2. Long-term memory ==
-Preference history (ADK user: state from STATE_DELTA rows):
-  diet = vegetarian    2026-09-28T17:00:01Z -> 2026-10-04T18:00:01Z  s-101
-  seat = window        2026-09-28T17:00:01Z -> current               s-101
-  diet = pescatarian   2026-10-04T18:00:01Z -> current               s-103
-...
-== 3. Reasoning memory ==
-...
-Trace inv-102 (session s-102): answered_with_errors
-  task   : Book a hotel in Kyoto near Kyoto Station for Oct 14 to 16.
-  step 1 : call: search_hotels
-           search_hotels  error  5003 ms  TimeoutError: hotel inventory API did not respond within 5000 ms
-  step 2 : call: search_hotels
-           search_hotels  success  820 ms
-  outcome: Sakura Station Hotel is 150 m from Kyoto Station at $180 per night. Shall I book it?
-  metrics: latency_ms=9323 llm_calls=3 tool_calls=2 tool_errors=1 total_tokens=1540
-...
-== 4. get_context() for the next model call ==
-# Memory for user u-ana
-
-## Short-term: current conversation (session s-104)
-- user: Find a restaurant in Osaka for dinner that fits my diet. [s-104/sp-104-inv]
-
-## Long-term: user preferences (ADK user: state)
-- diet = pescatarian (since 2026-10-04T18:00:01Z; replaced vegetarian) [s-103/sp-103-agent]
-- seat = window (since 2026-09-28T17:00:01Z) [s-101/sp-101-agent]
-
-## Long-term: entities the agent acted on
-- Kyoto (LOCATION): 3 tool calls [s-102/sp-102-tool-1, s-102/sp-102-tool-2, s-103/sp-103-tool-2]
-- Kyoto Station (LOCATION): 2 tool calls [s-102/sp-102-tool-1, s-102/sp-102-tool-2]
-- SFO (LOCATION): 1 tool call [s-101/sp-101-tool-3]
-- Tokyo (LOCATION): 1 tool call [s-101/sp-101-tool-3]
-
-## Reasoning: similar past tasks that succeeded
-- 0.31 trace inv-103: "I eat fish now, so update my diet to pescatarian. Find a restaurant in Kyoto for dinner on Oct 15." -> save_preference, find_restaurants -> "Updated your diet to pescatarian. Kamo Grill in Kyoto has pescatarian dinner options on Oct 15." [s-103/sp-103-llm-2]
-
-## Reasoning: tools that failed before
-- search_hotels failed 1 of 2 calls; last error: TimeoutError: hotel inventory API did not respond within 5000 ms [s-102/sp-102-tool-1]
-```
-
-The second user in the fixture, `u-ben`, asked an almost identical Osaka
-question and stored `diet = vegan` under the same key. None of it appears in
-`u-ana`'s memory, because the user pin is applied in the `list_traces` SQL.
-Run with `--user-id u-ben --session-id s-201` to see that user's view.
+- **During a session.** The agent starts each conversation with
+  `recall_memory`, which reads this analyst's memory from BigQuery and
+  returns the `get_context()` block. When the analyst states a lasting
+  preference or scope, the agent calls `save_preference`, which writes ADK
+  `user:` state.
+- **After each day.** [`memory_consolidation.py`](memory_consolidation.py)
+  runs the day's user messages through `AI.GENERATE` with a typed
+  `output_schema` (entities with a type; facts as subject, predicate and
+  object), and through `AI.EMBED`. The results go to
+  `analyst_memory_items` and `analyst_task_embeddings`, keyed to the span of
+  each message.
+- **What recall returns.** Saved preferences (latest version), facts and
+  entities, similar past tasks ranked by embedding with the SQL that
+  answered them (a `reuse:` line), and tool calls that failed before. Every
+  line names its source as `[session_id/span_id]`.
 
 ## Run it end to end
 
-This is the full loop on your own project: a live agent writes memory, then
-the demo, the export and the web view read it back. Use a scratch dataset.
-Cost depends on your rates; the recorded run cost about $0.05 (see
-[`recorded_run/`](recorded_run/README.md)).
+Use a scratch dataset. The recorded run cost about $2.35; see
+[`recorded_run/`](recorded_run/README.md) for the breakdown.
 
-1. **Run the agent.**
+1. **Run the week.**
 
    ```bash
    pip install "google-adk[bigquery-analytics]"   # the plugin's writer dependencies
    gcloud auth application-default login
-   python examples/agent_memory/live_agent.py \
-     --project-id PROJECT_ID --dataset-id bqaa_agent_memory_demo \
-     --record /tmp/live_run.json
+   python examples/agent_memory/analyst_agent.py \
+     --project-id PROJECT_ID --dataset-id bqaa_agent_memory_demo
    ```
 
-   [`live_agent.py`](live_agent.py) creates the dataset if it is missing. It
-   then runs five scripted sessions on `gemini-3.8-flash` (Vertex AI location
-   `global`), with the `BigQueryAgentAnalyticsPlugin` writing every event
-   (`enable_otel_correlation=True`). Two users take part, and the sessions
-   exercise the main memory paths:
-   - multi-turn context within a session;
-   - preferences saved as ADK `user:` state, one of them later replaced;
-   - a simulated hotel-inventory outage (a real `TOOL_ERROR`) that the next
-     turn retries;
-   - two `recall_memory` calls, where the agent reads its earlier sessions
-     back from BigQuery through `load_user_memory()` and `get_context()`.
+   The agent runs on `gemini-3.8-flash` (Vertex AI location `global`). Each
+   of its queries is a BigQuery job billed to `PROJECT_ID`, checked by a dry
+   run (only `SELECT`, at most 2 GB scanned) and labeled
+   `bqaa_demo=agent_memory`. `--days N` and `--user ID` run part of the
+   week. The run record (sessions, transcript, comparisons, nightly passes,
+   row counts and token usage) goes to `recorded_run/live_run.json`.
 
-   The run record (session IDs, row counts, transcript) goes to `--record`.
-
-2. **Read the memory back.** Take the session IDs from the run record.
+2. **Read one analyst's memory back.**
 
    ```bash
    python examples/agent_memory/agent_memory_demo.py \
      --project-id PROJECT_ID --dataset-id bqaa_agent_memory_demo \
-     --user-id demo-ana --session-id mem-RUN_TAG-s5
+     --table-id analyst_events --memory-tables analyst_ \
+     --user-id maya.chen --session-id SESSION_ID
    ```
+
+   `--memory-tables` adds the extracted facts and entities and ranks similar
+   tasks by embedding, the same read `recall_memory` does.
 
 3. **Export it for the web view and open it.**
 
    ```bash
    python examples/agent_memory/export_memory.py \
      --project-id PROJECT_ID --dataset-id bqaa_agent_memory_demo \
-     --user-id demo-ana --user-id demo-ben
+     --table-id analyst_events --memory-tables analyst_ \
+     --run-record examples/agent_memory/recorded_run/live_run.json
    cd examples/agent_memory/viz && python -m http.server 8000
    # open http://localhost:8000/
    ```
 
-   Browsers block local file reads from a `file://` page, so serve the folder.
-   The export shows the project as `<project>` unless you pass
-   `--show-project`. Running `export_memory.py` without `--project-id`
-   exports the offline fixture instead.
+   Browsers block local file reads from a `file://` page, so serve the
+   folder. The export shows the project as `<project>` unless you pass
+   `--show-project`.
 
-4. **Record a walkthrough (optional).** This needs
+4. **Record a narrated walkthrough (optional, macOS).** This needs
    `pip install playwright`, `python -m playwright install chromium` and
    ffmpeg.
 
    ```bash
-   python examples/agent_memory/viz/record_demo.py
+   python examples/agent_memory/viz/record_demo.py \
+     --narration examples/agent_memory/recorded_run/narration.md
    ```
 
-   [`viz/record_demo.py`](viz/record_demo.py) serves the folder on a local
-   port and drives the page in headless Chromium with video recording on. It
-   writes `demo.mp4` and `viz/screenshot.png`, and writes its captions from the
-   export.
+   [`viz/record_demo.py`](viz/record_demo.py) drives the page in headless
+   Chromium with video recording on. Each line of the script is spoken with
+   the macOS `say` command, and each scene stays on screen until its lines
+   end. The captions go to `demo.srt` next to the script and are burned into
+   `demo.mp4` with ffmpeg's `overlay` filter, with the voiceover as its
+   audio. The script names the export it narrates, and a different export is
+   refused. Without `--narration`, the recorder writes a silent video with
+   captions taken from the export.
+
+## Offline quick start
+
+```bash
+# From the repository root, with the SDK installed (pip install -e .)
+python examples/agent_memory/agent_memory_demo.py
+```
+
+The offline run needs no credentials or network. It replays
+[`fixtures/agent_events.json`](fixtures/agent_events.json): 65 synthetic
+rows of a small trip-planner agent, two users and five sessions, with all 16
+`agent_events` columns the SDK reads and the payload keys the plugin writes.
+The unit tests use the same rows. `offline_bigquery.py` stands in for
+`google.cloud.bigquery.Client`, and the real `Client.list_traces` code path
+runs on top of it. The stand-in implements exactly one statement: the SDK's
+list-traces query, pinned in the file, with the `user_id`, `start_time` and
+`limit` filters. Any other statement, a changed join, projection, ordering
+or limit, another predicate, or an unexpected query parameter raises
+`NotImplementedError` instead of returning rows a real query would not.
+
+To browse the recorded week without a project, serve `viz/` as in step 3:
+`viz/data/memory_export.json` is the export of the live run.
 
 ## The web view
 
 [`viz/index.html`](viz/index.html) and [`viz/app.js`](viz/app.js) are plain
 HTML and JavaScript with no dependencies. They read `viz/data/memory_export.json`:
-- **Sessions (short-term):** one entry per session; pick one to see its
-  conversation. A reply whose stream did not finish is marked incomplete.
-- **Long-term memory across sessions:** a graph with sessions on a time line.
-  Saved preferences sit above it; a replaced version is struck through and
-  linked to its successor. Entities from tool arguments sit below it, linked
-  to every session that used them. Hover any node for its source row.
-- **Reasoning:** one waterfall per turn. It shows each model call, the tool
-  calls that call asked for, and how the turn ended. A failed tool call shows
-  in the status color with an icon and a label; an incomplete model call is
-  drawn faded and labeled.
-- **What the agent reads next:** the `get_context()` block for the latest
-  session.
+- **Same question, with and without memory:** both answers side by side,
+  with their tool calls, SQL queries, failures, time and tokens, and the
+  earlier sessions the recall cited. A pair whose run without memory read
+  the memory tables is marked "flawed control", with the queries' purposes.
+- **The week:** every session by analyst and day. Arcs link the selected
+  session to the earlier sessions its recall cited.
+- **Sessions (short-term):** one analyst's sessions by day; pick one to see
+  its conversation.
+- **Long-term memory:** a graph of the analyst and the entities extracted
+  from their messages, with the facts that link them; the facts as
+  sentences; and each preference with its versions, a replaced one struck
+  through. Every item opens the session it came from.
+- **Reasoning:** one waterfall per turn: each model call, the tool calls it
+  asked for, and how the turn ended. A failed tool call shows in the status
+  color with an icon and a label.
+- **What the agent read:** the memory `recall_memory` returned in the
+  selected session.
 
-Every chart has a table view, and the page follows the system dark mode. A
-user switch shows that each user is read with their own `TraceFilter`.
+Every chart has a table view, and the page follows the system dark mode. An
+analyst switch shows that each analyst is read with their own `TraceFilter`.
 
 ## Where each layer comes from
 
-| Layer | Rows the plugin writes | Demo API (`memory_layers.py`) | neo4j-agent-memory |
+| Layer | Source in BigQuery | Demo API (`memory_layers.py`) | neo4j-agent-memory |
 |---|---|---|---|
-| Short-term | `USER_MESSAGE_RECEIVED` (`content.text_summary`) and the text parts of `LLM_RESPONSE` (`content.response`) | `short_term.get_conversation(session_id)`, `short_term.list_sessions()` | `short_term.get_conversation`, `list_sessions` |
+| Short-term | `USER_MESSAGE_RECEIVED` (`content.text_summary`) and the text parts of `LLM_RESPONSE` (`content.response`) | `short_term.get_conversation(session_id)`, `short_term.list_sessions()` (with each session's logged state) | `short_term.get_conversation`, `list_sessions` |
 | Long-term: preferences | `STATE_DELTA` rows for ADK `user:` keys (`attributes.state_delta`) | `long_term.get_preference_history()`, `long_term.get_preferences(as_of=...)` | `long_term.add_preference`, `supersede_preference`, `get_preferences_for(as_of=...)` |
-| Long-term: entities | `TOOL_STARTING` arguments that you map to an entity type | `long_term.get_entities()` | `long_term.add_entity`; `touched_entities` writes `(:ReasoningStep)-[:TOUCHED]->(:Entity)` |
-| Reasoning | `LLM_RESPONSE`, `TOOL_STARTING` / `TOOL_COMPLETED` / `TOOL_ERROR`, `INVOCATION_COMPLETED`; one trace per `invocation_id` | `reasoning.get_trace_with_steps(trace_id)`, `get_session_traces`, `list_traces(success_only=, since=, until=)`, `get_similar_traces`, `get_tool_stats` | Written with `reasoning.start_trace` / `add_step` / `record_tool_call` / `complete_trace`; read with the same-named methods |
-| Combined | All of the above; every line names its source rows as `[session_id/span_id]` | `get_context(query, session_id=...)` | `MemoryClient.get_context(query, session_id=...)` |
+| Long-term: facts | `AI.GENERATE` over `USER_MESSAGE_RECEIVED` rows (`memory_consolidation.py`) | `long_term.get_facts()` | `add_fact` (subject, predicate, object) |
+| Long-term: entities | The same extraction, plus `TOOL_STARTING` arguments you map to an entity type | `long_term.get_entities()` (mentions keep their source: `extracted` or `tool`) | `long_term.add_entity`; extraction pipeline; `touched_entities` writes `(:ReasoningStep)-[:TOUCHED]->(:Entity)` |
+| Reasoning | `LLM_RESPONSE`, `TOOL_STARTING` / `TOOL_COMPLETED` / `TOOL_ERROR`, `INVOCATION_COMPLETED`; one trace per `invocation_id` | `reasoning.get_trace_with_steps(trace_id)`, `get_session_traces`, `list_traces(success_only=, since=, until=)`, `get_similar_traces(scores=...)`, `get_tool_stats` | Written with `reasoning.start_trace` / `add_step` / `record_tool_call` / `complete_trace`; read with the same-named methods |
+| Similarity | `AI.EMBED` of each task, `ML.DISTANCE` at recall (`memory_consolidation.similar_task_scores`) | `get_similar_traces(task, scores=...)`; word overlap when no scores are given | Vector similarity over embedded traces |
+| Combined | All of the above; every line names its source rows as `[session_id/span_id]` | `get_context(query, session_id=..., scores=..., reuse_tools=...)` | `MemoryClient.get_context(query, session_id=...)` |
 
-`load_user_memory(client, user_id, since=...)` makes the single
-`Client.list_traces(TraceFilter(user_id=..., start_time=...))` call. The
-three layers are then computed from the returned `Trace` objects.
+`load_user_memory(client, user_id, since=..., facts=..., extracted_entities=...)`
+makes the single `Client.list_traces(TraceFilter(user_id=..., start_time=...))`
+call and adds the extracted items it is given. The layers are then computed
+from the returned `Trace` objects.
 
 ## Writing memory
 
-Nothing in this demo writes memory. The agent writes it as a side effect of
-running with the plugin:
+The agent writes memory as a side effect of running with the plugin:
 - **Conversations and reasoning traces:** every invocation's user message,
   model turns and tool calls.
 - **Preferences:** written when a tool sets ADK user-scoped state:
@@ -226,18 +253,20 @@ from google.adk.tools import ToolContext
 
 
 def save_preference(key: str, value: str, tool_context: ToolContext) -> dict:
-  """Remembers a user preference across sessions."""
+  """Remembers a lasting preference or scope of this user across sessions."""
   tool_context.state[f"user:{key}"] = value
-  return {"status": "saved", "key": key}
+  return {"status": "saved", "key": key, "value": value}
 ```
 
 `user:` is ADK's prefix for state shared by all of a user's sessions. The
 plugin logs the change as a `STATE_DELTA` row with
-`attributes.state_delta = {"user:diet": "vegetarian"}`. A later write of the
+`attributes.state_delta = {"user:currency": "EUR"}`. A later write of the
 same key starts a new version and closes the previous one, so the history
-and `as_of` reads need no separate supersede call. The long-term layer
-ignores session-scoped keys (no prefix), such as `last_hotel_search` in the
-fixture.
+and `as_of` reads need no separate supersede call.
+
+- **Facts, entities and embeddings:** written by the consolidation pass, in
+  BigQuery, from rows the plugin already logged. Each step skips messages it
+  has processed, so a pass can be re-run.
 
 In neo4j-agent-memory the application records reasoning itself. Its docs
 say "Always pair a started trace with a matching `complete_trace` call." Here
@@ -253,13 +282,13 @@ row was actually recorded; a stream that stopped part-way, for example, is
 |---|---|---|
 | `ReasoningTrace.task` | `ReasoningTrace.task` | The invocation's first `USER_MESSAGE_RECEIVED` |
 | `ReasoningStep` (thought / action / observation) | `ReasoningStep` | One step per model call except the final answer; the fragments of a streamed call are one call. `thought` holds its text parts, `action` is `call: <tools>`, and `observation` summarizes the tool results or errors |
-| `ToolCall` (status, `duration_ms`, `error`) | `ToolCall` (`success` / `error` / `pending`) | `TOOL_STARTING` paired by span id with `TOOL_COMPLETED` or `TOOL_ERROR`; `latency_ms.total_ms`; `error_message`. A start with no completion row is `pending` |
+| `ToolCall` (status, `duration_ms`, `error`) | `ToolCall` (`success` / `error` / `pending`) | `TOOL_STARTING` paired by span id with `TOOL_COMPLETED` or `TOOL_ERROR`; `latency_ms.total_ms`; `error_message`. A start with no completion row is `pending`. A completion whose result is `{"status": "error", ...}`, the way the analyst's `run_sql` reports bad SQL, is an `error` |
 | `complete_trace(outcome=TraceOutcome(success, summary, error_kind, metrics))` | `outcome`, `outcome_status`, `metrics` | `outcome` is the text of the last model call, if that call completed. `outcome_status` is one of `answered`, `answered_with_errors` or `unanswered`. `metrics` holds latency, model calls, tool calls and errors, and tokens (`content.usage.total`, the largest value per call, since streamed usage is cumulative) |
 | `INITIATED_BY` / `TOUCHED` edges | `session_id` / `span_id` on every item | The source row |
 
 How `outcome_status` is derived:
 - `answered`: the invocation's last model call completed with text and no tool calls, and no error rows were recorded.
-- `answered_with_errors`: the same final answer, but at least one error row was recorded (such as the retried hotel search above).
+- `answered_with_errors`: the same final answer, but at least one error row was recorded.
 - `unanswered`: there is no recorded final answer. The invocation is still running, a stream stopped part-way, or it failed.
 
 What counts as a completed model call:
@@ -291,16 +320,18 @@ the same numbers come from one query that can be sliced by any column:
 SELECT
   JSON_VALUE(content, '$.tool') AS tool_name,
   COUNTIF(event_type = 'TOOL_STARTING') AS total_calls,
-  COUNTIF(event_type = 'TOOL_COMPLETED') AS successful_calls,
-  COUNTIF(event_type = 'TOOL_ERROR') AS failed_calls,
-  SAFE_DIVIDE(
-    COUNTIF(event_type = 'TOOL_COMPLETED'),
-    COUNTIF(event_type = 'TOOL_STARTING')) AS success_rate,
+  COUNTIF(event_type = 'TOOL_COMPLETED'
+          AND COALESCE(JSON_VALUE(content, '$.result.status'), '') != 'error')
+    AS successful_calls,
+  COUNTIF(event_type = 'TOOL_ERROR'
+          OR (event_type = 'TOOL_COMPLETED'
+              AND JSON_VALUE(content, '$.result.status') = 'error'))
+    AS failed_calls,
   AVG(IF(event_type != 'TOOL_STARTING',
          CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64),
          NULL)) AS avg_duration_ms,
   MAX(IF(event_type = 'TOOL_STARTING', timestamp, NULL)) AS last_used_at
-FROM `my-project.agent_analytics.agent_events`
+FROM `my-project.bqaa_agent_memory_demo.analyst_events`
 WHERE event_type IN ('TOOL_STARTING', 'TOOL_COMPLETED', 'TOOL_ERROR')
   AND user_id = @user_id
   AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
@@ -308,14 +339,19 @@ GROUP BY tool_name
 ORDER BY total_calls DESC, tool_name
 ```
 
-This query returns the same rows as `get_tool_stats()` in two checks:
-- on the recorded live table in BigQuery, for `demo-ana` (0 bytes billed);
-- on the fixture, transpiled to DuckDB with sqlglot.
+On the recorded week, this query and `get_tool_stats()` agree for all six
+analysts: the same total, successful and failed calls, and the same average
+duration, for each of their four tools. `recall_memory` averaged about 4 s a
+call and `run_sql` about 1.3 s.
 
 ## Compared with neo4j-agent-memory
 
 **Where this approach differs:**
-- **No recording calls.** The plugin's event log is the memory store.
+- **No recording calls.** The plugin's event log is the memory store; the
+  agent adds nothing but ADK state.
+- **Extraction in the warehouse.** Facts and entities come from one SQL
+  statement over the logged rows (`AI.GENERATE` with a typed output
+  schema), with no extraction service to run.
 - **History for free.** The log is append-only, so preference history and
   `as_of` reads come from row timestamps.
 - **SQL aggregation.** Aggregations such as tool stats run over the full
@@ -330,52 +366,62 @@ The user pin is still a filter, not access control. Restrict who can read
 the table with BigQuery IAM or row-level security.
 
 **Where neo4j-agent-memory is stronger, and this demo does not claim parity:**
-- Application-declared outcomes and provenance (`TraceOutcome`,
-  `touched_entities`, `INITIATED_BY`).
-- Embedding similarity for messages, entities and traces.
-- Entity resolution and deduplication.
-- Write APIs for entities and subject-predicate-object facts.
-- Multi-hop graph queries.
-- A wide set of framework integrations.
+- **Graph queries.** Multi-hop queries over the entity graph. BigQuery Graph
+  could hold the same graph, but running GQL needs an Enterprise or
+  Enterprise Plus reservation; on this project's on-demand billing a probe
+  query failed with exactly that error, so the demo uses plain SQL.
+- **Entity resolution.** Here, names that differ only in case or spacing are
+  merged; nothing more. neo4j-agent-memory deduplicates and resolves
+  entities.
+- **Write APIs and recorded outcomes.** Application-declared outcomes and
+  provenance (`TraceOutcome`, `touched_entities`, `INITIATED_BY`), and write
+  APIs for entities and facts.
+- **Integrations.** A wide set of framework integrations.
 
 ## Limitations
 
-- **Similarity is lexical.** `get_similar_traces` uses Jaccard overlap of
-  content words, so it runs without a model. The SDK's
-  `BigQueryEpisodicMemory` can rank user messages with `ML.DISTANCE` over a
-  precomputed embeddings table; that path is not exercised here.
-- **Entities come only from mapped tool arguments.** For LLM extraction from
-  payloads, see `ContextGraphManager.extract_biz_nodes` (`AI.GENERATE`) in
-  [SDK.md](../../SDK.md).
+- **Extraction runs after the fact.** Facts and entities from today's
+  sessions appear after the nightly pass; preferences the agent saves are
+  available at once.
+- **Extraction is a model call.** Its facts are as good as the model's
+  reading of each message, and it reads user messages only, not answers.
 - **Everything loads at once.** One user's sessions (default: last 30 days,
   up to 100 sessions) are read into memory in a single call. Push filters
   into SQL for large histories.
 - **Session ids must be unique.** A session id shared by two root agents or
   evaluation scopes raises `ValueError` rather than merging two
   conversations.
-- **The live agent is a demo.** Its inventories are fake and its outage is
-  simulated. The model's replies vary from run to run, so a rerun can call
-  tools differently from the recorded one.
+- **The days are simulated.** All sessions ran on one real day; each carries
+  its simulated date in session state, and the agent treats that date as
+  today. Rows keep their real timestamps.
+- **Recall takes seconds.** `recall_memory` runs a few BigQuery queries and
+  one `AI.EMBED`; it averaged about 4 s a call in the recorded run.
+- **One run.** Each before/after pair is one sample, and three of the six
+  controls are not clean (see above).
 
 ## Files
 
 | File | What it is |
 |---|---|
+| `analyst_agent.py` | The live data-analyst agent, its tools, and the harness that runs the week |
+| `analyst_scenario.py` | The six analysts, five days and the scripted questions |
+| `memory_consolidation.py` | The nightly pass: `AI.GENERATE` extraction and `AI.EMBED` embeddings in BigQuery, and the loaders `recall_memory` uses |
+| `memory_layers.py` | The three layers and `get_context`, computed from SDK `Trace` objects and extracted items |
 | `agent_memory_demo.py` | CLI; offline by default, live with `--project-id/--dataset-id` |
-| `memory_layers.py` | The three layers and `get_context`, computed from SDK `Trace` objects |
-| `offline_bigquery.py` | Offline `bigquery.Client` stand-in that serves `Client.list_traces` from the fixture and fails closed |
-| `fixtures/agent_events.json` | The synthetic rows |
-| `live_agent.py` | Live ADK trip planner that writes the memory (and reads it back with `recall_memory`) |
 | `export_memory.py` | Writes the web view's JSON from BigQuery or the fixture |
+| `offline_bigquery.py` | Offline `bigquery.Client` stand-in that serves `Client.list_traces` from the fixture and fails closed |
+| `fixtures/agent_events.json` | The synthetic rows behind the offline run and the unit tests |
 | `viz/index.html`, `viz/app.js` | The web view |
-| `viz/data/memory_export.json` | The export from the recorded run |
-| `viz/record_demo.py` | Records `demo.mp4` and `viz/screenshot.png` with headless Chromium |
-| `recorded_run/` | The recorded live run: run record, demo output and a labeled note |
+| `viz/data/memory_export.json` | The export of the recorded week |
+| `viz/record_demo.py` | Records the walkthrough and `viz/screenshot.png` with headless Chromium; `--narration` adds a voiceover and burned-in captions |
+| `recorded_run/` | The recorded week: run record, demo output, the narrated walkthrough with its script and captions, and a labeled note |
 
 Hermetic tests are in [`tests/examples/`](../../tests/examples/):
 - `test_agent_memory_demo.py`: the memory layers, the CLI and the stand-in client;
-- `test_agent_memory_live_agent.py`: the agent's tools;
-- `test_agent_memory_export.py`: the export.
+- `test_agent_memory_analyst.py`: the agent's tools, the scenario and the consolidation SQL;
+- `test_agent_memory_export.py`: the export;
+- `test_agent_memory_recording.py`: the narration script, captions and
+  ffmpeg command of the recorder.
 
 ## Sources
 
@@ -386,3 +432,4 @@ All fetched 2026-10-06; neo4j-agent-memory 0.6.0.
 - API reference: [trace operations](https://neo4j.com/labs/agent-memory/reference/api/reasoning-traces/), [steps and tool calls](https://neo4j.com/labs/agent-memory/reference/api/reasoning-steps/), [search and stats](https://neo4j.com/labs/agent-memory/reference/api/reasoning-search-stats/), [MemoryClient](https://neo4j.com/labs/agent-memory/reference/api/memory-client/), [preferences and facts](https://neo4j.com/labs/agent-memory/reference/api/long-term-preferences/)
 - Repository: https://github.com/neo4j-labs/agent-memory
 - PyPI: https://pypi.org/project/neo4j-agent-memory/
+- TheLook data: `bigquery-public-data.thelook_ecommerce` (BigQuery public datasets)

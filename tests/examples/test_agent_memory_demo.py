@@ -1253,3 +1253,354 @@ def test_cli_marks_an_incomplete_reply(fixture, tmp_path, capsys):
 
   assert "  [assistant, incomplete] Dotonbori" in out
   assert "- assistant (incomplete): Dotonbori [s-104/sp-104-llm-1]" in out
+
+
+# ---- extracted facts and entities, session state, tool error payloads -------
+
+
+def _extracted(span_id, at, session_id="s-101"):
+  return dict(session_id=session_id, span_id=span_id, observed_at=at)
+
+
+ANA_FACTS = (
+    memory_layers.Fact(
+        subject="Ana",
+        subject_type="PERSON",
+        predicate="follows_diet",
+        object="vegetarian",
+        object_type="DIET",
+        statement="Ana is vegetarian.",
+        **_extracted("sp-101-inv", _ts(2026, 9, 28, 17, 0, 0, 100000)),
+    ),
+    memory_layers.Fact(
+        subject="Ana",
+        subject_type="PERSON",
+        predicate="follows_diet",
+        object="pescatarian",
+        object_type="DIET",
+        statement="Ana eats fish now: pescatarian.",
+        **_extracted("sp-103-inv", _ts(2026, 10, 4, 18, 0, 0, 100000), "s-103"),
+    ),
+)
+ANA_ENTITIES = (
+    memory_layers.ExtractedEntity(
+        name="kyoto",
+        entity_type="location",
+        **_extracted("sp-103-inv", _ts(2026, 10, 4, 18, 0, 0, 100000), "s-103"),
+    ),
+    memory_layers.ExtractedEntity(
+        name="Tokyo ",
+        entity_type="LOCATION",
+        **_extracted("sp-101-inv", _ts(2026, 9, 28, 17, 0, 0, 100000)),
+    ),
+)
+
+
+def _ana_with_extraction(client):
+  return memory_layers.load_user_memory(
+      client,
+      "u-ana",
+      since=_ts(2026, 9, 6, 16, 0, 0),
+      entity_args=TRIP_ENTITY_ARGS,
+      facts=reversed(ANA_FACTS),
+      extracted_entities=ANA_ENTITIES,
+  )
+
+
+def test_extracted_facts_are_kept_oldest_first_with_their_source(client):
+  memory = _ana_with_extraction(client)
+
+  assert [
+      (f.object, f.session_id, f.span_id) for f in memory.long_term.get_facts()
+  ] == [
+      ("vegetarian", "s-101", "sp-101-inv"),
+      ("pescatarian", "s-103", "sp-103-inv"),
+  ]
+
+
+def test_extracted_entities_merge_with_tool_arguments_by_name_and_type(client):
+  memory = _ana_with_extraction(client)
+
+  entities = {
+      (e.name, e.entity_type): [(m.source, m.span_id) for m in e.mentions]
+      for e in memory.long_term.get_entities()
+  }
+
+  # "kyoto"/"location" is the same entity as the tool argument "Kyoto".
+  assert entities[("Kyoto", "LOCATION")] == [
+      ("tool", "sp-102-tool-1"),
+      ("tool", "sp-102-tool-2"),
+      ("extracted", "sp-103-inv"),
+      ("tool", "sp-103-tool-2"),
+  ]
+  assert entities[("Tokyo", "LOCATION")] == [
+      ("extracted", "sp-101-inv"),
+      ("tool", "sp-101-tool-3"),
+  ]
+
+
+def test_context_lists_extracted_facts_and_counts_mentions(client):
+  context = _ana_with_extraction(client).get_context(
+      ANA_S104_TASK, session_id="s-104"
+  )
+
+  assert (
+      "## Long-term: facts from earlier conversations\n"
+      "- Ana is vegetarian. [s-101/sp-101-inv]\n"
+      "- Ana eats fish now: pescatarian. [s-103/sp-103-inv]\n"
+  ) in context
+  assert "## Long-term: entities from conversations and tool calls" in context
+  assert "- Kyoto (LOCATION): 4 mentions [" in context
+  # Entities seen only in tool calls still count tool calls.
+  assert "- Kyoto Station (LOCATION): 2 tool calls [" in context
+
+
+def test_context_without_extraction_keeps_its_sections(ana):
+  context = ana.get_context(ANA_S104_TASK, session_id="s-104")
+
+  assert "facts from earlier conversations" not in context
+  assert "## Long-term: entities the agent acted on" in context
+
+
+def test_session_state_comes_from_the_logged_session_metadata(fixture):
+  rows = copy.deepcopy(fixture.rows)
+  for row in rows:
+    if row["session_id"] == "s-101":
+      row["attributes"]["session_metadata"] = {
+          "session_id": "s-101",
+          "app_name": "trip_planner",
+          "user_id": "u-ana",
+          "state": {
+              "sim_date": "2026-10-01",
+              "user:diet": "vegetarian",
+              "app:theme": "dark",
+              "temp:scratch": 1,
+          },
+      }
+  memory = memory_layers.load_user_memory(_client(rows), "u-ana")
+
+  states = {s.session_id: s.state for s in memory.short_term.list_sessions()}
+
+  assert states == {
+      "s-101": {"sim_date": "2026-10-01"},
+      "s-102": {},
+      "s-103": {},
+      "s-104": {},
+  }
+
+
+def test_a_tool_that_reports_an_error_counts_as_a_failed_call(fixture):
+  rows = copy.deepcopy(fixture.rows)
+  _row(rows, "sp-103-tool-2", "TOOL_COMPLETED")["content"]["result"] = {
+      "status": "error",
+      "message": "Unrecognized name: cuisine",
+  }
+  memory = memory_layers.load_user_memory(_client(rows), "u-ana")
+
+  call = memory.reasoning.get_trace_with_steps("inv-103").tool_calls[-1]
+  (stats,) = memory.reasoning.get_tool_stats("find_restaurants")
+  context = memory.get_context(ANA_S104_TASK, session_id="s-104")
+
+  assert (call.tool_name, call.status, call.error) == (
+      "find_restaurants",
+      "error",
+      "Unrecognized name: cuisine",
+  )
+  assert call.result == {
+      "status": "error",
+      "message": "Unrecognized name: cuisine",
+  }
+  assert (stats.failed_calls, stats.total_calls) == (1, 1)
+  assert (
+      "- find_restaurants failed 1 of 1 calls; last error: Unrecognized name:"
+      " cuisine [s-103/sp-103-tool-2]"
+  ) in context
+
+
+def test_similar_traces_can_be_ranked_by_given_scores(ana):
+  similar = ana.reasoning.get_similar_traces(
+      "anything", scores={"inv-101": 0.62, "inv-103": 0.91}, threshold=0.6
+  )
+  below = ana.reasoning.get_similar_traces(
+      "anything", scores={"inv-101": 0.55}, threshold=0.6
+  )
+
+  assert [(s.trace.trace_id, s.similarity) for s in similar] == [
+      ("inv-103", 0.91),
+      ("inv-101", 0.62),
+  ]
+  assert below == []
+
+
+def test_context_shows_the_call_to_reuse_from_a_similar_task(ana):
+  context = ana.get_context(
+      ANA_S104_TASK,
+      session_id="s-104",
+      reuse_tools=("find_restaurants",),
+  )
+
+  assert (
+      '  reuse: find_restaurants({"city": "Kyoto", "cuisine": "seafood",'
+      ' "date": "2026-10-15", "diet": "pescatarian", "party_size": 1})'
+      " [s-103/sp-103-tool-2]"
+  ) in context
+
+
+def test_long_outcomes_are_shortened_in_context(fixture):
+  rows = copy.deepcopy(fixture.rows)
+  answer = "Kamo Grill fits a pescatarian dinner. " * 20
+  _row(rows, "sp-103-llm-2", "LLM_RESPONSE")["content"][
+      "response"
+  ] = f"text: '{answer}'"
+  memory = memory_layers.load_user_memory(_client(rows), "u-ana")
+
+  context = memory.get_context(ANA_S104_TASK, session_id="s-104")
+  (line,) = [l for l in context.splitlines() if "trace inv-103" in l]
+
+  assert answer not in context
+  assert '..." [s-103/sp-103-llm-2]' in line
+  assert len(line) < 600
+
+
+class _ConsolidatedClient:
+  """Traces from the fixture; extracted items and similar tasks canned."""
+
+  def __init__(self, rows, items, similar):
+    self._traces = offline_bigquery.OfflineBigQueryClient(rows)
+    self._answers = {"_memory_items`": items, "_task_embeddings`": similar}
+    self.params = {}
+
+  def query(self, sql, job_config=None, **kwargs):
+    for marker, rows in self._answers.items():
+      if marker in sql:
+        self.params[marker] = {
+            p.name: p.value for p in job_config.query_parameters
+        }
+        return _Canned(rows)
+    return self._traces.query(sql, job_config=job_config, **kwargs)
+
+
+class _Canned:
+
+  def __init__(self, rows):
+    self._rows = rows
+
+  def result(self):
+    return self._rows
+
+
+def test_cli_live_reads_extracted_facts_and_ranks_tasks_by_embedding(
+    fixture, capsys
+):
+  items = [
+      {
+          "kind": "fact",
+          "session_id": "s-101",
+          "span_id": "sp-101-inv",
+          "observed_at": "2026-09-28T17:00:00.100Z",
+          "subject": "Ana",
+          "subject_type": "PERSON",
+          "predicate": "follows_diet",
+          "object": "vegetarian",
+          "object_type": "VALUE",
+          "statement": "Ana is vegetarian.",
+      }
+  ]
+  fake = _ConsolidatedClient(
+      fixture.rows, items, [{"invocation_id": "inv-103", "similarity": 0.91}]
+  )
+
+  code = agent_memory_demo.main(
+      [
+          "--project-id",
+          "p",
+          "--dataset-id",
+          "d",
+          "--table-id",
+          "analyst_events",
+          "--memory-tables",
+          "analyst_",
+          "--user-id",
+          "u-ana",
+          "--session-id",
+          "s-104",
+          "--now",
+          "2026-10-06T16:00:00Z",
+      ],
+      bq_client=fake,
+  )
+  out = capsys.readouterr().out
+
+  assert code == 0
+  assert (
+      "Facts extracted from the conversations (memory_consolidation):\n"
+      "  Ana is vegetarian.  [s-101/sp-101-inv]\n"
+  ) in out
+  assert "(by embedding, successful only):\n  0.91  inv-103" in out
+  assert "- Ana is vegetarian. [s-101/sp-101-inv]" in out
+  assert fake.params["_task_embeddings`"] == {
+      "query": ANA_S104_TASK,
+      "user_id": "u-ana",
+      "session_id": "s-104",
+      "top_k": 8,
+  }
+  assert fake.params["_memory_items`"] == {"user_id": "u-ana"}
+
+
+@pytest.mark.parametrize(
+    "entity_args, heading",
+    [
+        # The fixture's tool arguments name places, and one entity was
+        # extracted: both sources.
+        (
+            [],
+            "Entities (tool arguments: city, destination, near, origin; and"
+            " extracted from messages):",
+        ),
+        # No tool argument names an entity: extracted ones only.
+        (["--entity-arg", "unused=THING"], "Entities extracted from messages:"),
+    ],
+)
+def test_cli_entity_heading_names_only_the_sources_present(
+    fixture, capsys, entity_args, heading
+):
+  items = [
+      {
+          "kind": "entity",
+          "session_id": "s-101",
+          "span_id": "sp-101-inv",
+          "observed_at": "2026-09-28T17:00:00.100Z",
+          "name": "Kyoto",
+          "entity_type": "LOCATION",
+      }
+  ]
+  fake = _ConsolidatedClient(fixture.rows, items, [])
+
+  code = agent_memory_demo.main(
+      [
+          "--project-id",
+          "p",
+          "--dataset-id",
+          "d",
+          "--memory-tables",
+          "analyst_",
+          "--user-id",
+          "u-ana",
+          "--session-id",
+          "s-104",
+          "--now",
+          "2026-10-06T16:00:00Z",
+          *entity_args,
+      ],
+      bq_client=fake,
+  )
+
+  assert code == 0
+  assert f"\n{heading}\n" in capsys.readouterr().out
+
+
+def test_cli_memory_tables_need_a_live_table(capsys):
+  with pytest.raises(SystemExit):
+    agent_memory_demo.main(["--memory-tables", "analyst_"])
+
+  assert "--memory-tables needs --project-id" in capsys.readouterr().err

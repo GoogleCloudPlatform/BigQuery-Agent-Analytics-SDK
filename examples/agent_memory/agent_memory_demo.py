@@ -26,6 +26,9 @@ user, then the combined context block an agent would put in its next prompt.
       --user-id USER --session-id CURRENT_SESSION
       Live: reads the agent_events table that the ADK
       BigQueryAgentAnalyticsPlugin writes (Application Default Credentials).
+      Add --memory-tables PREFIX to also read the facts and entities that
+      memory_consolidation.py extracted, and rank similar past tasks by
+      embedding, as the analyst agent's recall_memory does.
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ from bigquery_agent_analytics import make_bq_client
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import memory_consolidation  # noqa: E402
 import memory_layers  # noqa: E402
 import offline_bigquery  # noqa: E402
 
@@ -56,6 +60,8 @@ ENTITY_ARGUMENTS = {
 }
 OFFLINE_USER = "u-ana"
 OFFLINE_SESSION = "s-104"
+# Cosine similarity a past task needs to count as similar (embeddings).
+SIMILARITY_THRESHOLD = 0.55
 
 
 def _utc(value: datetime) -> str:
@@ -119,6 +125,7 @@ def _print_report(
     query: Optional[str],
     trace_id: Optional[str],
     entity_args: dict[str, str],
+    scores: Optional[dict[str, float]] = None,
 ) -> None:
   reasoning_traces = memory.reasoning.list_traces()
   print("Agent memory from BigQuery Agent Analytics traces")
@@ -140,8 +147,10 @@ def _print_report(
   print("\n== 1. Short-term memory ==")
   print("Sessions (ShortTermMemory.list_sessions):")
   for info in memory.short_term.list_sessions():
+    day = info.state.get("sim_date")
     print(
-        f"  {info.session_id}  {_utc(info.created_at)} "
+        f"  {info.session_id}  {_utc(info.created_at)}"
+        f"{f'  day {day}' if day else ''} "
         f" {_plural(info.message_count, 'message'):<10}"
         f"  {_shorten(info.first_message_preview)}"
     )
@@ -176,13 +185,33 @@ def _print_report(
           or "(none)"
       )
   )
+  facts = memory.long_term.get_facts()
+  if facts:
+    print("Facts extracted from the conversations (memory_consolidation):")
+    for fact in facts:
+      text = fact.statement or f"{fact.subject} {fact.predicate} {fact.object}"
+      print(f"  {text}  [{fact.session_id}/{fact.span_id}]")
   arguments = ", ".join(sorted(entity_args))
-  print(f"Entities the agent acted on (tool arguments: {arguments}):")
   entities = memory.long_term.get_entities()
+  extracted = any(m.source != "tool" for e in entities for m in e.mentions)
+  from_tools = any(m.source == "tool" for e in entities for m in e.mentions)
+  if extracted and not from_tools:
+    print("Entities extracted from messages:")
+  elif extracted:
+    print(
+        f"Entities (tool arguments: {arguments}; and extracted from messages):"
+    )
+  else:
+    print(f"Entities the agent acted on (tool arguments: {arguments}):")
   for entity in entities:
+    noun = (
+        "tool call"
+        if all(m.source == "tool" for m in entity.mentions)
+        else "mention"
+    )
     print(
         f"  {entity.name:<14} {entity.entity_type:<9}"
-        f" {_plural(len(entity.mentions), 'tool call'):<12}"
+        f" {_plural(len(entity.mentions), noun):<12}"
         f"  {', '.join(entity.sessions)}"
     )
   if not entities:
@@ -239,9 +268,13 @@ def _print_report(
         f" {stats.failed_calls:>7} {stats.success_rate:>8.0%} {avg:>8}"
     )
   if query:
-    print(f"Similar past tasks for {query!r} (lexical, successful only):")
+    how = "by embedding" if scores is not None else "lexical"
+    print(f"Similar past tasks for {query!r} ({how}, successful only):")
     similar = memory.reasoning.get_similar_traces(
-        query, exclude_session_id=session_id
+        query,
+        exclude_session_id=session_id,
+        scores=scores,
+        **({} if scores is None else {"threshold": SIMILARITY_THRESHOLD}),
     )
     for match in similar:
       print(
@@ -252,7 +285,19 @@ def _print_report(
       print("  (none above the threshold)")
 
   print("\n== 4. get_context() for the next model call ==")
-  print(memory.get_context(query or "", session_id=session_id))
+  if scores is None:
+    print(memory.get_context(query or "", session_id=session_id))
+  else:
+    print(
+        memory.get_context(
+            query or "",
+            session_id=session_id,
+            max_items=6,
+            scores=scores,
+            threshold=SIMILARITY_THRESHOLD,
+            reuse_tools=("run_sql",),
+        )
+    )
 
 
 def main(argv: Optional[list[str]] = None, *, bq_client: Any = None) -> int:
@@ -295,6 +340,14 @@ def main(argv: Optional[list[str]] = None, *, bq_client: Any = None) -> int:
       help="a tool argument that names an entity (repeatable)",
   )
   parser.add_argument(
+      "--memory-tables",
+      metavar="PREFIX",
+      help=(
+          "live: read extracted facts, entities and task embeddings from the"
+          " consolidation tables with this prefix (e.g. analyst_)"
+      ),
+  )
+  parser.add_argument(
       "--fixture",
       type=Path,
       default=offline_bigquery.DEFAULT_FIXTURE,
@@ -308,22 +361,32 @@ def main(argv: Optional[list[str]] = None, *, bq_client: Any = None) -> int:
   except argparse.ArgumentTypeError as e:
     parser.error(str(e))
 
+  tables = None
   if args.project_id:
     if not (args.user_id and args.session_id):
       parser.error("live mode needs --user-id and --session-id")
     now = _parse_now(args.now) if args.now else datetime.now(timezone.utc)
+    bq = bq_client or make_bq_client(args.project_id, location=args.location)
     client = Client(
         project_id=args.project_id,
         dataset_id=args.dataset_id,
         table_id=args.table_id,
         location=args.location,
         verify_schema=False,
-        bq_client=bq_client
-        or make_bq_client(args.project_id, location=args.location),
+        bq_client=bq,
     )
+    if args.memory_tables:
+      tables = memory_consolidation.MemoryTables.in_dataset(
+          args.project_id,
+          args.dataset_id,
+          events=args.table_id,
+          prefix=args.memory_tables,
+      )
     source = f"BigQuery {args.project_id}.{args.dataset_id}.{args.table_id}"
     user_id, session_id = args.user_id, args.session_id
   else:
+    if args.memory_tables:
+      parser.error("--memory-tables needs --project-id")
     fixture = offline_bigquery.load_fixture(args.fixture)
     now = _parse_now(args.now) if args.now else fixture.now
     client = Client(
@@ -338,8 +401,18 @@ def main(argv: Optional[list[str]] = None, *, bq_client: Any = None) -> int:
     session_id = args.session_id or OFFLINE_SESSION
 
   since = now - timedelta(days=args.lookback_days)
+  facts, extracted = (
+      memory_consolidation.load_memory_items(bq, tables, user_id)
+      if tables is not None
+      else ([], [])
+  )
   memory = memory_layers.load_user_memory(
-      client, user_id, since=since, entity_args=entity_args
+      client,
+      user_id,
+      since=since,
+      entity_args=entity_args,
+      facts=facts,
+      extracted_entities=extracted,
   )
   query = args.query
   if query is None:
@@ -348,6 +421,11 @@ def main(argv: Optional[list[str]] = None, *, bq_client: Any = None) -> int:
     except KeyError:
       conversation = []
     query = next((m.content for m in conversation if m.role == "user"), None)
+  scores = None
+  if tables is not None and query:
+    scores = memory_consolidation.similar_task_scores(
+        bq, tables, user_id, query, session_id=session_id
+    )
   _print_report(
       memory,
       source=source,
@@ -357,6 +435,7 @@ def main(argv: Optional[list[str]] = None, *, bq_client: Any = None) -> int:
       query=query,
       trace_id=args.trace_id,
       entity_args=entity_args,
+      scores=scores,
   )
   return 0
 
