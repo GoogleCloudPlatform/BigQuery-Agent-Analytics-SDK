@@ -80,6 +80,15 @@ def _unwrap_text_field(value: str) -> str:
   return inner[1:]
 
 
+def _str_or_none(value: Any) -> Optional[str]:
+  """Returns ``value`` if it is a string, else ``None``.
+
+  The producer writes correlation IDs as strings; any other JSON value
+  comes from a malformed row and is ignored.
+  """
+  return value if isinstance(value, str) else None
+
+
 class EventType(Enum):
   """Standard event types logged by the analytics plugin."""
 
@@ -160,7 +169,7 @@ class Span:
      span attribute ``gcp.vertex.agent.associated_event_ids``.
 
   Fields of layers 2 and 3 are ``None`` when the producer did not
-  record them.
+  record them or recorded a non-string value in ``attributes``.
   """
 
   event_type: str
@@ -214,12 +223,16 @@ class Span:
     adk_dict = attrs.get("adk")
     if not isinstance(adk_dict, dict):
       adk_dict = {}
-    otel_span_id = row.get("otel_span_id") or otel_dict.get("span_id")
-    otel_trace_id = row.get("otel_trace_id") or otel_dict.get("trace_id")
+    otel_span_id = row.get("otel_span_id") or _str_or_none(
+        otel_dict.get("span_id")
+    )
+    otel_trace_id = row.get("otel_trace_id") or _str_or_none(
+        otel_dict.get("trace_id")
+    )
     source_event_id = (
         row.get("source_event_id")
-        or adk_dict.get("source_event_id")
-        or attrs.get("source_event_id")
+        or _str_or_none(adk_dict.get("source_event_id"))
+        or _str_or_none(attrs.get("source_event_id"))
     )
 
     latency_ms = row.get("latency_ms")

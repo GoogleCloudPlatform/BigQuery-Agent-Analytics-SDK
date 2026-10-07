@@ -23,6 +23,7 @@ import pytest
 from bigquery_agent_analytics.views import _CROSS_EVENT_VIEW_DEFS
 from bigquery_agent_analytics.views import _EVENT_VIEW_DEFS
 from bigquery_agent_analytics.views import _OTEL_CORRELATION_COLUMNS
+from bigquery_agent_analytics.views import _referenced_columns
 from bigquery_agent_analytics.views import _STANDARD_HEADERS
 from bigquery_agent_analytics.views import ViewManager
 
@@ -514,6 +515,47 @@ class TestDeniedColumns:
     for event_type in kept:
       assert event_type in created
     assert "USER_MESSAGE_RECEIVED" in created
+
+  def test_rendered_names_do_not_count_as_reads(self):
+    """Project, dataset and table names are not part of a view's own SQL."""
+    vm = ViewManager(
+        project_id="acme-content-prod",
+        dataset_id="latency_ms_lab",
+        table_id="attributes-2026",
+        bq_client=mock.MagicMock(),
+        denied_columns=["content"],
+    )
+    sql = vm.get_view_sql("USER_MESSAGE_RECEIVED")
+    assert "FROM `acme-content-prod.latency_ms_lab.attributes-2026`" in sql
+    # A check on the rendered statement would see ``content`` in the
+    # project ID.
+    assert _reads(sql, "content")
+    assert vm._denied_columns_read_by("USER_MESSAGE_RECEIVED") == []
+    created = vm.create_all_views()
+    assert created.get("USER_MESSAGE_RECEIVED") == "adk_user_messages"
+    issued = [c.args[0] for c in vm.bq_client.query.call_args_list]
+    assert sql in issued
+
+  @pytest.mark.parametrize(
+      "sql, columns, expected",
+      [
+          ("JSON_VALUE(content_parts, '$.x')", {"content"}, []),
+          ("content_parts", {"content_parts"}, ["content_parts"]),
+          ("JSON_VALUE(content, '$.x')", {"content"}, ["content"]),
+          ("my_content", {"content"}, []),
+          ("'my_content'", {"content"}, []),
+      ],
+      ids=[
+          "content_parts-is-not-content",
+          "content_parts",
+          "content-read",
+          "my_content",
+          "my_content-literal",
+      ],
+  )
+  def test_referenced_columns_matches_whole_names(self, sql, columns, expected):
+    """A column counts only as a whole name, never inside a longer one."""
+    assert _referenced_columns(sql, columns) == expected
 
   def test_default_denies_nothing(self, vm):
     assert vm.denied_columns == frozenset()

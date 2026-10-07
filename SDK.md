@@ -250,7 +250,6 @@ from `otel_spans`:
 WITH events AS (
   SELECT
     timestamp,
-    event_id,
     event_type,
     agent,
     trace_id,
@@ -270,7 +269,6 @@ spans AS (
 )
 SELECT
   e.timestamp,
-  e.event_id,
   e.event_type,
   e.agent,
   e.span_id AS bqaa_span_id,
@@ -302,7 +300,6 @@ against the `gcp.vertex.agent.associated_event_ids` attribute of that node's
 WITH events AS (
   SELECT
     timestamp,
-    event_id,
     event_type,
     agent,
     trace_id,
@@ -321,7 +318,6 @@ spans AS (
 )
 SELECT
   e.timestamp,
-  e.event_id,
   e.event_type,
   e.agent,
   e.source_event_id,

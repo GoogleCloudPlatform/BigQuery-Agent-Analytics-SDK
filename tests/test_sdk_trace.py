@@ -1117,6 +1117,67 @@ class TestSpanOtelCorrelation:
     assert span.otel_trace_id is None
     assert span.source_event_id is None
 
+  @pytest.mark.parametrize("as_json", [False, True], ids=["dict", "json"])
+  @pytest.mark.parametrize(
+      "otel",
+      [
+          {"span_id": 123, "trace_id": 456},
+          {"span_id": {"x": 1}, "trace_id": ["a"]},
+          {"span_id": True, "trace_id": 1.5},
+          {"span_id": 0, "trace_id": []},
+      ],
+      ids=["numbers", "object-and-array", "bool-and-float", "falsy"],
+  )
+  def test_non_string_otel_ids_become_none(self, otel, as_json):
+    """The fields are ``Optional[str]``; the producer writes hex strings."""
+    attributes = {"otel": otel}
+    if as_json:
+      attributes = json.dumps(attributes)
+    span = Span.from_bigquery_row(self._row(attributes=attributes))
+    assert span.otel_span_id is None
+    assert span.otel_trace_id is None
+
+  @pytest.mark.parametrize(
+      "attributes",
+      [
+          {"adk": {"source_event_id": ["evt-1"]}},
+          json.dumps({"adk": {"source_event_id": ["evt-1"]}}),
+          {"adk": {"source_event_id": 7}},
+          {"source_event_id": {"id": "evt-1"}},
+          json.dumps({"source_event_id": 7}),
+      ],
+      ids=[
+          "adk-array",
+          "adk-array-json",
+          "adk-number",
+          "legacy-object",
+          "legacy-number-json",
+      ],
+  )
+  def test_non_string_source_event_id_becomes_none(self, attributes):
+    span = Span.from_bigquery_row(self._row(attributes=attributes))
+    assert span.source_event_id is None
+
+  def test_non_string_adk_source_event_id_falls_back_to_legacy_key(self):
+    row = self._row(
+        attributes={
+            "source_event_id": "evt-legacy",
+            "adk": {"source_event_id": ["evt-adk"]},
+        }
+    )
+    assert Span.from_bigquery_row(row).source_event_id == "evt-legacy"
+
+  def test_string_ids_survive_non_string_siblings(self):
+    attributes = {
+        "otel": {"span_id": self._OTEL_SPAN_ID, "trace_id": 42},
+        "adk": {"source_event_id": "evt-123"},
+    }
+    row = self._row(attributes=json.dumps(attributes))
+    span = Span.from_bigquery_row(row)
+    assert span.otel_span_id == self._OTEL_SPAN_ID
+    assert span.otel_trace_id is None
+    assert span.source_event_id == "evt-123"
+
   def test_build_span_tree_links_by_bqaa_ids_and_keeps_otel_ids(self):
     """The tree stays keyed on ``span_id`` / ``parent_span_id``.
 
