@@ -1,0 +1,1082 @@
+{
+ "schema": "bqaa-agent-memory-viz/1",
+ "label": "Recorded live run, 2026-10-07",
+ "source": "<project>.bqaa_agent_memory_demo.agent_events",
+ "exported_at": "2026-10-07T06:11:46.013Z",
+ "users": [
+  {
+   "user_id": "demo-ana",
+   "current_session_id": "mem-20261007t0603-s5",
+   "sessions": [
+    {
+     "session_id": "mem-20261007t0603-s1",
+     "created_at": "2026-10-07T06:03:55.080Z",
+     "updated_at": "2026-10-07T06:04:19.674Z",
+     "row_count": 27,
+     "messages": [
+      {
+       "role": "user",
+       "content": "Hi! Please remember two things about me: I'm vegetarian, and I always want a window seat.",
+       "timestamp": "2026-10-07T06:03:55.080Z",
+       "span_id": "4d2a571f16613b18"
+      },
+      {
+       "role": "assistant",
+       "content": "I have saved your preferences: vegetarian diet and window seat. Let me know whenever you'd like help planning your next trip!",
+       "timestamp": "2026-10-07T06:03:59.035Z",
+       "span_id": "b44df5cb466b44d7"
+      },
+      {
+       "role": "user",
+       "content": "Now find me a flight from SFO to Tokyo on 2026-10-12.",
+       "timestamp": "2026-10-07T06:03:59.562Z",
+       "span_id": "ab15bd2dff3e17e1"
+      },
+      {
+       "role": "assistant",
+       "content": "I found two flights from SFO to Tokyo on October 12, 2026 with window seats available. Flight DM101 departs at 11:05 with 12 window seats remaining, and flight DM205 departs at 16:40 with 3 window seats left. Let me know which option you prefer!",
+       "timestamp": "2026-10-07T06:04:19.668Z",
+       "span_id": "68378c700f1a456c"
+      }
+     ]
+    },
+    {
+     "session_id": "mem-20261007t0603-s2",
+     "created_at": "2026-10-07T06:04:20.208Z",
+     "updated_at": "2026-10-07T06:04:40.549Z",
+     "row_count": 30,
+     "messages": [
+      {
+       "role": "user",
+       "content": "Find me a hotel in Kyoto near Kyoto Station from 2026-10-14 to 2026-10-16.",
+       "timestamp": "2026-10-07T06:04:20.208Z",
+       "span_id": "be9fd134c316df2c"
+      },
+      {
+       "role": "user",
+       "content": "The hotel search failed. Please try it again.",
+       "timestamp": "2026-10-07T06:04:25.143Z",
+       "span_id": "7cdcf4c4761f5c4c"
+      },
+      {
+       "role": "assistant",
+       "content": "I found two hotel options in Kyoto near Kyoto Station for October 14–16, 2026. The closest is the Sakura Station Hotel, located just 150 meters away at $180 per night. Alternatively, Higashiyama Ryokan is available 2.4 km away for $260 per night.",
+       "timestamp": "2026-10-07T06:04:38.283Z",
+       "span_id": "600cb8b8d09e4da5"
+      },
+      {
+       "role": "user",
+       "content": "What was the nightly price of the first hotel you found?",
+       "timestamp": "2026-10-07T06:04:38.942Z",
+       "span_id": "87f65613dcd8051f"
+      },
+      {
+       "role": "assistant",
+       "content": "The nightly price of the Sakura Station Hotel was $180.",
+       "timestamp": "2026-10-07T06:04:40.547Z",
+       "span_id": "2d3793fec2a74d14"
+      }
+     ]
+    },
+    {
+     "session_id": "mem-20261007t0603-s3",
+     "created_at": "2026-10-07T06:04:41.273Z",
+     "updated_at": "2026-10-07T06:04:53.531Z",
+     "row_count": 31,
+     "messages": [
+      {
+       "role": "user",
+       "content": "Find me a dinner place in Kyoto on 2026-10-15 that fits my diet.",
+       "timestamp": "2026-10-07T06:04:41.273Z",
+       "span_id": "313ce71d45a90c01"
+      },
+      {
+       "role": "assistant",
+       "content": "I found Kamo Garden in Kyoto, which offers vegetarian dining for dinner on October 15, 2026. It matches your saved vegetarian dietary preference. Let me know if you would like more details or assistance booking!",
+       "timestamp": "2026-10-07T06:04:48.600Z",
+       "span_id": "f0d21ddc616f4411"
+      },
+      {
+       "role": "user",
+       "content": "Actually, I eat fish now. Please update my diet to pescatarian and check again.",
+       "timestamp": "2026-10-07T06:04:49.130Z",
+       "span_id": "a436e408f2a70954"
+      },
+      {
+       "role": "assistant",
+       "content": "I have updated your dietary preference to pescatarian. For dinner in Kyoto on October 15, 2026, you can dine at Kamo Garden or Pontocho Grill. Both options accommodate a pescatarian diet.",
+       "timestamp": "2026-10-07T06:04:53.528Z",
+       "span_id": "078f65ca7a234c75"
+      }
+     ]
+    },
+    {
+     "session_id": "mem-20261007t0603-s5",
+     "created_at": "2026-10-07T06:04:59.376Z",
+     "updated_at": "2026-10-07T06:05:12.586Z",
+     "row_count": 16,
+     "messages": [
+      {
+       "role": "user",
+       "content": "Plan dinner in Osaka on 2026-10-17. Do you remember what I eat?",
+       "timestamp": "2026-10-07T06:04:59.376Z",
+       "span_id": "bc263ea608964416"
+      },
+      {
+       "role": "assistant",
+       "content": "Yes, I remember you follow a pescatarian diet. For your dinner in Osaka on October 17, 2026, I found Dotonbori Greens and Umeda Sushi Bar, both offering pescatarian-friendly options. Let me know if you'd like more details on either of these!",
+       "timestamp": "2026-10-07T06:05:12.581Z",
+       "span_id": "4fdc8f7241ad407b"
+      }
+     ]
+    }
+   ],
+   "preferences": [
+    {
+     "category": "diet",
+     "preference": "vegetarian",
+     "valid_from": "2026-10-07T06:03:57.610Z",
+     "valid_until": "2026-10-07T06:04:51.713Z",
+     "session_id": "mem-20261007t0603-s1",
+     "span_id": "4d2a571f16613b18"
+    },
+    {
+     "category": "seat",
+     "preference": "window",
+     "valid_from": "2026-10-07T06:03:57.610Z",
+     "valid_until": null,
+     "session_id": "mem-20261007t0603-s1",
+     "span_id": "4d2a571f16613b18"
+    },
+    {
+     "category": "diet",
+     "preference": "pescatarian",
+     "valid_from": "2026-10-07T06:04:51.713Z",
+     "valid_until": null,
+     "session_id": "mem-20261007t0603-s3",
+     "span_id": "a436e408f2a70954"
+    }
+   ],
+   "entities": [
+    {
+     "name": "Kyoto",
+     "entity_type": "LOCATION",
+     "mentions": [
+      {
+       "tool_name": "search_hotels",
+       "argument": "city",
+       "session_id": "mem-20261007t0603-s2",
+       "span_id": "d039f83df55240ab",
+       "timestamp": "2026-10-07T06:04:24.323Z"
+      },
+      {
+       "tool_name": "search_hotels",
+       "argument": "city",
+       "session_id": "mem-20261007t0603-s2",
+       "span_id": "1684d289ceb64e82",
+       "timestamp": "2026-10-07T06:04:36.339Z"
+      },
+      {
+       "tool_name": "find_restaurants",
+       "argument": "city",
+       "session_id": "mem-20261007t0603-s3",
+       "span_id": "7bd49026598b4a80",
+       "timestamp": "2026-10-07T06:04:46.849Z"
+      },
+      {
+       "tool_name": "find_restaurants",
+       "argument": "city",
+       "session_id": "mem-20261007t0603-s3",
+       "span_id": "44c7b8470d784171",
+       "timestamp": "2026-10-07T06:04:51.712Z"
+      }
+     ]
+    },
+    {
+     "name": "Kyoto Station",
+     "entity_type": "LOCATION",
+     "mentions": [
+      {
+       "tool_name": "search_hotels",
+       "argument": "near",
+       "session_id": "mem-20261007t0603-s2",
+       "span_id": "d039f83df55240ab",
+       "timestamp": "2026-10-07T06:04:24.323Z"
+      },
+      {
+       "tool_name": "search_hotels",
+       "argument": "near",
+       "session_id": "mem-20261007t0603-s2",
+       "span_id": "1684d289ceb64e82",
+       "timestamp": "2026-10-07T06:04:36.339Z"
+      }
+     ]
+    },
+    {
+     "name": "Osaka",
+     "entity_type": "LOCATION",
+     "mentions": [
+      {
+       "tool_name": "find_restaurants",
+       "argument": "city",
+       "session_id": "mem-20261007t0603-s5",
+       "span_id": "7f97533b048e4d10",
+       "timestamp": "2026-10-07T06:05:09.994Z"
+      }
+     ]
+    },
+    {
+     "name": "SFO",
+     "entity_type": "LOCATION",
+     "mentions": [
+      {
+       "tool_name": "search_flights",
+       "argument": "origin",
+       "session_id": "mem-20261007t0603-s1",
+       "span_id": "7ff21c8f664c400a",
+       "timestamp": "2026-10-07T06:04:17.394Z"
+      }
+     ]
+    },
+    {
+     "name": "Tokyo",
+     "entity_type": "LOCATION",
+     "mentions": [
+      {
+       "tool_name": "search_flights",
+       "argument": "destination",
+       "session_id": "mem-20261007t0603-s1",
+       "span_id": "7ff21c8f664c400a",
+       "timestamp": "2026-10-07T06:04:17.394Z"
+      }
+     ]
+    }
+   ],
+   "traces": [
+    {
+     "trace_id": "e-8106023c-e91e-4f6b-9160-78f5e851d04d",
+     "session_id": "mem-20261007t0603-s1",
+     "task": "Hi! Please remember two things about me: I'm vegetarian, and I always want a window seat.",
+     "outcome": "I have saved your preferences: vegetarian diet and window seat. Let me know whenever you'd like help planning your next trip!",
+     "outcome_status": "answered",
+     "started_at": "2026-10-07T06:03:55.080Z",
+     "completed_at": "2026-10-07T06:03:59.039Z",
+     "latency_ms": 3958.969,
+     "llm_calls": 2,
+     "total_tokens": 1697,
+     "errors": [],
+     "steps": [
+      {
+       "step_number": 1,
+       "thought": null,
+       "action": "call: save_preference, save_preference",
+       "observation": "save_preference -> {\"key\": \"diet\", \"status\": \"saved\", \"value\": \"vegetarian\"}; save_preference -> {\"key\": \"seat\", \"status\": \"saved\", \"value\": \"window\"}",
+       "tool_calls": [
+        {
+         "tool_name": "save_preference",
+         "arguments": {
+          "key": "diet",
+          "value": "vegetarian"
+         },
+         "result": "{\"key\": \"diet\", \"status\": \"saved\", \"value\": \"vegetarian\"}",
+         "status": "success",
+         "duration_ms": 0,
+         "error": null,
+         "span_id": "3d9fc5423ba14577",
+         "started_at": "2026-10-07T06:03:57.606Z"
+        },
+        {
+         "tool_name": "save_preference",
+         "arguments": {
+          "key": "seat",
+          "value": "window"
+         },
+         "result": "{\"key\": \"seat\", \"status\": \"saved\", \"value\": \"window\"}",
+         "status": "success",
+         "duration_ms": 0,
+         "error": null,
+         "span_id": "b7d973c0ea6b46dc",
+         "started_at": "2026-10-07T06:03:57.609Z"
+        }
+       ]
+      }
+     ],
+     "timeline": [
+      {
+       "kind": "model",
+       "label": "call: save_preference, save_preference",
+       "start_ms": 49.869,
+       "end_ms": 2513.387,
+       "status": "success",
+       "span_id": "d0df50f3ea654504",
+       "detail": null
+      },
+      {
+       "kind": "tool",
+       "label": "save_preference",
+       "start_ms": 2525.906,
+       "end_ms": 2526.672,
+       "status": "success",
+       "span_id": "3d9fc5423ba14577",
+       "detail": "{\"key\": \"diet\", \"status\": \"saved\", \"value\": \"vegetarian\"}"
+      },
+      {
+       "kind": "tool",
+       "label": "save_preference",
+       "start_ms": 2528.074,
+       "end_ms": 2528.602,
+       "status": "success",
+       "span_id": "b7d973c0ea6b46dc",
+       "detail": "{\"key\": \"seat\", \"status\": \"saved\", \"value\": \"window\"}"
+      },
+      {
+       "kind": "model",
+       "label": "answer",
+       "start_ms": 2530.689,
+       "end_ms": 3954.97,
+       "status": "success",
+       "span_id": "b44df5cb466b44d7",
+       "detail": "I have saved your preferences: vegetarian diet and window seat. Let me know whenever you'd like help planning your next trip!"
+      }
+     ]
+    },
+    {
+     "trace_id": "e-b2db84df-6108-4822-b425-e9389918626a",
+     "session_id": "mem-20261007t0603-s1",
+     "task": "Now find me a flight from SFO to Tokyo on 2026-10-12.",
+     "outcome": "I found two flights from SFO to Tokyo on October 12, 2026 with window seats available. Flight DM101 departs at 11:05 with 12 window seats remaining, and flight DM205 departs at 16:40 with 3 window seats left. Let me know which option you prefer!",
+     "outcome_status": "answered",
+     "started_at": "2026-10-07T06:03:59.562Z",
+     "completed_at": "2026-10-07T06:04:19.674Z",
+     "latency_ms": 20112.104,
+     "llm_calls": 2,
+     "total_tokens": 6982,
+     "errors": [],
+     "steps": [
+      {
+       "step_number": 1,
+       "thought": null,
+       "action": "call: search_flights",
+       "observation": "search_flights -> {\"date\": \"2026-10-12\", \"destination\": \"Tokyo\", \"flights\": [{\"departs\": \"11:05\", \"flight\": \"DM101\", \"window_seats_left...",
+       "tool_calls": [
+        {
+         "tool_name": "search_flights",
+         "arguments": {
+          "date": "2026-10-12",
+          "destination": "Tokyo",
+          "origin": "SFO",
+          "seat": "window"
+         },
+         "result": "{\"date\": \"2026-10-12\", \"destination\": \"Tokyo\", \"flights\": [{\"departs\": \"11:05\", \"flight\": \"DM101\", \"window_seats_left\": 12}, {\"departs\": \"16:40\", \"flight\": \"DM205\", \"window_seats_left\": 3}], \"note\": \"demo inventory\", \"origin\": \"SFO\", \"se...",
+         "status": "success",
+         "duration_ms": 2,
+         "error": null,
+         "span_id": "7ff21c8f664c400a",
+         "started_at": "2026-10-07T06:04:17.394Z"
+        }
+       ]
+      }
+     ],
+     "timeline": [
+      {
+       "kind": "model",
+       "label": "call: search_flights",
+       "start_ms": 5.434,
+       "end_ms": 17827.078,
+       "status": "success",
+       "span_id": "ff9187fa99d44003",
+       "detail": null
+      },
+      {
+       "kind": "tool",
+       "label": "search_flights",
+       "start_ms": 17831.909,
+       "end_ms": 17834.441,
+       "status": "success",
+       "span_id": "7ff21c8f664c400a",
+       "detail": "{\"date\": \"2026-10-12\", \"destination\": \"Tokyo\", \"flights\": [{\"departs\": \"11:05\", \"flight\": \"DM101\", \"window_seats_left\": 12}, {\"departs\": \"16:40\", \"flight\": \"DM205\", \"window_seats_left\": 3}], \"note\": \"demo inventory\", \"origin\": \"SFO\", \"se..."
+      },
+      {
+       "kind": "model",
+       "label": "answer",
+       "start_ms": 17838.222,
+       "end_ms": 20106.724,
+       "status": "success",
+       "span_id": "68378c700f1a456c",
+       "detail": "I found two flights from SFO to Tokyo on October 12, 2026 with window seats available. Flight DM101 departs at 11:05 with 12 window seats remaining, and flight DM205 departs at 16:40 with 3 window seats left. Let me know which option you prefer!"
+      }
+     ]
+    },
+    {
+     "trace_id": "e-d2beb2a9-4e8d-400c-b1dd-24f5bf8318cd",
+     "session_id": "mem-20261007t0603-s2",
+     "task": "Find me a hotel in Kyoto near Kyoto Station from 2026-10-14 to 2026-10-16.",
+     "outcome": null,
+     "outcome_status": "unanswered",
+     "started_at": "2026-10-07T06:04:20.208Z",
+     "completed_at": null,
+     "latency_ms": 4133.214,
+     "llm_calls": 1,
+     "total_tokens": 1120,
+     "errors": [
+      "hotel inventory API timed out (simulated outage)"
+     ],
+     "steps": [
+      {
+       "step_number": 1,
+       "thought": null,
+       "action": "call: search_hotels",
+       "observation": "search_hotels -> error: hotel inventory API timed out (simulated outage)",
+       "tool_calls": [
+        {
+         "tool_name": "search_hotels",
+         "arguments": {
+          "check_in": "2026-10-14",
+          "check_out": "2026-10-16",
+          "city": "Kyoto",
+          "near": "Kyoto Station"
+         },
+         "result": null,
+         "status": "error",
+         "duration_ms": 1,
+         "error": "hotel inventory API timed out (simulated outage)",
+         "span_id": "d039f83df55240ab",
+         "started_at": "2026-10-07T06:04:24.323Z"
+        }
+       ]
+      }
+     ],
+     "timeline": [
+      {
+       "kind": "model",
+       "label": "call: search_hotels",
+       "start_ms": 7.234,
+       "end_ms": 4110.647,
+       "status": "success",
+       "span_id": "350baf11e37a4e1d",
+       "detail": null
+      },
+      {
+       "kind": "tool",
+       "label": "search_hotels",
+       "start_ms": 4115.589,
+       "end_ms": 4117.28,
+       "status": "error",
+       "span_id": "d039f83df55240ab",
+       "detail": "hotel inventory API timed out (simulated outage)"
+      }
+     ]
+    },
+    {
+     "trace_id": "e-8b956fd4-2aeb-46c2-84d0-66a784d3603d",
+     "session_id": "mem-20261007t0603-s2",
+     "task": "The hotel search failed. Please try it again.",
+     "outcome": "I found two hotel options in Kyoto near Kyoto Station for October 14–16, 2026. The closest is the Sakura Station Hotel, located just 150 meters away at $180 per night. Alternatively, Higashiyama Ryokan is available 2.4 km away for $260 per night.",
+     "outcome_status": "answered",
+     "started_at": "2026-10-07T06:04:25.143Z",
+     "completed_at": "2026-10-07T06:04:38.287Z",
+     "latency_ms": 13144.306,
+     "llm_calls": 2,
+     "total_tokens": 4674,
+     "errors": [],
+     "steps": [
+      {
+       "step_number": 1,
+       "thought": null,
+       "action": "call: search_hotels",
+       "observation": "search_hotels -> {\"check_in\": \"2026-10-14\", \"check_out\": \"2026-10-16\", \"city\": \"Kyoto\", \"hotels\": [{\"distance_m\": 150, \"name\": \"Sakura...",
+       "tool_calls": [
+        {
+         "tool_name": "search_hotels",
+         "arguments": {
+          "check_in": "2026-10-14",
+          "check_out": "2026-10-16",
+          "city": "Kyoto",
+          "near": "Kyoto Station"
+         },
+         "result": "{\"check_in\": \"2026-10-14\", \"check_out\": \"2026-10-16\", \"city\": \"Kyoto\", \"hotels\": [{\"distance_m\": 150, \"name\": \"Sakura Station Hotel\", \"price_per_night_usd\": 180}, {\"distance_m\": 2400, \"name\": \"Higashiyama Ryokan\", \"price_per_night_usd\": ...",
+         "status": "success",
+         "duration_ms": 1,
+         "error": null,
+         "span_id": "1684d289ceb64e82",
+         "started_at": "2026-10-07T06:04:36.339Z"
+        }
+       ]
+      }
+     ],
+     "timeline": [
+      {
+       "kind": "model",
+       "label": "call: search_hotels",
+       "start_ms": 5.155,
+       "end_ms": 11189.061,
+       "status": "success",
+       "span_id": "61f4cd66337c45eb",
+       "detail": null
+      },
+      {
+       "kind": "tool",
+       "label": "search_hotels",
+       "start_ms": 11195.587,
+       "end_ms": 11197.002,
+       "status": "success",
+       "span_id": "1684d289ceb64e82",
+       "detail": "{\"check_in\": \"2026-10-14\", \"check_out\": \"2026-10-16\", \"city\": \"Kyoto\", \"hotels\": [{\"distance_m\": 150, \"name\": \"Sakura Station Hotel\", \"price_per_night_usd\": 180}, {\"distance_m\": 2400, \"name\": \"Higashiyama Ryokan\", \"price_per_night_usd\": ..."
+      },
+      {
+       "kind": "model",
+       "label": "answer",
+       "start_ms": 11200.29,
+       "end_ms": 13140.466,
+       "status": "success",
+       "span_id": "600cb8b8d09e4da5",
+       "detail": "I found two hotel options in Kyoto near Kyoto Station for October 14–16, 2026. The closest is the Sakura Station Hotel, located just 150 meters away at $180 per night. Alternatively, Higashiyama Ryokan is available 2.4 km away for $260 per night."
+      }
+     ]
+    },
+    {
+     "trace_id": "e-3651624a-8427-44b4-9003-99bfd70fa0d3",
+     "session_id": "mem-20261007t0603-s2",
+     "task": "What was the nightly price of the first hotel you found?",
+     "outcome": "The nightly price of the Sakura Station Hotel was $180.",
+     "outcome_status": "answered",
+     "started_at": "2026-10-07T06:04:38.942Z",
+     "completed_at": "2026-10-07T06:04:40.549Z",
+     "latency_ms": 1607.255,
+     "llm_calls": 1,
+     "total_tokens": 2518,
+     "errors": [],
+     "steps": [],
+     "timeline": [
+      {
+       "kind": "model",
+       "label": "answer",
+       "start_ms": 6.168,
+       "end_ms": 1605.26,
+       "status": "success",
+       "span_id": "2d3793fec2a74d14",
+       "detail": "The nightly price of the Sakura Station Hotel was $180."
+      }
+     ]
+    },
+    {
+     "trace_id": "e-49a32f93-b77b-4061-ac63-0d7cc81ca47c",
+     "session_id": "mem-20261007t0603-s3",
+     "task": "Find me a dinner place in Kyoto on 2026-10-15 that fits my diet.",
+     "outcome": "I found Kamo Garden in Kyoto, which offers vegetarian dining for dinner on October 15, 2026. It matches your saved vegetarian dietary preference. Let me know if you would like more details or assistance booking!",
+     "outcome_status": "answered",
+     "started_at": "2026-10-07T06:04:41.273Z",
+     "completed_at": "2026-10-07T06:04:48.606Z",
+     "latency_ms": 7332.188,
+     "llm_calls": 3,
+     "total_tokens": 3614,
+     "errors": [],
+     "steps": [
+      {
+       "step_number": 1,
+       "thought": null,
+       "action": "call: recall_memory",
+       "observation": "recall_memory -> {\"memory\": \"# Memory for user demo-ana\\n\\n## Short-term: current conversation (session mem-20261007t0603-s3)\\n- user:...",
+       "tool_calls": [
+        {
+         "tool_name": "recall_memory",
+         "arguments": {
+          "query": "dinner place in Kyoto diet"
+         },
+         "result": "{\"memory\": \"# Memory for user demo-ana\\n\\n## Short-term: current conversation (session mem-20261007t0603-s3)\\n- user: Find me a dinner place in Kyoto on 2026-10-15 that fits my diet. [mem-20261007t0603-s3/313ce71d45a90c01]\\n\\n## Long-ter...",
+         "status": "success",
+         "duration_ms": 2063,
+         "error": null,
+         "span_id": "dbb6866c33c5435a",
+         "started_at": "2026-10-07T06:04:43.267Z"
+        }
+       ]
+      },
+      {
+       "step_number": 2,
+       "thought": null,
+       "action": "call: find_restaurants",
+       "observation": "find_restaurants -> {\"city\": \"Kyoto\", \"date\": \"2026-10-15\", \"diet\": \"vegetarian\", \"note\": \"demo listings\", \"restaurants\": [{\"fits\": \"vege...",
+       "tool_calls": [
+        {
+         "tool_name": "find_restaurants",
+         "arguments": {
+          "city": "Kyoto",
+          "date": "2026-10-15",
+          "diet": "vegetarian"
+         },
+         "result": "{\"city\": \"Kyoto\", \"date\": \"2026-10-15\", \"diet\": \"vegetarian\", \"note\": \"demo listings\", \"restaurants\": [{\"fits\": \"vegetarian\", \"name\": \"Kamo Garden\"}]}",
+         "status": "success",
+         "duration_ms": 1,
+         "error": null,
+         "span_id": "7bd49026598b4a80",
+         "started_at": "2026-10-07T06:04:46.849Z"
+        }
+       ]
+      }
+     ],
+     "timeline": [
+      {
+       "kind": "model",
+       "label": "call: recall_memory",
+       "start_ms": 5.551,
+       "end_ms": 1988.681,
+       "status": "success",
+       "span_id": "0dd3a25a7a1e4939",
+       "detail": null
+      },
+      {
+       "kind": "tool",
+       "label": "recall_memory",
+       "start_ms": 1993.778,
+       "end_ms": 4056.808,
+       "status": "success",
+       "span_id": "dbb6866c33c5435a",
+       "detail": "{\"memory\": \"# Memory for user demo-ana\\n\\n## Short-term: current conversation (session mem-20261007t0603-s3)\\n- user: Find me a dinner place in Kyoto on 2026-10-15 that fits my diet. [mem-20261007t0603-s3/313ce71d45a90c01]\\n\\n## Long-ter..."
+      },
+      {
+       "kind": "model",
+       "label": "call: find_restaurants",
+       "start_ms": 4061.571,
+       "end_ms": 5570.313,
+       "status": "success",
+       "span_id": "279f86bc24e944d5",
+       "detail": null
+      },
+      {
+       "kind": "tool",
+       "label": "find_restaurants",
+       "start_ms": 5575.423,
+       "end_ms": 5576.912,
+       "status": "success",
+       "span_id": "7bd49026598b4a80",
+       "detail": "{\"city\": \"Kyoto\", \"date\": \"2026-10-15\", \"diet\": \"vegetarian\", \"note\": \"demo listings\", \"restaurants\": [{\"fits\": \"vegetarian\", \"name\": \"Kamo Garden\"}]}"
+      },
+      {
+       "kind": "model",
+       "label": "answer",
+       "start_ms": 5579.534,
+       "end_ms": 7327.091,
+       "status": "success",
+       "span_id": "f0d21ddc616f4411",
+       "detail": "I found Kamo Garden in Kyoto, which offers vegetarian dining for dinner on October 15, 2026. It matches your saved vegetarian dietary preference. Let me know if you would like more details or assistance booking!"
+      }
+     ]
+    },
+    {
+     "trace_id": "e-4ab8c5e3-8300-4f1f-9dd6-4edb18feeb69",
+     "session_id": "mem-20261007t0603-s3",
+     "task": "Actually, I eat fish now. Please update my diet to pescatarian and check again.",
+     "outcome": "I have updated your dietary preference to pescatarian. For dinner in Kyoto on October 15, 2026, you can dine at Kamo Garden or Pontocho Grill. Both options accommodate a pescatarian diet.",
+     "outcome_status": "answered",
+     "started_at": "2026-10-07T06:04:49.130Z",
+     "completed_at": "2026-10-07T06:04:53.531Z",
+     "latency_ms": 4401.073,
+     "llm_calls": 2,
+     "total_tokens": 3562,
+     "errors": [],
+     "steps": [
+      {
+       "step_number": 1,
+       "thought": null,
+       "action": "call: save_preference, find_restaurants",
+       "observation": "save_preference -> {\"key\": \"diet\", \"status\": \"saved\", \"value\": \"pescatarian\"}; find_restaurants -> {\"city\": \"Kyoto\", \"date\": \"2026-10-15\", \"diet\": \"pescatarian\", \"note\": \"demo listings\", \"restaurants\": [{\"fits\": \"pes...",
+       "tool_calls": [
+        {
+         "tool_name": "save_preference",
+         "arguments": {
+          "key": "diet",
+          "value": "pescatarian"
+         },
+         "result": "{\"key\": \"diet\", \"status\": \"saved\", \"value\": \"pescatarian\"}",
+         "status": "success",
+         "duration_ms": 1,
+         "error": null,
+         "span_id": "94a60a5e7cf346fd",
+         "started_at": "2026-10-07T06:04:51.709Z"
+        },
+        {
+         "tool_name": "find_restaurants",
+         "arguments": {
+          "city": "Kyoto",
+          "date": "2026-10-15",
+          "diet": "pescatarian"
+         },
+         "result": "{\"city\": \"Kyoto\", \"date\": \"2026-10-15\", \"diet\": \"pescatarian\", \"note\": \"demo listings\", \"restaurants\": [{\"fits\": \"pescatarian\", \"name\": \"Kamo Garden\"}, {\"fits\": \"pescatarian\", \"name\": \"Pontocho Grill\"}]}",
+         "status": "success",
+         "duration_ms": 0,
+         "error": null,
+         "span_id": "44c7b8470d784171",
+         "started_at": "2026-10-07T06:04:51.712Z"
+        }
+       ]
+      }
+     ],
+     "timeline": [
+      {
+       "kind": "model",
+       "label": "call: save_preference, find_restaurants",
+       "start_ms": 4.875,
+       "end_ms": 2573.768,
+       "status": "success",
+       "span_id": "6ef3f39170c841e7",
+       "detail": null
+      },
+      {
+       "kind": "tool",
+       "label": "save_preference",
+       "start_ms": 2578.719,
+       "end_ms": 2580.108,
+       "status": "success",
+       "span_id": "94a60a5e7cf346fd",
+       "detail": "{\"key\": \"diet\", \"status\": \"saved\", \"value\": \"pescatarian\"}"
+      },
+      {
+       "kind": "tool",
+       "label": "find_restaurants",
+       "start_ms": 2581.688,
+       "end_ms": 2582.395,
+       "status": "success",
+       "span_id": "44c7b8470d784171",
+       "detail": "{\"city\": \"Kyoto\", \"date\": \"2026-10-15\", \"diet\": \"pescatarian\", \"note\": \"demo listings\", \"restaurants\": [{\"fits\": \"pescatarian\", \"name\": \"Kamo Garden\"}, {\"fits\": \"pescatarian\", \"name\": \"Pontocho Grill\"}]}"
+      },
+      {
+       "kind": "model",
+       "label": "answer",
+       "start_ms": 2584.123,
+       "end_ms": 4398.052,
+       "status": "success",
+       "span_id": "078f65ca7a234c75",
+       "detail": "I have updated your dietary preference to pescatarian. For dinner in Kyoto on October 15, 2026, you can dine at Kamo Garden or Pontocho Grill. Both options accommodate a pescatarian diet."
+      }
+     ]
+    },
+    {
+     "trace_id": "e-2711d870-1190-4892-80a6-609a0e7afd27",
+     "session_id": "mem-20261007t0603-s5",
+     "task": "Plan dinner in Osaka on 2026-10-17. Do you remember what I eat?",
+     "outcome": "Yes, I remember you follow a pescatarian diet. For your dinner in Osaka on October 17, 2026, I found Dotonbori Greens and Umeda Sushi Bar, both offering pescatarian-friendly options. Let me know if you'd like more details on either of these!",
+     "outcome_status": "answered",
+     "started_at": "2026-10-07T06:04:59.376Z",
+     "completed_at": "2026-10-07T06:05:12.586Z",
+     "latency_ms": 13210.136,
+     "llm_calls": 3,
+     "total_tokens": 4021,
+     "errors": [],
+     "steps": [
+      {
+       "step_number": 1,
+       "thought": null,
+       "action": "call: recall_memory",
+       "observation": "recall_memory -> {\"memory\": \"# Memory for user demo-ana\\n\\n## Short-term: current conversation (session mem-20261007t0603-s5)\\n- user:...",
+       "tool_calls": [
+        {
+         "tool_name": "recall_memory",
+         "arguments": {
+          "query": "dinner in Osaka diet"
+         },
+         "result": "{\"memory\": \"# Memory for user demo-ana\\n\\n## Short-term: current conversation (session mem-20261007t0603-s5)\\n- user: Plan dinner in Osaka on 2026-10-17. Do you remember what I eat? [mem-20261007t0603-s5/bc263ea608964416]\\n\\n## Long-term...",
+         "status": "success",
+         "duration_ms": 1387,
+         "error": null,
+         "span_id": "ae97ee3e59e244ac",
+         "started_at": "2026-10-07T06:05:05.833Z"
+        }
+       ]
+      },
+      {
+       "step_number": 2,
+       "thought": null,
+       "action": "call: find_restaurants",
+       "observation": "find_restaurants -> {\"city\": \"Osaka\", \"date\": \"2026-10-17\", \"diet\": \"pescatarian\", \"note\": \"demo listings\", \"restaurants\": [{\"fits\": \"pes...",
+       "tool_calls": [
+        {
+         "tool_name": "find_restaurants",
+         "arguments": {
+          "city": "Osaka",
+          "date": "2026-10-17",
+          "diet": "pescatarian"
+         },
+         "result": "{\"city\": \"Osaka\", \"date\": \"2026-10-17\", \"diet\": \"pescatarian\", \"note\": \"demo listings\", \"restaurants\": [{\"fits\": \"pescatarian\", \"name\": \"Dotonbori Greens\"}, {\"fits\": \"pescatarian\", \"name\": \"Umeda Sushi Bar\"}]}",
+         "status": "success",
+         "duration_ms": 1,
+         "error": null,
+         "span_id": "7f97533b048e4d10",
+         "started_at": "2026-10-07T06:05:09.994Z"
+        }
+       ]
+      }
+     ],
+     "timeline": [
+      {
+       "kind": "model",
+       "label": "call: recall_memory",
+       "start_ms": 6.216,
+       "end_ms": 6451.837,
+       "status": "success",
+       "span_id": "419c0348b0654ef4",
+       "detail": null
+      },
+      {
+       "kind": "tool",
+       "label": "recall_memory",
+       "start_ms": 6456.684,
+       "end_ms": 7843.997,
+       "status": "success",
+       "span_id": "ae97ee3e59e244ac",
+       "detail": "{\"memory\": \"# Memory for user demo-ana\\n\\n## Short-term: current conversation (session mem-20261007t0603-s5)\\n- user: Plan dinner in Osaka on 2026-10-17. Do you remember what I eat? [mem-20261007t0603-s5/bc263ea608964416]\\n\\n## Long-term..."
+      },
+      {
+       "kind": "model",
+       "label": "call: find_restaurants",
+       "start_ms": 7848.488,
+       "end_ms": 10612.573,
+       "status": "success",
+       "span_id": "03f05e7960c348dc",
+       "detail": null
+      },
+      {
+       "kind": "tool",
+       "label": "find_restaurants",
+       "start_ms": 10617.271,
+       "end_ms": 10618.544,
+       "status": "success",
+       "span_id": "7f97533b048e4d10",
+       "detail": "{\"city\": \"Osaka\", \"date\": \"2026-10-17\", \"diet\": \"pescatarian\", \"note\": \"demo listings\", \"restaurants\": [{\"fits\": \"pescatarian\", \"name\": \"Dotonbori Greens\"}, {\"fits\": \"pescatarian\", \"name\": \"Umeda Sushi Bar\"}]}"
+      },
+      {
+       "kind": "model",
+       "label": "answer",
+       "start_ms": 10620.92,
+       "end_ms": 13204.551,
+       "status": "success",
+       "span_id": "4fdc8f7241ad407b",
+       "detail": "Yes, I remember you follow a pescatarian diet. For your dinner in Osaka on October 17, 2026, I found Dotonbori Greens and Umeda Sushi Bar, both offering pescatarian-friendly options. Let me know if you'd like more details on either of these!"
+      }
+     ]
+    }
+   ],
+   "tool_stats": [
+    {
+     "name": "find_restaurants",
+     "total_calls": 3,
+     "successful_calls": 3,
+     "failed_calls": 0,
+     "success_rate": 1.0,
+     "avg_duration_ms": 0.6666666666666666,
+     "last_used_at": "2026-10-07T06:05:09.994Z",
+     "last_failure": null
+    },
+    {
+     "name": "save_preference",
+     "total_calls": 3,
+     "successful_calls": 3,
+     "failed_calls": 0,
+     "success_rate": 1.0,
+     "avg_duration_ms": 0.3333333333333333,
+     "last_used_at": "2026-10-07T06:04:51.709Z",
+     "last_failure": null
+    },
+    {
+     "name": "recall_memory",
+     "total_calls": 2,
+     "successful_calls": 2,
+     "failed_calls": 0,
+     "success_rate": 1.0,
+     "avg_duration_ms": 1725.0,
+     "last_used_at": "2026-10-07T06:05:05.833Z",
+     "last_failure": null
+    },
+    {
+     "name": "search_hotels",
+     "total_calls": 2,
+     "successful_calls": 1,
+     "failed_calls": 1,
+     "success_rate": 0.5,
+     "avg_duration_ms": 1.0,
+     "last_used_at": "2026-10-07T06:04:36.339Z",
+     "last_failure": {
+      "error": "hotel inventory API timed out (simulated outage)",
+      "session_id": "mem-20261007t0603-s2",
+      "span_id": "d039f83df55240ab"
+     }
+    },
+    {
+     "name": "search_flights",
+     "total_calls": 1,
+     "successful_calls": 1,
+     "failed_calls": 0,
+     "success_rate": 1.0,
+     "avg_duration_ms": 2.0,
+     "last_used_at": "2026-10-07T06:04:17.394Z",
+     "last_failure": null
+    }
+   ],
+   "context": "# Memory for user demo-ana\n\n## Short-term: current conversation (session mem-20261007t0603-s5)\n- user: Plan dinner in Osaka on 2026-10-17. Do you remember what I eat? [mem-20261007t0603-s5/bc263ea608964416]\n- assistant: Yes, I remember you follow a pescatarian diet. For your dinner in Osaka on October 17, 2026, I found Dotonbori Greens and Umeda Sushi Bar, both offering pescatarian-friendly options. Let me know if you'd like more details on either of these! [mem-20261007t0603-s5/4fdc8f7241ad407b]\n\n## Long-term: user preferences (ADK user: state)\n- diet = pescatarian (since 2026-10-07T06:04:51Z; replaced vegetarian) [mem-20261007t0603-s3/a436e408f2a70954]\n- seat = window (since 2026-10-07T06:03:57Z) [mem-20261007t0603-s1/4d2a571f16613b18]\n\n## Long-term: entities the agent acted on\n- Kyoto (LOCATION): 4 tool calls in mem-20261007t0603-s2, mem-20261007t0603-s3\n- Kyoto Station (LOCATION): 2 tool calls in mem-20261007t0603-s2\n- Osaka (LOCATION): 1 tool call in mem-20261007t0603-s5\n- SFO (LOCATION): 1 tool call in mem-20261007t0603-s1\n- Tokyo (LOCATION): 1 tool call in mem-20261007t0603-s1\n\n## Reasoning: similar past tasks that succeeded\n- 0.20 \"Find me a dinner place in Kyoto on 2026-10-15 that fits my diet.\" -> recall_memory, find_restaurants -> \"I found Kamo Garden in Kyoto, which offers vegetarian dining for dinner on October 15, 2026. It matches your saved vegetarian dietary preference. Let me know if you would like more details or assistance booking!\" [mem-20261007t0603-s3/e-49a32f93-b77b-4061-ac63-0d7cc81ca47c]\n\n## Reasoning: tools that failed before\n- search_hotels failed 1 of 2 calls; last error: hotel inventory API timed out (simulated outage) [mem-20261007t0603-s2/d039f83df55240ab]"
+  },
+  {
+   "user_id": "demo-ben",
+   "current_session_id": "mem-20261007t0603-s4",
+   "sessions": [
+    {
+     "session_id": "mem-20261007t0603-s4",
+     "created_at": "2026-10-07T06:04:54.351Z",
+     "updated_at": "2026-10-07T06:04:58.879Z",
+     "row_count": 15,
+     "messages": [
+      {
+       "role": "user",
+       "content": "I'm vegan, please remember that. Find me a dinner place in Osaka on 2026-10-17.",
+       "timestamp": "2026-10-07T06:04:54.351Z",
+       "span_id": "e21a1d366aeafd6f"
+      },
+      {
+       "role": "assistant",
+       "content": "I have saved your preference for a vegan diet. For dinner in Osaka on October 17, 2026, I recommend Dotonbori Greens.",
+       "timestamp": "2026-10-07T06:04:58.875Z",
+       "span_id": "ab06cb9877624b6a"
+      }
+     ]
+    }
+   ],
+   "preferences": [
+    {
+     "category": "diet",
+     "preference": "vegan",
+     "valid_from": "2026-10-07T06:04:57.072Z",
+     "valid_until": null,
+     "session_id": "mem-20261007t0603-s4",
+     "span_id": "e21a1d366aeafd6f"
+    }
+   ],
+   "entities": [
+    {
+     "name": "Osaka",
+     "entity_type": "LOCATION",
+     "mentions": [
+      {
+       "tool_name": "find_restaurants",
+       "argument": "city",
+       "session_id": "mem-20261007t0603-s4",
+       "span_id": "848b7453c571418c",
+       "timestamp": "2026-10-07T06:04:57.071Z"
+      }
+     ]
+    }
+   ],
+   "traces": [
+    {
+     "trace_id": "e-bcff8ab3-423a-46a6-b95a-b57abbdf5bb9",
+     "session_id": "mem-20261007t0603-s4",
+     "task": "I'm vegan, please remember that. Find me a dinner place in Osaka on 2026-10-17.",
+     "outcome": "I have saved your preference for a vegan diet. For dinner in Osaka on October 17, 2026, I recommend Dotonbori Greens.",
+     "outcome_status": "answered",
+     "started_at": "2026-10-07T06:04:54.351Z",
+     "completed_at": "2026-10-07T06:04:58.879Z",
+     "latency_ms": 4528.232,
+     "llm_calls": 2,
+     "total_tokens": 2030,
+     "errors": [],
+     "steps": [
+      {
+       "step_number": 1,
+       "thought": null,
+       "action": "call: save_preference, find_restaurants",
+       "observation": "save_preference -> {\"key\": \"diet\", \"status\": \"saved\", \"value\": \"vegan\"}; find_restaurants -> {\"city\": \"Osaka\", \"date\": \"2026-10-17\", \"diet\": \"vegan\", \"note\": \"demo listings\", \"restaurants\": [{\"fits\": \"vegan\", \"...",
+       "tool_calls": [
+        {
+         "tool_name": "save_preference",
+         "arguments": {
+          "key": "diet",
+          "value": "vegan"
+         },
+         "result": "{\"key\": \"diet\", \"status\": \"saved\", \"value\": \"vegan\"}",
+         "status": "success",
+         "duration_ms": 0,
+         "error": null,
+         "span_id": "a7331534aaf6477c",
+         "started_at": "2026-10-07T06:04:57.070Z"
+        },
+        {
+         "tool_name": "find_restaurants",
+         "arguments": {
+          "city": "Osaka",
+          "date": "2026-10-17",
+          "diet": "vegan"
+         },
+         "result": "{\"city\": \"Osaka\", \"date\": \"2026-10-17\", \"diet\": \"vegan\", \"note\": \"demo listings\", \"restaurants\": [{\"fits\": \"vegan\", \"name\": \"Dotonbori Greens\"}]}",
+         "status": "success",
+         "duration_ms": 0,
+         "error": null,
+         "span_id": "848b7453c571418c",
+         "started_at": "2026-10-07T06:04:57.071Z"
+        }
+       ]
+      }
+     ],
+     "timeline": [
+      {
+       "kind": "model",
+       "label": "call: save_preference, find_restaurants",
+       "start_ms": 5.504,
+       "end_ms": 2714.717,
+       "status": "success",
+       "span_id": "315d7df411b04b5f",
+       "detail": null
+      },
+      {
+       "kind": "tool",
+       "label": "save_preference",
+       "start_ms": 2718.993,
+       "end_ms": 2719.958,
+       "status": "success",
+       "span_id": "a7331534aaf6477c",
+       "detail": "{\"key\": \"diet\", \"status\": \"saved\", \"value\": \"vegan\"}"
+      },
+      {
+       "kind": "tool",
+       "label": "find_restaurants",
+       "start_ms": 2720.699,
+       "end_ms": 2721.205,
+       "status": "success",
+       "span_id": "848b7453c571418c",
+       "detail": "{\"city\": \"Osaka\", \"date\": \"2026-10-17\", \"diet\": \"vegan\", \"note\": \"demo listings\", \"restaurants\": [{\"fits\": \"vegan\", \"name\": \"Dotonbori Greens\"}]}"
+      },
+      {
+       "kind": "model",
+       "label": "answer",
+       "start_ms": 2722.669,
+       "end_ms": 4524.248,
+       "status": "success",
+       "span_id": "ab06cb9877624b6a",
+       "detail": "I have saved your preference for a vegan diet. For dinner in Osaka on October 17, 2026, I recommend Dotonbori Greens."
+      }
+     ]
+    }
+   ],
+   "tool_stats": [
+    {
+     "name": "find_restaurants",
+     "total_calls": 1,
+     "successful_calls": 1,
+     "failed_calls": 0,
+     "success_rate": 1.0,
+     "avg_duration_ms": 0.0,
+     "last_used_at": "2026-10-07T06:04:57.071Z",
+     "last_failure": null
+    },
+    {
+     "name": "save_preference",
+     "total_calls": 1,
+     "successful_calls": 1,
+     "failed_calls": 0,
+     "success_rate": 1.0,
+     "avg_duration_ms": 0.0,
+     "last_used_at": "2026-10-07T06:04:57.070Z",
+     "last_failure": null
+    }
+   ],
+   "context": "# Memory for user demo-ben\n\n## Short-term: current conversation (session mem-20261007t0603-s4)\n- user: I'm vegan, please remember that. Find me a dinner place in Osaka on 2026-10-17. [mem-20261007t0603-s4/e21a1d366aeafd6f]\n- assistant: I have saved your preference for a vegan diet. For dinner in Osaka on October 17, 2026, I recommend Dotonbori Greens. [mem-20261007t0603-s4/ab06cb9877624b6a]\n\n## Long-term: user preferences (ADK user: state)\n- diet = vegan (since 2026-10-07T06:04:57Z) [mem-20261007t0603-s4/e21a1d366aeafd6f]\n\n## Long-term: entities the agent acted on\n- Osaka (LOCATION): 1 tool call in mem-20261007t0603-s4\n\n## Reasoning: similar past tasks that succeeded\n- (none)\n\n## Reasoning: tools that failed before\n- (none)"
+  }
+ ]
+}

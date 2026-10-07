@@ -1,0 +1,78 @@
+Agent memory from BigQuery Agent Analytics traces
+source : BigQuery test-project-0728-467323.bqaa_agent_memory_demo.agent_events
+user   : demo-ana   current session: mem-20261007t0603-s5   now: 2026-10-07T06:24:51Z
+read   : 4 sessions, 8 traces from one Client.list_traces() call
+         TraceFilter(user_id='demo-ana', start_time=2026-09-07T06:24:51Z)
+
+== 1. Short-term memory ==
+Sessions (ShortTermMemory.list_sessions):
+  mem-20261007t0603-s5  2026-10-07T06:04:59Z  2 messages  Plan dinner in Osaka on 2026-10-17. Do you remember what I eat?
+  mem-20261007t0603-s3  2026-10-07T06:04:41Z  4 messages  Find me a dinner place in Kyoto on 2026-10-15 that fits my diet.
+  mem-20261007t0603-s2  2026-10-07T06:04:20Z  5 messages  Find me a hotel in Kyoto near Kyoto Station from 2026-10-14 to 2026-1...
+  mem-20261007t0603-s1  2026-10-07T06:03:55Z  4 messages  Hi! Please remember two things about me: I'm vegetarian, and I always...
+Conversation mem-20261007t0603-s5 (ShortTermMemory.get_conversation):
+  [user] Plan dinner in Osaka on 2026-10-17. Do you remember what I eat?
+  [assistant] Yes, I remember you follow a pescatarian diet. For your dinner in Osaka on October 17, 2026, I found Dotonbori Greens and Umeda Sushi Bar, both offering pescatarian-friendly options. Let me know if you'd like more details on either of these!
+
+== 2. Long-term memory ==
+Preference history (ADK user: state from STATE_DELTA rows):
+  diet = vegetarian    2026-10-07T06:03:57Z -> 2026-10-07T06:04:51Z  mem-20261007t0603-s1
+  seat = window        2026-10-07T06:03:57Z -> current               mem-20261007t0603-s1
+  diet = pescatarian   2026-10-07T06:04:51Z -> current               mem-20261007t0603-s3
+Current preferences: diet = pescatarian, seat = window
+Entities the agent acted on (tool arguments: city, destination, near, origin):
+  Kyoto          LOCATION  4 tool calls  mem-20261007t0603-s2, mem-20261007t0603-s3
+  Kyoto Station  LOCATION  2 tool calls  mem-20261007t0603-s2
+  Osaka          LOCATION  1 tool call   mem-20261007t0603-s5
+  SFO            LOCATION  1 tool call   mem-20261007t0603-s1
+  Tokyo          LOCATION  1 tool call   mem-20261007t0603-s1
+
+== 3. Reasoning memory ==
+Traces (ReasoningMemory.list_traces):
+  e-2711d870-1190-4892-80a6-609a0e7afd27  mem-20261007t0603-s5  answered              2 tool calls  Plan dinner in Osaka on 2026-10-17. Do you re...
+  e-4ab8c5e3-8300-4f1f-9dd6-4edb18feeb69  mem-20261007t0603-s3  answered              2 tool calls  Actually, I eat fish now. Please update my di...
+  e-49a32f93-b77b-4061-ac63-0d7cc81ca47c  mem-20261007t0603-s3  answered              2 tool calls  Find me a dinner place in Kyoto on 2026-10-15...
+  e-3651624a-8427-44b4-9003-99bfd70fa0d3  mem-20261007t0603-s2  answered              0 tool calls  What was the nightly price of the first hotel...
+  e-8b956fd4-2aeb-46c2-84d0-66a784d3603d  mem-20261007t0603-s2  answered              1 tool call   The hotel search failed. Please try it again.
+  e-d2beb2a9-4e8d-400c-b1dd-24f5bf8318cd  mem-20261007t0603-s2  unanswered            1 tool call   Find me a hotel in Kyoto near Kyoto Station f...
+  e-b2db84df-6108-4822-b425-e9389918626a  mem-20261007t0603-s1  answered              1 tool call   Now find me a flight from SFO to Tokyo on 202...
+  e-8106023c-e91e-4f6b-9160-78f5e851d04d  mem-20261007t0603-s1  answered              2 tool calls  Hi! Please remember two things about me: I'm ...
+Trace e-d2beb2a9-4e8d-400c-b1dd-24f5bf8318cd (session mem-20261007t0603-s2): unanswered
+  task   : Find me a hotel in Kyoto near Kyoto Station from 2026-10-14 to 2026-10-16.
+  step 1 : call: search_hotels
+           search_hotels  error  1 ms  hotel inventory API timed out (simulated outage)
+  outcome: None
+  metrics: latency_ms=4133 llm_calls=1 tool_calls=1 tool_errors=1 total_tokens=1120
+Tool stats (ReasoningMemory.get_tool_stats):
+  tool              calls  ok  failed  success   avg_ms
+  find_restaurants      3   3       0     100%      0.7
+  save_preference       3   3       0     100%      0.3
+  recall_memory         2   2       0     100%   1725.0
+  search_hotels         2   1       1      50%      1.0
+  search_flights        1   1       0     100%      2.0
+Similar past tasks for 'Plan dinner in Osaka on 2026-10-17. Do you remember what I eat?' (lexical, successful only):
+  0.20  e-49a32f93-b77b-4061-ac63-0d7cc81ca47c  Find me a dinner place in Kyoto on 2026-10-15 that fits my diet.
+
+== 4. get_context() for the next model call ==
+# Memory for user demo-ana
+
+## Short-term: current conversation (session mem-20261007t0603-s5)
+- user: Plan dinner in Osaka on 2026-10-17. Do you remember what I eat? [mem-20261007t0603-s5/bc263ea608964416]
+- assistant: Yes, I remember you follow a pescatarian diet. For your dinner in Osaka on October 17, 2026, I found Dotonbori Greens and Umeda Sushi Bar, both offering pescatarian-friendly options. Let me know if you'd like more details on either of these! [mem-20261007t0603-s5/4fdc8f7241ad407b]
+
+## Long-term: user preferences (ADK user: state)
+- diet = pescatarian (since 2026-10-07T06:04:51Z; replaced vegetarian) [mem-20261007t0603-s3/a436e408f2a70954]
+- seat = window (since 2026-10-07T06:03:57Z) [mem-20261007t0603-s1/4d2a571f16613b18]
+
+## Long-term: entities the agent acted on
+- Kyoto (LOCATION): 4 tool calls in mem-20261007t0603-s2, mem-20261007t0603-s3
+- Kyoto Station (LOCATION): 2 tool calls in mem-20261007t0603-s2
+- Osaka (LOCATION): 1 tool call in mem-20261007t0603-s5
+- SFO (LOCATION): 1 tool call in mem-20261007t0603-s1
+- Tokyo (LOCATION): 1 tool call in mem-20261007t0603-s1
+
+## Reasoning: similar past tasks that succeeded
+- 0.20 "Find me a dinner place in Kyoto on 2026-10-15 that fits my diet." -> recall_memory, find_restaurants -> "I found Kamo Garden in Kyoto, which offers vegetarian dining for dinner on October 15, 2026. It matches your saved vegetarian dietary preference. Let me know if you would like more details or assistance booking!" [mem-20261007t0603-s3/e-49a32f93-b77b-4061-ac63-0d7cc81ca47c]
+
+## Reasoning: tools that failed before
+- search_hotels failed 1 of 2 calls; last error: hotel inventory API timed out (simulated outage) [mem-20261007t0603-s2/d039f83df55240ab]

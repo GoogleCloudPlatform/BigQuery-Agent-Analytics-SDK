@@ -278,7 +278,7 @@ def _unquote(value: str) -> str:
   return value
 
 
-def _response_parts(response: Any) -> tuple[list[str], list[str]]:
+def response_parts(response: Any) -> tuple[list[str], list[str]]:
   """Splits an ``LLM_RESPONSE`` ``response`` into text parts and tool calls."""
   if not isinstance(response, str) or not response:
     return [], []
@@ -322,7 +322,7 @@ def _conversation(trace: Trace) -> list[Message]:
             )
         )
     elif span.event_type == "LLM_RESPONSE":
-      texts, _ = _response_parts(span.content.get("response"))
+      texts, _ = response_parts(span.content.get("response"))
       if texts:
         messages.append(
             Message(
@@ -406,7 +406,7 @@ def _reasoning_trace(
   final = responses[-1] if responses else None
   outcome = None
   if final is not None:
-    texts, calls = _response_parts(final.content.get("response"))
+    texts, calls = response_parts(final.content.get("response"))
     if texts and not calls:
       outcome = " ".join(texts)
 
@@ -420,7 +420,7 @@ def _reasoning_trace(
     elif span.event_type == "LLM_RESPONSE":
       if span is final and outcome is not None:
         continue
-      texts, calls = _response_parts(span.content.get("response"))
+      texts, calls = response_parts(span.content.get("response"))
       action = "call: " + ", ".join(calls) if calls else "respond"
       drafts.append(_StepDraft(" ".join(texts) or None, action))
     elif span.event_type == "TOOL_STARTING":
@@ -479,13 +479,18 @@ def _reasoning_trace(
   )
 
 
-def _invocation_traces(trace: Trace) -> list[ReasoningTrace]:
+def spans_by_invocation(trace: Trace) -> dict[str, list[Span]]:
+  """A session's spans grouped by ADK invocation, in time order."""
   groups: dict[str, list[Span]] = {}
   for span in _ordered_spans(trace):
     groups.setdefault(span.invocation_id or trace.session_id, []).append(span)
+  return groups
+
+
+def _invocation_traces(trace: Trace) -> list[ReasoningTrace]:
   return [
       _reasoning_trace(trace, trace_id, spans)
-      for trace_id, spans in groups.items()
+      for trace_id, spans in spans_by_invocation(trace).items()
   ]
 
 

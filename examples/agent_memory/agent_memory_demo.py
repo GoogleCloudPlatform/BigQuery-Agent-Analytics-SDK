@@ -83,7 +83,7 @@ def _display_path(path: Path) -> str:
     return str(path)
 
 
-def _entity_args(values: Optional[list[str]]) -> dict[str, str]:
+def parse_entity_args(values: Optional[list[str]]) -> dict[str, str]:
   if not values:
     return dict(ENTITY_ARGUMENTS)
   mapping = {}
@@ -228,7 +228,11 @@ def _print_report(
   print("Tool stats (ReasoningMemory.get_tool_stats):")
   print("  tool              calls  ok  failed  success   avg_ms")
   for stats in memory.reasoning.get_tool_stats():
-    avg = f"{stats.avg_duration_ms:.1f}" if stats.avg_duration_ms else "-"
+    avg = (
+        f"{stats.avg_duration_ms:.1f}"
+        if stats.avg_duration_ms is not None
+        else "-"
+    )
     print(
         f"  {stats.name:<17} {stats.total_calls:>5} {stats.successful_calls:>3}"
         f" {stats.failed_calls:>7} {stats.success_rate:>8.0%} {avg:>8}"
@@ -299,7 +303,7 @@ def main(argv: Optional[list[str]] = None, *, bq_client: Any = None) -> int:
   if bool(args.project_id) != bool(args.dataset_id):
     parser.error("--project-id and --dataset-id go together")
   try:
-    entity_args = _entity_args(args.entity_arg)
+    entity_args = parse_entity_args(args.entity_arg)
   except argparse.ArgumentTypeError as e:
     parser.error(str(e))
 

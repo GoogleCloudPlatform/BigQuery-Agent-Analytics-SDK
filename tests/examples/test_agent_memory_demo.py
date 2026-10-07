@@ -26,6 +26,7 @@ from __future__ import annotations
 import copy
 from datetime import datetime
 from datetime import timezone
+import json
 from pathlib import Path
 import sys
 
@@ -778,3 +779,26 @@ def test_cli_live_mode_reads_the_named_table_once(fixture, capsys):
 def test_cli_rejects_a_project_without_a_dataset(capsys):
   with pytest.raises(SystemExit):
     agent_memory_demo.main(["--project-id", "my-project"])
+
+
+def test_cli_prints_a_zero_millisecond_average(fixture, tmp_path, capsys):
+  # Live in-process tools often finish in 0 ms; that is a value, not "-".
+  rows = copy.deepcopy(fixture.rows)
+  for row in rows:
+    if row["span_id"] == "sp-101-tool-3" and row["latency_ms"]:
+      row["latency_ms"] = {"total_ms": 0}
+  doc = {
+      "description": "zero-latency variant",
+      "now": "2026-10-06T16:00:00.000Z",
+      "rows": [
+          dict(row, timestamp=row["timestamp"].isoformat()) for row in rows
+      ],
+  }
+  path = tmp_path / "agent_events.json"
+  path.write_text(json.dumps(doc), encoding="utf-8")
+
+  assert agent_memory_demo.main(["--fixture", str(path)]) == 0
+  out = capsys.readouterr().out
+
+  (line,) = [l for l in out.splitlines() if l.startswith("  search_flights ")]
+  assert line.split()[-1] == "0.0"

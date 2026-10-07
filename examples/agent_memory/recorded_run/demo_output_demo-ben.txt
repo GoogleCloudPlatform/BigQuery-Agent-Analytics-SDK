@@ -1,0 +1,49 @@
+Agent memory from BigQuery Agent Analytics traces
+source : BigQuery test-project-0728-467323.bqaa_agent_memory_demo.agent_events
+user   : demo-ben   current session: mem-20261007t0603-s4   now: 2026-10-07T06:24:54Z
+read   : 1 session, 1 trace from one Client.list_traces() call
+         TraceFilter(user_id='demo-ben', start_time=2026-09-07T06:24:54Z)
+
+== 1. Short-term memory ==
+Sessions (ShortTermMemory.list_sessions):
+  mem-20261007t0603-s4  2026-10-07T06:04:54Z  2 messages  I'm vegan, please remember that. Find me a dinner place in Osaka on 2...
+Conversation mem-20261007t0603-s4 (ShortTermMemory.get_conversation):
+  [user] I'm vegan, please remember that. Find me a dinner place in Osaka on 2026-10-17.
+  [assistant] I have saved your preference for a vegan diet. For dinner in Osaka on October 17, 2026, I recommend Dotonbori Greens.
+
+== 2. Long-term memory ==
+Preference history (ADK user: state from STATE_DELTA rows):
+  diet = vegan         2026-10-07T06:04:57Z -> current               mem-20261007t0603-s4
+Current preferences: diet = vegan
+Entities the agent acted on (tool arguments: city, destination, near, origin):
+  Osaka          LOCATION  1 tool call   mem-20261007t0603-s4
+
+== 3. Reasoning memory ==
+Traces (ReasoningMemory.list_traces):
+  e-bcff8ab3-423a-46a6-b95a-b57abbdf5bb9  mem-20261007t0603-s4  answered              2 tool calls  I'm vegan, please remember that. Find me a di...
+No past trace to inspect.
+Tool stats (ReasoningMemory.get_tool_stats):
+  tool              calls  ok  failed  success   avg_ms
+  find_restaurants      1   1       0     100%      0.0
+  save_preference       1   1       0     100%      0.0
+Similar past tasks for "I'm vegan, please remember that. Find me a dinner place in Osaka on 2026-10-17." (lexical, successful only):
+  (none above the threshold)
+
+== 4. get_context() for the next model call ==
+# Memory for user demo-ben
+
+## Short-term: current conversation (session mem-20261007t0603-s4)
+- user: I'm vegan, please remember that. Find me a dinner place in Osaka on 2026-10-17. [mem-20261007t0603-s4/e21a1d366aeafd6f]
+- assistant: I have saved your preference for a vegan diet. For dinner in Osaka on October 17, 2026, I recommend Dotonbori Greens. [mem-20261007t0603-s4/ab06cb9877624b6a]
+
+## Long-term: user preferences (ADK user: state)
+- diet = vegan (since 2026-10-07T06:04:57Z) [mem-20261007t0603-s4/e21a1d366aeafd6f]
+
+## Long-term: entities the agent acted on
+- Osaka (LOCATION): 1 tool call in mem-20261007t0603-s4
+
+## Reasoning: similar past tasks that succeeded
+- (none)
+
+## Reasoning: tools that failed before
+- (none)

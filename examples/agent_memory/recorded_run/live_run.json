@@ -1,0 +1,162 @@
+{
+ "label": "recorded live run (demo inventories, simulated hotel outage)",
+ "table": "test-project-0728-467323.bqaa_agent_memory_demo.agent_events",
+ "model": "gemini-3.8-flash",
+ "vertex_location": "global",
+ "otel_correlation": true,
+ "run_tag": "20261007t0603",
+ "started_at": "2026-10-07T06:03:52.741226+00:00",
+ "finished_at": "2026-10-07T06:05:25.761515+00:00",
+ "sessions": [
+  {
+   "session_id": "mem-20261007t0603-s1",
+   "user_id": "demo-ana",
+   "row_count": 27,
+   "invocations": 2,
+   "tool_errors": 0,
+   "state_deltas": 1,
+   "otel_rows": 27,
+   "first_event": "2026-10-07T06:03:55.080997+00:00",
+   "last_event": "2026-10-07T06:04:19.674273+00:00"
+  },
+  {
+   "session_id": "mem-20261007t0603-s2",
+   "user_id": "demo-ana",
+   "row_count": 30,
+   "invocations": 3,
+   "tool_errors": 1,
+   "state_deltas": 0,
+   "otel_rows": 30,
+   "first_event": "2026-10-07T06:04:20.208114+00:00",
+   "last_event": "2026-10-07T06:04:40.549812+00:00"
+  },
+  {
+   "session_id": "mem-20261007t0603-s3",
+   "user_id": "demo-ana",
+   "row_count": 31,
+   "invocations": 2,
+   "tool_errors": 0,
+   "state_deltas": 1,
+   "otel_rows": 31,
+   "first_event": "2026-10-07T06:04:41.273871+00:00",
+   "last_event": "2026-10-07T06:04:53.531617+00:00"
+  },
+  {
+   "session_id": "mem-20261007t0603-s4",
+   "user_id": "demo-ben",
+   "row_count": 15,
+   "invocations": 1,
+   "tool_errors": 0,
+   "state_deltas": 1,
+   "otel_rows": 15,
+   "first_event": "2026-10-07T06:04:54.351057+00:00",
+   "last_event": "2026-10-07T06:04:58.879289+00:00"
+  },
+  {
+   "session_id": "mem-20261007t0603-s5",
+   "user_id": "demo-ana",
+   "row_count": 16,
+   "invocations": 1,
+   "tool_errors": 0,
+   "state_deltas": 0,
+   "otel_rows": 16,
+   "first_event": "2026-10-07T06:04:59.376820+00:00",
+   "last_event": "2026-10-07T06:05:12.586956+00:00"
+  }
+ ],
+ "turns": [
+  {
+   "session_id": "mem-20261007t0603-s1",
+   "user_id": "demo-ana",
+   "user": "Hi! Please remember two things about me: I'm vegetarian, and I always want a window seat.",
+   "tool_calls": [
+    "save_preference",
+    "save_preference"
+   ],
+   "reply": "I have saved your preferences: vegetarian diet and window seat. Let me know whenever you'd like help planning your next trip!",
+   "error": null
+  },
+  {
+   "session_id": "mem-20261007t0603-s1",
+   "user_id": "demo-ana",
+   "user": "Now find me a flight from SFO to Tokyo on 2026-10-12.",
+   "tool_calls": [
+    "search_flights"
+   ],
+   "reply": "I found two flights from SFO to Tokyo on October 12, 2026 with window seats available. Flight DM101 departs at 11:05 with 12 window seats remaining, and flight DM205 departs at 16:40 with 3 window seats left. Let me know which option you prefer!",
+   "error": null
+  },
+  {
+   "session_id": "mem-20261007t0603-s2",
+   "user_id": "demo-ana",
+   "user": "Find me a hotel in Kyoto near Kyoto Station from 2026-10-14 to 2026-10-16.",
+   "tool_calls": [
+    "search_hotels"
+   ],
+   "reply": null,
+   "error": "TimeoutError: hotel inventory API timed out (simulated outage)"
+  },
+  {
+   "session_id": "mem-20261007t0603-s2",
+   "user_id": "demo-ana",
+   "user": "The hotel search failed. Please try it again.",
+   "tool_calls": [
+    "search_hotels"
+   ],
+   "reply": "I found two hotel options in Kyoto near Kyoto Station for October 14–16, 2026. The closest is the Sakura Station Hotel, located just 150 meters away at $180 per night. Alternatively, Higashiyama Ryokan is available 2.4 km away for $260 per night.",
+   "error": null
+  },
+  {
+   "session_id": "mem-20261007t0603-s2",
+   "user_id": "demo-ana",
+   "user": "What was the nightly price of the first hotel you found?",
+   "tool_calls": [],
+   "reply": "The nightly price of the Sakura Station Hotel was $180.",
+   "error": null
+  },
+  {
+   "session_id": "mem-20261007t0603-s3",
+   "user_id": "demo-ana",
+   "user": "Find me a dinner place in Kyoto on 2026-10-15 that fits my diet.",
+   "tool_calls": [
+    "recall_memory",
+    "find_restaurants"
+   ],
+   "reply": "I found Kamo Garden in Kyoto, which offers vegetarian dining for dinner on October 15, 2026. It matches your saved vegetarian dietary preference. Let me know if you would like more details or assistance booking!",
+   "error": null
+  },
+  {
+   "session_id": "mem-20261007t0603-s3",
+   "user_id": "demo-ana",
+   "user": "Actually, I eat fish now. Please update my diet to pescatarian and check again.",
+   "tool_calls": [
+    "save_preference",
+    "find_restaurants"
+   ],
+   "reply": "I have updated your dietary preference to pescatarian. For dinner in Kyoto on October 15, 2026, you can dine at Kamo Garden or Pontocho Grill. Both options accommodate a pescatarian diet.",
+   "error": null
+  },
+  {
+   "session_id": "mem-20261007t0603-s4",
+   "user_id": "demo-ben",
+   "user": "I'm vegan, please remember that. Find me a dinner place in Osaka on 2026-10-17.",
+   "tool_calls": [
+    "save_preference",
+    "find_restaurants"
+   ],
+   "reply": "I have saved your preference for a vegan diet. For dinner in Osaka on October 17, 2026, I recommend Dotonbori Greens.",
+   "error": null
+  },
+  {
+   "session_id": "mem-20261007t0603-s5",
+   "user_id": "demo-ana",
+   "user": "Plan dinner in Osaka on 2026-10-17. Do you remember what I eat?",
+   "tool_calls": [
+    "recall_memory",
+    "find_restaurants"
+   ],
+   "reply": "Yes, I remember you follow a pescatarian diet. For your dinner in Osaka on October 17, 2026, I found Dotonbori Greens and Umeda Sushi Bar, both offering pescatarian-friendly options. Let me know if you'd like more details on either of these!",
+   "error": null
+  }
+ ]
+}

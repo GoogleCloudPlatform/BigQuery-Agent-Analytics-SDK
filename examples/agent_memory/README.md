@@ -10,13 +10,21 @@ context, out of the `agent_events` table that the ADK
 `make_bq_client` in live mode. Tracked in
 [#511](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/511).
 
-> **Synthetic data.** The offline run replays
-> [`fixtures/agent_events.json`](fixtures/agent_events.json): 65 rows for two
-> users and five sessions of a trip-planner agent. The rows have all 16
-> `agent_events` columns the SDK reads, and their payload keys are the ones
-> the plugin writes. They were generated for this demo, not exported from a
-> live agent. Live mode runs the same code against a real table; it was not
-> run against BigQuery when this demo was added.
+> **Two kinds of data.**
+> - **Offline:** the run and the tests replay
+>   [`fixtures/agent_events.json`](fixtures/agent_events.json), 65 synthetic
+>   rows for two users and five sessions of a trip-planner agent. The rows
+>   have all 16 `agent_events` columns the SDK reads, with the payload keys
+>   the plugin writes.
+> - **Live:** a real end-to-end run is recorded in
+>   [`recorded_run/`](recorded_run/README.md). A live ADK agent on Vertex AI
+>   wrote 119 rows to BigQuery, and the demo, the export and the web view below
+>   read them back.
+
+![The web view on the recorded run: sessions, long-term memory across sessions, and the reasoning waterfall](viz/screenshot.png)
+
+[Watch the 63-second walkthrough (`demo.mp4`)](demo.mp4) of the web view on the
+recorded run.
 
 ## Run it
 
@@ -102,6 +110,92 @@ The second user in the fixture, `u-ben`, asked an almost identical Osaka
 question and stored `diet = vegan` under the same key. None of it appears in
 `u-ana`'s memory, because the user pin is applied in the `list_traces` SQL.
 Run with `--user-id u-ben --session-id s-201` to see that user's view.
+
+## Run it end to end
+
+This is the full loop on your own project: a live agent writes memory, then
+the demo, the export and the web view read it back. Use a scratch dataset.
+Cost depends on your rates; the recorded run cost about $0.05 (see
+[`recorded_run/`](recorded_run/README.md)).
+
+1. **Run the agent.**
+
+   ```bash
+   pip install "google-adk[bigquery-analytics]"   # the plugin's writer dependencies
+   gcloud auth application-default login
+   python examples/agent_memory/live_agent.py \
+     --project-id PROJECT_ID --dataset-id bqaa_agent_memory_demo \
+     --record /tmp/live_run.json
+   ```
+
+   [`live_agent.py`](live_agent.py) creates the dataset if it is missing. It
+   then runs five scripted sessions on `gemini-3.8-flash` (Vertex AI location
+   `global`), with the `BigQueryAgentAnalyticsPlugin` writing every event
+   (`enable_otel_correlation=True`). Two users take part, and the sessions
+   exercise the main memory paths:
+   - multi-turn context within a session;
+   - preferences saved as ADK `user:` state, one of them later replaced;
+   - a simulated hotel-inventory outage (a real `TOOL_ERROR`) that the next
+     turn retries;
+   - two `recall_memory` calls, where the agent reads its earlier sessions
+     back from BigQuery through `load_user_memory()` and `get_context()`.
+
+   The run record (session IDs, row counts, transcript) goes to `--record`.
+
+2. **Read the memory back.** Take the session IDs from the run record.
+
+   ```bash
+   python examples/agent_memory/agent_memory_demo.py \
+     --project-id PROJECT_ID --dataset-id bqaa_agent_memory_demo \
+     --user-id demo-ana --session-id mem-RUN_TAG-s5
+   ```
+
+3. **Export it for the web view and open it.**
+
+   ```bash
+   python examples/agent_memory/export_memory.py \
+     --project-id PROJECT_ID --dataset-id bqaa_agent_memory_demo \
+     --user-id demo-ana --user-id demo-ben
+   cd examples/agent_memory/viz && python -m http.server 8000
+   # open http://localhost:8000/
+   ```
+
+   Browsers block local file reads from a `file://` page, so serve the folder.
+   The export shows the project as `<project>` unless you pass
+   `--show-project`. Running `export_memory.py` without `--project-id`
+   exports the offline fixture instead.
+
+4. **Record a walkthrough (optional).** This needs
+   `pip install playwright`, `python -m playwright install chromium` and
+   ffmpeg.
+
+   ```bash
+   python examples/agent_memory/viz/record_demo.py
+   ```
+
+   [`viz/record_demo.py`](viz/record_demo.py) serves the folder on a local
+   port and drives the page in headless Chromium with video recording on. It
+   writes `demo.mp4` and `viz/screenshot.png`, and writes its captions from the
+   export.
+
+## The web view
+
+[`viz/index.html`](viz/index.html) and [`viz/app.js`](viz/app.js) are plain
+HTML and JavaScript with no dependencies. They read `viz/data/memory_export.json`:
+- **Sessions (short-term):** one entry per session; pick one to see its
+  conversation.
+- **Long-term memory across sessions:** a graph with sessions on a time line.
+  Saved preferences sit above it; a replaced version is struck through and
+  linked to its successor. Entities from tool arguments sit below it, linked
+  to every session that used them. Hover any node for its source row.
+- **Reasoning:** one waterfall per turn. It shows each model call, the tool
+  calls that call asked for, and how the turn ended. A failed tool call shows
+  in the status color with an icon and a label.
+- **What the agent reads next:** the `get_context()` block for the latest
+  session.
+
+Every chart has a table view, and the page follows the system dark mode. A
+user switch shows that each user is read with their own `TraceFilter`.
 
 ## Where each layer comes from
 
@@ -197,9 +291,9 @@ GROUP BY tool_name
 ORDER BY total_calls DESC, tool_name
 ```
 
-On the fixture this returns the same rows as `get_tool_stats()`. That was
-checked offline by transpiling the query to DuckDB with sqlglot; it has not
-been run on BigQuery.
+This query returns the same rows as `get_tool_stats()` in two checks:
+- on the recorded live table in BigQuery, for `demo-ana` (0 bytes billed);
+- on the fixture, transpiled to DuckDB with sqlglot.
 
 ## Compared with neo4j-agent-memory
 
@@ -242,6 +336,9 @@ the table with BigQuery IAM or row-level security.
 - **Session ids must be unique.** A session id shared by two root agents or
   evaluation scopes raises `ValueError` rather than merging two
   conversations.
+- **The live agent is a demo.** Its inventories are fake and its outage is
+  simulated. The model's replies vary from run to run, so a rerun can call
+  tools differently from the recorded one.
 
 ## Files
 
@@ -251,9 +348,17 @@ the table with BigQuery IAM or row-level security.
 | `memory_layers.py` | The three layers and `get_context`, computed from SDK `Trace` objects |
 | `offline_bigquery.py` | Offline `bigquery.Client` stand-in that serves `Client.list_traces` from the fixture and fails closed |
 | `fixtures/agent_events.json` | The synthetic rows |
+| `live_agent.py` | Live ADK trip planner that writes the memory (and reads it back with `recall_memory`) |
+| `export_memory.py` | Writes the web view's JSON from BigQuery or the fixture |
+| `viz/index.html`, `viz/app.js` | The web view |
+| `viz/data/memory_export.json` | The export from the recorded run |
+| `viz/record_demo.py` | Records `demo.mp4` and `viz/screenshot.png` with headless Chromium |
+| `recorded_run/` | The recorded live run: run record, demo output and a labeled note |
 
-Hermetic tests are in
-[`tests/examples/test_agent_memory_demo.py`](../../tests/examples/test_agent_memory_demo.py).
+Hermetic tests are in [`tests/examples/`](../../tests/examples/):
+- `test_agent_memory_demo.py`: the memory layers, the CLI and the stand-in client;
+- `test_agent_memory_live_agent.py`: the agent's tools;
+- `test_agent_memory_export.py`: the export.
 
 ## Sources
 
