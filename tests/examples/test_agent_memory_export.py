@@ -22,6 +22,8 @@ BigQuery stand-in; expected values are written out from the fixture rows.
 from __future__ import annotations
 
 import copy
+from datetime import datetime
+from datetime import timezone
 import json
 from pathlib import Path
 import sys
@@ -86,6 +88,7 @@ def test_user_export_lists_sessions_oldest_first_with_messages(ana):
       ),
       "timestamp": "2026-09-28T17:00:00.100Z",
       "span_id": "sp-101-inv",
+      "complete": True,
   }
 
 
@@ -272,4 +275,115 @@ def test_cli_live_mode_labels_the_table(
       "s-102",
       "s-103",
       "s-104",
+  ]
+
+
+# ---- streamed model calls ----------------------------------------------------
+
+# google-adk 2.11 writes these only on a terminal (non-partial) LLM_RESPONSE.
+TERMINAL_MARKERS = ("cache_type", "finish_reason")
+
+
+def _row(rows, span_id, event_type):
+  return next(
+      r
+      for r in rows
+      if r["span_id"] == span_id and r["event_type"] == event_type
+  )
+
+
+def _fragment(row, text, at):
+  """A streaming chunk of ``row``'s model call: same span, no terminal marker."""
+  chunk = copy.deepcopy(row)
+  chunk["timestamp"] = at
+  chunk["content"] = {"response": f"text: '{text}'"}
+  for key in TERMINAL_MARKERS:
+    chunk["attributes"].pop(key)
+  return chunk
+
+
+def _at(*args):
+  return datetime(*args, tzinfo=timezone.utc)
+
+
+def test_timeline_has_one_row_per_streamed_model_call(fixture):
+  rows = copy.deepcopy(fixture.rows)
+  final = _row(rows, "sp-101-llm-3", "LLM_RESPONSE")
+  rows += [
+      _fragment(
+          final, "Saved: vegetarian, ", _at(2026, 9, 28, 17, 0, 3, 900000)
+      ),
+      _fragment(
+          final, "window seat. DM101", _at(2026, 9, 28, 17, 0, 4, 200000)
+      ),
+  ]
+
+  export = export_memory.build_user_export(_memory(rows))
+
+  trace = next(t for t in export["traces"] if t["trace_id"] == "inv-101")
+  assert [
+      (row["label"], row["start_ms"], row["end_ms"], row["status"])
+      for row in trace["timeline"]
+      if row["kind"] == "model"
+  ] == [
+      ("call: save_preference, save_preference", 300.0, 1400.0, "success"),
+      ("call: search_flights", 1680.0, 2480.0, "success"),
+      ("answer", 3280.0, 4480.0, "success"),
+  ]
+  assert trace["llm_calls"] == 3
+
+
+def test_an_interrupted_stream_exports_as_incomplete(fixture):
+  rows = copy.deepcopy(fixture.rows)
+  request = copy.deepcopy(_row(rows, "sp-103-llm-1", "LLM_REQUEST"))
+  chunk = _fragment(
+      _row(rows, "sp-103-llm-2", "LLM_RESPONSE"),
+      "Dotonbori",
+      _at(2026, 10, 6, 15, 59, 51),
+  )
+  for row, at in (
+      (request, _at(2026, 10, 6, 15, 59, 50, 300000)),
+      (chunk, None),
+  ):
+    row.update(
+        session_id="s-104",
+        invocation_id="inv-104",
+        trace_id="t-104",
+        span_id="sp-104-llm-1",
+        parent_span_id="sp-104-agent",
+    )
+    if at is not None:
+      row["timestamp"] = at
+  rows += [request, chunk]
+
+  export = export_memory.build_user_export(_memory(rows))
+
+  session = next(s for s in export["sessions"] if s["session_id"] == "s-104")
+  assert [
+      (m["role"], m["content"], m["complete"]) for m in session["messages"]
+  ] == [
+      (
+          "user",
+          "Find a restaurant in Osaka for dinner that fits my diet.",
+          True,
+      ),
+      ("assistant", "Dotonbori", False),
+  ]
+  trace = next(t for t in export["traces"] if t["trace_id"] == "inv-104")
+  assert [
+      (row["label"], row["start_ms"], row["end_ms"], row["status"])
+      for row in trace["timeline"]
+  ] == [("reply", 300.0, 1000.0, "incomplete")]
+  assert (trace["outcome_status"], trace["outcome_span_id"]) == (
+      "unanswered",
+      None,
+  )
+
+
+def test_answered_traces_name_the_span_of_their_answer(ana):
+  assert [(t["trace_id"], t["outcome_span_id"]) for t in ana["traces"]] == [
+      ("inv-101", "sp-101-llm-3"),
+      ("inv-102", "sp-102-llm-3"),
+      ("inv-103", "sp-103-llm-2"),
+      ("inv-104", None),
   ]

@@ -35,10 +35,11 @@ python examples/agent_memory/agent_memory_demo.py
 
 The offline run needs no credentials or network. `offline_bigquery.py` stands
 in for `google.cloud.bigquery.Client`, and the real `Client.list_traces` code
-path runs on top of it. The stand-in serves only that one statement, with the
-`user_id`, `start_time` and `limit` filters; any other query or predicate
-raises `NotImplementedError` instead of returning rows a real query would
-have excluded.
+path runs on top of it. The stand-in implements exactly one statement: the
+SDK's list-traces query, pinned in the file, with the `user_id`, `start_time`
+and `limit` filters. Any other statement, a changed join, projection,
+ordering or limit, another predicate, or an unexpected query parameter raises
+`NotImplementedError` instead of returning rows a real query would not.
 
 To read a live table written by the plugin (Application Default
 Credentials):
@@ -94,13 +95,13 @@ Trace inv-102 (session s-102): answered_with_errors
 - seat = window (since 2026-09-28T17:00:01Z) [s-101/sp-101-agent]
 
 ## Long-term: entities the agent acted on
-- Kyoto (LOCATION): 3 tool calls in s-102, s-103
-- Kyoto Station (LOCATION): 2 tool calls in s-102
-- SFO (LOCATION): 1 tool call in s-101
-- Tokyo (LOCATION): 1 tool call in s-101
+- Kyoto (LOCATION): 3 tool calls [s-102/sp-102-tool-1, s-102/sp-102-tool-2, s-103/sp-103-tool-2]
+- Kyoto Station (LOCATION): 2 tool calls [s-102/sp-102-tool-1, s-102/sp-102-tool-2]
+- SFO (LOCATION): 1 tool call [s-101/sp-101-tool-3]
+- Tokyo (LOCATION): 1 tool call [s-101/sp-101-tool-3]
 
 ## Reasoning: similar past tasks that succeeded
-- 0.31 "I eat fish now, so update my diet to pescatarian. Find a restaurant in Kyoto for dinner on Oct 15." -> save_preference, find_restaurants -> "Updated your diet to pescatarian. Kamo Grill in Kyoto has pescatarian dinner options on Oct 15." [s-103/inv-103]
+- 0.31 trace inv-103: "I eat fish now, so update my diet to pescatarian. Find a restaurant in Kyoto for dinner on Oct 15." -> save_preference, find_restaurants -> "Updated your diet to pescatarian. Kamo Grill in Kyoto has pescatarian dinner options on Oct 15." [s-103/sp-103-llm-2]
 
 ## Reasoning: tools that failed before
 - search_hotels failed 1 of 2 calls; last error: TimeoutError: hotel inventory API did not respond within 5000 ms [s-102/sp-102-tool-1]
@@ -183,14 +184,15 @@ Cost depends on your rates; the recorded run cost about $0.05 (see
 [`viz/index.html`](viz/index.html) and [`viz/app.js`](viz/app.js) are plain
 HTML and JavaScript with no dependencies. They read `viz/data/memory_export.json`:
 - **Sessions (short-term):** one entry per session; pick one to see its
-  conversation.
+  conversation. A reply whose stream did not finish is marked incomplete.
 - **Long-term memory across sessions:** a graph with sessions on a time line.
   Saved preferences sit above it; a replaced version is struck through and
   linked to its successor. Entities from tool arguments sit below it, linked
   to every session that used them. Hover any node for its source row.
 - **Reasoning:** one waterfall per turn. It shows each model call, the tool
   calls that call asked for, and how the turn ended. A failed tool call shows
-  in the status color with an icon and a label.
+  in the status color with an icon and a label; an incomplete model call is
+  drawn faded and labeled.
 - **What the agent reads next:** the `get_context()` block for the latest
   session.
 
@@ -205,7 +207,7 @@ user switch shows that each user is read with their own `TraceFilter`.
 | Long-term: preferences | `STATE_DELTA` rows for ADK `user:` keys (`attributes.state_delta`) | `long_term.get_preference_history()`, `long_term.get_preferences(as_of=...)` | `long_term.add_preference`, `supersede_preference`, `get_preferences_for(as_of=...)` |
 | Long-term: entities | `TOOL_STARTING` arguments that you map to an entity type | `long_term.get_entities()` | `long_term.add_entity`; `touched_entities` writes `(:ReasoningStep)-[:TOUCHED]->(:Entity)` |
 | Reasoning | `LLM_RESPONSE`, `TOOL_STARTING` / `TOOL_COMPLETED` / `TOOL_ERROR`, `INVOCATION_COMPLETED`; one trace per `invocation_id` | `reasoning.get_trace_with_steps(trace_id)`, `get_session_traces`, `list_traces(success_only=, since=, until=)`, `get_similar_traces`, `get_tool_stats` | Written with `reasoning.start_trace` / `add_step` / `record_tool_call` / `complete_trace`; read with the same-named methods |
-| Combined | All of the above | `get_context(query, session_id=...)` | `MemoryClient.get_context(query, session_id=...)` |
+| Combined | All of the above; every line names its source rows as `[session_id/span_id]` | `get_context(query, session_id=...)` | `MemoryClient.get_context(query, session_id=...)` |
 
 `load_user_memory(client, user_id, since=...)` makes the single
 `Client.list_traces(TraceFilter(user_id=..., start_time=...))` call. The
@@ -239,24 +241,39 @@ fixture.
 
 In neo4j-agent-memory the application records reasoning itself. Its docs
 say "Always pair a started trace with a matching `complete_trace` call." Here
-there is no trace lifecycle to manage, so a trace cannot be left without an
-outcome. The cost is that the outcome is inferred from the logged rows (see
-below), not declared by the application.
+there is no trace lifecycle to manage, so there is no completion call to
+forget. The status, however, is derived from the logged rows, not declared
+by the application. A trace counts as answered only when its final answer
+row was actually recorded; a stream that stopped part-way, for example, is
+`unanswered` (see below).
 
 ## The reasoning-trace model
 
 | neo4j-agent-memory | This demo | Derived from |
 |---|---|---|
 | `ReasoningTrace.task` | `ReasoningTrace.task` | The invocation's first `USER_MESSAGE_RECEIVED` |
-| `ReasoningStep` (thought / action / observation) | `ReasoningStep` | One step per model turn except the final answer. `thought` holds its text parts, `action` is `call: <tools>`, and `observation` summarizes the tool results or errors |
+| `ReasoningStep` (thought / action / observation) | `ReasoningStep` | One step per model call except the final answer; the fragments of a streamed call are one call. `thought` holds its text parts, `action` is `call: <tools>`, and `observation` summarizes the tool results or errors |
 | `ToolCall` (status, `duration_ms`, `error`) | `ToolCall` (`success` / `error` / `pending`) | `TOOL_STARTING` paired by span id with `TOOL_COMPLETED` or `TOOL_ERROR`; `latency_ms.total_ms`; `error_message`. A start with no completion row is `pending` |
-| `complete_trace(outcome=TraceOutcome(success, summary, error_kind, metrics))` | `outcome`, `outcome_status`, `metrics` | `outcome` is the text of the last model turn. `outcome_status` is one of `answered`, `answered_with_errors` or `unanswered`. `metrics` holds latency, LLM calls, tool calls and errors, and tokens (`content.usage.total`) |
+| `complete_trace(outcome=TraceOutcome(success, summary, error_kind, metrics))` | `outcome`, `outcome_status`, `metrics` | `outcome` is the text of the last model call, if that call completed. `outcome_status` is one of `answered`, `answered_with_errors` or `unanswered`. `metrics` holds latency, model calls, tool calls and errors, and tokens (`content.usage.total`, the largest value per call, since streamed usage is cumulative) |
 | `INITIATED_BY` / `TOUCHED` edges | `session_id` / `span_id` on every item | The source row |
 
 How `outcome_status` is derived:
-- `answered`: the invocation ends with a text answer and recorded no error rows.
-- `answered_with_errors`: it ends with a text answer, but at least one error row was recorded (such as the retried hotel search above).
-- `unanswered`: it ends without a text answer, because it is still running or was cut off.
+- `answered`: the invocation's last model call completed with text and no tool calls, and no error rows were recorded.
+- `answered_with_errors`: the same final answer, but at least one error row was recorded (such as the retried hotel search above).
+- `unanswered`: there is no recorded final answer. The invocation is still running, a stream stopped part-way, or it failed.
+
+What counts as a completed model call:
+- **Streaming.** A streamed model call writes several `LLM_RESPONSE` rows on one span. They are read as one call, and partial text never counts as an answer.
+- **Terminal marker.** google-adk 2.11 marks the terminal response row with `attributes.cache_type` (and `finish_reason`); fragments carry neither. The marked row completes the call even if no later row has landed yet.
+- **Older plugins.** These write no marker. A non-error row after the response (a tool call, the next model call, `AGENT_COMPLETED`) then shows that the call finished.
+- **Incomplete calls.** A call with neither is incomplete, and appears as an incomplete reply in the conversation and the context.
+
+How a response is read:
+- **The format.** The plugin writes a response as `text: '...'`, `call: <tool>` and similar parts joined by ` | `, without escaping the text.
+- **Ambiguous text.** Text that itself contains ` | call: x` can be read more than one way. A quote closes a text part only where ` | ` or the end follows it. The parser compares the structurally valid readings and uses the `TOOL_STARTING` rows that follow the call to choose between them.
+- **No evidence.** Without tool rows, it keeps the text whole rather than inventing a tool call.
+- **Truncated rows.** The plugin cuts an over-long payload and appends `...[TRUNCATED]`, so the last text part has no closing quote. That text is kept, marker included.
+- **Bounded work.** The search for readings is capped, so crafted text cannot stall the reader. It tries whole-text readings first and, when tool rows exist, finely split ones too.
 
 `success` means `answered`. It is an execution-level proxy, not proof that
 the task succeeded.

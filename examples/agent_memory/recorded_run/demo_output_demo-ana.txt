@@ -1,8 +1,8 @@
 Agent memory from BigQuery Agent Analytics traces
 source : BigQuery test-project-0728-467323.bqaa_agent_memory_demo.agent_events
-user   : demo-ana   current session: mem-20261007t0603-s5   now: 2026-10-07T06:24:51Z
+user   : demo-ana   current session: mem-20261007t0603-s5   now: 2026-10-07T07:10:07Z
 read   : 4 sessions, 8 traces from one Client.list_traces() call
-         TraceFilter(user_id='demo-ana', start_time=2026-09-07T06:24:51Z)
+         TraceFilter(user_id='demo-ana', start_time=2026-09-07T07:10:07Z)
 
 == 1. Short-term memory ==
 Sessions (ShortTermMemory.list_sessions):
@@ -65,14 +65,14 @@ Similar past tasks for 'Plan dinner in Osaka on 2026-10-17. Do you remember what
 - seat = window (since 2026-10-07T06:03:57Z) [mem-20261007t0603-s1/4d2a571f16613b18]
 
 ## Long-term: entities the agent acted on
-- Kyoto (LOCATION): 4 tool calls in mem-20261007t0603-s2, mem-20261007t0603-s3
-- Kyoto Station (LOCATION): 2 tool calls in mem-20261007t0603-s2
-- Osaka (LOCATION): 1 tool call in mem-20261007t0603-s5
-- SFO (LOCATION): 1 tool call in mem-20261007t0603-s1
-- Tokyo (LOCATION): 1 tool call in mem-20261007t0603-s1
+- Kyoto (LOCATION): 4 tool calls [mem-20261007t0603-s2/d039f83df55240ab, mem-20261007t0603-s2/1684d289ceb64e82, mem-20261007t0603-s3/7bd49026598b4a80, mem-20261007t0603-s3/44c7b8470d784171]
+- Kyoto Station (LOCATION): 2 tool calls [mem-20261007t0603-s2/d039f83df55240ab, mem-20261007t0603-s2/1684d289ceb64e82]
+- Osaka (LOCATION): 1 tool call [mem-20261007t0603-s5/7f97533b048e4d10]
+- SFO (LOCATION): 1 tool call [mem-20261007t0603-s1/7ff21c8f664c400a]
+- Tokyo (LOCATION): 1 tool call [mem-20261007t0603-s1/7ff21c8f664c400a]
 
 ## Reasoning: similar past tasks that succeeded
-- 0.20 "Find me a dinner place in Kyoto on 2026-10-15 that fits my diet." -> recall_memory, find_restaurants -> "I found Kamo Garden in Kyoto, which offers vegetarian dining for dinner on October 15, 2026. It matches your saved vegetarian dietary preference. Let me know if you would like more details or assistance booking!" [mem-20261007t0603-s3/e-49a32f93-b77b-4061-ac63-0d7cc81ca47c]
+- 0.20 trace e-49a32f93-b77b-4061-ac63-0d7cc81ca47c: "Find me a dinner place in Kyoto on 2026-10-15 that fits my diet." -> recall_memory, find_restaurants -> "I found Kamo Garden in Kyoto, which offers vegetarian dining for dinner on October 15, 2026. It matches your saved vegetarian dietary preference. Let me know if you would like more details or assistance booking!" [mem-20261007t0603-s3/f0d21ddc616f4411]
 
 ## Reasoning: tools that failed before
 - search_hotels failed 1 of 2 calls; last error: hotel inventory API timed out (simulated outage) [mem-20261007t0603-s2/d039f83df55240ab]

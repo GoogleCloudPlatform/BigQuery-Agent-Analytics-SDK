@@ -2,7 +2,7 @@
  "schema": "bqaa-agent-memory-viz/1",
  "label": "Recorded live run, 2026-10-07",
  "source": "<project>.bqaa_agent_memory_demo.agent_events",
- "exported_at": "2026-10-07T06:11:46.013Z",
+ "exported_at": "2026-10-07T07:10:40.404Z",
  "users": [
   {
    "user_id": "demo-ana",
@@ -18,25 +18,29 @@
        "role": "user",
        "content": "Hi! Please remember two things about me: I'm vegetarian, and I always want a window seat.",
        "timestamp": "2026-10-07T06:03:55.080Z",
-       "span_id": "4d2a571f16613b18"
+       "span_id": "4d2a571f16613b18",
+       "complete": true
       },
       {
        "role": "assistant",
        "content": "I have saved your preferences: vegetarian diet and window seat. Let me know whenever you'd like help planning your next trip!",
        "timestamp": "2026-10-07T06:03:59.035Z",
-       "span_id": "b44df5cb466b44d7"
+       "span_id": "b44df5cb466b44d7",
+       "complete": true
       },
       {
        "role": "user",
        "content": "Now find me a flight from SFO to Tokyo on 2026-10-12.",
        "timestamp": "2026-10-07T06:03:59.562Z",
-       "span_id": "ab15bd2dff3e17e1"
+       "span_id": "ab15bd2dff3e17e1",
+       "complete": true
       },
       {
        "role": "assistant",
        "content": "I found two flights from SFO to Tokyo on October 12, 2026 with window seats available. Flight DM101 departs at 11:05 with 12 window seats remaining, and flight DM205 departs at 16:40 with 3 window seats left. Let me know which option you prefer!",
        "timestamp": "2026-10-07T06:04:19.668Z",
-       "span_id": "68378c700f1a456c"
+       "span_id": "68378c700f1a456c",
+       "complete": true
       }
      ]
     },
@@ -50,31 +54,36 @@
        "role": "user",
        "content": "Find me a hotel in Kyoto near Kyoto Station from 2026-10-14 to 2026-10-16.",
        "timestamp": "2026-10-07T06:04:20.208Z",
-       "span_id": "be9fd134c316df2c"
+       "span_id": "be9fd134c316df2c",
+       "complete": true
       },
       {
        "role": "user",
        "content": "The hotel search failed. Please try it again.",
        "timestamp": "2026-10-07T06:04:25.143Z",
-       "span_id": "7cdcf4c4761f5c4c"
+       "span_id": "7cdcf4c4761f5c4c",
+       "complete": true
       },
       {
        "role": "assistant",
        "content": "I found two hotel options in Kyoto near Kyoto Station for October 14–16, 2026. The closest is the Sakura Station Hotel, located just 150 meters away at $180 per night. Alternatively, Higashiyama Ryokan is available 2.4 km away for $260 per night.",
        "timestamp": "2026-10-07T06:04:38.283Z",
-       "span_id": "600cb8b8d09e4da5"
+       "span_id": "600cb8b8d09e4da5",
+       "complete": true
       },
       {
        "role": "user",
        "content": "What was the nightly price of the first hotel you found?",
        "timestamp": "2026-10-07T06:04:38.942Z",
-       "span_id": "87f65613dcd8051f"
+       "span_id": "87f65613dcd8051f",
+       "complete": true
       },
       {
        "role": "assistant",
        "content": "The nightly price of the Sakura Station Hotel was $180.",
        "timestamp": "2026-10-07T06:04:40.547Z",
-       "span_id": "2d3793fec2a74d14"
+       "span_id": "2d3793fec2a74d14",
+       "complete": true
       }
      ]
     },
@@ -88,25 +97,29 @@
        "role": "user",
        "content": "Find me a dinner place in Kyoto on 2026-10-15 that fits my diet.",
        "timestamp": "2026-10-07T06:04:41.273Z",
-       "span_id": "313ce71d45a90c01"
+       "span_id": "313ce71d45a90c01",
+       "complete": true
       },
       {
        "role": "assistant",
        "content": "I found Kamo Garden in Kyoto, which offers vegetarian dining for dinner on October 15, 2026. It matches your saved vegetarian dietary preference. Let me know if you would like more details or assistance booking!",
        "timestamp": "2026-10-07T06:04:48.600Z",
-       "span_id": "f0d21ddc616f4411"
+       "span_id": "f0d21ddc616f4411",
+       "complete": true
       },
       {
        "role": "user",
        "content": "Actually, I eat fish now. Please update my diet to pescatarian and check again.",
        "timestamp": "2026-10-07T06:04:49.130Z",
-       "span_id": "a436e408f2a70954"
+       "span_id": "a436e408f2a70954",
+       "complete": true
       },
       {
        "role": "assistant",
        "content": "I have updated your dietary preference to pescatarian. For dinner in Kyoto on October 15, 2026, you can dine at Kamo Garden or Pontocho Grill. Both options accommodate a pescatarian diet.",
        "timestamp": "2026-10-07T06:04:53.528Z",
-       "span_id": "078f65ca7a234c75"
+       "span_id": "078f65ca7a234c75",
+       "complete": true
       }
      ]
     },
@@ -120,13 +133,15 @@
        "role": "user",
        "content": "Plan dinner in Osaka on 2026-10-17. Do you remember what I eat?",
        "timestamp": "2026-10-07T06:04:59.376Z",
-       "span_id": "bc263ea608964416"
+       "span_id": "bc263ea608964416",
+       "complete": true
       },
       {
        "role": "assistant",
        "content": "Yes, I remember you follow a pescatarian diet. For your dinner in Osaka on October 17, 2026, I found Dotonbori Greens and Umeda Sushi Bar, both offering pescatarian-friendly options. Let me know if you'd like more details on either of these!",
        "timestamp": "2026-10-07T06:05:12.581Z",
-       "span_id": "4fdc8f7241ad407b"
+       "span_id": "4fdc8f7241ad407b",
+       "complete": true
       }
      ]
     }
@@ -265,6 +280,7 @@
      "llm_calls": 2,
      "total_tokens": 1697,
      "errors": [],
+     "outcome_span_id": "b44df5cb466b44d7",
      "steps": [
       {
        "step_number": 1,
@@ -352,6 +368,7 @@
      "llm_calls": 2,
      "total_tokens": 6982,
      "errors": [],
+     "outcome_span_id": "68378c700f1a456c",
      "steps": [
       {
        "step_number": 1,
@@ -421,6 +438,7 @@
      "errors": [
       "hotel inventory API timed out (simulated outage)"
      ],
+     "outcome_span_id": null,
      "steps": [
       {
        "step_number": 1,
@@ -479,6 +497,7 @@
      "llm_calls": 2,
      "total_tokens": 4674,
      "errors": [],
+     "outcome_span_id": "600cb8b8d09e4da5",
      "steps": [
       {
        "step_number": 1,
@@ -546,6 +565,7 @@
      "llm_calls": 1,
      "total_tokens": 2518,
      "errors": [],
+     "outcome_span_id": "2d3793fec2a74d14",
      "steps": [],
      "timeline": [
       {
@@ -571,6 +591,7 @@
      "llm_calls": 3,
      "total_tokens": 3614,
      "errors": [],
+     "outcome_span_id": "f0d21ddc616f4411",
      "steps": [
       {
        "step_number": 1,
@@ -675,6 +696,7 @@
      "llm_calls": 2,
      "total_tokens": 3562,
      "errors": [],
+     "outcome_span_id": "078f65ca7a234c75",
      "steps": [
       {
        "step_number": 1,
@@ -763,6 +785,7 @@
      "llm_calls": 3,
      "total_tokens": 4021,
      "errors": [],
+     "outcome_span_id": "4fdc8f7241ad407b",
      "steps": [
       {
        "step_number": 1,
@@ -912,7 +935,7 @@
      "last_failure": null
     }
    ],
-   "context": "# Memory for user demo-ana\n\n## Short-term: current conversation (session mem-20261007t0603-s5)\n- user: Plan dinner in Osaka on 2026-10-17. Do you remember what I eat? [mem-20261007t0603-s5/bc263ea608964416]\n- assistant: Yes, I remember you follow a pescatarian diet. For your dinner in Osaka on October 17, 2026, I found Dotonbori Greens and Umeda Sushi Bar, both offering pescatarian-friendly options. Let me know if you'd like more details on either of these! [mem-20261007t0603-s5/4fdc8f7241ad407b]\n\n## Long-term: user preferences (ADK user: state)\n- diet = pescatarian (since 2026-10-07T06:04:51Z; replaced vegetarian) [mem-20261007t0603-s3/a436e408f2a70954]\n- seat = window (since 2026-10-07T06:03:57Z) [mem-20261007t0603-s1/4d2a571f16613b18]\n\n## Long-term: entities the agent acted on\n- Kyoto (LOCATION): 4 tool calls in mem-20261007t0603-s2, mem-20261007t0603-s3\n- Kyoto Station (LOCATION): 2 tool calls in mem-20261007t0603-s2\n- Osaka (LOCATION): 1 tool call in mem-20261007t0603-s5\n- SFO (LOCATION): 1 tool call in mem-20261007t0603-s1\n- Tokyo (LOCATION): 1 tool call in mem-20261007t0603-s1\n\n## Reasoning: similar past tasks that succeeded\n- 0.20 \"Find me a dinner place in Kyoto on 2026-10-15 that fits my diet.\" -> recall_memory, find_restaurants -> \"I found Kamo Garden in Kyoto, which offers vegetarian dining for dinner on October 15, 2026. It matches your saved vegetarian dietary preference. Let me know if you would like more details or assistance booking!\" [mem-20261007t0603-s3/e-49a32f93-b77b-4061-ac63-0d7cc81ca47c]\n\n## Reasoning: tools that failed before\n- search_hotels failed 1 of 2 calls; last error: hotel inventory API timed out (simulated outage) [mem-20261007t0603-s2/d039f83df55240ab]"
+   "context": "# Memory for user demo-ana\n\n## Short-term: current conversation (session mem-20261007t0603-s5)\n- user: Plan dinner in Osaka on 2026-10-17. Do you remember what I eat? [mem-20261007t0603-s5/bc263ea608964416]\n- assistant: Yes, I remember you follow a pescatarian diet. For your dinner in Osaka on October 17, 2026, I found Dotonbori Greens and Umeda Sushi Bar, both offering pescatarian-friendly options. Let me know if you'd like more details on either of these! [mem-20261007t0603-s5/4fdc8f7241ad407b]\n\n## Long-term: user preferences (ADK user: state)\n- diet = pescatarian (since 2026-10-07T06:04:51Z; replaced vegetarian) [mem-20261007t0603-s3/a436e408f2a70954]\n- seat = window (since 2026-10-07T06:03:57Z) [mem-20261007t0603-s1/4d2a571f16613b18]\n\n## Long-term: entities the agent acted on\n- Kyoto (LOCATION): 4 tool calls [mem-20261007t0603-s2/d039f83df55240ab, mem-20261007t0603-s2/1684d289ceb64e82, mem-20261007t0603-s3/7bd49026598b4a80, mem-20261007t0603-s3/44c7b8470d784171]\n- Kyoto Station (LOCATION): 2 tool calls [mem-20261007t0603-s2/d039f83df55240ab, mem-20261007t0603-s2/1684d289ceb64e82]\n- Osaka (LOCATION): 1 tool call [mem-20261007t0603-s5/7f97533b048e4d10]\n- SFO (LOCATION): 1 tool call [mem-20261007t0603-s1/7ff21c8f664c400a]\n- Tokyo (LOCATION): 1 tool call [mem-20261007t0603-s1/7ff21c8f664c400a]\n\n## Reasoning: similar past tasks that succeeded\n- 0.20 trace e-49a32f93-b77b-4061-ac63-0d7cc81ca47c: \"Find me a dinner place in Kyoto on 2026-10-15 that fits my diet.\" -> recall_memory, find_restaurants -> \"I found Kamo Garden in Kyoto, which offers vegetarian dining for dinner on October 15, 2026. It matches your saved vegetarian dietary preference. Let me know if you would like more details or assistance booking!\" [mem-20261007t0603-s3/f0d21ddc616f4411]\n\n## Reasoning: tools that failed before\n- search_hotels failed 1 of 2 calls; last error: hotel inventory API timed out (simulated outage) [mem-20261007t0603-s2/d039f83df55240ab]"
   },
   {
    "user_id": "demo-ben",
@@ -928,13 +951,15 @@
        "role": "user",
        "content": "I'm vegan, please remember that. Find me a dinner place in Osaka on 2026-10-17.",
        "timestamp": "2026-10-07T06:04:54.351Z",
-       "span_id": "e21a1d366aeafd6f"
+       "span_id": "e21a1d366aeafd6f",
+       "complete": true
       },
       {
        "role": "assistant",
        "content": "I have saved your preference for a vegan diet. For dinner in Osaka on October 17, 2026, I recommend Dotonbori Greens.",
        "timestamp": "2026-10-07T06:04:58.875Z",
-       "span_id": "ab06cb9877624b6a"
+       "span_id": "ab06cb9877624b6a",
+       "complete": true
       }
      ]
     }
@@ -977,6 +1002,7 @@
      "llm_calls": 2,
      "total_tokens": 2030,
      "errors": [],
+     "outcome_span_id": "ab06cb9877624b6a",
      "steps": [
       {
        "step_number": 1,
@@ -1076,7 +1102,7 @@
      "last_failure": null
     }
    ],
-   "context": "# Memory for user demo-ben\n\n## Short-term: current conversation (session mem-20261007t0603-s4)\n- user: I'm vegan, please remember that. Find me a dinner place in Osaka on 2026-10-17. [mem-20261007t0603-s4/e21a1d366aeafd6f]\n- assistant: I have saved your preference for a vegan diet. For dinner in Osaka on October 17, 2026, I recommend Dotonbori Greens. [mem-20261007t0603-s4/ab06cb9877624b6a]\n\n## Long-term: user preferences (ADK user: state)\n- diet = vegan (since 2026-10-07T06:04:57Z) [mem-20261007t0603-s4/e21a1d366aeafd6f]\n\n## Long-term: entities the agent acted on\n- Osaka (LOCATION): 1 tool call in mem-20261007t0603-s4\n\n## Reasoning: similar past tasks that succeeded\n- (none)\n\n## Reasoning: tools that failed before\n- (none)"
+   "context": "# Memory for user demo-ben\n\n## Short-term: current conversation (session mem-20261007t0603-s4)\n- user: I'm vegan, please remember that. Find me a dinner place in Osaka on 2026-10-17. [mem-20261007t0603-s4/e21a1d366aeafd6f]\n- assistant: I have saved your preference for a vegan diet. For dinner in Osaka on October 17, 2026, I recommend Dotonbori Greens. [mem-20261007t0603-s4/ab06cb9877624b6a]\n\n## Long-term: user preferences (ADK user: state)\n- diet = vegan (since 2026-10-07T06:04:57Z) [mem-20261007t0603-s4/e21a1d366aeafd6f]\n\n## Long-term: entities the agent acted on\n- Osaka (LOCATION): 1 tool call [mem-20261007t0603-s4/848b7453c571418c]\n\n## Reasoning: similar past tasks that succeeded\n- (none)\n\n## Reasoning: tools that failed before\n- (none)"
   }
  ]
 }

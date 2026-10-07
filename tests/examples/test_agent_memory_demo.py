@@ -28,11 +28,14 @@ from datetime import datetime
 from datetime import timezone
 import json
 from pathlib import Path
+import re
 import sys
 
+from google.cloud import bigquery
 import pytest
 
 from bigquery_agent_analytics import Client
+from bigquery_agent_analytics import client as sdk_client
 from bigquery_agent_analytics import TraceFilter
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "examples" / "agent_memory"
@@ -62,6 +65,12 @@ ANA_S104_TASK = "Find a restaurant in Osaka for dinner that fits my diet."
 HOTEL_TIMEOUT = (
     "TimeoutError: hotel inventory API did not respond within 5000 ms"
 )
+ANA_S101_ANSWER = (
+    "Saved: vegetarian, window seat. DM101 leaves SFO at 11:05 on Oct 12 with"
+    " 12 window seats left."
+)
+# google-adk 2.11 writes these only on a terminal (non-partial) LLM_RESPONSE.
+TERMINAL_MARKERS = ("cache_type", "finish_reason")
 
 
 def _ts(*args) -> datetime:
@@ -88,11 +97,13 @@ class _RecordingClient:
 
   def __init__(self, rows):
     self.statements: list[str] = []
+    self.configs: list = []
     self.returned: list[list[dict]] = []
     self._inner = offline_bigquery.OfflineBigQueryClient(rows)
 
   def query(self, sql, job_config=None, **kwargs):
     self.statements.append(sql)
+    self.configs.append(job_config)
     job = self._inner.query(sql, job_config=job_config, **kwargs)
     self.returned.append(job.result())
     return job
@@ -237,6 +248,79 @@ def test_offline_client_rejects_predicates_it_cannot_honor(client, filt):
 def test_offline_client_rejects_other_statements(client):
   with pytest.raises(NotImplementedError, match="Client.list_traces"):
     client.get_trace("t-101")
+
+
+def test_offline_client_pins_the_sdk_statement():
+  # If the SDK changes its list-traces query, the stand-in stops serving it;
+  # update the pinned copy and the row semantics in query() together.
+  assert (
+      offline_bigquery._LIST_TRACES_STATEMENT == sdk_client._LIST_TRACES_QUERY
+  )
+
+
+def _list_traces_call(fixture):
+  """The statement and job config the SDK sends for one user's traces."""
+  recorder = _RecordingClient(fixture.rows)
+  Client(
+      project_id="offline-demo",
+      dataset_id="agent_analytics",
+      verify_schema=False,
+      bq_client=recorder,
+  ).list_traces(TraceFilter(user_id="u-ana"))
+  return recorder.statements[0], recorder.configs[0]
+
+
+def _replace_once(old, new):
+  def mutate(sql):
+    assert old in sql
+    return sql.replace(old, new, 1)
+
+  return mutate
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda sql: sql + "LIMIT 0\n",
+        _replace_once(
+            "JOIN trace_sessions ts\n  ON e.session_id",
+            "JOIN trace_sessions ts\n  ON FALSE AND e.session_id",
+        ),
+        _replace_once("  e.error_message,\n", ""),
+        _replace_once("e.timestamp ASC", "e.timestamp DESC"),
+        _replace_once("LIMIT @trace_limit", "LIMIT 1000"),
+        _replace_once(".agent_events` e\n", ".other_events` e\n"),
+    ],
+    ids=[
+        "outer-limit-0",
+        "join-on-false",
+        "dropped-column",
+        "order",
+        "limit",
+        "rows-from-another-table",
+    ],
+)
+def test_offline_client_rejects_any_other_statement_shape(fixture, mutate):
+  # Each variant changes which rows a real BigQuery would return, so the
+  # stand-in must refuse it rather than answer with the supported shape.
+  sql, config = _list_traces_call(fixture)
+  stand_in = offline_bigquery.OfflineBigQueryClient(fixture.rows)
+
+  assert len(stand_in.query(sql, job_config=config).result()) == 51
+  with pytest.raises(NotImplementedError, match="statement"):
+    stand_in.query(mutate(sql), job_config=config)
+
+
+def test_offline_client_rejects_unexpected_query_parameters(fixture):
+  sql, config = _list_traces_call(fixture)
+  config.query_parameters = list(config.query_parameters) + [
+      bigquery.ScalarQueryParameter("agent_id", "STRING", "trip_planner")
+  ]
+
+  with pytest.raises(NotImplementedError, match="parameters"):
+    offline_bigquery.OfflineBigQueryClient(fixture.rows).query(
+        sql, job_config=config
+    )
 
 
 # ---- short-term memory ------------------------------------------------------
@@ -508,6 +592,322 @@ def test_cut_off_invocation_is_unanswered_with_a_pending_call(fixture):
   ) == (2, 1, 0, 0.5)
 
 
+def _row(rows, span_id, event_type):
+  return next(
+      r
+      for r in rows
+      if r["span_id"] == span_id and r["event_type"] == event_type
+  )
+
+
+def _fragment(row, text, at, total):
+  """A streaming chunk of ``row``'s model call: same span, no terminal marker."""
+  chunk = copy.deepcopy(row)
+  chunk["timestamp"] = at
+  chunk["content"] = {
+      "response": f"text: '{text}'",
+      "usage": {"prompt": 540, "completion": 5, "total": total},
+  }
+  for key in TERMINAL_MARKERS:
+    chunk["attributes"].pop(key)
+  return chunk
+
+
+def _moved_to_s104(row, span_id, at):
+  moved = copy.deepcopy(row)
+  moved.update(
+      session_id="s-104",
+      invocation_id="inv-104",
+      trace_id="t-104",
+      span_id=span_id,
+      parent_span_id="sp-104-agent",
+      timestamp=at,
+  )
+  return moved
+
+
+def _interrupted_s104(fixture):
+  """s-104 plus a model call that streamed one fragment and stopped."""
+  rows = copy.deepcopy(fixture.rows)
+  request = _moved_to_s104(
+      _row(rows, "sp-103-llm-1", "LLM_REQUEST"),
+      "sp-104-llm-1",
+      _ts(2026, 10, 6, 15, 59, 50, 300000),
+  )
+  request["content"] = {"prompt": [{"role": "user", "content": ANA_S104_TASK}]}
+  chunk = _fragment(
+      _moved_to_s104(
+          _row(rows, "sp-103-llm-2", "LLM_RESPONSE"),
+          "sp-104-llm-1",
+          _ts(2026, 10, 6, 15, 59, 51),
+      ),
+      "Dotonbori",
+      _ts(2026, 10, 6, 15, 59, 51),
+      120,
+  )
+  return rows + [request, chunk]
+
+
+def test_a_completed_stream_is_one_model_call_and_one_answer(fixture):
+  rows = copy.deepcopy(fixture.rows)
+  final = _row(rows, "sp-101-llm-3", "LLM_RESPONSE")
+  rows += [
+      _fragment(
+          final,
+          "Saved: vegetarian, window seat. ",
+          _ts(2026, 9, 28, 17, 0, 3, 900000),
+          550,
+      ),
+      _fragment(
+          final,
+          "DM101 leaves SFO at 11:05 on Oct 12 with 12 window seats left.",
+          _ts(2026, 9, 28, 17, 0, 4, 200000),
+          560,
+      ),
+  ]
+  memory = memory_layers.load_user_memory(_client(rows), "u-ana")
+
+  conversation = memory.short_term.get_conversation("s-101")
+  trace = memory.reasoning.get_trace_with_steps("inv-101")
+
+  assert [(m.role, m.content, m.complete) for m in conversation[1:]] == [
+      ("assistant", "Noted. Saving your preferences first.", True),
+      ("assistant", ANA_S101_ANSWER, True),
+  ]
+  assert (trace.outcome, trace.outcome_status) == (ANA_S101_ANSWER, "answered")
+  assert len(trace.steps) == 2
+  # One model call per span, and cumulative usage is not added up twice.
+  assert (trace.metrics["llm_calls"], trace.metrics["total_tokens"]) == (
+      3,
+      1512,
+  )
+
+
+def test_an_interrupted_stream_is_not_an_answer(fixture):
+  memory = memory_layers.load_user_memory(
+      _client(_interrupted_s104(fixture)), "u-ana"
+  )
+
+  trace = memory.reasoning.get_trace_with_steps("inv-104")
+  conversation = memory.short_term.get_conversation("s-104")
+
+  assert (
+      trace.outcome,
+      trace.outcome_status,
+      trace.success,
+      trace.completed_at,
+  ) == (None, "unanswered", False, None)
+  assert trace.metrics["llm_calls"] == 1
+  successful = memory.reasoning.list_traces(success_only=True)
+  assert "inv-104" not in [t.trace_id for t in successful]
+  assert [(m.role, m.content, m.complete) for m in conversation] == [
+      ("user", ANA_S104_TASK, True),
+      ("assistant", "Dotonbori", False),
+  ]
+  context = memory.get_context(ANA_S104_TASK, session_id="s-104")
+  assert "- assistant (incomplete): Dotonbori [s-104/sp-104-llm-1]" in context
+
+
+def test_a_stream_cut_off_by_an_error_is_not_an_answer(fixture):
+  rows = _interrupted_s104(fixture)
+  error = _moved_to_s104(
+      _row(rows, "sp-102-tool-1", "TOOL_ERROR"),
+      "sp-104-inv",
+      _ts(2026, 10, 6, 15, 59, 51, 500000),
+  )
+  error.update(
+      event_type="INVOCATION_ERROR",
+      content=None,
+      error_message="stream reset by peer",
+  )
+  memory = memory_layers.load_user_memory(_client(rows + [error]), "u-ana")
+
+  trace = memory.reasoning.get_trace_with_steps("inv-104")
+
+  assert (trace.outcome_status, trace.errors) == (
+      "unanswered",
+      ("stream reset by peer",),
+  )
+
+
+def test_rows_without_terminal_markers_use_the_next_row_as_evidence(fixture):
+  # Older plugin versions write no terminal marker; a non-error row after
+  # the response (a tool call, the next model call, AGENT_COMPLETED) shows
+  # that the model call finished.
+  rows = copy.deepcopy(fixture.rows)
+  for row in rows:
+    if row["event_type"] == "LLM_RESPONSE":
+      for key in TERMINAL_MARKERS:
+        row["attributes"].pop(key)
+  memory = memory_layers.load_user_memory(_client(rows), "u-ana")
+
+  assert sorted(
+      (t.trace_id, t.outcome_status) for t in memory.reasoning.list_traces()
+  ) == [
+      ("inv-101", "answered"),
+      ("inv-102", "answered_with_errors"),
+      ("inv-103", "answered"),
+      ("inv-104", "unanswered"),
+  ]
+
+
+def test_a_terminal_response_answers_before_the_closing_rows_land(fixture):
+  # A reader can see the final LLM_RESPONSE before AGENT_COMPLETED and
+  # INVOCATION_COMPLETED are written; its terminal marker shows that the
+  # model call finished.
+  closing = ("AGENT_COMPLETED", "INVOCATION_COMPLETED")
+  rows = [
+      row
+      for row in fixture.rows
+      if row["session_id"] != "s-101" or row["event_type"] not in closing
+  ]
+  memory = memory_layers.load_user_memory(_client(rows), "u-ana")
+
+  trace = memory.reasoning.get_trace_with_steps("inv-101")
+
+  assert (trace.outcome, trace.outcome_status, trace.completed_at) == (
+      ANA_S101_ANSWER,
+      "answered",
+      None,
+  )
+  assert memory.short_term.get_conversation("s-101")[-1].complete
+
+
+@pytest.mark.parametrize(
+    "response,expected",
+    [
+        (
+            "text: 'The log format is text: message | call: tool_name.'",
+            (["The log format is text: message | call: tool_name."], []),
+        ),
+        (
+            "text: 'I'm here, it's done' | call: save_preference",
+            (["I'm here, it's done"], ["save_preference"]),
+        ),
+        (
+            "call: save_preference | call: find_restaurants",
+            ([], ["save_preference", "find_restaurants"]),
+        ),
+        # Two readings fit; with no tool evidence the text stays whole.
+        (
+            "text: 'a' | call: b | text: 'c'",
+            (["a' | call: b | text: 'c"], []),
+        ),
+        (
+            "plain text from another producer",
+            (["plain text from another producer"], []),
+        ),
+        # Text that only starts like a part: "the front desk" is no tool.
+        ("call: the front desk", (["call: the front desk"], [])),
+        # Over-long payloads as google-adk 2.11 stores them: cut, marked,
+        # and left without the closing quote.
+        (
+            "text: 'Press '1' | call: rebook_flight t...[TRUNCATED]",
+            (["Press '1' | call: rebook_flight t...[TRUNCATED]"], []),
+        ),
+        (
+            "call: save_preference | text: 'Saved. Kamo Gr...[TRUNCATED]",
+            (["Saved. Kamo Gr...[TRUNCATED]"], ["save_preference"]),
+        ),
+        ("None", ([], [])),
+    ],
+)
+def test_response_parts_reads_the_plugin_format_structurally(
+    response, expected
+):
+  assert memory_layers.response_parts(response) == expected
+
+
+def test_response_parts_uses_recorded_tool_calls_for_ambiguous_text():
+  assert memory_layers.response_parts(
+      "text: 'a' | call: b | text: 'c'", executed_tools=["b"]
+  ) == (["a", "c"], ["b"])
+
+
+def test_a_quote_closes_text_only_before_a_separator():
+  # After '1' comes " - ", not " | ", so no part can end there, even
+  # though the recorded calls would favour splitting.
+  assert memory_layers.response_parts(
+      "text: 'Press '1' - call: rebook | text: 'ok' | call: rebook",
+      executed_tools=["rebook", "rebook"],
+  ) == (["Press '1' - call: rebook | text: 'ok"], ["rebook"])
+
+
+@pytest.mark.parametrize(
+    "tail,last_text",
+    [
+        ("", []),
+        (" | text: 'and then...[TRUNCATED]", ["and then...[TRUNCATED]"]),
+    ],
+    ids=["complete", "truncated"],
+)
+def test_recorded_tool_calls_split_a_long_response_in_full(tail, last_text):
+  # Twelve text parts can be read thousands of ways; the recorded calls
+  # still select the reading that splits every part.
+  steps = " | ".join(f"text: 'step {i}' | call: tool_{i}" for i in range(12))
+  tools = [f"tool_{i}" for i in range(12)]
+
+  assert memory_layers.response_parts(steps + tail, executed_tools=tools) == (
+      [f"step {i}" for i in range(12)] + last_text,
+      tools,
+  )
+
+
+def test_without_recorded_calls_a_long_ambiguous_text_stays_whole():
+  response = "text: 'a' | call: b | " * 12 + "text: 'end'"
+
+  assert memory_layers.response_parts(response) == (
+      [response[len("text: '") : -1]],
+      [],
+  )
+
+
+def test_crafted_text_cannot_stall_the_reader():
+  # Every split of this text dead-ends at the malformed call, so trying
+  # them all would take 2**1999 steps. The text comes back whole.
+  crafted = "text: 'x' | " * 2000 + "call: not a tool"
+
+  assert memory_layers.response_parts(crafted, executed_tools=[]) == (
+      [crafted[len("text: '") :]],
+      [],
+  )
+
+
+def test_literal_delimiters_in_an_answer_do_not_invent_a_tool_call(fixture):
+  rows = copy.deepcopy(fixture.rows)
+  answer = (
+      "Log lines look like text: message | call: tool_name. Kamo Grill fits."
+  )
+  final = _row(rows, "sp-103-llm-2", "LLM_RESPONSE")
+  final["content"]["response"] = f"text: '{answer}'"
+  memory = memory_layers.load_user_memory(_client(rows), "u-ana")
+
+  trace = memory.reasoning.get_trace_with_steps("inv-103")
+
+  assert (trace.outcome, trace.outcome_status) == (answer, "answered")
+  assert [s.action for s in trace.steps] == [
+      "call: save_preference, find_restaurants"
+  ]
+
+
+def test_recorded_tool_calls_resolve_an_ambiguous_model_turn(fixture):
+  # This text reads two ways; the TOOL_STARTING rows that follow show that
+  # both calls were real.
+  rows = copy.deepcopy(fixture.rows)
+  _row(rows, "sp-103-llm-1", "LLM_RESPONSE")["content"]["response"] = (
+      "text: 'Saving it' | call: save_preference | text: 'then searching'"
+      " | call: find_restaurants"
+  )
+  memory = memory_layers.load_user_memory(_client(rows), "u-ana")
+
+  (step,) = memory.reasoning.get_trace_with_steps("inv-103").steps
+
+  assert (step.thought, step.action) == (
+      "Saving it then searching",
+      "call: save_preference, find_restaurants",
+  )
+
+
 def test_each_invocation_of_a_session_is_its_own_trace(fixture):
   # Replay s-103 as a second turn of s-101: same session, new invocation.
   rows = copy.deepcopy(fixture.rows)
@@ -674,15 +1074,47 @@ def test_context_combines_the_three_layers_with_provenance(ana):
       "- seat = window (since 2026-09-28T17:00:01Z) [s-101/sp-101-agent]"
       in context
   )
-  assert "- Kyoto (LOCATION): 3 tool calls in s-102, s-103" in context
   assert (
-      f'- 0.31 "{ANA_S103_TASK}" -> save_preference, find_restaurants ->'
-      ' "Updated your diet to pescatarian. Kamo Grill in Kyoto has'
-      ' pescatarian dinner options on Oct 15." [s-103/inv-103]' in context
+      "- Kyoto (LOCATION): 3 tool calls [s-102/sp-102-tool-1,"
+      " s-102/sp-102-tool-2, s-103/sp-103-tool-2]" in context
+  )
+  assert (
+      f'- 0.31 trace inv-103: "{ANA_S103_TASK}" -> save_preference,'
+      ' find_restaurants -> "Updated your diet to pescatarian. Kamo Grill in'
+      ' Kyoto has pescatarian dinner options on Oct 15." [s-103/sp-103-llm-2]'
+      in context
   )
   assert (
       f"- search_hotels failed 1 of 2 calls; last error: {HOTEL_TIMEOUT}"
       " [s-102/sp-102-tool-1]" in context
+  )
+
+
+# A session/span pair, optionally preceded by a count of older sources.
+_SOURCE_TAG = re.compile(
+    r" \[(\+\d+ earlier, )?[^\s/\]]+/[^\s,\]]+(, [^\s/\]]+/[^\s,\]]+)*\]$"
+)
+
+
+def test_every_context_line_names_its_source_rows(ana):
+  context = ana.get_context(ANA_S104_TASK, session_id="s-104")
+
+  facts = [
+      line
+      for line in context.splitlines()
+      if line.startswith("- ") and line != "- (none)"
+  ]
+  # 1 message, 2 preferences, 4 entities, 1 similar task, 1 failed tool.
+  assert len(facts) == 9
+  assert [line for line in facts if not _SOURCE_TAG.search(line)] == []
+
+
+def test_entity_context_keeps_the_latest_sources_within_max_items(ana):
+  context = ana.get_context(ANA_S104_TASK, session_id="s-104", max_items=2)
+
+  assert (
+      "- Kyoto (LOCATION): 3 tool calls [+1 earlier, s-102/sp-102-tool-2,"
+      " s-103/sp-103-tool-2]" in context
   )
 
 
@@ -802,3 +1234,22 @@ def test_cli_prints_a_zero_millisecond_average(fixture, tmp_path, capsys):
 
   (line,) = [l for l in out.splitlines() if l.startswith("  search_flights ")]
   assert line.split()[-1] == "0.0"
+
+
+def test_cli_marks_an_incomplete_reply(fixture, tmp_path, capsys):
+  rows = _interrupted_s104(fixture)
+  doc = {
+      "description": "interrupted-stream variant",
+      "now": "2026-10-06T16:00:00.000Z",
+      "rows": [
+          dict(row, timestamp=row["timestamp"].isoformat()) for row in rows
+      ],
+  }
+  path = tmp_path / "agent_events.json"
+  path.write_text(json.dumps(doc), encoding="utf-8")
+
+  assert agent_memory_demo.main(["--fixture", str(path)]) == 0
+  out = capsys.readouterr().out
+
+  assert "  [assistant, incomplete] Dotonbori" in out
+  assert "- assistant (incomplete): Dotonbori [s-104/sp-104-llm-1]" in out

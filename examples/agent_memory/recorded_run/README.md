@@ -32,6 +32,13 @@ How the cost estimate was built:
 | [`../viz/data/memory_export.json`](../viz/data/memory_export.json) | Output of `export_memory.py` for both users, with the project shown as `<project>` |
 | [`../demo.mp4`](../demo.mp4), [`../viz/screenshot.png`](../viz/screenshot.png) | Walkthrough video (63 s) and screenshot of the web view on that export, recorded with `viz/record_demo.py` |
 
+The demo outputs, the export and the walkthrough were regenerated on
+2026-10-07 at 07:10 UTC, after review fixes changed how the memory is read
+(source rows on every context line, streamed responses, response parsing).
+They read the same 119 rows; the agent did not run again. That pass ran 5
+read-only query jobs, which billed 50 MB in total (the 10 MB minimum per
+query).
+
 ## What happened
 
 | Session | User | What the rows show |

@@ -130,7 +130,9 @@
     "adk": {
      "app_name": "trip_planner"
     },
-    "model_version": "gemini-2.5-flash"
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
    },
    "latency_ms": {
     "total_ms": 1100,
@@ -346,7 +348,9 @@
     "adk": {
      "app_name": "trip_planner"
     },
-    "model_version": "gemini-2.5-flash"
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
    },
    "latency_ms": {
     "total_ms": 800,
@@ -485,7 +489,9 @@
     "adk": {
      "app_name": "trip_planner"
     },
-    "model_version": "gemini-2.5-flash"
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
    },
    "latency_ms": {
     "total_ms": 1200,
@@ -673,7 +679,9 @@
     "adk": {
      "app_name": "trip_planner"
     },
-    "model_version": "gemini-2.5-flash"
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
    },
    "latency_ms": {
     "total_ms": 900,
@@ -804,7 +812,9 @@
     "adk": {
      "app_name": "trip_planner"
     },
-    "model_version": "gemini-2.5-flash"
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
    },
    "latency_ms": {
     "total_ms": 700,
@@ -964,7 +974,9 @@
     "adk": {
      "app_name": "trip_planner"
     },
-    "model_version": "gemini-2.5-flash"
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
    },
    "latency_ms": {
     "total_ms": 1000,
@@ -1152,7 +1164,9 @@
     "adk": {
      "app_name": "trip_planner"
     },
-    "model_version": "gemini-2.5-flash"
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
    },
    "latency_ms": {
     "total_ms": 1000,
@@ -1378,7 +1392,9 @@
     "adk": {
      "app_name": "trip_planner"
     },
-    "model_version": "gemini-2.5-flash"
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
    },
    "latency_ms": {
     "total_ms": 1100,
@@ -1639,7 +1655,9 @@
     "adk": {
      "app_name": "trip_planner"
     },
-    "model_version": "gemini-2.5-flash"
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
    },
    "latency_ms": {
     "total_ms": 900,
@@ -1861,7 +1879,9 @@
     "adk": {
      "app_name": "trip_planner"
     },
-    "model_version": "gemini-2.5-flash"
+    "model_version": "gemini-2.5-flash",
+    "cache_type": "none",
+    "finish_reason": "STOP"
    },
    "latency_ms": {
     "total_ms": 900,

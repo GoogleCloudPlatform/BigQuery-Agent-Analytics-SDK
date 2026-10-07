@@ -315,7 +315,7 @@
           { class: `msg ${message.role}` },
           el('span', {
             class: 'msg-role',
-            text: `${message.role === 'user' ? 'User' : 'Agent'}, ${clock(message.timestamp)}`,
+            text: `${message.role === 'user' ? 'User' : 'Agent'}${message.complete === false ? ' (reply incomplete: the stream did not finish)' : ''}, ${clock(message.timestamp)}`,
           }),
           message.content,
         ),
@@ -741,7 +741,8 @@
         group.append(svg('circle', { cx: labelX + 6, cy: y, r: 6, fill: status.color }));
         group.append(svg('text', { x: labelX + 6, y: y + 0.5, 'text-anchor': 'middle', 'dominant-baseline': 'middle', 'font-size': 8.5, 'font-weight': 700, fill: '#fff' }, status.icon));
       }
-      const label = isTool ? row.label : `Model: ${row.label}`;
+      const incomplete = !isTool && row.status === 'incomplete';
+      const label = isTool ? row.label : `Model: ${row.label}${incomplete ? ' (incomplete)' : ''}`;
       group.append(
         svg('text', {
           x: labelX + (isTool ? 18 : 0), y, 'dominant-baseline': 'middle', 'font-size': 12.5,
@@ -754,17 +755,20 @@
       group.append(svg('rect', {
         x: start, y: y - 6, width: barW, height: 12, rx: 3,
         fill: isTool ? status.color : 'var(--model)',
+        'fill-opacity': incomplete ? 0.45 : null,
       }));
       const span = row.end_ms === null ? null : row.end_ms - row.start_ms;
       group.append(svg('text', {
         x: start + barW + 6, y, 'dominant-baseline': 'middle', 'font-size': 11.5, fill: 'var(--muted)',
       }, row.end_ms === null ? 'no completion row' : duration(span)));
       group.append(svg('rect', { x: 0, y: y - ROW / 2, width, height: ROW, fill: 'transparent' }));
-      group.setAttribute('aria-label', `${label}, ${isTool ? status.label : 'model call'}, ${duration(span)}`);
+      group.setAttribute('aria-label', `${label}, ${isTool ? status.label : `model call ${row.status}`}, ${duration(span)}`);
       bindTip(group, () => [
         row.end_ms === null ? 'No completion row' : duration(span),
         [
-          isTool ? `${row.label} ${status.label}` : `Model call (${row.label})`,
+          isTool
+            ? `${row.label} ${status.label}`
+            : `Model call (${row.label})${incomplete ? ': no terminal response row, so not an answer' : ''}`,
           row.detail ? (row.detail.length > 220 ? `${row.detail.slice(0, 219)}…` : row.detail) : null,
           `Started ${duration(row.start_ms)} into the turn`,
         ],
@@ -803,7 +807,7 @@
   function renderContext() {
     const user = state.user;
     document.getElementById('context-hint').textContent =
-      `The get_context() block for ${sessionLabel(user.current_session_id)}, the latest session: all three layers in one prompt, each line tagged with the session and span or trace it came from.`;
+      `The get_context() block for ${sessionLabel(user.current_session_id)}, the latest session: all three layers in one prompt, each line tagged with the session and span of the rows it came from.`;
     document.getElementById('context').textContent = user.context;
   }
 

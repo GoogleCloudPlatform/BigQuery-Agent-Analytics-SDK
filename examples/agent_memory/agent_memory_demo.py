@@ -151,7 +151,8 @@ def _print_report(
   except KeyError:
     conversation = []
   for message in conversation:
-    print(f"  [{message.role}] {message.content}")
+    role = message.role if message.complete else f"{message.role}, incomplete"
+    print(f"  [{role}] {message.content}")
   if not conversation:
     print("  (no messages)")
 

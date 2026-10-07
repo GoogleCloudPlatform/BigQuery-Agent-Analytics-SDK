@@ -75,53 +75,63 @@ def _short(value: Any, limit: int = RESULT_PREVIEW_CHARS) -> Optional[str]:
 
 
 def _timeline(spans: list[Span]) -> list[dict[str, Any]]:
-  """Model turns and tool calls of one invocation, in ms from its start."""
+  """Model calls and tool calls of one invocation, in ms from its start.
+
+  A streamed model call is one row, from its request to its last response
+  row. Its status is ``success`` when a terminal response was recorded,
+  ``incomplete`` when only fragments were, and ``error`` when it failed.
+  """
   start = spans[0].timestamp
 
-  def offset(span: Span) -> float:
-    return (span.timestamp - start) / timedelta(milliseconds=1)
+  def offset(at: datetime) -> float:
+    return (at - start) / timedelta(milliseconds=1)
 
-  rows: list[dict[str, Any]] = []
-  requests: dict[Any, Span] = {}
+  # (row index of the event that places the entry, entry)
+  entries: list[tuple[int, dict[str, Any]]] = []
+  for call in memory_layers.model_calls(spans):
+    if call.calls:
+      label = "call: " + ", ".join(call.calls)
+    elif call.texts:
+      # Text from a stream that never finished is not an answer.
+      label = "answer" if call.complete else "reply"
+    else:
+      label = "model turn"
+    if call.failed:
+      status = "error"
+    elif call.complete:
+      status = "success"
+    else:
+      status = "incomplete"
+    entries.append(
+        (
+            call.last_index,
+            {
+                "kind": "model",
+                "label": label,
+                "start_ms": offset(call.started_at),
+                "end_ms": offset(call.ended_at),
+                "status": status,
+                "span_id": call.span_id,
+                "detail": call.error
+                if call.failed
+                else (" ".join(call.texts) or None),
+            },
+        )
+    )
   open_tools: dict[Any, dict[str, Any]] = {}
-  for span in spans:
-    if span.event_type == "LLM_REQUEST":
-      requests[span.span_id] = span
-    elif span.event_type in ("LLM_RESPONSE", "LLM_ERROR"):
-      request = requests.pop(span.span_id, span)
-      texts, calls = memory_layers.response_parts(span.content.get("response"))
-      if calls:
-        label = "call: " + ", ".join(calls)
-      elif texts:
-        label = "answer"
-      else:
-        label = "model turn"
-      failed = span.event_type == "LLM_ERROR" or span.is_error
-      rows.append(
-          {
-              "kind": "model",
-              "label": label,
-              "start_ms": offset(request),
-              "end_ms": offset(span),
-              "status": "error" if failed else "success",
-              "span_id": span.span_id,
-              "detail": span.error_message
-              if failed
-              else (" ".join(texts) or None),
-          }
-      )
-    elif span.event_type == "TOOL_STARTING":
+  for index, span in enumerate(spans):
+    if span.event_type == "TOOL_STARTING":
       row = {
           "kind": "tool",
           "label": span.content.get("tool") or "unknown",
-          "start_ms": offset(span),
+          "start_ms": offset(span.timestamp),
           "end_ms": None,
           "status": "pending",
           "span_id": span.span_id,
           "detail": None,
       }
       open_tools[span.span_id or row["label"]] = row
-      rows.append(row)
+      entries.append((index, row))
     elif span.event_type in ("TOOL_COMPLETED", "TOOL_ERROR"):
       key = span.span_id or span.content.get("tool")
       row = open_tools.pop(key, None)
@@ -129,17 +139,18 @@ def _timeline(spans: list[Span]) -> list[dict[str, Any]]:
         row = {
             "kind": "tool",
             "label": span.content.get("tool") or "unknown",
-            "start_ms": offset(span),
+            "start_ms": offset(span.timestamp),
             "span_id": span.span_id,
         }
-        rows.append(row)
+        entries.append((index, row))
       failed = span.event_type == "TOOL_ERROR" or span.is_error
-      row["end_ms"] = offset(span)
+      row["end_ms"] = offset(span.timestamp)
       row["status"] = "error" if failed else "success"
       row["detail"] = (
           span.error_message if failed else _short(span.content.get("result"))
       )
-  return rows
+  entries.sort(key=lambda entry: entry[0])
+  return [row for _, row in entries]
 
 
 def _tool_call(call: memory_layers.ToolCall) -> dict[str, Any]:
@@ -182,6 +193,7 @@ def build_user_export(
                     "content": m.content,
                     "timestamp": _iso(m.timestamp),
                     "span_id": m.span_id,
+                    "complete": m.complete,
                 }
                 for m in memory.short_term.get_conversation(info.session_id)
             ],
@@ -207,6 +219,7 @@ def build_user_export(
             "llm_calls": rt.llm_calls,
             "total_tokens": rt.total_tokens,
             "errors": list(dict.fromkeys(rt.errors)),
+            "outcome_span_id": rt.outcome_span_id,
             "steps": [
                 {
                     "step_number": step.step_number,

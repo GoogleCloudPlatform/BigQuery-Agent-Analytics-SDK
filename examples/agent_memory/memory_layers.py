@@ -35,6 +35,7 @@ Every item keeps the ``session_id`` and ``span_id`` of the row it came from.
 
 from __future__ import annotations
 
+import bisect
 import dataclasses
 from datetime import datetime
 from datetime import timezone
@@ -55,8 +56,23 @@ UNANSWERED = "unanswered"
 USER_STATE_PREFIX = "user:"
 
 # The plugin writes an LLM_RESPONSE as parts joined by " | ": "text: '...'",
-# "call: <tool>", "resp: <tool>" or "other".
-_RESPONSE_PART = re.compile(r" \| (?=text: |call: |resp: |other(?: \| |$))")
+# "call: <tool>", "resp: <tool>" or "other". Text is not escaped, so a text
+# part can itself contain " | call: ..."; see response_parts().
+_PART_SEPARATOR = " | "
+_TEXT_PREFIX = "text: '"
+# A quote can close a text part only where a separator or the end follows.
+_TEXT_END = re.compile(r"'(?= \| |\Z)")
+# The plugin cuts an over-long payload and appends this marker, so the last
+# text part of a truncated response has no closing quote.
+_TRUNCATED = "...[TRUNCATED]"
+_TOOL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]*")
+# Bounds on the search for readings, so crafted text cannot stall it.
+_MAX_READINGS = 256
+_MAX_STEPS = 8192
+
+# google-adk 2.11 writes these attributes only on a terminal (non-partial)
+# LLM_RESPONSE; streaming fragments carry neither.
+_TERMINAL_MARKERS = ("cache_type", "finish_reason")
 
 _STOP_WORDS = frozenset(
     {
@@ -101,13 +117,18 @@ _STOP_WORDS = frozenset(
 
 @dataclasses.dataclass(frozen=True)
 class Message:
-  """One user or assistant turn of a conversation."""
+  """One user or assistant turn of a conversation.
+
+  An assistant message is one model call. ``complete`` is False when only
+  streaming fragments of it were recorded (the stream never finished).
+  """
 
   role: str
   content: str
   timestamp: datetime
   session_id: str
   span_id: Optional[str]
+  complete: bool = True
 
 
 @dataclasses.dataclass(frozen=True)
@@ -182,6 +203,28 @@ class ToolCall:
 
 
 @dataclasses.dataclass(frozen=True)
+class ModelCall:
+  """One model call: its ``LLM_REQUEST`` and every response row of its span.
+
+  A streamed call writes several ``LLM_RESPONSE`` rows on one span. The
+  call is ``complete`` when a terminal response row was recorded, or (for
+  producers that write no terminal marker) when a non-error row follows its
+  last response row. Only a complete call's text counts as an answer.
+  """
+
+  span_id: Optional[str]
+  started_at: datetime
+  ended_at: datetime
+  texts: tuple[str, ...]
+  calls: tuple[str, ...]
+  complete: bool
+  failed: bool
+  error: Optional[str]
+  total_tokens: int
+  last_index: int  # position of its last row in the invocation's rows
+
+
+@dataclasses.dataclass(frozen=True)
 class ReasoningStep:
   """One model turn and the tool calls it requested."""
 
@@ -196,11 +239,14 @@ class ReasoningStep:
 class ReasoningTrace:
   """What the agent did for one task (one ADK invocation).
 
-  The outcome is the text of the invocation's last model response. The
-  status is derived from the logged rows, not declared by the application:
-  ``answered`` means a final text answer and no error rows,
-  ``answered_with_errors`` a final answer after at least one error row, and
-  ``unanswered`` no final text answer (still running, or it failed).
+  The outcome is the text of the invocation's last model call, and only
+  when that call completed (a terminal response row was recorded) with text
+  and no tool calls. The status is derived from the logged rows, not
+  declared by the application: ``answered`` means such a final answer and
+  no error rows, ``answered_with_errors`` a final answer after at least one
+  error row, and ``unanswered`` no recorded final answer (still running, an
+  interrupted stream, or a failure). ``outcome_span_id`` is the span of the
+  model call that produced the answer.
   """
 
   trace_id: str
@@ -216,6 +262,7 @@ class ReasoningTrace:
   llm_calls: int
   total_tokens: int
   errors: tuple[str, ...]
+  outcome_span_id: Optional[str] = None
 
   @property
   def success(self) -> bool:
@@ -270,28 +317,135 @@ def _user_text(span: Span) -> Optional[str]:
   return text if isinstance(text, str) and text else None
 
 
-def _unquote(value: str) -> str:
-  if len(value) >= 2 and value[0] in "'\"" and value[-1] == value[0]:
-    return value[1:-1]
-  if value[:1] in ("'", '"'):
-    return value[1:]
-  return value
+def _parts_at(
+    response: str,
+    pos: int,
+    text_ends: list[int],
+    truncated: bool,
+    longest_first: bool,
+):
+  """Yields ``(end, (kind, value))`` for each part that can start at pos.
+
+  ``text_ends`` are the quotes that can close a text part. Quotes inside
+  the text are not escaped, so each one after ``pos`` is a candidate end.
+  """
+  if response.startswith(_TEXT_PREFIX, pos):
+    start = pos + len(_TEXT_PREFIX)
+    closes = range(bisect.bisect_left(text_ends, start), len(text_ends))
+    if longest_first:
+      if truncated:
+        yield len(response), ("text", response[start:])
+      closes = reversed(closes)
+    for i in closes:
+      yield text_ends[i] + 1, ("text", response[start : text_ends[i]])
+    if truncated and not longest_first:
+      yield len(response), ("text", response[start:])
+  for prefix, kind in (("call: ", "call"), ("resp: ", "resp")):
+    if response.startswith(prefix, pos):
+      end = response.find(_PART_SEPARATOR, pos)
+      end = len(response) if end == -1 else end
+      name = response[pos + len(prefix) : end]
+      if _TOOL_NAME.fullmatch(name):
+        yield end, (kind, name)
+  if response.startswith("other", pos):
+    end = pos + len("other")
+    if end == len(response) or response.startswith(_PART_SEPARATOR, end):
+      yield end, ("other", "")
 
 
-def response_parts(response: Any) -> tuple[list[str], list[str]]:
-  """Splits an ``LLM_RESPONSE`` ``response`` into text parts and tool calls."""
-  if not isinstance(response, str) or not response:
+def _readings(
+    response: str, longest_first: bool = True
+) -> list[list[tuple[str, str]]]:
+  """Ways to read ``response`` as plugin parts joined by `` | ``.
+
+  A depth-first search. Trying longer text parts first finds the readings
+  that keep text whole before the bounds can cut the search short; trying
+  shorter ones first finds the most finely split readings. A position that
+  cannot reach the end is not searched twice.
+  """
+  text_ends = [match.start() for match in _TEXT_END.finditer(response)]
+  truncated = response.endswith(_TRUNCATED)
+
+  def parts_at(pos: int):
+    return _parts_at(response, pos, text_ends, truncated, longest_first)
+
+  readings: list[list[tuple[str, str]]] = []
+  dead: set[int] = set()
+  # Frames: (start, parts before it, its candidate parts, readings on entry).
+  stack = [(0, [], parts_at(0), 0)]
+  steps = 0
+  while stack and len(readings) < _MAX_READINGS and steps < _MAX_STEPS:
+    pos, parts, candidates, found = stack[-1]
+    candidate = next(candidates, None)
+    if candidate is None:
+      stack.pop()
+      if len(readings) == found:
+        dead.add(pos)
+      continue
+    steps += 1
+    end, part = candidate
+    if end == len(response):
+      readings.append(parts + [part])
+    elif end + len(_PART_SEPARATOR) not in dead:
+      start = end + len(_PART_SEPARATOR)
+      stack.append((start, parts + [part], parts_at(start), len(readings)))
+  return readings
+
+
+def _evidence_score(
+    reading: list[tuple[str, str]], executed_tools: list[str]
+) -> int:
+  """Calls confirmed by recorded tool calls, minus calls with no record."""
+  available = list(executed_tools)
+  score = 0
+  for kind, value in reading:
+    if kind != "call":
+      continue
+    if value in available:
+      available.remove(value)
+      score += 1
+    else:
+      score -= 1
+  return score
+
+
+def response_parts(
+    response: Any, executed_tools: Optional[list[str]] = None
+) -> tuple[list[str], list[str]]:
+  """Reads an ``LLM_RESPONSE`` ``response`` into text parts and tool calls.
+
+  The plugin joins ``text: '...'``, ``call: <tool>``, ``resp: <tool>`` and
+  ``other`` parts with `` | `` and does not escape the text, so text that
+  itself contains `` | call: x`` can be read more than one way. The
+  structurally valid readings are compared. When several fit, the tools the
+  model call actually ran (``executed_tools``, from the ``TOOL_STARTING``
+  rows that follow it) pick the reading; without that evidence the reading
+  with the fewest parts wins, keeping the text whole and inventing no call.
+  A truncated response keeps the plugin's marker on its last text part. A
+  response that is not in the part format at all is returned as text.
+  """
+  if not isinstance(response, str) or not response or response == "None":
+    # "None" is the plugin's placeholder for a response without parts.
     return [], []
-  texts, calls = [], []
-  for part in _RESPONSE_PART.split(response):
-    if part.startswith("call: "):
-      calls.append(part[len("call: ") :].strip())
-    elif part.startswith("text: "):
-      texts.append(_unquote(part[len("text: ") :]))
-    elif not (part.startswith("resp: ") or part in ("other", "None")):
-      # "None" is the plugin's placeholder for a response without parts.
-      texts.append(part)
-  return [text for text in texts if text], calls
+  readings = _readings(response)
+  if not readings:
+    text = response
+    if text.startswith(_TEXT_PREFIX):
+      text = text[len(_TEXT_PREFIX) :]
+      text = text[:-1] if text.endswith("'") else text
+    return ([text] if text else []), []
+  if len(readings) > 1 and executed_tools is not None:
+    # Evidence can favour a finely split reading that the search for
+    # whole-text readings did not reach in a long response.
+    readings += _readings(response, longest_first=False)
+    best = max(
+        readings, key=lambda r: (_evidence_score(r, executed_tools), -len(r))
+    )
+  else:
+    best = min(readings, key=len)
+  texts = [value for kind, value in best if kind == "text" and value]
+  calls = [value for kind, value in best if kind == "call"]
+  return texts, calls
 
 
 def _usage_total(span: Span) -> int:
@@ -299,6 +453,97 @@ def _usage_total(span: Span) -> int:
   if isinstance(usage, dict) and isinstance(usage.get("total"), int):
     return usage["total"]
   return 0
+
+
+def _is_terminal_response(span: Span) -> bool:
+  return span.event_type == "LLM_RESPONSE" and any(
+      key in span.attributes for key in _TERMINAL_MARKERS
+  )
+
+
+def model_calls(spans: list[Span]) -> list[ModelCall]:
+  """The model calls of one invocation, in the order they finished.
+
+  ``spans`` are one invocation's rows in time order. Response rows are
+  grouped by span id, so the fragments of a streamed call form one call.
+  """
+  groups: dict[str, list[tuple[int, Span]]] = {}
+  requests: dict[str, Span] = {}
+  for index, span in enumerate(spans):
+    if span.event_type == "LLM_REQUEST" and span.span_id:
+      requests.setdefault(span.span_id, span)
+    elif span.event_type in ("LLM_RESPONSE", "LLM_ERROR"):
+      groups.setdefault(span.span_id or f"row-{index}", []).append(
+          (index, span)
+      )
+  firsts = sorted(rows[0][0] for rows in groups.values())
+  calls = []
+  for rows in sorted(groups.values(), key=lambda rows: rows[-1][0]):
+    last = rows[-1][0]
+    responses = [span for _, span in rows if span.event_type == "LLM_RESPONSE"]
+    failed = any(
+        span.event_type == "LLM_ERROR" or span.is_error for _, span in rows
+    )
+    terminal = [span for span in responses if _is_terminal_response(span)]
+    following = spans[last + 1] if last + 1 < len(spans) else None
+    if failed:
+      complete = False
+    elif terminal:
+      complete = True
+    else:
+      complete = following is not None and not following.is_error
+    # Tools it asked for: TOOL_STARTING rows before the next model call.
+    upto = next((i for i in firsts if i > last), len(spans))
+    executed = [
+        span.content.get("tool") or "unknown"
+        for span in spans[last + 1 : upto]
+        if span.event_type == "TOOL_STARTING"
+    ]
+    texts: list[str] = []
+    called: list[str] = []
+    if complete:
+      sources = terminal or responses[-1:]
+      for span in sources:
+        found, asked = response_parts(
+            span.content.get("response"),
+            executed if len(sources) == 1 else None,
+        )
+        texts += [text for text in found if text not in texts]
+        called += asked
+    else:
+      # Fragments are deltas: join them, but do not call them an answer.
+      fragments = []
+      for span in responses:
+        found, asked = response_parts(span.content.get("response"))
+        fragments += found
+        called += asked
+      texts = ["".join(fragments)] if fragments else []
+    first = rows[0][1]
+    request = requests.get(first.span_id) if first.span_id else None
+    started = (
+        request.timestamp
+        if request is not None and request.timestamp <= first.timestamp
+        else first.timestamp
+    )
+    calls.append(
+        ModelCall(
+            span_id=rows[-1][1].span_id,
+            started_at=started,
+            ended_at=rows[-1][1].timestamp,
+            texts=tuple(texts),
+            calls=tuple(called),
+            complete=complete,
+            failed=failed,
+            error=next(
+                (span.error_message for _, span in rows if span.error_message),
+                None,
+            ),
+            # Streamed usage is cumulative, so take the largest, not the sum.
+            total_tokens=max((_usage_total(s) for s in responses), default=0),
+            last_index=last,
+        )
+    )
+  return calls
 
 
 def _compact(value: Any, limit: int = 120) -> str:
@@ -312,27 +557,29 @@ def _compact(value: Any, limit: int = 120) -> str:
 
 def _conversation(trace: Trace) -> list[Message]:
   messages = []
-  for span in _ordered_spans(trace):
-    if span.event_type == "USER_MESSAGE_RECEIVED":
-      text = _user_text(span)
-      if text:
-        messages.append(
-            Message(
-                "user", text, span.timestamp, trace.session_id, span.span_id
-            )
-        )
-    elif span.event_type == "LLM_RESPONSE":
-      texts, _ = response_parts(span.content.get("response"))
-      if texts:
+  for spans in spans_by_invocation(trace).values():
+    for span in spans:
+      if span.event_type == "USER_MESSAGE_RECEIVED":
+        text = _user_text(span)
+        if text:
+          messages.append(
+              Message(
+                  "user", text, span.timestamp, trace.session_id, span.span_id
+              )
+          )
+    for call in model_calls(spans):
+      if call.texts:
         messages.append(
             Message(
                 "assistant",
-                " ".join(texts),
-                span.timestamp,
+                " ".join(call.texts),
+                call.ended_at,
                 trace.session_id,
-                span.span_id,
+                call.span_id,
+                complete=call.complete,
             )
         )
+  messages.sort(key=lambda message: message.timestamp)
   return messages
 
 
@@ -402,27 +649,31 @@ class _StepDraft:
 def _reasoning_trace(
     trace: Trace, trace_id: str, spans: list[Span]
 ) -> ReasoningTrace:
-  responses = [s for s in spans if s.event_type == "LLM_RESPONSE"]
-  final = responses[-1] if responses else None
+  model = model_calls(spans)
+  by_last_row = {call.last_index: call for call in model}
+  final = model[-1] if model else None
   outcome = None
-  if final is not None:
-    texts, calls = response_parts(final.content.get("response"))
-    if texts and not calls:
-      outcome = " ".join(texts)
+  if final is not None and final.complete and final.texts and not final.calls:
+    outcome = " ".join(final.texts)
 
   task = None
   drafts: list[_StepDraft] = []
   # Tool span id -> (step index, call index, TOOL_STARTING span).
   open_calls: dict[Any, tuple[int, int, Span]] = {}
-  for span in spans:
+  for index, span in enumerate(spans):
     if span.event_type == "USER_MESSAGE_RECEIVED" and task is None:
       task = _user_text(span)
-    elif span.event_type == "LLM_RESPONSE":
-      if span is final and outcome is not None:
+    elif index in by_last_row:
+      call = by_last_row[index]
+      if call is final and outcome is not None:
         continue
-      texts, calls = response_parts(span.content.get("response"))
-      action = "call: " + ", ".join(calls) if calls else "respond"
-      drafts.append(_StepDraft(" ".join(texts) or None, action))
+      if call.failed:
+        action = "model call failed"
+      elif call.calls:
+        action = "call: " + ", ".join(call.calls)
+      else:
+        action = "respond" if call.complete else "respond (incomplete)"
+      drafts.append(_StepDraft(" ".join(call.texts) or None, action))
     elif span.event_type == "TOOL_STARTING":
       if not drafts:
         tool = span.content.get("tool") or "unknown"
@@ -473,9 +724,10 @@ def _reasoning_trace(
       completed_at=completed[-1].timestamp if completed else None,
       latency_ms=(spans[-1].timestamp - spans[0].timestamp).total_seconds()
       * 1000,
-      llm_calls=len(responses),
-      total_tokens=sum(_usage_total(s) for s in responses),
+      llm_calls=len(model),
+      total_tokens=sum(call.total_tokens for call in model),
       errors=errors,
+      outcome_span_id=final.span_id if outcome is not None else None,
   )
 
 
@@ -778,8 +1030,9 @@ class UserMemory:
   ) -> str:
     """A prompt-ready block combining the three layers.
 
-    Each line ends with ``[session/span]`` (or ``[session/trace]``) so the
-    model's context can be traced back to the rows it came from.
+    Every line ends with ``[session/span]`` source references (several for
+    an entity, the newest ``max_items`` of them) so each fact in the model's
+    context can be traced back to the rows it came from.
     """
     lines = [f"# Memory for user {self.user_id}", ""]
 
@@ -789,7 +1042,8 @@ class UserMemory:
     except KeyError:
       conversation = []
     lines += [
-        f"- {m.role}: {m.content} [{m.session_id}/{m.span_id}]"
+        f"- {m.role}{'' if m.complete else ' (incomplete)'}: {m.content}"
+        f" [{m.session_id}/{m.span_id}]"
         for m in conversation[-max_items:]
     ] or ["- (none)"]
 
@@ -812,11 +1066,19 @@ class UserMemory:
     lines += entries or ["- (none)"]
 
     lines += ["", "## Long-term: entities the agent acted on"]
-    lines += [
-        f"- {e.name} ({e.entity_type}): {len(e.mentions)} tool"
-        f" call{'s' if len(e.mentions) != 1 else ''} in {', '.join(e.sessions)}"
-        for e in self.long_term.get_entities()[:max_items]
-    ] or ["- (none)"]
+    entries = []
+    for entity in self.long_term.get_entities()[:max_items]:
+      shown = entity.mentions[-max_items:]
+      older = len(entity.mentions) - len(shown)
+      sources = [f"{m.session_id}/{m.span_id}" for m in shown]
+      if older:
+        sources.insert(0, f"+{older} earlier")
+      count = len(entity.mentions)
+      entries.append(
+          f"- {entity.name} ({entity.entity_type}): {count} tool"
+          f" call{'s' if count != 1 else ''} [{', '.join(sources)}]"
+      )
+    lines += entries or ["- (none)"]
 
     lines += ["", "## Reasoning: similar past tasks that succeeded"]
     similar = self.reasoning.get_similar_traces(
@@ -827,8 +1089,9 @@ class UserMemory:
       rt = match.trace
       tools = ", ".join(dict.fromkeys(c.tool_name for c in rt.tool_calls))
       entries.append(
-          f'- {match.similarity:.2f} "{rt.task}" -> {tools or "no tools"} ->'
-          f' "{rt.outcome}" [{rt.session_id}/{rt.trace_id}]'
+          f'- {match.similarity:.2f} trace {rt.trace_id}: "{rt.task}" ->'
+          f' {tools or "no tools"} -> "{rt.outcome}"'
+          f" [{rt.session_id}/{rt.outcome_span_id}]"
       )
     lines += entries or ["- (none)"]
 

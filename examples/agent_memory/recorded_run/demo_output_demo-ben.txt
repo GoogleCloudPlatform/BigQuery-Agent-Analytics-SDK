@@ -1,8 +1,8 @@
 Agent memory from BigQuery Agent Analytics traces
 source : BigQuery test-project-0728-467323.bqaa_agent_memory_demo.agent_events
-user   : demo-ben   current session: mem-20261007t0603-s4   now: 2026-10-07T06:24:54Z
+user   : demo-ben   current session: mem-20261007t0603-s4   now: 2026-10-07T07:10:10Z
 read   : 1 session, 1 trace from one Client.list_traces() call
-         TraceFilter(user_id='demo-ben', start_time=2026-09-07T06:24:54Z)
+         TraceFilter(user_id='demo-ben', start_time=2026-09-07T07:10:10Z)
 
 == 1. Short-term memory ==
 Sessions (ShortTermMemory.list_sessions):
@@ -40,7 +40,7 @@ Similar past tasks for "I'm vegan, please remember that. Find me a dinner place 
 - diet = vegan (since 2026-10-07T06:04:57Z) [mem-20261007t0603-s4/e21a1d366aeafd6f]
 
 ## Long-term: entities the agent acted on
-- Osaka (LOCATION): 1 tool call in mem-20261007t0603-s4
+- Osaka (LOCATION): 1 tool call [mem-20261007t0603-s4/848b7453c571418c]
 
 ## Reasoning: similar past tasks that succeeded
 - (none)
