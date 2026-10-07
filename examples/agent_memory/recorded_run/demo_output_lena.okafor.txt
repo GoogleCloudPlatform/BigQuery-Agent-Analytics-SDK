@@ -1,0 +1,139 @@
+Agent memory from BigQuery Agent Analytics traces
+source : BigQuery test-project-0728-467323.bqaa_agent_memory_demo.analyst_events
+user   : lena.okafor   current session: an-20261007t0834-d4-lena-1   now: 2026-10-07T10:03:41Z
+read   : 7 sessions, 7 traces from one Client.list_traces() call
+         TraceFilter(user_id='lena.okafor', start_time=2026-09-07T10:03:41Z)
+
+== 1. Short-term memory ==
+Sessions (ShortTermMemory.list_sessions):
+  an-20261007t0834-d5-lena-1  2026-10-07T09:24:19Z  day 2026-10-07  2 messages  How many items did my DCs ship yesterday, and what was the average le...
+  an-20261007t0834-d4-lena-2  2026-10-07T09:09:29Z  day 2026-10-06  2 messages  Show lead times in hours with one decimal from now on. Which of my DC...
+  an-20261007t0834-d4-lena-1  2026-10-07T09:03:21Z  day 2026-10-06  2 messages  Run the same lead-time check for this month so far.
+  an-20261007t0834-d3-lena-1  2026-10-07T08:56:27Z  day 2026-10-05  2 messages  How many items did my DCs ship over the weekend?
+  an-20261007t0834-d2-lena-1  2026-10-07T08:45:05Z  day 2026-10-02  2 messages  How many items did my DCs ship yesterday?
+  an-20261007t0834-d1-lena-2  2026-10-07T08:41:18Z  day 2026-10-01  2 messages  Which product categories shipped slowest from my DCs last month?
+  an-20261007t0834-d1-lena-1  2026-10-07T08:37:23Z  day 2026-10-01  2 messages  I'm Lena Okafor in operations. I manage the Memphis and Chicago distr...
+Conversation an-20261007t0834-d4-lena-1 (ShortTermMemory.get_conversation):
+  [user] Run the same lead-time check for this month so far.
+  [assistant] For items shipped this month so far (October 1–6, 2026) from your distribution centers, here is the lead-time summary:
+
+| Distribution Center | Shipped Items | Avg Time from Order (`orders.created_at`) | Avg Time from Item Record (`order_items.created_at`) |
+| :--- | :---: | :---: | :---: |
+| **Memphis TN** | 366 | **32.22 hrs** (1.34 days) | **12.17 hrs** (0.51 days) |
+| **Chicago IL** | 406 | **30.08 hrs** (1.25 days) | **7.34 hrs** (0.31 days) |
+
+*Filters and definitions:* Filtered to Memphis and Chicago DCs (`dc.id IN (1, 2)`) with `oi.shipped_at >= '2026-10-01'` and `oi.shipped_at < '2026-10-07'`; lead times calculated as elapsed time from order creation and order item creation to shipment.
+
+== 2. Long-term memory ==
+Preference history (ADK user: state from STATE_DELTA rows):
+  my_distribution_centers = Memphis, Chicago 2026-10-07T08:37:34Z -> current               an-20261007t0834-d1-lena-1
+  lead_time_format = hours with one decimal 2026-10-07T09:09:40Z -> current               an-20261007t0834-d4-lena-2
+Current preferences: lead_time_format = hours with one decimal, my_distribution_centers = Memphis, Chicago
+Facts extracted from the conversations (memory_consolidation):
+  Lena Okafor works in operations.  [an-20261007t0834-d1-lena-1/9aadfd80c9a33332]
+  Lena Okafor manages the Memphis TN distribution center.  [an-20261007t0834-d1-lena-1/9aadfd80c9a33332]
+  Lena Okafor manages the Chicago IL distribution center.  [an-20261007t0834-d1-lena-1/9aadfd80c9a33332]
+Entities extracted from messages:
+  Lena Okafor    PERSON    5 mentions    an-20261007t0834-d1-lena-1, an-20261007t0834-d1-lena-2, an-20261007t0834-d2-lena-1, an-20261007t0834-d3-lena-1, an-20261007t0834-d5-lena-1
+  Chicago IL     DISTRIBUTION_CENTER 1 mention     an-20261007t0834-d1-lena-1
+  Memphis TN     DISTRIBUTION_CENTER 1 mention     an-20261007t0834-d1-lena-1
+  operations     TEAM      1 mention     an-20261007t0834-d1-lena-1
+
+== 3. Reasoning memory ==
+Traces (ReasoningMemory.list_traces):
+  e-5d2142a4-afeb-4a7a-b779-cac553165c5d  an-20261007t0834-d5-lena-1  answered              3 tool calls  How many items did my DCs ship yesterday, and...
+  e-d53f6570-baf4-4491-bbfa-537567bf041c  an-20261007t0834-d4-lena-2  answered              8 tool calls  Show lead times in hours with one decimal fro...
+  e-3d597ff6-43fa-4068-80fa-6d3325bbbe59  an-20261007t0834-d4-lena-1  answered              5 tool calls  Run the same lead-time check for this month s...
+  e-3b6d95bb-4030-499a-a1b7-f2b4061e043a  an-20261007t0834-d3-lena-1  answered              3 tool calls  How many items did my DCs ship over the weekend?
+  e-3fe7cafd-c131-409d-9366-438b53fc0dde  an-20261007t0834-d2-lena-1  answered              4 tool calls  How many items did my DCs ship yesterday?
+  e-c7d29ead-4e6c-4ee2-94fa-c058d801d961  an-20261007t0834-d1-lena-2  answered              15 tool calls  Which product categories shipped slowest from...
+  e-0143f8bd-2dc5-405a-927e-658b8b992762  an-20261007t0834-d1-lena-1  answered              14 tool calls  I'm Lena Okafor in operations. I manage the M...
+Trace e-5d2142a4-afeb-4a7a-b779-cac553165c5d (session an-20261007t0834-d5-lena-1): answered
+  task   : How many items did my DCs ship yesterday, and what was the average lead time?
+  step 1 : call: recall_memory
+           recall_memory  success  4492 ms
+  step 2 : call: run_sql
+           run_sql  success  1290 ms
+  step 3 : call: run_sql
+           run_sql  success  1063 ms
+  outcome: Your distribution centers shipped **240 items** yesterday (October 6, 2026) with an overall average fulfillment lead time of **29.3 hours** from order creation:
+
+| Distribution Center | Items Shipped | Avg Lead Time (Order to Ship) | Avg Lead Time (Item Creation to Ship) |
+| :--- | :---: | :---: | :---: |
+| **Memphis TN** | 122 | 31.1 hrs | 12.9 hrs |
+| **Chicago IL** | 118 | 27.4 hrs | 1.7 hrs |
+| **Total / Overall** | **240** | **29.3 hrs** | **7.4 hrs** |
+
+*Definitions & filters: Count of `order_items` linked to Memphis TN and Chicago IL via `inventory_items` with `shipped_at` between `2026-10-06 00:00:00` and `2026-10-07 00:00:00 UTC`; lead times measured from `orders.created_at` (and `order_items.created_at`) to `oi.shipped_at`.*
+  metrics: latency_ms=45104 llm_calls=4 tool_calls=3 tool_errors=0 total_tokens=21405
+Tool stats (ReasoningMemory.get_tool_stats):
+  tool              calls  ok  failed  success   avg_ms
+  run_sql              34  34       0     100%   1277.6
+  describe_table        9   9       0     100%    291.3
+  recall_memory         7   7       0     100%   4096.1
+  save_preference       2   2       0     100%      1.0
+Similar past tasks for 'Run the same lead-time check for this month so far.' (by embedding, successful only):
+  0.62  e-d53f6570-baf4-4491-bbfa-537567bf041c  Show lead times in hours with one decimal from now on. Which of my DC...
+  0.61  e-5d2142a4-afeb-4a7a-b779-cac553165c5d  How many items did my DCs ship yesterday, and what was the average le...
+  0.59  e-c7d29ead-4e6c-4ee2-94fa-c058d801d961  Which product categories shipped slowest from my DCs last month?
+
+== 4. get_context() for the next model call ==
+# Memory for user lena.okafor
+
+## Short-term: current conversation (session an-20261007t0834-d4-lena-1)
+- user: Run the same lead-time check for this month so far. [an-20261007t0834-d4-lena-1/1041ae258bc156f0]
+- assistant: For items shipped this month so far (October 1–6, 2026) from your distribution centers, here is the lead-time summary:
+
+| Distribution Center | Shipped Items | Avg Time from Order (`orders.created_at`) | Avg Time from Item Record (`order_items.created_at`) |
+| :--- | :---: | :---: | :---: |
+| **Memphis TN** | 366 | **32.22 hrs** (1.34 days) | **12.17 hrs** (0.51 days) |
+| **Chicago IL** | 406 | **30.08 hrs** (1.25 days) | **7.34 hrs** (0.31 days) |
+
+*Filters and definitions:* Filtered to Memphis and Chicago DCs (`dc.id IN (1, 2)`) with `oi.shipped_at >= '2026-10-01'` and `oi.shipped_at < '2026-10-07'`; lead times calculated as elapsed time from order creation and order item creation to shipment. [an-20261007t0834-d4-lena-1/3254549872384020]
+
+## Long-term: user preferences (ADK user: state)
+- lead_time_format = hours with one decimal (since 2026-10-07T09:09:40Z) [an-20261007t0834-d4-lena-2/227315c6fb05d302]
+- my_distribution_centers = Memphis, Chicago (since 2026-10-07T08:37:34Z) [an-20261007t0834-d1-lena-1/9aadfd80c9a33332]
+
+## Long-term: facts from earlier conversations
+- Lena Okafor works in operations. [an-20261007t0834-d1-lena-1/9aadfd80c9a33332]
+- Lena Okafor manages the Memphis TN distribution center. [an-20261007t0834-d1-lena-1/9aadfd80c9a33332]
+- Lena Okafor manages the Chicago IL distribution center. [an-20261007t0834-d1-lena-1/9aadfd80c9a33332]
+
+## Long-term: entities from conversations and tool calls
+- Lena Okafor (PERSON): 5 mentions [an-20261007t0834-d1-lena-1/9aadfd80c9a33332, an-20261007t0834-d1-lena-2/e363d91d81d547b4, an-20261007t0834-d2-lena-1/142d7c545c85d47f, an-20261007t0834-d3-lena-1/812a7bcaa57e5bac, an-20261007t0834-d5-lena-1/a572e98e69a5365c]
+- Chicago IL (DISTRIBUTION_CENTER): 1 mention [an-20261007t0834-d1-lena-1/9aadfd80c9a33332]
+- Memphis TN (DISTRIBUTION_CENTER): 1 mention [an-20261007t0834-d1-lena-1/9aadfd80c9a33332]
+- operations (TEAM): 1 mention [an-20261007t0834-d1-lena-1/9aadfd80c9a33332]
+
+## Reasoning: similar past tasks that succeeded
+- 0.62 trace e-d53f6570-baf4-4491-bbfa-537567bf041c: "Show lead times in hours with one decimal from now on. Which of my DCs had the higher return rate last month?" -> recall_memory, save_preference, describe_table, run_sql -> "I have updated your preferences to show all lead times in hours rounded to one decimal place.
+
+For orders placed last month (September 2026), **Memphis TN** had the higher return rate.
+
+| Distribution Center | Items Ordered | Items Shipped | Items Delivered | Items Returned | Return Rate (% of Delivered) | Return Rate (% of Shipped) | Avg Fulfillment Lead Time | Avg Delivery Lead Time |
+| :--- ..." [an-20261007t0834-d4-lena-2/76f105e561db463f]
+  reuse: run_sql({"purpose": "Check lead times for Memphis and Chicago in Sept 2026", "sql": "SELECT \n  dc.name,\n  ROUND(AVG(TIMESTAMP_DIFF(oi.shipped_at, oi.created_at, MINUTE)) / 60.0, 1) as avg_fulfillment_hours,\n  ROUND(AVG(TIMESTAMP_DIFF(oi.delivered_at, oi.created_at, MINUTE)) / 60.0, 1) as avg_order_to_delivery_hours\nFROM `bigquery-public-data.thelook_ecommerce.order_items` oi\nJOIN `bigquery-public-data.thelook_ecommerce.inventory_items` ii ON oi.inventory_item_id = ii.id\nJOIN `bigquery-public-data.thelook_ecommerce.distribution_centers` dc ON ii.product_distribution_center_id = dc.id\nWHERE dc.id IN (1, 2)\n  AND oi.created_at >= '2026-09-01' AND oi.created_at < '2026-10-01'\nGROUP BY dc.name"}) [an-20261007t0834-d4-lena-2/84a4c93407594eda]
+- 0.61 trace e-5d2142a4-afeb-4a7a-b779-cac553165c5d: "How many items did my DCs ship yesterday, and what was the average lead time?" -> recall_memory, run_sql -> "Your distribution centers shipped **240 items** yesterday (October 6, 2026) with an overall average fulfillment lead time of **29.3 hours** from order creation:
+
+| Distribution Center | Items Shipped | Avg Lead Time (Order to Ship) | Avg Lead Time (Item Creation to Ship) |
+| :--- | :---: | :---: | :---: |
+| **Memphis TN** | 122 | 31.1 hrs | 12.9 hrs |
+| **Chicago IL** | 118 | 27.4 hrs | 1.7 hrs..." [an-20261007t0834-d5-lena-1/9073bd8fc33644d5]
+  reuse: run_sql({"purpose": "Verify distribution centers table", "sql": "SELECT id, name FROM `bigquery-public-data.thelook_ecommerce.distribution_centers` WHERE name LIKE '%Memphis%' OR name LIKE '%Chicago%'"}) [an-20261007t0834-d5-lena-1/c5ba1a32bed34b7f]
+- 0.59 trace e-c7d29ead-4e6c-4ee2-94fa-c058d801d961: "Which product categories shipped slowest from my DCs last month?" -> recall_memory, describe_table, run_sql -> "Here are the slowest-shipping product categories from your distribution centers (**Memphis TN** and **Chicago IL**) last month (September 2026), ranked by average fulfillment time (order creation to ship):
+
+| Product Category | Items Shipped | Avg Time to Ship (Hours) | Avg Time to Ship (Days) | Avg Transit Time (Days) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Clothing Sets** | 3 | 36.2 | ..." [an-20261007t0834-d1-lena-2/a6d7d2e5caec4858]
+  reuse: run_sql({"purpose": "Get top 10 slowest shipping categories from Memphis and Chicago in September 2026", "sql": "SELECT \n  p.category,\n  COUNT(*) as items_shipped,\n  ROUND(AVG(TIMESTAMP_DIFF(oi.shipped_at, oi.created_at, MINUTE)) / 60.0, 1) as avg_hours_to_ship,\n  ROUND(AVG(TIMESTAMP_DIFF(oi.shipped_at, oi.created_at, MINUTE)) / 60.0 / 24.0, 2) as avg_days_to_ship,\n  ROUND(AVG(TIMESTAMP_DIFF(oi.delivered_at, oi.shipped_at, MINUTE)) / 60.0 / 24.0, 2) as avg_transit_days\nFROM `bigquery-public-data.thelook_ecommerce.order_items` oi\nJOIN `bigquery-public-data.thelook_ecommerce.products` p\n  ON oi.product_id = p.id\nJOIN `bigquery-public-data.thelook_ecommerce.inventory_items` ii\n  ON oi.inventory_item_id = ii.id\nWHERE ii.product_distribution_center_id IN (1, 2)\n  AND oi.shipped_at >= '2026-09-01' \n  AND oi.shipped_at < '2026-10-01'\nGROUP BY 1\nORDER BY avg_hours_to_ship DESC\nLIMIT 10"}) [an-20261007t0834-d1-lena-2/2bfab875931b42e7]
+- 0.59 trace e-0143f8bd-2dc5-405a-927e-658b8b992762: "I'm Lena Okafor in operations. I manage the Memphis and Chicago distribution centers. What was the average time from order to shipment last month for items from my DCs?" -> recall_memory, save_preference, describe_table, run_sql -> "For items shipped last month (September 2026) from your distribution centers, the average time from order to shipment was:
+
+| Distribution Center | Shipped Items | Avg Time from Order (`orders.created_at`) | Avg Time from Item Record (`order_items.created_at`) |
+| :--- | :---: | :---: | :---: |
+| **Memphis TN** | 769 | **36.90 hrs** (1.54 days) | **14.55 hrs** (0.61 days) |
+| **Chicago IL** | 7..." [an-20261007t0834-d1-lena-1/158a212bb506485c]
+  reuse: run_sql({"purpose": "Check order_items.created_at in September 2026", "sql": "SELECT\n  dc.name,\n  COUNT(*) AS item_count,\n  ROUND(AVG(TIMESTAMP_DIFF(oi.shipped_at, oi.created_at, SECOND) / 3600.0), 2) AS avg_hours_oi_oi,\n  ROUND(AVG(TIMESTAMP_DIFF(oi.shipped_at, oi.created_at, SECOND) / 86400.0), 2) AS avg_days_oi_oi,\n  ROUND(AVG(TIMESTAMP_DIFF(oi.shipped_at, o.created_at, SECOND) / 3600.0), 2) AS avg_hours_oi_o,\n  ROUND(AVG(TIMESTAMP_DIFF(oi.shipped_at, o.created_at, SECOND) / 86400.0), 2) AS avg_days_oi_o\nFROM `bigquery-public-data.thelook_ecommerce.order_items` oi\nJOIN `bigquery-public-data.thelook_ecommerce.orders` o ON oi.order_id = o.order_id\nJOIN `bigquery-public-data.thelook_ecommerce.inventory_items` ii ON oi.inventory_item_id = ii.id\nJOIN `bigquery-public-data.thelook_ecommerce.distribution_centers` dc ON ii.product_distribution_center_id = dc.id\nWHERE dc.id IN (1, 2)\n  AND oi.created_at >= '2026-09-01' AND oi.created_at < '2026-10-01'\n  AND oi.shipped_at IS NOT NULL AND oi.shipped_at <= '2026-10-01'\nGROUP BY dc.name"}) [an-20261007t0834-d1-lena-1/2e42b3b22b664927]
+
+## Reasoning: tools that failed before
+- (none)

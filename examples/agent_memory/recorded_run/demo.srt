@@ -1,0 +1,63 @@
+1
+00:00:01,061 --> 00:00:11,890
+Six analysts at an online clothing store shared one ADK data-analyst agent for a simulated week: 36 sessions, logged to BigQuery by the Agent Analytics plugin.
+
+2
+00:00:11,990 --> 00:00:14,617
+Its memory is built only from those rows.
+
+3
+00:00:15,471 --> 00:00:20,115
+On Monday, Maya asks: how did my categories do last month?
+
+4
+00:00:20,215 --> 00:00:24,531
+Without memory, the agent reports on all 26 categories.
+
+5
+00:00:24,631 --> 00:00:30,178
+With memory, it recalls her categories and her net revenue rule, and answers with one query.
+
+6
+00:00:31,030 --> 00:00:34,735
+On Wednesday, Diego asks how his markets are trending.
+
+7
+00:00:34,835 --> 00:00:41,275
+Without memory, he gets every country by quarter; with memory, Brazil and Spain, week by week.
+
+8
+00:00:41,375 --> 00:00:47,095
+Three other runs without memory read the memory tables through SQL, so the page flags them.
+
+9
+00:00:47,948 --> 00:00:52,432
+Arcs link the selected session to the earlier sessions its recall drew on.
+
+10
+00:00:54,892 --> 00:01:01,061
+Each night, AI.GENERATE extracts entities and facts from the day's messages, inside BigQuery.
+
+11
+00:01:01,161 --> 00:01:04,451
+Each fact keeps the span of the message it came from.
+
+12
+00:01:05,304 --> 00:01:12,600
+Preferences are saved as ADK user state. When Raj changed his exchange rate, the old version stayed in the history.
+
+13
+00:01:13,454 --> 00:01:18,273
+On Tuesday, Lena asked for the same lead-time check, this month so far.
+
+14
+00:01:18,373 --> 00:01:24,168
+Recall returned her Thursday analysis with its SQL, and the agent adapted it to October.
+
+15
+00:01:25,022 --> 00:01:33,095
+This is exactly what the agent read: preferences, facts and similar past analyses with their SQL, each with its source row.
+
+16
+00:01:33,950 --> 00:01:39,678
+Each analyst's memory is read with their own user filter, so nobody sees anyone else's rows.
