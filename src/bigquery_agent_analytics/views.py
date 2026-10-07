@@ -20,6 +20,14 @@ columns.  Every view retains the standard identity headers:
 ``timestamp``, ``event_type``, ``agent``, ``session_id``,
 ``invocation_id``.
 
+Per-event views also expose ``otel_span_id`` and ``otel_trace_id``,
+read from the ``attributes.otel`` object the producer writes when
+OpenTelemetry correlation is enabled (#312).  For an events table whose
+producer projects payload columns out (``payload_column_denylist``,
+#321), pass the same names as ``ViewManager(denied_columns=...)``: views
+that read a denied column are skipped, and denying ``attributes`` also
+drops the OpenTelemetry columns.
+
 ``ViewManager`` also deploys cross-event analytical views — views that
 span several event types — from a second registry,
 ``_CROSS_EVENT_VIEW_DEFS``.  Both registries share one manager, one
@@ -41,7 +49,9 @@ Example usage::
 
 from __future__ import annotations
 
+from collections.abc import Collection
 import logging
+import re
 from typing import Optional
 
 from google.cloud import bigquery
@@ -69,6 +79,26 @@ _STANDARD_HEADERS = """\
   status,
   error_message,
   is_truncated"""
+
+# ------------------------------------------------------------------ #
+# OpenTelemetry correlation columns (#312)                             #
+# ------------------------------------------------------------------ #
+# Projected into every per-event view right after the standard
+# headers.  The producer writes ``attributes.otel`` only when
+# ``BigQueryLoggerConfig(enable_otel_correlation=True)``, so both
+# columns are NULL otherwise.  They read ``attributes`` and are kept
+# out of ``_STANDARD_HEADERS`` so that denying that column drops them.
+
+_OTEL_CORRELATION_COLUMNS = """\
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id"""
+
+# Payload columns the producer can project out of the events table
+# (``BigQueryLoggerConfig.payload_column_denylist``, #321).  The
+# producer rejects any other column name in that list.
+_PROJECTABLE_PAYLOAD_COLUMNS = frozenset(
+    {"content", "content_parts", "attributes", "latency_ms"}
+)
 
 # ------------------------------------------------------------------ #
 # Per-event-type column definitions                                    #
@@ -399,19 +429,70 @@ def _build_view_sql(
     event_type: str,
     view_name: str,
     extra_columns: str,
+    denied_columns: Collection[str] = (),
 ) -> str:
-  """Builds the CREATE OR REPLACE VIEW SQL for one event type."""
+  """Builds the CREATE OR REPLACE VIEW SQL for one event type.
+
+  The select list is the standard headers, then the OpenTelemetry
+  correlation columns (omitted when ``attributes`` is in
+  ``denied_columns``), then the event-specific ``extra_columns``.
+  """
+  columns = [_STANDARD_HEADERS]
+  if "attributes" not in denied_columns:
+    columns.append(_OTEL_CORRELATION_COLUMNS)
   if extra_columns:
-    select_clause = f"{_STANDARD_HEADERS},\n{extra_columns}"
-  else:
-    select_clause = _STANDARD_HEADERS
+    columns.append(extra_columns)
   return _VIEW_SQL_TEMPLATE.format(
       project=project,
       dataset=dataset,
       table=table,
       view_name=view_name,
       event_type=event_type,
-      select_clause=select_clause,
+      select_clause=",\n".join(columns),
+  )
+
+
+def _validate_denied_columns(
+    denied_columns: Optional[Collection[str]],
+) -> frozenset[str]:
+  """Returns ``denied_columns`` as a frozenset after validating it.
+
+  Mirrors the producer's ``payload_column_denylist`` check: only the
+  projectable payload columns may be named.
+
+  Raises:
+      TypeError: If ``denied_columns`` is a single string.
+      ValueError: If it names any other column.
+  """
+  if denied_columns is None:
+    return frozenset()
+  if isinstance(denied_columns, str):
+    raise TypeError(
+        "denied_columns must be a collection of column names, not a"
+        f" string; did you mean ({denied_columns!r},)?"
+    )
+  denied = frozenset(denied_columns)
+  invalid = denied - _PROJECTABLE_PAYLOAD_COLUMNS
+  if invalid:
+    raise ValueError(
+        "denied_columns may only contain projectable payload columns"
+        f" {sorted(_PROJECTABLE_PAYLOAD_COLUMNS)}; got"
+        f" {sorted(invalid, key=repr)}."
+    )
+  return denied
+
+
+def _referenced_columns(sql: str, columns: Collection[str]) -> list[str]:
+  """Returns the sorted names in ``columns`` that ``sql`` references.
+
+  A column counts as referenced when it appears as a bare identifier
+  (``\\b<column>\\b``), the same rule the producer uses to drop view
+  columns that read a denied column.
+  """
+  return sorted(
+      column
+      for column in columns
+      if re.search(rf"\b{re.escape(column)}\b", sql)
   )
 
 
@@ -480,6 +561,20 @@ class ViewManager:
       table_id: Source table name (default ``agent_events``).
       view_prefix: Optional prefix for view names (e.g. ``"adk_"``).
       bq_client: Optional pre-configured BigQuery client.
+      denied_columns: Payload columns missing from the events table
+          because the producer projects them out
+          (``BigQueryLoggerConfig.payload_column_denylist``).  Only
+          ``content``, ``content_parts``, ``attributes`` and
+          ``latency_ms`` are accepted.  A view whose SQL reads a denied
+          column is skipped by ``create_all_views()`` and rejected by
+          ``create_view()``.  Denying ``attributes`` also drops the
+          ``otel_span_id`` / ``otel_trace_id`` columns from every
+          per-event view.  ``None`` or empty (the default) denies
+          nothing.
+
+  Raises:
+      TypeError: If ``denied_columns`` is a single string.
+      ValueError: If ``denied_columns`` names any other column.
   """
 
   def __init__(
@@ -489,11 +584,14 @@ class ViewManager:
       table_id: str = "agent_events",
       view_prefix: str = "adk_",
       bq_client: Optional[bigquery.Client] = None,
+      *,
+      denied_columns: Optional[Collection[str]] = (),
   ) -> None:
     self.project_id = project_id
     self.dataset_id = dataset_id
     self.table_id = table_id
     self.view_prefix = view_prefix
+    self.denied_columns = _validate_denied_columns(denied_columns)
     self._bq_client = bq_client
     self._warned_unlabeled_client = False
 
@@ -536,6 +634,11 @@ class ViewManager:
   def get_view_sql(self, event_type: str) -> str:
     """Returns the SQL for a single view.
 
+    When ``attributes`` is in ``denied_columns``, per-event views omit
+    the ``otel_span_id`` / ``otel_trace_id`` columns.  The SQL of a view
+    that reads a denied column is still returned for inspection, but
+    ``create_view()`` refuses to run it.
+
     Args:
         event_type: One of the supported event type strings, or a
             cross-event view key.
@@ -571,7 +674,24 @@ class ViewManager:
         event_type=event_type,
         view_name=view_name,
         extra_columns=extra_columns,
+        denied_columns=self.denied_columns,
     )
+
+  def _denied_columns_read_by(self, event_type: str) -> list[str]:
+    """Returns the sorted denied columns that a view's own SQL reads.
+
+    Checks the registry SQL (per-event ``extra_columns`` or cross-event
+    ``query_sql``), not the rendered statement: the OpenTelemetry
+    columns are already dropped when ``attributes`` is denied, and
+    rendered project, dataset or table names must not count.
+    """
+    if not self.denied_columns:
+      return []
+    if event_type in _CROSS_EVENT_VIEW_DEFS:
+      sql = _CROSS_EVENT_VIEW_DEFS[event_type][1]
+    else:
+      sql = _EVENT_VIEW_DEFS[event_type][1]
+    return _referenced_columns(sql, self.denied_columns)
 
   def create_view(self, event_type: str) -> None:
     """Creates (or replaces) one view.
@@ -579,8 +699,19 @@ class ViewManager:
     Args:
         event_type: The event type, or cross-event view key, to create
             a view for.
+
+    Raises:
+        KeyError: If the event_type is not recognized.
+        ValueError: If the view reads a column in ``denied_columns``.
+            No query is issued.
     """
     sql = self.get_view_sql(event_type)
+    denied = self._denied_columns_read_by(event_type)
+    if denied:
+      raise ValueError(
+          f"The view for {event_type!r} reads denied column(s) {denied},"
+          " so it cannot be created over this events table."
+      )
     view_name = self.get_view_name(event_type)
     logger.info(
         "Creating view %s.%s.%s", self.project_id, self.dataset_id, view_name
@@ -593,6 +724,8 @@ class ViewManager:
     """Creates all per-event-type views, then all cross-event views.
 
     Per-event views go first because cross-event views may read them.
+    Views that read a column in ``denied_columns`` are skipped with a
+    warning and left out of the result.
 
     Returns:
         A dict mapping event_type (or cross-event view key) to view
@@ -604,6 +737,14 @@ class ViewManager:
     _check_view_registries()
     created = {}
     for event_type in [*_EVENT_VIEW_DEFS, *_CROSS_EVENT_VIEW_DEFS]:
+      denied = self._denied_columns_read_by(event_type)
+      if denied:
+        logger.warning(
+            "Skipping view for %s: it reads denied column(s) %s.",
+            event_type,
+            denied,
+        )
+        continue
       try:
         self.create_view(event_type)
         created[event_type] = self.get_view_name(event_type)

@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Span-level OpenTelemetry correlation (#312)** — `Span` gains
+  `otel_span_id`, `otel_trace_id` and `source_event_id`.
+  `Span.from_bigquery_row()` reads them from same-named columns, or else
+  from `attributes.otel` and `attributes.adk` (or the legacy
+  `attributes.source_event_id`); they stay `None` on rows without those
+  keys, and the span tree is still built from `span_id` /
+  `parent_span_id`. Every per-event view also projects `otel_span_id` and
+  `otel_trace_id`, which are `NULL` unless the ADK plugin runs with
+  `BigQueryLoggerConfig(enable_otel_correlation=True)`
+  (`google-adk>=2.4.0`).
+- **`ViewManager(denied_columns=...)` (#321)** — for an events table
+  written with the plugin's `payload_column_denylist`. Denying
+  `attributes` drops the two OpenTelemetry columns, and a view whose own
+  SQL reads a denied column is skipped by `create_all_views()` (with a
+  warning) and rejected by `create_view()`. With
+  `denied_columns=["attributes"]` the six per-event views that read
+  `attributes` and `compaction_windows` are skipped; the other 19
+  per-event views deploy. Names other than `content`, `content_parts`,
+  `attributes` and `latency_ms` raise `ValueError`.
+  `bq-agent-sdk views create-all` and `views create` take the same names
+  as a repeatable `--denied-column` flag.
+- **Trace and span correlation guide (#209, #220, #320)** — SDK.md
+  documents the three correlation layers, the plugin's
+  `enable_otel_correlation`, `custom_metadata_allowlist` and
+  `payload_column_denylist` options, the OpenTelemetry span each plugin
+  callback records, and two partition-pruned SQL recipes that join the
+  events table to an `otel_spans` table.
+
+### Changed
+
+- **Per-event views select two more columns (#312)** — every per-event
+  `CREATE OR REPLACE VIEW` statement now selects the nullable
+  `otel_span_id` and `otel_trace_id` between the standard headers and the
+  event-specific columns; existing columns keep their names and types.
+  Re-run `create_all_views()` to pick them up. Over an events table
+  without an `attributes` column, every per-event view now fails to deploy
+  unless you pass `ViewManager(denied_columns=["attributes"])` or
+  `bq-agent-sdk views create-all --denied-column=attributes`; with it, the
+  same 19 per-event views deploy as before and the other six are skipped.
+
 ## [0.5.4] - 2026-09-29
 
 ### Release highlights
