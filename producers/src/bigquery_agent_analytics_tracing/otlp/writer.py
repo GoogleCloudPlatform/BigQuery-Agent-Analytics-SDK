@@ -90,10 +90,6 @@ def _int_list(values: Any) -> list[int]:
   return [int(v) for v in (values or [])]
 
 
-def _str(value: Any) -> str | None:
-  return None if value is None else str(value)
-
-
 # OTLP/JSON encodes enums as ints while protobuf MessageToDict emits names;
 # both must land the same canonical STRING or filters silently miss rows.
 _SPAN_KIND_NAMES = {

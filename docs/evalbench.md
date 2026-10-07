@@ -471,11 +471,12 @@ listing is interchangeable with `classify_sessions()` output.
 
 ### Drill-down without mixing versions
 
-Published rows use the version-specific identity
-`evalbench-import:{job_id}:{import_version}:{scenario_id}` for both
-`session_id` and `trace_id`, so a `Client` pointed at the mirror table
-resolves one version by construction — there is no other version under
-that identity to merge:
+Rows converted from EvalBench source tables use the version-specific
+identity `evalbench-import:{job_id}:{import_version}:{scenario_id}` for
+both `session_id` and `trace_id`, so for those imports a `Client`
+pointed at the mirror table resolves one version by construction.
+Native `agent_events` imports (#463) keep the real ADK ids, so the
+selector also pins `import_version` (below):
 
 ```python
 from bigquery_agent_analytics import Client
@@ -490,12 +491,18 @@ for session in listing.sessions:
     # equivalently: trace = session.get_trace(client)
 ```
 
-`trace_selector()` returns `{"session_id": ..., "experiment_id": job_id}`:
-the session id already pins the import version, and the `experiment_id`
-pin matches `attributes.experiment_id` on every published row, so the
-selector is unambiguous for the identity-resolving reader. Extra
-`get_session_trace` keyword arguments (for example `event_types=`) pass
-through `session.get_trace(client, ...)`.
+`trace_selector()` returns
+`{"session_id": ..., "experiment_id": job_id, "import_version": ...}`.
+The `experiment_id` pin matches `attributes.experiment_id` on every
+published row, and the `import_version` pin matches the top-level
+`import_version` column stamped on every mirror row. For rows converted
+from EvalBench source tables (`EvalBenchRun.materialize()`), the version
+pin is redundant because the versioned session id is already unique per
+version. With the native `agent_events` writer (#463), retained versions
+share the real ADK `session_id` and the job-scoped `experiment_id`, so the
+version pin is what keeps a read of one version from replaying another
+version's rows. Extra `get_session_trace` keyword arguments (for example
+`event_types=`) pass through `session.get_trace(client, ...)`.
 
 ## Score An Import With The LLM Judge (#97)
 
@@ -531,13 +538,16 @@ print(pinned.import_version, report.pass_rate, report.total_sessions)
 the default is the job's latest successful import) and then reads that
 version's distinct `session_id` values from the `events_table` recorded in
 the manifest row. `EvalBenchImportSessions.trace_filter()` returns
-`TraceFilter(experiment_id=job_id, session_ids=<those ids>, limit=<count>)`:
-`TraceFilter` has no import-version dimension, so the version pin reaches
-`Client.evaluate` through the exact versioned session identities, which
-retained versions of one job never share. `trace_filter()` refuses an
-empty session set because `TraceFilter` treats "no `session_ids`" as
-unfiltered, which would silently widen the evaluation to every retained
-version of the job. `Client.evaluate` itself is unchanged.
+`TraceFilter(experiment_id=job_id, session_ids=<those ids>, limit=<count>,
+import_version=<version>)`. The `import_version` pin is a no-op for
+converted imports, whose versioned session ids are already unique per
+version, but load-bearing for native `agent_events` imports (#463), where
+retained versions share the real ADK session ids; without it the
+evaluation would widen to every retained version of those sessions.
+`trace_filter()` refuses an empty session set (`ValueError`, nothing to
+score) instead of returning a filter with no `session_ids`, which
+`TraceFilter` would treat as no session filter at all. `Client.evaluate`
+itself is unchanged.
 
 ## CLI
 
