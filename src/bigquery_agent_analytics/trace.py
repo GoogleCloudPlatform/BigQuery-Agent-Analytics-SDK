@@ -80,6 +80,15 @@ def _unwrap_text_field(value: str) -> str:
   return inner[1:]
 
 
+def _str_or_none(value: Any) -> Optional[str]:
+  """Returns ``value`` if it is a string, else ``None``.
+
+  The producer writes correlation IDs as strings; any other JSON value
+  comes from a malformed row and is ignored.
+  """
+  return value if isinstance(value, str) else None
+
+
 class EventType(Enum):
   """Standard event types logged by the analytics plugin."""
 
@@ -140,6 +149,27 @@ class Span:
   """Represents a single span (event) in a trace.
 
   Spans form a tree structure via ``parent_span_id`` references.
+
+  A span carries three layers of correlation identifiers:
+
+  1. ``trace_id`` / ``span_id`` / ``parent_span_id``: the producer's
+     execution-tree IDs. ``span_id`` and ``parent_span_id`` link rows of
+     the events table to each other and drive the tree built by
+     ``Trace``. ``span_id`` is not an OpenTelemetry span ID (only the
+     root invocation row may reuse the ambient one).
+  2. ``otel_trace_id`` / ``otel_span_id``: the ambient OpenTelemetry
+     span context captured when the row was written
+     (``attributes.otel``, recorded only when the producer runs with
+     ``enable_otel_correlation=True``). A best-effort join key into
+     Cloud Trace or an ``otel_spans`` table; spans dropped by trace
+     sampling have no match.
+  3. ``source_event_id``: the ADK ``Event.id`` that produced the row
+     (``attributes.adk.source_event_id``, or the legacy top-level
+     ``attributes.source_event_id``). It matches entries of the ADK
+     span attribute ``gcp.vertex.agent.associated_event_ids``.
+
+  Fields of layers 2 and 3 are ``None`` when the producer did not
+  record them or recorded a non-string value in ``attributes``.
   """
 
   event_type: str
@@ -159,6 +189,9 @@ class Span:
   user_id: Optional[str] = None
   trace_id: Optional[str] = None
   time_to_first_token_ms: Optional[float] = None
+  otel_span_id: Optional[str] = None
+  otel_trace_id: Optional[str] = None
+  source_event_id: Optional[str] = None
 
   @classmethod
   def from_bigquery_row(cls, row: dict[str, Any]) -> Span:
@@ -180,6 +213,27 @@ class Span:
         attributes = {}
     elif attributes is None:
       attributes = {}
+
+    # Correlation IDs (#312). A column projected by a per-event view wins
+    # over the raw ``attributes`` JSON written by the producer.
+    attrs = attributes if isinstance(attributes, dict) else {}
+    otel_dict = attrs.get("otel")
+    if not isinstance(otel_dict, dict):
+      otel_dict = {}
+    adk_dict = attrs.get("adk")
+    if not isinstance(adk_dict, dict):
+      adk_dict = {}
+    otel_span_id = row.get("otel_span_id") or _str_or_none(
+        otel_dict.get("span_id")
+    )
+    otel_trace_id = row.get("otel_trace_id") or _str_or_none(
+        otel_dict.get("trace_id")
+    )
+    source_event_id = (
+        row.get("source_event_id")
+        or _str_or_none(adk_dict.get("source_event_id"))
+        or _str_or_none(attrs.get("source_event_id"))
+    )
 
     latency_ms = row.get("latency_ms")
     time_to_first_token_ms = None
@@ -236,6 +290,9 @@ class Span:
         user_id=row.get("user_id"),
         trace_id=row.get("trace_id"),
         time_to_first_token_ms=time_to_first_token_ms,
+        otel_span_id=otel_span_id,
+        otel_trace_id=otel_trace_id,
+        source_event_id=source_event_id,
     )
 
   @property

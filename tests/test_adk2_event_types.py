@@ -23,6 +23,7 @@ that the typed-view column SQL matches the keys the producer actually writes.
 
 from __future__ import annotations
 
+import re
 from unittest import mock
 
 import pytest
@@ -200,3 +201,56 @@ def test_tool_completed_exposes_long_running_columns(vm):
       "CAST(JSON_VALUE(attributes, '$.adk.pause_orphan') AS BOOL) AS pause_orphan"
       in sql
   )
+
+
+# ------------------------------------------------------------------ #
+# E. OTel correlation columns and the attributes denylist (#312/#321) #
+# ------------------------------------------------------------------ #
+
+_OTEL_COLUMNS = (
+    "JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id",
+    "JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id",
+)
+
+
+@pytest.fixture
+def attributes_denied_vm():
+  return ViewManager(
+      project_id="test-project",
+      dataset_id="analytics",
+      table_id="agent_events",
+      bq_client=mock.MagicMock(),
+      denied_columns=("attributes",),
+  )
+
+
+@pytest.mark.parametrize("event_type", NEW_TYPES)
+def test_new_type_view_projects_otel_columns(vm, event_type):
+  sql = vm.get_view_sql(event_type)
+  for column in _OTEL_COLUMNS:
+    assert column in sql
+
+
+@pytest.mark.parametrize("event_type", NEW_TYPES)
+def test_new_type_view_under_attributes_denylist(
+    attributes_denied_vm, event_type
+):
+  sql = attributes_denied_vm.get_view_sql(event_type)
+  assert "otel_" not in sql
+  if event_type == "TOOL_PAUSED":
+    # Its pair keys live in attributes.adk, so it cannot be deployed.
+    with pytest.raises(ValueError, match="reads denied column"):
+      attributes_denied_vm.create_view(event_type)
+    attributes_denied_vm.bq_client.query.assert_not_called()
+  else:
+    assert re.search(r"\battributes\b", sql) is None
+    attributes_denied_vm.create_view(event_type)
+    attributes_denied_vm.bq_client.query.assert_called_once()
+    assert attributes_denied_vm.bq_client.query.call_args[0][0] == sql
+
+
+def test_create_all_views_under_attributes_denylist(attributes_denied_vm):
+  created = attributes_denied_vm.create_all_views()
+  assert "TOOL_PAUSED" not in created
+  for event_type in set(NEW_TYPES) - {"TOOL_PAUSED"}:
+    assert event_type in created

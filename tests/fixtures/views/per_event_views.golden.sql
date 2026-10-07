@@ -12,7 +12,9 @@ SELECT
   parent_span_id,
   status,
   error_message,
-  is_truncated
+  is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id
 FROM `test-project.analytics.agent_events`
 WHERE event_type = 'USER_MESSAGE_RECEIVED'
 
@@ -31,6 +33,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   JSON_VALUE(attributes, '$.model') AS model,
   content AS request_content,
   JSON_QUERY(attributes, '$.llm_config') AS llm_config,
@@ -53,6 +57,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   JSON_QUERY(content, '$.response') AS response,
   CAST(JSON_VALUE(content, '$.usage.prompt') AS INT64) AS usage_prompt_tokens,
   CAST(JSON_VALUE(content, '$.usage.completion') AS INT64) AS usage_completion_tokens,
@@ -81,6 +87,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms
 FROM `test-project.analytics.agent_events`
 WHERE event_type = 'LLM_ERROR'
@@ -100,6 +108,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   JSON_VALUE(content, '$.tool') AS tool_name,
   JSON_QUERY(content, '$.args') AS tool_args,
   JSON_VALUE(content, '$.tool_origin') AS tool_origin
@@ -121,6 +131,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   JSON_VALUE(content, '$.tool') AS tool_name,
   JSON_QUERY(content, '$.result') AS tool_result,
   JSON_VALUE(content, '$.tool_origin') AS tool_origin,
@@ -150,6 +162,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   JSON_VALUE(content, '$.tool') AS tool_name,
   JSON_QUERY(content, '$.args') AS tool_args,
   JSON_VALUE(content, '$.tool_origin') AS tool_origin,
@@ -172,6 +186,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   JSON_VALUE(content, '$.text_summary') AS agent_instruction
 FROM `test-project.analytics.agent_events`
 WHERE event_type = 'AGENT_STARTING'
@@ -191,6 +207,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms
 FROM `test-project.analytics.agent_events`
 WHERE event_type = 'AGENT_COMPLETED'
@@ -209,7 +227,9 @@ SELECT
   parent_span_id,
   status,
   error_message,
-  is_truncated
+  is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id
 FROM `test-project.analytics.agent_events`
 WHERE event_type = 'INVOCATION_STARTING'
 
@@ -227,7 +247,9 @@ SELECT
   parent_span_id,
   status,
   error_message,
-  is_truncated
+  is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id
 FROM `test-project.analytics.agent_events`
 WHERE event_type = 'INVOCATION_COMPLETED'
 
@@ -246,6 +268,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   JSON_QUERY(attributes, '$.state_delta') AS state_delta
 FROM `test-project.analytics.agent_events`
 WHERE event_type = 'STATE_DELTA'
@@ -265,6 +289,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   JSON_VALUE(content, '$.tool') AS tool_name,
   JSON_QUERY(content, '$.args') AS tool_args
 FROM `test-project.analytics.agent_events`
@@ -285,6 +311,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   JSON_VALUE(content, '$.tool') AS tool_name,
   JSON_QUERY(content, '$.args') AS tool_args
 FROM `test-project.analytics.agent_events`
@@ -305,6 +333,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   JSON_VALUE(content, '$.tool') AS tool_name,
   JSON_QUERY(content, '$.args') AS tool_args
 FROM `test-project.analytics.agent_events`
@@ -325,6 +355,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   JSON_VALUE(content, '$.tool') AS tool_name,
   JSON_QUERY(content, '$.result') AS tool_result
 FROM `test-project.analytics.agent_events`
@@ -345,6 +377,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   JSON_VALUE(content, '$.tool') AS tool_name,
   JSON_QUERY(content, '$.result') AS tool_result
 FROM `test-project.analytics.agent_events`
@@ -365,6 +399,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   JSON_VALUE(content, '$.tool') AS tool_name,
   JSON_QUERY(content, '$.result') AS tool_result
 FROM `test-project.analytics.agent_events`
@@ -385,6 +421,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   JSON_VALUE(
     attributes, '$.a2a_metadata."a2a:task_id"'
   ) AS a2a_task_id,
@@ -422,6 +460,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   JSON_VALUE(content, '$.from_agent') AS from_agent,
   JSON_VALUE(content, '$.to_agent') AS to_agent
 FROM `test-project.analytics.agent_events`
@@ -442,6 +482,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   TIMESTAMP_MICROS(CAST(
     CAST(JSON_VALUE(content, '$.start_timestamp') AS FLOAT64) * 1000000 AS INT64
   )) AS start_timestamp,
@@ -467,6 +509,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   JSON_QUERY(content, '$.agent_state') AS agent_state,
   JSON_TYPE(JSON_QUERY(content, '$.agent_state')) AS agent_state_type,
   CAST(JSON_VALUE(content, '$.end_of_agent') AS BOOL) AS end_of_agent
@@ -488,6 +532,8 @@ SELECT
   status,
   error_message,
   is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,
   JSON_VALUE(content, '$.tool') AS tool_name,
   JSON_QUERY(content, '$.args') AS tool_args,
   JSON_VALUE(attributes, '$.adk.function_call_id') AS function_call_id,
@@ -509,7 +555,9 @@ SELECT
   parent_span_id,
   status,
   error_message,
-  is_truncated
+  is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id
 FROM `test-project.analytics.agent_events`
 WHERE event_type = 'WORKFLOW_NODE_STARTING'
 
@@ -527,7 +575,9 @@ SELECT
   parent_span_id,
   status,
   error_message,
-  is_truncated
+  is_truncated,
+  JSON_VALUE(attributes, '$.otel.span_id') AS otel_span_id,
+  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id
 FROM `test-project.analytics.agent_events`
 WHERE event_type = 'WORKFLOW_NODE_COMPLETED'
 

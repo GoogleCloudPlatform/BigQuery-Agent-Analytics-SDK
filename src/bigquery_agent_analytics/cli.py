@@ -1816,22 +1816,43 @@ views_app = typer.Typer(
 )
 app.add_typer(views_app, name="views")
 
+_DENIED_COLUMN_HELP = (
+    "Payload column missing from the events table, for tables written"
+    " with BigQueryLoggerConfig(payload_column_denylist=[...]). One of"
+    " content, content_parts, attributes or latency_ms (exact case)."
+    " Repeat as needed. A view that reads a denied column is skipped by"
+    " create-all and rejected by create; denying attributes also drops"
+    " the otel_span_id / otel_trace_id columns."
+)
+
 
 def _build_view_manager(
     project_id: str,
     dataset_id: str,
     table_id: str,
     prefix: str,
+    denied_columns: Optional[list[str]] = None,
 ):
-  """Lazily import ViewManager and construct an instance."""
+  """Lazily import ViewManager and construct an instance.
+
+  ``denied_columns`` holds the ``--denied-column`` values. ``ViewManager``
+  validates them exactly as it validates its ``denied_columns`` argument;
+  a rejected name is re-raised as a ``ValueError`` that names the flag.
+  """
   from .views import ViewManager
 
-  return ViewManager(
-      project_id=project_id,
-      dataset_id=dataset_id,
-      table_id=table_id,
-      view_prefix=prefix,
-  )
+  try:
+    return ViewManager(
+        project_id=project_id,
+        dataset_id=dataset_id,
+        table_id=table_id,
+        view_prefix=prefix,
+        denied_columns=tuple(denied_columns or ()),
+    )
+  except ValueError as exc:
+    # The constructor raises ValueError only for a denied column name
+    # it does not accept.
+    raise ValueError(f"Invalid --denied-column: {exc}") from exc
 
 
 @views_app.command("create-all")
@@ -1844,6 +1865,11 @@ def views_create_all(
     ),
     table_id: str = typer.Option("agent_events", help="Events table name."),
     prefix: str = typer.Option("adk_", help="View name prefix."),
+    denied_columns: Optional[list[str]] = typer.Option(
+        None,
+        "--denied-column",
+        help=_DENIED_COLUMN_HELP,
+    ),
     fmt: str = typer.Option(
         "json",
         "--format",
@@ -1852,7 +1878,9 @@ def views_create_all(
 ) -> None:
   """Create all per-event-type views and all cross-event views."""
   try:
-    vm = _build_view_manager(project_id, dataset_id, table_id, prefix)
+    vm = _build_view_manager(
+        project_id, dataset_id, table_id, prefix, denied_columns
+    )
     result = vm.create_all_views()
     typer.echo(format_output(result, fmt))
   except Exception as exc:
@@ -1873,6 +1901,11 @@ def views_create(
     ),
     table_id: str = typer.Option("agent_events", help="Events table name."),
     prefix: str = typer.Option("adk_", help="View name prefix."),
+    denied_columns: Optional[list[str]] = typer.Option(
+        None,
+        "--denied-column",
+        help=_DENIED_COLUMN_HELP,
+    ),
     fmt: str = typer.Option(
         "json",
         "--format",
@@ -1881,7 +1914,9 @@ def views_create(
 ) -> None:
   """Create a single per-event-type or cross-event view."""
   try:
-    vm = _build_view_manager(project_id, dataset_id, table_id, prefix)
+    vm = _build_view_manager(
+        project_id, dataset_id, table_id, prefix, denied_columns
+    )
     vm.create_view(event_type)
     result = {"event_type": event_type, "status": "created"}
     typer.echo(format_output(result, fmt))
