@@ -49,7 +49,7 @@ from __future__ import annotations
 import dataclasses
 from datetime import datetime
 import textwrap
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 import memory_layers
 
@@ -153,6 +153,10 @@ ALTER TABLE `{embeddings}` ADD COLUMN IF NOT EXISTS status STRING"""
 # When a row of a step's table means its message is processed.
 EXTRACTED = "COALESCE(status, '') = ''"
 EMBEDDED = "COALESCE(status, '') = '' AND ARRAY_LENGTH(embedding) > 0"
+# An embeddings table from before the status column (such as the recorded
+# run's) stored no status. Readers treat a missing status like an empty
+# one, so a non-empty embedding counts as successful.
+EMBEDDED_BEFORE_STATUS = "ARRAY_LENGTH(embedding) > 0"
 
 # The user messages of the given sessions with no successful row in
 # `{done}` yet; `{processed}` says which rows succeeded. Rows are delivered
@@ -454,12 +458,27 @@ def embed_sql(
 def similar_tasks_sql(
     tables: MemoryTables,
     embedding_endpoint: str = DEFAULT_EMBEDDING_ENDPOINT,
+    *,
+    has_status: bool = True,
 ) -> str:
+  """Ranks this user's past tasks; ``has_status``: the table has a status.
+
+  Readers do not migrate tables, so the query also runs on an embeddings
+  table written before the ``status`` column existed.
+  """
   return _SIMILAR_TASKS.format(
       embeddings=tables.embeddings,
       embedding_endpoint=embedding_endpoint,
-      embedded=EMBEDDED,
+      embedded=EMBEDDED if has_status else EMBEDDED_BEFORE_STATUS,
   )
+
+
+def has_status_column(bq: Any, table: str) -> bool:
+  """Whether ``table`` has the ``status`` column, from its schema.
+
+  ``ensure_tables`` adds the column for writers; a reader only looks.
+  """
+  return any(field.name == "status" for field in bq.get_table(table).schema)
 
 
 def usage_sql(tables: MemoryTables) -> str:
@@ -604,14 +623,19 @@ def similar_task_scores(
     session_id: str,
     top_k: int = 8,
     embedding_endpoint: str = DEFAULT_EMBEDDING_ENDPOINT,
+    has_status: Optional[bool] = None,
 ) -> dict[str, float]:
   """Cosine similarity of this user's past tasks to ``query``, by trace id.
 
   The trace id of a task is its invocation id, as in ``memory_layers``.
-  The current session is left out.
+  The current session is left out. ``has_status`` says whether the
+  embeddings table has its ``status`` column; by default the table's schema
+  is read, so this also works on tables written before that column.
   """
+  if has_status is None:
+    has_status = has_status_column(bq, tables.embeddings)
   job = bq.query(
-      similar_tasks_sql(tables, embedding_endpoint),
+      similar_tasks_sql(tables, embedding_endpoint, has_status=has_status),
       job_config=_job_config(
           query=query, user_id=user_id, session_id=session_id, top_k=top_k
       ),

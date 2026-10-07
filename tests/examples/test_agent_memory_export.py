@@ -25,6 +25,7 @@ import copy
 import dataclasses
 from datetime import datetime
 from datetime import timezone
+from html.parser import HTMLParser
 import json
 from pathlib import Path
 import sys
@@ -647,9 +648,21 @@ def _sql_call(sql, purpose):
   )
 
 
+REFUSED = (
+    "Only tables in bigquery-public-data.thelook_ecommerce can be read here,"
+    " not p.d.analyst_memory_items."
+)
+
+
 def test_memory_table_reads_are_the_sql_calls_that_name_the_memory_dataset():
   dataset = "bqaa_agent_memory_demo"
+  refused = dataclasses.replace(
+      _sql_call(f"SELECT * FROM `{dataset}.analyst_memory_items`", "refused"),
+      status="error",
+      error=REFUSED,
+  )
   calls = [
+      refused,
       _sql_call(f"SELECT * FROM `{dataset}.analyst_memory_items`", "items"),
       _sql_call(
           f"SELECT * FROM `p.{dataset}.INFORMATION_SCHEMA.TABLES`", "tables"
@@ -672,6 +685,66 @@ def test_memory_table_reads_are_the_sql_calls_that_name_the_memory_dataset():
   ]
   assert reads[0]["sql"] == f"SELECT * FROM `{dataset}.analyst_memory_items`"
   assert export_memory.memory_table_reads(calls, None) == []
+  # A query the guard refused named the dataset but read nothing.
+  assert export_memory.memory_table_attempts(calls, dataset) == [
+      {
+          "purpose": "refused",
+          "sql": f"SELECT * FROM `{dataset}.analyst_memory_items`",
+          "span_id": "span-refused",
+          "error": REFUSED,
+      }
+  ]
+
+
+def _control_queries_memory(rows, result):
+  """The control's restaurant search becomes a query of the memory dataset."""
+  _row(rows, "sp-201-llm-1", "LLM_RESPONSE")["content"][
+      "response"
+  ] = "call: save_preference | call: run_sql"
+  _row(rows, "sp-201-tool-2", "TOOL_STARTING")["content"] = {
+      "tool": "run_sql",
+      "args": {
+          "purpose": "Look for what is known about this user",
+          "sql": "SELECT * FROM `p.d.analyst_memory_items`",
+      },
+  }
+  _row(rows, "sp-201-tool-2", "TOOL_COMPLETED")["content"] = {
+      "tool": "run_sql",
+      "result": result,
+  }
+
+
+@pytest.mark.parametrize(
+    "result, read",
+    [
+        ({"status": "ok", "rows": [{"statement": "Ana is vegetarian."}]}, True),
+        ({"status": "error", "message": REFUSED}, False),
+    ],
+    ids=["returned-rows", "refused"],
+)
+def test_a_control_is_flawed_only_if_its_memory_query_returned_rows(
+    fixture, result, read
+):
+  rows = copy.deepcopy(fixture.rows)
+  _control_queries_memory(rows, result)
+  memories = {
+      "u-ana": _memory(rows, "u-ana"),
+      "u-ben": _memory(rows, "u-ben"),
+  }
+
+  (pair,) = export_memory.build_comparisons(
+      RECORD, memories, {}, memory_dataset="d"
+  )
+
+  side = pair["without_memory"]
+  assert side["tool_calls"] == ["save_preference", "run_sql"]
+  assert pair["control_read_memory"] is read
+  assert [q["purpose"] for q in side["memory_table_reads"]] == (
+      ["Look for what is known about this user"] if read else []
+  )
+  assert [q.get("error") for q in side["memory_table_attempts"]] == (
+      [] if read else [REFUSED]
+  )
 
 
 def test_hide_project_rewrites_only_the_project_in_memory_table_reads():
@@ -795,6 +868,41 @@ def test_cli_rejects_memory_tables_offline(capsys):
   assert "need --project-id" in capsys.readouterr().err
 
 
+class _Ancestors(HTMLParser):
+  """Records the open elements around the element with a given id."""
+
+  VOID = {"meta", "link", "br", "img", "input", "hr", "source", "wbr"}
+
+  def __init__(self, element_id):
+    super().__init__()
+    self._id = element_id
+    self._open = []
+    self.ancestors = None
+
+  def handle_starttag(self, tag, attrs):
+    attrs = dict(attrs)
+    if attrs.get("id") == self._id:
+      self.ancestors = list(self._open)
+    if tag not in self.VOID:
+      self._open.append(attrs)
+
+  def handle_endtag(self, tag):
+    if tag not in self.VOID:
+      self._open.pop()
+
+
+def test_the_tooltip_takes_the_theme_and_survives_a_load_error():
+  # The theme's colors are custom properties on .viz-root, and the notice
+  # for a failed load replaces the children of #app.
+  parser = _Ancestors("tooltip")
+  parser.feed((EXAMPLE_DIR / "viz" / "index.html").read_text("utf-8"))
+
+  classes = [a.get("class", "") for a in parser.ancestors]
+  ids = [a.get("id") for a in parser.ancestors]
+  assert "viz-root" in " ".join(classes).split()
+  assert "app" not in ids
+
+
 def test_the_committed_export_matches_the_committed_run_record():
   export = json.loads(
       (EXAMPLE_DIR / "viz" / "data" / "memory_export.json").read_text("utf-8")
@@ -833,9 +941,17 @@ def test_the_committed_export_matches_the_committed_run_record():
       assert all(error in trace["errors"] for error in failed)
       if failed and trace["outcome_status"] != "unanswered":
         assert trace["outcome_status"] == "answered_with_errors"
-  # Flagged exactly when the run without memory read the memory dataset.
+  # Flagged exactly when the run without memory read the memory dataset:
+  # a query of it that returned rows. Failed queries are only listed.
   for pair in export["comparisons"]:
     assert pair["control_read_memory"] == bool(
         pair["without_memory"]["memory_table_reads"]
     )
+    assert all(
+        "error" not in q for q in pair["without_memory"]["memory_table_reads"]
+    )
+    assert all(
+        q.get("error") for q in pair["without_memory"]["memory_table_attempts"]
+    )
     assert pair["with_memory"]["memory_table_reads"] == []
+    assert pair["with_memory"]["memory_table_attempts"] == []

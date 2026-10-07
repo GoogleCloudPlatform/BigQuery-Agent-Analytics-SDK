@@ -30,6 +30,7 @@ import json
 from pathlib import Path
 import re
 import sys
+from types import SimpleNamespace
 
 from google.cloud import bigquery
 import pytest
@@ -42,6 +43,7 @@ EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "examples" / "agent_memory"
 sys.path.insert(0, str(EXAMPLE_DIR))
 
 import agent_memory_demo  # noqa: E402
+import memory_consolidation  # noqa: E402
 import memory_layers  # noqa: E402
 import offline_bigquery  # noqa: E402
 
@@ -1497,12 +1499,37 @@ def test_long_outcomes_are_shortened_in_context(fixture):
 
 
 class _ConsolidatedClient:
-  """Traces from the fixture; extracted items and similar tasks canned."""
+  """Traces from the fixture; extracted items and similar tasks canned.
 
-  def __init__(self, rows, items, similar):
+  Its embeddings table has the recorded run's columns, from before the
+  status column existed, unless ``columns`` says otherwise.
+  """
+
+  BEFORE_STATUS = (
+      "span_id",
+      "user_id",
+      "session_id",
+      "invocation_id",
+      "observed_at",
+      "sim_date",
+      "task",
+      "embedding",
+      "model",
+      "embedded_at",
+  )
+
+  def __init__(self, rows, items, similar, columns=BEFORE_STATUS):
     self._traces = offline_bigquery.OfflineBigQueryClient(rows)
     self._answers = {"_memory_items`": items, "_task_embeddings`": similar}
+    self._columns = columns
     self.params = {}
+    self.sql = {}
+
+  def get_table(self, table):
+    assert table.endswith("_task_embeddings")
+    return SimpleNamespace(
+        schema=[SimpleNamespace(name=c) for c in self._columns]
+    )
 
   def query(self, sql, job_config=None, **kwargs):
     for marker, rows in self._answers.items():
@@ -1510,6 +1537,7 @@ class _ConsolidatedClient:
         self.params[marker] = {
             p.name: p.value for p in job_config.query_parameters
         }
+        self.sql[marker] = sql
         return _Canned(rows)
     return self._traces.query(sql, job_config=job_config, **kwargs)
 
@@ -1579,6 +1607,42 @@ def test_cli_live_reads_extracted_facts_and_ranks_tasks_by_embedding(
       "top_k": 8,
   }
   assert fake.params["_memory_items`"] == {"user_id": "u-ana"}
+  # The recorded run's embeddings table has no status column, and the
+  # reader leaves it as it is.
+  assert "status" not in fake.sql["_task_embeddings`"]
+
+
+def test_cli_live_ranks_by_embedding_on_a_table_with_status(fixture, capsys):
+  fake = _ConsolidatedClient(
+      fixture.rows,
+      [],
+      [{"invocation_id": "inv-103", "similarity": 0.91}],
+      columns=_ConsolidatedClient.BEFORE_STATUS + ("status",),
+  )
+
+  code = agent_memory_demo.main(
+      [
+          "--project-id",
+          "p",
+          "--dataset-id",
+          "d",
+          "--memory-tables",
+          "analyst_",
+          "--user-id",
+          "u-ana",
+          "--session-id",
+          "s-104",
+          "--now",
+          "2026-10-06T16:00:00Z",
+      ],
+      bq_client=fake,
+  )
+
+  assert code == 0
+  assert "(by embedding, successful only):\n  0.91  inv-103" in (
+      capsys.readouterr().out
+  )
+  assert memory_consolidation.EMBEDDED in fake.sql["_task_embeddings`"]
 
 
 @pytest.mark.parametrize(

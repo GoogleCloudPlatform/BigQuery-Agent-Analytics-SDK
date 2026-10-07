@@ -45,7 +45,7 @@ export, so this is not an invoice figure):
 | `live_run.json` | The run record written by `analyst_agent.py`: days, analysts, every session with its transcript (user turns, tool calls, tool errors, replies, seconds), the before/after pairs, each nightly pass, per-session row counts from a `GROUP BY` over the table, and token usage |
 | `demo_output_maya.chen.txt`, `demo_output_lena.okafor.txt` | Output of `agent_memory_demo.py --memory-tables analyst_` for the two sessions the video follows (Maya's Monday question, Lena's Tuesday one). They were read after the run, so they include the whole week; what `recall_memory` returned at the time is in the export (`traces[].recall`) |
 | [`../viz/data/memory_export.json`](../viz/data/memory_export.json) | Output of `export_memory.py --memory-tables analyst_ --run-record live_run.json`, with the project shown as `<project>` |
-| [`demo.mp4`](demo.mp4) | Narrated walkthrough of the web view on that export: 1 min 41 s, 1280×800 H.264 with an AAC voiceover (macOS `say`, voice Samantha), 16 burned-in captions, 4.4 MB. Recorded with `viz/record_demo.py --narration`, from the export made at 09:55 UTC; see the note below on the later export |
+| [`demo.mp4`](demo.mp4) | Narrated walkthrough of the web view: 1 min 41 s, 1280×800 H.264 with an AAC voiceover (macOS `say`, voice Samantha), 16 burned-in captions, 4.4 MB. Recorded with `viz/record_demo.py --narration` from the export made at 09:55 UTC. It predates the later export and the tooltip fix; see the notes |
 | [`narration.md`](narration.md) | The voiceover script: one section per scene, one bullet per spoken line and caption |
 | [`demo.srt`](demo.srt) | The captions, timed to the voiceover, exactly as burned into `demo.mp4` |
 | [`../viz/screenshot.png`](../viz/screenshot.png) | Screenshot of the web view, taken with the video |
@@ -64,7 +64,11 @@ export, so this is not an invoice figure):
 Sessions with memory only. The nightly passes extracted 21, 18, 8, 9 and 6
 entity mentions and 17, 5, 2, 2 and 0 facts after days 1 to 5; most of what
 the analysts said about themselves came on the first day. Of the 26 facts,
-3 came back with only a subject and were not stored, which leaves 23.
+3 came back with only a subject and were not stored, which leaves 23. In
+this run each night read only that day's sessions, and no extraction or
+embedding failed. The runner now covers every session so far each night,
+so that a message that fails is tried again the next night. The night's
+totals then describe the run so far.
 
 The questions are scripted; the agent, its SQL, the data and the answers
 are real. The days are simulated: every session ran on 2026-10-07 UTC and
@@ -75,7 +79,8 @@ agent treats as today and the plugin logs with every row
 ## Notes
 
 - **Three runs without memory are not clean controls.** Lena's, Raj's and
-  Tom's read the memory tables with `run_sql` (2, 10 and 8 queries); see
+  Tom's read the memory tables with `run_sql`: 2, 9 and 7 queries that
+  returned rows. Raj's and Tom's each had one more that failed; see
   [Memory is data, so scope the tools](../README.md#memory-changes-the-answer).
   The scope check that now stops this (`run_sql` reads only TheLook's
   dataset) was added after the run. The sessions with memory never queried
@@ -87,16 +92,24 @@ agent treats as today and the plugin logs with every row
   the runs without memory. After the run, `run_sql`'s exception handling was
   narrowed to BigQuery API errors and timeouts; it would have returned the
   same five errors.
-- **The export was made again after a review fix.** A tool result that
-  reports `{"status": "error"}` now fails the trace as well as the tool
-  call (see `memory_layers.row_error`). Regenerated from the same rows at
-  11:39 UTC, the export changed in four places only. Priya's Day 1 and Day 3
-  turns, which each recovered from a failed query, are now answered with
-  errors, with the failed `run_sql` bars marked. Raj's and Tom's runs
-  without memory are now answered with errors too. The fourth change is the
-  export time. No scene of `demo.mp4` shows those traces or labels. The
-  header's export time (09:55 UTC in the video and screenshot) is the only
-  on-screen difference, so the video was not recorded again.
+- **The video predates two review rounds.** The video and screenshot show
+  the export made at 09:55 UTC. The export was regenerated from the same
+  rows after each review, last at 12:16 UTC, and changed in these ways:
+  - A tool result that reports `{"status": "error"}` now fails its trace
+    (`memory_layers.row_error`). Priya's Day 1 and Day 3 turns, which each
+    recovered from a failed query, are answered with errors, with the
+    failed `run_sql` bars marked. Raj's and Tom's runs without memory are
+    answered with errors too.
+  - A query of the memory dataset counts as a read only if it returned
+    rows. Raj's and Tom's controls have 9 and 7 reads and one failed
+    attempt each, down from 10 and 8 counted before, and are still flagged.
+
+  No scene of the video shows those traces, labels or counts. Rendered by
+  the current page, every scene's page is the same with either export
+  except the header's export time. One change after the recording does
+  show: in the reasoning scene, the tooltip over the waterfall was drawn
+  outside the theme, so it had no background. The page now draws it on the
+  theme's surface color, in light and dark mode.
 - **What the agent knew when.** Each session's recall read only what was in
   BigQuery at that moment: preferences right away; facts, entities and
   similar past tasks after the previous night's pass.

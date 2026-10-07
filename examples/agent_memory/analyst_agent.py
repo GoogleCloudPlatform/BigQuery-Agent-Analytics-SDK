@@ -283,13 +283,24 @@ class MemoryStore:
   similarity_threshold: float = 0.55
   max_items: int = 6
   now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+  # Whether the embeddings table has its status column; read once.
+  has_status: Optional[bool] = None
 
   def context(self, user_id: str, session_id: str, request: str) -> str:
     facts, entities = memory_consolidation.load_memory_items(
         self.bq, self.tables, user_id
     )
+    if self.has_status is None:
+      self.has_status = memory_consolidation.has_status_column(
+          self.bq, self.tables.embeddings
+      )
     scores = memory_consolidation.similar_task_scores(
-        self.bq, self.tables, user_id, request, session_id=session_id
+        self.bq,
+        self.tables,
+        user_id,
+        request,
+        session_id=session_id,
+        has_status=self.has_status,
     )
     memory = memory_layers.load_user_memory(
         self.client,
@@ -637,6 +648,8 @@ async def _run_days(
   memory_runner, control_runner = runners
   memory_plugin, control_plugin = plugins
   sessions, comparisons, nights = out
+  # The memory sessions run so far; each night consolidates all of them.
+  so_far: list[str] = []
   for day in days:
     today = [
         (sid, s)
@@ -695,11 +708,13 @@ async def _run_days(
         )
     await memory_plugin.flush()
     await control_plugin.flush()
-    # Nightly consolidation of the day's memory sessions (not the controls).
+    # Nightly consolidation of every memory session so far (not the
+    # controls). Only messages without a successful row are sent to the
+    # models: today's, and any that failed on an earlier night, which are
+    # tried again. The night's totals cover the run so far.
+    so_far += [sid for sid, _ in today]
     started = time.monotonic()
-    night = memory_consolidation.consolidate(
-        bq, tables, [sid for sid, _ in today]
-    )
+    night = memory_consolidation.consolidate(bq, tables, so_far)
     night.update(day=day.number, seconds=round(time.monotonic() - started, 1))
     print(f"NIGHT {day.number}: {json.dumps(night['extraction'], default=str)}")
     nights.append(night)

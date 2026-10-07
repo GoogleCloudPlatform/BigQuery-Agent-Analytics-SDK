@@ -389,28 +389,62 @@ def build_user_export(
   }
 
 
-def memory_table_reads(
+def _memory_queries(
     calls: list[memory_layers.ToolCall], dataset: Optional[str]
-) -> list[dict[str, Any]]:
-  """The ``run_sql`` calls whose SQL names ``dataset``.
-
-  ``dataset`` is the one that holds the events and memory tables. A run
-  without memory tools that queries it has read memory anyway, so it is
-  not a memory-free answer.
-  """
+) -> list[memory_layers.ToolCall]:
+  """The ``run_sql`` calls whose SQL names ``dataset``."""
   if not dataset:
     return []
   named = re.compile(rf"\b{re.escape(dataset)}\b")
   return [
-      {
-          "purpose": c.arguments.get("purpose"),
-          "sql": _short(c.arguments.get("sql")),
-          "span_id": c.span_id,
-      }
+      c
       for c in calls
       if c.tool_name == SQL_TOOL
       and isinstance(c.arguments.get("sql"), str)
       and named.search(c.arguments["sql"])
+  ]
+
+
+def _query_entry(call: memory_layers.ToolCall) -> dict[str, Any]:
+  entry = {
+      "purpose": call.arguments.get("purpose"),
+      "sql": _short(call.arguments.get("sql")),
+      "span_id": call.span_id,
+  }
+  if call.status != "success":
+    entry["error"] = call.error
+  return entry
+
+
+def memory_table_reads(
+    calls: list[memory_layers.ToolCall], dataset: Optional[str]
+) -> list[dict[str, Any]]:
+  """The ``run_sql`` calls that read ``dataset``: its SQL names it and ran.
+
+  ``dataset`` is the one that holds the events and memory tables. A run
+  without memory tools that read it has seen memory anyway, so it is not a
+  memory-free answer. A query that failed, for example one the ``run_sql``
+  guard refused, returned no rows and is not a read
+  (``memory_table_attempts``).
+  """
+  return [
+      _query_entry(c)
+      for c in _memory_queries(calls, dataset)
+      if c.status == "success"
+  ]
+
+
+def memory_table_attempts(
+    calls: list[memory_layers.ToolCall], dataset: Optional[str]
+) -> list[dict[str, Any]]:
+  """The ``run_sql`` calls that named ``dataset`` but returned no rows.
+
+  Refused by the guard, failed, or never completed; each with its error.
+  """
+  return [
+      _query_entry(c)
+      for c in _memory_queries(calls, dataset)
+      if c.status != "success"
   ]
 
 
@@ -439,6 +473,9 @@ def _side(
       "sql_queries": len(sql_calls),
       "sql_errors": sum(c.status == "error" for c in sql_calls),
       "memory_table_reads": memory_table_reads(rt.tool_calls, memory_dataset),
+      "memory_table_attempts": memory_table_attempts(
+          rt.tool_calls, memory_dataset
+      ),
       "llm_calls": rt.llm_calls,
       "latency_ms": rt.latency_ms,
       "total_tokens": rt.total_tokens,
@@ -458,7 +495,8 @@ def build_comparisons(
 
   ``memories`` maps user ids (the analysts' and their control users') to
   loaded memory. ``control_read_memory`` marks a pair whose run without
-  memory queried ``memory_dataset``.
+  memory read ``memory_dataset``: a query of it that succeeded. Queries of
+  it that failed or were refused are listed, but do not mark the pair.
   """
   out = []
   sessions = {s["session_id"]: s for s in record.get("sessions", [])}
@@ -488,13 +526,15 @@ def build_comparisons(
 
 
 def hide_project(comparisons: list[dict[str, Any]], project_id: str) -> None:
-  """Shows the project as ``<project>`` in the SQL of memory table reads."""
+  """Shows the project as ``<project>`` in memory table queries and errors."""
   named = re.compile(rf"(?<![\w-]){re.escape(project_id)}(?![\w-])")
   for pair in comparisons:
     for side in (pair["with_memory"], pair["without_memory"]):
-      for read in (side or {}).get("memory_table_reads", []):
-        if read["sql"]:
-          read["sql"] = named.sub("<project>", read["sql"])
+      for key in ("memory_table_reads", "memory_table_attempts"):
+        for query in (side or {}).get(key, []):
+          for field in ("sql", "error"):
+            if query.get(field):
+              query[field] = named.sub("<project>", query[field])
 
 
 def build_run(
@@ -609,7 +649,7 @@ def main(argv: Optional[list[str]] = None, *, bq_client: Any = None) -> int:
       action="store_true",
       help=(
           "show the real project id in the export (default: <project>, also"
-          " in the SQL of memory table reads)"
+          " in memory table queries and their errors)"
       ),
   )
   args = parser.parse_args(argv)

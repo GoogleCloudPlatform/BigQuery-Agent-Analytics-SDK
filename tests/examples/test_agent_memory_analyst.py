@@ -21,6 +21,7 @@ fixture through the real SDK ``Client``.
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 from datetime import date
 from datetime import datetime
@@ -297,13 +298,39 @@ def test_save_preference_writes_user_scoped_state():
 # ---- recall_memory ------------------------------------------------------------
 
 
+# The columns of the recorded run's embeddings table, written before the
+# status column existed.
+EMBEDDING_COLUMNS_BEFORE_STATUS = (
+    "span_id",
+    "user_id",
+    "session_id",
+    "invocation_id",
+    "observed_at",
+    "sim_date",
+    "task",
+    "embedding",
+    "model",
+    "embedded_at",
+)
+
+
+def _schema(columns):
+  return SimpleNamespace(schema=[SimpleNamespace(name=c) for c in columns])
+
+
 class _ConsolidationBigQuery:
   """Serves the items and similar-task queries from canned rows."""
 
-  def __init__(self, items, similar):
+  def __init__(self, items, similar, columns=EMBEDDING_COLUMNS_BEFORE_STATUS):
     self.calls = []
+    self.tables_read = []
     self._items = items
     self._similar = similar
+    self._columns = columns
+
+  def get_table(self, table):
+    self.tables_read.append(table)
+    return _schema(self._columns)
 
   def query(self, sql, job_config=None):
     self.calls.append((sql, job_config))
@@ -337,7 +364,9 @@ def test_recall_memory_combines_traces_extraction_and_embedding_scores():
       }
   ]
   bq = _ConsolidationBigQuery(
-      items, [{"invocation_id": "inv-103", "similarity": 0.83}]
+      items,
+      [{"invocation_id": "inv-103", "similarity": 0.83}],
+      columns=EMBEDDING_COLUMNS_BEFORE_STATUS + ("status",),
   )
   store = analyst_agent.MemoryStore(
       client=client,
@@ -351,6 +380,7 @@ def test_recall_memory_combines_traces_extraction_and_embedding_scores():
   )
 
   memory = recall("Find dinner in Osaka that fits my diet", context)["memory"]
+  recall("And tomorrow?", context)
 
   assert "- Ana is pescatarian. [s-103/sp-103-inv]" in memory
   assert '- 0.83 trace inv-103: "I eat fish now' in memory
@@ -362,6 +392,30 @@ def test_recall_memory_combines_traces_extraction_and_embedding_scores():
       "session_id": "s-104",
       "top_k": 8,
   }
+  # The table has its status column; the schema is read once per store.
+  assert memory_consolidation.EMBEDDED in similar_sql
+  assert bq.tables_read == [TABLES.embeddings]
+
+
+def test_similar_tasks_also_rank_a_table_written_before_the_status_column():
+  bq = _ConsolidationBigQuery(
+      [], [{"invocation_id": "inv-1", "similarity": 0.7}]
+  )
+
+  scores = memory_consolidation.similar_task_scores(
+      bq, TABLES, "u-ana", "net revenue", session_id="s-9"
+  )
+
+  ((sql, _),) = bq.calls
+  assert scores == {"inv-1": 0.7}
+  assert bq.tables_read == [TABLES.embeddings]
+  # No reference to the missing column; a non-empty embedding counts.
+  assert "status" not in sql
+  assert (
+      "AND session_id != @session_id\n    AND ARRAY_LENGTH(embedding) > 0\n"
+      in sql
+  )
+  assert sql == memory_consolidation.similar_tasks_sql(TABLES, has_status=False)
 
 
 def test_memory_agent_has_memory_tools_and_the_control_has_none():
@@ -861,6 +915,80 @@ def test_a_failed_extraction_or_embedding_is_tried_again_by_the_next_pass():
   assert warehouse.items == items
   assert third["steps"]["items"]["rows_inserted"] == 0
   assert "sp-other" not in {r["span_id"] for r in warehouse.extractions}
+
+
+class _Plugin:
+
+  async def flush(self):
+    pass
+
+
+def test_the_week_retries_a_message_that_failed_on_an_earlier_night(
+    monkeypatch,
+):
+  # The real week runner over two business days. On night 1, both AI calls
+  # fail for one of day 1's messages; on day 2 the quota is back.
+  warehouse = _Warehouse(TABLES)
+  warehouse.failing = {"sp-flaky"}
+  sent = {}
+
+  async def run_turns(runner, user_id, session_id, state, turns):
+    if session_id == "s-2":
+      sent[1] = list(warehouse.sent)
+      warehouse.sent.clear()
+      warehouse.failing.clear()
+    return [{"user": text, "reply": "ok"} for text in turns]
+
+  monkeypatch.setattr(analyst_agent, "_run_turns", run_turns)
+  numbered = [
+      ("s-1", scenario.ScriptedSession(1, "maya.chen", ("Day 1 question",))),
+      ("s-2", scenario.ScriptedSession(2, "maya.chen", ("Day 2 question",))),
+  ]
+  sessions, comparisons, nights = [], [], []
+
+  asyncio.run(
+      analyst_agent._run_days(
+          SimpleNamespace(users=None),
+          [scenario.day(1), scenario.day(2)],
+          numbered,
+          (None, None),
+          (_Plugin(), _Plugin()),
+          warehouse,
+          TABLES,
+          (sessions, comparisons, nights),
+      )
+  )
+  sent[2] = warehouse.sent
+
+  assert sent[1] == [
+      ("AI.GENERATE", "sp-ok"),
+      ("AI.GENERATE", "sp-flaky"),
+      ("AI.EMBED", "sp-ok"),
+      ("AI.EMBED", "sp-flaky"),
+  ]
+  # Night 2 sends day 1's failed message again with day 2's new one, and
+  # not the one that succeeded.
+  assert sent[2] == [
+      ("AI.GENERATE", "sp-flaky"),
+      ("AI.GENERATE", "sp-other"),
+      ("AI.EMBED", "sp-flaky"),
+      ("AI.EMBED", "sp-other"),
+  ]
+  assert [night["sessions"] for night in nights] == [["s-1"], ["s-1", "s-2"]]
+  assert [
+      (n["extraction"]["failed"], n["extraction"]["embeddings_failed"])
+      for n in nights
+  ] == [(1, 1), (0, 0)]
+  # No memory twice: one item per entity and fact, one embedding each.
+  items = [item["item_id"] for item in warehouse.items]
+  assert sorted(items) == [
+      f"{span}:{kind}:0"
+      for span in ("sp-flaky", "sp-ok", "sp-other")
+      for kind in ("entity", "fact")
+  ]
+  assert sorted(
+      r["span_id"] for r in warehouse.embeddings if r["embedding"]
+  ) == ["sp-flaky", "sp-ok", "sp-other"]
 
 
 def test_items_from_rows_builds_facts_and_entities_with_their_source():

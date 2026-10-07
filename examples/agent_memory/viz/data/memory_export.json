@@ -2,7 +2,7 @@
  "schema": "bqaa-agent-memory-viz/2",
  "label": "Recorded live run: TheLook analyst week",
  "source": "<project>.bqaa_agent_memory_demo.analyst_events",
- "exported_at": "2026-10-07T11:39:20.119Z",
+ "exported_at": "2026-10-07T12:16:22.742Z",
  "run": {
   "model": "gemini-3.8-flash",
   "run_tag": "20261007t0834",
@@ -14185,6 +14185,7 @@
     "sql_queries": 1,
     "sql_errors": 0,
     "memory_table_reads": [],
+    "memory_table_attempts": [],
     "llm_calls": 3,
     "latency_ms": 21869.874,
     "total_tokens": 16155,
@@ -14210,6 +14211,7 @@
     "sql_queries": 3,
     "sql_errors": 0,
     "memory_table_reads": [],
+    "memory_table_attempts": [],
     "llm_calls": 5,
     "latency_ms": 35460.590000000004,
     "total_tokens": 11613,
@@ -14237,6 +14239,7 @@
     "sql_queries": 4,
     "sql_errors": 0,
     "memory_table_reads": [],
+    "memory_table_attempts": [],
     "llm_calls": 6,
     "latency_ms": 44935.549,
     "total_tokens": 26939,
@@ -14272,6 +14275,7 @@
       "span_id": "418676b4295844e7"
      }
     ],
+    "memory_table_attempts": [],
     "llm_calls": 5,
     "latency_ms": 30858.922,
     "total_tokens": 76885,
@@ -14301,6 +14305,7 @@
     "sql_queries": 6,
     "sql_errors": 0,
     "memory_table_reads": [],
+    "memory_table_attempts": [],
     "llm_calls": 8,
     "latency_ms": 73733.015,
     "total_tokens": 40912,
@@ -14373,11 +14378,6 @@
       "span_id": "640096a023b94b59"
      },
      {
-      "purpose": "Inspect all tasks and preferences for raj.patel",
-      "sql": "SELECT session_id, sim_date, event_type, content\nFROM `<project>.bqaa_agent_memory_demo.analyst_events`\nWHERE user_id = 'raj.patel' AND event_type IN ('USER_MESSAGE_RECEIVED', 'AGENT_RESPONSE', 'TOOL_COMPLETED')\nORDER BY t...",
-      "span_id": "37bb179d2d594739"
-     },
-     {
       "purpose": "Inspect events for raj.patel",
       "sql": "SELECT timestamp, session_id, event_type, content\nFROM `<project>.bqaa_agent_memory_demo.analyst_events`\nWHERE user_id = 'raj.patel' AND event_type IN ('USER_MESSAGE_RECEIVED', 'AGENT_RESPONSE')\nORDER BY timestamp",
       "span_id": "1919b49e047f4be1"
@@ -14386,6 +14386,14 @@
       "purpose": "Get the exact SQL and execution details from session an-20261007t0834-d5-raj-1",
       "sql": "SELECT content\nFROM `<project>.bqaa_agent_memory_demo.analyst_events`\nWHERE session_id = 'an-20261007t0834-d5-raj-1' AND event_type = 'TOOL_STARTING'",
       "span_id": "b900a33e80e34bf7"
+     }
+    ],
+    "memory_table_attempts": [
+     {
+      "purpose": "Inspect all tasks and preferences for raj.patel",
+      "sql": "SELECT session_id, sim_date, event_type, content\nFROM `<project>.bqaa_agent_memory_demo.analyst_events`\nWHERE user_id = 'raj.patel' AND event_type IN ('USER_MESSAGE_RECEIVED', 'AGENT_RESPONSE', 'TOOL_COMPLETED')\nORDER BY t...",
+      "span_id": "37bb179d2d594739",
+      "error": "Unrecognized name: sim_date at [1:20]"
      }
     ],
     "llm_calls": 16,
@@ -14413,6 +14421,7 @@
     "sql_queries": 2,
     "sql_errors": 0,
     "memory_table_reads": [],
+    "memory_table_attempts": [],
     "llm_calls": 4,
     "latency_ms": 40453.173,
     "total_tokens": 18672,
@@ -14438,6 +14447,7 @@
     "sql_queries": 4,
     "sql_errors": 0,
     "memory_table_reads": [],
+    "memory_table_attempts": [],
     "llm_calls": 6,
     "latency_ms": 99607.503,
     "total_tokens": 26714,
@@ -14470,6 +14480,7 @@
     "sql_queries": 7,
     "sql_errors": 0,
     "memory_table_reads": [],
+    "memory_table_attempts": [],
     "llm_calls": 11,
     "latency_ms": 156291.842,
     "total_tokens": 55167,
@@ -14497,6 +14508,7 @@
     "sql_queries": 7,
     "sql_errors": 0,
     "memory_table_reads": [],
+    "memory_table_attempts": [],
     "llm_calls": 8,
     "latency_ms": 67631.71699999999,
     "total_tokens": 32393,
@@ -14523,6 +14535,7 @@
     "sql_queries": 3,
     "sql_errors": 0,
     "memory_table_reads": [],
+    "memory_table_attempts": [],
     "llm_calls": 5,
     "latency_ms": 32698.445999999996,
     "total_tokens": 27411,
@@ -14580,11 +14593,6 @@
       "span_id": "fb59ad644ff94136"
      },
      {
-      "purpose": "Check analyst_events in bqaa_agent_memory_demo",
-      "sql": "SELECT * \nFROM `bqaa_agent_memory_demo.analyst_events` \nORDER BY event_timestamp DESC \nLIMIT 20",
-      "span_id": "f84eafba68ea4413"
-     },
-     {
       "purpose": "Get columns of analyst_events",
       "sql": "SELECT column_name, data_type \nFROM `bqaa_agent_memory_demo.INFORMATION_SCHEMA.COLUMNS` \nWHERE table_name = 'analyst_events'",
       "span_id": "6b67ff051c2f46c4"
@@ -14598,6 +14606,14 @@
       "purpose": "Inspect session an-20261007t0834-d5-tom-1 events",
       "sql": "SELECT event_type, TO_JSON_STRING(content) AS content_str\nFROM `bqaa_agent_memory_demo.analyst_events`\nWHERE session_id = 'an-20261007t0834-d5-tom-1'\nORDER BY timestamp ASC",
       "span_id": "f81bf8e8fea14ab7"
+     }
+    ],
+    "memory_table_attempts": [
+     {
+      "purpose": "Check analyst_events in bqaa_agent_memory_demo",
+      "sql": "SELECT * \nFROM `bqaa_agent_memory_demo.analyst_events` \nORDER BY event_timestamp DESC \nLIMIT 20",
+      "span_id": "f84eafba68ea4413",
+      "error": "Unrecognized name: event_timestamp at [3:10]"
      }
     ],
     "llm_calls": 17,

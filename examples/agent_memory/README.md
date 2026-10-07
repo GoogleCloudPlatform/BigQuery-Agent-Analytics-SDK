@@ -61,8 +61,8 @@ memory read the memory tables anyway (below).
 | Diego, growth, Wednesday | "How are my markets trending?" | Twelve countries by quarter, led by China. 6 tool calls, 100 s | Brazil and Spain, week by week from Monday, as he asked on Friday. 3 tool calls, 40 s |
 | Priya, customer insights, Wednesday | "What should I bring to the business review?" | A company-wide KPI scorecard. 7 tool calls, 68 s | The 90-day repeat rate of her segment (customers aged 18 to 34) by cohort quarter, against customers 35 and over. 10 tool calls, 156 s |
 | Lena, operations, Tuesday | "Run the same lead-time check for this month so far." | Not a clean control: read the memory tables (2 queries), then gave the same table as with memory. 4 tool calls, 31 s | Recalled her Thursday lead-time SQL and ran it for October 1 to 6: 32.22 hours from order to shipment in Memphis, 30.08 in Chicago. 5 tool calls, 45 s |
-| Raj, FP&A, Wednesday | "What numbers do I need for the board meeting?" | Not a clean control: 10 of its 15 queries read the memory tables and logged rows; the same figures after 623 s and 480,000 tokens | Fiscal Q3 to date (his year starts February 1), in euros at his latest rate: net revenue €656,112.90. 7 tool calls, 74 s |
-| Tom, category management, Wednesday | "Units yesterday for my categories and my watch brands?" | Not a clean control: 8 of its 16 queries read the memory tables and logged rows; the same table as with memory. 16 tool calls, 65 s | Outerwear & Coats 50 and Active 33 net units; Columbia 6 and The North Face 1. 4 tool calls, 33 s |
+| Raj, FP&A, Wednesday | "What numbers do I need for the board meeting?" | Not a clean control: 9 of its 15 queries read the memory tables and logged rows, and one more failed; the same figures after 623 s and 480,000 tokens | Fiscal Q3 to date (his year starts February 1), in euros at his latest rate: net revenue €656,112.90. 7 tool calls, 74 s |
+| Tom, category management, Wednesday | "Units yesterday for my categories and my watch brands?" | Not a clean control: 7 of its 16 queries read the memory tables and logged rows, and one more failed; the same table as with memory. 16 tool calls, 65 s | Outerwear & Coats 50 and Active 33 net units; Columbia 6 and The North Face 1. 4 tool calls, 33 s |
 
 Memory did not always make the agent faster: Priya's answer took longer
 because her segment needed a cohort analysis.
@@ -70,11 +70,14 @@ because her segment needed a cohort analysis.
 **Memory is data, so scope the tools.** Three of the six runs without memory
 found the memory anyway. They listed tables and datasets through
 `INFORMATION_SCHEMA`, found `bqaa_agent_memory_demo`, and read its tables
-with `run_sql`: 2, 10 and 8 queries. Raj's and Tom's also read the logged
+with `run_sql`: 2, 9 and 7 queries that returned rows. Raj's and Tom's also
+read the logged
 rows of the session with memory that had just answered the same question,
 and repeated its numbers. The export flags these pairs
-(`control_read_memory`, set when a run's SQL names the memory dataset), and
-the web view marks them "flawed control". `run_sql` now refuses any table
+(`control_read_memory`), and the web view marks them "flawed control". Only
+a query of the memory dataset that returned rows counts as a read. A query
+that failed or that the guard refused read nothing; it is listed as an
+attempt and does not flag the pair. `run_sql` now refuses any table
 outside TheLook's dataset; the dry run lists every table a query reads. A
 re-run of the six questions under that rule (`analyst_agent.py
 --rerun-controls`) stopped after Maya's: that session
@@ -101,11 +104,13 @@ flowchart LR
   preference or scope, the agent calls `save_preference`, which writes ADK
   `user:` state.
 - **After each day.** [`memory_consolidation.py`](memory_consolidation.py)
-  runs the day's user messages through `AI.GENERATE` with a typed
-  `output_schema` (entities with a type; facts as subject, predicate and
-  object), and through `AI.EMBED`. The results go to
-  `analyst_memory_items` and `analyst_task_embeddings`, keyed to the span of
-  each message. A message whose row failed is tried again the next night.
+  runs user messages through `AI.GENERATE` with a typed `output_schema`
+  (entities with a type; facts as subject, predicate and object), and
+  through `AI.EMBED`. Each night covers every session so far, but sends a
+  message to the models only until it has a successful row: so it sends the
+  day's new messages, and any that failed before, which are tried again the
+  next night. The results go to `analyst_memory_items` and
+  `analyst_task_embeddings`, keyed to the span of each message.
 - **What recall returns.** Saved preferences (latest version), facts and
   entities, similar past tasks ranked by embedding with the SQL that
   answered them (a `reuse:` line), and tool calls that failed before. Every
@@ -142,7 +147,10 @@ Use a scratch dataset. The recorded run cost about $2.35; see
    ```
 
    `--memory-tables` adds the extracted facts and entities and ranks similar
-   tasks by embedding, the same read `recall_memory` does.
+   tasks by embedding, the same read `recall_memory` does. Readers never
+   change a table. An embeddings table written before its `status` column
+   existed, like the recorded run's, is read as it is: a non-empty
+   embedding counts as successful. Only the week's runner adds the column.
 
 3. **Export it for the web view and open it.**
 

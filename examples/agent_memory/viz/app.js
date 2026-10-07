@@ -504,6 +504,8 @@
       [plural(side.total_tokens, 'token'), null],
     ];
     const reads = side.memory_table_reads || [];
+    const attempts = side.memory_table_attempts || [];
+    const purposes = (queries) => `${queries.map((q) => q.purpose || 'no purpose given').slice(0, 3).join('; ')}${queries.length > 3 ? '; …' : ''}`;
     const recalled = (side.recalled_sessions || []).map((sid) =>
       el('button', { type: 'button', class: 'chip', text: sessionLabel(sid), onclick: () => openSession(sid) }),
     );
@@ -521,15 +523,24 @@
         ...stats.map(([value, note]) => el('span', {}, el('strong', { text: value }), note ? ` (${note})` : '')),
       ),
       withMemory && recalled.length ? el('p', { class: 'recalled' }, 'Recalled from', ...recalled) : null,
+      // A query of the memory tables counts as a read only if it returned
+      // rows; one that failed or was refused is noted, not flagged.
       reads.length
         ? el(
           'p',
           { class: 'flag' },
           el('strong', { text: 'Not memory-free. ' }),
-          `${plural(reads.length, 'SQL query')} read the memory tables (${reads.map((r) => r.purpose || 'no purpose given').slice(0, 3).join('; ')}${reads.length > 3 ? '; …' : ''}). `
+          `${plural(reads.length, 'SQL query')} read the memory tables (${purposes(reads)})${attempts.length ? `; ${attempts.length} more failed` : ''}. `
             + 'This run had no memory tools, but run_sql could still read the dataset that holds memory. run_sql now reads only TheLook.',
         )
-        : null,
+        : attempts.length
+          ? el(
+            'p',
+            { class: 'attempts' },
+            el('strong', { text: 'No memory read. ' }),
+            `${plural(attempts.length, 'SQL query')} named the memory tables (${purposes(attempts)}), and none returned rows: ${attempts[0].error || 'the query failed'}`,
+          )
+          : null,
       side.answer ? markdown(side.answer) : el('p', { class: 'hint', text: 'The turn ended without a text answer.' }),
       ].filter(Boolean),
     );
