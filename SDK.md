@@ -1132,7 +1132,7 @@ Compare your golden dataset against production traffic to understand coverage ga
 
 ```python
 drift_report = client.drift_detection(
-    golden_dataset="my_project.golden.qa_pairs_v3",
+    golden_dataset="qa_pairs_v3",  # a table in the client's dataset
     filters=TraceFilter(
         agent_id="support_bot",
         start_time=datetime.now() - timedelta(days=30),

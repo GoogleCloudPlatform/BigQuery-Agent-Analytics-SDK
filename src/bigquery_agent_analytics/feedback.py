@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any, Optional
+import unicodedata
 
 from pydantic import BaseModel
 from pydantic import Field
@@ -398,6 +399,36 @@ def _sanitize_categories(categories_str: str) -> str:
   return categories_str.replace("\\", "\\\\").replace("'", "''")
 
 
+# Unicode categories a BigQuery table name may use besides letters (L),
+# marks (M) and numbers (N): connectors such as ``_``, dashes and spaces.
+_TABLE_NAME_EXTRA_CATEGORIES = frozenset({"Pc", "Pd", "Zs"})
+
+
+def _validate_golden_table(golden_table: Any) -> None:
+  """Raises ``ValueError`` unless *golden_table* is one BigQuery table name.
+
+  The name is formatted into ``FROM `{project}.{dataset}.{golden_table}```,
+  and the BigQuery Remote Function's ``drift`` operation passes it straight
+  from the caller's params. Any character outside BigQuery's table-name set
+  (a backtick that closes the quoted path, a dot that names another
+  dataset, a backslash, a line break) is refused before a query is built.
+  """
+  if (
+      not isinstance(golden_table, str)
+      or not golden_table
+      or any(
+          unicodedata.category(char)[0] not in "LMN"
+          and unicodedata.category(char) not in _TABLE_NAME_EXTRA_CATEGORIES
+          for char in golden_table
+      )
+  ):
+    raise ValueError(
+        "golden_dataset must be one table name in the client's dataset,"
+        " using only letters, marks, numbers, '_', '-' or spaces; got"
+        f" {golden_table!r}"
+    )
+
+
 async def compute_drift(
     bq_client: Any,
     project_id: str,
@@ -415,14 +446,20 @@ async def compute_drift(
       project_id: GCP project ID.
       dataset_id: BigQuery dataset.
       table_id: Events table.
-      golden_table: Golden questions table.
+      golden_table: Golden questions table: one table name in
+          *dataset_id*.
       where_clause: SQL WHERE clause for filtering.
       query_params: BigQuery query parameters.
       embedding_model: Optional model for semantic comparison.
 
   Returns:
       DriftReport with coverage metrics.
+
+  Raises:
+      ValueError: If *golden_table* is not one BigQuery table name.
   """
+  _validate_golden_table(golden_table)
+
   from google.cloud import bigquery
 
   loop = asyncio.get_event_loop()
