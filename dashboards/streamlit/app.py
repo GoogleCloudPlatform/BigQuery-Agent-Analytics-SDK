@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import dataclasses
+import datetime as dt
 import os
 from pathlib import Path
 import sys
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from dotenv import load_dotenv
 
@@ -76,6 +77,9 @@ from queries import build_trace_detail_sql
 from queries import fetch
 from queries import load_filter_options
 
+if TYPE_CHECKING:
+  from bqca_models import BqcaFilterState
+
 APP_TITLE = "BigQuery Agent Analytics"
 
 _FILTER_WIDGETS = (
@@ -84,6 +88,34 @@ _FILTER_WIDGETS = (
     ("flt_event_type", "event_type"),
     ("flt_session_id", "session_id"),
 )
+
+# The two dashboard surfaces. ADK Agents is the default; BQCA Prompt & Response
+# Logging is opt-in through the sidebar, ``?profile=bqca`` or
+# ``BQAA_PROFILE=bqca``.
+ADK_SURFACE = "ADK Agents"
+BQCA_SURFACE = "BQCA Prompt & Response Logging"
+SURFACES = (ADK_SURFACE, BQCA_SURFACE)
+BQCA_PROFILE = "bqca"
+BQCA_TABS = (
+    "Overview & Latency",
+    "Data Agents & Personas",
+    "Prompt, Response & SQL Explorer",
+    "Tokens & Embedding Suggestions",
+    "Error Attribution",
+)
+
+# BQCA filter field -> the key of the sidebar widget that edits it. The
+# widget keys hold the in-progress edit; ``_bqca_applied`` holds what was last
+# applied, mirroring how the ADK filters survive a widget re-creation.
+_BQCA_WIDGET_KEYS = {
+    "data_agent_ids": "bqca_flt_data_agent",
+    "personas": "bqca_flt_persona",
+    "event_types": "bqca_flt_event_type",
+    "fast_path_mode": "bqca_flt_fast_path",
+    "session_search": "bqca_flt_session_search",
+    "prompt_search": "bqca_flt_prompt_search",
+    "errors_only": "bqca_flt_errors_only",
+}
 
 
 def _seed_options(
@@ -750,10 +782,932 @@ def footer(ctx: Context) -> None:
   )
 
 
+# ------------------------------------------------------------------ #
+# BQCA Prompt & Response Logging surface                               #
+# ------------------------------------------------------------------ #
+# Everything from here to ``main`` runs only when the BQCA surface is
+# selected. The bqca_* modules are imported lazily (``_bqca_modules``), so the
+# ADK surface, and every test that imports this module to exercise it, never
+# loads the BQCA code.
+
+
+def _bqca_modules() -> tuple[Any, Any, Any]:
+  """Imports the BQCA modules on first use.
+
+  Returns:
+    A tuple of ``(bqca_models, bqca_queries, bqca_charts)``.
+  """
+  # pylint: disable=g-import-not-at-top
+  import bqca_charts
+  import bqca_models
+  import bqca_queries
+
+  # pylint: enable=g-import-not-at-top
+  return bqca_models, bqca_queries, bqca_charts
+
+
+def _query_param(name: str) -> str | None:
+  """Reads one URL query parameter, or None when unset or not a string."""
+  try:
+    value = st.query_params.get(name)
+  except Exception:  # pylint: disable=broad-exception-caught
+    return None
+  return value if isinstance(value, str) else None
+
+
+def _requested_profile() -> str:
+  """Returns the profile the URL or the environment asks for, lowercased.
+
+  ``?profile=`` wins over ``BQAA_PROFILE``, so a shared link opens the surface
+  it was copied from whatever the server's default is.
+
+  Returns:
+    The requested profile, or an empty string when none was requested.
+  """
+  for candidate in (_query_param("profile"), os.environ.get("BQAA_PROFILE")):
+    if isinstance(candidate, str) and candidate.strip():
+      return candidate.strip().lower()
+  return ""
+
+
+def sidebar_surface() -> str:
+  """Renders the top-of-sidebar dashboard surface selector.
+
+  The URL or environment only picks the *initial* surface; the radio is the
+  source of truth after that. ``index`` depends on inputs that cannot change
+  within a session, so the widget keeps its identity across reruns.
+
+  Returns:
+    ``ADK_SURFACE`` or ``BQCA_SURFACE``.
+  """
+  index = (
+      SURFACES.index(BQCA_SURFACE)
+      if _requested_profile() == BQCA_PROFILE
+      else 0
+  )
+  return st.sidebar.radio(
+      "Dashboard Surface",
+      options=list(SURFACES),
+      index=index,
+      key="_dashboard_surface",
+      help=(
+          "ADK Agents: dashboards for ADK agent telemetry. BQCA Prompt &"
+          " Response Logging: dashboards for Conversational Analytics prompt"
+          " and response logs. Open straight into BQCA with `?profile=bqca`"
+          " or `BQAA_PROFILE=bqca`."
+      ),
+  )
+
+
+def sidebar_connection_bqca() -> tuple[TableRefs | None, int]:
+  """Resolves the BQCA logs table from the environment, then the form.
+
+  The same contract as ``sidebar_connection``: the environment seeds the
+  fields, the form overrides them, and Project ID is locked when
+  ``BQ_PROJECT_ID`` is set. Two BQCA differences: the table comes from
+  ``BQCA_TABLE_ID``, then the shared ``BQ_TABLE_ID``, then
+  ``bqca_prompt_response_logs`` (so a ``.env`` that points the ADK surface at
+  ``agent_events`` does not have to be edited), and there is no typed-view
+  prefix because the BQCA panels read the raw table.
+
+  Returns:
+    A tuple containing validated TableRefs (or None if invalid) and the
+    selected byte cap limit.
+  """
+  bqca_models, _, _ = _bqca_modules()
+  env_project = os.environ.get("BQ_PROJECT_ID", "")
+  env_dataset = os.environ.get("BQ_DATASET_ID", "")
+  env_table = (
+      os.environ.get("BQCA_TABLE_ID", "")
+      or os.environ.get("BQ_TABLE_ID", "")
+      or bqca_models.BQCA_DEFAULT_TABLE_ID
+  )
+
+  st.sidebar.subheader("BigQuery source")
+
+  with st.sidebar.form("bqca_connection"):
+    project = st.text_input(
+        "Project ID",
+        value=env_project,
+        disabled=bool(env_project),
+        key="bqca_project",
+    )
+    dataset = st.text_input("Dataset ID", value=env_dataset, key="bqca_dataset")
+    table = st.text_input(
+        "Events table",
+        value=env_table,
+        key="bqca_table",
+        help=(
+            "The BQCA prompt and response logs table"
+            f" (`{bqca_models.BQCA_DEFAULT_TABLE_ID}` by default)."
+        ),
+    )
+    cap_label = st.selectbox(
+        "Per-query scan cap",
+        options=list(BYTES_CAPS),
+        index=list(BYTES_CAPS).index(DEFAULT_BYTES_CAP),
+        key="bqca_scan_cap",
+        help=(
+            "Sets `maximum_bytes_billed` on every job. BigQuery refuses a"
+            " query that would exceed it rather than billing for it."
+        ),
+    )
+    connected = st.form_submit_button("Connect", width="stretch")
+    if connected:
+      st.session_state["_bqca_connect_attempted"] = True
+
+  if env_project:
+    project = env_project
+  refs, errors = validate_refs(project, dataset, table, "")
+  if st.session_state.get("_bqca_connect_attempted") or bool(dataset):
+    for message in errors:
+      st.sidebar.error(message)
+  return refs, BYTES_CAPS[cap_label]
+
+
+def sidebar_window_bqca(
+    state: BqcaFilterState,
+) -> tuple[BqcaFilterState, Window]:
+  """Renders the BQCA time range picker in the sidebar.
+
+  Presets resolve through ``BqcaFilterState.window`` (snapped, so reruns hit
+  the result cache). "Custom range" takes inclusive UTC calendar days.
+
+  Args:
+    state: The filter state to complete with the chosen window.
+
+  Returns:
+    The state carrying the chosen window, and that window resolved.
+  """
+  bqca_models, _, _ = _bqca_modules()
+  windows = bqca_models.BQCA_TIME_WINDOWS
+  token_for = {label: token for token, (label, _) in windows.items()}
+  labels = list(token_for)
+  st.sidebar.subheader("Time range")
+  label = st.sidebar.selectbox(
+      "Range",
+      options=labels,
+      index=labels.index(windows[bqca_models.DEFAULT_TIME_WINDOW][0]),
+      label_visibility="collapsed",
+      key="bqca_range",
+  )
+  token = token_for[label]
+  start = end = None
+  if token == bqca_models.CUSTOM_WINDOW:
+    today = dt.datetime.now(dt.timezone.utc).date()
+    picked = st.sidebar.date_input(
+        "Custom range (UTC days, inclusive)",
+        value=(today - dt.timedelta(days=6), today),
+        key="bqca_custom_range",
+    )
+    days = tuple(picked) if isinstance(picked, (list, tuple)) else (picked,)
+    if len(days) != 2:
+      st.sidebar.info("Pick an end date to apply the custom range.")
+      st.stop()
+    utc = dt.timezone.utc
+    start = dt.datetime.combine(days[0], dt.time.min, tzinfo=utc)
+    # The picker's end day is inclusive; the window's end is exclusive.
+    end = dt.datetime.combine(days[1], dt.time.min, tzinfo=utc) + dt.timedelta(
+        days=1
+    )
+  state = dataclasses.replace(
+      state, time_window=token, custom_start=start, custom_end=end
+  )
+  try:
+    window = state.window()
+  except ValueError as exc:
+    st.sidebar.error(str(exc))
+    st.stop()
+  st.sidebar.caption(
+      f"{window.start:%Y-%m-%d %H:%M} → {window.end:%Y-%m-%d %H:%M} UTC"
+      f" · {window.bucket.lower()} buckets"
+  )
+  return state, window
+
+
+def _bqca_default_applied(bqca_models: Any) -> dict[str, Any]:
+  """Returns the applied BQCA filters when nothing has been applied yet."""
+  return {
+      "data_agent_ids": (),
+      "personas": (),
+      "event_types": (),
+      "fast_path_mode": bqca_models.FAST_PATH_ALL,
+      "session_search": "",
+      "prompt_search": "",
+      "errors_only": False,
+  }
+
+
+def reset_bqca_filters() -> None:
+  """Resets the BQCA applied and widget filter states to their defaults."""
+  st.session_state.pop("_bqca_applied", None)
+  st.session_state.pop("_bqca_filter_options", None)
+  st.session_state.pop("_bqca_selected_turn", None)
+  for key in _BQCA_WIDGET_KEYS.values():
+    st.session_state.pop(key, None)
+
+
+def _commit_bqca_filters() -> None:
+  """Promotes the submitted BQCA widget values into ``_bqca_applied``.
+
+  Runs as the Apply button's on_click callback, before the rerun.
+  """
+  keys = _BQCA_WIDGET_KEYS
+  state = st.session_state
+  state["_bqca_applied"] = {
+      "data_agent_ids": tuple(_pending(keys["data_agent_ids"])),
+      "personas": tuple(_pending(keys["personas"])),
+      "event_types": tuple(_pending(keys["event_types"])),
+      "fast_path_mode": str(state.get(keys["fast_path_mode"], "")),
+      "session_search": str(state.get(keys["session_search"], "")).strip(),
+      "prompt_search": str(state.get(keys["prompt_search"], "")).strip(),
+      "errors_only": bool(state.get(keys["errors_only"], False)),
+  }
+
+
+def sidebar_filters_bqca(
+    options: dict[str, list[str]], state: BqcaFilterState
+) -> BqcaFilterState:
+  """Renders the BQCA filter form in the sidebar.
+
+  A form, so a multi-select that is still being built does not fire a query
+  per keystroke: every panel re-queries once, on Apply filters.
+
+  Args:
+    options: Map of ``data_agent_id`` / ``persona`` / ``event_type`` to the
+      values seen in the window.
+    state: The ``BqcaFilterState`` carrying the connection and time window.
+
+  Returns:
+    ``state`` carrying the last-applied filters.
+  """
+  bqca_models, _, _ = _bqca_modules()
+  keys = _BQCA_WIDGET_KEYS
+  st.sidebar.subheader("Filters")
+  applied = st.session_state.setdefault(
+      "_bqca_applied", _bqca_default_applied(bqca_models)
+  )
+  for field, key in keys.items():
+    if key not in st.session_state:
+      value = applied[field]
+      st.session_state[key] = list(value) if isinstance(value, tuple) else value
+
+  with st.sidebar.form("bqca_filters"):
+    st.multiselect(
+        "Data agent",
+        options=_seed_options(
+            keys["data_agent_ids"],
+            options.get("data_agent_id", []),
+            applied["data_agent_ids"],
+        ),
+        key=keys["data_agent_ids"],
+        accept_new_options=True,
+        help="The data agent that served the turn (its `data-agent-id` label).",
+    )
+    st.multiselect(
+        "Persona",
+        options=_seed_options(
+            keys["personas"],
+            options.get("persona", []),
+            applied["personas"],
+        ),
+        key=keys["personas"],
+        accept_new_options=True,
+        help=(
+            "The `persona` custom label, else the user's handle, else the"
+            " data agent."
+        ),
+    )
+    st.multiselect(
+        "Event type",
+        options=list(bqca_models.BQCA_ALLOWED_EVENT_TYPES),
+        key=keys["event_types"],
+        help=(
+            "Narrows Error Attribution and the turn timeline. Turn-level"
+            " panels always count whole turns, so picking one event type"
+            " there would zero them out."
+        ),
+    )
+    st.radio(
+        "Fast path",
+        options=list(bqca_models.FAST_PATH_MODES),
+        key=keys["fast_path_mode"],
+        help=(
+            "Fast-path turns answer from a saved query: no LLM call and no"
+            " tokens."
+        ),
+    )
+    st.text_input(
+        "Session / conversation",
+        key=keys["session_search"],
+        help="Case-insensitive substring of a session ID or conversation ID.",
+    )
+    st.text_input(
+        "Prompt contains",
+        key=keys["prompt_search"],
+        help=(
+            "Case-insensitive substring of the user's prompt. Applies to the"
+            " Prompt, Response & SQL Explorer."
+        ),
+    )
+    st.toggle(
+        "Errors only",
+        key=keys["errors_only"],
+        help="Keep only turns that contain at least one error event.",
+    )
+    st.caption("An empty selection means all values.")
+    st.form_submit_button(
+        "Apply filters", width="stretch", on_click=_commit_bqca_filters
+    )
+
+  applied = st.session_state["_bqca_applied"]
+  mode = applied["fast_path_mode"]
+  return dataclasses.replace(
+      state,
+      data_agent_ids=tuple(applied["data_agent_ids"]),
+      personas=tuple(applied["personas"]),
+      event_types=tuple(applied["event_types"]),
+      fast_path_mode=(
+          mode
+          if mode in bqca_models.FAST_PATH_MODES
+          else bqca_models.FAST_PATH_ALL
+      ),
+      session_search=str(applied["session_search"]),
+      prompt_search=str(applied["prompt_search"]),
+      errors_only=bool(applied["errors_only"]),
+  )
+
+
+def _bqca_count(value: Any) -> str:
+  """Formats a count, with a dash for a missing value."""
+  return "—" if pd.isna(value) else f"{int(value):,}"
+
+
+def _bqca_rate(value: Any) -> str:
+  """Formats a 0..1 fraction as a percentage, with a dash when undefined."""
+  return "—" if pd.isna(value) else f"{float(value) * 100:.1f}%"
+
+
+def _bqca_ms(value: Any) -> str:
+  """Formats a latency in milliseconds, with a dash when undefined."""
+  return "—" if pd.isna(value) else f"{float(value):,.0f} ms"
+
+
+def _code(value: Any) -> str:
+  """Wraps a value in a markdown code span, neutralizing backticks."""
+  return f"`{str(value).replace('`', chr(39))}`"
+
+
+def _fig_or_none(fig: Any) -> Any:
+  """Returns ``fig`` when it draws something, else None (table view only)."""
+  return fig if fig.data else None
+
+
+_BQCA_KPIS = (
+    (
+        "Total Turns",
+        "A turn is one invocation (`invocation_id`) in scope, completed or not.",
+    ),
+    (
+        "Turn Error Rate",
+        "Share of turns with at least one error event: status ERROR, an error"
+        " message, or an event type ending in _ERROR.",
+    ),
+    ("P50 Turn Latency", "Median INVOCATION_COMPLETED latency."),
+    ("P95 Turn Latency", "95th-percentile INVOCATION_COMPLETED latency."),
+    ("Total Tokens", "Summed over LLM_RESPONSE events."),
+    ("Thinking Tokens", "Reasoning tokens, summed over LLM_RESPONSE events."),
+    ("Cached Tokens", "Cached prompt tokens, summed over LLM_RESPONSE events."),
+    (
+        "Fast-Path Rate",
+        "Share of completed turns answered from a saved query"
+        " (`fast_path = true`), with no LLM call.",
+    ),
+    (
+        "Embedding Suggestion Coverage",
+        "Share of turns that received at least one EMBEDDING_SUGGESTION with"
+        " suggested columns.",
+    ),
+)
+
+
+def _bqca_completion_note(kpi: Any) -> str:
+  """Says how many turns completed, and what an incomplete turn is left out of.
+
+  Args:
+    kpi: The ``BqcaKpiSummary`` of the KPI strip.
+
+  Returns:
+    One caption line: all turns completed, or how many are incomplete.
+  """
+  if not kpi.incomplete_turns:
+    return (
+        f"All {kpi.total_turns:,} turns completed (reached"
+        " INVOCATION_COMPLETED)."
+    )
+  return (
+      f"{kpi.completed_turns:,} of {kpi.total_turns:,} turns completed;"
+      f" {kpi.incomplete_turns:,} incomplete (no INVOCATION_COMPLETED event:"
+      " still running, failed before completing, or cut off by the time"
+      " range). Latency percentiles and the fast-path rate cover completed"
+      " turns only."
+  )
+
+
+def row_bqca_kpis(state: BqcaFilterState, ctx: Context) -> None:
+  """Renders the KPI header strip (panel P1) above the BQCA tabs.
+
+  Args:
+    state: Active BQCA filters.
+    ctx: Active dashboard context.
+  """
+  bqca_models, bqca_queries, _ = _bqca_modules()
+  result = bqca_queries.fetch_panel("kpis", state, ctx)
+  kpi = bqca_models.BqcaKpiSummary.from_frame(result.df)
+  if kpi is None:
+    values = ["—"] * len(_BQCA_KPIS)
+  else:
+    row = result.df.iloc[0]
+    # A rate over an empty denominator is NULL in SQL (no completed turn, no
+    # turn at all): show a dash, not a confident 0%.
+    fast_path = (
+        None if pd.isna(row.get("fast_path_rate")) else kpi.fast_path_rate
+    )
+    embedding = (
+        None
+        if pd.isna(row.get("embedding_coverage"))
+        else kpi.embedding_coverage
+    )
+    values = [
+        _bqca_count(kpi.total_turns),
+        _bqca_rate(kpi.turn_error_rate),
+        _bqca_ms(kpi.p50_turn_latency_ms),
+        _bqca_ms(kpi.p95_turn_latency_ms),
+        _bqca_count(kpi.total_tokens),
+        _bqca_count(kpi.thoughts_tokens),
+        _bqca_count(kpi.cached_tokens),
+        _bqca_rate(fast_path),
+        _bqca_rate(embedding),
+    ]
+  columns = [*st.columns(4), *st.columns(5)]
+  for column, (label, help_text), value in zip(columns, _BQCA_KPIS, values):
+    _metric(column, label, value, help_text)
+  if kpi is not None and kpi.total_turns:
+    st.caption(_bqca_completion_note(kpi))
+
+
+def _latency_view(
+    df: pd.DataFrame, columns: Sequence[str], *, overall: bool
+) -> pd.DataFrame:
+  """Slices the latency frame into the rows and columns one chart draws.
+
+  Args:
+    df: The ``latency`` panel's result.
+    columns: Columns to keep (those present).
+    overall: True for the rows that cover every path, False for the
+      per-path rows.
+
+  Returns:
+    The sliced frame without rows that carry no latency at all.
+  """
+  _, _, bqca_charts = _bqca_modules()
+  if df.empty or "fast_path_label" not in df.columns:
+    return df.iloc[0:0]
+  is_overall = df["fast_path_label"] == bqca_charts.ALL_PATHS_LABEL
+  rows = df[is_overall if overall else ~is_overall]
+  keep = [column for column in columns if column in rows.columns]
+  metrics = [column for column in keep if column.endswith("_ms")]
+  return rows[keep].dropna(how="all", subset=metrics).reset_index(drop=True)
+
+
+def row_bqca_overview(state: BqcaFilterState, ctx: Context) -> None:
+  """Renders the Overview & Latency tab (panels P2 and P3).
+
+  Args:
+    state: Active BQCA filters.
+    ctx: Active dashboard context.
+  """
+  _, bqca_queries, bqca_charts = _bqca_modules()
+  volume = bqca_queries.fetch_panel("turn_volume", state, ctx)
+  latency = bqca_queries.fetch_panel("latency", state, ctx)
+
+  left, right = st.columns(2)
+  with left:
+    panel(
+        "Turn volume by path",
+        _fig_or_none(bqca_charts.turn_volume_chart(volume.df, ctx)),
+        volume.df,
+        key="bqca_turn_volume",
+    )
+    st.caption(
+        "A turn is one invocation. The line counts turns with at least one"
+        " error event."
+    )
+  with right:
+    percentiles = _latency_view(
+        latency.df,
+        ("bucket", "turn_p50_ms", "turn_p95_ms", "turn_p99_ms"),
+        overall=True,
+    )
+    panel(
+        "Turn latency percentiles (ms)",
+        _fig_or_none(bqca_charts.latency_percentiles_chart(latency.df, ctx)),
+        percentiles,
+        empty="No completed turns in this range.",
+        key="bqca_latency_percentiles",
+    )
+
+  left, right = st.columns(2)
+  with left:
+    by_path = _latency_view(
+        latency.df,
+        ("bucket", "fast_path_label", "turn_p50_ms", "turn_p95_ms"),
+        overall=False,
+    )
+    panel(
+        "Fast path vs standard NL2SQL: turn latency (ms)",
+        _fig_or_none(bqca_charts.path_latency_chart(latency.df, ctx)),
+        by_path,
+        empty="No completed turns in this range.",
+        key="bqca_path_latency",
+    )
+  with right:
+    llm = _latency_view(
+        latency.df,
+        ("bucket", "llm_p50_ms", "llm_p95_ms", "tfft_p50_ms", "tfft_p95_ms"),
+        overall=True,
+    )
+    panel(
+        "LLM latency and time to first token (ms)",
+        _fig_or_none(bqca_charts.llm_latency_chart(latency.df, ctx)),
+        llm,
+        empty="No LLM responses in this range.",
+        key="bqca_llm_latency",
+    )
+    st.caption("Fast-path turns make no LLM call, so they have no LLM latency.")
+
+
+def row_bqca_agents(state: BqcaFilterState, ctx: Context) -> None:
+  """Renders the Data Agents & Personas tab (panels P5 and P6).
+
+  Args:
+    state: Active BQCA filters.
+    ctx: Active dashboard context.
+  """
+  _, bqca_queries, bqca_charts = _bqca_modules()
+  agents = bqca_queries.fetch_panel("data_agents", state, ctx)
+  personas = bqca_queries.fetch_panel("personas", state, ctx)
+
+  left, right = st.columns(2)
+  with left:
+    panel(
+        "Data agents: turns",
+        _fig_or_none(bqca_charts.data_agent_leaderboard_chart(agents.df, ctx)),
+        agents.df,
+        empty="No data-agent turns in this range.",
+        key="bqca_data_agents",
+    )
+    st.caption("Turns that carry no data-agent id are grouped as unattributed.")
+  with right:
+    panel(
+        "Personas: turns",
+        _fig_or_none(bqca_charts.persona_breakdown_chart(personas.df, ctx)),
+        personas.df,
+        empty="No persona turns in this range.",
+        key="bqca_personas",
+    )
+    st.caption(
+        "Persona is the persona custom label, else the user's handle, else"
+        " the data agent."
+    )
+
+
+_BQCA_EXPLORER_COLUMNS = (
+    "timestamp",
+    "invocation_id",
+    "data_agent_id",
+    "persona",
+    "status",
+    "fast_path",
+    "turn_latency_ms",
+    "total_tokens",
+    "user_prompt",
+)
+
+
+def _bqca_turn_label(turn: Any) -> str:
+  """Describes a turn in one line for the explorer's picker.
+
+  The prompt and data agent are customer-logged text in a widget that can
+  render Markdown, so the label is made inert like the other logged text.
+  """
+  bqca_models, _, _ = _bqca_modules()
+  prompt = " ".join((turn.user_prompt or "").split())
+  if len(prompt) > 60:
+    prompt = f"{prompt[:57]}..."
+  stamp = f"{turn.timestamp:%Y-%m-%d %H:%M:%S}"
+  agent = turn.data_agent_id or "unattributed"
+  return bqca_models.inert_markdown(
+      f"{stamp} · {agent} · {prompt or '(no prompt logged)'}"
+  )
+
+
+def _render_bqca_turn(turn: Any, state: BqcaFilterState, ctx: Context) -> None:
+  """Renders one turn: prompt, rendered response, SQL, errors and timeline.
+
+  Args:
+    turn: The selected ``BqcaTurnRow``.
+    state: Active BQCA filters.
+    ctx: Active dashboard context.
+  """
+  bqca_models, bqca_queries, _ = _bqca_modules()
+  cols = st.columns(5)
+  _metric(cols[0], "Status", turn.status)
+  _metric(cols[1], "Path", "Fast path" if turn.fast_path else "Standard NL2SQL")
+  _metric(cols[2], "Turn latency", _bqca_ms(turn.turn_latency_ms))
+  _metric(cols[3], "Tokens", _bqca_count(turn.total_tokens))
+  _metric(cols[4], "Thinking tokens", _bqca_count(turn.thoughts_tokens))
+  st.caption(
+      f"Data agent {_code(turn.data_agent_id or 'unattributed')} · persona"
+      f" {_code(turn.persona)} · conversation"
+      f" {_code(turn.conversation_id or '—')} · session"
+      f" {_code(turn.session_id or '—')} · invocation"
+      f" {_code(turn.invocation_id)}"
+  )
+
+  with st.expander("Prompt", expanded=True):
+    st.text(turn.user_prompt or "(no prompt logged for this turn)")
+  with st.expander("Response", expanded=True):
+    # Markdown only: HTML in a logged answer is never rendered, and Markdown
+    # images are turned into links so a logged answer cannot make the
+    # viewer's browser fetch a remote image.
+    st.markdown(
+        bqca_models.inert_markdown(turn.agent_response)
+        or "_(no response logged for this turn)_"
+    )
+    if (turn.agent_response_count or 0) > 1:
+      st.caption(
+          f"This turn logged {turn.agent_response_count} AGENT_RESPONSE"
+          " events. The last one, the answer that was served, is shown; the"
+          " earlier ones were superseded."
+      )
+  if turn.extracted_sql:
+    st.markdown("**SQL in the response**")
+    st.code(turn.extracted_sql, language="sql")
+  else:
+    st.caption("No SQL block was found in this response.")
+  if turn.error_message:
+    # ``st.error`` renders its body as Markdown, like the response above.
+    st.error(bqca_models.inert_markdown(turn.error_message))
+
+  timeline = bqca_queries.fetch_panel(
+      "timeline", state, ctx, invocation_id=turn.invocation_id
+  )
+  panel(
+      "Turn timeline",
+      None,
+      timeline.df,
+      empty="No events for this turn in the range.",
+  )
+
+
+def row_bqca_explorer(state: BqcaFilterState, ctx: Context) -> None:
+  """Renders the Prompt, Response & SQL Explorer tab (panels P8 and P9).
+
+  Args:
+    state: Active BQCA filters.
+    ctx: Active dashboard context.
+  """
+  bqca_models, bqca_queries, _ = _bqca_modules()
+  turns = bqca_queries.fetch_panel("turns", state, ctx)
+  shown = (
+      turns.df[[c for c in _BQCA_EXPLORER_COLUMNS if c in turns.df.columns]]
+      if not turns.df.empty
+      else turns.df
+  )
+  panel(
+      f"Turns (most recent {bqca_models.TURN_EXPLORER_LIMIT})",
+      None,
+      shown,
+      empty="No turns match the filters in this range.",
+  )
+  st.caption(
+      "This tab reads each turn's full prompt and response, so it scans more"
+      " than the others on a wide range. Prompt search applies here only."
+  )
+  rows = bqca_models.BqcaTurnRow.from_frame(turns.df)
+  if not rows:
+    return
+
+  st.divider()
+  st.markdown("**Turn detail**")
+  labels = {row.invocation_id: _bqca_turn_label(row) for row in rows}
+  ids = list(labels)
+  # `_bqca_selected_turn` must stay a non-widget key (not passed as key=...),
+  # so a dynamically computed index cannot conflict with the widget's own
+  # state when the options change between queries.
+  previous = st.session_state.get("_bqca_selected_turn")
+  chosen = st.selectbox(
+      "Turn",
+      options=ids,
+      index=ids.index(previous) if previous in ids else 0,
+      format_func=lambda invocation_id: labels[invocation_id],
+  )
+  st.session_state["_bqca_selected_turn"] = chosen
+  _render_bqca_turn(
+      next(row for row in rows if row.invocation_id == chosen), state, ctx
+  )
+
+
+def row_bqca_tokens(state: BqcaFilterState, ctx: Context) -> None:
+  """Renders the Tokens & Embedding Suggestions tab (panels P4 and P7).
+
+  Args:
+    state: Active BQCA filters.
+    ctx: Active dashboard context.
+  """
+  _, bqca_queries, bqca_charts = _bqca_modules()
+  usage = bqca_queries.fetch_panel("token_usage", state, ctx)
+  embedding = bqca_queries.fetch_panel("embedding", state, ctx)
+
+  left, right = st.columns(2)
+  with left:
+    panel(
+        "Token usage over time",
+        _fig_or_none(bqca_charts.token_breakdown_chart(usage.df, ctx)),
+        usage.df,
+        empty="No LLM responses in this range.",
+        key="bqca_tokens",
+    )
+    st.caption(
+        "Input (uncached) is prompt tokens minus cached tokens, so the"
+        " segments add up to the real volume. Table view lists the raw"
+        " columns."
+    )
+  with right:
+    panel(
+        "Tokens by model",
+        _fig_or_none(bqca_charts.tokens_by_model_chart(usage.df, ctx)),
+        usage.df,
+        empty="No LLM responses in this range.",
+        key="bqca_tokens_by_model",
+    )
+
+  left, right = st.columns(2)
+  with left:
+    panel(
+        "Embedding suggestions by reason",
+        _fig_or_none(
+            bqca_charts.embedding_suggestions_chart(embedding.df, ctx)
+        ),
+        embedding.df,
+        empty="No embedding suggestions in this range.",
+        key="bqca_embedding",
+    )
+    st.caption(
+        "Each suggestion is one logged EMBEDDING_SUGGESTION event, tagged with"
+        " the reason the agent made it. Table view lists the suggested"
+        " columns per time bucket and reason."
+    )
+  with right:
+    panel(
+        "Columns suggested per suggestion",
+        _fig_or_none(bqca_charts.suggested_columns_chart(embedding.df, ctx)),
+        embedding.df,
+        empty="No embedding suggestions in this range.",
+        key="bqca_suggested_columns",
+    )
+
+
+def row_bqca_errors(state: BqcaFilterState, ctx: Context) -> None:
+  """Renders the Error Attribution tab (panel P10).
+
+  Args:
+    state: Active BQCA filters.
+    ctx: Active dashboard context.
+  """
+  bqca_models, bqca_queries, bqca_charts = _bqca_modules()
+  errors = bqca_queries.fetch_panel("errors", state, ctx)
+  totals = errors.df
+  if not totals.empty and {"data_agent_id", "event_type"} <= set(
+      totals.columns
+  ):
+    totals = (
+        totals.groupby(["data_agent_id", "event_type"], as_index=False)[
+            "errors"
+        ]
+        .sum()
+        .sort_values("errors", ascending=False)
+    )
+  panel(
+      "Errors by data agent and event type",
+      _fig_or_none(bqca_charts.error_attribution_chart(errors.df, ctx)),
+      totals,
+      empty="No errors in this range.",
+      key="bqca_errors",
+  )
+  panel(
+      f"Error groups (top {bqca_models.ERROR_ATTRIBUTION_LIMIT})",
+      None,
+      errors.df,
+      empty="No errors in this range.",
+  )
+  st.caption(
+      "An event counts as an error when its status is ERROR, it carries an"
+      " error message, or its event type ends in _ERROR. Groups share an"
+      " event type, data agent, persona and message (first 300 characters)."
+      " The Event type filter narrows this tab."
+  )
+
+
+def main_bqca() -> None:
+  """Runs the BQCA Prompt & Response Logging surface."""
+  bqca_models, bqca_queries, _ = _bqca_modules()
+  st.caption(
+      "Conversational Analytics prompt and response logs: turn volume,"
+      " latency, tokens, data agents, personas and errors."
+  )
+  theme = active_theme()
+  refs, max_bytes = sidebar_connection_bqca()
+  if refs is None:
+    st.info(
+        "Set `BQ_PROJECT_ID`, `BQ_DATASET_ID` and `BQCA_TABLE_ID` (or"
+        f" `BQ_TABLE_ID`; default `{bqca_models.BQCA_DEFAULT_TABLE_ID}`), or"
+        " fill in the sidebar, to connect."
+    )
+    st.stop()
+
+  prev_refs = st.session_state.get("_bqca_last_refs")
+  if prev_refs is not None and prev_refs != refs:
+    reset_bqca_filters()
+  st.session_state["_bqca_last_refs"] = refs
+
+  state, window = sidebar_window_bqca(
+      bqca_models.BqcaFilterState(
+          project_id=refs.project,
+          dataset_id=refs.dataset,
+          table_id=refs.table,
+      )
+  )
+
+  # BQCA has no per-panel Filters or pricing: the filters travel in ``state``.
+  # The context only carries the table, the window, the scan cap and the scan
+  # log the footer reports.
+  ctx = Context(
+      refs=refs,
+      window=window,
+      filters=Filters(),
+      max_bytes=max_bytes,
+      theme=theme,
+      price_in=0.0,
+      price_out=0.0,
+  )
+
+  # Options are read unfiltered, so the sidebar can be drawn before any panel
+  # runs and picking one data agent never hides the others.
+  options, result = bqca_queries.load_bqca_filter_options(state, ctx)
+  if result.error is None and options:
+    st.session_state["_bqca_filter_options"] = options
+  else:
+    options = st.session_state.get("_bqca_filter_options", {})
+
+  state = sidebar_filters_bqca(options, state)
+
+  row_bqca_kpis(state, ctx)
+
+  renderers = (
+      row_bqca_overview,
+      row_bqca_agents,
+      row_bqca_explorer,
+      row_bqca_tokens,
+      row_bqca_errors,
+  )
+  if _LAZY_TABS:
+    tab = st.segmented_control(
+        "Dashboard",
+        list(BQCA_TABS),
+        default=BQCA_TABS[0],
+        label_visibility="collapsed",
+        required=True,
+        key="_bqca_active_tab",
+    )
+    renderers[BQCA_TABS.index(tab) if tab in BQCA_TABS else 0](state, ctx)
+  else:
+    for container, render in zip(st.tabs(list(BQCA_TABS)), renderers):
+      with container:
+        render(state, ctx)
+
+  footer(ctx)
+
+
 def main() -> None:
   """Runs the main entrypoint for the Streamlit dashboard application."""
   st.set_page_config(page_title=APP_TITLE, page_icon="📊", layout="wide")
   st.title(APP_TITLE)
+
+  if sidebar_surface() == BQCA_SURFACE:
+    main_bqca()
+    return
 
   theme = active_theme()
   refs, max_bytes = sidebar_connection()
@@ -835,18 +1789,33 @@ def main() -> None:
 
 
 __all__ = [
+    "ADK_SURFACE",
     "APP_TITLE",
+    "BQCA_SURFACE",
+    "BQCA_TABS",
     "_LAZY_TABS",
     "footer",
     "main",
+    "main_bqca",
+    "reset_bqca_filters",
     "reset_filters",
+    "row_bqca_agents",
+    "row_bqca_errors",
+    "row_bqca_explorer",
+    "row_bqca_kpis",
+    "row_bqca_overview",
+    "row_bqca_tokens",
     "row_llm",
     "row_overview",
     "row_sessions",
     "row_tools",
     "sidebar_connection",
+    "sidebar_connection_bqca",
     "sidebar_filters",
+    "sidebar_filters_bqca",
+    "sidebar_surface",
     "sidebar_window",
+    "sidebar_window_bqca",
 ]
 
 if __name__ == "__main__":

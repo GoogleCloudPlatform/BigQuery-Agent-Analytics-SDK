@@ -4,7 +4,9 @@ A Looker Studio (Data Studio) dashboard with tile-level parity to the Looker
 [`agent-analytics-block`](https://github.com/looker-open-source/agent-analytics-block),
 built directly on the event table populated by the
 [ADK BigQuery Agent Analytics plugin](https://adk.dev/observability/bigquery-agent-analytics/).
-For teams that run BQAA but do not run Looker.
+For teams that run BQAA but do not run Looker. BigQuery Conversational
+Analytics (BQCA) Prompt & Response Logging tables use the same template
+through the [`bqca` profile](#bqca-prompt--response-logging-profile).
 
 **Just want to use the dashboard?** Read the
 [User Manual](USER_MANUAL.md) — prerequisites, three-step setup, page guide,
@@ -47,13 +49,21 @@ billing project is supported as an optional advanced setting.
 | `sql/events_v1.sql.tmpl` | Reviewed base-table query (**generated** by `tools/gen_events_tmpl.py`) |
 | `sql/events_v1.template.sql` | Sentinel-rendered SQL embedded in the canonical report (**generated** by `tools/render_template.py`) |
 | `sql/preflight.sql.tmpl` / `.template.sql` | Structural compatibility check, run by the hydration helper before emitting a link |
+| `sql/bqca_events_v1.sql.tmpl` | BQCA Prompt & Response Logging reporting query (**generated** by `tools/gen_bqca_events_tmpl.py`) |
+| `sql/bqca_events_v1.template.sql` | Sentinel-rendered BQCA reporting query for a custom-query data source (**generated** by `tools/render_template.py --profile bqca`) |
+| `sql/bqca_preflight.sql.tmpl` / `.template.sql` | Advisory 30-day BQCA data profile, run by the hydration helper after the structural check |
 | `bindings/template_bindings.yaml` | Executable sentinel bindings (real fixture identifiers, not placeholders) |
+| `bindings/bqca_report_template.yaml` | BQCA profile: the shared template it copies, BQCA report and data-source names, default table, custom query |
+| `bindings/bqca_template_bindings.yaml` | BQCA sentinel bindings — the shared template's, so `sqlReplace` can rebind them |
 | `tools/gen_events_tmpl.py` | Base-table reporting-query generator |
-| `tools/render_template.py` | Deterministic tmpl → template renderer with sentinel-uniqueness checks |
+| `tools/gen_bqca_events_tmpl.py` | BQCA reporting-query generator (nine-event allowlist, one base-table scan) |
+| `tools/render_template.py` | Deterministic tmpl → template renderer with sentinel-uniqueness checks (`--profile adk\|bqca\|all`, `--check`) |
+| `tools/render_web_config.py` | Renders `docs/report-config.mjs` from the bindings and derives `docs/bqca/index.html` from `docs/index.html` (`--check`) |
 | `tools/validate_spec.py` | CI assertions over the manifest (counts, listener matrix, defaults) |
 | `tools/validate_live_bqaa.py` | Read-only 37-query smoke test for a real BQAA dataset; writes only a sanitized local receipt |
-| `docs/index.html` | Three-field, client-only configurator for the public dashboard template |
-| `tools/hydrate_dashboard.py` | Validates a BQAA table and emits a user-owned Looker Studio report URL |
+| `docs/index.html` | Client-only configurator for the public dashboard template, with an ADK Agents / BQCA Prompt & Response Logging surface toggle |
+| `docs/bqca/index.html` | The `/bqca/` deep link: the configurator with the BQCA surface preselected (**generated** by `tools/render_web_config.py`) |
+| `tools/hydrate_dashboard.py` | Validates a BQAA table and emits a user-owned Looker Studio report URL (`--profile adk\|bqca`) |
 | `docs/dashboard-implementation.md` | Looker Studio page, field, formula, and live-validation implementation contract |
 | `docs/issue-377-review.md` | Live validation matrix for the UX/design backlog |
 | `docs/rendering-and-viewport-support.md` | Native-chart completion protocol and supported desktop viewport contract |
@@ -233,6 +243,112 @@ publication review must repeat the live check after every template change.
 `--table` is both the object validated by the CLI and the only BigQuery object
 queried by the dashboard.
 
+## BQCA Prompt & Response Logging profile
+
+BigQuery Conversational Analytics (BQCA) data agents can log each turn —
+prompt, response, generated SQL, model usage, and errors — with Prompt &
+Response Logging. The BigQuery Agent Analytics plugin writes those rows, so
+the logging table has the BQAA base-table schema and passes the same
+structural preflight. The configurator and the hydration helper target it
+through a second profile, `bqca`; the default `adk` profile and every ADK
+URL are unchanged.
+
+**Configurator.** Choose **BQCA Prompt & Response Logging** in the surface
+toggle, open the deep link
+[`/bqca/`](https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/bqca/),
+or add `profile=bqca` to a setup link:
+
+```text
+https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/?project=PROJECT_ID&dataset=DATASET_ID&table=bqca_prompt_response_logs&profile=bqca
+```
+
+The field placeholder names the BQCA default table,
+`bqca_prompt_response_logs`; any table ID that validates works. Switching
+surfaces keeps the typed ID and revalidates it. **Copy setup link** always
+adds `profile=bqca` on the BQCA surface, and adds `profile=adk` when an ADK
+link is copied from `/bqca/`, so a setup link reopens the surface it was
+copied from. An ADK link copied from the main page keeps the
+three-parameter format.
+
+**CLI.** Pass `--profile bqca`; `--table` then defaults to
+`bqca_prompt_response_logs`:
+
+```sh
+cd dashboard/looker_studio
+python3 tools/hydrate_dashboard.py \
+  --profile bqca \
+  --project YOUR_PROJECT_ID \
+  --dataset YOUR_DATASET_ID \
+  --location US \
+  --custom-sql-out /tmp/bqca_events.sql
+```
+
+After the shared structural preflight passes, the helper runs an advisory
+30-day data profile (`sql/bqca_preflight.sql.tmpl`): events per BQCA event
+type, data-agent attribution coverage, and fast-path events. The profile
+reads table data, so it is capped by `--maximum-bytes-billed` (default
+10 GiB); it warns — and never blocks the link — when the scan fails or
+exceeds the cap, when the table holds no BQCA events in the last 30 days,
+or when no event carries a data-agent ID. `--skip-data-profile` reads no
+table data. `--custom-sql-out` writes the BQCA reporting query bound to your
+table.
+
+**BQCA uses the shared template.** No BQCA-specific Looker Studio template
+is published yet, so the 1-click button opens your BQCA table in the shared
+BQAA report layout (preview) by copying the same
+[8-page template](https://lookerstudio.google.com/reporting/5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40)
+through data source `ds230` and the same sentinels. Only the table, the
+report name (`BigQuery Conversational Analytics (BQCA) — dataset.table`),
+and the data-source name (`BQCA — project.dataset.table`) differ. On BQCA
+data:
+
+- the tool pages and tool-error charts stay empty — BQCA logs no tool
+  events;
+- agent charts show the root agent for every data agent, and session counts
+  are turn counts, because every BQCA turn starts a new session;
+- user charts group by the raw `user_id`, which BQCA leaves empty when the
+  caller is unresolved;
+- the Looker Studio acknowledgement dialog shows the shared template's
+  query (`sql/events_v1.template.sql`), which reads only your table.
+
+To unlock all 9-event BQCA, data-agent, persona, fast-path, prompt,
+response, and generated-SQL panels, either run the
+[Self-Hosted Streamlit BQCA Dashboard](../../dashboards/streamlit/)
+(`dashboards/streamlit/`), or add a BigQuery custom-query data source in
+Looker Studio with `sql/bqca_events_v1.template.sql` — replace its three
+sentinels with your IDs, or use the `sql/bqca_events_v1.sql.tmpl` output from
+`--custom-sql-out` — and enable date range parameters on it. The query reads
+only the nine event types BQCA logs, in one date-pruned scan of your table,
+and adds:
+
+| Column | Meaning |
+|---|---|
+| `data_agent_id`, `conversation_id` | From `attributes.session_metadata.state`, never from `agent`, `user_id`, or `session_id` |
+| `persona` | `custom_labels.persona`, else the local part of a well-formed email `user_id`, else the data agent, else `unattributed` |
+| `fast_path`, `fast_path_label` | Whether the turn took the fast path |
+| `is_error` | Any of: status `ERROR`, a non-null `error_message`, or an `_ERROR` event type |
+| `is_turn_start`, `is_turn_complete` | `INVOCATION_STARTING` / `INVOCATION_COMPLETED` rows; a start without a completion is a failed or abandoned turn |
+| `turn_latency_ms`, `llm_latency_ms`, `ttft_ms`, `total_latency_ms` | Turn, model-call, time-to-first-token, and per-row latency |
+| `model_name`, `model_version`, `input_tokens`, `output_tokens`, `thoughts_tokens`, `cached_tokens`, `total_tokens` | Model usage on `LLM_RESPONSE` rows |
+| `user_prompt_text`, `agent_response_text` | The prompt, and every markdown part of a response in order |
+| `extracted_sql`, `summary_text` | The first fenced SQL block of an `AGENT_RESPONSE`, and a 2,000-character text summary |
+| `similar_queries_count`, `is_embedding_hit`, `embedding_suggestion_reason` | Suggested-column / suggestion count (`$.suggested_columns` first in `COALESCE`, before `$.similar_queries_count` and `$.suggestions`), non-empty indicator, and `$.reason` on `EMBEDDING_SUGGESTION` rows |
+
+A dedicated BQCA template with BQCA-native pages is follow-up work.
+
+Every generated file is deterministic and CI-checked for drift. After
+editing a source, regenerate from `dashboard/looker_studio`:
+
+```sh
+python3 tools/gen_bqca_events_tmpl.py   # sql/bqca_events_v1.sql.tmpl
+python3 tools/render_template.py        # every *.template.sql; --profile adk|bqca|all
+python3 tools/render_web_config.py      # docs/report-config.mjs, docs/bqca/index.html
+```
+
+Each accepts `--check` to verify without writing. `docs/bqca/index.html` is
+derived from `docs/index.html`, so rerun `render_web_config.py` after any
+configurator page edit.
+
 ## Already on Looker? Natural-language Q&A today
 
 If your organization already runs Looker (not just Looker Studio), the
@@ -279,7 +395,8 @@ To run the browser configurator from this checkout:
 python3 -m http.server 8000 --directory dashboard/looker_studio/docs
 ```
 
-Then open `http://localhost:8000`. The page is entirely client-side.
+Then open `http://localhost:8000` (or `http://localhost:8000/bqca/` for the
+BQCA deep link). The page is entirely client-side.
 
 ## Publication safety
 

@@ -1,0 +1,33 @@
+# Looker Studio template metadata for the BQCA profile (BigQuery
+# Conversational Analytics / Conversational Analytics API data agents with
+# Prompt & Response Logging enabled). Consumed by:
+#   * tools/hydrate_dashboard.py --profile bqca;
+#   * tools/render_web_config.py -> docs/report-config.mjs profiles.bqca, which
+#     drives the configurator toggle, ?profile=bqca, and the /bqca/ page.
+#
+# No dedicated BQCA Looker Studio template is published yet. BQCA writes its
+# logs through the same BigQuery Agent Analytics plugin, into a table with the
+# same base schema, so this profile deliberately reuses the published BQAA
+# template named by `shared_template` (same report_id and data source alias).
+# What that means for users, disclosed on the /bqca/ page and in README.md /
+# USER_MANUAL.md:
+#   * the copied report runs the shared template's embedded query
+#     (sql/events_v1.template.sql) against the BQCA table, not
+#     sql/bqca_events_v1.template.sql;
+#   * the tool pages and tool-error charts stay empty because BQCA never logs
+#     tool events, and "sessions" count turns (a new session per turn);
+#   * data-agent, persona, fast-path, prompt, and response fields come from
+#     the BQCA custom query (custom_query_template) in a data source you add.
+# Live-template attestations (reviewed SQL hash, external access, viewer QA)
+# stay in the shared template's file; they are not restated here.
+# tests/test_looker_studio_dashboard.py asserts that report_id and
+# data_source_alias equal the shared template's while `shared_template` is set.
+# Publishing a dedicated BQCA template means removing `shared_template` and
+# replacing report_id, data_source_alias, and the sentinel bindings.
+shared_template: bindings/report_template.yaml
+report_id: 5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40
+data_source_alias: ds230
+default_report_name: BigQuery Conversational Analytics (BQCA)
+default_table: bqca_prompt_response_logs
+datasource_name_prefix: BQCA
+custom_query_template: sql/bqca_events_v1.template.sql

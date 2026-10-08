@@ -25,6 +25,12 @@
   box-sizing: border-box;
 }
 
+/* Profile-only copy toggles with the hidden attribute; author display rules
+   such as .facts { display: flex } must not resurrect the inactive surface. */
+[hidden] {
+  display: none !important;
+}
+
 body {
   min-height: 100vh;
   margin: 0;
@@ -54,6 +60,44 @@ main {
   grid-template-columns: minmax(0, 1.1fr) minmax(340px, 0.9fr);
   gap: 54px;
   align-items: center;
+}
+
+.surface-toggle {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 0 22px;
+  padding: 4px;
+  border: 1px solid rgba(25, 103, 210, 0.24);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.68);
+}
+
+.surface-option {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  color: var(--action-dark);
+  background: transparent;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.surface-option:hover {
+  background: var(--action-soft);
+}
+
+.surface-option[aria-pressed="true"] {
+  color: white;
+  background: var(--action);
+}
+
+.surface-option:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 
 h1 {
@@ -429,6 +473,15 @@ footer a {
 
   .button-primary:hover {
     background: var(--action-dark);
+  }
+
+  .surface-toggle {
+    border-color: rgba(138, 180, 248, 0.3);
+    background: rgba(32, 33, 36, 0.78);
+  }
+
+  .surface-option[aria-pressed="true"] {
+    color: #202124;
   }
 }
 

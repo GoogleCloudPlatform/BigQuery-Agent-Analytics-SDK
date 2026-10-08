@@ -22,7 +22,7 @@ regressions — all through BigQuery SQL or Python.
 **Observability**
 - Trace reconstruction and DAG visualization
 - Per-event-type BigQuery views
-- Observability dashboards (Looker Studio, SQL, and BigFrames)
+- Observability dashboards (Looker Studio, Streamlit, SQL, and BigFrames), including BQCA Prompt & Response Logging dashboards for Conversational Analytics data agents
 
 **Evaluation**
 - System metrics (latency, turn count, tool call error rate, token efficiency, time to first token, cost)
@@ -280,6 +280,8 @@ with a runnable ADK agent.
 | [BQCA Prompt & Response Logging Manual](docs/guides/bqca-prompt-response-logging-manual.md) | Self-hosting setup, capability matrix, customization, and self-debugging guide for the [BQCA Customer Starter Notebook](examples/bqca_prompt_response_logging_customer_notebook.ipynb) ([Open in Colab](https://colab.research.google.com/github/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/bqca_prompt_response_logging_customer_notebook.ipynb)) |
 | [Looker Studio Dashboard](dashboard/looker_studio/README.md) | Published 37-chart BQAA observability template with project/dataset/table configurator |
 | [Dashboard User Manual](dashboard/looker_studio/USER_MANUAL.md) | End-user guide to the Looker Studio dashboard: setup in three steps, page guide, sharing, troubleshooting |
+| [Streamlit Dashboard](dashboards/streamlit/README.md) | Self-hosted dashboard with two surfaces: ADK Agents, and BQCA Prompt & Response Logging (turn latency, data agents and personas, prompt/response/SQL explorer, tokens, embedding suggestions, error attribution) |
+| [BQCA Analytics Dashboards](docs/guides/bqca-prompt-response-logging-manual.md#74-visualizing-logs-with-the-bqca-analytics-dashboards-looker-studio--streamlit) | Visualize BQCA Prompt & Response Logging with Looker Studio (`hydrate_dashboard.py --profile bqca`, `/bqca/` configurator) or Streamlit (`?profile=bqca`) |
 | [Agent Context Graph Codelab](docs/codelabs/periodic_materialization.md) | Extract decision traces from your agent's context graph, end to end (~35 min) |
 | [Scheduled Deploy Runbook](docs/guides/scheduled-context-graph-deploy.md) | Keep the context graph fresh on a Cloud Run + Cloud Scheduler cron |
 | [Design Documents](docs/README.md) | Architecture decisions and design rationale |

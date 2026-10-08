@@ -1,0 +1,17 @@
+# Executable sentinel bindings for the BQCA profile.
+#
+# While bindings/bqca_report_template.yaml names a `shared_template`, these
+# values MUST equal bindings/template_bindings.yaml: the Linking API
+# sqlReplace parameter rewrites the sentinel strings embedded in the shared
+# template's query, so any other value would leave a copied report reading
+# the fixture instead of the user's table.
+# tests/test_looker_studio_dashboard.py enforces the equality.
+#
+# tools/render_template.py --profile bqca renders sql/bqca_*.sql.tmpl with
+# these values, so the committed BQCA templates execute against the same
+# synthetic fixture: the base-table schema is identical, but the fixture holds
+# ADK events only, so BQCA queries compile and return no BQCA rows.
+placeholders:
+  PROJECT: test-project-0728-467323
+  DATASET: bqaa_fixture_adk_1_27_0
+  TABLE: sentinelbqaaevents

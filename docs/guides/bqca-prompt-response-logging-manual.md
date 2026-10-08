@@ -46,6 +46,7 @@ This manual shows your data platform, BI, and analytics engineering teams how to
 5. [Self-Debugging & Troubleshooting Runbook (12 Common Issues)](#5-self-debugging--troubleshooting-runbook-12-common-issues)
 6. [Copy-Paste Diagnostic SQL & Python One-Liners (5 Live Checks)](#6-copy-paste-diagnostic-sql--python-one-liners-5-live-checks)
 7. [Production Scheduling, Looker Studio BI & Data Governance](#7-production-scheduling-looker-studio-bi--data-governance)
+   - [7.4 Visualizing Logs with the BQCA Analytics Dashboards (Looker Studio & Streamlit)](#74-visualizing-logs-with-the-bqca-analytics-dashboards-looker-studio--streamlit)
 8. [FAQ & Quick-Reference Cheat Sheet](#8-faq--quick-reference-cheat-sheet)
 
 ---
@@ -894,7 +895,7 @@ Because Cell `1.3` creates `v_bqca_customer_turns` as a standard BigQuery view w
 - End-to-end latency P50/P90 (`e2e_latency_ms`) and Verified Queries Fast-Path share (`is_fast_path = TRUE`).
 - Token consumption (`prompt_tokens`, `candidate_tokens`, `thinking_tokens`, `cached_tokens`, `total_tokens`) and estimated token cost (`cost_sdk_usd`, `cost_incl_thinking_usd`).
 
-For the full 37-chart observability template over `v_bqca_customer_sdk_events`, see the [Looker Studio Dashboard User Manual](../../dashboard/looker_studio/USER_MANUAL.md).
+For the full 37-chart observability template over `v_bqca_customer_sdk_events`, see the [Looker Studio Dashboard User Manual](../../dashboard/looker_studio/USER_MANUAL.md). To drill down turn by turn on the raw logging table (prompts, responses, generated SQL, latency, tokens, and errors per data agent) with the BQCA Looker Studio profile or the Streamlit dashboard, see [Section 7.4](#74-visualizing-logs-with-the-bqca-analytics-dashboards-looker-studio--streamlit).
 
 ### 7.2 Recommended Evaluation Cadence & Cost Control
 - **Real-time / Hourly (Zero LLM Cost)**: Query `v_bqca_customer_turns`, `SystemEvaluator` SLO checks (Section 7), and `bqaa.ERROR_SQL_PREDICATE` + `finish_reason != 'STOP'` (Section 8). These are pure BigQuery SQL queries with zero Vertex AI model invocations.
@@ -909,6 +910,85 @@ For the full 37-chart observability template over `v_bqca_customer_sdk_events`, 
 > - Keep `v_bqca_customer_sdk_events` and `v_bqca_customer_turns` in the same BigQuery dataset (`DATASET_ID`) as `agent_events` so dataset-level IAM policies and VPC Service Controls perimeter rules apply uniformly, and base-table Row-Level Security (RLS) and Column-Level Security (CLS / policy tags) on `agent_events` remain enforced when querying those views. **Important (`bqca_golden_qa` CTAS security caveat):** Because `bqca_golden_qa` is a derived physical table materialized via `CREATE TABLE IF NOT EXISTS ... AS SELECT` (Cell `5.1`) from whatever rows the executing principal can see, BigQuery does **not** automatically copy source-table row access policies or column policy tags onto `bqca_golden_qa`. Cell `5.1` inspects `RAW_TABLE_ID` via the BigQuery REST `tables.rowAccessPolicies.list` endpoint and recursive `SchemaField.policy_tags` and **fails closed** by default if any row access policy or column policy tag is present **or if the caller lacks `bigquery.rowAccessPolicies.list` to verify row access policies** (included in `roles/bigquery.dataOwner`, `roles/bigquery.admin`, and basic `Viewer`/`Editor`/`Owner` roles, not `roles/bigquery.dataEditor`; policies on tables underneath a view are not inspected): pre-create `bqca_golden_qa` in `DATASET_ID` with matching row access policies / policy tags, or set `BQCA_AUTO_SEED_GOLDEN_TABLE=false` before running Section 5 (only set `BQCA_AUTO_SEED_GOLDEN_TABLE=force` in an isolated scratch dataset).
 > - When Cell `5.1` auto-bootstraps `bqca_golden_qa`, it copies up to 50 distinct historical `user_prompt` and `agent_response` values into `DATASET_ID.bqca_golden_qa`, and Sections 3–6 send `user_prompt` and `agent_response` text to Vertex AI (`AI.GENERATE`, `AI.CLASSIFY`, `AI.EMBED`, and `google-genai`) inside your GCP project (`PROJECT_ID`). Set `ANONYMIZE_USER_ID = True` in Cell `1.1` (or `BQCA_ANONYMIZE_USER_ID=true`) if you want `v_bqca_customer_turns` and Section 8.1 to SHA-256 pseudonymize `user_id`, `user_id`-derived cohort fallback labels, and email-like explicit `custom_labels.persona` labels as `user_<8hex>` (note that unsalted 8-hex SHA-256 is a 32-bit display pseudonym with ~39% birthday collision probability at 65,536 distinct users and ~50% around ~77,000 distinct users, rather than cryptographic anonymization). Masking covers the turns view and Section 8.1 cohort labels only: prompts, answers, other explicit persona labels/emails, and the `v_bqca_customer_sdk_events` compatibility view are outside its scope and still carry raw text. Restrict `agent_events`, `v_bqca_customer_sdk_events`, `v_bqca_customer_turns`, and `bqca_golden_qa` (as well as any executed notebooks or HTML reports exported via Option C, which embed sample prompts, responses, and `user_id`-derived cohort labels unless `ANONYMIZE_USER_ID = True`) to authorized data stewards, and grant broader BI viewers access only to aggregated metrics views.
 > - **Endpoint data residency:** Distinguish the BigQuery query/connection region (`LOCATION` and `VERTEX_CONNECTION_ID`) from the Vertex AI inference endpoint. In-warehouse `AI.GENERATE` / `AI.CLASSIFY` executes the BigQuery job at `LOCATION`, while BigQuery automatically routes short `gemini-3.5-flash` model names from US single regions (e.g. `us-central1`) to the `us` multi-region endpoint, from eligible EU single regions to the `eu` multi-region endpoint, and from other locations to `global` (in `asia-south1`, pass a fully qualified `global` endpoint URL; see [BigQuery generative AI locations](https://cloud.google.com/bigquery/docs/generative-ai-overview#locations)). By contrast, direct `google-genai` calls in Section 6B and `api_fallback` use `VERTEX_LOCATION` (default `"global"`) directly without BigQuery's multi-region routing. For US or EU multi-region data residency with `gemini-3.5-flash`, keep your BigQuery dataset in `US` or `EU` and set `VERTEX_LOCATION = "us"` or `"eu"`; if you require strict single-region inference in a region such as `us-central1` (for both warehouse `AI.*` and direct `google-genai` calls), set `LOCATION = "us-central1"`, `VERTEX_LOCATION = "us-central1"`, and switch `JUDGE_MODEL`, `CATEGORICAL_MODEL`, and `DIRECT_JUDGE_MODEL` to a single-region model such as `"gemini-2.5-flash"` (see [Vertex AI generative AI locations](https://cloud.google.com/vertex-ai/generative-ai/docs/learn/locations)).
+
+### 7.4 Visualizing Logs with the BQCA Analytics Dashboards (Looker Studio & Streamlit)
+
+Sections 7.1–7.3 chart the session-level `v_bqca_customer_turns` view. For turn-level drill-down straight on the raw logging table, the SDK ships two dashboards for BQCA Prompt & Response Logging. Use either one, or both: they read the same table, only the nine event types BQCA logs, and they attribute each turn to its data agent through the `data-agent-id` label.
+
+| | **Looker Studio** | **Streamlit** |
+|---|---|---|
+| Runs as | A report you copy into your own Looker Studio account | A self-hosted Python app (laptop, VM, or Cloud Run) |
+| Setup | One CLI command or a configurator link; no servers | `pip install -e '.[streamlit]'`, then `streamlit run` |
+| Best for | Sharing charts with BI viewers | Reading prompts, responses, and generated SQL turn by turn, with a per-query cost cap |
+| Reference | [Looker Studio README](../../dashboard/looker_studio/README.md), [User Manual](../../dashboard/looker_studio/USER_MANUAL.md) | [Streamlit README](../../dashboards/streamlit/README.md) |
+
+**Before you start.** Both dashboards read the raw logging table: `agent_events` in this manual's notebook (`RAW_TABLE_ID`), while the dashboards default to `bqca_prompt_response_logs`, so pass your own table name as shown below. Whoever runs a dashboard needs `roles/bigquery.jobUser` on the project and `roles/bigquery.dataViewer` on the dataset that holds the table. Neither dashboard needs the notebook's views.
+
+#### Looker Studio
+
+```bash
+# From the repository root. Validates your table, then prints a link that
+# copies the dashboard template into your Looker Studio account.
+cd dashboard/looker_studio
+python3 tools/hydrate_dashboard.py \
+  --profile bqca \
+  --project YOUR_PROJECT_ID \
+  --dataset YOUR_DATASET_ID \
+  --table YOUR_LOGS_TABLE \
+  --location US \
+  --custom-sql-out /tmp/bqca_events.sql
+```
+
+Set `--location` to the location of your dataset. Prefer a browser? Open the web configurator's BQCA page, enter the same project, dataset, and table, and follow the link it builds:
+
+```text
+https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/bqca/
+```
+
+`--custom-sql-out` writes the BQCA reporting query bound to your table. Add it to the report as a BigQuery custom-query data source to get the BQCA fields (data agent, persona, fast path, latency, tokens, prompt, response, and extracted SQL). The [Looker Studio README](../../dashboard/looker_studio/README.md) describes the BQCA profile, its fields, and its current limits.
+
+#### Streamlit
+
+```bash
+# From the repository root.
+pip install -e '.[streamlit]'
+gcloud auth application-default login   # or set GOOGLE_APPLICATION_CREDENTIALS
+
+cd dashboards/streamlit
+BQ_PROJECT_ID=YOUR_PROJECT_ID \
+BQ_DATASET_ID=YOUR_DATASET_ID \
+BQCA_TABLE_ID=YOUR_LOGS_TABLE \
+BQAA_PROFILE=bqca \
+streamlit run app.py
+```
+
+The app opens on **BQCA Prompt & Response Logging**. Adding `?profile=bqca` to the URL (for example `http://localhost:8501/?profile=bqca`) or choosing it under the sidebar's **Dashboard Surface** opens the same surface. Run from `dashboards/streamlit`, the app binds to `127.0.0.1` only, which is the right default for a tool that shows prompts and responses.
+
+It shows nine KPI tiles and five tabs:
+
+| Tab | Answers |
+|---|---|
+| Overview & Latency | How many turns, how many failed, and how fast, split by fast path and standard NL2SQL |
+| Data Agents & Personas | Which data agents and personas drive the traffic |
+| Prompt, Response & SQL Explorer | What a user asked, what was answered (the last response of the turn), and which SQL that answer contained |
+| Tokens & Embedding Suggestions | Token spend over time and by model, which embedding suggestions the agent made and why, and how many columns each proposed |
+| Error Attribution | Which data agents and event types produce errors, and the most frequent error messages |
+
+The **Embedding Suggestion Coverage** tile is the share of turns that received at least one embedding suggestion with suggested columns. A line under the tiles says how many turns completed (reached `INVOCATION_COMPLETED`): a turn that is still running, failed before completing, or was cut off by the time range counts toward **Total Turns** and the error rate, but the latency percentiles and the fast-path rate cover completed turns only.
+
+Filters (data agent, persona, event type, fast path, session / conversation, prompt text, and errors only) take effect when you press **Apply filters**. The [Streamlit README](../../dashboards/streamlit/README.md#6-bqca-prompt--response-logging-dashboard) lists which panels each filter narrows.
+
+#### Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Every tile shows `—`, or a panel reports a missing table | Check the table name (**Events table** in Streamlit, `--table` for Looker Studio): the dashboards default to `bqca_prompt_response_logs`, your logs may be in `agent_events`. In Streamlit, `BQCA_TABLE_ID` (or the shared `BQ_TABLE_ID`) overrides the default |
+| Streamlit opens on the wrong table | **Events table** starts from `BQCA_TABLE_ID`, else `BQ_TABLE_ID`, else the `bqca_prompt_response_logs` default. A `BQ_TABLE_ID` in your environment or `.env` is shared with the ADK surface and wins over the default: set `BQCA_TABLE_ID` to override it for BQCA only, or edit **Events table** and press **Connect** |
+| A Streamlit panel refuses to run because of the scan cap | Narrow the time range or raise **Per-query scan cap**. The Prompt, Response & SQL Explorer reads full prompts and responses, so it scans the most |
+| Tool pages are empty in Looker Studio | Expected: BQCA logs no tool events |
+
+> [!CAUTION]
+> Both dashboards show raw prompts and responses, so the guidance in Section 7.3 applies to them as well: grant dataset access only to authorized data stewards. The Streamlit app runs every query as the server's own BigQuery identity and has no login of its own, so keep it on `127.0.0.1` or put an authenticating reverse proxy such as IAP in front of it before you share a URL.
 
 ---
 
