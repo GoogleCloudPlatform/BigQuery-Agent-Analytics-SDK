@@ -1051,6 +1051,23 @@ def test_browser_smoke_negative_fixtures_are_detected():
   )
 
 
+@pytest.mark.parametrize("value", ["0", "-1", "abc"])
+def test_browser_smoke_rejects_invalid_readiness_budget(value):
+  # The self-test lowers SMOKE_READY_POLLS for one fixture. A bad value
+  # must fail fast with its own message (before any browser or server
+  # starts), not as a misleading readiness timeout.
+  result = subprocess.run(
+      ["bash", "tools/browser_smoke.sh"],
+      cwd=DASHBOARD,
+      env={**os.environ, "SMOKE_READY_POLLS": value},
+      capture_output=True,
+      text=True,
+      timeout=30,
+  )
+  assert result.returncode == 1
+  assert "SMOKE_READY_POLLS must be a positive integer" in result.stderr
+
+
 def test_googlecloudplatform_pages_configuration():
   page = (DASHBOARD / "docs/index.html").read_text()
   styles = (DASHBOARD / "docs/styles.css").read_text()
