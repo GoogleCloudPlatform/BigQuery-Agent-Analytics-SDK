@@ -1155,7 +1155,9 @@ BQCA_SQL_FILES = (
     "sql/bqca_preflight.sql.tmpl",
     "sql/bqca_preflight.template.sql",
 )
-BQCA_REPORT_ID = "5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40"
+BQCA_REPORT_ID = "1ffb0888-20ea-451f-aeb8-69fc37973335"
+BQCA_DATASOURCE_ID = "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc"
+BQCA_DATASOURCE_ALIAS = "ds0"
 BQCA_DEFAULT_TABLE = "bqca_prompt_response_logs"
 SHARED_SENTINELS = (
     "test-project-0728-467323",
@@ -1275,11 +1277,14 @@ def test_bqca_profile_reuses_the_published_template_bindings():
       (DASHBOARD / "bindings/bqca_template_bindings.yaml").read_text()
   )["placeholders"]
 
-  # The Linking API can only rebind sentinels the template's SQL contains,
-  # so the BQCA profile must name the shared report, alias, and sentinels.
-  assert bqca["shared_template"] == "bindings/report_template.yaml"
-  assert bqca["report_id"] == shared["report_id"] == BQCA_REPORT_ID
-  assert bqca["data_source_alias"] == shared["data_source_alias"] == "ds230"
+  # BQCA uses its own dedicated 7-page tool-free report template and ds0 alias
+  # while keeping the same three sentinel strings in sql/bqca_events_v1.template.sql.
+  assert "shared_template" not in bqca
+  assert bqca["report_id"] == BQCA_REPORT_ID
+  assert bqca["report_id"] != shared["report_id"]
+  assert bqca["data_source_alias"] == BQCA_DATASOURCE_ALIAS
+  assert bqca["datasource_id"] == BQCA_DATASOURCE_ID
+  assert bqca["product_contract"] == "spec/bqca_product_contract.yaml"
   assert bqca_placeholders == adk_placeholders
   assert (
       tuple(bqca_placeholders[name] for name in ("PROJECT", "DATASET", "TABLE"))
@@ -1292,6 +1297,31 @@ def test_bqca_profile_reuses_the_published_template_bindings():
   assert bqca["datasource_name_prefix"] == "BQCA"
   assert bqca["custom_query_template"] == "sql/bqca_events_v1.template.sql"
   assert (DASHBOARD / bqca["custom_query_template"]).is_file()
+  assert bqca["reviewed_template_sql"] == {
+      "path": "sql/bqca_events_v1.template.sql",
+      "sha256": hashlib.sha256(
+          (DASHBOARD / "sql/bqca_events_v1.template.sql").read_bytes()
+      ).hexdigest(),
+  }
+
+  contract = yaml.safe_load((DASHBOARD / bqca["product_contract"]).read_text())
+  assert contract["surface"]["canonical_report_id"] == BQCA_REPORT_ID
+  assert contract["surface"]["datasource_id"] == BQCA_DATASOURCE_ID
+  assert contract["surface"]["data_source_alias"] == BQCA_DATASOURCE_ALIAS
+  assert tuple(contract["allowed_event_types"]) == BQCA_EVENT_TYPES
+  assert [page["id"] for page in contract["pages"]] == [
+      "p_539b9240",
+      "p_a89cfece",
+      "p_97efe693",
+      "p_edf06c14",
+      "p_08774fec",
+      "p_88bcf5f8",
+      "p_b87a335e",
+  ]
+  assert sum(page["component_count"] for page in contract["pages"]) == 34
+  assert contract["excluded_adk_surfaces"]["tool_pages_included"] is False
+  assert contract["excluded_adk_surfaces"]["tool_scorecards_included"] is False
+  assert contract["excluded_adk_surfaces"]["tool_charts_included"] is False
 
   web = _web_report_config()
   assert list(web["profiles"]) == ["adk", "bqca"]
@@ -1463,6 +1493,7 @@ def test_bqca_artifacts_never_name_event_types_bqca_does_not_log():
       "tools/hydrate_dashboard.py",
       "bindings/bqca_report_template.yaml",
       "bindings/bqca_template_bindings.yaml",
+      "spec/bqca_product_contract.yaml",
       "docs/index.html",
       "docs/bqca/index.html",
       "docs/app.mjs",
@@ -1500,19 +1531,20 @@ def test_bqca_deep_link_page_is_published_with_the_site():
       r'\bid="([^"]+)"', page
   )
 
-  # P1-A: The BQCA hero, fact pills, CTA button, and notice upfront disclose
-  # that the 1-click button opens the shared BQAA report layout (preview) and
-  # point to sql/bqca_events_v1.sql.tmpl (--custom-sql-out) and the
-  # Self-Hosted Streamlit BQCA Dashboard (dashboards/streamlit/).
-  assert "shared BQAA report layout (preview)" in bqca_page
-  assert "BQCA data in shared BQAA layout (preview)" in bqca_page
+  # The BQCA hero, fact pills, CTA button, and notice describe the dedicated
+  # 7-page tool-free BQCA Looker Studio template and also point to
+  # sql/bqca_events_v1.sql.tmpl (--custom-sql-out) and dashboards/streamlit/.
+  assert "7-page tool-free BQCA Looker Studio dashboard" in bqca_page
+  assert "34 BQCA-native charts &amp; KPIs" in bqca_page
+  assert "7 tool-free report pages" in bqca_page
   assert "Self-Hosted Streamlit BQCA Dashboard" in bqca_page
-  assert "Create my dashboard (BQAA layout preview)" in bqca_page
+  assert "Create my BQCA dashboard" in bqca_page
   assert 'id="profile-adk" aria-pressed="true"' in page
   assert 'id="bqca-template-note"' in page
   note = page.split('id="bqca-template-note"', 1)[1].split("</aside>", 1)[0]
   assert 'data-profile-only="bqca" hidden>' in note
-  assert "shared BQAA template" in note
+  assert "Dedicated 7-page tool-free BQCA Looker Studio template" in note
+  assert BQCA_REPORT_ID in note
   assert "dashboard/looker_studio/sql/bqca_events_v1.sql.tmpl" in note
   assert "--profile bqca --custom-sql-out" in note
   assert "dashboards/streamlit" in note
@@ -1570,9 +1602,9 @@ def test_bqca_hydration_link_names_and_defaults():
       "c.reportId": [BQCA_REPORT_ID],
       "c.mode": ["view"],
       "r.reportName": ["Customer BQCA"],
-      "ds.ds230.datasourceName": ["BQCA Events — ca_logs"],
-      "ds.ds230.billingProjectId": ["billing-project-123"],
-      "ds.ds230.sqlReplace": [
+      "ds.ds0.datasourceName": ["BQCA Events — ca_logs"],
+      "ds.ds0.billingProjectId": ["billing-project-123"],
+      "ds.ds0.sqlReplace": [
           ",".join(
               [
                   SHARED_SENTINELS[0],
@@ -1584,7 +1616,7 @@ def test_bqca_hydration_link_names_and_defaults():
               ]
           )
       ],
-      "ds.ds230.refreshFields": ["false"],
+      "ds.ds0.refreshFields": ["false"],
   }
   with pytest.raises(ValueError, match="reserved template sentinel"):
     hydration.build_link(
@@ -1692,15 +1724,15 @@ def test_bqca_hydration_gates_then_runs_a_capped_data_profile(
   assert "BQCA preflight OK: base event table is compatible" in err
   assert "BQCA data profile (last 30 days): 40 events" in err
   assert "WARNING" not in err
-  assert "NOTE: BQCA uses the shared BQAA template" in err
+  assert "NOTE: BQCA uses the dedicated 7-page tool-free BQCA template" in err
   assert "SECURITY: keep the new report private" in err
 
   parameters = _link_parameters(out.strip())
   assert parameters["r.reportName"] == [
       "BigQuery Conversational Analytics (BQCA) — ca_logs"
   ]
-  assert parameters["ds.ds230.datasourceName"] == ["BQCA Events — ca_logs"]
-  assert parameters["ds.ds230.sqlReplace"][0].split(",")[-1] == (
+  assert parameters["ds.ds0.datasourceName"] == ["BQCA Events — ca_logs"]
+  assert parameters["ds.ds0.sqlReplace"][0].split(",")[-1] == (
       BQCA_DEFAULT_TABLE
   )
   assert sql_out.read_text() == hydration.custom_query_sql(
@@ -1731,9 +1763,7 @@ def test_bqca_data_profile_failure_or_skip_never_blocks_the_link(
   out, err = capsys.readouterr()
   assert calls[1]["maximum_bytes_billed"] == 1048576
   assert "WARNING: BQCA data profile not run" in err
-  assert _link_parameters(out.strip())["ds.ds230.sqlReplace"][0].endswith(
-      ",logs"
-  )
+  assert _link_parameters(out.strip())["ds.ds0.sqlReplace"][0].endswith(",logs")
 
   fake, calls = _fake_bq_query([[], _profile_rows(0, 0)])
   monkeypatch.setattr(hydration, "bq_query", fake)
@@ -1859,8 +1889,10 @@ def test_bqca_profile_is_documented_for_contributors_and_users():
       "sql/bqca_events_v1.template.sql",
       "tools/gen_bqca_events_tmpl.py",
       "tools/render_web_config.py",
-      "BQCA uses the shared template",
-      "tool pages and tool-error charts stay empty",
+      "BQCA uses a dedicated 7-page tool-free template",
+      BQCA_REPORT_ID,
+      "spec/bqca_product_contract.yaml",
+      "all tool-usage pages, tool-latency series, and tool-error charts are omitted",
       "session counts are turn counts",
   ):
     assert fragment in readme, f"README.md must document {fragment!r}"
@@ -1870,6 +1902,8 @@ def test_bqca_profile_is_documented_for_contributors_and_users():
       "&profile=bqca",
       "--profile bqca",
       "--skip-data-profile",
+      "dedicated 7-page tool-free BQCA Looker Studio template",
+      BQCA_REPORT_ID,
       "session counts are turn counts",
   ):
     assert fragment in manual, f"USER_MANUAL.md must document {fragment!r}"

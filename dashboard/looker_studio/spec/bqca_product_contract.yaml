@@ -1,0 +1,168 @@
+# Looker Studio BQCA Dashboard — Product Contract (dedicated 7-page tool-free template)
+#
+# Canonical machine-readable contract for the BigQuery Conversational Analytics
+# (BQCA) Prompt & Response Logging Looker Studio template. Provisioned via
+# LegoMidtierService (CreateDashboard + CreateDatasource + UpsertDashboardPage)
+# over sql/bqca_events_v1.template.sql.
+#
+#BQCA logs only the nine conversational and model event types listed under
+# allowed_event_types; tool-related pages, scorecards, and charts from the ADK
+# template are intentionally omitted.
+
+schema_version: 1
+profile: bqca
+
+surface:
+  platform: Looker Studio
+  report_title: "BigQuery Conversational Analytics (BQCA) — Prompt & Response Logging"
+  canonical_report_id: "1ffb0888-20ea-451f-aeb8-69fc37973335"
+  canonical_report_url: "https://lookerstudio.google.com/reporting/1ffb0888-20ea-451f-aeb8-69fc37973335"
+  datasource_id: "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc"
+  data_source_alias: "ds0"
+  data_source_name: "BQCA Prompt & Response Logs (Template)"
+  template_sql: "sql/bqca_events_v1.template.sql"
+  credential_mode: VIEWERS
+  default_date_window_days: 90
+  timezone: UTC
+  published_date: "2026-10-08"
+
+allowed_event_types:
+  - INVOCATION_STARTING
+  - USER_MESSAGE_RECEIVED
+  - AGENT_RESPONSE
+  - INVOCATION_COMPLETED
+  - LLM_RESPONSE
+  - EMBEDDING_SUGGESTION
+  - INVOCATION_ERROR
+  - AGENT_ERROR
+  - LLM_ERROR
+
+excluded_adk_surfaces:
+  tool_pages_included: false
+  tool_scorecards_included: false
+  tool_charts_included: false
+  omitted_pages:
+    - "Tool Usage (ADK Page 3)"
+  omitted_metrics_and_charts:
+    - "Tool-call volume and error scorecards"
+    - "Tool-latency scorecards and daily trends"
+    - "Per-tool error breakdown charts and tables"
+
+base_table_contract:
+  table_placeholder: "{{PROJECT}}.{{DATASET}}.{{TABLE}}"
+  default_table: "bqca_prompt_response_logs"
+  partition_column: timestamp
+  required_columns:
+    - {name: timestamp, type: TIMESTAMP}
+    - {name: event_type, type: STRING}
+    - {name: agent, type: STRING}
+    - {name: session_id, type: STRING}
+    - {name: invocation_id, type: STRING}
+    - {name: user_id, type: STRING}
+    - {name: trace_id, type: STRING}
+    - {name: span_id, type: STRING}
+    - {name: parent_span_id, type: STRING}
+    - {name: content, type: JSON}
+    - {name: attributes, type: JSON}
+    - {name: latency_ms, type: JSON}
+    - {name: status, type: STRING}
+    - {name: error_message, type: STRING}
+    - {name: is_truncated, type: BOOL}
+
+pages:
+  - index: 1
+    id: p_539b9240
+    encoded_page_id: p_539b9240
+    name: "Token Consumption"
+    component_count: 7
+    purpose: "Monitor Gemini token consumption (total, input, output, thinking, and cached tokens) across BQCA data agents and over time."
+    scorecards:
+      - {id: kpi_total_tokens, label: "Total Tokens", field: total_tokens, aggregation: SUM}
+      - {id: kpi_input_tokens, label: "Input Tokens", field: input_tokens, aggregation: SUM}
+      - {id: kpi_output_tokens, label: "Output Tokens", field: output_tokens, aggregation: SUM}
+      - {id: kpi_thoughts_tokens, label: "Thinking Tokens", field: thoughts_tokens, aggregation: SUM}
+      - {id: kpi_cached_tokens, label: "Cached Tokens", field: cached_tokens, aggregation: SUM}
+    charts:
+      - {id: chart_tokens_by_agent, type: bar_chart, title: "Token Usage by Data Agent", dimensions: [data_agent_id], metrics: [total_tokens]}
+      - {id: chart_tokens_over_time, type: bar_chart, title: "Daily Token Usage (Input / Output / Thinking)", dimensions: [event_date], metrics: [input_tokens, output_tokens, thoughts_tokens]}
+
+  - index: 2
+    id: p_a89cfece
+    encoded_page_id: p_a89cfece
+    name: "Data Agents & Turns"
+    component_count: 6
+    purpose: "Track active BQCA data agents, turn volume, completed turns, and generated SQL queries using session_metadata.state.\"data-agent-id\" attribution."
+    scorecards:
+      - {id: kpi_distinct_agents, label: "Active Data Agents", field: data_agent_id, aggregation: COUNT_DISTINCT}
+      - {id: kpi_total_sessions, label: "Total Turns (Sessions)", field: session_id, aggregation: COUNT_DISTINCT}
+      - {id: kpi_turn_completes, label: "Completed Turns", field: turn_latency_ms, aggregation: COUNT}
+      - {id: kpi_extracted_sql_count, label: "Generated SQL Queries", field: extracted_sql, aggregation: COUNT}
+    charts:
+      - {id: chart_turns_by_agent, type: bar_chart, title: "Turns by Data Agent", dimensions: [data_agent_id], metrics: [session_id]}
+      - {id: chart_events_by_agent, type: table, title: "Data Agent Volume, Latency & Errors", dimensions: [data_agent_id], metrics: [session_id, turn_latency_ms, total_tokens, error_message]}
+
+  - index: 3
+    id: p_97efe693
+    encoded_page_id: p_97efe693
+    name: "LLM Interactions & Embedding Suggestions"
+    component_count: 6
+    purpose: "Inspect LLM response volume, model latency, time-to-first-token, model version token distribution, and EMBEDDING_SUGGESTION column recommendations."
+    scorecards:
+      - {id: kpi_llm_calls, label: "LLM Responses", field: llm_latency_ms, aggregation: COUNT}
+      - {id: kpi_llm_latency_avg, label: "Avg LLM Call Latency (ms)", field: llm_latency_ms, aggregation: AVG}
+      - {id: kpi_ttft_avg, label: "Avg Time to First Token (ms)", field: ttft_ms, aggregation: AVG}
+      - {id: kpi_similar_queries, label: "Suggested Columns Proposed", field: similar_queries_count, aggregation: SUM}
+    charts:
+      - {id: chart_tokens_by_model, type: bar_chart, title: "Tokens by Model Version", dimensions: [model_version], metrics: [total_tokens]}
+      - {id: chart_embedding_reasons, type: bar_chart, title: "Embedding Suggestions by Reason", dimensions: [embedding_suggestion_reason], metrics: [similar_queries_count]}
+
+  - index: 4
+    id: p_edf06c14
+    encoded_page_id: p_edf06c14
+    name: "User & Persona Analytics"
+    component_count: 5
+    purpose: "Understand turn volume and token usage across personas, user IDs, and conversations."
+    scorecards:
+      - {id: kpi_distinct_personas, label: "Distinct Personas", field: persona, aggregation: COUNT_DISTINCT}
+      - {id: kpi_distinct_users, label: "Distinct User IDs", field: user_id, aggregation: COUNT_DISTINCT}
+      - {id: kpi_distinct_conversations, label: "Distinct Conversations", field: conversation_id, aggregation: COUNT_DISTINCT}
+    charts:
+      - {id: chart_turns_by_persona, type: bar_chart, title: "Turns by Persona", dimensions: [persona], metrics: [session_id]}
+      - {id: chart_persona_breakdown, type: table, title: "Persona & Data Agent Activity", dimensions: [persona, data_agent_id], metrics: [session_id, total_tokens, turn_latency_ms]}
+
+  - index: 5
+    id: p_08774fec
+    encoded_page_id: p_08774fec
+    name: "Latency & Fast-Path ROI"
+    component_count: 5
+    purpose: "Compare end-to-end turn latency and share of turns served by Verified Queries Fast Path versus standard NL2SQL generation."
+    scorecards:
+      - {id: kpi_turn_latency_avg, label: "Avg End-to-End Turn Latency (ms)", field: turn_latency_ms, aggregation: AVG}
+      - {id: kpi_llm_latency_p5, label: "Avg LLM Latency (ms)", field: llm_latency_ms, aggregation: AVG}
+      - {id: kpi_total_latency_avg, label: "Avg Event Latency (ms)", field: total_latency_ms, aggregation: AVG}
+    charts:
+      - {id: chart_fast_path_pie, type: pie_chart, title: "Fast-Path vs Standard NL2SQL Turns", dimensions: [fast_path_label], metrics: [session_id]}
+      - {id: chart_latency_by_fast_path, type: bar_chart, title: "Avg Turn Latency: Fast-Path vs Standard NL2SQL", dimensions: [fast_path_label], metrics: [turn_latency_ms]}
+
+  - index: 6
+    id: p_88bcf5f8
+    encoded_page_id: p_88bcf5f8
+    name: "Errors (BQCA 3-Condition)"
+    component_count: 4
+    purpose: "Triage BQCA errors detected via the 3-condition error predicate (status = 'ERROR', non-null error_message, or *_ERROR event type) across data agents and event types."
+    scorecards:
+      - {id: kpi_total_errors, label: "Error Events (with Message)", field: error_message, aggregation: COUNT}
+      - {id: kpi_distinct_errors, label: "Distinct Error Messages", field: error_message, aggregation: COUNT_DISTINCT}
+    charts:
+      - {id: chart_errors_by_event_type, type: bar_chart, title: "Error Events by BQCA Event Type", dimensions: [event_type], metrics: [error_message]}
+      - {id: chart_errors_by_agent, type: table, title: "Error Breakdown by Data Agent, Event Type & Message", dimensions: [is_error, data_agent_id, event_type, error_message], metrics: [span_id, session_id]}
+
+  - index: 7
+    id: p_b87a335e
+    encoded_page_id: p_b87a335e
+    name: "Prompt, Response & SQL Inspector"
+    component_count: 1
+    purpose: "Inspect individual turns end-to-end: user prompt, extracted SQL, agent response summary, execution path, latency, tokens, and error messages."
+    scorecards: []
+    charts:
+      - {id: tbl_prompt_response_sql, type: table, title: "Turn-Level Prompt, Response & Extracted SQL", dimensions: [event_date, session_id, data_agent_id, persona, event_type, fast_path_label, user_prompt_text, extracted_sql, summary_text, error_message], metrics: [total_latency_ms, total_tokens]}

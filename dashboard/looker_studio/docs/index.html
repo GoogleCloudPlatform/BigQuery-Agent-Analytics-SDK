@@ -52,11 +52,10 @@
           </p>
           <p class="lede" data-profile-only="bqca" hidden>
             Enter the fully qualified ID of the table your Conversational
-            Analytics data agents log prompts and responses to. The 1-click
-            Looker Studio button below opens your BQCA table in the
-            <strong>shared BQAA report layout (preview)</strong> with your
-            Google credentials. To unlock all BQCA-native 9-event, Data Agent,
-            Persona, and Fast-Path panels, attach
+            Analytics data agents log prompts and responses to. We’ll prepare
+            a private copy of the published
+            <strong>7-page tool-free BQCA Looker Studio dashboard</strong>,
+            connected with your Google credentials. You can also export
             <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/dashboard/looker_studio/sql/bqca_events_v1.sql.tmpl">
               <code>sql/bqca_events_v1.sql.tmpl</code></a>
             (<code>--custom-sql-out</code>) or run the
@@ -70,8 +69,8 @@
             <li>No data leaves Google</li>
           </ul>
           <ul class="facts" aria-label="Dashboard facts" data-profile-only="bqca" hidden>
-            <li>BQCA data in shared BQAA layout (preview)</li>
-            <li>Custom SQL or Streamlit for 9-event BQCA panels</li>
+            <li>34 BQCA-native charts &amp; KPIs</li>
+            <li>7 tool-free report pages</li>
             <li>No data leaves Google</li>
           </ul>
         </div>
@@ -149,7 +148,7 @@
               aria-describedby="create-wait-note"
             >
               <span data-profile-only="adk">Create my dashboard</span>
-              <span data-profile-only="bqca" hidden>Create my dashboard (BQAA layout preview)</span>
+              <span data-profile-only="bqca" hidden>Create my BQCA dashboard</span>
             </a>
             <button class="button button-secondary" id="copy-link" type="button">
               Copy setup link
@@ -197,7 +196,8 @@
             see <a href="#report-not-shared">below</a>.) Looker Studio then
             shows an acknowledgement dialog. It appears because you’re about
             to create a data source that runs a SQL query this page supplied —
-            <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/dashboard/looker_studio/sql/events_v1.template.sql">
+            <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/dashboard/looker_studio/sql/events_v1.template.sql" data-profile-only="adk">
+              read the exact query</a><a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/dashboard/looker_studio/sql/bqca_events_v1.template.sql" data-profile-only="bqca" hidden>
               read the exact query</a>. The dialog lists that query, your
             billing project, and that the new data source initially uses
             Owner’s Credentials; nothing is created until you acknowledge it.
@@ -221,21 +221,19 @@
         id="bqca-template-note"
         aria-labelledby="bqca-template-title"
         data-profile-only="bqca" hidden>
-        <strong id="bqca-template-title">BQCA uses the shared BQAA template (preview).</strong>
-        No separate BQCA Looker Studio template is published yet, so your 1-click
-        copy opens your Prompt &amp; Response Logging table in the shared 8-page
-        BQAA report layout with the query linked in step 02. BQCA logs no tool
-        events, so the tool pages and tool-error charts stay empty; agent charts
-        show the root agent, and session counts are turn counts because every
-        BQCA turn starts a new session. For all 9-event BQCA, data-agent,
-        persona, fast-path, prompt, response, and generated-SQL panels, attach a
-        BigQuery custom-query data source with the
+        <strong id="bqca-template-title">Dedicated 7-page tool-free BQCA Looker Studio template.</strong>
+        Your 1-click copy opens the dedicated 7-page tool-free BQCA report
+        template (<code>1ffb0888-20ea-451f-aeb8-69fc37973335</code>, data source
+        alias <code>ds0</code>) backed by the
         <a id="custom-query-link" href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/dashboard/looker_studio/sql/bqca_events_v1.sql.tmpl">
-          BQCA reporting query</a>
-        (replace <code>{{PROJECT}}</code>, <code>{{DATASET}}</code>, and
-        <code>{{TABLE}}</code> with your IDs, or have the repository’s CLI
-        write it for your table with
-        <code>--profile bqca --custom-sql-out</code>), or run the
+          BQCA reporting query</a>:
+        Token Consumption, Data Agents &amp; Turns, LLM Interactions &amp;
+        Embedding Suggestions, User &amp; Persona Analytics, Latency &amp;
+        Fast-Path ROI, Errors (BQCA 3-Condition), and Prompt, Response &amp;
+        SQL Inspector. All tool-usage pages, tool-latency series, and tool-error
+        charts are omitted. You can also export a standalone custom query bound
+        to your table with <code>--profile bqca --custom-sql-out</code> or run
+        the
         <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/dashboards/streamlit">
           Self-Hosted Streamlit BQCA Dashboard</a>
         (<code>dashboards/streamlit/</code>).
@@ -329,8 +327,11 @@
             GoogleCloudPlatform source and verified CLI
           </a>
           ·
-          <a href="https://lookerstudio.google.com/reporting/5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40">
+          <a href="https://lookerstudio.google.com/reporting/5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40" data-profile-only="adk">
             View template
+          </a>
+          <a href="https://lookerstudio.google.com/reporting/1ffb0888-20ea-451f-aeb8-69fc37973335" data-profile-only="bqca" hidden>
+            View BQCA template
           </a>
         </span>
       </footer>

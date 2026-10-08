@@ -5,8 +5,8 @@ A Looker Studio (Data Studio) dashboard with tile-level parity to the Looker
 built directly on the event table populated by the
 [ADK BigQuery Agent Analytics plugin](https://adk.dev/observability/bigquery-agent-analytics/).
 For teams that run BQAA but do not run Looker. BigQuery Conversational
-Analytics (BQCA) Prompt & Response Logging tables use the same template
-through the [`bqca` profile](#bqca-prompt--response-logging-profile).
+Analytics (BQCA) Prompt & Response Logging tables use a dedicated 7-page
+tool-free template through the [`bqca` profile](#bqca-prompt--response-logging-profile).
 
 **Just want to use the dashboard?** Read the
 [User Manual](USER_MANUAL.md) — prerequisites, three-step setup, page guide,
@@ -46,6 +46,7 @@ billing project is supported as an optional advanced setting.
 |---|---|
 | `spec/chart_manifest.yaml` | Reviewed consumer snapshot: 37 chart records, 9 non-data elements, controls, listener matrix, layout, and oracle mappings |
 | `spec/product_contract.yaml` | Current product-layer titles, layout, filters, live fixes, and intentional divergences from the pinned block |
+| `spec/bqca_product_contract.yaml` | Product contract for the dedicated 7-page tool-free BQCA template (`1ffb0888-20ea-451f-aeb8-69fc37973335`, alias `ds0`) |
 | `sql/events_v1.sql.tmpl` | Reviewed base-table query (**generated** by `tools/gen_events_tmpl.py`) |
 | `sql/events_v1.template.sql` | Sentinel-rendered SQL embedded in the canonical report (**generated** by `tools/render_template.py`) |
 | `sql/preflight.sql.tmpl` / `.template.sql` | Structural compatibility check, run by the hydration helper before emitting a link |
@@ -53,8 +54,8 @@ billing project is supported as an optional advanced setting.
 | `sql/bqca_events_v1.template.sql` | Sentinel-rendered BQCA reporting query for a custom-query data source (**generated** by `tools/render_template.py --profile bqca`) |
 | `sql/bqca_preflight.sql.tmpl` / `.template.sql` | Advisory 30-day BQCA data profile, run by the hydration helper after the structural check |
 | `bindings/template_bindings.yaml` | Executable sentinel bindings (real fixture identifiers, not placeholders) |
-| `bindings/bqca_report_template.yaml` | BQCA profile: the shared template it copies, BQCA report and data-source names, default table, custom query |
-| `bindings/bqca_template_bindings.yaml` | BQCA sentinel bindings — the shared template's, so `sqlReplace` can rebind them |
+| `bindings/bqca_report_template.yaml` | BQCA profile: dedicated 7-page tool-free template (`1ffb0888-20ea-451f-aeb8-69fc37973335`, alias `ds0`), BQCA report and data-source names, default table, custom query |
+| `bindings/bqca_template_bindings.yaml` | BQCA sentinel bindings for the embedded `ds0` custom query, so `sqlReplace` can rebind them |
 | `tools/gen_events_tmpl.py` | Base-table reporting-query generator |
 | `tools/gen_bqca_events_tmpl.py` | BQCA reporting-query generator (nine-event allowlist, one base-table scan) |
 | `tools/render_template.py` | Deterministic tmpl → template renderer with sentinel-uniqueness checks (`--profile adk\|bqca\|all`, `--check`) |
@@ -293,33 +294,44 @@ or when no event carries a data-agent ID. `--skip-data-profile` reads no
 table data. `--custom-sql-out` writes the BQCA reporting query bound to your
 table.
 
-**BQCA uses the shared template.** No BQCA-specific Looker Studio template
-is published yet, so the 1-click button opens your BQCA table in the shared
-BQAA report layout (preview) by copying the same
-[8-page template](https://lookerstudio.google.com/reporting/5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40)
-through data source `ds230` and the same sentinels. Only the table, the
-report name (`BigQuery Conversational Analytics (BQCA) — dataset.table`),
-and the data-source name (`BQCA — project.dataset.table`) differ. On BQCA
-data:
+**BQCA uses a dedicated 7-page tool-free template.** The 1-click button
+opens your BQCA table in the dedicated
+[7-page tool-free BQCA template](https://lookerstudio.google.com/reporting/1ffb0888-20ea-451f-aeb8-69fc37973335)
+(`report_id: 1ffb0888-20ea-451f-aeb8-69fc37973335`, data source alias `ds0`)
+backed by `sql/bqca_events_v1.template.sql` (`spec/bqca_product_contract.yaml`).
+Because BQCA never logs tool events, all tool-usage pages, tool-latency series,
+and tool-error charts are omitted from the template:
 
-- the tool pages and tool-error charts stay empty — BQCA logs no tool
-  events;
-- agent charts show the root agent for every data agent, and session counts
-  are turn counts, because every BQCA turn starts a new session;
-- user charts group by the raw `user_id`, which BQCA leaves empty when the
-  caller is unresolved;
-- the Looker Studio acknowledgement dialog shows the shared template's
-  query (`sql/events_v1.template.sql`), which reads only your table.
+- **Token Consumption** (`p_539b9240`) — total, input, output, thoughts, and
+  cached tokens over time and by `data_agent_id`;
+- **Data Agents & Turns** (`p_a89cfece`) — active data agents (`data_agent_id`),
+  total turns (`session_id`), completed turns (`turn_latency_ms`), generated SQL
+  queries (`extracted_sql`), and volume/latency/errors by `data_agent_id`
+  (session counts are turn counts because every BQCA turn starts a new session);
+- **LLM Interactions & Embedding Suggestions** (`p_97efe693`) — model calls
+  (`llm_latency_ms`), average LLM call latency, average time to first token
+  (`ttft_ms`), suggested columns proposed (`similar_queries_count`), and token /
+  suggestion trends by `model_version` and `embedding_suggestion_reason`;
+- **User & Persona Analytics** (`p_edf06c14`) — distinct personas (`persona`),
+  distinct user IDs (`user_id`), distinct conversations (`conversation_id`), and
+  activity by `persona` and `data_agent_id`;
+- **Latency & Fast-Path ROI** (`p_08774fec`) — average end-to-end turn latency
+  (`turn_latency_ms`), LLM latency (`llm_latency_ms`), event latency
+  (`total_latency_ms`), and Fast-Path vs standard NL2SQL comparison
+  (`fast_path_label`);
+- **Errors (BQCA 3-Condition)** (`p_88bcf5f8`) — errors across all three BQCA
+  error conditions (`is_error`), attributed by `data_agent_id`, `event_type`, and
+  `error_message`;
+- **Prompt, Response & SQL Inspector** (`p_b87a335e`) — turn-by-turn table of
+  `event_date`, `session_id`, `data_agent_id`, `persona`, `event_type`,
+  `fast_path_label`, `user_prompt_text`, `extracted_sql`, `summary_text`,
+  `error_message`, `total_latency_ms`, and `total_tokens`.
 
-To unlock all 9-event BQCA, data-agent, persona, fast-path, prompt,
-response, and generated-SQL panels, either run the
+You can also run the
 [Self-Hosted Streamlit BQCA Dashboard](../../dashboards/streamlit/)
-(`dashboards/streamlit/`), or add a BigQuery custom-query data source in
-Looker Studio with `sql/bqca_events_v1.template.sql` — replace its three
-sentinels with your IDs, or use the `sql/bqca_events_v1.sql.tmpl` output from
-`--custom-sql-out` — and enable date range parameters on it. The query reads
-only the nine event types BQCA logs, in one date-pruned scan of your table,
-and adds:
+(`dashboards/streamlit/`) or export `sql/bqca_events_v1.sql.tmpl` bound to your
+table with `--custom-sql-out`. The query reads only the nine event types BQCA
+logs, in one date-pruned scan of your table, and adds:
 
 | Column | Meaning |
 |---|---|
@@ -333,8 +345,6 @@ and adds:
 | `user_prompt_text`, `agent_response_text` | The prompt, and every markdown part of a response in order |
 | `extracted_sql`, `summary_text` | The first fenced SQL block of an `AGENT_RESPONSE`, and a 2,000-character text summary |
 | `similar_queries_count`, `is_embedding_hit`, `embedding_suggestion_reason` | Suggested-column / suggestion count (`$.suggested_columns` first in `COALESCE`, before `$.similar_queries_count` and `$.suggestions`), non-empty indicator, and `$.reason` on `EMBEDDING_SUGGESTION` rows |
-
-A dedicated BQCA template with BQCA-native pages is follow-up work.
 
 Every generated file is deterministic and CI-checked for drift. After
 editing a source, regenerate from `dashboard/looker_studio`:

@@ -407,8 +407,9 @@ def main(argv: list[str] | None = None) -> int:
   )
   if profile == "bqca":
     print(
-        "NOTE: BQCA uses the shared BQAA template; tool pages stay empty and"
-        " data-agent fields need the BQCA custom query (--custom-sql-out)",
+        "NOTE: BQCA uses the dedicated 7-page tool-free BQCA template"
+        f" (report {load_yaml(ROOT / PROFILES['bqca']['report'])['report_id']},"
+        " alias ds0) over sql/bqca_events_v1.template.sql",
         file=sys.stderr,
     )
   print(

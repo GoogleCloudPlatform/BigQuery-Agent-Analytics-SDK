@@ -945,7 +945,7 @@ Set `--location` to the location of your dataset. Prefer a browser? Open the web
 https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/bqca/
 ```
 
-`--custom-sql-out` writes the BQCA reporting query bound to your table. Add it to the report as a BigQuery custom-query data source to get the BQCA fields (data agent, persona, fast path, latency, tokens, prompt, response, and extracted SQL). The [Looker Studio README](../../dashboard/looker_studio/README.md) describes the BQCA profile, its fields, and its current limits.
+The Linking API URL opens the **dedicated 7-page tool-free BQCA Looker Studio template** (`1ffb0888-20ea-451f-aeb8-69fc37973335`, alias `ds0`) backed by `sql/bqca_events_v1.template.sql` — covering Token Consumption, Data Agents & Turns, LLM Interactions & Embedding Suggestions, User & Persona Analytics, Latency & Fast-Path ROI, Errors (BQCA 3-Condition), and the Prompt, Response & SQL Inspector, with all tool-related pages and charts omitted. `--custom-sql-out` also writes the standalone BQCA reporting query bound to your table. The [Looker Studio README](../../dashboard/looker_studio/README.md) describes the BQCA profile and its derived columns.
 
 #### Streamlit
 
@@ -985,7 +985,7 @@ Filters (data agent, persona, event type, fast path, session / conversation, pro
 | Every tile shows `—`, or a panel reports a missing table | Check the table name (**Events table** in Streamlit, `--table` for Looker Studio): the dashboards default to `bqca_prompt_response_logs`, your logs may be in `agent_events`. In Streamlit, `BQCA_TABLE_ID` (or the shared `BQ_TABLE_ID`) overrides the default |
 | Streamlit opens on the wrong table | **Events table** starts from `BQCA_TABLE_ID`, else `BQ_TABLE_ID`, else the `bqca_prompt_response_logs` default. A `BQ_TABLE_ID` in your environment or `.env` is shared with the ADK surface and wins over the default: set `BQCA_TABLE_ID` to override it for BQCA only, or edit **Events table** and press **Connect** |
 | A Streamlit panel refuses to run because of the scan cap | Narrow the time range or raise **Per-query scan cap**. The Prompt, Response & SQL Explorer reads full prompts and responses, so it scans the most |
-| Tool pages are empty in Looker Studio | Expected: BQCA logs no tool events |
+| Looker Studio opened an 8-page ADK template with empty tool pages | You opened the ADK surface instead of the BQCA surface: use `hydrate_dashboard.py --profile bqca` or the `/bqca/` web configurator (`?profile=bqca`) to open the dedicated 7-page tool-free BQCA template |
 
 > [!CAUTION]
 > Both dashboards show raw prompts and responses, so the guidance in Section 7.3 applies to them as well: grant dataset access only to authorized data stewards. The Streamlit app runs every query as the server's own BigQuery identity and has no login of its own, so keep it on `127.0.0.1` or put an authenticating reverse proxy such as IAP in front of it before you share a URL.

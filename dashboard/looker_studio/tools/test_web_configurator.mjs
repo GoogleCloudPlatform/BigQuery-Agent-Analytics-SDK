@@ -1346,8 +1346,8 @@ const bqcaProfile = resolveProfileConfig("bqca");
 assert.equal(bqcaProfile, REPORT_CONFIG.profiles.bqca);
 assert.equal(bqcaProfile.id, "bqca");
 assert.equal(bqcaProfile.label, "BQCA Prompt & Response Logging");
-assert.equal(bqcaProfile.reportId, "5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40");
-assert.equal(bqcaProfile.dataSourceAlias, "ds230");
+assert.equal(bqcaProfile.reportId, "1ffb0888-20ea-451f-aeb8-69fc37973335");
+assert.equal(bqcaProfile.dataSourceAlias, "ds0");
 assert.deepEqual(
   bqcaProfile.sentinels,
   {
@@ -1355,7 +1355,7 @@ assert.deepEqual(
     dataset: "bqaa_fixture_adk_1_27_0",
     table: "sentinelbqaaevents",
   },
-  "the shared template's sentinels are the only ones its SQL can replace",
+  "the BQCA template's sentinels match the rendered bqca_events_v1.template.sql",
 );
 assert.equal(bqcaProfile.defaultTable, "bqca_prompt_response_logs");
 assert.equal(bqcaProfile.reportName, "BigQuery Conversational Analytics (BQCA)");
@@ -1423,7 +1423,7 @@ assert.equal(bqcaDashboard.origin, "https://lookerstudio.google.com");
 assert.equal(bqcaDashboard.pathname, "/reporting/create");
 assert.equal(
   bqcaDashboard.searchParams.get("c.reportId"),
-  "5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40",
+  "1ffb0888-20ea-451f-aeb8-69fc37973335",
 );
 assert.equal(bqcaDashboard.searchParams.get("c.mode"), "view");
 assert.equal(
@@ -1431,28 +1431,30 @@ assert.equal(
   "BigQuery Conversational Analytics (BQCA) — agent_analytics.agent_events",
 );
 assert.equal(
-  bqcaDashboard.searchParams.get("ds.ds230.datasourceName"),
+  bqcaDashboard.searchParams.get("ds.ds0.datasourceName"),
   "BQCA — customer-project-123.agent_analytics.agent_events",
 );
 assert.equal(
-  bqcaDashboard.searchParams.get("ds.ds230.sqlReplace"),
+  bqcaDashboard.searchParams.get("ds.ds0.sqlReplace"),
   dashboard.searchParams.get("ds.ds230.sqlReplace"),
   "BQCA rebinds the same three sentinels to the customer's table",
 );
 assert.equal(
-  bqcaDashboard.searchParams.get("ds.ds230.billingProjectId"),
+  bqcaDashboard.searchParams.get("ds.ds0.billingProjectId"),
   "customer-project-123",
 );
-assert.equal(bqcaDashboard.searchParams.get("ds.ds230.refreshFields"), "false");
+assert.equal(bqcaDashboard.searchParams.get("ds.ds0.refreshFields"), "false");
 assert.deepEqual(
   [...bqcaDashboard.searchParams.keys()],
-  [...dashboard.searchParams.keys()],
-  "BQCA uses exactly the ADK Linking API parameter set",
+  [...dashboard.searchParams.keys()].map((key) =>
+    key.replace("ds.ds230.", "ds.ds0."),
+  ),
+  "BQCA uses the Linking API parameter set with its ds0 alias",
 );
 assert.equal(
   new URL(
     buildDashboardUrl({ ...advanced, profile: "bqca" }),
-  ).searchParams.get("ds.ds230.billingProjectId"),
+  ).searchParams.get("ds.ds0.billingProjectId"),
   "billing-project-123",
 );
 assert.throws(
@@ -1584,22 +1586,27 @@ assert.equal(
 assert.match(
   pageSource,
   /id="bqca-template-note"[^>]*data-profile-only="bqca" hidden>/s,
-  "the shared-template disclosure ships with the BQCA surface",
+  "the BQCA template note ships with the BQCA surface",
 );
 assert.match(
   pageSource,
   /dashboard\/looker_studio\/sql\/bqca_events_v1\.sql\.tmpl/,
-  "the BQCA disclosure links the BQCA custom query",
+  "the BQCA note links the BQCA custom query",
 );
 assert.match(
   bqcaPageSource,
-  /shared BQAA report layout \(preview\)/,
-  "the BQCA hero upfront discloses the shared BQAA report layout (preview)",
+  /7-page tool-free BQCA Looker Studio dashboard/,
+  "the BQCA hero describes the dedicated 7-page tool-free BQCA Looker Studio dashboard",
 );
 assert.match(
   bqcaPageSource,
-  /BQCA data in shared BQAA layout \(preview\)/,
-  "the BQCA hero fact pill labels the 1-click report as a shared BQAA layout preview",
+  /34 BQCA-native charts &amp; KPIs/,
+  "the BQCA hero fact pill lists 34 BQCA-native charts & KPIs",
+);
+assert.match(
+  bqcaPageSource,
+  /7 tool-free report pages/,
+  "the BQCA hero fact pill lists 7 tool-free report pages",
 );
 assert.match(
   bqcaPageSource,
@@ -1608,8 +1615,8 @@ assert.match(
 );
 assert.match(
   bqcaPageSource,
-  /Create my dashboard \(BQAA layout preview\)/,
-  "the BQCA CTA button explicitly names the BQAA layout preview",
+  /Create my BQCA dashboard/,
+  "the BQCA CTA button names the BQCA dashboard",
 );
 assert.match(bqcaPageSource, /https:\/\/googlecloudplatform\.github\.io\/BigQuery-Agent-Analytics-SDK\/bqca\//);
 
@@ -1720,8 +1727,8 @@ assert.match(
 );
 assert.match(
   formStatus.textContent,
-  /shared BQAA report layout \(preview\).*sql\/bqca_events_v1\.sql\.tmpl \(--custom-sql-out\).*dashboards\/streamlit\//,
-  "BQCA Ready status discloses the shared BQAA layout preview and native BQCA alternatives",
+  /dedicated 7-page tool-free BQCA Looker Studio template \(ds0\).*sql\/bqca_events_v1\.sql\.tmpl \(--custom-sql-out\).*dashboards\/streamlit\//,
+  "BQCA Ready status describes the dedicated 7-page tool-free BQCA template and custom-SQL/Streamlit options",
 );
 assert.equal(
   createLink.href,
@@ -1789,7 +1796,7 @@ assert.deepEqual(
   "a non-default surface is mirrored into the address bar",
 );
 assert.equal(
-  new URL(createLink.href).searchParams.get("ds.ds230.datasourceName"),
+  new URL(createLink.href).searchParams.get("ds.ds0.datasourceName"),
   "BQCA — my-project.my_dataset.bqca_prompt_response_logs",
 );
 const statusBeforeNoop = formStatus.textContent;

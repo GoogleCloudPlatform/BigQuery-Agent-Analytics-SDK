@@ -26,8 +26,8 @@ export const REPORT_CONFIG = Object.freeze({
     "bqca": {
       "id": "bqca",
       "label": "BQCA Prompt & Response Logging",
-      "reportId": "5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40",
-      "dataSourceAlias": "ds230",
+      "reportId": "1ffb0888-20ea-451f-aeb8-69fc37973335",
+      "dataSourceAlias": "ds0",
       "sentinels": {
         "project": "test-project-0728-467323",
         "dataset": "bqaa_fixture_adk_1_27_0",

@@ -148,24 +148,31 @@ Your copy is named **BigQuery Conversational Analytics (BQCA) —
 dataset.table**. On the BQCA page, **Copy setup link** produces a link that
 ends in `&profile=bqca`, so teammates who open it land on the BQCA page too.
 
-**What to expect.** A BQCA-specific Looker Studio template is not published
-yet, so the 1-click button opens your logging table in the **shared BQAA
-report layout (preview)** (the same 8-page report described below). On BQCA
-data:
+**What you get on BQCA.** The 1-click button opens your logging table in the
+**dedicated 7-page tool-free BQCA Looker Studio template**
+(`1ffb0888-20ea-451f-aeb8-69fc37973335`, data source alias `ds0`) built over
+`sql/bqca_events_v1.template.sql`. Because BQCA logs no tool calls, all
+tool-usage pages, tool-latency charts, and tool-error panels are omitted:
 
-- **Tool Usage**, the tool latency charts, and **Errors** (tool errors) stay
-  empty — BQCA logs no tool calls;
-- agent charts show one root agent rather than each data agent;
-- session counts are turn counts — every BQCA turn starts a new session;
-- user charts show the `user_id` BQCA logged, which is empty when the caller
-  could not be resolved.
+- **Token Consumption** — total, input, output, thoughts, and cached tokens
+  over time and by data agent;
+- **Data Agents & Turns** — turns, completed turns, distinct data agents, and
+  conversations (session counts are turn counts — every BQCA turn starts a new
+  session);
+- **LLM Interactions & Embedding Suggestions** — model calls, embedding
+  suggestions, hit counts, and suggested-column counts;
+- **User & Persona Analytics** — activity by resolved persona and data agent;
+- **Latency & Fast-Path ROI** — turn latency, LLM latency, TTFT, and Fast-Path
+  vs standard NL2SQL comparison;
+- **Errors (BQCA 3-Condition)** — errors across all three BQCA error signals,
+  broken down by data agent, event type, and error message;
+- **Prompt, Response & SQL Inspector** — full prompts, concatenated markdown
+  responses, and extracted SQL per turn.
 
-For all 9-event BQCA, per-data-agent, persona, fast-path, prompt, response,
-and generated-SQL panels, either run the
+You can also run the
 [Self-Hosted Streamlit BQCA Dashboard](../../dashboards/streamlit/)
-(`dashboards/streamlit/`), or ask whoever maintains your dashboards to attach
-`sql/bqca_events_v1.sql.tmpl` (`--custom-sql-out`) as a second custom-query
-data source per the
+(`dashboards/streamlit/`) or export `sql/bqca_events_v1.sql.tmpl`
+(`--custom-sql-out`) per the
 [contributor README](README.md#bqca-prompt--response-logging-profile).
 
 ---

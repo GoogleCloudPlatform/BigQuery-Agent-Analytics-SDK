@@ -189,7 +189,7 @@ function refresh() {
     copyButton.disabled = false;
     const readySuffix =
       activeProfile === "bqca"
-        ? " Opens in the shared BQAA report layout (preview); attach sql/bqca_events_v1.sql.tmpl (--custom-sql-out) or run the Self-Hosted Streamlit BQCA Dashboard (dashboards/streamlit/) for 9-event, Data Agent, and Fast-Path panels."
+        ? " Opens the dedicated 7-page tool-free BQCA Looker Studio template (ds0); you can also export sql/bqca_events_v1.sql.tmpl (--custom-sql-out) or run the Self-Hosted Streamlit BQCA Dashboard (dashboards/streamlit/)."
         : "";
     setStatus(
       `Ready for ${derived.project}.${derived.dataset}.${derived.table}.${readySuffix}`,

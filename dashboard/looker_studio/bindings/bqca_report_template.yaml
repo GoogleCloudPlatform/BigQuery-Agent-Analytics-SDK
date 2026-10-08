@@ -5,29 +5,21 @@
 #   * tools/render_web_config.py -> docs/report-config.mjs profiles.bqca, which
 #     drives the configurator toggle, ?profile=bqca, and the /bqca/ page.
 #
-# No dedicated BQCA Looker Studio template is published yet. BQCA writes its
-# logs through the same BigQuery Agent Analytics plugin, into a table with the
-# same base schema, so this profile deliberately reuses the published BQAA
-# template named by `shared_template` (same report_id and data source alias).
-# What that means for users, disclosed on the /bqca/ page and in README.md /
-# USER_MANUAL.md:
-#   * the copied report runs the shared template's embedded query
-#     (sql/events_v1.template.sql) against the BQCA table, not
-#     sql/bqca_events_v1.template.sql;
-#   * the tool pages and tool-error charts stay empty because BQCA never logs
-#     tool events, and "sessions" count turns (a new session per turn);
-#   * data-agent, persona, fast-path, prompt, and response fields come from
-#     the BQCA custom query (custom_query_template) in a data source you add.
-# Live-template attestations (reviewed SQL hash, external access, viewer QA)
-# stay in the shared template's file; they are not restated here.
-# tests/test_looker_studio_dashboard.py asserts that report_id and
-# data_source_alias equal the shared template's while `shared_template` is set.
-# Publishing a dedicated BQCA template means removing `shared_template` and
-# replacing report_id, data_source_alias, and the sentinel bindings.
-shared_template: bindings/report_template.yaml
-report_id: 5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40
-data_source_alias: ds230
+# Points at the dedicated 7-page tool-free BQCA Looker Studio template
+# provisioned via LegoMidtierService over sql/bqca_events_v1.template.sql
+# (report_id 1ffb0888-20ea-451f-aeb8-69fc37973335, data source alias ds0).
+# Tool-related pages, scorecards, and charts from the ADK template are omitted.
+report_id: 1ffb0888-20ea-451f-aeb8-69fc37973335
+data_source_alias: ds0
+datasource_id: 4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc
 default_report_name: BigQuery Conversational Analytics (BQCA)
 default_table: bqca_prompt_response_logs
 datasource_name_prefix: BQCA
+template_sql: sql/bqca_events_v1.template.sql
 custom_query_template: sql/bqca_events_v1.template.sql
+product_contract: spec/bqca_product_contract.yaml
+credential_mode: VIEWERS
+published_date: "2026-10-08"
+reviewed_template_sql:
+  path: sql/bqca_events_v1.template.sql
+  sha256: be4571cb9eb0529913a4c3c9ea6c135711e8570a9fbdb3c8b03cd955627416ed
