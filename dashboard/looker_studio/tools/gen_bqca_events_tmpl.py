@@ -273,7 +273,6 @@ bqca_fields AS (
       COALESCE(
         NULLIF(JSON_VALUE(content, '$.text_summary'), ''),
         NULLIF(JSON_VALUE(content, '$.prompt'), ''),
-        NULLIF(JSON_VALUE(content, '$.parts[0].text'), ''),
         NULLIF(
           ARRAY_TO_STRING(
             ARRAY(
@@ -286,7 +285,8 @@ bqca_fields AS (
             '\n'
           ),
           ''
-        )
+        ),
+        NULLIF(JSON_VALUE(content, '$.parts[0].text'), '')
       ),
       NULL
     ) AS user_prompt_text,

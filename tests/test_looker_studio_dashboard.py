@@ -1249,6 +1249,7 @@ def test_bqca_generated_artifacts_cannot_drift(tmp_path):
   generator = _load_dashboard_module("gen_bqca_events_tmpl")
   renderer = _load_dashboard_module("render_template")
   web = _load_dashboard_module("render_web_config")
+  validator = _load_dashboard_module("validate_contracts")
 
   assert generator.BQCA_EVENT_TYPES == BQCA_EVENT_TYPES
   logical = generator.generate()
@@ -1284,6 +1285,13 @@ def test_bqca_generated_artifacts_cannot_drift(tmp_path):
   for path, rendered in web.outputs().items():
     assert (DASHBOARD / path).read_text() == rendered, path
   assert web.main(["--check"]) == 0
+  assert web.main(["--profile", "bqca", "--check"]) == 0
+  assert web.main(["--profile", "adk", "--check"]) == 0
+  assert web.main(["--profile", "all", "--check"]) == 0
+
+  assert validator.main(["--profile", "bqca"]) == 0
+  assert validator.main(["--profile", "adk"]) == 0
+  assert validator.main(["--profile", "all"]) == 0
 
 
 def test_bqca_profile_reuses_the_published_template_bindings():
@@ -1308,6 +1316,21 @@ def test_bqca_profile_reuses_the_published_template_bindings():
   assert bqca["data_source_alias"] == BQCA_DATASOURCE_ALIAS
   assert bqca["datasource_id"] == BQCA_DATASOURCE_ID
   assert bqca["product_contract"] == "spec/bqca_product_contract.yaml"
+  assert bqca["chart_manifest"] == "spec/bqca_chart_manifest.yaml"
+  assert bqca["link_access"] == "PUBLIC"
+  assert bqca["publishing_mode"] == "MANUAL"
+  assert (
+      bqca["generated_report_credential_gate"]
+      == shared["generated_report_credential_gate"]
+  )
+  assert bqca["source_contract"] == shared["source_contract"]
+  assert bqca["governance"] == shared["governance"]
+  assert bqca["default_date_range"] == shared["default_date_range"]
+  assert bqca["product_verification"]["pages"] == 7
+  assert bqca["product_verification"]["component_count"] == 34
+  assert bqca["product_verification"]["scorecard_count"] == 21
+  assert bqca["product_verification"]["chart_count"] == 13
+  assert bqca["product_verification"]["result"] == "PASSED"
   assert bqca_placeholders == adk_placeholders
   assert (
       tuple(bqca_placeholders[name] for name in ("PROJECT", "DATASET", "TABLE"))
@@ -1331,6 +1354,10 @@ def test_bqca_profile_reuses_the_published_template_bindings():
   assert contract["surface"]["canonical_report_id"] == BQCA_REPORT_ID
   assert contract["surface"]["datasource_id"] == BQCA_DATASOURCE_ID
   assert contract["surface"]["data_source_alias"] == BQCA_DATASOURCE_ALIAS
+  assert (
+      contract["surface"]["source_parity_contract"]
+      == "spec/bqca_chart_manifest.yaml"
+  )
   assert tuple(contract["allowed_event_types"]) == BQCA_EVENT_TYPES
   assert [page["id"] for page in contract["pages"]] == [
       "p_539b9240",
@@ -1459,6 +1486,15 @@ def test_bqca_query_reads_only_bqca_events_with_canonical_extractions():
   ):
     assert re.search(rf"\bAS {column}\b", logical), column
   assert "tfft_ms" not in logical
+
+  # F1: user_prompt_text joins all text parts in offset order BEFORE falling
+  # back to $.parts[0].text so multipart user messages are never truncated.
+  prompt_coalesce = logical.split(
+      "event_type IN ('USER_MESSAGE_RECEIVED', 'INVOCATION_STARTING')", 1
+  )[1].split("AS user_prompt_text", 1)[0]
+  assert prompt_coalesce.index(
+      "JSON_QUERY_ARRAY(content, '$.parts')"
+  ) < prompt_coalesce.index("JSON_VALUE(content, '$.parts[0].text')")
 
   # P1-B: EMBEDDING_SUGGESTION emits {reason, suggested_columns} at HEAD, so
   # $.suggested_columns must appear FIRST in the COALESCE for
@@ -1607,14 +1643,18 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
   pages, or a setting fails here until the data source is republished,
   verified again, and the records are updated.
   """
+  validator = _load_dashboard_module("validate_contracts")
   bqca = yaml.safe_load(
       (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
   )
   contract = yaml.safe_load(
       (DASHBOARD / "spec/bqca_product_contract.yaml").read_text()
   )
+  manifest_bytes = (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_bytes()
   rendered = (DASHBOARD / "sql/bqca_events_v1.template.sql").read_bytes()
   digest = hashlib.sha256(rendered).hexdigest()
+  pages_digest = validator.canonical_pages_sha256(contract["pages"])
+  manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
 
   invariants = {
       "use_datetime_type": True,
@@ -1633,12 +1673,14 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
       bqca["block_datasource"]["parameter_configuration"]
   )
 
-  # The live evidence names the exact SQL and pages it was gathered for.
+  # The live evidence names the exact SQL, pages, and manifest it was gathered for.
   assert bqca["reviewed_template_sql"]["sha256"] == digest
   evidence = bqca["live_template_verification"]
   assert evidence == {
       "verified_date": "2026-10-08",
       "repository_sql_sha256": digest,
+      "pages_sha256": pages_digest,
+      "manifest_sha256": manifest_digest,
       "method": [
           "data_studio_web_service_publish_datasource",
           "data_studio_web_service_get_block_datasource",
@@ -1648,12 +1690,14 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
       "publish_datasource": {
           "health": "HEALTHY",
           "versions": {
-              "hydrated_bqca_table": 1791481478480,
-              "canonical_sentinel_table": 1791481567763,
+              "hydrated_bqca_table": 1791487397284,
+              "canonical_sentinel_table": 1791487478792,
           },
       },
       "execute_query": {
           "hydrated_bqca_table": {
+              "schema": "bqaa_base_table_13_columns",
+              "date_range": "default_dates",
               "code": 0,
               "pages": [page["id"] for page in contract["pages"]],
               "non_empty": True,
@@ -1705,6 +1749,68 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
       ),
   }
 
+  # External-access attestation in bqca_report_template.yaml is stdlib-parseable
+  # by scripts/check_external_access_staleness.py.
+  staleness_spec = importlib.util.spec_from_file_location(
+      "check_external_access_staleness",
+      ROOT / "scripts" / "check_external_access_staleness.py",
+  )
+  assert staleness_spec is not None and staleness_spec.loader is not None
+  staleness_mod = importlib.util.module_from_spec(staleness_spec)
+  staleness_spec.loader.exec_module(staleness_mod)
+  bqca_raw = (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+  bqca_ext = bqca["external_access_verification"]
+  assert staleness_mod.read_attestation_fields(bqca_raw) == {
+      "next_due_date": bqca_ext["next_due_date"],
+      "status": bqca_ext["status"],
+      "tracking_issue": bqca_ext["tracking_issue"],
+  }
+
+
+def test_bqca_chart_manifest_and_contract_mutation_detection():
+  """F6: mutating any scorecard, chart, or field in contract or manifest fails."""
+  validator = _load_dashboard_module("validate_contracts")
+  assert validator.validate_bqca() == []
+
+  contract = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_product_contract.yaml").read_text()
+  )
+  manifest = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text()
+  )
+  assert manifest["meta"]["page_count"] == 7
+  assert manifest["meta"]["scorecard_count"] == 21
+  assert manifest["meta"]["chart_count"] == 13
+  assert manifest["meta"]["total_component_count"] == 34
+  assert manifest["datasource"]["field_count"] == 40
+  assert len(manifest["datasource"]["fields"]) == 40
+  assert len(manifest["pages"]) == 7
+  assert len(manifest["components"]) == 34
+
+  # Mutating a scorecard field in contract["pages"] invalidates pages_sha256
+  # and contract-vs-manifest parity.
+  mutated_contract = json.loads(json.dumps(contract))
+  mutated_contract["pages"][0]["scorecards"][0]["field"] = "input_tokens"
+  errors = validator.validate_bqca(contract_override=mutated_contract)
+  assert any("pages_sha256" in e for e in errors), errors
+  assert any("kpi_total_tokens" in e for e in errors), errors
+
+  # Mutating a chart metric in contract["pages"] invalidates pages_sha256.
+  mutated_chart_contract = json.loads(json.dumps(contract))
+  mutated_chart_contract["pages"][0]["charts"][0]["metric"] = "input_tokens"
+  chart_errors = validator.validate_bqca(
+      contract_override=mutated_chart_contract
+  )
+  assert any("pages_sha256" in e for e in chart_errors), chart_errors
+
+  # Mutating a component title in manifest invalidates manifest_sha256 and
+  # contract-vs-manifest parity.
+  mutated_manifest = json.loads(json.dumps(manifest))
+  mutated_manifest["pages"][0]["components"][0]["label"] = "Tampered Label"
+  m_errors = validator.validate_bqca(manifest_override=mutated_manifest)
+  assert any("manifest_sha256" in e for e in m_errors), m_errors
+  assert any("kpi_total_tokens" in e for e in m_errors), m_errors
+
 
 def test_bqca_artifacts_never_name_event_types_bqca_does_not_log():
   for relative in (
@@ -1714,6 +1820,7 @@ def test_bqca_artifacts_never_name_event_types_bqca_does_not_log():
       "bindings/bqca_report_template.yaml",
       "bindings/bqca_template_bindings.yaml",
       "spec/bqca_product_contract.yaml",
+      "spec/bqca_chart_manifest.yaml",
       "docs/index.html",
       "docs/bqca/index.html",
       "docs/app.mjs",
@@ -2098,6 +2205,9 @@ def test_bqca_hydration_rejects_invalid_arguments_before_querying(
 def test_bqca_profile_is_documented_for_contributors_and_users():
   readme = " ".join((DASHBOARD / "README.md").read_text().split())
   manual = " ".join((DASHBOARD / "USER_MANUAL.md").read_text().split())
+  impl = " ".join(
+      (DASHBOARD / "docs/dashboard-implementation.md").read_text().split()
+  )
   for fragment in (
       "## BQCA Prompt & Response Logging profile",
       "BigQuery-Agent-Analytics-SDK/bqca/",
@@ -2109,9 +2219,11 @@ def test_bqca_profile_is_documented_for_contributors_and_users():
       "sql/bqca_events_v1.template.sql",
       "tools/gen_bqca_events_tmpl.py",
       "tools/render_web_config.py",
+      "tools/validate_contracts.py",
       "BQCA uses a dedicated 7-page tool-free template",
       BQCA_REPORT_ID,
       "spec/bqca_product_contract.yaml",
+      "spec/bqca_chart_manifest.yaml",
       "all tool-usage pages, tool-latency series, and tool-error charts are omitted",
       "session counts are turn counts",
   ):
@@ -2127,6 +2239,18 @@ def test_bqca_profile_is_documented_for_contributors_and_users():
       "session counts are turn counts",
   ):
     assert fragment in manual, f"USER_MANUAL.md must document {fragment!r}"
+  for fragment in (
+      "## Dedicated 7-page BQCA Prompt & Response Logging template",
+      BQCA_REPORT_ID,
+      BQCA_DATASOURCE_ID,
+      "spec/bqca_product_contract.yaml",
+      "spec/bqca_chart_manifest.yaml",
+      "tools/validate_contracts.py --profile bqca",
+      "dashboards/streamlit/",
+  ):
+    assert (
+        fragment in impl
+    ), f"docs/dashboard-implementation.md must document {fragment!r}"
   for relative, text in (("README.md", readme), ("USER_MANUAL.md", manual)):
     for event_type in BQCA_UNLOGGED_EVENT_TYPES:
       assert event_type not in text, f"{relative} names {event_type}"

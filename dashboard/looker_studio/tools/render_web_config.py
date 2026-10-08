@@ -198,15 +198,26 @@ def render_bqca_page(index_html: str) -> str:
   return page
 
 
-def outputs() -> dict[str, str]:
-  return {
+def outputs(profile: str = "all") -> dict[str, str]:
+  rendered = {
       CONFIG_PATH: render_config(),
       BQCA_PAGE_PATH: render_bqca_page((ROOT / INDEX_PATH).read_text()),
   }
+  if profile == "adk":
+    return {CONFIG_PATH: rendered[CONFIG_PATH]}
+  if profile in ("bqca", "all"):
+    return rendered
+  raise ValueError(f"unknown profile {profile!r}")
 
 
 def main(argv: list[str] | None = None) -> int:
   parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+  parser.add_argument(
+      "--profile",
+      choices=("adk", "bqca", "all"),
+      default="all",
+      help="dashboard profile to render or check (default: all)",
+  )
   parser.add_argument(
       "--check",
       action="store_true",
@@ -214,7 +225,7 @@ def main(argv: list[str] | None = None) -> int:
   )
   args = parser.parse_args(argv)
   try:
-    rendered = outputs()
+    rendered = outputs(args.profile)
   except (KeyError, ValueError) as exc:
     print(f"ERROR: {exc}", file=sys.stderr)
     return 1

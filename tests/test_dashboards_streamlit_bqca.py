@@ -1385,6 +1385,236 @@ def test_response_text_is_the_markdown_of_every_part_joined_in_order():
   assert expr.index("$.text_summary") < expr.index("$.response.parts")
 
 
+# --------------------------------------------------------------------------- #
+# Review fixes: whole prompts, one latency sample per turn, completed-turn     #
+# fast-path rate                                                               #
+# --------------------------------------------------------------------------- #
+
+
+def _user_prompt_text(payload: dict[str, Any]) -> str | None:
+  """Evaluates USER_PROMPT_TEXT_EXPR's COALESCE chain over a payload.
+
+  The arms are tried in the order the expression lists them, so reordering the
+  SQL changes the answer here exactly as it changes it in BigQuery.
+  """
+  expr = bqca_queries.USER_PROMPT_TEXT_EXPR
+  parts = payload.get("parts")
+  parts = parts if isinstance(parts, list) else []
+  first = parts[0] if parts and isinstance(parts[0], dict) else {}
+  texts = [
+      _json_value(part, "text") for part in parts if isinstance(part, dict)
+  ]
+  arms = {
+      expr.index("'$.text_summary'"): _json_value(payload, "text_summary"),
+      expr.index("'$.prompt'"): _json_value(payload, "prompt"),
+      expr.index("'$.parts[0].text'"): _json_value(first, "text"),
+      expr.index("ARRAY_TO_STRING("): "\n".join(
+          text for text in texts if text is not None
+      ),
+  }
+  # Every arm is a NULLIF(..., ''), so a NULL and an empty string both fall
+  # through; an arm this evaluator does not know about fails loudly instead.
+  assert expr.count("NULLIF(") == len(arms), expr
+  for _, value in sorted(arms.items()):
+    if value:
+      return value
+  return None
+
+
+def test_prompt_text_reads_every_part_before_the_first_part_alone():
+  expr = bqca_queries.USER_PROMPT_TEXT_EXPR
+  order = [
+      expr.index("'$.text_summary'"),
+      expr.index("'$.prompt'"),
+      expr.index("ARRAY_TO_STRING(ARRAY(SELECT JSON_VALUE(p, '$.text')"),
+      expr.index("'$.parts[0].text'"),
+  ]
+  # The first part alone is only the last resort: when it came first it cut a
+  # multi-part prompt down to part 1 in the explorer and in the prompt search.
+  assert order == sorted(order)
+  for panel in ("turns", "timeline"):
+    assert expr in _sql(panel), panel
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        # A multi-part prompt is every text part, in order.
+        (
+            {"parts": [{"text": "Show orders"}, {"text": "for EMEA"}]},
+            "Show orders\nfor EMEA",
+        ),
+        ({"parts": [{"text": "a"}, {"text": "b"}, {"text": "c"}]}, "a\nb\nc"),
+        # One part, and parts that carry no text (an image), still read.
+        ({"parts": [{"text": "only part"}]}, "only part"),
+        (
+            {
+                "parts": [
+                    {"inline_data": {"mime_type": "image/png"}},
+                    {"text": "after the image"},
+                ]
+            },
+            "after the image",
+        ),
+        # A logged summary or plain prompt still wins over the parts.
+        (
+            {
+                "text_summary": "summary",
+                "parts": [{"text": "a"}, {"text": "b"}],
+            },
+            "summary",
+        ),
+        ({"prompt": "plain", "parts": [{"text": "a"}, {"text": "b"}]}, "plain"),
+        ({"text_summary": "", "prompt": "plain"}, "plain"),
+        ({"text_summary": "", "parts": [{"text": "a"}, {"text": "b"}]}, "a\nb"),
+        # Nothing to show.
+        ({"parts": []}, None),
+        ({"parts": [{"text": ""}]}, None),
+        ({}, None),
+    ],
+)
+def test_prompt_text_is_every_part_not_just_the_first(payload, expected):
+  assert _user_prompt_text(payload) == expected
+
+
+def test_a_prompt_search_finds_text_in_a_later_part_of_the_prompt():
+  prompt = _user_prompt_text(
+      {"parts": [{"text": "Show orders"}, {"text": "placed in EMEA"}]}
+  )
+  # The explorer matches @prompt_search against this very assembled text.
+  assert prompt is not None and "placed in emea" in prompt.lower()
+  assert (
+      "STRPOS(LOWER(IFNULL(user_prompt, '')), LOWER(@prompt_search))"
+      in _sql("turns")
+  )
+
+
+def _cte_body(sql: str, name: str) -> str:
+  """Returns the squashed text inside ``name AS (...)`` of a generated query."""
+  text = _squash(sql)
+  head = re.search(rf"(?<![\w]){re.escape(name)} AS \(", text)
+  assert head, f"the query has no {name} CTE"
+  depth, in_literal = 1, False
+  for end in range(head.end(), len(text)):
+    char = text[end]
+    if char == "'":
+      in_literal = not in_literal
+    elif in_literal:
+      continue
+    elif char == "(":
+      depth += 1
+    elif char == ")":
+      depth -= 1
+      if depth == 0:
+        return text[head.end() : end]
+  raise AssertionError(f"the {name} CTE never closes")
+
+
+def test_kpi_latency_percentiles_take_one_sample_per_completed_turn():
+  sql = _squash(_sql("kpis"))
+  per_turn = _cte_body(sql, "completion_per_turn")
+  # One row per turn, made of its completion rows only: a turn whose completion
+  # was logged more than once must not weigh more than once in a percentile.
+  assert "FROM scoped" in per_turn
+  assert "event_type = 'INVOCATION_COMPLETED'" in per_turn
+  assert "invocation_id IS NOT NULL" in per_turn
+  assert "GROUP BY invocation_id" in per_turn
+  assert "MAX(turn_latency_ms) AS turn_latency_ms" in per_turn
+  for offset in (50, 95):
+    assert (
+        f"(SELECT APPROX_QUANTILES(turn_latency_ms, 100)[SAFE_OFFSET({offset})]"
+        " FROM completion_per_turn)"
+    ) in sql
+  # No percentile is left reading the raw, repeatable rows.
+  assert sql.count("APPROX_QUANTILES(") == 2
+  # Every other tile stays a distinct-turn or per-event count over scoped rows.
+  assert "COUNT(DISTINCT invocation_id) AS total_turns" in sql
+  assert "COUNTIF(is_error) AS error_events" in sql
+
+
+def test_latency_panel_turn_percentiles_take_one_sample_per_completed_turn():
+  sql = _squash(_sql("latency"))
+  per_turn = _cte_body(sql, "completion_per_turn")
+  assert "FROM scoped" in per_turn
+  assert "event_type = 'INVOCATION_COMPLETED'" in per_turn
+  assert "invocation_id IS NOT NULL" in per_turn
+  assert "GROUP BY invocation_id" in per_turn
+  assert "MAX(total_latency_ms) AS turn_ms" in per_turn
+  # A turn lands in exactly one bucket and one path however many rows ended it.
+  assert "MIN(bucket) AS bucket" in per_turn
+  assert "LOGICAL_OR(fast_path)" in per_turn
+  assert "FROM completion_per_turn" in sql
+  grouped = _cte_body(sql, "grouped")
+  for offset in (50, 95, 99):
+    assert f"APPROX_QUANTILES(turn_ms, 100)[SAFE_OFFSET({offset})]" in grouped
+  # The raw completion rows no longer feed any percentile ...
+  assert (
+      "IF(event_type = 'INVOCATION_COMPLETED', total_latency_ms, NULL)"
+      not in sql
+  )
+  # ... while LLM calls and first-token times stay one sample per event.
+  for column in ("llm_ms", "tfft_ms"):
+    for offset in (50, 95):
+      fragment = f"APPROX_QUANTILES({column}, 100)[SAFE_OFFSET({offset})]"
+      assert fragment in grouped, fragment
+  assert "IF(event_type = 'LLM_RESPONSE', total_latency_ms, NULL)" in sql
+  assert "IF(event_type = 'LLM_RESPONSE', tfft_ms, NULL)" in sql
+
+
+@pytest.mark.parametrize("panel", ["data_agents", "personas"])
+def test_breakdown_latency_is_read_from_the_one_row_per_turn_relation(panel):
+  # Already correct before the review: pinned so it stays that way.
+  sql = _squash(_sql(panel))
+  per_turn = _cte_body(sql, "per_turn")
+  assert "GROUP BY invocation_id" in per_turn
+  assert "MAX(turn_latency_ms) AS turn_latency_ms" in per_turn
+  assert "FROM per_turn" in sql.split(per_turn, 1)[1]
+  assert "FROM scoped" not in sql.split(per_turn, 1)[1]
+
+
+def test_agent_fast_path_rate_covers_completed_turns_like_the_kpi_tile():
+  sql = _squash(_sql("data_agents"))
+  per_turn = _cte_body(sql, "per_turn")
+  # Completion is the INVOCATION_COMPLETED event itself, never inferred from a
+  # latency being present.
+  assert (
+      "LOGICAL_OR(event_type = 'INVOCATION_COMPLETED') AS is_completed"
+      in per_turn
+  )
+  assert (
+      "LOGICAL_OR(event_type = 'INVOCATION_COMPLETED' AND fast_path)"
+      " AS is_completed_fast_path"
+  ) in per_turn
+  assert (
+      "SAFE_DIVIDE(COUNTIF(is_completed_fast_path), COUNTIF(is_completed))"
+      " AS fast_path_rate"
+  ) in sql
+  # Turns that never completed are in neither term of the rate.
+  assert "COUNTIF(fast_path)" not in sql
+  assert "COUNTIF(is_completed_fast_path), COUNT(*)" not in sql
+  # The KPI tile counts the very same completion events, so the two agree.
+  kpis = _squash(_sql("kpis"))
+  assert (
+      "COUNT(DISTINCT IF(event_type = 'INVOCATION_COMPLETED' AND fast_path,"
+      " invocation_id, NULL))"
+  ) in kpis
+  assert (
+      "COUNT(DISTINCT IF(event_type = 'INVOCATION_COMPLETED', invocation_id,"
+      " NULL))"
+  ) in kpis
+
+
+@uses_chart_state
+def test_an_agent_without_a_completed_turn_shows_a_dash_not_a_zero_rate():
+  frame = _agents_frame()
+  # SAFE_DIVIDE over zero completed turns is NULL, which pandas reads as NaN.
+  frame.loc[frame["data_agent_id"] == "DA2", "fast_path_rate"] = NAN
+  fig = bqca_charts.data_agent_leaderboard_chart(frame, models.LIGHT_THEME)
+  hover = {text.split("<br>")[0]: text for text in fig.data[0].hovertext}
+  assert "Fast-path rate: —" in hover["DA2"]
+  assert "Fast-path rate: 50.0%" in hover["DA1"]
+
+
 @pytest.mark.parametrize(
     ("span", "bucket"),
     [
@@ -3476,6 +3706,8 @@ def test_streamlit_readme_documents_the_review_fixes(docs):
       "Embedding Suggestion Coverage",
       "INVOCATION_COMPLETED",
       "completed turns only",
+      "A turn counts once in a latency percentile",
+      "an agent's fast-path rate and latency cover its completed turns",
       "shows the last one, the answer that was served",
       "embedding suggestions by reason",
       "columns suggested per suggestion",

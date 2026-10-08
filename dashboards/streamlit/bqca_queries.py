@@ -153,16 +153,19 @@ TFFT_MS_EXPR = (
     "SAFE_CAST(JSON_VALUE(latency_ms, '$.time_to_first_token_ms') AS FLOAT64)"
 )
 # ``\\n`` below is the two characters backslash-n in Python and therefore a
-# newline escape inside the SQL string literal.
+# newline escape inside the SQL string literal. The text parts are joined
+# before ``$.parts[0].text`` is tried alone: reading the first part first would
+# cut a multi-part prompt down to part 1 in the explorer and in the prompt
+# search.
 USER_PROMPT_TEXT_EXPR = (
     "COALESCE("
     "NULLIF(JSON_VALUE(content, '$.text_summary'), ''),"
     " NULLIF(JSON_VALUE(content, '$.prompt'), ''),"
-    " NULLIF(JSON_VALUE(content, '$.parts[0].text'), ''),"
     " NULLIF(ARRAY_TO_STRING(ARRAY(SELECT JSON_VALUE(p, '$.text')"
     " FROM UNNEST(JSON_QUERY_ARRAY(content, '$.parts')) AS p"
     " WITH OFFSET AS o WHERE JSON_VALUE(p, '$.text') IS NOT NULL"
-    " ORDER BY o), '\\n'), ''))"
+    " ORDER BY o), '\\n'), ''),"
+    " NULLIF(JSON_VALUE(content, '$.parts[0].text'), ''))"
 )
 # A multi-part answer is the markdown of every ``response.parts`` entry, in
 # order, separated by a blank line. ``text_summary`` wins when present.
@@ -421,8 +424,11 @@ def build_bqca_kpis_sql(
   one noisy turn cannot read as many failures. ``total_turns`` minus
   ``completed_turns`` are the *incomplete* turns (no ``INVOCATION_COMPLETED``
   event): they count in the turn totals and error rate but not in latency or
-  the fast-path rate, and the app says so. ``embedding_coverage`` is the share
-  of all turns that received at least one ``EMBEDDING_SUGGESTION`` with
+  the fast-path rate, and the app says so. The latency percentiles take one
+  sample per completed turn: completion rows are folded per ``invocation_id``
+  first (the slowest logged latency), so a turn whose completion was logged
+  more than once is not weighted more than once. ``embedding_coverage`` is the
+  share of all turns that received at least one ``EMBEDDING_SUGGESTION`` with
   suggested columns; the denominator is every turn because the logging plugin
   drops a suggestion that has no columns, so a per-suggestion "hit rate"
   would always read 100%. ``HAVING COUNT(*) > 0`` keeps the no-data contract:
@@ -467,7 +473,16 @@ def build_bqca_kpis_sql(
       ),
   )
   return f"""
-{prelude}
+{prelude},
+completion_per_turn AS (
+  SELECT
+    invocation_id,
+    MAX(turn_latency_ms) AS turn_latency_ms
+  FROM scoped
+  WHERE event_type = 'INVOCATION_COMPLETED'
+    AND invocation_id IS NOT NULL
+  GROUP BY invocation_id
+)
 SELECT
   COUNT(DISTINCT invocation_id) AS total_turns,
   COUNT(DISTINCT IF(event_type = 'INVOCATION_COMPLETED', invocation_id, NULL))
@@ -477,10 +492,14 @@ SELECT
     COUNT(DISTINCT IF(is_error, invocation_id, NULL)),
     COUNT(DISTINCT invocation_id)
   ) AS turn_error_rate,
-  APPROX_QUANTILES(turn_latency_ms, 100)[SAFE_OFFSET(50)]
-    AS p50_turn_latency_ms,
-  APPROX_QUANTILES(turn_latency_ms, 100)[SAFE_OFFSET(95)]
-    AS p95_turn_latency_ms,
+  (
+    SELECT APPROX_QUANTILES(turn_latency_ms, 100)[SAFE_OFFSET(50)]
+    FROM completion_per_turn
+  ) AS p50_turn_latency_ms,
+  (
+    SELECT APPROX_QUANTILES(turn_latency_ms, 100)[SAFE_OFFSET(95)]
+    FROM completion_per_turn
+  ) AS p95_turn_latency_ms,
   IFNULL(SUM(total_tokens), 0) AS total_tokens,
   IFNULL(SUM(thoughts_tokens), 0) AS thoughts_tokens,
   IFNULL(SUM(cached_tokens), 0) AS cached_tokens,
@@ -552,6 +571,13 @@ def build_bqca_latency_sql(
   for ``fast_path_label = 'all'`` and once per path, so the chart can compare
   the fast path with standard NL2SQL without a second query.
 
+  The turn percentiles take one sample per turn: a turn whose completion was
+  logged more than once is folded into a single row first (its slowest logged
+  latency, in the first bucket it completed in, on the fast path if any of
+  those rows is tagged), so duplicates cannot weigh a turn more than once.
+  LLM latency and time-to-first-token stay one sample per ``LLM_RESPONSE``
+  event, because every response is a call of its own.
+
   Args:
     f: Active filters and connection.
     window: Query window; resolved from ``f`` when omitted.
@@ -569,23 +595,56 @@ def build_bqca_latency_sql(
           ("tfft_ms", TFFT_MS_EXPR),
       ),
   )
-  turn = "IF(event_type = 'INVOCATION_COMPLETED', total_latency_ms, NULL)"
   llm = "IF(event_type = 'LLM_RESPONSE', total_latency_ms, NULL)"
   tfft = "IF(event_type = 'LLM_RESPONSE', tfft_ms, NULL)"
+  # ``latency_samples`` is one row per sample: each turn's folded completion
+  # (turn latency only) and every scoped event (LLM latency and time to first
+  # token only, NULL for event types that carry neither). Keeping every event
+  # as a row leaves the bucket/path grid exactly as it was, so a bucket that
+  # has events but no latency sample still gets its all-NULL row.
   return f"""
 {prelude},
+completion_per_turn AS (
+  SELECT
+    invocation_id,
+    MIN(bucket) AS bucket,
+    IF(LOGICAL_OR(fast_path), 'fast_path', 'standard_nl2sql')
+      AS fast_path_label,
+    MAX(total_latency_ms) AS turn_ms
+  FROM scoped
+  WHERE event_type = 'INVOCATION_COMPLETED'
+    AND invocation_id IS NOT NULL
+  GROUP BY invocation_id
+),
+latency_samples AS (
+  SELECT
+    bucket,
+    fast_path_label,
+    turn_ms,
+    CAST(NULL AS FLOAT64) AS llm_ms,
+    CAST(NULL AS FLOAT64) AS tfft_ms
+  FROM completion_per_turn
+  UNION ALL
+  SELECT
+    bucket,
+    fast_path_label,
+    CAST(NULL AS FLOAT64) AS turn_ms,
+    {llm} AS llm_ms,
+    {tfft} AS tfft_ms
+  FROM scoped
+),
 grouped AS (
   SELECT
     bucket,
     fast_path_label AS path_label,
-    APPROX_QUANTILES({turn}, 100)[SAFE_OFFSET(50)] AS turn_p50_ms,
-    APPROX_QUANTILES({turn}, 100)[SAFE_OFFSET(95)] AS turn_p95_ms,
-    APPROX_QUANTILES({turn}, 100)[SAFE_OFFSET(99)] AS turn_p99_ms,
-    APPROX_QUANTILES({llm}, 100)[SAFE_OFFSET(50)] AS llm_p50_ms,
-    APPROX_QUANTILES({llm}, 100)[SAFE_OFFSET(95)] AS llm_p95_ms,
-    APPROX_QUANTILES({tfft}, 100)[SAFE_OFFSET(50)] AS tfft_p50_ms,
-    APPROX_QUANTILES({tfft}, 100)[SAFE_OFFSET(95)] AS tfft_p95_ms
-  FROM scoped
+    APPROX_QUANTILES(turn_ms, 100)[SAFE_OFFSET(50)] AS turn_p50_ms,
+    APPROX_QUANTILES(turn_ms, 100)[SAFE_OFFSET(95)] AS turn_p95_ms,
+    APPROX_QUANTILES(turn_ms, 100)[SAFE_OFFSET(99)] AS turn_p99_ms,
+    APPROX_QUANTILES(llm_ms, 100)[SAFE_OFFSET(50)] AS llm_p50_ms,
+    APPROX_QUANTILES(llm_ms, 100)[SAFE_OFFSET(95)] AS llm_p95_ms,
+    APPROX_QUANTILES(tfft_ms, 100)[SAFE_OFFSET(50)] AS tfft_p50_ms,
+    APPROX_QUANTILES(tfft_ms, 100)[SAFE_OFFSET(95)] AS tfft_p95_ms
+  FROM latency_samples
   GROUP BY GROUPING SETS ((bucket), (bucket, fast_path_label))
 )
 SELECT
@@ -674,7 +733,11 @@ def build_bqca_data_agent_breakdown_sql(
   Turn grain first, then grouped by the turn's data agent, so counts are
   turns, not events. Turns that carry no data-agent id are grouped under
   ``'unattributed'`` rather than dropped, so the table still adds up to the
-  KPI header.
+  KPI header. As in the KPI header, latency and the fast-path rate cover
+  completed turns only (a turn that reached ``INVOCATION_COMPLETED``): the
+  rate is the completed fast-path turns over the completed turns, so a turn
+  that never completed weighs in neither term and an agent with no completed
+  turn has no rate at all.
 
   Args:
     f: Active filters and connection.
@@ -709,7 +772,9 @@ per_turn AS (
     IFNULL(MAX(data_agent_id), 'unattributed') AS data_agent_id,
     MAX(conversation_id) AS conversation_id,
     MAX(user_id) AS user_id,
-    LOGICAL_OR(fast_path) AS fast_path,
+    LOGICAL_OR(event_type = 'INVOCATION_COMPLETED') AS is_completed,
+    LOGICAL_OR(event_type = 'INVOCATION_COMPLETED' AND fast_path)
+      AS is_completed_fast_path,
     LOGICAL_OR(is_error) AS has_error,
     MAX(turn_latency_ms) AS turn_latency_ms,
     SUM(total_tokens) AS total_tokens
@@ -723,7 +788,8 @@ SELECT
   COUNT(DISTINCT conversation_id) AS unique_conversations,
   COUNT(DISTINCT user_id) AS unique_users,
   SAFE_DIVIDE(COUNTIF(has_error), COUNT(*)) AS error_rate,
-  SAFE_DIVIDE(COUNTIF(fast_path), COUNT(*)) AS fast_path_rate,
+  SAFE_DIVIDE(COUNTIF(is_completed_fast_path), COUNTIF(is_completed))
+    AS fast_path_rate,
   APPROX_QUANTILES(turn_latency_ms, 100)[SAFE_OFFSET(50)] AS p50_latency_ms,
   APPROX_QUANTILES(turn_latency_ms, 100)[SAFE_OFFSET(95)] AS p95_latency_ms,
   IFNULL(SUM(total_tokens), 0) AS total_tokens

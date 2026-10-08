@@ -46,6 +46,7 @@ billing project is supported as an optional advanced setting.
 |---|---|
 | `spec/chart_manifest.yaml` | Reviewed consumer snapshot: 37 chart records, 9 non-data elements, controls, listener matrix, layout, and oracle mappings |
 | `spec/product_contract.yaml` | Current product-layer titles, layout, filters, live fixes, and intentional divergences from the pinned block |
+| `spec/bqca_chart_manifest.yaml` | Consumer snapshot of the dedicated 7-page tool-free BQCA template: 7 pages, 34 components (21 scorecards + 13 charts/tables), fixed-layout geometry, and 40-field `BlockDatasource` schema |
 | `spec/bqca_product_contract.yaml` | Product contract for the dedicated 7-page tool-free BQCA template (`1ffb0888-20ea-451f-aeb8-69fc37973335`, alias `ds0`) |
 | `sql/events_v1.sql.tmpl` | Reviewed base-table query (**generated** by `tools/gen_events_tmpl.py`) |
 | `sql/events_v1.template.sql` | Sentinel-rendered SQL embedded in the canonical report (**generated** by `tools/render_template.py`) |
@@ -59,8 +60,8 @@ billing project is supported as an optional advanced setting.
 | `tools/gen_events_tmpl.py` | Base-table reporting-query generator |
 | `tools/gen_bqca_events_tmpl.py` | BQCA reporting-query generator (nine-event allowlist, one base-table scan) |
 | `tools/render_template.py` | Deterministic tmpl → template renderer with sentinel-uniqueness checks (`--profile adk\|bqca\|all`, `--check`) |
-| `tools/render_web_config.py` | Renders `docs/report-config.mjs` from the bindings and derives `docs/bqca/index.html` from `docs/index.html` (`--check`) |
-| `tools/validate_spec.py` | CI assertions over the manifest (counts, listener matrix, defaults) |
+| `tools/render_web_config.py` | Renders `docs/report-config.mjs` from the bindings and derives `docs/bqca/index.html` from `docs/index.html` (`--profile adk\|bqca\|all`, `--check`) |
+| `tools/validate_contracts.py` | CI assertions over the ADK and BQCA product contracts, chart manifests, and report template bindings (`--profile adk\|bqca\|all`) |
 | `tools/validate_live_bqaa.py` | Read-only 37-query smoke test for a real BQAA dataset; writes only a sanitized local receipt |
 | `docs/index.html` | Client-only configurator for the public dashboard template, with an ADK Agents / BQCA Prompt & Response Logging surface toggle |
 | `docs/bqca/index.html` | The `/bqca/` deep link: the configurator with the BQCA surface preselected (**generated** by `tools/render_web_config.py`) |
@@ -104,8 +105,12 @@ fixture parity certification or M4 visual sign-off.
 
 ## Create your dashboard
 
-Canonical published template:
-[BigQuery Agent Analytics — Template](https://lookerstudio.google.com/reporting/5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40).
+Canonical published templates:
+
+- **ADK Agents (8 pages, alias `ds230`)**:
+  [BigQuery Agent Analytics — Template](https://lookerstudio.google.com/reporting/5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40)
+- **BQCA Prompt & Response Logging (7 pages, tool-free, alias `ds0`)**:
+  [BigQuery Conversational Analytics (BQCA) — Prompt & Response Logging](https://lookerstudio.google.com/reporting/1ffb0888-20ea-451f-aeb8-69fc37973335)
 
 All eight report pages share one report-level date control. It defaults to a
 rolling 90-day window including today; changing the range on any page persists
@@ -298,7 +303,8 @@ table.
 opens your BQCA table in the dedicated
 [7-page tool-free BQCA template](https://lookerstudio.google.com/reporting/1ffb0888-20ea-451f-aeb8-69fc37973335)
 (`report_id: 1ffb0888-20ea-451f-aeb8-69fc37973335`, data source alias `ds0`)
-backed by `sql/bqca_events_v1.template.sql` (`spec/bqca_product_contract.yaml`).
+backed by `sql/bqca_events_v1.template.sql` (`spec/bqca_product_contract.yaml`,
+`spec/bqca_chart_manifest.yaml`).
 Because BQCA never logs tool events, all tool-usage pages, tool-latency series,
 and tool-error charts are omitted from the template:
 
@@ -342,17 +348,18 @@ logs, in one date-pruned scan of your table, and adds:
 | `is_turn_start`, `is_turn_complete` | `INVOCATION_STARTING` / `INVOCATION_COMPLETED` rows; a start without a completion is a failed or abandoned turn |
 | `turn_latency_ms`, `llm_latency_ms`, `ttft_ms`, `total_latency_ms` | Turn, model-call, time-to-first-token, and per-row latency |
 | `model_name`, `model_version`, `input_tokens`, `output_tokens`, `thoughts_tokens`, `cached_tokens`, `total_tokens` | Model usage on `LLM_RESPONSE` rows |
-| `user_prompt_text`, `agent_response_text` | The prompt, and every markdown part of a response in order |
+| `user_prompt_text`, `agent_response_text` | Every text part of a prompt in offset order, and every markdown part of a response in order |
 | `extracted_sql`, `summary_text` | The first fenced SQL block of an `AGENT_RESPONSE`, and a 2,000-character text summary |
 | `similar_queries_count`, `is_embedding_hit`, `embedding_suggestion_reason` | Suggested-column / suggestion count (`$.suggested_columns` first in `COALESCE`, before `$.similar_queries_count` and `$.suggestions`), non-empty indicator, and `$.reason` on `EMBEDDING_SUGGESTION` rows |
 
 Every generated file is deterministic and CI-checked for drift. After
-editing a source, regenerate from `dashboard/looker_studio`:
+editing a source, regenerate and validate from `dashboard/looker_studio`:
 
 ```sh
 python3 tools/gen_bqca_events_tmpl.py   # sql/bqca_events_v1.sql.tmpl
 python3 tools/render_template.py        # every *.template.sql; --profile adk|bqca|all
-python3 tools/render_web_config.py      # docs/report-config.mjs, docs/bqca/index.html
+python3 tools/render_web_config.py      # docs/report-config.mjs, docs/bqca/index.html; --profile adk|bqca|all
+python3 tools/validate_contracts.py     # validate ADK and BQCA contracts & manifests; --profile adk|bqca|all
 ```
 
 Each accepts `--check` to verify without writing. `docs/bqca/index.html` is
