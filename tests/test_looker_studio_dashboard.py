@@ -1164,6 +1164,29 @@ SHARED_SENTINELS = (
     "bqaa_fixture_adk_1_27_0",
     "sentinelbqaaevents",
 )
+# The Looker Studio query reads both date parameters itself; a parameter that
+# was replaced by '' left PARSE_DATE('%Y%m%d', '') in the published data
+# source, which BigQuery rejects (the report showed "User Configuration
+# Error").
+BQCA_EVENTS_SQL_FILES = (
+    "sql/bqca_events_v1.sql.tmpl",
+    "sql/bqca_events_v1.template.sql",
+)
+BQCA_DATE_PARAMETERS = ("DS_START_DATE", "DS_END_DATE")
+BQCA_EMPTY_DATE_LITERAL = "PARSE_DATE('%Y%m%d', '')"
+# The embedded BlockDatasource's date fields, as verified against the live
+# data source after the 2026-10-08 republish.
+BQCA_BLOCK_DATASOURCE_FIELDS = {
+    "_event_date_": {"data_type": "DATE", "semantic_type": "YEAR_MONTH_DAY"},
+    "_timestamp_": {
+        "data_type": "TIMESTAMP",
+        "semantic_type": "YEAR_MONTH_DAY_SECOND",
+    },
+    "_event_hour_": {
+        "data_type": "TIMESTAMP",
+        "semantic_type": "YEAR_MONTH_DAY_HOUR",
+    },
+}
 
 
 def _web_report_config():
@@ -1484,6 +1507,203 @@ def test_bqca_query_reads_only_bqca_events_with_canonical_extractions():
       "fast_path_events",
   ):
     assert f"AS {name}" in profile, name
+
+
+def _bqca_date_window_defects(sql):
+  """Return how `sql` misreads the Looker Studio date window (empty if right).
+
+  The query must parse exactly the `@DS_START_DATE` and `@DS_END_DATE`
+  parameters with PARSE_DATE('%Y%m%d', ...) and read no other `@DS_`
+  parameter. The text is checked as written, comments included.
+  """
+  defects = []
+  if re.search(
+      r"PARSE_DATE\s*\([^()]*,\s*(?:''|\"\")\s*\)", sql, re.IGNORECASE
+  ):
+    defects.append("PARSE_DATE parses an empty string literal")
+  calls = sorted(
+      re.sub(r"\s+", "", call)
+      for call in re.findall(r"PARSE_DATE\s*(\([^()]*\))", sql, re.IGNORECASE)
+  )
+  expected = sorted(f"('%Y%m%d',@{name})" for name in BQCA_DATE_PARAMETERS)
+  if calls != expected:
+    defects.append(f"PARSE_DATE calls {calls} are not exactly {expected}")
+  parameters = sorted(set(re.findall(r"@(DS_[A-Z_]+)", sql)))
+  if parameters != sorted(BQCA_DATE_PARAMETERS):
+    defects.append(
+        f"@DS_ parameters {parameters} are not {sorted(BQCA_DATE_PARAMETERS)}"
+    )
+  return defects
+
+
+@pytest.mark.parametrize("relative", BQCA_EVENTS_SQL_FILES)
+def test_bqca_events_sql_reads_both_date_parameters(relative):
+  """The published report failed because both date parameters became ''.
+
+  The embedded data source ran `PARSE_DATE('%Y%m%d', '')` instead of reading
+  `@DS_START_DATE`/`@DS_END_DATE`; BigQuery rejects that as an invalid date
+  and Looker Studio showed "User Configuration Error". Both the logical
+  template and the rendered query that gets published must keep reading the
+  parameters.
+  """
+  sql = (DASHBOARD / relative).read_text()
+
+  assert BQCA_EMPTY_DATE_LITERAL not in sql
+  assert _bqca_date_window_defects(sql) == []
+
+
+BQCA_START_DATE_PARSE = "PARSE_DATE('%Y%m%d', @DS_START_DATE)"
+BQCA_END_DATE_PARSE = "PARSE_DATE('%Y%m%d', @DS_END_DATE)"
+# Ways the rendered query's date window can break, as replacements applied to
+# the real file (each replaced text occurs exactly once in it).
+BQCA_BROKEN_DATE_WINDOWS = {
+    # The published query as it was found: both parameters blanked.
+    "both-parameters-blanked": (
+        (BQCA_START_DATE_PARSE, BQCA_EMPTY_DATE_LITERAL),
+        (BQCA_END_DATE_PARSE, BQCA_EMPTY_DATE_LITERAL),
+    ),
+    "start-parameter-blanked": (
+        (BQCA_START_DATE_PARSE, BQCA_EMPTY_DATE_LITERAL),
+    ),
+    "end-parameter-blanked-in-another-spelling": (
+        (BQCA_END_DATE_PARSE, 'parse_date(\n    "%Y%m%d",\n    ""\n  )'),
+    ),
+    "start-date-hard-coded": (
+        (BQCA_START_DATE_PARSE, "PARSE_DATE('%Y%m%d', '20200101')"),
+    ),
+    "end-date-reads-the-start-parameter": (
+        (BQCA_END_DATE_PARSE, BQCA_START_DATE_PARSE),
+    ),
+    "start-bound-dropped": ((BQCA_START_DATE_PARSE, "DATE '2026-01-01'"),),
+    "end-date-reads-an-unknown-parameter": (
+        (BQCA_END_DATE_PARSE, "PARSE_DATE('%Y%m%d', @DS_OTHER_DATE)"),
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "replacements",
+    list(BQCA_BROKEN_DATE_WINDOWS.values()),
+    ids=list(BQCA_BROKEN_DATE_WINDOWS),
+)
+def test_bqca_date_window_check_rejects_broken_queries(replacements):
+  """The date-window check must fail for each way the window can break."""
+  sql = (DASHBOARD / "sql/bqca_events_v1.template.sql").read_text()
+  assert _bqca_date_window_defects(sql) == []
+  for old, new in replacements:
+    assert sql.count(old) == 1, old
+    sql = sql.replace(old, new)
+
+  assert _bqca_date_window_defects(sql)
+
+
+def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
+  """The published data source's required settings and live proof are pinned.
+
+  Looker Studio runs the embedded query only when the data source declares
+  both date parameters and types its date fields natively. The report is
+  external and mutable, so both artifacts record those settings and the
+  digest of the SQL they were verified against: changing the query, the
+  pages, or a setting fails here until the data source is republished,
+  verified again, and the records are updated.
+  """
+  bqca = yaml.safe_load(
+      (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+  )
+  contract = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_product_contract.yaml").read_text()
+  )
+  rendered = (DASHBOARD / "sql/bqca_events_v1.template.sql").read_bytes()
+  digest = hashlib.sha256(rendered).hexdigest()
+
+  invariants = {
+      "use_datetime_type": True,
+      "parameter_configuration": list(BQCA_DATE_PARAMETERS),
+      "fields": BQCA_BLOCK_DATASOURCE_FIELDS,
+  }
+  assert bqca["block_datasource"] == invariants
+  block = dict(contract["block_datasource"])
+  assert block.pop("sql") == {
+      "path": "sql/bqca_events_v1.template.sql",
+      "forbidden_literals": [BQCA_EMPTY_DATE_LITERAL],
+  }
+  assert block == invariants
+  # The declared parameters are exactly the ones the reviewed query reads.
+  assert set(re.findall(r"@(DS_[A-Z_]+)", rendered.decode())) == set(
+      bqca["block_datasource"]["parameter_configuration"]
+  )
+
+  # The live evidence names the exact SQL and pages it was gathered for.
+  assert bqca["reviewed_template_sql"]["sha256"] == digest
+  evidence = bqca["live_template_verification"]
+  assert evidence == {
+      "verified_date": "2026-10-08",
+      "repository_sql_sha256": digest,
+      "method": [
+          "data_studio_web_service_publish_datasource",
+          "data_studio_web_service_get_block_datasource",
+          "lego_midtier_service_execute_query",
+          "lego_midtier_service_render_dashboard_pdf",
+      ],
+      "publish_datasource": {
+          "health": "HEALTHY",
+          "versions": {
+              "hydrated_bqca_table": 1791481478480,
+              "canonical_sentinel_table": 1791481567763,
+          },
+      },
+      "execute_query": {
+          "hydrated_bqca_table": {
+              "code": 0,
+              "pages": [page["id"] for page in contract["pages"]],
+              "non_empty": True,
+          },
+          "canonical_sentinel_table": [
+              {"date_range": "default_dates", "code": 0, "size": 0},
+              {"date_range": "20200101..20261231", "code": 0, "size": 57891},
+          ],
+      },
+      "render_dashboard_pdf": {
+          "hydrated_bqca_table": {
+              "code": 0,
+              "contains_user_configuration_error": False,
+          },
+      },
+      "result": "PASSED",
+      "limitation": "mutable_external_report_requires_reverification_after_changes",
+  }
+  verified = datetime.date.fromisoformat(evidence["verified_date"])
+  assert (
+      datetime.date.fromisoformat(bqca["published_date"])
+      <= verified
+      <= datetime.date.today()
+  )
+
+  # The contract states the gate to pass after every publish, and points at
+  # the evidence of the last run.
+  assert contract["live_verification"] == {
+      "gate": [
+          {
+              "rpc": "DataStudioWebService.PublishDatasource",
+              "expect": {"health": "HEALTHY"},
+          },
+          {
+              "rpc": "LegoMidtierService.ExecuteQuery",
+              "expect": {"code": 0, "pages": "all_report_pages"},
+          },
+          {
+              "rpc": "LegoMidtierService.RenderDashboardPdf",
+              "expect": {
+                  "code": 0,
+                  "contains_user_configuration_error": False,
+              },
+          },
+      ],
+      "last_attested_date": evidence["verified_date"],
+      "evidence": (
+          "bindings/bqca_report_template.yaml#live_template_verification"
+      ),
+  }
 
 
 def test_bqca_artifacts_never_name_event_types_bqca_does_not_log():

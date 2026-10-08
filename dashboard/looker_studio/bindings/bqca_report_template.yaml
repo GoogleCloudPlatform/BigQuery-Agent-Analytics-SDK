@@ -23,3 +23,72 @@ published_date: "2026-10-08"
 reviewed_template_sql:
   path: sql/bqca_events_v1.template.sql
   sha256: be4571cb9eb0529913a4c3c9ea6c135711e8570a9fbdb3c8b03cd955627416ed
+# Invariants of the embedded BlockDatasource (data source alias ds0). The
+# reviewed SQL reads @DS_START_DATE and @DS_END_DATE through
+# PARSE_DATE('%Y%m%d', ...), so the published data source must declare both
+# parameters (parameter_configuration) and type its date fields natively
+# (use_datetime_type). The template as found before the 2026-10-08 in-place
+# republish had neither and embedded PARSE_DATE('%Y%m%d', '') in place of the
+# parameters, which BigQuery cannot parse; the report showed "User
+# Configuration Error". Re-provisioning or republishing must keep every value
+# below and must never replace a date parameter with ''.
+# spec/bqca_product_contract.yaml records the same invariants as the normative
+# contract, and tests/test_looker_studio_dashboard.py fails if either file or
+# the SQL drifts from them.
+block_datasource:
+  use_datetime_type: true
+  parameter_configuration:
+    - DS_START_DATE
+    - DS_END_DATE
+  fields:
+    _event_date_:
+      data_type: DATE
+      semantic_type: YEAR_MONTH_DAY
+    _timestamp_:
+      data_type: TIMESTAMP
+      semantic_type: YEAR_MONTH_DAY_SECOND
+    _event_hour_:
+      data_type: TIMESTAMP
+      semantic_type: YEAR_MONTH_DAY_HOUR
+# Live evidence for the 2026-10-08 in-place republish of the embedded data
+# source. The canonical sentinel publication embedded exactly the reviewed
+# repository SQL (repository_sql_sha256). The checks ran against two bindings
+# of the same data source: a hydrated BQCA event table (every report page
+# returns rows) and the canonical sentinel table this template ships with (the
+# final published state; the fixture has no rows in the default date window).
+# The external report is mutable, so any change to the data source, its SQL, or
+# its pages needs a fresh run.
+live_template_verification:
+  verified_date: "2026-10-08"
+  repository_sql_sha256: be4571cb9eb0529913a4c3c9ea6c135711e8570a9fbdb3c8b03cd955627416ed
+  method:
+    - data_studio_web_service_publish_datasource
+    - data_studio_web_service_get_block_datasource
+    - lego_midtier_service_execute_query
+    - lego_midtier_service_render_dashboard_pdf
+  publish_datasource:
+    health: HEALTHY
+    versions:
+      hydrated_bqca_table: 1791481478480
+      canonical_sentinel_table: 1791481567763
+  execute_query:
+    hydrated_bqca_table:
+      code: 0
+      pages:
+        - p_539b9240
+        - p_a89cfece
+        - p_97efe693
+        - p_edf06c14
+        - p_08774fec
+        - p_88bcf5f8
+        - p_b87a335e
+      non_empty: true
+    canonical_sentinel_table:
+      - {date_range: default_dates, code: 0, size: 0}
+      - {date_range: "20200101..20261231", code: 0, size: 57891}
+  render_dashboard_pdf:
+    hydrated_bqca_table:
+      code: 0
+      contains_user_configuration_error: false
+  result: PASSED
+  limitation: mutable_external_report_requires_reverification_after_changes

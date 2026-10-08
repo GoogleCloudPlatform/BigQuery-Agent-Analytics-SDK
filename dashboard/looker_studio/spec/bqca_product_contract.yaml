@@ -69,6 +69,44 @@ base_table_contract:
     - {name: error_message, type: STRING}
     - {name: is_truncated, type: BOOL}
 
+# Looker Studio BlockDatasource contract for the embedded BigQuery
+# custom-query data source (surface.datasource_id, alias
+# surface.data_source_alias). The reviewed SQL reads @DS_START_DATE and
+# @DS_END_DATE through PARSE_DATE('%Y%m%d', ...). Provisioning that strips a
+# date parameter to '' (for example to pass a schema dry-run) bakes an
+# unparseable PARSE_DATE('%Y%m%d', '') into the query, and the report fails
+# with "User Configuration Error". Publish the complete BlockDatasource
+# (DataStudioWebService.PublishDatasource) with the settings below, keep the
+# SQL byte-identical to sql/bqca_events_v1.template.sql, and pass the
+# live_verification gate after every publish.
+block_datasource:
+  use_datetime_type: true
+  parameter_configuration:
+    - DS_START_DATE
+    - DS_END_DATE
+  fields:
+    _event_date_: {data_type: DATE, semantic_type: YEAR_MONTH_DAY}
+    _timestamp_: {data_type: TIMESTAMP, semantic_type: YEAR_MONTH_DAY_SECOND}
+    _event_hour_: {data_type: TIMESTAMP, semantic_type: YEAR_MONTH_DAY_HOUR}
+  sql:
+    path: sql/bqca_events_v1.template.sql
+    forbidden_literals:
+      - "PARSE_DATE('%Y%m%d', '')"
+
+# Gate to pass after every publish of the data source, its SQL, or any page.
+# bindings/bqca_report_template.yaml (live_template_verification) holds the
+# evidence of the last run.
+live_verification:
+  gate:
+    - rpc: DataStudioWebService.PublishDatasource
+      expect: {health: HEALTHY}
+    - rpc: LegoMidtierService.ExecuteQuery
+      expect: {code: 0, pages: all_report_pages}
+    - rpc: LegoMidtierService.RenderDashboardPdf
+      expect: {code: 0, contains_user_configuration_error: false}
+  last_attested_date: "2026-10-08"
+  evidence: bindings/bqca_report_template.yaml#live_template_verification
+
 pages:
   - index: 1
     id: p_539b9240
