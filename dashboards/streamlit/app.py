@@ -1173,8 +1173,16 @@ _BQCA_KPIS = (
         "Share of turns with at least one error event: status ERROR, an error"
         " message, or an event type ending in _ERROR.",
     ),
-    ("P50 Turn Latency", "Median INVOCATION_COMPLETED latency."),
-    ("P95 Turn Latency", "95th-percentile INVOCATION_COMPLETED latency."),
+    (
+        "P50 Turn Latency",
+        "Approximate median (APPROX_QUANTILES) INVOCATION_COMPLETED latency"
+        " over completed turns.",
+    ),
+    (
+        "P95 Turn Latency",
+        "Approximate 95th-percentile (APPROX_QUANTILES) INVOCATION_COMPLETED"
+        " latency over completed turns.",
+    ),
     ("Total Tokens", "Summed over LLM_RESPONSE events."),
     ("Thinking Tokens", "Reasoning tokens, summed over LLM_RESPONSE events."),
     ("Cached Tokens", "Cached prompt tokens, summed over LLM_RESPONSE events."),
@@ -1209,8 +1217,8 @@ def _bqca_completion_note(kpi: Any) -> str:
       f"{kpi.completed_turns:,} of {kpi.total_turns:,} turns completed;"
       f" {kpi.incomplete_turns:,} incomplete (no INVOCATION_COMPLETED event:"
       " still running, failed before completing, or cut off by the time"
-      " range). Latency percentiles and the fast-path rate cover completed"
-      " turns only."
+      " range). Latency percentiles (approximate, via BigQuery"
+      " APPROX_QUANTILES) and the fast-path rate cover completed turns only."
   )
 
 
@@ -1230,6 +1238,9 @@ def row_bqca_kpis(state: BqcaFilterState, ctx: Context) -> None:
     row = result.df.iloc[0]
     # A rate over an empty denominator is NULL in SQL (no completed turn, no
     # turn at all): show a dash, not a confident 0%.
+    turn_error_rate = (
+        None if pd.isna(row.get("turn_error_rate")) else kpi.turn_error_rate
+    )
     fast_path = (
         None if pd.isna(row.get("fast_path_rate")) else kpi.fast_path_rate
     )
@@ -1240,7 +1251,7 @@ def row_bqca_kpis(state: BqcaFilterState, ctx: Context) -> None:
     )
     values = [
         _bqca_count(kpi.total_turns),
-        _bqca_rate(kpi.turn_error_rate),
+        _bqca_rate(turn_error_rate),
         _bqca_ms(kpi.p50_turn_latency_ms),
         _bqca_ms(kpi.p95_turn_latency_ms),
         _bqca_count(kpi.total_tokens),
@@ -1254,6 +1265,14 @@ def row_bqca_kpis(state: BqcaFilterState, ctx: Context) -> None:
     _metric(column, label, value, help_text)
   if kpi is not None and kpi.total_turns:
     st.caption(_bqca_completion_note(kpi))
+  elif kpi is not None and kpi.total_tokens:
+    # Events exist but none belongs to a turn: the token totals are real, the
+    # turn-based figures are undefined, and the reader should be told why.
+    st.caption(
+        "0 attributed turns (all events in scope have missing or blank"
+        " invocation_id); token totals include unattributed LLM_RESPONSE"
+        " events."
+    )
 
 
 def _latency_view(
@@ -1345,6 +1364,10 @@ def row_bqca_overview(state: BqcaFilterState, ctx: Context) -> None:
         key="bqca_llm_latency",
     )
     st.caption("Fast-path turns make no LLM call, so they have no LLM latency.")
+  st.caption(
+      "Latency percentiles are approximate (BigQuery APPROX_QUANTILES); on a"
+      " small window they can differ visibly from exact values."
+  )
 
 
 def row_bqca_agents(state: BqcaFilterState, ctx: Context) -> None:
@@ -1367,7 +1390,10 @@ def row_bqca_agents(state: BqcaFilterState, ctx: Context) -> None:
         empty="No data-agent turns in this range.",
         key="bqca_data_agents",
     )
-    st.caption("Turns that carry no data-agent id are grouped as unattributed.")
+    st.caption(
+        "Turns that carry no data-agent id are grouped as unattributed. P95"
+        " latency is approximate (BigQuery APPROX_QUANTILES)."
+    )
   with right:
     panel(
         "Personas: turns",
@@ -1432,7 +1458,7 @@ def _render_bqca_turn(turn: Any, state: BqcaFilterState, ctx: Context) -> None:
       f" {_code(turn.persona)} · conversation"
       f" {_code(turn.conversation_id or '—')} · session"
       f" {_code(turn.session_id or '—')} · invocation"
-      f" {_code(turn.invocation_id)}"
+      f" {_code(turn.invocation_id or '—')}"
   )
 
   with st.expander("Prompt", expanded=True):
@@ -1460,15 +1486,20 @@ def _render_bqca_turn(turn: Any, state: BqcaFilterState, ctx: Context) -> None:
     # ``st.error`` renders its body as Markdown, like the response above.
     st.error(bqca_models.inert_markdown(turn.error_message))
 
-  timeline = bqca_queries.fetch_panel(
-      "timeline", state, ctx, invocation_id=turn.invocation_id
-  )
-  panel(
-      "Turn timeline",
-      None,
-      timeline.df,
-      empty="No events for this turn in the range.",
-  )
+  if not turn.invocation_id or not turn.invocation_id.strip():
+    # The timeline is keyed on the invocation id, and the query builder
+    # rejects a blank one, so there is nothing to look up for this turn.
+    st.caption("No valid invocation ID is associated with this turn.")
+  else:
+    timeline = bqca_queries.fetch_panel(
+        "timeline", state, ctx, invocation_id=turn.invocation_id
+    )
+    panel(
+        "Turn timeline",
+        None,
+        timeline.df,
+        empty="No events for this turn in the range.",
+    )
 
 
 def row_bqca_explorer(state: BqcaFilterState, ctx: Context) -> None:

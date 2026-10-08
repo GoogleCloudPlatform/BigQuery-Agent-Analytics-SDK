@@ -24,7 +24,7 @@ publishing_mode: MANUAL
 
 reviewed_template_sql:
   path: sql/bqca_events_v1.template.sql
-  sha256: d16a13599c6cfd95940c97245d2cc3e592ae3b832284fafe926c9b329e1c82fa
+  sha256: 9edf20a0b52e4cc96e4e559805b9e9372f0d789f0429fdd9308faeea95d15d46
 
 # Required settings on the published Looker Studio BlockDatasource (`ds0`).
 # `_event_date_`, `_timestamp_`, and `_event_hour_` must keep native date/time
@@ -55,7 +55,7 @@ block_datasource:
 # `spec/bqca_chart_manifest.yaml`, so mutating any component or metric fails CI.
 live_template_verification:
   verified_date: "2026-10-08"
-  repository_sql_sha256: d16a13599c6cfd95940c97245d2cc3e592ae3b832284fafe926c9b329e1c82fa
+  repository_sql_sha256: 9edf20a0b52e4cc96e4e559805b9e9372f0d789f0429fdd9308faeea95d15d46
   pages_sha256: 40cb6b25379611da8f8b05db9345245a9928fa1e149c39466f092b15029c0279
   manifest_sha256: f41be518adf4a64b75532ebec348f3fd5533ede0af28cc0433ab51d324a4b074
   method:
@@ -66,17 +66,17 @@ live_template_verification:
   publish_datasource:
     health: HEALTHY
     versions:
-      hydrated_bqca_table: 1791487397284
-      canonical_sentinel_table: 1791487478792
+      hydrated_bqca_table: 1791494305139
+      canonical_sentinel_table: 1791494402606
   execute_query:
     # hydrated_bqca_table is a sanitized live BQCA Prompt & Response Logging
-    # table conforming to the 13-column BQAA base schema with recent events
+    # table conforming to the 15-column BQAA base schema with recent events
     # inside the default rolling 90-day window (default_dates).
     # canonical_sentinel_table is a static historical fixture whose event
     # timestamps predate the rolling 90-day window, so default_dates returns
     # 0 bytes while 20200101..20261231 returns 57,891 bytes.
     hydrated_bqca_table:
-      schema: bqaa_base_table_13_columns
+      schema: bqaa_base_table_15_columns
       date_range: default_dates
       code: 0
       pages:

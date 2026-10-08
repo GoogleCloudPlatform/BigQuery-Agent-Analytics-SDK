@@ -289,15 +289,17 @@ def _datetime(value: Any) -> dt.datetime:
 class BqcaKpiSummary:
   """The KPI header (panel P1) as typed values.
 
-  Rates are fractions in ``0.0..1.0``. Latencies are ``None`` when the
-  window holds no completed turn, so the UI can show a dash rather than a
-  confident zero.
+  Rates are fractions in ``0.0..1.0``. Latencies and the turn error rate are
+  ``None`` when they are undefined (no completed turn for a latency, no turn at
+  all for the error rate), so the UI can show a dash rather than a confident
+  zero.
 
   Attributes:
     total_turns: Distinct invocations in scope.
     completed_turns: Distinct invocations that reached INVOCATION_COMPLETED.
     error_events: Events that satisfy the three-condition error predicate.
-    turn_error_rate: Share of turns with at least one error event.
+    turn_error_rate: Share of turns with at least one error event; ``None``
+      when no turn is in scope (``0 / 0`` is undefined, not 0%).
     p50_turn_latency_ms: Median INVOCATION_COMPLETED latency.
     p95_turn_latency_ms: 95th-percentile INVOCATION_COMPLETED latency.
     total_tokens: Tokens over LLM_RESPONSE events.
@@ -311,7 +313,7 @@ class BqcaKpiSummary:
   total_turns: int
   completed_turns: int
   error_events: int
-  turn_error_rate: float
+  turn_error_rate: float | None
   p50_turn_latency_ms: float | None
   p95_turn_latency_ms: float | None
   total_tokens: int
@@ -335,7 +337,8 @@ class BqcaKpiSummary:
 
     Args:
       row: A mapping (or ``pd.Series``) with the column names the KPI query
-        returns. Missing or NULL values become zero (``None`` for latency).
+        returns. Missing or NULL values become zero (``None`` for the
+        latencies and the turn error rate).
 
     Returns:
       The typed summary.
@@ -344,7 +347,7 @@ class BqcaKpiSummary:
         total_turns=_int(row.get("total_turns")),
         completed_turns=_int(row.get("completed_turns")),
         error_events=_int(row.get("error_events")),
-        turn_error_rate=_float(row.get("turn_error_rate")),
+        turn_error_rate=_opt_float(row.get("turn_error_rate")),
         p50_turn_latency_ms=_opt_float(row.get("p50_turn_latency_ms")),
         p95_turn_latency_ms=_opt_float(row.get("p95_turn_latency_ms")),
         total_tokens=_int(row.get("total_tokens")),
@@ -375,7 +378,8 @@ class BqcaTurnRow:
 
   Attributes:
     timestamp: When the turn started.
-    invocation_id: The turn's invocation id.
+    invocation_id: The turn's invocation id, whitespace-trimmed. Empty when
+      the row carries none; such a turn has no timeline to open.
     session_id: Session the turn belongs to.
     conversation_id: Conversational Analytics conversation id.
     data_agent_id: Data agent that served the turn.
@@ -427,7 +431,7 @@ class BqcaTurnRow:
     """
     return cls(
         timestamp=_datetime(row.get("timestamp")),
-        invocation_id=str(row.get("invocation_id") or ""),
+        invocation_id=(_opt_str(row.get("invocation_id")) or "").strip(),
         session_id=_opt_str(row.get("session_id")),
         conversation_id=_opt_str(row.get("conversation_id")),
         data_agent_id=_opt_str(row.get("data_agent_id")),

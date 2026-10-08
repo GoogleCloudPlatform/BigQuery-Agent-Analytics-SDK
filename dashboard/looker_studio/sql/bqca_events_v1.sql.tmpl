@@ -101,7 +101,14 @@ bqca_fields AS (
     ) AS is_error,
     is_truncated,
     event_type = 'INVOCATION_STARTING' AS is_turn_start,
-    event_type = 'INVOCATION_COMPLETED' AS is_turn_complete,
+    (
+      event_type = 'INVOCATION_COMPLETED'
+      AND NULLIF(TRIM(invocation_id), '') IS NOT NULL
+      AND ROW_NUMBER() OVER (
+        PARTITION BY NULLIF(TRIM(invocation_id), ''), event_type
+        ORDER BY SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64) DESC NULLS LAST, timestamp DESC, span_id
+      ) = 1
+    ) AS is_turn_complete,
     SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64)
       AS total_latency_ms,
     IF(
@@ -112,7 +119,12 @@ bqca_fields AS (
       NULL
     ) AS ttft_ms,
     IF(
-      event_type = 'INVOCATION_COMPLETED',
+      event_type = 'INVOCATION_COMPLETED'
+        AND NULLIF(TRIM(invocation_id), '') IS NOT NULL
+        AND ROW_NUMBER() OVER (
+          PARTITION BY NULLIF(TRIM(invocation_id), ''), event_type
+          ORDER BY SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64) DESC NULLS LAST, timestamp DESC, span_id
+        ) = 1,
       SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64),
       NULL
     ) AS turn_latency_ms,
@@ -253,7 +265,8 @@ bqca_fields AS (
       COALESCE(
         ARRAY_LENGTH(JSON_QUERY_ARRAY(content, '$.suggested_columns')),
         SAFE_CAST(JSON_VALUE(content, '$.similar_queries_count') AS INT64),
-        ARRAY_LENGTH(JSON_QUERY_ARRAY(content, '$.suggestions'))
+        ARRAY_LENGTH(JSON_QUERY_ARRAY(content, '$.suggestions')),
+        0
       ),
       NULL
     ) AS similar_queries_count,

@@ -601,7 +601,7 @@ def test_kpi_summary_reads_a_result_row():
   assert kpi.incomplete_turns == 1
 
 
-def test_kpi_summary_turns_nulls_into_zero_and_missing_latency_into_none():
+def test_kpi_summary_turns_nulls_into_zero_and_undefined_figures_into_none():
   kpi = bqca_models.BqcaKpiSummary.from_row(
       {
           "total_turns": 3,
@@ -613,12 +613,23 @@ def test_kpi_summary_turns_nulls_into_zero_and_missing_latency_into_none():
   assert kpi.total_turns == 3
   assert kpi.p50_turn_latency_ms is None
   assert kpi.p95_turn_latency_ms is None
-  assert kpi.turn_error_rate == 0.0
+  # SAFE_DIVIDE over no turn is NULL: undefined, not a confident 0%.
+  assert kpi.turn_error_rate is None
   assert kpi.total_tokens == 0
   assert kpi.embedding_coverage == 0.0
   # No completion was counted, so every turn is incomplete.
   assert kpi.completed_turns == 0
   assert kpi.incomplete_turns == 3
+
+
+def test_kpi_summary_keeps_a_real_zero_error_rate():
+  kpi = bqca_models.BqcaKpiSummary.from_row(
+      {"total_turns": 3, "turn_error_rate": 0.0}
+  )
+  # Turns exist and none of them failed: that is 0%, and must not read as
+  # "undefined".
+  assert kpi.turn_error_rate is not None
+  assert kpi.turn_error_rate == 0.0
 
 
 def test_incomplete_turns_are_the_turns_that_never_completed():
@@ -685,6 +696,26 @@ def test_turn_row_defaults_missing_values():
 def test_turn_row_requires_a_timestamp():
   with pytest.raises(ValueError, match="timestamp"):
     bqca_models.BqcaTurnRow.from_row({"invocation_id": "inv-x"})
+
+
+@pytest.mark.parametrize(
+    ("logged", "expected"),
+    [
+        ("inv-1", "inv-1"),
+        ("  inv-1 \n", "inv-1"),
+        ("   ", ""),
+        ("\t\n", ""),
+        ("", ""),
+        (None, ""),
+        (NAN, ""),
+        (pd.NA, ""),
+    ],
+)
+def test_turn_row_reads_a_blank_invocation_id_as_empty(logged, expected):
+  row = {"timestamp": T0, "invocation_id": logged}
+  # A whitespace-only id is not an id (a NaN is no id at all, and must not
+  # become the text "nan"), and a padded one is trimmed.
+  assert bqca_models.BqcaTurnRow.from_row(row).invocation_id == expected
 
 
 def test_turn_rows_keep_frame_order_and_survive_nullable_columns():
@@ -880,10 +911,14 @@ def test_user_text_never_reaches_sql_text(panel):
 def test_errors_only_keeps_whole_turns_that_hold_an_error(panel):
   narrowed = _sql(panel, dataclasses.replace(STATE, errors_only=True))
   assert "turn_has_error" not in _sql(panel)
+  # A turn that has an error somewhere keeps every one of its events ...
   assert (
-      f"LOGICAL_OR({bqca_queries.IS_ERROR_EXPR}) OVER (PARTITION BY"
-      " invocation_id) AS turn_has_error"
+      "IF(invocation_id IS NULL, is_error, LOGICAL_OR(is_error) OVER"
+      " (PARTITION BY invocation_id)) AS turn_has_error"
   ) in narrowed
+  # ... where "an error" is still the one canonical three-condition predicate.
+  assert f"{bqca_queries.IS_ERROR_EXPR} AS is_error" in narrowed
+  assert f"LOGICAL_OR({bqca_queries.IS_ERROR_EXPR})" not in narrowed
   # Once as the computed column, once as the predicate that uses it.
   assert narrowed.count("turn_has_error") == 2
   assert "AND turn_has_error" in narrowed
@@ -1314,7 +1349,8 @@ def test_explorer_serves_the_last_agent_response_with_the_sql_it_carries():
         (
             "data_agents",
             [
-                "IFNULL(MAX(data_agent_id), 'unattributed')",
+                "COALESCE(MAX(NULLIF(data_agent_id, 'unattributed')),"
+                " 'unattributed')",
                 "GROUP BY invocation_id",
                 "GROUP BY data_agent_id",
                 "LIMIT 100",
@@ -1344,7 +1380,7 @@ def test_explorer_serves_the_last_agent_response_with_the_sql_it_carries():
         (
             "timeline",
             [
-                "invocation_id = @invocation_id",
+                "NULLIF(TRIM(invocation_id), '') = @invocation_id",
                 "ORDER BY timestamp, event_type",
                 "LIMIT 200",
                 "SUBSTR(",
@@ -1615,6 +1651,418 @@ def test_an_agent_without_a_completed_turn_shows_a_dash_not_a_zero_rate():
   assert "Fast-path rate: 50.0%" in hover["DA1"]
 
 
+# --------------------------------------------------------------------------- #
+# Review fixes, round 2: blank turn ids, attribution filters that keep whole   #
+# turns, the string-MAX fallback bias                                          #
+# --------------------------------------------------------------------------- #
+
+# What every scoped panel reads per row, before ``events`` resolves it across
+# the turn. ``events_raw`` is the only stage that touches the table.
+RAW_TURN_COLUMNS = {
+    "raw_data_agent_id": bqca_queries.DATA_AGENT_ID_EXPR,
+    "raw_persona": bqca_queries.PERSONA_EXPR,
+    "raw_fast_path": bqca_queries.FAST_PATH_EXPR,
+}
+ERRORS_ONLY = dataclasses.replace(STATE, errors_only=True)
+
+
+def test_a_blank_invocation_id_is_not_a_turn():
+  # Blank and whitespace-only ids become NULL; a padded id is trimmed.
+  assert bqca_queries.INVOCATION_ID_EXPR == "NULLIF(TRIM(invocation_id), '')"
+  for panel in SCOPED_PANELS:
+    sql = _sql(panel)
+    # The raw column is read in exactly one place and always normalized, so
+    # every later ``IS NOT NULL`` and ``COUNT(DISTINCT ...)`` ignores blanks.
+    raw = _cte_body(sql, "events_raw")
+    assert f"{bqca_queries.INVOCATION_ID_EXPR} AS invocation_id" in raw, panel
+    assert sql.count("TRIM(invocation_id)") == 1, panel
+
+
+@pytest.mark.parametrize(
+    ("panel", "relation"),
+    [
+        ("kpis", "completion_per_turn"),
+        ("turn_volume", "per_turn"),
+        ("latency", "completion_per_turn"),
+        ("data_agents", "per_turn"),
+        ("personas", "per_turn"),
+        ("turns", "per_turn"),
+    ],
+)
+def test_every_per_turn_relation_drops_rows_that_belong_to_no_turn(
+    panel, relation
+):
+  body = _cte_body(_sql(panel), relation)
+  assert "FROM scoped" in body
+  assert re.search(r"(?:WHERE|AND) invocation_id IS NOT NULL", body), body
+  assert "GROUP BY invocation_id" in body
+
+
+@pytest.mark.parametrize("panel", SCOPED_PANELS)
+def test_attribution_is_resolved_across_the_turn_before_any_filter_runs(panel):
+  sql = _sql(panel)
+  raw, events, scoped = (
+      _cte_body(sql, name) for name in ("events_raw", "events", "scoped")
+  )
+  # The table is read once, by the first stage; the others only read CTEs.
+  assert TABLE in raw
+  assert sql.count(TABLE) == 1
+  assert "FROM events_raw" in events
+  assert "FROM events" in scoped
+  # Stage 1 only *reads* each per-row value, with the canonical expression.
+  for alias, expression in RAW_TURN_COLUMNS.items():
+    assert f"{expression} AS {alias}" in raw, alias
+  # Stage 2 resolves them across the turn and hides the per-row columns.
+  assert "* EXCEPT (raw_data_agent_id, raw_persona, raw_fast_path)" in events
+  for column, alias in (
+      ("raw_data_agent_id", "data_agent_id"),
+      ("raw_persona", "persona"),
+  ):
+    assert (
+        f"IF(invocation_id IS NULL, {column}, COALESCE("
+        f"FIRST_VALUE(NULLIF({column}, 'unattributed') IGNORE NULLS)"
+        " OVER (PARTITION BY invocation_id"
+        f" ORDER BY timestamp ASC, event_type ASC, {column} ASC"
+        " ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),"
+        f" 'unattributed')) AS {alias}"
+    ) in events, alias
+  assert (
+      "IF(invocation_id IS NULL, raw_fast_path,"
+      " LOGICAL_OR(raw_fast_path) OVER (PARTITION BY invocation_id))"
+      " AS fast_path"
+  ) in events
+  assert (
+      "IF(fast_path, 'fast_path', 'standard_nl2sql') AS fast_path_label"
+      in events
+  )
+  # Stage 3 filters on the resolved columns only.
+  assert "raw_" not in scoped
+  for predicate in (
+      "data_agent_id IN UNNEST(@data_agent_ids)",
+      "persona IN UNNEST(@personas)",
+      "fast_path_label IN UNNEST(@fast_path_labels)",
+  ):
+    assert predicate in scoped, predicate
+
+
+@pytest.mark.parametrize("panel", SCOPED_PANELS)
+def test_rows_without_a_turn_are_judged_on_their_own(panel):
+  events = _cte_body(_sql(panel, ERRORS_ONLY), "events")
+  # A row with no turn would otherwise fall into one shared NULL partition and
+  # inherit the verdict of unrelated rows.
+  for column in (
+      "raw_data_agent_id",
+      "raw_persona",
+      "raw_fast_path",
+      "is_error",
+  ):
+    assert f"IF(invocation_id IS NULL, {column}, " in events, column
+
+
+def _normalize_invocation_id(logged: str | None) -> str | None:
+  """What ``INVOCATION_ID_EXPR`` makes of a logged ``invocation_id``."""
+  assert bqca_queries.INVOCATION_ID_EXPR == "NULLIF(TRIM(invocation_id), '')"
+  return None if logged is None else (logged.strip() or None)
+
+
+def _asc(value: Any) -> tuple[bool, Any]:
+  """``ORDER BY ... ASC`` in BigQuery: NULL sorts first."""
+  return (value is not None, "" if value is None else value)
+
+
+def _window_rule(events: str, column: str, alias: str) -> dict[str, Any]:
+  """Reads a first-real-value window expression back out of ``events``."""
+  match = re.search(
+      rf"IF\(invocation_id IS NULL, {column}, COALESCE\("
+      rf"FIRST_VALUE\(NULLIF\({column}, '(?P<fallback>[^']+)'\) IGNORE NULLS\)"
+      r" OVER \(PARTITION BY (?P<partition>\w+)"
+      r" ORDER BY (?P<order>[\w ,]+)"
+      r" ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\),"
+      rf" '(?P<default>[^']+)'\)\) AS {alias}\b",
+      events,
+  )
+  assert match, f"{alias} is no longer a first-real-value window: {events}"
+  keys = [key.split() for key in match["order"].split(",")]
+  assert all(direction == "ASC" for _, direction in keys), keys
+  return {
+      "partition": match["partition"],
+      "order": [name for name, _ in keys],
+      "fallback": match["fallback"],
+      "default": match["default"],
+  }
+
+
+def _resolve_attribution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+  """Applies the turn-resolving ``events`` stage to synthetic raw rows.
+
+  Each window expression is read back out of the generated SQL (the sort keys,
+  the fallback label it ignores, the label a turn with nothing real gets) and
+  applied the way BigQuery applies it, so editing the SQL changes the answer
+  here exactly as it changes it there.
+  """
+  events = _cte_body(_sql("kpis", ERRORS_ONLY), "events")
+  agent = _window_rule(events, "raw_data_agent_id", "data_agent_id")
+  persona = _window_rule(events, "raw_persona", "persona")
+  assert agent["partition"] == persona["partition"] == "invocation_id"
+  # An unrecognized shape fails loudly instead of being guessed at.
+  assert (
+      "IF(invocation_id IS NULL, raw_fast_path, LOGICAL_OR(raw_fast_path)"
+      " OVER (PARTITION BY invocation_id)) AS fast_path"
+  ) in events
+  assert (
+      "IF(invocation_id IS NULL, is_error, LOGICAL_OR(is_error)"
+      " OVER (PARTITION BY invocation_id)) AS turn_has_error"
+  ) in events
+  label = re.search(
+      r"IF\(fast_path, '(?P<yes>\w+)', '(?P<no>\w+)'\) AS fast_path_label",
+      events,
+  )
+  assert label, events
+  assert (label["yes"], label["no"]) == bqca_models.FAST_PATH_LABELS
+
+  normalized = [
+      {**row, "invocation_id": _normalize_invocation_id(row["invocation_id"])}
+      for row in rows
+  ]
+  turns: dict[str, list[dict[str, Any]]] = {}
+  for row in normalized:
+    if row["invocation_id"] is not None:
+      turns.setdefault(row["invocation_id"], []).append(row)
+
+  def first_real(row: dict[str, Any], rule: dict[str, Any], column: str):
+    if row["invocation_id"] is None:
+      return row[column]
+    ordered = sorted(
+        turns[row["invocation_id"]],
+        key=lambda other: tuple(_asc(other[key]) for key in rule["order"]),
+    )
+    real = (
+        other[column]
+        for other in ordered
+        if other[column] not in (None, rule["fallback"])
+    )
+    return next(real, rule["default"])
+
+  resolved = []
+  for row in normalized:
+    turn = turns.get(row["invocation_id"], [row])
+    fast_path = any(other["raw_fast_path"] for other in turn)
+    resolved.append(
+        {
+            **row,
+            "data_agent_id": first_real(row, agent, "raw_data_agent_id"),
+            "persona": first_real(row, persona, "raw_persona"),
+            "fast_path": fast_path,
+            "fast_path_label": label["yes"] if fast_path else label["no"],
+            "turn_has_error": any(other["is_error"] for other in turn),
+        }
+    )
+  return resolved
+
+
+def _event(
+    second: int,
+    event_type: str,
+    *,
+    turn: str | None = "inv-1",
+    persona: str | None = None,
+    agent: str | None = None,
+    fast: bool = False,
+    error: bool = False,
+) -> dict[str, Any]:
+  """One ``events_raw`` row; a persona that is not set is the fallback label."""
+  return {
+      "timestamp": second,
+      "event_type": event_type,
+      "invocation_id": turn,
+      "raw_persona": persona or "unattributed",
+      "raw_data_agent_id": agent,
+      "raw_fast_path": fast,
+      "is_error": error,
+  }
+
+
+TURN_EVENT_TYPES = [
+    "USER_MESSAGE_RECEIVED",
+    "LLM_RESPONSE",
+    "INVOCATION_COMPLETED",
+]
+
+
+def test_a_persona_filter_keeps_every_event_of_the_turns_it_matches():
+  rows = [
+      _event(0, "USER_MESSAGE_RECEIVED", persona="analyst"),
+      _event(1, "LLM_RESPONSE"),
+      _event(2, "INVOCATION_COMPLETED"),
+      _event(0, "USER_MESSAGE_RECEIVED", turn="inv-2", persona="bob"),
+      _event(1, "INVOCATION_COMPLETED", turn="inv-2"),
+  ]
+  resolved = _resolve_attribution(rows)
+  assert [r["persona"] for r in resolved] == ["analyst"] * 3 + ["bob"] * 2
+  # So ``persona IN UNNEST(@personas)`` keeps all three events of inv-1, its
+  # completion included, and none of inv-2's ...
+  kept = [r["event_type"] for r in resolved if r["persona"] in {"analyst"}]
+  assert kept == TURN_EVENT_TYPES
+  # ... where the per-row value kept the prompt alone and made the turn look
+  # unfinished.
+  assert [r["event_type"] for r in rows if r["raw_persona"] == "analyst"] == [
+      "USER_MESSAGE_RECEIVED"
+  ]
+
+
+def test_a_data_agent_filter_keeps_every_event_of_the_turns_it_matches():
+  agent = "ops-agent-東京"
+  rows = [
+      _event(0, "USER_MESSAGE_RECEIVED", agent=agent),
+      _event(1, "LLM_RESPONSE"),
+      _event(2, "INVOCATION_COMPLETED"),
+      # A turn that never names an agent stays unattributed on every row.
+      _event(0, "USER_MESSAGE_RECEIVED", turn="inv-2"),
+      _event(1, "INVOCATION_COMPLETED", turn="inv-2"),
+  ]
+  resolved = _resolve_attribution(rows)
+  assert [r["data_agent_id"] for r in resolved] == (
+      [agent] * 3 + ["unattributed"] * 2
+  )
+  kept = [r["event_type"] for r in resolved if r["data_agent_id"] == agent]
+  assert kept == TURN_EVENT_TYPES
+  assert [r["event_type"] for r in rows if r["raw_data_agent_id"] == agent] == [
+      "USER_MESSAGE_RECEIVED"
+  ]
+
+
+def test_a_fast_path_filter_keeps_every_event_of_the_turns_it_matches():
+  rows = [
+      _event(0, "USER_MESSAGE_RECEIVED", fast=True),
+      _event(1, "INVOCATION_COMPLETED"),  # not tagged by the plugin
+      _event(0, "USER_MESSAGE_RECEIVED", turn="inv-2"),
+      _event(1, "INVOCATION_COMPLETED", turn="inv-2"),
+  ]
+  resolved = _resolve_attribution(rows)
+  assert [r["fast_path"] for r in resolved] == [True, True, False, False]
+  assert [r["fast_path_label"] for r in resolved] == (
+      [bqca_models.FAST_PATH_LABEL] * 2 + [bqca_models.STANDARD_LABEL] * 2
+  )
+
+
+def test_the_first_real_attribution_wins_whatever_order_rows_arrive_in():
+  rows = [
+      _event(0, "INVOCATION_STARTING", persona="first", agent="DA-first"),
+      _event(1, "LLM_RESPONSE", persona="second", agent="DA-second"),
+      _event(2, "INVOCATION_COMPLETED"),
+      # Two rows share a timestamp and an event type: the value itself breaks
+      # the tie, so the answer never depends on which row came first.
+      _event(0, "LLM_RESPONSE", turn="inv-2", persona="zeta", agent="DA-z"),
+      _event(0, "LLM_RESPONSE", turn="inv-2", persona="alpha", agent="DA-a"),
+  ]
+  expected = [("first", "DA-first")] * 3 + [("alpha", "DA-a")] * 2
+  for ordering in (rows, rows[::-1], rows[2:] + rows[:2], rows[3:] + rows[:3]):
+    resolved = _resolve_attribution(list(ordering))
+    got = {
+        id(row): (r["persona"], r["data_agent_id"])
+        for row, r in zip(ordering, resolved)
+    }
+    assert [got[id(row)] for row in rows] == expected
+
+
+def test_rows_without_a_turn_keep_their_own_attribution_and_verdict():
+  rows = [
+      _event(0, "LLM_ERROR", turn=None, persona="alice", error=True),
+      _event(1, "LLM_RESPONSE", turn="   ", persona="bob"),
+      _event(2, "AGENT_RESPONSE", turn="", fast=True),
+      _event(3, "LLM_RESPONSE", turn=None),
+      _event(0, "USER_MESSAGE_RECEIVED", persona="carol"),
+      _event(1, "AGENT_ERROR", error=True),
+      _event(2, "INVOCATION_COMPLETED"),
+  ]
+  resolved = _resolve_attribution(rows)
+  orphans, turn = resolved[:4], resolved[4:]
+  assert [r["invocation_id"] for r in orphans] == [None] * 4
+  # Nothing is shared between unrelated rows ...
+  assert [r["persona"] for r in orphans] == [
+      "alice",
+      "bob",
+      "unattributed",
+      "unattributed",
+  ]
+  assert [r["fast_path"] for r in orphans] == [False, False, True, False]
+  # ... and an error among them does not make the others "turns with an error".
+  assert [r["turn_has_error"] for r in orphans] == [True, False, False, False]
+  # A real turn still shares everything across its rows.
+  assert [r["persona"] for r in turn] == ["carol"] * 3
+  assert [r["turn_has_error"] for r in turn] == [True] * 3
+
+
+def test_an_id_padded_with_whitespace_is_the_same_turn():
+  rows = [
+      _event(0, "USER_MESSAGE_RECEIVED", turn="  inv-1 ", persona="analyst"),
+      _event(1, "INVOCATION_COMPLETED", turn="inv-1"),
+  ]
+  resolved = _resolve_attribution(rows)
+  assert [r["invocation_id"] for r in resolved] == ["inv-1", "inv-1"]
+  assert [r["persona"] for r in resolved] == ["analyst", "analyst"]
+
+
+@pytest.mark.parametrize(
+    ("panel", "columns"),
+    [
+        ("data_agents", ("data_agent_id",)),
+        ("personas", ("persona",)),
+        ("turns", ("data_agent_id", "persona")),
+    ],
+)
+def test_a_turns_real_attribution_beats_the_fallback_label(panel, columns):
+  per_turn = _cte_body(_sql(panel), "per_turn")
+  for column in columns:
+    # ``MAX`` over strings ranks 'unattributed' above 'analyst', so a bare MAX
+    # would hide a real value behind the fallback label.
+    assert (
+        f"COALESCE(MAX(NULLIF({column}, 'unattributed')), 'unattributed')"
+        f" AS {column}"
+    ) in per_turn, column
+    assert f"MAX({column})" not in per_turn, column
+
+
+def test_timeline_matches_the_turn_key_the_explorer_lists():
+  sql = _sql("timeline")
+  assert f"AND {bqca_queries.INVOCATION_ID_EXPR} = @invocation_id" in sql
+  # The raw column no longer decides: a padded id would list a turn whose
+  # timeline is empty.
+  assert "AND invocation_id = @invocation_id" not in sql
+
+
+def test_fetch_panel_binds_the_trimmed_invocation_id():
+  seen: dict[str, Any] = {}
+
+  def fake(sql, params, ctx_, label):
+    seen.update(params={p.name: p for p in params})
+    return models.QueryResult(pd.DataFrame())
+
+  with mock.patch.object(bqca_queries, "fetch_bqca", side_effect=fake):
+    bqca_queries.fetch_panel(
+        "timeline", STATE, _ctx(), invocation_id="  inv-1 \n"
+    )
+  assert seen["params"]["invocation_id"].value == "inv-1"
+
+
+@pytest.mark.parametrize(
+    ("panel", "columns"),
+    [
+        ("data_agents", ("data_agent_id",)),
+        ("personas", ("persona",)),
+    ],
+)
+def test_the_breakdown_panels_group_by_the_resolved_columns(panel, columns):
+  # They aggregate ``scoped``'s turn-resolved columns: no panel recomputes an
+  # attribution from the raw per-row expressions.
+  sql = _sql(panel)
+  scoped_onward = sql.split("scoped AS (", 1)[1]
+  for expression in RAW_TURN_COLUMNS.values():
+    assert expression not in scoped_onward
+  for column in columns:
+    assert f"GROUP BY {column}" in scoped_onward
+
+
 @pytest.mark.parametrize(
     ("span", "bucket"),
     [
@@ -1706,7 +2154,7 @@ def test_timeline_binds_the_invocation_and_never_embeds_it():
   )
   assert "inv-secret" not in sql
   assert "DROP TABLE" not in sql
-  assert "invocation_id = @invocation_id" in sql
+  assert f"{bqca_queries.INVOCATION_ID_EXPR} = @invocation_id" in sql
 
 
 def test_timeline_honors_only_the_event_type_selection():
@@ -3395,6 +3843,120 @@ def test_a_frame_without_response_counts_shows_no_superseded_note(bqca_app):
   at = bqca_app.run()
   assert not at.exception
   assert not any("AGENT_RESPONSE events" in c for c in _captions(at))
+
+
+# --------------------------------------------------------------------------- #
+# Review fixes, round 2 (surface): a turn without a usable id, a scope without #
+# turns, and percentiles labelled as the estimates they are                    #
+# --------------------------------------------------------------------------- #
+
+NO_TURN_ID_NOTE = "No valid invocation ID is associated with this turn."
+
+
+def _zero_turn_kpi_frame() -> pd.DataFrame:
+  """A KPI row for a scope whose events all lack a usable ``invocation_id``.
+
+  The tokens are real (they come from events outside any turn); everything that
+  is defined per turn is zero, or an undefined (NULL) rate.
+  """
+  return _kpi_frame().assign(
+      total_turns=0,
+      completed_turns=0,
+      error_events=2,
+      turn_error_rate=NAN,
+      p50_turn_latency_ms=NAN,
+      p95_turn_latency_ms=NAN,
+      fast_path_rate=NAN,
+      embedding_coverage=NAN,
+  )
+
+
+def test_a_turn_without_a_usable_invocation_id_opens_without_a_timeline(
+    bqca_app, bq
+):
+  turns = _turns_frame()
+  turns.loc[0, "invocation_id"] = "   "
+  bq.frames["Turns"] = turns
+  at = bqca_app.run()
+  assert not at.exception
+  assert NO_TURN_ID_NOTE in _captions(at)
+  # The timeline is keyed on the id: with none there is nothing to look up.
+  assert "Turn timeline" not in bq.labels()
+
+  # Picking a turn with a real id brings the timeline back.
+  _selectbox(at, "Turn").select_index(1).run()
+  assert not at.exception
+  assert NO_TURN_ID_NOTE not in _captions(at)
+  assert bq.last("Turn timeline").params["invocation_id"] == "inv2"
+
+
+def test_a_scope_without_turns_shows_a_dash_and_explains_the_tokens(
+    bqca_app, bq
+):
+  bq.frames["KPIs"] = _zero_turn_kpi_frame()
+  at = bqca_app.run()
+  assert not at.exception
+  metrics = _metrics(at)
+  assert metrics["Total Turns"] == "0"
+  # Two error events but no turn to be a rate of: a dash, never a 0.0%.
+  assert metrics["Turn Error Rate"] == "—"
+  # The tokens are real, and the caption says where they come from.
+  assert metrics["Total Tokens"] == "130"
+  [note] = [c for c in _captions(at) if c.startswith("0 attributed turns")]
+  assert "missing or blank invocation_id" in note
+  assert "token totals include unattributed LLM_RESPONSE events" in note
+  # The "turns completed" line only ever speaks of real turns.
+  assert _completion_notes(at) == []
+
+
+def test_the_no_turns_note_appears_only_for_tokens_without_turns(bqca_app, bq):
+  def notes(at: AppTest) -> list[str]:
+    return [c for c in _captions(at) if c.startswith("0 attributed turns")]
+
+  at = bqca_app.run()
+  assert not at.exception
+  assert notes(at) == []
+
+  # No turn and no token either: nothing in scope, so nothing to explain.
+  bq.frames["KPIs"] = _zero_turn_kpi_frame().assign(
+      total_tokens=0, thoughts_tokens=0, cached_tokens=0, error_events=0
+  )
+  at = bqca_app.run()
+  assert not at.exception
+  assert notes(at) == []
+  assert _metrics(at)["Turn Error Rate"] == "—"
+
+
+def test_a_real_zero_error_rate_still_reads_zero_percent(bqca_app, bq):
+  bq.frames["KPIs"] = _kpi_frame().assign(error_events=0, turn_error_rate=0.0)
+  at = bqca_app.run()
+  assert not at.exception
+  assert _metrics(at)["Turn Error Rate"] == "0.0%"
+
+
+def test_the_latency_percentiles_are_labelled_as_approximate(bqca_app):
+  at = bqca_app.run()
+  assert not at.exception
+  helps = {metric.label: metric.help for metric in at.metric}
+  for label in ("P50 Turn Latency", "P95 Turn Latency"):
+    assert helps[label].startswith("Approximate "), label
+    assert "APPROX_QUANTILES" in helps[label], label
+    assert "completed turns" in helps[label], label
+
+  captions = _captions(at)
+  # The incomplete-turn note, the latency tab and the per-agent P95 all say so.
+  [note] = _completion_notes(at)
+  assert "approximate" in note
+  assert "APPROX_QUANTILES" in note
+  assert "cover completed turns only" in note
+  [latency] = [c for c in captions if c.startswith("Latency percentiles are")]
+  assert "approximate" in latency
+  assert "APPROX_QUANTILES" in latency
+  [agents] = [
+      c for c in captions if c.startswith("Turns that carry no data-agent id")
+  ]
+  assert "P95 latency is approximate" in agents
+  assert "APPROX_QUANTILES" in agents
 
 
 # --------------------------------------------------------------------------- #

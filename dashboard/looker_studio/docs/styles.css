@@ -60,6 +60,12 @@ main {
   grid-template-columns: minmax(0, 1.1fr) minmax(340px, 0.9fr);
   gap: 54px;
   align-items: center;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.hero > * {
+  min-width: 0;
 }
 
 .surface-toggle {
@@ -137,6 +143,8 @@ h1 {
 }
 
 .card {
+  min-width: 0;
+  max-width: 100%;
   padding: 30px;
   border: 1px solid rgba(218, 220, 224, 0.9);
   border-radius: 22px;
@@ -222,9 +230,13 @@ summary {
 
 #form-status {
   min-height: 20px;
+  min-width: 0;
+  max-width: 100%;
   margin: 18px 0 12px;
   color: var(--muted);
   font-size: 0.82rem;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 #form-status[data-kind="ready"] {

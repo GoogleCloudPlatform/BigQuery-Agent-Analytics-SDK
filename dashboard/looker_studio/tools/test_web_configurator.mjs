@@ -1595,6 +1595,20 @@ assert.match(
 );
 assert.match(
   bqcaPageSource,
+  /<aside[^>]*class="notice notice-warning"[^>]*id="bqca-template-note"[^>]*>.*Template not yet publicly shared for external accounts.*<details class="advanced-bqca-options">/s,
+  "the BQCA note prominently warns about pending external link sharing and collapses advanced CLI/Streamlit options",
+);
+const bqcaHeroLedeMatch = bqcaPageSource.match(
+  /<p class="lede" data-profile-only="bqca">([\s\S]*?)<\/p>/,
+);
+assert.ok(bqcaHeroLedeMatch, "the BQCA hero lede paragraph exists");
+assert.doesNotMatch(
+  bqcaHeroLedeMatch[1],
+  /--custom-sql-out|sql\/bqca_events_v1\.sql\.tmpl|dashboards\/streamlit/,
+  "the BQCA hero lede keeps CLI flags and repo file paths out of the primary copy",
+);
+assert.match(
+  bqcaPageSource,
   /7-page tool-free BQCA Looker Studio dashboard/,
   "the BQCA hero describes the dedicated 7-page tool-free BQCA Looker Studio dashboard",
 );
@@ -1727,8 +1741,13 @@ assert.match(
 );
 assert.match(
   formStatus.textContent,
-  /dedicated 7-page tool-free BQCA Looker Studio template \(ds0\).*sql\/bqca_events_v1\.sql\.tmpl \(--custom-sql-out\).*dashboards\/streamlit\//,
-  "BQCA Ready status describes the dedicated 7-page tool-free BQCA template and custom-SQL/Streamlit options",
+  /dedicated 7-page tool-free BQCA Looker Studio template \(public link sharing for external accounts is pending verification/,
+  "BQCA Ready status describes the dedicated 7-page tool-free BQCA template and pending public sharing notice",
+);
+assert.doesNotMatch(
+  formStatus.textContent,
+  /--custom-sql-out|sql\/bqca_events_v1\.sql\.tmpl|dashboards\/streamlit/,
+  "BQCA Ready status keeps raw CLI flags and repo paths out of the inline status line",
 );
 assert.equal(
   createLink.href,

@@ -17,6 +17,12 @@ Governance (the BQCA SQL contract):
   feeds the *last-resort* persona fallback.)
 * An error is the three-condition predicate ``IS_ERROR_EXPR``, never
   ``status = 'ERROR'`` alone.
+* A turn is a distinct *non-blank* ``invocation_id`` (``INVOCATION_ID_EXPR``):
+  a blank or whitespace-only value names no turn and reads as missing.
+* The data-agent, persona and fast-path filters decide at *turn* grain. The
+  plugin does not stamp every event of a turn with the same attribution, so
+  ``_prelude`` resolves each value across the turn's events before any filter
+  looks at it; filtering never keeps a turn's prompt but drops its completion.
 * User-controlled values (filters, search text, the selected invocation) are
   BigQuery query parameters, never SQL text. Only identifiers that passed
   ``models.validate_refs``, a ``Window`` the app built, and ``int()``-clamped
@@ -78,6 +84,11 @@ CONVERSATION_ID_EXPR = (
     "NULLIF(JSON_VALUE(attributes,"
     " '$.session_metadata.state.\"conversation-id\"'), '')"
 )
+# A turn is a distinct ``invocation_id``. A blank or whitespace-only value names
+# no turn (the explorer could not open its timeline), so it reads as missing,
+# and an id padded with whitespace is trimmed so the turn table and the
+# timeline spell it the same way.
+INVOCATION_ID_EXPR = "NULLIF(TRIM(invocation_id), '')"
 # ``user_id`` is often an opaque id (a service-account name, a numeric id), and
 # the text before an ``@`` in it must not become a persona. Only a real email
 # address yields a handle; an optional ``:suffix`` after the address is
@@ -101,10 +112,6 @@ IS_ERROR_EXPR = (
     " OR ENDS_WITH(event_type, '_ERROR'))"
 )
 FAST_PATH_EXPR = "IFNULL(JSON_VALUE(attributes, '$.fast_path') = 'true', FALSE)"
-FAST_PATH_LABEL_EXPR = (
-    "IF(IFNULL(JSON_VALUE(attributes, '$.fast_path') = 'true', FALSE),"
-    " 'fast_path', 'standard_nl2sql')"
-)
 MODEL_NAME_EXPR = (
     "COALESCE(NULLIF(JSON_VALUE(attributes, '$.model'), ''),"
     " NULLIF(JSON_VALUE(attributes, '$.model_version'), ''))"
@@ -211,19 +218,26 @@ EMBEDDING_REASON_EXPR = (
 
 # Raw columns every panel needs, and the canonical dimensions every panel
 # filters on. Derived here once so the filters apply identically everywhere.
+# ``invocation_id`` is not a raw column here: it is the turn key and always
+# goes through ``INVOCATION_ID_EXPR``.
 _BASE_RAW: tuple[str, ...] = (
     "timestamp",
     "event_type",
     "session_id",
-    "invocation_id",
 )
-_DIMENSIONS: tuple[tuple[str, str], ...] = (
-    ("data_agent_id", DATA_AGENT_ID_EXPR),
+# Facts that belong to one row, however many rows the turn has.
+_ROW_DIMENSIONS: tuple[tuple[str, str], ...] = (
     ("conversation_id", CONVERSATION_ID_EXPR),
-    ("persona", PERSONA_EXPR),
     ("is_error", IS_ERROR_EXPR),
-    ("fast_path", FAST_PATH_EXPR),
-    ("fast_path_label", FAST_PATH_LABEL_EXPR),
+)
+# Facts that belong to a *turn*, but that the plugin may not stamp on every one
+# of the turn's events. They are read per row as ``raw_<name>`` and resolved
+# across the turn by ``_prelude``; the panels and the filters only ever see the
+# resolved ``<name>`` columns.
+_TURN_DIMENSIONS: tuple[tuple[str, str], ...] = (
+    ("raw_data_agent_id", DATA_AGENT_ID_EXPR),
+    ("raw_persona", PERSONA_EXPR),
+    ("raw_fast_path", FAST_PATH_EXPR),
 )
 
 _MAX_LIMIT = 1000
@@ -274,7 +288,9 @@ def _scope_sql(*, honor_event_types: bool = False) -> str:
 
   The sentinel idiom (``'___ALL___' IN UNNEST(@x) OR col IN UNNEST(@x)``)
   is injection-safe and cannot crash on an empty array the way an ``IN ()``
-  list would.
+  list would. The data-agent, persona and fast-path predicates read the
+  turn-resolved columns of ``events`` (see ``_prelude``), so each one keeps or
+  drops a turn's events together.
 
   Args:
     honor_event_types: Whether to apply the event-type multi-select. Off for
@@ -303,6 +319,54 @@ def _scope_sql(*, honor_event_types: bool = False) -> str:
   return "\n    AND ".join(clauses)
 
 
+def _first_attributed(column: str) -> str:
+  """Renders the earliest real value of ``column`` across a row's turn.
+
+  NULL and ``'unattributed'`` (the fallback ``PERSONA_EXPR`` ends in) both mean
+  "this event carries no attribution", so neither may win over a real value
+  that another event of the same turn does carry. ``FIRST_VALUE ... IGNORE
+  NULLS`` takes the first real value in time order; ``event_type`` and then the
+  value itself break ties, so the answer never depends on row order; and the
+  frame spans the whole turn, so *every* row of it (not only the rows after the
+  first real value) gets the same answer. A turn with no real value anywhere is
+  ``'unattributed'``. A row with no turn (a missing or blank ``invocation_id``)
+  has nothing to resolve against and keeps its own value.
+
+  Args:
+    column: The per-row ``raw_*`` column of ``events_raw`` to resolve.
+
+  Returns:
+    A SQL expression over ``events_raw``.
+  """
+  return (
+      f"IF(invocation_id IS NULL, {column},"
+      f" COALESCE(FIRST_VALUE(NULLIF({column}, 'unattributed') IGNORE NULLS)"
+      " OVER (PARTITION BY invocation_id"
+      f" ORDER BY timestamp ASC, event_type ASC, {column} ASC"
+      " ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),"
+      " 'unattributed'))"
+  )
+
+
+def _turn_any(column: str) -> str:
+  """Renders whether *any* event of a row's turn satisfies a boolean column.
+
+  A row with no turn (a missing or blank ``invocation_id``) is judged on its
+  own: every such row would otherwise fall into one shared NULL partition and
+  inherit the verdict of an unrelated row.
+
+  Args:
+    column: A boolean column of ``events_raw``.
+
+  Returns:
+    A SQL expression over ``events_raw``.
+  """
+  return (
+      f"IF(invocation_id IS NULL, {column},"
+      f" LOGICAL_OR({column}) OVER (PARTITION BY invocation_id))"
+  )
+
+
 def _prelude(
     state: BqcaFilterState,
     window: Window,
@@ -312,13 +376,25 @@ def _prelude(
     honor_event_types: bool = False,
     extra_scope: Sequence[str] = (),
 ) -> str:
-  """Renders the ``events`` and ``scoped`` CTEs every panel starts from.
+  """Renders the ``events_raw``, ``events`` and ``scoped`` CTEs of every panel.
 
-  ``events`` is the only place the raw table is read: allowlisted rows in
-  the window, with the canonical dimensions (and any panel-specific
-  columns) computed once. ``scoped`` applies the sidebar filters to those
-  computed columns — a separate step because BigQuery cannot reference a
-  select-list alias in ``WHERE``.
+  ``events_raw`` is the only place the raw table is read: allowlisted rows in
+  the window, with the normalized turn key (``INVOCATION_ID_EXPR``), the
+  per-row dimensions, each turn-grain dimension as a per-row ``raw_*`` column,
+  and any panel-specific columns, all computed once.
+
+  ``events`` then resolves the turn-grain dimensions across each turn's rows
+  (see ``_first_attributed`` and ``_turn_any``): ``data_agent_id`` and
+  ``persona`` are the turn's first real value, ``fast_path`` is "any event of
+  the turn is tagged", and ``fast_path_label`` names that path. Resolving
+  before filtering is the point: the plugin does not stamp every event of a turn
+  with the same attribution, so a row-level filter would keep a turn's prompt
+  but drop its completion and make the turn look unfinished. With
+  ``state.errors_only`` it also adds ``turn_has_error``, so *every* event of a
+  turn that has an error somewhere survives, not just the error events.
+
+  ``scoped`` applies the sidebar filters to the resolved columns, a separate
+  step because BigQuery cannot reference a select-list alias in ``WHERE``.
 
   Args:
     state: Active filters and connection.
@@ -329,34 +405,58 @@ def _prelude(
     extra_scope: Extra predicates AND-ed into ``scoped``.
 
   Returns:
-    ``WITH events AS (...), scoped AS (...)`` with no trailing newline.
+    ``WITH events_raw AS (...), events AS (...), scoped AS (...)`` with no
+    trailing newline.
   """
   table = _validate_ident(state.project_id, state.dataset_id, state.table_id)
-  columns = list(dict.fromkeys((*_BASE_RAW, *raw)))
+  columns = [
+      column
+      for column in dict.fromkeys((*_BASE_RAW, *raw))
+      if column != "invocation_id"
+  ]
   items = [f"    {column}" for column in columns]
+  items.append(f"    {INVOCATION_ID_EXPR} AS invocation_id")
   items += [
       f"    {expression} AS {alias}"
-      for alias, expression in (*_DIMENSIONS, *derived)
+      for alias, expression in (
+          *_ROW_DIMENSIONS,
+          *_TURN_DIMENSIONS,
+          *derived,
+      )
+  ]
+  resolved = [
+      f"      {_first_attributed('raw_data_agent_id')} AS data_agent_id",
+      f"      {_first_attributed('raw_persona')} AS persona",
+      f"      {_turn_any('raw_fast_path')} AS fast_path",
   ]
   where = [_scope_sql(honor_event_types=honor_event_types)]
   if state.errors_only:
     # Turn-level: keep *every* event of a turn that has an error somewhere,
     # not just the error events themselves.
-    items.append(
-        f"    LOGICAL_OR({IS_ERROR_EXPR}) OVER (PARTITION BY invocation_id)"
-        " AS turn_has_error"
-    )
+    resolved.append(f"      {_turn_any('is_error')} AS turn_has_error")
     where.append("turn_has_error")
   where.extend(extra_scope)
   select = ",\n".join(items)
+  turn_select = ",\n".join(resolved)
   predicates = "\n    AND ".join(where)
   return f"""
-WITH events AS (
+WITH events_raw AS (
   SELECT
 {select}
   FROM {table}
   WHERE {queries.time_bounds(window)}
     AND event_type IN UNNEST(@allowed_event_types)
+),
+events AS (
+  SELECT
+    *,
+    IF(fast_path, 'fast_path', 'standard_nl2sql') AS fast_path_label
+  FROM (
+    SELECT
+      * EXCEPT (raw_data_agent_id, raw_persona, raw_fast_path),
+{turn_select}
+    FROM events_raw
+  )
 ),
 scoped AS (
   SELECT *
@@ -427,14 +527,19 @@ def build_bqca_kpis_sql(
   the fast-path rate, and the app says so. The latency percentiles take one
   sample per completed turn: completion rows are folded per ``invocation_id``
   first (the slowest logged latency), so a turn whose completion was logged
-  more than once is not weighted more than once. ``embedding_coverage`` is the
-  share of all turns that received at least one ``EMBEDDING_SUGGESTION`` with
-  suggested columns; the denominator is every turn because the logging plugin
-  drops a suggestion that has no columns, so a per-suggestion "hit rate"
-  would always read 100%. ``HAVING COUNT(*) > 0`` keeps the no-data contract:
-  an unaggregated SELECT over aggregates always emits a row, so an empty
-  filter intersection would otherwise report a confident "0 turns, 0%
-  errors".
+  more than once is not weighted more than once. A turn is on the fast path if
+  any of its events is tagged; ``_prelude`` resolves that across the whole turn
+  before any filter runs, so the rate agrees with the per-data-agent table.
+  ``embedding_coverage`` is the share of all turns that received at least one
+  ``EMBEDDING_SUGGESTION`` with suggested columns; the denominator is every
+  turn because the logging plugin drops a suggestion that has no columns, so a
+  per-suggestion "hit rate" would always read 100%. ``HAVING COUNT(*) > 0``
+  keeps the no-data contract: an unaggregated SELECT over aggregates always
+  emits a row, so an empty filter intersection would otherwise report a
+  confident "0 turns, 0% errors". When events exist but none belongs to a turn
+  (every ``invocation_id`` is missing or blank) the row reads 0 turns, an
+  *undefined* (NULL) error rate and the orphan events' token totals; the app
+  shows the rate as a dash and says why.
 
   Args:
     f: Active filters and connection.
@@ -731,13 +836,14 @@ def build_bqca_data_agent_breakdown_sql(
   """Builds the per-data-agent leaderboard (panel P5).
 
   Turn grain first, then grouped by the turn's data agent, so counts are
-  turns, not events. Turns that carry no data-agent id are grouped under
-  ``'unattributed'`` rather than dropped, so the table still adds up to the
-  KPI header. As in the KPI header, latency and the fast-path rate cover
-  completed turns only (a turn that reached ``INVOCATION_COMPLETED``): the
-  rate is the completed fast-path turns over the completed turns, so a turn
-  that never completed weighs in neither term and an agent with no completed
-  turn has no rate at all.
+  turns, not events. A turn's data agent is the first real id any of its events
+  carries (the plugin does not stamp every event). Turns that carry no
+  data-agent id are grouped under ``'unattributed'`` rather than dropped, so
+  the table still adds up to the KPI header. As in the KPI header, latency and
+  the fast-path rate cover completed turns only (a turn that reached
+  ``INVOCATION_COMPLETED``): the rate is the completed fast-path turns over the
+  completed turns, so a turn that never completed weighs in neither term and an
+  agent with no completed turn has no rate at all.
 
   Args:
     f: Active filters and connection.
@@ -769,7 +875,8 @@ def build_bqca_data_agent_breakdown_sql(
 per_turn AS (
   SELECT
     invocation_id,
-    IFNULL(MAX(data_agent_id), 'unattributed') AS data_agent_id,
+    COALESCE(MAX(NULLIF(data_agent_id, 'unattributed')), 'unattributed')
+      AS data_agent_id,
     MAX(conversation_id) AS conversation_id,
     MAX(user_id) AS user_id,
     LOGICAL_OR(event_type = 'INVOCATION_COMPLETED') AS is_completed,
@@ -808,6 +915,9 @@ def build_bqca_persona_breakdown_sql(
 ) -> str:
   """Builds the per-persona breakdown (panel P6).
 
+  Turn grain first, then grouped by the turn's persona: its first real persona,
+  or ``'unattributed'`` only when none of its events carries one.
+
   Args:
     f: Active filters and connection.
     limit: Maximum number of personas to return.
@@ -837,7 +947,7 @@ def build_bqca_persona_breakdown_sql(
 per_turn AS (
   SELECT
     invocation_id,
-    MAX(persona) AS persona,
+    COALESCE(MAX(NULLIF(persona, 'unattributed')), 'unattributed') AS persona,
     MAX(conversation_id) AS conversation_id,
     LOGICAL_OR(is_error) AS has_error,
     MAX(turn_latency_ms) AS turn_latency_ms,
@@ -986,8 +1096,9 @@ per_turn AS (
     MIN(timestamp) AS timestamp,
     MAX(session_id) AS session_id,
     MAX(conversation_id) AS conversation_id,
-    MAX(data_agent_id) AS data_agent_id,
-    MAX(persona) AS persona,
+    COALESCE(MAX(NULLIF(data_agent_id, 'unattributed')), 'unattributed')
+      AS data_agent_id,
+    COALESCE(MAX(NULLIF(persona, 'unattributed')), 'unattributed') AS persona,
     MAX(user_id) AS user_id,
     LOGICAL_OR(fast_path) AS fast_path,
     IF(LOGICAL_OR(is_error), 'ERROR', 'OK') AS status,
@@ -1045,11 +1156,12 @@ def build_bqca_turn_timeline_sql(
 ) -> str:
   """Builds the ordered event timeline of one turn (panel P9).
 
-  The invocation is bound as ``@invocation_id``; this builder only checks it
-  is non-empty. The sidebar's event-type selection narrows the timeline, but
-  the other filters do not: once a turn is picked, every one of its events
-  belongs in the picture. The query is still bounded by the window, so
-  partition pruning keeps it cheap.
+  The invocation is bound as ``@invocation_id`` and compared with the same
+  normalized turn key the explorer lists (``INVOCATION_ID_EXPR``); this builder
+  only checks it is non-blank. The sidebar's event-type selection narrows the
+  timeline, but the other filters do not: once a turn is picked, every one of
+  its events belongs in the picture. The query is still bounded by the window,
+  so partition pruning keeps it cheap.
 
   Args:
     f: Active connection and event-type selection.
@@ -1060,7 +1172,7 @@ def build_bqca_turn_timeline_sql(
     The SQL query string.
 
   Raises:
-    ValueError: If ``invocation_id`` is empty.
+    ValueError: If ``invocation_id`` is empty or only whitespace.
   """
   if not str(invocation_id).strip():
     raise ValueError("invocation_id is required for a turn timeline.")
@@ -1093,7 +1205,7 @@ WITH events AS (
   FROM {table}
   WHERE {queries.time_bounds(window)}
     AND event_type IN UNNEST(@allowed_event_types)
-    AND invocation_id = @invocation_id
+    AND {INVOCATION_ID_EXPR} = @invocation_id
 )
 SELECT
   timestamp,
@@ -1584,7 +1696,7 @@ def fetch_panel(
   builder, label = PANELS[panel]
   sql = builder(f, window=ctx.window, **kwargs)
   scalars = (
-      {"invocation_id": kwargs["invocation_id"]}
+      {"invocation_id": str(kwargs["invocation_id"]).strip()}
       if "invocation_id" in kwargs
       else {}
   )

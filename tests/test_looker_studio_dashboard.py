@@ -1496,9 +1496,10 @@ def test_bqca_query_reads_only_bqca_events_with_canonical_extractions():
       "JSON_QUERY_ARRAY(content, '$.parts')"
   ) < prompt_coalesce.index("JSON_VALUE(content, '$.parts[0].text')")
 
-  # P1-B: EMBEDDING_SUGGESTION emits {reason, suggested_columns} at HEAD, so
-  # $.suggested_columns must appear FIRST in the COALESCE for
-  # similar_queries_count, ahead of $.similar_queries_count and $.suggestions.
+  # P1-B & R2-P3-3: EMBEDDING_SUGGESTION emits {reason, suggested_columns} at
+  # HEAD, so $.suggested_columns must appear FIRST in the COALESCE for
+  # similar_queries_count, ahead of $.similar_queries_count and $.suggestions,
+  # with a trailing 0 fallback so reason-only EMBEDDING_SUGGESTION rows emit 0.
   similar_coalesce = logical.split("event_type = 'EMBEDDING_SUGGESTION'", 1)[
       1
   ].split("AS similar_queries_count", 1)[0]
@@ -1506,6 +1507,26 @@ def test_bqca_query_reads_only_bqca_events_with_canonical_extractions():
       similar_coalesce.index("$.suggested_columns")
       < similar_coalesce.index("$.similar_queries_count")
       < similar_coalesce.index("$.suggestions")
+  )
+  assert re.search(r",\s*0\s*\)", similar_coalesce), similar_coalesce
+
+  # R2-P2-3: is_turn_complete and turn_latency_ms deduplicate multiple
+  # INVOCATION_COMPLETED rows per non-blank invocation_id via ROW_NUMBER().
+  assert logical.count("NULLIF(TRIM(invocation_id), '') IS NOT NULL") == 2
+  assert (
+      logical.count("PARTITION BY NULLIF(TRIM(invocation_id), ''), event_type")
+      == 2
+  )
+  assert (
+      len(
+          re.findall(
+              r"ORDER BY\s+SAFE_CAST\(JSON_VALUE\(latency_ms,"
+              r" '\$\.total_ms'\) AS FLOAT64\) DESC NULLS LAST,\s+timestamp"
+              r" DESC,\s+span_id",
+              logical,
+          )
+      )
+      == 2
   )
 
   # P2-2: generator docstring reflects that rejected drafts are suppressed and
@@ -1690,13 +1711,13 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
       "publish_datasource": {
           "health": "HEALTHY",
           "versions": {
-              "hydrated_bqca_table": 1791487397284,
-              "canonical_sentinel_table": 1791487478792,
+              "hydrated_bqca_table": 1791494305139,
+              "canonical_sentinel_table": 1791494402606,
           },
       },
       "execute_query": {
           "hydrated_bqca_table": {
-              "schema": "bqaa_base_table_13_columns",
+              "schema": "bqaa_base_table_15_columns",
               "date_range": "default_dates",
               "code": 0,
               "pages": [page["id"] for page in contract["pages"]],
@@ -1750,7 +1771,7 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
   }
 
   # External-access attestation in bqca_report_template.yaml is stdlib-parseable
-  # by scripts/check_external_access_staleness.py.
+  # by scripts/check_external_access_staleness.py and included in default checks.
   staleness_spec = importlib.util.spec_from_file_location(
       "check_external_access_staleness",
       ROOT / "scripts" / "check_external_access_staleness.py",
@@ -1758,6 +1779,10 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
   assert staleness_spec is not None and staleness_spec.loader is not None
   staleness_mod = importlib.util.module_from_spec(staleness_spec)
   staleness_spec.loader.exec_module(staleness_mod)
+  assert staleness_mod.DEFAULT_ATTESTATION_PATHS == (
+      staleness_mod.ATTESTATION_PATH,
+      staleness_mod.BQCA_ATTESTATION_PATH,
+  )
   bqca_raw = (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
   bqca_ext = bqca["external_access_verification"]
   assert staleness_mod.read_attestation_fields(bqca_raw) == {
@@ -1765,10 +1790,36 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
       "status": bqca_ext["status"],
       "tracking_issue": bqca_ext["tracking_issue"],
   }
+  assert (
+      staleness_mod.main(
+          [
+              "--today",
+              bqca_ext["next_due_date"],
+              "--attestation-path",
+              str(staleness_mod.BQCA_ATTESTATION_PATH),
+          ]
+      )
+      == 0
+  )
+  overdue_day = (
+      datetime.date.fromisoformat(bqca_ext["next_due_date"])
+      + datetime.timedelta(days=1)
+  ).isoformat()
+  assert (
+      staleness_mod.main(
+          [
+              "--today",
+              overdue_day,
+              "--attestation-path",
+              str(staleness_mod.BQCA_ATTESTATION_PATH),
+          ]
+      )
+      == 1
+  )
 
 
 def test_bqca_chart_manifest_and_contract_mutation_detection():
-  """F6: mutating any scorecard, chart, or field in contract or manifest fails."""
+  """F6 & R2-P3-6: mutating any scorecard, chart, embedded spec, or SQL column fails."""
   validator = _load_dashboard_module("validate_contracts")
   assert validator.validate_bqca() == []
 
@@ -1778,6 +1829,10 @@ def test_bqca_chart_manifest_and_contract_mutation_detection():
   manifest = yaml.safe_load(
       (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text()
   )
+  binding = yaml.safe_load(
+      (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+  )
+  sql_text = (DASHBOARD / "sql/bqca_events_v1.template.sql").read_text()
   assert manifest["meta"]["page_count"] == 7
   assert manifest["meta"]["scorecard_count"] == 21
   assert manifest["meta"]["chart_count"] == 13
@@ -1786,6 +1841,22 @@ def test_bqca_chart_manifest_and_contract_mutation_detection():
   assert len(manifest["datasource"]["fields"]) == 40
   assert len(manifest["pages"]) == 7
   assert len(manifest["components"]) == 34
+
+  def _recomputed_binding(m_override=None, c_override=None, s_override=None):
+    b_copy = json.loads(json.dumps(binding))
+    if m_override is not None:
+      b_copy["live_template_verification"]["manifest_sha256"] = hashlib.sha256(
+          yaml.safe_dump(m_override, sort_keys=False).encode("utf-8")
+      ).hexdigest()
+    if c_override is not None:
+      b_copy["live_template_verification"]["pages_sha256"] = (
+          validator.canonical_pages_sha256(c_override["pages"])
+      )
+    if s_override is not None:
+      s_sha = hashlib.sha256(s_override.encode("utf-8")).hexdigest()
+      b_copy["reviewed_template_sql"]["sha256"] = s_sha
+      b_copy["live_template_verification"]["repository_sql_sha256"] = s_sha
+    return b_copy
 
   # Mutating a scorecard field in contract["pages"] invalidates pages_sha256
   # and contract-vs-manifest parity.
@@ -1811,6 +1882,63 @@ def test_bqca_chart_manifest_and_contract_mutation_detection():
   assert any("manifest_sha256" in e for e in m_errors), m_errors
   assert any("kpi_total_tokens" in e for e in m_errors), m_errors
 
+  # R2-P3-6 (a): mutating an embedded spec fieldName is caught even when
+  # manifest_sha256 is recomputed.
+  bad_spec_field = json.loads(json.dumps(manifest))
+  bad_spec_field["pages"][0]["components"][0]["spec"]["scorecard"]["dataset"][
+      "columns"
+  ][0]["fieldName"] = "_nonexistent_field_"
+  spec_field_errors = validator.validate_bqca(
+      manifest_override=bad_spec_field,
+      binding_override=_recomputed_binding(m_override=bad_spec_field),
+  )
+  assert any(
+      "unknown fieldName" in e for e in spec_field_errors
+  ), spec_field_errors
+
+  # R2-P3-6 (b): mutating an embedded spec aggregation (on either a scorecard
+  # or a chart) is caught even when manifest_sha256 is recomputed.
+  bad_spec_agg = json.loads(json.dumps(manifest))
+  bad_spec_agg["pages"][0]["components"][5]["spec"]["barChart"]["dataset"][
+      "columns"
+  ][1]["aggregation"] = "AVG"
+  spec_agg_errors = validator.validate_bqca(
+      manifest_override=bad_spec_agg,
+      binding_override=_recomputed_binding(m_override=bad_spec_agg),
+  )
+  assert any(
+      "chart_tokens_by_agent" in e and "aggregation" in e
+      for e in spec_agg_errors
+  ), spec_agg_errors
+
+  # R2-P3-6 (c): mutating a manifest field's data_type (e.g. total_tokens from
+  # INT64 to STRING) is caught against SQL projected types even when
+  # manifest_sha256 is recomputed.
+  bad_dtype_manifest = json.loads(json.dumps(manifest))
+  for field_entry in bad_dtype_manifest["datasource"]["fields"]:
+    if field_entry["display_name"] == "total_tokens":
+      field_entry["data_type"] = "STRING"
+      field_entry["semantic_type"] = "TEXT"
+  dtype_errors = validator.validate_bqca(
+      manifest_override=bad_dtype_manifest,
+      binding_override=_recomputed_binding(m_override=bad_dtype_manifest),
+  )
+  assert any(
+      "total_tokens" in e and "data_type" in e for e in dtype_errors
+  ), dtype_errors
+
+  # R2-P3-6 (d): renaming a projected column in SQL is caught against
+  # manifest["datasource"]["fields"] even when SQL SHA-256 is recomputed.
+  drifted_sql = sql_text.replace(") AS persona,", ") AS persona_idx,", 1)
+  sql_drift_errors = validator.validate_bqca(
+      sql_override=drifted_sql,
+      binding_override=_recomputed_binding(s_override=drifted_sql),
+  )
+  assert any(
+      "SQL projected columns do not match manifest" in e
+      for e in sql_drift_errors
+  ), sql_drift_errors
+
 
 def test_bqca_artifacts_never_name_event_types_bqca_does_not_log():
   for relative in (
@@ -1835,6 +1963,7 @@ def test_bqca_artifacts_never_name_event_types_bqca_does_not_log():
 def test_bqca_deep_link_page_is_published_with_the_site():
   page = (DASHBOARD / "docs/index.html").read_text()
   bqca_page = (DASHBOARD / "docs/bqca/index.html").read_text()
+  styles = (DASHBOARD / "docs/styles.css").read_text()
 
   assert bqca_page.startswith(
       "<!doctype html>\n<!-- Generated by tools/render_web_config.py from"
@@ -1859,18 +1988,25 @@ def test_bqca_deep_link_page_is_published_with_the_site():
   )
 
   # The BQCA hero, fact pills, CTA button, and notice describe the dedicated
-  # 7-page tool-free BQCA Looker Studio template and also point to
-  # sql/bqca_events_v1.sql.tmpl (--custom-sql-out) and dashboards/streamlit/.
+  # 7-page tool-free BQCA Looker Studio template while keeping CLI flags out of
+  # the primary hero lede and prominently warning about pending external access.
   assert "7-page tool-free BQCA Looker Studio dashboard" in bqca_page
   assert "34 BQCA-native charts &amp; KPIs" in bqca_page
   assert "7 tool-free report pages" in bqca_page
   assert "Self-Hosted Streamlit BQCA Dashboard" in bqca_page
   assert "Create my BQCA dashboard" in bqca_page
+  hero_lede = bqca_page.split('<p class="lede" data-profile-only="bqca">', 1)[
+      1
+  ].split("</p>", 1)[0]
+  assert "--custom-sql-out" not in hero_lede
+  assert "sql/bqca_events_v1.sql.tmpl" not in hero_lede
   assert 'id="profile-adk" aria-pressed="true"' in page
   assert 'id="bqca-template-note"' in page
   note = page.split('id="bqca-template-note"', 1)[1].split("</aside>", 1)[0]
   assert 'data-profile-only="bqca" hidden>' in note
+  assert "Template not yet publicly shared for external accounts" in note
   assert "Dedicated 7-page tool-free BQCA Looker Studio template" in note
+  assert '<details class="advanced-bqca-options">' in note
   assert BQCA_REPORT_ID in note
   assert "dashboard/looker_studio/sql/bqca_events_v1.sql.tmpl" in note
   assert "--profile bqca --custom-sql-out" in note
@@ -1881,6 +2017,9 @@ def test_bqca_deep_link_page_is_published_with_the_site():
       .rstrip()
       .endswith('data-profile-only="bqca"')
   ), "the /bqca/ page shows the disclosure before app.mjs runs"
+  assert re.search(
+      r"#form-status\s*\{[^}]*overflow-wrap:\s*anywhere", styles
+  ), "P3-7: #form-status must wrap long identifiers on 375px viewports"
 
 
 def test_bqca_hydration_link_names_and_defaults():

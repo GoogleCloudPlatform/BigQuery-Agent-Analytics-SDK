@@ -288,11 +288,11 @@ On the published `BlockDatasource` (`4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc`):
 
 When a user's Workspace organization blocks external Looker Studio templates or
 while public-sharing allowlist completion is in progress (`#515`), users have
-two full-parity alternatives over the same 13-column BQAA table:
+two alternatives over the same 15-column BQAA base schema:
 
 1. **Self-Hosted Streamlit BQCA Dashboard** (`dashboards/streamlit/`) — renders
-   the same 7 tabs and 34 components locally or on Cloud Run using
-   `sql/bqca_events_v1.sql.tmpl`.
+   5 BQCA tabs and 9 KPI tiles locally or on Cloud Run using its own
+   parameterized BigQuery SQL builders (`dashboards/streamlit/bqca_queries.py`).
 2. **Bound custom query export** — `python3 tools/hydrate_dashboard.py --profile bqca --project PROJECT --dataset DATASET --custom-sql-out /tmp/bqca_events.sql`
    writes the validated single-scan BQCA query bound to the user's table.
 

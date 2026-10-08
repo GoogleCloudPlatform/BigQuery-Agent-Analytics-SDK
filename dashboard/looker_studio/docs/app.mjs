@@ -189,7 +189,7 @@ function refresh() {
     copyButton.disabled = false;
     const readySuffix =
       activeProfile === "bqca"
-        ? " Opens the dedicated 7-page tool-free BQCA Looker Studio template (ds0); you can also export sql/bqca_events_v1.sql.tmpl (--custom-sql-out) or run the Self-Hosted Streamlit BQCA Dashboard (dashboards/streamlit/)."
+        ? " Opens the dedicated 7-page tool-free BQCA Looker Studio template (public link sharing for external accounts is pending verification — see note below)."
         : "";
     setStatus(
       `Ready for ${derived.project}.${derived.dataset}.${derived.table}.${readySuffix}`,
