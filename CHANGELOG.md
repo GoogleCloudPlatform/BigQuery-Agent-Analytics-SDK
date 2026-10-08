@@ -40,9 +40,10 @@ and tests, a hash lock and the tracing producer get small cleanups (#505,
   existing fields, so positional construction is unchanged.
   `Span.from_bigquery_row()` reads them from same-named columns, or else
   from `attributes.otel` and `attributes.adk` (or the legacy
-  `attributes.source_event_id`); they stay `None` on rows without those
-  keys or with non-string values, and the span tree is still built from
-  `span_id` / `parent_span_id`. Every per-event view also projects
+  `attributes.source_event_id`), ignoring non-string values in
+  `attributes`; they stay `None` on rows without those columns or keys,
+  and the span tree is still built from `span_id` / `parent_span_id`.
+  Every per-event view also projects
   `otel_span_id` and `otel_trace_id`, which are `NULL` unless the ADK
   plugin runs with `BigQueryLoggerConfig(enable_otel_correlation=True)`
   (`google-adk>=2.4.0`).
