@@ -1520,8 +1520,13 @@ def test_bqca_query_reads_only_bqca_events_with_canonical_extractions():
   # deduplicate multiple INVOCATION_COMPLETED rows per non-blank invocation_id
   # via raw_turn_complete_rn = 1.
   assert "AS raw_turn_complete_rn" in logical
-  assert "IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id" in logical
-  assert "IFNULL(raw_turn_complete_rn = 1, FALSE) AS is_turn_complete" in logical
+  assert (
+      "IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id"
+      in logical
+  )
+  assert (
+      "IFNULL(raw_turn_complete_rn = 1, FALSE) AS is_turn_complete" in logical
+  )
   assert re.search(
       r"ORDER BY\s+SAFE_CAST\(JSON_VALUE\(latency_ms,"
       r" '\$\.total_ms'\) AS FLOAT64\) DESC NULLS LAST,\s+timestamp"
@@ -2473,7 +2478,10 @@ def test_bqca_events_sql_semantic_turn_and_error_edge_cases():
       "      IFNULL(NULLIF(TRIM(invocation_id), ''), CAST(timestamp AS STRING))\n"
       "    ) AS turn_partition_key"
   ) in logical
-  assert "IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id" in logical
+  assert (
+      "IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id"
+      in logical
+  )
 
   comp_by_id = {c["id"]: c for c in manifest["components"]}
   assert comp_by_id["kpi_total_sessions"]["field"] == "invocation_id"
@@ -2486,7 +2494,9 @@ def test_bqca_events_sql_semantic_turn_and_error_edge_cases():
       "chart_persona_breakdown",
       "chart_fast_path_pie",
   ):
-    assert "invocation_id" in comp_by_id[turn_chart_id]["metrics"], turn_chart_id
+    assert (
+        "invocation_id" in comp_by_id[turn_chart_id]["metrics"]
+    ), turn_chart_id
 
   # (2) Turn-grain fast_path and data_agent_id/conversation_id/persona propagation
   # across all events in a turn so INVOCATION_COMPLETED and LLM_RESPONSE rows
@@ -2504,11 +2514,9 @@ def test_bqca_events_sql_semantic_turn_and_error_edge_cases():
   ):
     assert (
         f"FIRST_VALUE({attr_col} IGNORE NULLS) OVER (\n"
-        "        PARTITION BY turn_partition_key"
-        in logical
+        "        PARTITION BY turn_partition_key" in logical
         or f"FIRST_VALUE({attr_col} IGNORE NULLS) OVER (\n"
-        "      PARTITION BY turn_partition_key"
-        in logical
+        "      PARTITION BY turn_partition_key" in logical
     ), attr_col
 
   # (3) 3-condition error_message synthesis: status='ERROR' with NULL error_message
@@ -2552,4 +2560,3 @@ def test_bqca_events_sql_semantic_turn_and_error_edge_cases():
   ) in logical
   assert "SELECT\n  * EXCEPT (raw_agent_response_rn)," in logical
   assert len(contract["pages"]) == 7
-
