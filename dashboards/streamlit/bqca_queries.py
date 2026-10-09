@@ -18,9 +18,10 @@ Governance (the BQCA SQL contract):
 * An error is the three-condition predicate ``IS_ERROR_EXPR``, never
   ``status = 'ERROR'`` alone.
 * A turn is a distinct ``invocation_id`` (``INVOCATION_ID_EXPR``): an id padded
-  with whitespace is trimmed, an event logged with a *blank* id is a turn of
-  its own keyed by its timestamp (the BQCA customer notebook's rule), and only
-  an event with no id at all (NULL) belongs to no turn.
+  with whitespace is trimmed, an event logged with a *blank* id inherits any
+  non-blank id on the same ``trace_id`` or falls back to its ``trace_id``,
+  ``session_id``, or timestamp, and only an event with no id at all (NULL)
+  belongs to no turn.
 * The data-agent, persona and fast-path filters decide at *turn* grain. The
   plugin does not stamp every event of a turn with the same attribution, so
   ``_prelude`` resolves each value across the turn's events before any filter
@@ -89,17 +90,25 @@ CONVERSATION_ID_EXPR = (
 )
 # A turn is a distinct ``invocation_id``. An id padded with whitespace is
 # trimmed, so the turn table and the timeline spell it the same way. An event
-# logged with a *blank* id (``''`` or only whitespace) falls back to its
-# trimmed ``trace_id``, else its trimmed ``session_id``, else
-# ``CAST(timestamp AS STRING)``: a non-NULL key that keeps multi-event turns
-# sharing a trace or session together while still giving a single timestamped
-# event a turn key of its own, so the turn table lists it and the timeline
-# opens it by the very same key instead of dropping it. Only an event with no
-# id at all (NULL) belongs to no turn: the per-turn panels leave it out, and
-# ``_TURN_PARTITION_KEY`` keeps it from merging with other NULL-id rows.
+# logged with a *blank* id (``''`` or only whitespace) first inherits any
+# non-blank ``invocation_id`` logged on the same ``trace_id`` (so a turn whose
+# completion or sibling event was logged with a blank id stays in the turn),
+# else falls back to its trimmed ``trace_id``, else its trimmed ``session_id``,
+# else ``CAST(timestamp AS STRING)``: a non-NULL key that keeps multi-event
+# turns sharing a trace or session together while still giving a single
+# timestamped event a turn key of its own, so the turn table lists it and the
+# timeline opens it by the very same key instead of dropping it. Only an event
+# with no id at all (NULL) belongs to no turn: the per-turn panels leave it out,
+# and ``_TURN_PARTITION_KEY`` keeps it from merging with other NULL-id rows.
 INVOCATION_ID_EXPR = (
     "IF(invocation_id IS NULL, NULL,"
     " COALESCE(NULLIF(TRIM(invocation_id), ''),"
+    " IF(NULLIF(TRIM(trace_id), '') IS NULL, NULL,"
+    " FIRST_VALUE(NULLIF(TRIM(invocation_id), '') IGNORE NULLS)"
+    " OVER (PARTITION BY NULLIF(TRIM(trace_id), '')"
+    " ORDER BY timestamp ASC, event_type ASC,"
+    " NULLIF(TRIM(invocation_id), '') ASC"
+    " ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)),"
     " NULLIF(TRIM(trace_id), ''),"
     " NULLIF(TRIM(session_id), ''),"
     " CAST(timestamp AS STRING)))"
@@ -291,15 +300,12 @@ _INTERMEDIATE_FIRST_COLUMNS: tuple[str, ...] = (
 # fast-path flag, or error verdict.
 _TURN_PARTITION_KEY = (
     "IF(invocation_id IS NULL,"
-    " CONCAT('__null_inv_', CAST(timestamp AS STRING), '_',"
-    " IFNULL(span_id, ''), '_', event_type, '_',"
-    " IFNULL(raw_session_id, ''), '_',"
-    " IFNULL(raw_conversation_id, ''), '_',"
-    " IFNULL(raw_data_agent_id, ''), '_',"
-    " IFNULL(raw_explicit_persona, ''), '_',"
-    " IFNULL(raw_email_persona, ''), '_',"
-    " IFNULL(CAST(raw_fast_path AS STRING), 'false'), '_',"
-    " IFNULL(CAST(is_error AS STRING), 'false')),"
+    " CONCAT('__null_inv_',"
+    " TO_JSON_STRING(STRUCT("
+    "timestamp, span_id, event_type,"
+    " raw_session_id, raw_conversation_id, raw_data_agent_id,"
+    " raw_explicit_persona, raw_email_persona,"
+    " raw_fast_path, is_error))),"
     " invocation_id)"
 )
 
@@ -392,8 +398,9 @@ def _first_attributed(column: str) -> str:
   it (not only the rows after the first real value) gets the same answer. A
   turn that carries no real value anywhere is NULL: the caller (``_prelude``)
   chooses the fallback, which keeps each persona tier separate until all three
-  have been resolved. An event with no turn is the only row of its own
-  partition (``_TURN_PARTITION_KEY``), so it keeps its own value.
+  have been resolved. An event with no turn (NULL ``invocation_id``) keeps its
+  own value directly and is also isolated in its own JSON-encoded partition
+  (``_TURN_PARTITION_KEY``).
 
   Args:
     column: The per-row ``raw_*`` column of ``events_raw`` to resolve.
@@ -402,20 +409,22 @@ def _first_attributed(column: str) -> str:
     A SQL expression over ``events_raw``.
   """
   return (
-      f"FIRST_VALUE({column} IGNORE NULLS)"
+      f"IF(invocation_id IS NULL, {column},"
+      f" FIRST_VALUE({column} IGNORE NULLS)"
       f" OVER (PARTITION BY {_TURN_PARTITION_KEY}"
       f" ORDER BY timestamp ASC, event_type ASC, {column} ASC"
-      " ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)"
+      " ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING))"
   )
 
 
 def _turn_any(column: str) -> str:
   """Renders whether *any* event of a row's turn satisfies a boolean column.
 
-  An event with no turn (a NULL ``invocation_id``) is judged on its own: it is
-  the only row of its own partition (``_TURN_PARTITION_KEY``), where all such
-  rows would otherwise share one NULL partition and inherit the verdict of an
-  unrelated row.
+  An event with no turn (a NULL ``invocation_id``) is judged on its own: it
+  keeps its own boolean verdict directly and is also isolated in its own
+  JSON-encoded partition (``_TURN_PARTITION_KEY``), where all such rows would
+  otherwise share one NULL partition and inherit the verdict of an unrelated
+  row.
 
   Args:
     column: A boolean column of ``events_raw``.
@@ -423,7 +432,10 @@ def _turn_any(column: str) -> str:
   Returns:
     A SQL expression over ``events_raw``.
   """
-  return f"LOGICAL_OR({column}) OVER (PARTITION BY {_TURN_PARTITION_KEY})"
+  return (
+      f"IF(invocation_id IS NULL, {column},"
+      f" LOGICAL_OR({column}) OVER (PARTITION BY {_TURN_PARTITION_KEY}))"
+  )
 
 
 def _prelude(
@@ -1277,6 +1289,7 @@ WITH events AS (
     parent_span_id,
     status,
     NULLIF(TRIM(error_message), '') AS error_message,
+    {INVOCATION_ID_EXPR} AS invocation_id,
     {TOTAL_LATENCY_MS_EXPR} AS total_latency_ms,
     {TFFT_MS_EXPR} AS tfft_ms,
     {MODEL_NAME_EXPR} AS model_name,
@@ -1287,7 +1300,6 @@ WITH events AS (
   FROM {table}
   WHERE {queries.time_bounds(window)}
     AND event_type IN UNNEST(@allowed_event_types)
-    AND {INVOCATION_ID_EXPR} = @invocation_id
 )
 SELECT
   timestamp,
@@ -1304,8 +1316,9 @@ SELECT
   fast_path,
   content_preview
 FROM events
-WHERE ('{ALL_SENTINEL}' IN UNNEST(@event_types)
-  OR event_type IN UNNEST(@event_types))
+WHERE invocation_id = @invocation_id
+  AND ('{ALL_SENTINEL}' IN UNNEST(@event_types)
+    OR event_type IN UNNEST(@event_types))
 ORDER BY timestamp, event_type
 LIMIT {TIMELINE_LIMIT}
 """.strip()

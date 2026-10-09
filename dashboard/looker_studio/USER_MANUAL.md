@@ -166,9 +166,12 @@ tool-usage pages, tool-latency charts, and tool-error panels are omitted:
   over time and by data agent;
 - **Data Agents & Turns** — active data agents (`data_agent_id`), total turns
   (`invocation_id`), completed turns (`completed_turn_id`), and generated SQL
-  queries (`extracted_sql`), where turns are keyed by `invocation_id` (falling
-  back to `trace_id`, `session_id`, then `timestamp` when blank) because a
-  session can span multiple turns;
+  queries (`extracted_sql`), where turns are keyed by `invocation_id` (when an
+  event's `invocation_id` is blank, it inherits any non-blank `invocation_id` on
+  the same `trace_id` before falling back to `trace_id`, `session_id`, then
+  `timestamp`, so multiple blank-ID turns that also lack a `trace_id` in the
+  same `session_id` count as one session-level turn) because a session can span
+  multiple turns;
 - **LLM Interactions & Embedding Suggestions** — model calls, embedding
   suggestions, hit counts, and suggested-column counts;
 - **User & Persona Analytics** — activity by resolved persona and data agent;

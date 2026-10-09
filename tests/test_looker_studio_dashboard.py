@@ -1705,7 +1705,7 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
   assert bqca["reviewed_template_sql"]["sha256"] == digest
   evidence = bqca["live_template_verification"]
   assert evidence == {
-      "verified_date": "2026-10-08",
+      "verified_date": "2026-10-09",
       "repository_sql_sha256": digest,
       "pages_sha256": pages_digest,
       "manifest_sha256": manifest_digest,
@@ -1719,8 +1719,8 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
       "publish_datasource": {
           "health": "HEALTHY",
           "versions": {
-              "hydrated_bqca_table": 1791564609624,
-              "canonical_sentinel_table": 1791564700330,
+              "hydrated_bqca_table": 1791578476993,
+              "canonical_sentinel_table": 1791578549613,
           },
       },
       "execute_query": {
@@ -1772,11 +1772,17 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
               },
           },
       ],
-      "last_attested_date": evidence["verified_date"],
+      "last_attested_date": contract["live_verification"]["last_attested_date"],
       "evidence": (
           "bindings/bqca_report_template.yaml#live_template_verification"
       ),
   }
+  assert (
+      datetime.date.fromisoformat(
+          contract["live_verification"]["last_attested_date"]
+      )
+      <= verified
+  )
 
   # External-access attestation in bqca_report_template.yaml is stdlib-parseable
   # by scripts/check_external_access_staleness.py and included in default checks.
@@ -2483,7 +2489,7 @@ def test_staleness_parser_rejects_malformed_or_nested_attestations(capsys):
 
 
 def test_bqca_events_sql_semantic_turn_and_error_edge_cases():
-  """P2-5 & N1/R3-1 & R3-N2 & N4: verify Looker Studio BQCA SQL turn-grain, deduplication, error, and final-SQL semantics."""
+  """P2-5 & N1/R3-1 & R3-N2 & N4 & R4-1..R4-5: verify Looker Studio BQCA SQL turn-grain, deduplication, error, and final-SQL semantics."""
   logical = (DASHBOARD / "sql/bqca_events_v1.sql.tmpl").read_text()
   contract = yaml.safe_load(
       (DASHBOARD / "spec/bqca_product_contract.yaml").read_text()
@@ -2491,29 +2497,73 @@ def test_bqca_events_sql_semantic_turn_and_error_edge_cases():
   manifest = yaml.safe_load(
       (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text()
   )
+  styles_css = (DASHBOARD / "docs/styles.css").read_text()
 
-  # (1) Multi-turn single-session_id & blank/NULL invocation_id turns:
-  # turn_id falls back to trace_id -> session_id -> timestamp when invocation_id
-  # is blank while preserving NULL when invocation_id IS NULL, and
-  # turn_partition_key isolates NULL invocation_id rows via SHA256 digest.
+  # (1) Multi-turn single-session_id & blank/NULL invocation_id turns (R4-1, R4-2):
+  # trace_resolved inherits any non-blank invocation_id on the same trace_id
+  # before falling back to trace_id -> session_id -> timestamp while preserving
+  # NULL when invocation_id IS NULL, and turn_partition_key isolates NULL
+  # invocation_id rows via SHA256 digest.
+  assert "WITH trace_resolved AS (" in logical
   assert (
       "IF(\n"
       "      invocation_id IS NULL,\n"
       "      NULL,\n"
       "      COALESCE(\n"
       "        NULLIF(TRIM(invocation_id), ''),\n"
+      "        IF(\n"
+      "          NULLIF(TRIM(trace_id), '') IS NULL,\n"
+      "          NULL,\n"
+      "          FIRST_VALUE(NULLIF(TRIM(invocation_id), '') IGNORE NULLS) OVER (\n"
+      "            PARTITION BY NULLIF(TRIM(trace_id), '')\n"
+      "            ORDER BY timestamp ASC, event_type ASC, NULLIF(TRIM(invocation_id), '') ASC\n"
+      "            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\n"
+      "          )\n"
+      "        ),\n"
       "        NULLIF(TRIM(trace_id), ''),\n"
       "        NULLIF(TRIM(session_id), ''),\n"
       "        CAST(timestamp AS STRING)\n"
       "      )\n"
       "    ) AS turn_id"
   ) in logical
+  assert (
+      "event_type = 'INVOCATION_COMPLETED' AND turn_id IS NOT NULL," in logical
+  )
+  assert (
+      "PARTITION BY\n"
+      "          turn_id,\n"
+      "          IF(event_type = 'INVOCATION_COMPLETED', 1, 0)" in logical
+  )
   assert "TO_HEX(\n          SHA256(" in logical
   assert "'__null_invocation__:'" in logical
   assert (
       "IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id"
       in logical
   )
+
+  # R4-3, R4-N1, P3-2: raw_conversation_id, raw_data_agent_id, and
+  # raw_explicit_persona trim whitespace before NULLIF(..., '').
+  for json_path in (
+      '$.session_metadata.state."conversation-id"',
+      '$.session_metadata.state."data-agent-id"',
+      "$.session_metadata.state.custom_labels.persona",
+  ):
+    assert (
+        f"NULLIF(\n      TRIM(\n        JSON_VALUE(attributes, '{json_path}')\n      ),\n      ''\n    )"
+        in logical
+        or f"NULLIF(\n      TRIM(\n        JSON_VALUE(\n          attributes, '{json_path}'\n        )\n      ),\n      ''\n    )"
+        in logical
+    ), json_path
+
+  # R4-5: #bqca-template-note body font size is 1rem (16px).
+  assert (
+      "#bqca-template-note {\n"
+      "  margin: 0 0 16px;\n"
+      "  padding: 13px 15px;\n"
+      "  border-radius: 10px;\n"
+      "  font-size: 1rem;\n"
+      "  line-height: 1.5;"
+  ) in styles_css
 
   comp_by_id = {c["id"]: c for c in manifest["components"]}
   assert comp_by_id["kpi_total_sessions"]["field"] == "invocation_id"
@@ -2604,7 +2654,7 @@ def test_bqca_events_sql_semantic_turn_and_error_edge_cases():
 
 
 def test_bqca_json_template_bundle_and_compatibility_profile_parity():
-  """Verify the portable Looker Studio JSON template bundle, BQCA compatibility profile, and M03/M04/M07/M08/M12/N8 mutation guards."""
+  """Verify the portable Looker Studio JSON template bundle, BQCA compatibility profile, and M03/M04/M07/M08/M12/M14/M15/M16/R4-N2/N8 mutation guards."""
   validator = _load_dashboard_module("validate_contracts")
   adk_compat = json.loads(
       (DASHBOARD / "spec/compatibility_profile.json").read_text()
@@ -2686,7 +2736,30 @@ def test_bqca_json_template_bundle_and_compatibility_profile_parity():
       "grid cell" in e and "overlap" in e for e in grid_errors
   ), grid_errors
 
-  # M03, M04, M07: mutating SQL semantic expressions is caught by validate_bqca
+  # M03, M04, M07, M14, M15, M16, R4-N2, r4-22, r4-23, r4-24, r3-08, R4-1..R4-3:
+  # mutating SQL semantic expressions is caught by validate_bqca even when all
+  # SHA-256 digests are re-pinned to the mutated SQL and bundle.
+  def _validate_with_repinned_sql_sha(mutated_sql: str) -> list[str]:
+    new_sql_sha = hashlib.sha256(mutated_sql.encode("utf-8")).hexdigest()
+    repinned_bundle = json.loads(json.dumps(bundle))
+    repinned_bundle["datasource"]["sql_sha256"] = new_sql_sha
+    new_bundle_sha = hashlib.sha256(
+        (json.dumps(repinned_bundle, indent=2) + "\n").encode("utf-8")
+    ).hexdigest()
+    repinned_binding = json.loads(json.dumps(binding))
+    repinned_binding["reviewed_template_sql"]["sha256"] = new_sql_sha
+    repinned_binding["live_template_verification"][
+        "repository_sql_sha256"
+    ] = new_sql_sha
+    repinned_binding["live_template_verification"][
+        "template_bundle_sha256"
+    ] = new_bundle_sha
+    return validator.validate_bqca(
+        sql_override=mutated_sql,
+        bundle_override=repinned_bundle,
+        binding_override=repinned_binding,
+    )
+
   for mut_label, old_frag, new_frag in (
       (
           "fast_path attribute extraction",
@@ -2703,14 +2776,89 @@ def test_bqca_json_template_bundle_and_compatibility_profile_parity():
           "FIRST_VALUE(raw_data_agent_id IGNORE NULLS) OVER (",
           "LAST_VALUE(raw_data_agent_id IGNORE NULLS) OVER (",
       ),
+      (
+          "M14 (raw_turn_complete_rn >= 1)",
+          "raw_turn_complete_rn = 1",
+          "raw_turn_complete_rn >= 1",
+      ),
+      (
+          "M15 (DESC NULLS LAST -> ASC NULLS LAST)",
+          "DESC NULLS LAST",
+          "ASC NULLS LAST",
+      ),
+      (
+          "M16 (drop trace_id fallback)",
+          "NULLIF(TRIM(trace_id), ''),\n        NULLIF(TRIM(session_id), '')",
+          "NULLIF(TRIM(session_id), '')",
+      ),
+      (
+          "R4-N2a (completed_turn_id NULL when rn=1)",
+          "IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id",
+          "IF(raw_turn_complete_rn = 1, NULL, turn_id) AS completed_turn_id",
+      ),
+      (
+          "R4-N2b (turn_latency_ms 0.0 when rn=1)",
+          "IF(\n      raw_turn_complete_rn = 1,\n      SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64),\n      NULL\n    ) AS turn_latency_ms",
+          "IF(raw_turn_complete_rn = 1, 0.0, SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64)) AS turn_latency_ms",
+      ),
+      (
+          "r4-22 (comment-spoofed completed_turn_id gate)",
+          "IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id",
+          "-- IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id\n    IF(TRUE, turn_id, NULL) AS completed_turn_id",
+      ),
+      (
+          "r4-23 (comment-spoofed turn_latency_ms gate)",
+          "IF(\n      raw_turn_complete_rn = 1,\n      SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64),\n      NULL\n    ) AS turn_latency_ms",
+          "-- IF( raw_turn_complete_rn = 1, SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64), NULL ) AS turn_latency_ms\n    IF(TRUE, SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64), NULL) AS turn_latency_ms",
+      ),
+      (
+          "R4-1 (drop per-trace invocation_id inheritance)",
+          "FIRST_VALUE(NULLIF(TRIM(invocation_id), '') IGNORE NULLS)",
+          "FIRST_VALUE(NULL IGNORE NULLS)",
+      ),
+      (
+          "R4-2 (drop turn_id IS NOT NULL on raw_turn_complete_rn)",
+          "event_type = 'INVOCATION_COMPLETED' AND turn_id IS NOT NULL",
+          "event_type = 'INVOCATION_COMPLETED'",
+      ),
+      (
+          "R4-3 (drop TRIM on raw_data_agent_id)",
+          "TRIM(\n        JSON_VALUE(attributes, '$.session_metadata.state.\"data-agent-id\"')\n      )",
+          "JSON_VALUE(attributes, '$.session_metadata.state.\"data-agent-id\"')",
+      ),
+      (
+          "r4-24 (drop ENDS_WITH _ERROR from raw_is_error)",
+          "OR ENDS_WITH(UPPER(TRIM(IFNULL(event_type, ''))), '_ERROR')",
+          "OR FALSE",
+      ),
+      (
+          "R4-N2c (partition raw_turn_complete_rn by session_id instead of"
+          " turn_id)",
+          "PARTITION BY\n          turn_id,\n          IF(event_type ="
+          " 'INVOCATION_COMPLETED', 1, 0)",
+          "PARTITION BY\n          session_id,\n          IF(event_type ="
+          " 'INVOCATION_COMPLETED', 1, 0)",
+      ),
   ):
-    mut_sql = sql_text.replace(old_frag, new_frag, 1)
+    mut_sql = sql_text.replace(old_frag, new_frag)
     assert mut_sql != sql_text, mut_label
-    sql_mut_errors = validator.validate_bqca(sql_override=mut_sql)
-    assert any(mut_label in e for e in sql_mut_errors), (
+    sql_mut_errors = _validate_with_repinned_sql_sha(mut_sql)
+    assert sql_mut_errors, (mut_label, "expected errors with repinned SHA-256")
+    assert any("behavioral oracle" in e for e in sql_mut_errors), (
         mut_label,
         sql_mut_errors,
     )
+
+  # r3-08: dropping SHA256 payload digest from null-invocation partition key is caught
+  r3_08_sql = re.sub(
+      r"TO_HEX\(\s*SHA256\(\s*CONCAT\(.*?error_message,\s*''\)\s*\)\s*\)\s*\)",
+      "'static_no_hash'",
+      sql_text,
+      flags=re.DOTALL,
+  )
+  assert r3_08_sql != sql_text
+  r3_08_errors = _validate_with_repinned_sql_sha(r3_08_sql)
+  assert any("behavioral oracle" in e for e in r3_08_errors), r3_08_errors
 
   # M08: setting external_access_verification.status = "PASSING" while link_access != "PUBLIC" fails
   tampered_binding = json.loads(json.dumps(binding))

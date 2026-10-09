@@ -26,7 +26,7 @@ publishing_mode: MANUAL
 
 reviewed_template_sql:
   path: sql/bqca_events_v1.template.sql
-  sha256: dba90a442905d21535f3787842fee801a1e59c593572aaac11e559af90ac812d
+  sha256: c915abe82c9e6d54aac6fffe78e34f90b436e852697c86747632a6c238754096
 
 # Required settings on the published Looker Studio BlockDatasource (`ds0`).
 # `_event_date_`, `_timestamp_`, and `_event_hour_` must keep native date/time
@@ -49,7 +49,7 @@ block_datasource:
       data_type: TIMESTAMP
       semantic_type: YEAR_MONTH_DAY_HOUR
 
-# Live verification of the published external template on 2026-10-08 after
+# Live verification of the published external template on 2026-10-09 after
 # publishing the data source with `DS_START_DATE`/`DS_END_DATE` enabled and
 # native date/time types on `_event_date_`, `_timestamp_`, and `_event_hour_`.
 # `pages_sha256` pins the canonical JSON digest of `contract["pages"]` (all 7
@@ -57,11 +57,11 @@ block_datasource:
 # `spec/bqca_chart_manifest.yaml`, and `template_bundle_sha256` pins
 # `spec/bqca_dashboard_template.json`, so mutating any component or metric fails CI.
 live_template_verification:
-  verified_date: "2026-10-08"
-  repository_sql_sha256: dba90a442905d21535f3787842fee801a1e59c593572aaac11e559af90ac812d
+  verified_date: "2026-10-09"
+  repository_sql_sha256: c915abe82c9e6d54aac6fffe78e34f90b436e852697c86747632a6c238754096
   pages_sha256: b3c14c7dfc8ed51690f7f3e0ac6d24506c31dc63038591f479c51362715a89c4
   manifest_sha256: fb75d8fe9bc046bb2e494b58ff11e0d71297a11843463915533faae1506884a9
-  template_bundle_sha256: 1c094fd9f45b137639901a6065d86d72e35c8d5acfe5c85ceb3039bc93e0e94c
+  template_bundle_sha256: c7cfea574d3ce66183de4defe0bffc1c4ae7310a520ffba0d202cf05e72caee5
   method:
     - data_studio_web_service_publish_datasource
     - data_studio_web_service_get_block_datasource
@@ -70,8 +70,8 @@ live_template_verification:
   publish_datasource:
     health: HEALTHY
     versions:
-      hydrated_bqca_table: 1791564609624
-      canonical_sentinel_table: 1791564700330
+      hydrated_bqca_table: 1791578476993
+      canonical_sentinel_table: 1791578549613
   execute_query:
     # hydrated_bqca_table is a sanitized live BQCA Prompt & Response Logging
     # table conforming to the 15-column BQAA base schema with recent events

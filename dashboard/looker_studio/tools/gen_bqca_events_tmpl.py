@@ -12,11 +12,13 @@ Extraction notes (the facts behind each expression):
 
 * Attribution reads session state, never ``agent``, ``user_id``, or
   ``session_id``: ``agent`` is always the root agent and turns are keyed by
-  ``invocation_id`` (falling back to ``trace_id``, ``session_id``, then
-  ``timestamp`` when ``invocation_id`` is blank, while preserving ``NULL`` when
-  ``invocation_id IS NULL``), so ``data_agent_id`` and ``conversation_id`` come
-  from ``attributes.session_metadata.state`` and are propagated across all rows
-  of the same non-null turn (partitioned by ``turn_partition_key``).
+  ``invocation_id`` (when ``invocation_id`` is blank, inheriting any non-blank
+  ``invocation_id`` logged on the same ``trace_id`` before falling back to
+  ``trace_id``, ``session_id``, then ``timestamp``, while preserving ``NULL``
+  when ``invocation_id IS NULL``), so ``data_agent_id`` and ``conversation_id``
+  come from ``attributes.session_metadata.state`` (trimmed via
+  ``NULLIF(TRIM(...), '')``) and are propagated across all rows of the same
+  non-null turn (partitioned by ``turn_partition_key``).
 * ``persona`` prefers the explicit ``custom_labels.persona`` label, then the
   local part of ``user_id`` only when ``user_id`` is a well-formed email
   (optionally followed by a ``:``-delimited memory suffix). Unresolved callers
@@ -86,15 +88,15 @@ HEADER = """\
 --
 -- Only the nine event types BQCA logs are read. Attribution uses session
 -- state, never the agent, user_id, or session_id columns: agent is always the
--- root agent and turns are keyed by invocation_id (with trace_id/session_id
--- fallbacks when blank).
+-- root agent and turns are keyed by invocation_id (with per-trace non-blank
+-- invocation_id inheritance and trace_id/session_id/timestamp fallbacks when blank).
 --
 -- Date-range parameters must be enabled on the Looker Studio data source.
 -- Timezone is UTC; @DS_START_DATE/@DS_END_DATE arrive as YYYYMMDD strings,
 -- with the end date inclusive.
 """
 
-BODY = r"""WITH raw_events AS (
+BODY = r"""WITH trace_resolved AS (
   SELECT
     timestamp,
     event_type,
@@ -116,124 +118,20 @@ BODY = r"""WITH raw_events AS (
       NULL,
       COALESCE(
         NULLIF(TRIM(invocation_id), ''),
-        NULLIF(TRIM(trace_id), ''),
-        NULLIF(TRIM(session_id), ''),
-        CAST(timestamp AS STRING)
-      )
-    ) AS turn_id,
-    IF(
-      invocation_id IS NULL,
-      CONCAT(
-        '__null_invocation__:',
-        CAST(timestamp AS STRING),
-        ':',
-        IFNULL(span_id, ''),
-        ':',
-        IFNULL(event_type, ''),
-        ':',
-        TO_HEX(
-          SHA256(
-            CONCAT(
-              IFNULL(TO_JSON_STRING(attributes), ''),
-              '|',
-              IFNULL(TO_JSON_STRING(content), ''),
-              '|',
-              IFNULL(status, ''),
-              '|',
-              IFNULL(error_message, '')
-            )
+        IF(
+          NULLIF(TRIM(trace_id), '') IS NULL,
+          NULL,
+          FIRST_VALUE(NULLIF(TRIM(invocation_id), '') IGNORE NULLS) OVER (
+            PARTITION BY NULLIF(TRIM(trace_id), '')
+            ORDER BY timestamp ASC, event_type ASC, NULLIF(TRIM(invocation_id), '') ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
           )
-        )
-      ),
-      COALESCE(
-        NULLIF(TRIM(invocation_id), ''),
+        ),
         NULLIF(TRIM(trace_id), ''),
         NULLIF(TRIM(session_id), ''),
         CAST(timestamp AS STRING)
       )
-    ) AS turn_partition_key,
-    NULLIF(
-      JSON_VALUE(attributes, '$.session_metadata.state."conversation-id"'),
-      ''
-    ) AS raw_conversation_id,
-    NULLIF(
-      JSON_VALUE(attributes, '$.session_metadata.state."data-agent-id"'),
-      ''
-    ) AS raw_data_agent_id,
-    NULLIF(
-      JSON_VALUE(
-        attributes, '$.session_metadata.state.custom_labels.persona'
-      ),
-      ''
-    ) AS raw_explicit_persona,
-    NULLIF(
-      REGEXP_EXTRACT(
-        TRIM(user_id),
-        r'^([A-Za-z0-9._%+-]+)@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?::|$)'
-      ),
-      ''
-    ) AS raw_email_persona,
-    IFNULL(
-      LOWER(JSON_VALUE(attributes, '$.fast_path')) = 'true',
-      FALSE
-    ) AS raw_fast_path,
-    (
-      IFNULL(UPPER(TRIM(status)) = 'ERROR', FALSE)
-      OR NULLIF(TRIM(error_message), '') IS NOT NULL
-      OR ENDS_WITH(UPPER(TRIM(IFNULL(event_type, ''))), '_ERROR')
-    ) AS raw_is_error,
-    IF(
-      event_type = 'INVOCATION_COMPLETED' AND invocation_id IS NOT NULL,
-      ROW_NUMBER() OVER (
-        PARTITION BY
-          COALESCE(
-            NULLIF(TRIM(invocation_id), ''),
-            NULLIF(TRIM(trace_id), ''),
-            NULLIF(TRIM(session_id), ''),
-            CAST(timestamp AS STRING)
-          ),
-          IF(event_type = 'INVOCATION_COMPLETED', 1, 0)
-        ORDER BY
-          SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64) DESC NULLS LAST,
-          timestamp DESC,
-          span_id DESC
-      ),
-      NULL
-    ) AS raw_turn_complete_rn,
-    IF(
-      event_type = 'AGENT_RESPONSE',
-      ROW_NUMBER() OVER (
-        PARTITION BY
-          IF(
-            invocation_id IS NULL,
-            CONCAT(
-              '__null_invocation__:',
-              CAST(timestamp AS STRING),
-              ':',
-              IFNULL(span_id, ''),
-              ':',
-              TO_HEX(
-                SHA256(
-                  CONCAT(
-                    IFNULL(TO_JSON_STRING(attributes), ''),
-                    '|',
-                    IFNULL(TO_JSON_STRING(content), '')
-                  )
-                )
-              )
-            ),
-            COALESCE(
-              NULLIF(TRIM(invocation_id), ''),
-              NULLIF(TRIM(trace_id), ''),
-              NULLIF(TRIM(session_id), ''),
-              CAST(timestamp AS STRING)
-            )
-          ),
-          IF(event_type = 'AGENT_RESPONSE', 1, 0)
-        ORDER BY timestamp DESC, span_id DESC
-      ),
-      NULL
-    ) AS raw_agent_response_rn
+    ) AS turn_id
   FROM `{{PROJECT}}.{{DATASET}}.{{TABLE}}`
   WHERE timestamp >= TIMESTAMP(
           PARSE_DATE('%Y%m%d', @DS_START_DATE), 'UTC'
@@ -256,6 +154,136 @@ BODY = r"""WITH raw_events AS (
       'AGENT_ERROR',
       'LLM_ERROR'
     )
+),
+raw_events AS (
+  SELECT
+    timestamp,
+    event_type,
+    agent,
+    session_id,
+    invocation_id,
+    user_id,
+    trace_id,
+    span_id,
+    parent_span_id,
+    content,
+    attributes,
+    latency_ms,
+    status,
+    error_message,
+    is_truncated,
+    turn_id,
+    IF(
+      turn_id IS NULL,
+      CONCAT(
+        '__null_invocation__:',
+        CAST(timestamp AS STRING),
+        ':',
+        IFNULL(span_id, ''),
+        ':',
+        IFNULL(event_type, ''),
+        ':',
+        TO_HEX(
+          SHA256(
+            CONCAT(
+              IFNULL(TO_JSON_STRING(attributes), ''),
+              '|',
+              IFNULL(TO_JSON_STRING(content), ''),
+              '|',
+              IFNULL(status, ''),
+              '|',
+              IFNULL(error_message, '')
+            )
+          )
+        )
+      ),
+      turn_id
+    ) AS turn_partition_key,
+    NULLIF(
+      TRIM(
+        JSON_VALUE(attributes, '$.session_metadata.state."conversation-id"')
+      ),
+      ''
+    ) AS raw_conversation_id,
+    NULLIF(
+      TRIM(
+        JSON_VALUE(attributes, '$.session_metadata.state."data-agent-id"')
+      ),
+      ''
+    ) AS raw_data_agent_id,
+    NULLIF(
+      TRIM(
+        JSON_VALUE(
+          attributes, '$.session_metadata.state.custom_labels.persona'
+        )
+      ),
+      ''
+    ) AS raw_explicit_persona,
+    NULLIF(
+      REGEXP_EXTRACT(
+        TRIM(user_id),
+        r'^([A-Za-z0-9._%+-]+)@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?::|$)'
+      ),
+      ''
+    ) AS raw_email_persona,
+    IFNULL(
+      LOWER(JSON_VALUE(attributes, '$.fast_path')) = 'true',
+      FALSE
+    ) AS raw_fast_path,
+    (
+      IFNULL(UPPER(TRIM(status)) = 'ERROR', FALSE)
+      OR NULLIF(TRIM(error_message), '') IS NOT NULL
+      OR ENDS_WITH(UPPER(TRIM(IFNULL(event_type, ''))), '_ERROR')
+    ) AS raw_is_error,
+    IF(
+      event_type = 'INVOCATION_COMPLETED' AND turn_id IS NOT NULL,
+      ROW_NUMBER() OVER (
+        PARTITION BY
+          turn_id,
+          IF(event_type = 'INVOCATION_COMPLETED', 1, 0)
+        ORDER BY
+          SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64) DESC NULLS LAST,
+          timestamp DESC,
+          span_id DESC
+      ),
+      NULL
+    ) AS raw_turn_complete_rn,
+    IF(
+      event_type = 'AGENT_RESPONSE',
+      ROW_NUMBER() OVER (
+        PARTITION BY
+          IF(
+            turn_id IS NULL,
+            CONCAT(
+              '__null_invocation__:',
+              CAST(timestamp AS STRING),
+              ':',
+              IFNULL(span_id, ''),
+              ':',
+              IFNULL(event_type, ''),
+              ':',
+              TO_HEX(
+                SHA256(
+                  CONCAT(
+                    IFNULL(TO_JSON_STRING(attributes), ''),
+                    '|',
+                    IFNULL(TO_JSON_STRING(content), ''),
+                    '|',
+                    IFNULL(status, ''),
+                    '|',
+                    IFNULL(error_message, '')
+                  )
+                )
+              )
+            ),
+            turn_id
+          ),
+          IF(event_type = 'AGENT_RESPONSE', 1, 0)
+        ORDER BY timestamp DESC, span_id DESC
+      ),
+      NULL
+    ) AS raw_agent_response_rn
+  FROM trace_resolved
 ),
 bqca_fields AS (
   SELECT

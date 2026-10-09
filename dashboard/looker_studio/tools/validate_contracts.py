@@ -14,6 +14,7 @@ import hashlib
 import json
 import pathlib
 import re
+import sqlite3
 import sys
 from typing import Any
 
@@ -439,6 +440,769 @@ def validate_adk(root: pathlib.Path = ROOT) -> list[str]:
         " SQL bytes"
     )
   return errors
+
+
+def _strip_sql_comments(sql_text: str) -> str:
+  """Strip single-line (--) and block (/* */) SQL comments outside quotes."""
+  out: list[str] = []
+  i = 0
+  n = len(sql_text)
+  in_single = False
+  in_backtick = False
+  while i < n:
+    ch = sql_text[i]
+    if in_single:
+      out.append(ch)
+      if ch == "\\" and i + 1 < n:
+        out.append(sql_text[i + 1])
+        i += 2
+        continue
+      if ch == "'":
+        in_single = False
+      i += 1
+    elif in_backtick:
+      out.append(ch)
+      if ch == "`":
+        in_backtick = False
+      i += 1
+    else:
+      if ch == "'":
+        in_single = True
+        out.append(ch)
+        i += 1
+      elif ch == "`":
+        in_backtick = True
+        out.append(ch)
+        i += 1
+      elif ch == "-" and i + 1 < n and sql_text[i + 1] == "-":
+        i += 2
+        while i < n and sql_text[i] != "\n":
+          i += 1
+      elif ch == "/" and i + 1 < n and sql_text[i + 1] == "*":
+        i += 2
+        while i + 1 < n and not (sql_text[i] == "*" and sql_text[i + 1] == "/"):
+          i += 1
+        i += 2
+      else:
+        out.append(ch)
+        i += 1
+  return "".join(out)
+
+
+def _validate_bqca_sql_behavioral_oracle(sql_text: str) -> list[str]:
+  """Execute BQCA SQL against synthetic edge-case turns in SQLite."""
+  try:
+    cols = [c[0] for c in extract_sql_projected_columns(sql_text)]
+  except ValueError as exc:
+    return [f"bqca SQL behavioral oracle parse failure: {exc}"]
+  if len(cols) < 37:
+    return [
+        f"bqca SQL behavioral oracle expected >= 37 bqca_fields columns, got {len(cols)}"
+    ]
+  bqca_cols = cols[:37] + ["raw_agent_response_rn"]
+
+  s = _strip_sql_comments(sql_text)
+  s = re.sub(r"FROM\s+`[^`]+`", "FROM source_events", s)
+  s = s.replace("@DS_START_DATE", "'20260401'").replace(
+      "@DS_END_DATE", "'20260430'"
+  )
+  s = re.sub(
+      r"ARRAY_TO_STRING\s*\(\s*ARRAY\s*\(\s*SELECT\s+JSON_VALUE\s*\(\s*\w+\s*,\s*('[^']+')\s*\)\s*FROM\s+UNNEST\s*\(\s*JSON_QUERY_ARRAY\s*\(\s*content\s*,\s*('[^']+')\s*\)\s*\).*?\)\s*,\s*('[^']*')\s*\)",
+      lambda m: (
+          f"BQ_JSON_PARTS_JOIN(content, {m.group(2)}, {m.group(1)},"
+          f" {m.group(3)})"
+      ),
+      s,
+      flags=re.DOTALL | re.IGNORECASE,
+  )
+  s = re.sub(
+      r"ARRAY_LENGTH\s*\(\s*JSON_QUERY_ARRAY\s*\(\s*content\s*,\s*('[^']+')\s*\)\s*\)",
+      r"BQ_JSON_ARRAY_LENGTH(content, \1)",
+      s,
+      flags=re.IGNORECASE,
+  )
+  s = re.sub(r"\br'", "'", s)
+  s = re.sub(r"\bSAFE_CAST\s*\(", "CAST(", s, flags=re.IGNORECASE)
+  s = re.sub(r"\bAS\s+STRING\b", "AS TEXT", s, flags=re.IGNORECASE)
+  s = re.sub(r"\bAS\s+FLOAT64\b", "AS REAL", s, flags=re.IGNORECASE)
+  s = re.sub(r"\bAS\s+INT64\b", "AS INTEGER", s, flags=re.IGNORECASE)
+  s = re.sub(
+      r"FIRST_VALUE\s*\((.*?)\s+IGNORE\s+NULLS\s*\)\s+OVER\s*\(\s*PARTITION\s+BY\s+(.*?)\s+ORDER\s+BY\s+(.*?)\s+ROWS\s+BETWEEN\s+UNBOUNDED\s+PRECEDING\s+AND\s+UNBOUNDED\s+FOLLOWING\s*\)",
+      lambda m: (
+          f"FIRST_VALUE({m.group(1)}) OVER (PARTITION BY {m.group(2)} ORDER BY"
+          f" CASE WHEN ({m.group(1)}) IS NULL THEN 1 ELSE 0 END ASC,"
+          f" {m.group(3)} ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED"
+          " FOLLOWING)"
+      ),
+      s,
+      flags=re.DOTALL | re.IGNORECASE,
+  )
+  s = re.sub(
+      r"LAST_VALUE\s*\((.*?)\s+IGNORE\s+NULLS\s*\)\s+OVER\s*\(\s*PARTITION\s+BY\s+(.*?)\s+ORDER\s+BY\s+(.*?)\s+ROWS\s+BETWEEN\s+UNBOUNDED\s+PRECEDING\s+AND\s+UNBOUNDED\s+FOLLOWING\s*\)",
+      lambda m: (
+          f"LAST_VALUE({m.group(1)}) OVER (PARTITION BY {m.group(2)} ORDER BY"
+          f" CASE WHEN ({m.group(1)}) IS NULL THEN 0 ELSE 1 END ASC,"
+          f" {m.group(3)} ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED"
+          " FOLLOWING)"
+      ),
+      s,
+      flags=re.DOTALL | re.IGNORECASE,
+  )
+  s = re.sub(
+      r"FIRST_VALUE\s*\((.*?)\s+RESPECT\s+NULLS\s*\)\s+OVER\s*\(",
+      r"FIRST_VALUE(\1) OVER (",
+      s,
+      flags=re.DOTALL | re.IGNORECASE,
+  )
+  s = re.sub(
+      r"LAST_VALUE\s*\((.*?)\s+RESPECT\s+NULLS\s*\)\s+OVER\s*\(",
+      r"LAST_VALUE(\1) OVER (",
+      s,
+      flags=re.DOTALL | re.IGNORECASE,
+  )
+  s = re.sub(
+      r"\bLOGICAL_OR\s*\(([^()]+)\)\s+OVER\s*\(",
+      r"MAX(CASE WHEN (\1) THEN 1 ELSE 0 END) OVER (",
+      s,
+      flags=re.IGNORECASE,
+  )
+  s = re.sub(
+      r"\bLOGICAL_AND\s*\(([^()]+)\)\s+OVER\s*\(",
+      r"MIN(CASE WHEN (\1) IS NULL THEN NULL WHEN (\1) THEN 1 ELSE 0 END) OVER (",
+      s,
+      flags=re.IGNORECASE,
+  )
+  s = re.sub(
+      r"DATE_ADD\s*\((.*?),\s*INTERVAL\s+(\d+)\s+DAY\s*\)",
+      r"DATE_ADD_DAY(\1, \2)",
+      s,
+      flags=re.DOTALL | re.IGNORECASE,
+  )
+  s = re.sub(
+      r"TIMESTAMP_TRUNC\s*\(\s*timestamp\s*,\s*HOUR\s*,\s*'UTC'\s*\)",
+      "TIMESTAMP_TRUNC_HOUR(timestamp, 'UTC')",
+      s,
+      flags=re.IGNORECASE,
+  )
+  s = re.sub(r"\bTIMESTAMP\s*\(", "BQ_TIMESTAMP(", s, flags=re.IGNORECASE)
+  s = re.sub(r"\bDATE\s*\(", "BQ_DATE(", s, flags=re.IGNORECASE)
+  s = re.sub(
+      r"\*\s+EXCEPT\s*\(([^)]+)\)",
+      lambda m: ", ".join(
+          c
+          for c in bqca_cols
+          if c not in {x.strip() for x in m.group(1).split(",")}
+      ),
+      s,
+      flags=re.IGNORECASE,
+  )
+
+  def _resolve_json_path(doc: Any, path: Any) -> Any:
+    if doc is None or path is None:
+      return None
+    try:
+      cur = json.loads(doc) if isinstance(doc, str) else doc
+    except Exception:
+      return None
+    p = str(path)
+    if p.startswith("$"):
+      p = p[1:]
+    tokens = re.findall(r'\."([^"]+)"|\.([A-Za-z0-9_]+)|\[(\d+)\]', p)
+    for quoted, bare, idx in tokens:
+      if quoted or bare:
+        key = quoted or bare
+        if isinstance(cur, dict) and key in cur:
+          cur = cur[key]
+        else:
+          return None
+      elif idx != "":
+        i = int(idx)
+        if isinstance(cur, list) and 0 <= i < len(cur):
+          cur = cur[i]
+        else:
+          return None
+    return cur
+
+  def _bq_json_value(doc: Any, path: Any) -> str | None:
+    val = _resolve_json_path(doc, path)
+    if val is None or isinstance(val, (dict, list)):
+      return None
+    if isinstance(val, bool):
+      return "true" if val else "false"
+    return str(val)
+
+  def _bq_json_parts_join(
+      doc: Any, arr_path: Any, item_path: Any, sep: Any
+  ) -> str | None:
+    arr = _resolve_json_path(doc, arr_path)
+    if not isinstance(arr, list):
+      return None
+    parts = [
+        v for item in arr if (v := _bq_json_value(item, item_path)) is not None
+    ]
+    return str(sep).join(parts)
+
+  def _bq_json_array_length(doc: Any, arr_path: Any) -> int | None:
+    arr = _resolve_json_path(doc, arr_path)
+    return len(arr) if isinstance(arr, list) else None
+
+  def _regexp_extract(val: Any, pat: Any) -> str | None:
+    if val is None or pat is None:
+      return None
+    m = re.search(str(pat), str(val))
+    if not m:
+      return None
+    return m.group(1) if m.lastindex else m.group(0)
+
+  conn = sqlite3.connect(":memory:")
+  conn.row_factory = sqlite3.Row
+  conn.create_function("IF", 3, lambda cond, t, f: t if bool(cond) else f)
+  conn.create_function(
+      "CONCAT",
+      -1,
+      lambda *args: None
+      if any(a is None for a in args)
+      else "".join(str(a) for a in args),
+  )
+  conn.create_function("JSON_VALUE", 2, _bq_json_value)
+  conn.create_function("BQ_JSON_PARTS_JOIN", 4, _bq_json_parts_join)
+  conn.create_function("BQ_JSON_ARRAY_LENGTH", 2, _bq_json_array_length)
+  conn.create_function(
+      "TO_JSON_STRING",
+      1,
+      lambda v: v if (v is None or isinstance(v, str)) else json.dumps(v),
+  )
+  conn.create_function(
+      "SHA256",
+      1,
+      lambda v: None
+      if v is None
+      else hashlib.sha256(str(v).encode("utf-8")).digest(),
+  )
+  conn.create_function(
+      "TO_HEX",
+      1,
+      lambda b: None
+      if b is None
+      else (
+          b.hex()
+          if isinstance(b, (bytes, bytearray))
+          else str(b).encode("utf-8").hex()
+      ),
+  )
+  conn.create_function(
+      "ENDS_WITH",
+      2,
+      lambda s_val, suf: None
+      if (s_val is None or suf is None)
+      else (1 if str(s_val).endswith(str(suf)) else 0),
+  )
+  conn.create_function("REGEXP_EXTRACT", 2, _regexp_extract)
+  conn.create_function(
+      "PARSE_DATE",
+      2,
+      lambda fmt, s_val: f"{s_val[:4]}-{s_val[4:6]}-{s_val[6:8]}"
+      if s_val and len(str(s_val)) == 8
+      else None,
+  )
+  conn.create_function(
+      "DATE_ADD_DAY",
+      2,
+      lambda d, n: f"{d[:8]}{int(d[8:10]) + int(n):02d}" if d else None,
+  )
+  conn.create_function(
+      "BQ_TIMESTAMP", 2, lambda d, tz: f"{d}T00:00:00Z" if d else None
+  )
+  conn.create_function(
+      "BQ_DATE", 2, lambda ts, tz: str(ts)[:10] if ts else None
+  )
+  conn.create_function(
+      "TIMESTAMP_TRUNC_HOUR",
+      2,
+      lambda ts, tz: f"{str(ts)[:13]}:00:00Z" if ts else None,
+  )
+
+  conn.execute("""
+      CREATE TABLE source_events (
+        timestamp TEXT, event_type TEXT, agent TEXT, session_id TEXT,
+        invocation_id TEXT, user_id TEXT, trace_id TEXT, span_id TEXT,
+        parent_span_id TEXT, content TEXT, attributes TEXT, latency_ms TEXT,
+        status TEXT, error_message TEXT, is_truncated INTEGER
+      )
+  """)
+  fixtures = [
+      (
+          "2026-04-05T10:00:00Z",
+          "INVOCATION_STARTING",
+          "root",
+          "sess-1",
+          "inv-edge-1",
+          "  alice@example.com:1  ",
+          "trace-1",
+          "span-1a",
+          None,
+          "{}",
+          json.dumps(
+              {
+                  "fast_path": "true",
+                  "session_metadata": {
+                      "state": {
+                          "conversation-id": "  conv-1  ",
+                          "data-agent-id": "  agent-alpha  ",
+                          "custom_labels": {"persona": "  analyst  "},
+                      }
+                  },
+              }
+          ),
+          None,
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T10:00:01Z",
+          "LLM_RESPONSE",
+          "root",
+          "sess-1",
+          "inv-edge-1",
+          None,
+          "trace-1",
+          "span-1b",
+          None,
+          "{}",
+          json.dumps(
+              {
+                  "usage_metadata": {
+                      "prompt_token_count": 100,
+                      "candidates_token_count": 50,
+                      "total_token_count": 150,
+                  }
+              }
+          ),
+          json.dumps({"total_ms": 400, "time_to_first_token_ms": 80}),
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T10:00:02Z",
+          "INVOCATION_COMPLETED",
+          "root",
+          "sess-1",
+          "inv-edge-1",
+          None,
+          "trace-1",
+          "span-1c",
+          None,
+          "{}",
+          "{}",
+          json.dumps({"total_ms": 1200}),
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T10:00:03Z",
+          "INVOCATION_COMPLETED",
+          "root",
+          "sess-1",
+          "inv-edge-1",
+          None,
+          "trace-1",
+          "span-1d",
+          None,
+          "{}",
+          "{}",
+          json.dumps({"total_ms": 2500}),
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T10:01:00Z",
+          "INVOCATION_STARTING",
+          "root",
+          "sess-1",
+          "inv-edge-1b",
+          None,
+          "trace-1b",
+          "span-1e",
+          None,
+          "{}",
+          "{}",
+          None,
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T10:01:01Z",
+          "AGENT_ERROR",
+          "root",
+          "sess-1",
+          "inv-edge-1b",
+          None,
+          "trace-1b",
+          "span-1f",
+          None,
+          "{}",
+          "{}",
+          None,
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T10:01:02Z",
+          "INVOCATION_COMPLETED",
+          "root",
+          "sess-1",
+          "inv-edge-1b",
+          None,
+          "trace-1b",
+          "span-1g",
+          None,
+          "{}",
+          "{}",
+          json.dumps({"total_ms": 1800}),
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T11:00:00Z",
+          "INVOCATION_STARTING",
+          "root",
+          "sess-2",
+          "inv-late-attr",
+          None,
+          "trace-2",
+          "span-2a",
+          None,
+          "{}",
+          "{}",
+          None,
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T11:00:01Z",
+          "AGENT_RESPONSE",
+          "root",
+          "sess-2",
+          "inv-late-attr",
+          None,
+          "trace-2",
+          "span-2b",
+          None,
+          json.dumps({"text_summary": "```sql\nSELECT 42\n```"}),
+          json.dumps(
+              {
+                  "session_metadata": {
+                      "state": {
+                          "conversation-id": "conv-2",
+                          "data-agent-id": "agent-beta",
+                          "custom_labels": {"persona": "manager"},
+                      }
+                  }
+              }
+          ),
+          None,
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T11:00:02Z",
+          "INVOCATION_COMPLETED",
+          "root",
+          "sess-2",
+          "inv-late-attr",
+          None,
+          "trace-2",
+          "span-2c",
+          None,
+          "{}",
+          json.dumps(
+              {
+                  "session_metadata": {
+                      "state": {
+                          "conversation-id": "conv-2-override",
+                          "data-agent-id": "agent-beta-override",
+                          "custom_labels": {"persona": "override"},
+                      }
+                  }
+              }
+          ),
+          json.dumps({"total_ms": 900}),
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T12:00:00Z",
+          "INVOCATION_STARTING",
+          "root",
+          "sess-3",
+          "   ",
+          None,
+          "trace-partial",
+          "span-3a",
+          None,
+          "{}",
+          json.dumps(
+              {"session_metadata": {"state": {"data-agent-id": "agent-gamma"}}}
+          ),
+          None,
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T12:00:01Z",
+          "INVOCATION_COMPLETED",
+          "root",
+          "sess-3",
+          "inv-partial-3",
+          None,
+          "trace-partial",
+          "span-3b",
+          None,
+          "{}",
+          "{}",
+          json.dumps({"total_ms": 1500}),
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T13:00:00Z",
+          "INVOCATION_STARTING",
+          "root",
+          "sess-4",
+          "  ",
+          None,
+          "trace-fallback-4",
+          "span-4a",
+          None,
+          "{}",
+          "{}",
+          None,
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T14:00:00Z",
+          "INVOCATION_COMPLETED",
+          "root",
+          "sess-5",
+          None,
+          None,
+          "trace-null-5",
+          "span-5a",
+          None,
+          "{}",
+          json.dumps(
+              {
+                  "session_metadata": {
+                      "state": {"data-agent-id": "agent-orphan-a"}
+                  }
+              }
+          ),
+          json.dumps({"total_ms": 9999}),
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T14:00:00Z",
+          "LLM_RESPONSE",
+          "root",
+          "sess-5",
+          None,
+          None,
+          "trace-null-5",
+          "span-5b",
+          None,
+          "{}",
+          json.dumps({"fast_path": "true"}),
+          json.dumps({"total_ms": 100}),
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T15:00:00Z",
+          "AGENT_RESPONSE",
+          "root",
+          "sess-6",
+          None,
+          None,
+          "trace-null-6",
+          None,
+          None,
+          json.dumps({"text_summary": "```sql\nSELECT 101\n```"}),
+          "{}",
+          None,
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T15:00:00Z",
+          "AGENT_RESPONSE",
+          "root",
+          "sess-6",
+          None,
+          None,
+          "trace-null-6",
+          None,
+          None,
+          json.dumps({"text_summary": "```sql\nSELECT 202\n```"}),
+          "{}",
+          None,
+          "OK",
+          None,
+          0,
+      ),
+  ]
+  conn.executemany(
+      "INSERT INTO source_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      fixtures,
+  )
+  try:
+    all_rows = [dict(r) for r in conn.execute(s).fetchall()]
+  except sqlite3.Error as exc:
+    conn.close()
+    return [f"bqca SQL behavioral oracle execution error: {exc}"]
+  conn.close()
+  by_span = {r["span_id"]: r for r in all_rows if r.get("span_id") is not None}
+
+  errs: list[str] = []
+  orphan_sqls = {
+      r.get("extracted_sql")
+      for r in all_rows
+      if r.get("timestamp") == "2026-04-05T15:00:00Z"
+  }
+  if orphan_sqls != {"SELECT 101", "SELECT 202"}:
+    errs.append(
+        "bqca SQL behavioral oracle: null-invocation AGENT_RESPONSE"
+        f" partition collision ({orphan_sqls!r} != {{'SELECT 101', 'SELECT 202'}})"
+    )
+  for sp in ("span-1a", "span-1b", "span-1c", "span-1d"):
+    r = by_span.get(sp, {})
+    if r.get("data_agent_id") != "agent-alpha":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} data_agent_id={r.get('data_agent_id')!r} != 'agent-alpha'"
+      )
+    if r.get("conversation_id") != "conv-1":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} conversation_id={r.get('conversation_id')!r} != 'conv-1'"
+      )
+    if r.get("persona") != "analyst":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} persona={r.get('persona')!r} != 'analyst'"
+      )
+    if not r.get("fast_path") or r.get("fast_path_label") != "fast_path":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} fast_path={r.get('fast_path')!r}/{r.get('fast_path_label')!r} != 1/'fast_path'"
+      )
+  if (
+      by_span.get("span-1c", {}).get("is_turn_complete")
+      or by_span.get("span-1c", {}).get("completed_turn_id") is not None
+      or by_span.get("span-1c", {}).get("turn_latency_ms") is not None
+  ):
+    errs.append(
+        "bqca SQL behavioral oracle: span-1c duplicate completion was not suppressed"
+    )
+  if (
+      not by_span.get("span-1d", {}).get("is_turn_complete")
+      or by_span.get("span-1d", {}).get("completed_turn_id") != "inv-edge-1"
+      or by_span.get("span-1d", {}).get("turn_latency_ms") != 2500.0
+  ):
+    errs.append(
+        "bqca SQL behavioral oracle: span-1d canonical completion"
+        f" mismatch ({by_span.get('span-1d', {})})"
+    )
+  if (
+      not by_span.get("span-1f", {}).get("is_error")
+      or by_span.get("span-1f", {}).get("error_message")
+      != "[AGENT_ERROR: status=OK]"
+  ):
+    errs.append(
+        "bqca SQL behavioral oracle: span-1f *_ERROR suffix detection"
+        f" mismatch ({by_span.get('span-1f', {})})"
+    )
+  if (
+      not by_span.get("span-1g", {}).get("is_turn_complete")
+      or by_span.get("span-1g", {}).get("completed_turn_id") != "inv-edge-1b"
+      or by_span.get("span-1g", {}).get("turn_latency_ms") != 1800.0
+  ):
+    errs.append(
+        "bqca SQL behavioral oracle: span-1g multi-turn session completion"
+        f" mismatch ({by_span.get('span-1g', {})})"
+    )
+  for sp in ("span-2a", "span-2b", "span-2c"):
+    r = by_span.get(sp, {})
+    if r.get("data_agent_id") != "agent-beta":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} data_agent_id={r.get('data_agent_id')!r} != 'agent-beta'"
+      )
+    if r.get("conversation_id") != "conv-2":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} conversation_id={r.get('conversation_id')!r} != 'conv-2'"
+      )
+    if r.get("persona") != "manager":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} persona={r.get('persona')!r} != 'manager'"
+      )
+    if r.get("fast_path") or r.get("fast_path_label") != "standard_nl2sql":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} fast_path={r.get('fast_path')!r}/{r.get('fast_path_label')!r}"
+      )
+  for sp in ("span-3a", "span-3b"):
+    r = by_span.get(sp, {})
+    if r.get("invocation_id") != "inv-partial-3":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} invocation_id={r.get('invocation_id')!r} != 'inv-partial-3'"
+      )
+    if r.get("data_agent_id") != "agent-gamma":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} data_agent_id={r.get('data_agent_id')!r} != 'agent-gamma'"
+      )
+  if (
+      by_span.get("span-3b", {}).get("completed_turn_id") != "inv-partial-3"
+      or by_span.get("span-3b", {}).get("turn_latency_ms") != 1500.0
+  ):
+    errs.append(
+        "bqca SQL behavioral oracle: span-3b partial-blank completion mismatch"
+    )
+  if by_span.get("span-4a", {}).get("invocation_id") != "trace-fallback-4":
+    errs.append(
+        "bqca SQL behavioral oracle: span-4a blank invocation_id did not fall"
+        " back to trace_id"
+    )
+  if (
+      by_span.get("span-5a", {}).get("invocation_id") is not None
+      or by_span.get("span-5a", {}).get("is_turn_complete")
+      or by_span.get("span-5a", {}).get("completed_turn_id") is not None
+      or by_span.get("span-5a", {}).get("turn_latency_ms") is not None
+  ):
+    errs.append(
+        "bqca SQL behavioral oracle: span-5a null invocation_id leaked into"
+        " completed turn metrics"
+    )
+  if (
+      by_span.get("span-5a", {}).get("fast_path")
+      or by_span.get("span-5b", {}).get("data_agent_id") != "unattributed"
+  ):
+    errs.append(
+        "bqca SQL behavioral oracle: span-5a/5b null invocation_id partition"
+        " bleed"
+    )
+  return errs
 
 
 def validate_bqca(
@@ -980,22 +1744,93 @@ def validate_bqca(
         f" expected {bundle_sha}, got {live.get('template_bundle_sha256')}"
     )
 
-  # 5. Semantic SQL invariants (M03, M04, M07) & external-access attestation guard (M08)
-  sql_norm = " ".join(sql_text.split())
+  # 5. Semantic SQL invariants (M03, M04, M07, M14, M15, M16, R4-1..R4-3, R4-N2) & behavioral oracle
+  sql_norm = " ".join(_strip_sql_comments(sql_text).split())
   required_sql_fragments = {
+      "trace_resolved per-trace invocation_id inheritance": (
+          "IF( invocation_id IS NULL, NULL, COALESCE("
+          " NULLIF(TRIM(invocation_id), ''), IF( NULLIF(TRIM(trace_id), '') IS"
+          " NULL, NULL, FIRST_VALUE(NULLIF(TRIM(invocation_id), '') IGNORE"
+          " NULLS) OVER ( PARTITION BY NULLIF(TRIM(trace_id), '') ORDER BY"
+          " timestamp ASC, event_type ASC, NULLIF(TRIM(invocation_id), '') ASC"
+          " ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING ) ),"
+          " NULLIF(TRIM(trace_id), ''), NULLIF(TRIM(session_id), ''),"
+          " CAST(timestamp AS STRING) ) ) AS turn_id"
+      ),
+      "null invocation_id SHA256 partition isolation": (
+          "IF( turn_id IS NULL, CONCAT( '__null_invocation__:', CAST(timestamp"
+          " AS STRING), ':', IFNULL(span_id, ''), ':', IFNULL(event_type, ''),"
+          " ':', TO_HEX( SHA256( CONCAT( IFNULL(TO_JSON_STRING(attributes),"
+          " ''), '|', IFNULL(TO_JSON_STRING(content), ''), '|', IFNULL(status,"
+          " ''), '|', IFNULL(error_message, '') ) ) ) ), turn_id ) AS"
+          " turn_partition_key"
+      ),
+      "raw_conversation_id whitespace trimming": (
+          "NULLIF( TRIM( JSON_VALUE(attributes,"
+          " '$.session_metadata.state.\"conversation-id\"') ), '' ) AS"
+          " raw_conversation_id"
+      ),
+      "raw_data_agent_id whitespace trimming": (
+          "NULLIF( TRIM( JSON_VALUE(attributes,"
+          " '$.session_metadata.state.\"data-agent-id\"') ), '' ) AS"
+          " raw_data_agent_id"
+      ),
+      "raw_explicit_persona whitespace trimming": (
+          "NULLIF( TRIM( JSON_VALUE( attributes,"
+          " '$.session_metadata.state.custom_labels.persona' ) ), '' ) AS"
+          " raw_explicit_persona"
+      ),
       "fast_path attribute extraction": (
-          "LOWER(JSON_VALUE(attributes, '$.fast_path')) = 'true'"
+          "IFNULL( LOWER(JSON_VALUE(attributes, '$.fast_path')) = 'true', FALSE"
+          " ) AS raw_fast_path"
+      ),
+      "raw_is_error 3-condition error attribution": (
+          "( IFNULL(UPPER(TRIM(status)) = 'ERROR', FALSE) OR"
+          " NULLIF(TRIM(error_message), '') IS NOT NULL OR"
+          " ENDS_WITH(UPPER(TRIM(IFNULL(event_type, ''))), '_ERROR') ) AS"
+          " raw_is_error"
+      ),
+      "INVOCATION_COMPLETED deduplication window": (
+          "IF( event_type = 'INVOCATION_COMPLETED' AND turn_id IS NOT NULL,"
+          " ROW_NUMBER() OVER ( PARTITION BY turn_id, IF(event_type ="
+          " 'INVOCATION_COMPLETED', 1, 0) ORDER BY SAFE_CAST(JSON_VALUE(latency_ms,"
+          " '$.total_ms') AS FLOAT64) DESC NULLS LAST, timestamp DESC, span_id"
+          " DESC ), NULL ) AS raw_turn_complete_rn"
+      ),
+      "data_agent_id turn-window propagation": (
+          "IF( turn_id IS NULL, COALESCE(raw_data_agent_id, 'unattributed'),"
+          " COALESCE( FIRST_VALUE(raw_data_agent_id IGNORE NULLS) OVER ("
+          " PARTITION BY turn_partition_key ORDER BY timestamp ASC, event_type"
+          " ASC, span_id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED"
+          " FOLLOWING ), 'unattributed' ) ) AS data_agent_id"
+      ),
+      "conversation_id turn-window propagation": (
+          "IF( turn_id IS NULL, raw_conversation_id,"
+          " FIRST_VALUE(raw_conversation_id IGNORE NULLS) OVER ( PARTITION BY"
+          " turn_partition_key ORDER BY timestamp ASC, event_type ASC, span_id"
+          " ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING ) )"
+          " AS conversation_id"
+      ),
+      "persona turn-window propagation": (
+          "IF( turn_id IS NULL, COALESCE( raw_explicit_persona,"
+          " raw_email_persona, raw_data_agent_id, 'unattributed' ), COALESCE("
+          " FIRST_VALUE(raw_explicit_persona IGNORE NULLS) OVER ( PARTITION BY"
+          " turn_partition_key ORDER BY timestamp ASC, event_type ASC, span_id"
+          " ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING ),"
+          " FIRST_VALUE(raw_email_persona IGNORE NULLS) OVER ( PARTITION BY"
+          " turn_partition_key ORDER BY timestamp ASC, event_type ASC, span_id"
+          " ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING ),"
+          " FIRST_VALUE(raw_data_agent_id IGNORE NULLS) OVER ( PARTITION BY"
+          " turn_partition_key ORDER BY timestamp ASC, event_type ASC, span_id"
+          " ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING ),"
+          " 'unattributed' ) ) AS persona"
       ),
       "fast_path turn-window propagation": (
           "IF( turn_id IS NULL, raw_fast_path, LOGICAL_OR(raw_fast_path) OVER ("
           " PARTITION BY turn_partition_key ) ) AS fast_path"
       ),
-      "fast_path_label derivation": (
-          "IF(fast_path, 'fast_path', 'standard_nl2sql') AS fast_path_label"
-      ),
-      "INVOCATION_COMPLETED deduplication window": (
-          "event_type = 'INVOCATION_COMPLETED' AND invocation_id IS NOT NULL,"
-          " ROW_NUMBER() OVER ("
+      "is_turn_complete deduplication gate": (
+          "IFNULL(raw_turn_complete_rn = 1, FALSE) AS is_turn_complete"
       ),
       "completed_turn_id deduplication gate": (
           "IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id"
@@ -1004,33 +1839,15 @@ def validate_bqca(
           "IF( raw_turn_complete_rn = 1, SAFE_CAST(JSON_VALUE(latency_ms,"
           " '$.total_ms') AS FLOAT64), NULL ) AS turn_latency_ms"
       ),
-      "invocation_id blank fallback chain": (
-          "COALESCE( NULLIF(TRIM(invocation_id), ''), NULLIF(TRIM(trace_id),"
-          " ''), NULLIF(TRIM(session_id), ''), CAST(timestamp AS STRING) )"
-      ),
-      "null invocation_id SHA256 partition isolation": "TO_HEX( SHA256(",
-      "data_agent_id turn-window propagation": (
-          "IF( turn_id IS NULL, COALESCE(raw_data_agent_id, 'unattributed'),"
-          " COALESCE( FIRST_VALUE(raw_data_agent_id IGNORE NULLS) OVER ("
-          " PARTITION BY turn_partition_key"
-      ),
-      "conversation_id turn-window propagation": (
-          "IF( turn_id IS NULL, raw_conversation_id,"
-          " FIRST_VALUE(raw_conversation_id IGNORE NULLS) OVER ( PARTITION BY"
-          " turn_partition_key"
-      ),
-      "explicit persona turn-window propagation": (
-          "FIRST_VALUE(raw_explicit_persona IGNORE NULLS) OVER ( PARTITION BY"
-          " turn_partition_key"
-      ),
-      "email persona turn-window propagation": (
-          "FIRST_VALUE(raw_email_persona IGNORE NULLS) OVER ( PARTITION BY"
-          " turn_partition_key"
+      "fast_path_label derivation": (
+          "IF(fast_path, 'fast_path', 'standard_nl2sql') AS fast_path_label"
       ),
   }
   for label, fragment in required_sql_fragments.items():
     if fragment not in sql_norm:
       errors.append(f"bqca SQL missing required {label} ({fragment!r})")
+
+  errors.extend(_validate_bqca_sql_behavioral_oracle(sql_text))
 
   ext = binding.get("external_access_verification", {})
   ext_status = ext.get("status")

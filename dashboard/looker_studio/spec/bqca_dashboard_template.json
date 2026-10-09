@@ -20,7 +20,7 @@
     "connector_type": "BIGQUERY_CUSTOM_QUERY",
     "credential_mode": "VIEWERS",
     "sql_path": "sql/bqca_events_v1.template.sql",
-    "sql_sha256": "dba90a442905d21535f3787842fee801a1e59c593572aaac11e559af90ac812d",
+    "sql_sha256": "c915abe82c9e6d54aac6fffe78e34f90b436e852697c86747632a6c238754096",
     "sentinels": {
       "project": "test-project-0728-467323",
       "dataset": "bqaa_fixture_adk_1_27_0",

@@ -322,10 +322,13 @@ and tool-error charts are omitted from the template:
 - **Data Agents & Turns** (`p_a89cfece`) — active data agents (`data_agent_id`),
   total turns (`invocation_id`), completed turns (`completed_turn_id`), generated
   SQL queries (`extracted_sql`), and volume/latency/errors by `data_agent_id`
-  (turns are keyed by `invocation_id` — falling back to `trace_id`,
-  `session_id`, then `timestamp` when `invocation_id` is blank while preserving
-  `NULL` when `invocation_id IS NULL` — because a session can contain multiple
-  turns);
+  (turns are keyed by `invocation_id` — when an event's `invocation_id` is
+  blank (`''`), it first inherits any non-blank `invocation_id` logged on the
+  same `trace_id` (`FIRST_VALUE(NULLIF(TRIM(invocation_id), '') IGNORE NULLS)
+  OVER (PARTITION BY NULLIF(TRIM(trace_id), '') ...)`), and otherwise falls back
+  to `trace_id`, `session_id`, then `timestamp` while preserving `NULL` when
+  `invocation_id IS NULL`; multiple blank-ID turns that also have no `trace_id`
+  within the same `session_id` therefore group as one session-level turn);
 - **LLM Interactions & Embedding Suggestions** (`p_97efe693`) — model calls
   (`llm_latency_ms`), average LLM call latency, average time to first token
   (`ttft_ms`), suggested columns proposed (`similar_queries_count`), and token /

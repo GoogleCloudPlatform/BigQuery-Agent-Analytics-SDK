@@ -16,9 +16,11 @@ import contextlib
 import dataclasses
 import datetime as dt
 import itertools
+import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -916,8 +918,8 @@ def test_errors_only_keeps_whole_turns_that_hold_an_error(panel):
   # verdict is read over the turn's partition, where an event with no turn at
   # all is the only row of a partition of its own ...
   assert (
-      "LOGICAL_OR(is_error) OVER (PARTITION BY "
-      f"{SPEC_TURN_KEY}) AS turn_has_error"
+      "IF(invocation_id IS NULL, is_error, LOGICAL_OR(is_error) OVER"
+      f" (PARTITION BY {SPEC_TURN_KEY})) AS turn_has_error"
   ) in narrowed
   # ... where "an error" is still the one canonical three-condition predicate.
   assert f"{bqca_queries.IS_ERROR_EXPR} AS is_error" in narrowed
@@ -1390,11 +1392,8 @@ def test_explorer_serves_the_last_agent_response_with_the_sql_it_carries():
         (
             "timeline",
             [
-                "IF(invocation_id IS NULL, NULL,"
-                " COALESCE(NULLIF(TRIM(invocation_id), ''),"
-                " NULLIF(TRIM(trace_id), ''),"
-                " NULLIF(TRIM(session_id), ''),"
-                " CAST(timestamp AS STRING))) = @invocation_id",
+                f"{bqca_queries.INVOCATION_ID_EXPR} AS invocation_id",
+                "WHERE invocation_id = @invocation_id",
                 "ORDER BY timestamp, event_type",
                 "LIMIT 200",
                 "SUBSTR(",
@@ -1698,25 +1697,29 @@ FIRST_TIERS = {
 # with no ``invocation_id`` at all gets a key of its own that includes all of
 # its per-row turn dimensions and error verdict.
 SPEC_TURN_KEY = (
-    "IF(invocation_id IS NULL, CONCAT('__null_inv_', CAST(timestamp AS"
-    " STRING), '_', IFNULL(span_id, ''), '_', event_type, '_',"
-    " IFNULL(raw_session_id, ''), '_', IFNULL(raw_conversation_id, ''), '_',"
-    " IFNULL(raw_data_agent_id, ''), '_', IFNULL(raw_explicit_persona, ''),"
-    " '_', IFNULL(raw_email_persona, ''), '_',"
-    " IFNULL(CAST(raw_fast_path AS STRING), 'false'), '_',"
-    " IFNULL(CAST(is_error AS STRING), 'false')), invocation_id)"
+    "IF(invocation_id IS NULL, CONCAT('__null_inv_',"
+    " TO_JSON_STRING(STRUCT(timestamp, span_id, event_type, raw_session_id,"
+    " raw_conversation_id, raw_data_agent_id, raw_explicit_persona,"
+    " raw_email_persona, raw_fast_path, is_error))), invocation_id)"
 )
 ERRORS_ONLY = dataclasses.replace(STATE, errors_only=True)
 
 
 def test_a_blank_invocation_id_is_a_turn_of_its_own_keyed_by_its_timestamp():
-  # NULL stays NULL (no turn at all). A blank or whitespace-only id falls back
-  # to trimmed ``trace_id``, else trimmed ``session_id``, else the text of the
-  # event's timestamp: a non-NULL key that every turn-grain panel keeps and the
-  # timeline can open. A padded id is trimmed.
+  # NULL stays NULL (no turn at all). A blank or whitespace-only id inherits any
+  # non-blank ``invocation_id`` logged on the same non-empty ``trace_id``, else
+  # falls back to trimmed ``trace_id``, else trimmed ``session_id``, else the
+  # text of the event's timestamp: a non-NULL key that every turn-grain panel
+  # keeps and the timeline can open. A padded id is trimmed.
   assert bqca_queries.INVOCATION_ID_EXPR == (
       "IF(invocation_id IS NULL, NULL,"
       " COALESCE(NULLIF(TRIM(invocation_id), ''),"
+      " IF(NULLIF(TRIM(trace_id), '') IS NULL, NULL,"
+      " FIRST_VALUE(NULLIF(TRIM(invocation_id), '') IGNORE NULLS) OVER"
+      " (PARTITION BY NULLIF(TRIM(trace_id), '')"
+      " ORDER BY timestamp ASC, event_type ASC,"
+      " NULLIF(TRIM(invocation_id), '') ASC"
+      " ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)),"
       " NULLIF(TRIM(trace_id), ''),"
       " NULLIF(TRIM(session_id), ''),"
       " CAST(timestamp AS STRING)))"
@@ -1727,7 +1730,8 @@ def test_a_blank_invocation_id_is_a_turn_of_its_own_keyed_by_its_timestamp():
     # every later ``IS NOT NULL`` and ``COUNT(DISTINCT ...)`` sees the key.
     raw = _cte_body(sql, "events_raw")
     assert f"{bqca_queries.INVOCATION_ID_EXPR} AS invocation_id" in raw, panel
-    assert sql.count("TRIM(invocation_id)") == 1, panel
+    assert sql.count(bqca_queries.INVOCATION_ID_EXPR) == 1, panel
+    assert sql.count("TRIM(invocation_id)") == 3, panel
 
 
 @pytest.mark.parametrize(
@@ -1771,14 +1775,15 @@ def test_attribution_is_resolved_across_the_turn_before_any_filter_runs(panel):
   ) in events
   for alias, column in FIRST_TIERS.items():
     assert (
-        f"FIRST_VALUE({column} IGNORE NULLS)"
+        f"IF(invocation_id IS NULL, {column}, FIRST_VALUE({column} IGNORE NULLS)"
         f" OVER (PARTITION BY {SPEC_TURN_KEY}"
         f" ORDER BY timestamp ASC, event_type ASC, {column} ASC"
-        " ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)"
+        " ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING))"
         f" AS {alias}"
     ) in events, alias
   assert (
-      f"LOGICAL_OR(raw_fast_path) OVER (PARTITION BY {SPEC_TURN_KEY})"
+      "IF(invocation_id IS NULL, raw_fast_path,"
+      f" LOGICAL_OR(raw_fast_path) OVER (PARTITION BY {SPEC_TURN_KEY}))"
       " AS fast_path"
   ) in events
   # Only then does it choose between the tiers, and name the fast path.
@@ -1917,18 +1922,25 @@ def _normalize_invocation_id(
     timestamp: Any,
     trace_id: str | None = None,
     session_id: str | None = None,
+    trace_resolved_id: str | None = None,
 ) -> str | None:
   """What ``INVOCATION_ID_EXPR`` makes of a logged ``invocation_id``."""
   assert bqca_queries.INVOCATION_ID_EXPR == (
       "IF(invocation_id IS NULL, NULL,"
       " COALESCE(NULLIF(TRIM(invocation_id), ''),"
+      " IF(NULLIF(TRIM(trace_id), '') IS NULL, NULL,"
+      " FIRST_VALUE(NULLIF(TRIM(invocation_id), '') IGNORE NULLS) OVER"
+      " (PARTITION BY NULLIF(TRIM(trace_id), '')"
+      " ORDER BY timestamp ASC, event_type ASC,"
+      " NULLIF(TRIM(invocation_id), '') ASC"
+      " ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)),"
       " NULLIF(TRIM(trace_id), ''),"
       " NULLIF(TRIM(session_id), ''),"
       " CAST(timestamp AS STRING)))"
   )
   if logged is None:
     return None
-  for candidate in (logged, trace_id, session_id):
+  for candidate in (logged, trace_resolved_id, trace_id, session_id):
     if candidate is not None and candidate.strip():
       return candidate.strip()
   return str(timestamp)
@@ -1942,10 +1954,11 @@ def _asc(value: Any) -> tuple[bool, Any]:
 def _window_rule(events: str, column: str, alias: str) -> dict[str, Any]:
   """Reads a first-real-value window expression back out of ``events``."""
   match = re.search(
-      rf"FIRST_VALUE\({column} IGNORE NULLS\)"
+      rf"IF\(invocation_id IS NULL, {column},"
+      rf" FIRST_VALUE\({column} IGNORE NULLS\)"
       r" OVER \(PARTITION BY (?P<partition>.+?)"
       r" ORDER BY (?P<order>[\w ,]+)"
-      r" ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\)"
+      r" ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\)\)"
       rf" AS {alias}\b",
       events,
   )
@@ -1984,11 +1997,13 @@ def _resolve_attribution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
   persona_chain = _coalesce_chain(events, "persona")
   # An unrecognized shape fails loudly instead of being guessed at.
   assert (
-      f"LOGICAL_OR(raw_fast_path) OVER (PARTITION BY {SPEC_TURN_KEY})"
+      "IF(invocation_id IS NULL, raw_fast_path,"
+      f" LOGICAL_OR(raw_fast_path) OVER (PARTITION BY {SPEC_TURN_KEY}))"
       " AS fast_path"
   ) in events
   assert (
-      f"LOGICAL_OR(is_error) OVER (PARTITION BY {SPEC_TURN_KEY})"
+      "IF(invocation_id IS NULL, is_error,"
+      f" LOGICAL_OR(is_error) OVER (PARTITION BY {SPEC_TURN_KEY}))"
       " AS turn_has_error"
   ) in events
   label = re.search(
@@ -1998,6 +2013,34 @@ def _resolve_attribution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
   assert label, events
   assert (label["yes"], label["no"]) == bqca_models.FAST_PATH_LABELS
 
+  def _clean(val: str | None) -> str | None:
+    return val.strip() if val is not None and val.strip() else None
+
+  by_trace: dict[str, list[dict[str, Any]]] = {}
+  for row in rows:
+    t_key = _clean(row.get("trace_id"))
+    if t_key is not None:
+      by_trace.setdefault(t_key, []).append(row)
+
+  trace_first_inv: dict[str, str | None] = {}
+  for t_key, group in by_trace.items():
+    ordered_trace = sorted(
+        group,
+        key=lambda r: (
+            _asc(r["timestamp"]),
+            _asc(r["event_type"]),
+            _asc(_clean(r["invocation_id"])),
+        ),
+    )
+    trace_first_inv[t_key] = next(
+        (
+            _clean(r["invocation_id"])
+            for r in ordered_trace
+            if _clean(r["invocation_id"]) is not None
+        ),
+        None,
+    )
+
   normalized = [
       {
           **row,
@@ -2006,28 +2049,32 @@ def _resolve_attribution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
               row["timestamp"],
               row.get("trace_id"),
               row.get("raw_session_id"),
+              trace_first_inv.get(_clean(row.get("trace_id")) or ""),
           ),
       }
       for row in rows
   ]
 
-  def partition(row: dict[str, Any]) -> Any:
-    # An event with no id at all is partitioned by all of its per-row turn
-    # dimensions and error verdict so unrelated orphan rows cannot collide.
+  def partition(row: dict[str, Any]) -> str:
+    # An event with no id at all is partitioned by the JSON-encoded struct of
+    # its per-row turn dimensions and error verdict, matching BigQuery's
+    # ``CONCAT('__null_inv_', TO_JSON_STRING(STRUCT(...)))``.
     if row["invocation_id"] is not None:
       return row["invocation_id"]
-    return (
-        "no-turn",
-        row["timestamp"],
-        row["span_id"] or "",
-        row["event_type"],
-        row["raw_session_id"] or "",
-        row["raw_conversation_id"] or "",
-        row["raw_data_agent_id"] or "",
-        row["raw_explicit_persona"] or "",
-        row["raw_email_persona"] or "",
-        bool(row["raw_fast_path"]),
-        bool(row["is_error"]),
+    return "__null_inv_" + json.dumps(
+        {
+            "timestamp": row["timestamp"],
+            "span_id": row["span_id"],
+            "event_type": row["event_type"],
+            "raw_session_id": row["raw_session_id"],
+            "raw_conversation_id": row["raw_conversation_id"],
+            "raw_data_agent_id": row["raw_data_agent_id"],
+            "raw_explicit_persona": row["raw_explicit_persona"],
+            "raw_email_persona": row["raw_email_persona"],
+            "raw_fast_path": bool(row["raw_fast_path"]),
+            "is_error": bool(row["is_error"]),
+        },
+        separators=(",", ":"),
     )
 
   turns: dict[Any, list[dict[str, Any]]] = {}
@@ -2035,6 +2082,8 @@ def _resolve_attribution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     turns.setdefault(partition(row), []).append(row)
 
   def first_real(row: dict[str, Any], alias: str, column: str) -> str | None:
+    if row["invocation_id"] is None:
+      return row[column]
     ordered = sorted(
         turns[partition(row)],
         key=lambda other: tuple(
@@ -2061,7 +2110,16 @@ def _resolve_attribution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         alias: first_real(row, alias, column)
         for alias, column in FIRST_TIERS.items()
     }
-    fast_path = any(other["raw_fast_path"] for other in turn)
+    fast_path = (
+        bool(row["raw_fast_path"])
+        if row["invocation_id"] is None
+        else any(other["raw_fast_path"] for other in turn)
+    )
+    turn_has_error = (
+        bool(row["is_error"])
+        if row["invocation_id"] is None
+        else any(other["is_error"] for other in turn)
+    )
     resolved.append(
         {
             **row,
@@ -2071,7 +2129,7 @@ def _resolve_attribution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "persona": choose(persona_chain, firsts),
             "fast_path": fast_path,
             "fast_path_label": label["yes"] if fast_path else label["no"],
-            "turn_has_error": any(other["is_error"] for other in turn),
+            "turn_has_error": turn_has_error,
         }
     )
   return resolved
@@ -2544,10 +2602,14 @@ def test_a_turns_real_attribution_beats_the_fallback_label(panel, columns):
 
 def test_timeline_matches_the_turn_key_the_explorer_lists():
   sql = _sql("timeline")
-  assert f"AND {bqca_queries.INVOCATION_ID_EXPR} = @invocation_id" in sql
-  # The raw column no longer decides: a padded id would list a turn whose
-  # timeline is empty.
-  assert "AND invocation_id = @invocation_id" not in sql
+  events = _cte_body(sql, "events")
+  assert f"{bqca_queries.INVOCATION_ID_EXPR} AS invocation_id" in events
+  assert (
+      "WHERE invocation_id = @invocation_id" in sql.split("FROM events", 1)[1]
+  )
+  # The raw column no longer decides inside the CTE: a padded or trace-inherited
+  # id would otherwise list a turn whose timeline is empty or incomplete.
+  assert "AND invocation_id = @invocation_id" not in events
 
 
 def test_fetch_panel_binds_the_trimmed_invocation_id():
@@ -2726,7 +2788,8 @@ def test_timeline_binds_the_invocation_and_never_embeds_it():
   )
   assert "inv-secret" not in sql
   assert "DROP TABLE" not in sql
-  assert f"{bqca_queries.INVOCATION_ID_EXPR} = @invocation_id" in sql
+  assert f"{bqca_queries.INVOCATION_ID_EXPR} AS invocation_id" in sql
+  assert "WHERE invocation_id = @invocation_id" in sql
 
 
 @pytest.mark.parametrize(
@@ -2738,7 +2801,10 @@ def test_timeline_opens_a_turn_by_the_timestamp_key_made_for_an_empty_id(key):
   assert key not in sql
   # ... and is compared with the very expression that makes the key the turn
   # table lists: an empty id is keyed by the text of its timestamp.
-  assert f"AND {bqca_queries.INVOCATION_ID_EXPR} = @invocation_id" in sql
+  assert f"{bqca_queries.INVOCATION_ID_EXPR} AS invocation_id" in _cte_body(
+      sql, "events"
+  )
+  assert "WHERE invocation_id = @invocation_id" in sql
   assert "CAST(timestamp AS STRING)" in bqca_queries.INVOCATION_ID_EXPR
 
   seen: dict[str, Any] = {}
@@ -5143,3 +5209,201 @@ def test_doc_helpers_understand_fences_and_anchors():
   assert _markdown_section(text, "## 6. A & B (C)") == "## 6. A & B (C)"
   with pytest.raises(AssertionError, match="not found"):
     _markdown_section(text, "## Missing")
+
+
+def test_null_id_orphan_rows_never_collide_on_underscore_delimiters():
+  # Two NULL-invocation_id rows at the same timestamp, session, conversation,
+  # and NULL span_id whose (data_agent_id, persona) values would produce the
+  # same '_' concatenation ('finance_ops' + '_' + 'analyst' ==
+  # 'finance' + '_' + 'ops_analyst') must stay distinct in both the Python
+  # attribution model and SQL execution.
+  assert "TO_JSON_STRING(STRUCT(" in bqca_queries._TURN_PARTITION_KEY
+  rows = [
+      {
+          **_event(
+              100,
+              "LLM_RESPONSE",
+              turn=None,
+              span=None,
+              session="sess-1",
+              conversation="conv-1",
+              persona="analyst",
+              agent="finance_ops",
+              fast=False,
+              error=False,
+          ),
+          "total_tokens": 10,
+      },
+      {
+          **_event(
+              100,
+              "LLM_RESPONSE",
+              turn=None,
+              span=None,
+              session="sess-1",
+              conversation="conv-1",
+              persona="ops_analyst",
+              agent="finance",
+              fast=False,
+              error=False,
+          ),
+          "total_tokens": 20,
+      },
+  ]
+  resolved = _resolve_attribution(rows)
+  assert [r["invocation_id"] for r in resolved] == [None, None]
+  assert [r["data_agent_id"] for r in resolved] == ["finance_ops", "finance"]
+  assert [r["persona"] for r in resolved] == ["analyst", "ops_analyst"]
+  assert (
+      sum(r["total_tokens"] for r in resolved if r["persona"] == "analyst")
+      == 10
+  )
+  assert (
+      sum(r["total_tokens"] for r in resolved if r["persona"] == "ops_analyst")
+      == 20
+  )
+
+
+def test_partial_blank_invocation_id_inherits_from_trace_in_prelude_and_timeline():
+  # When a producer logs a non-blank invocation_id on INVOCATION_STARTING /
+  # USER_MESSAGE_RECEIVED / LLM_RESPONSE / AGENT_RESPONSE but logs '' or '   '
+  # on INVOCATION_COMPLETED under the same non-empty trace_id, every event on
+  # that trace inherits the turn's invocation_id in both _prelude and
+  # build_bqca_turn_timeline_sql.
+  rows = [
+      _event(
+          10,
+          "INVOCATION_STARTING",
+          turn="pb-A",
+          trace="tr-pb-A",
+          session="sess-pb-1",
+          persona="analyst",
+          agent="agent_alpha",
+      ),
+      _event(
+          11,
+          "USER_MESSAGE_RECEIVED",
+          turn="pb-A",
+          trace="tr-pb-A",
+          session="sess-pb-1",
+      ),
+      _event(
+          12,
+          "LLM_RESPONSE",
+          turn="pb-A",
+          trace="tr-pb-A",
+          session="sess-pb-1",
+      ),
+      _event(
+          13,
+          "AGENT_RESPONSE",
+          turn="pb-A",
+          trace="tr-pb-A",
+          session="sess-pb-1",
+      ),
+      _event(
+          14,
+          "INVOCATION_COMPLETED",
+          turn="",
+          trace="tr-pb-A",
+          session="sess-pb-1",
+      ),
+      _event(
+          20,
+          "INVOCATION_STARTING",
+          turn="pb-B",
+          trace="tr-pb-B",
+          session="sess-pb-1",
+          persona="executive",
+          agent="agent_beta",
+      ),
+      _event(
+          25,
+          "INVOCATION_COMPLETED",
+          turn="   ",
+          trace="tr-pb-B",
+          session="sess-pb-1",
+      ),
+  ]
+  resolved = _resolve_attribution(rows)
+  assert [r["invocation_id"] for r in resolved] == ["pb-A"] * 5 + ["pb-B"] * 2
+  assert [r["persona"] for r in resolved] == ["analyst"] * 5 + ["executive"] * 2
+  assert [r["data_agent_id"] for r in resolved] == (
+      ["agent_alpha"] * 5 + ["agent_beta"] * 2
+  )
+
+  # Execute the exact trace-inheritance window semantics in SQLite to verify
+  # that the timeline query returns all 5 events (including the blank-id
+  # INVOCATION_COMPLETED) when queried for @invocation_id = 'pb-A'.
+  con = sqlite3.connect(":memory:")
+  con.execute(
+      "CREATE TABLE raw_logs ("
+      " timestamp INTEGER, event_type TEXT, invocation_id TEXT,"
+      " trace_id TEXT, session_id TEXT)"
+  )
+  con.executemany(
+      "INSERT INTO raw_logs VALUES (?, ?, ?, ?, ?)",
+      [
+          (
+              r["timestamp"],
+              r["event_type"],
+              r["invocation_id"],
+              r["trace_id"],
+              r["raw_session_id"],
+          )
+          for r in rows
+      ],
+  )
+  sqlite_inv_expr = (
+      "CASE WHEN invocation_id IS NULL THEN NULL ELSE COALESCE("
+      "NULLIF(TRIM(invocation_id), ''), "
+      "CASE WHEN NULLIF(TRIM(trace_id), '') IS NULL THEN NULL ELSE "
+      "FIRST_VALUE(NULLIF(TRIM(invocation_id), '')) OVER ("
+      "PARTITION BY NULLIF(TRIM(trace_id), '') "
+      "ORDER BY CASE WHEN NULLIF(TRIM(invocation_id), '') IS NULL THEN 1 ELSE 0 END ASC, "
+      "timestamp ASC, event_type ASC, NULLIF(TRIM(invocation_id), '') ASC "
+      "ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) END, "
+      "NULLIF(TRIM(trace_id), ''), "
+      "NULLIF(TRIM(session_id), ''), "
+      "CAST(timestamp AS TEXT)) END"
+  )
+  timeline_rows = con.execute(
+      f"WITH events AS ("
+      f" SELECT timestamp, event_type, {sqlite_inv_expr} AS invocation_id"
+      f" FROM raw_logs"
+      f") SELECT event_type FROM events"
+      f" WHERE invocation_id = ? ORDER BY timestamp, event_type",
+      ("pb-A",),
+  ).fetchall()
+  assert [r[0] for r in timeline_rows] == [
+      "INVOCATION_STARTING",
+      "USER_MESSAGE_RECEIVED",
+      "LLM_RESPONSE",
+      "AGENT_RESPONSE",
+      "INVOCATION_COMPLETED",
+  ]
+
+
+def test_total_turns_tooltip_and_readme_document_trace_and_session_fallback(
+    docs,
+):
+  import app as app_module
+
+  kpis = dict(app_module._BQCA_KPIS)
+  total_turns_help = kpis["Total Turns"]
+  assert "inherit any non-blank" in total_turns_help
+  assert "trace_id" in total_turns_help
+  assert "session_id" in total_turns_help
+  assert "one turn" in total_turns_help
+
+  what_you_see = _markdown_section(docs["readme"], "### What you see")
+  assert "shares a `trace_id` with an event that carries a non-blank" in (
+      what_you_see
+  )
+  assert "grouped as one turn" in what_you_see
+
+  verification = _markdown_section(docs["readme"], README_VERIFICATION_HEADING)
+  assert "FIRST_VALUE(NULLIF(TRIM(invocation_id), '') IGNORE NULLS)" in (
+      verification
+  )
+  assert "in one session into one turn" in verification

@@ -364,8 +364,8 @@ input:focus-visible {
   margin: 0 0 16px;
   padding: 13px 15px;
   border-radius: 10px;
-  font-size: 0.78rem;
-  line-height: 1.48;
+  font-size: 1rem;
+  line-height: 1.5;
   overflow-wrap: anywhere;
 }
 

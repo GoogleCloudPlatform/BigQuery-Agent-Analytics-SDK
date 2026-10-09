@@ -1167,7 +1167,11 @@ def _fig_or_none(fig: Any) -> Any:
 _BQCA_KPIS = (
     (
         "Total Turns",
-        "A turn is one invocation (`invocation_id`) in scope, completed or not.",
+        "A turn is one invocation (`invocation_id`) in scope, completed"
+        " or not. Blank `invocation_id` events inherit any non-blank"
+        " `invocation_id` on the same `trace_id`, or fall back to"
+        " `trace_id`, `session_id` (grouping traceless blank-ID events"
+        " in a session as one turn), or `timestamp`.",
     ),
     (
         "Turn Error Rate",
