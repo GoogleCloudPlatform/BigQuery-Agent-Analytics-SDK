@@ -1,6 +1,6 @@
 # Consumer snapshot of the dedicated 7-page tool-free BQCA Looker Studio template.
 # Captures the 7 pages, 34 components (21 scorecards + 13 charts/tables), and
-# 40-field remediated BlockDatasource schema of report 1ffb0888-20ea-451f-aeb8-69fc37973335.
+# 41-field remediated BlockDatasource schema of report 1ffb0888-20ea-451f-aeb8-69fc37973335.
 meta:
   surface: bqca_prompt_response_logging_looker_studio
   report_id: 1ffb0888-20ea-451f-aeb8-69fc37973335
@@ -26,7 +26,7 @@ datasource:
   parameter_configuration:
   - DS_START_DATE
   - DS_END_DATE
-  field_count: 40
+  field_count: 41
   system_fields:
   - name: datastudio_record_count_system_field_id_98323387
     display_name: Record Count
@@ -141,6 +141,11 @@ datasource:
     display_name: is_turn_complete
     data_type: BOOL
     semantic_type: BOOLEAN
+    concept_type: DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION
+  - name: _completed_turn_id_
+    display_name: completed_turn_id
+    data_type: STRING
+    semantic_type: TEXT
     concept_type: DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION
   - name: _total_latency_ms_
     display_name: total_latency_ms
@@ -707,19 +712,19 @@ pages:
     category: scorecard
     component_type: kpi-metric
     chart_type: SCORECARD
-    label: Total Turns (Sessions)
-    title: Total Turns (Sessions)
+    label: Total Turns
+    title: Total Turns
     datasource_id: 4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc
     data_source_alias: ds0
-    field: session_id
+    field: invocation_id
     aggregation: COUNT_DISTINCT
     dimensions: []
     metrics:
-    - field: session_id
+    - field: invocation_id
       aggregation: COUNT_DISTINCT
-      display_name: Total Turns (Sessions)
+      display_name: Total Turns
     columns:
-    - _session_id_
+    - _invocation_id_
     geometry:
       top: 16
       left: 313
@@ -737,14 +742,14 @@ pages:
           datasourceId: 4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc
           columns:
           - id: met
-            fieldName: _session_id_
-            displayName: Total Turns (Sessions)
+            fieldName: _invocation_id_
+            displayName: Total Turns
             aggregation: COUNT_DISTINCT
         fields:
           primaryMetricId: met
         title:
           showTitle: false
-          text: Total Turns (Sessions)
+          text: Total Turns
   - &id010
     id: kpi_turn_completes
     given_id: kpi_turn_completes
@@ -758,15 +763,15 @@ pages:
     title: Completed Turns
     datasource_id: 4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc
     data_source_alias: ds0
-    field: turn_latency_ms
-    aggregation: COUNT
+    field: completed_turn_id
+    aggregation: COUNT_DISTINCT
     dimensions: []
     metrics:
-    - field: turn_latency_ms
-      aggregation: COUNT
+    - field: completed_turn_id
+      aggregation: COUNT_DISTINCT
       display_name: Completed Turns
     columns:
-    - _turn_latency_ms_
+    - _completed_turn_id_
     geometry:
       top: 16
       left: 610
@@ -784,9 +789,9 @@ pages:
           datasourceId: 4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc
           columns:
           - id: met
-            fieldName: _turn_latency_ms_
+            fieldName: _completed_turn_id_
             displayName: Completed Turns
-            aggregation: COUNT
+            aggregation: COUNT_DISTINCT
         fields:
           primaryMetricId: met
         title:
@@ -854,10 +859,10 @@ pages:
     dimensions:
     - data_agent_id
     metrics:
-    - session_id
+    - invocation_id
     columns:
     - _data_agent_id_
-    - _session_id_
+    - _invocation_id_
     geometry:
       top: 132
       left: 16
@@ -878,7 +883,7 @@ pages:
             fieldName: _data_agent_id_
             displayName: Data Agent
           - id: m0
-            fieldName: _session_id_
+            fieldName: _invocation_id_
             displayName: Turns
             aggregation: COUNT_DISTINCT
         fields:
@@ -913,13 +918,13 @@ pages:
     dimensions:
     - data_agent_id
     metrics:
-    - session_id
+    - invocation_id
     - turn_latency_ms
     - total_tokens
     - error_message
     columns:
     - _data_agent_id_
-    - _session_id_
+    - _invocation_id_
     - _turn_latency_ms_
     - _total_tokens_
     - _error_message_
@@ -943,7 +948,7 @@ pages:
             fieldName: _data_agent_id_
             displayName: Data Agent
           - id: m0
-            fieldName: _session_id_
+            fieldName: _invocation_id_
             displayName: Turns
             aggregation: COUNT_DISTINCT
           - id: m1
@@ -1259,7 +1264,7 @@ pages:
     category: chart
     component_type: simple-barchart
     chart_type: bar_chart
-    title: Embedding Suggestions by Reason
+    title: Suggested Columns by Reason
     datasource_id: 4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc
     data_source_alias: ds0
     dimensions:
@@ -1308,7 +1313,7 @@ pages:
           stackType: NONE
         title:
           showTitle: true
-          text: Embedding Suggestions by Reason
+          text: Suggested Columns by Reason
 - index: 4
   id: p_edf06c14
   encoded_page_id: p_edf06c14
@@ -1485,10 +1490,10 @@ pages:
     dimensions:
     - persona
     metrics:
-    - session_id
+    - invocation_id
     columns:
     - _persona_
-    - _session_id_
+    - _invocation_id_
     geometry:
       top: 132
       left: 16
@@ -1509,7 +1514,7 @@ pages:
             fieldName: _persona_
             displayName: Persona
           - id: m0
-            fieldName: _session_id_
+            fieldName: _invocation_id_
             displayName: Turns
             aggregation: COUNT_DISTINCT
         fields:
@@ -1545,13 +1550,13 @@ pages:
     - persona
     - data_agent_id
     metrics:
-    - session_id
+    - invocation_id
     - total_tokens
     - turn_latency_ms
     columns:
     - _persona_
     - _data_agent_id_
-    - _session_id_
+    - _invocation_id_
     - _total_tokens_
     - _turn_latency_ms_
     geometry:
@@ -1577,7 +1582,7 @@ pages:
             fieldName: _data_agent_id_
             displayName: Data Agent
           - id: m0
-            fieldName: _session_id_
+            fieldName: _invocation_id_
             displayName: Turns
             aggregation: COUNT_DISTINCT
           - id: m1
@@ -1787,10 +1792,10 @@ pages:
     dimensions:
     - fast_path_label
     metrics:
-    - session_id
+    - invocation_id
     columns:
     - _fast_path_label_
-    - _session_id_
+    - _invocation_id_
     geometry:
       top: 132
       left: 16
@@ -1811,7 +1816,7 @@ pages:
             fieldName: _fast_path_label_
             displayName: Execution Path
           - id: met
-            fieldName: _session_id_
+            fieldName: _invocation_id_
             displayName: Turns
             aggregation: COUNT_DISTINCT
         fields:
@@ -1912,8 +1917,8 @@ pages:
     category: scorecard
     component_type: kpi-metric
     chart_type: SCORECARD
-    label: Error Events (with Message)
-    title: Error Events (with Message)
+    label: Error Events (3-Condition)
+    title: Error Events (3-Condition)
     datasource_id: 4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc
     data_source_alias: ds0
     field: error_message
@@ -1922,7 +1927,7 @@ pages:
     metrics:
     - field: error_message
       aggregation: COUNT
-      display_name: Error Events (with Message)
+      display_name: Error Events (3-Condition)
     columns:
     - _error_message_
     geometry:
@@ -1943,13 +1948,13 @@ pages:
           columns:
           - id: met
             fieldName: _error_message_
-            displayName: Error Events (with Message)
+            displayName: Error Events (3-Condition)
             aggregation: COUNT
         fields:
           primaryMetricId: met
         title:
           showTitle: false
-          text: Error Events (with Message)
+          text: Error Events (3-Condition)
   - &id031
     id: kpi_distinct_errors
     given_id: kpi_distinct_errors
@@ -2063,26 +2068,18 @@ pages:
     page_id: p_88bcf5f8
     page_title: Errors (BQCA 3-Condition)
     category: chart
-    component_type: simple-table
-    chart_type: table
-    title: Error Breakdown by Data Agent, Event Type & Message
+    component_type: simple-barchart
+    chart_type: bar_chart
+    title: Error Events by Data Agent
     datasource_id: 4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc
     data_source_alias: ds0
     dimensions:
-    - is_error
     - data_agent_id
-    - event_type
-    - error_message
     metrics:
-    - span_id
-    - session_id
+    - error_message
     columns:
-    - _is_error_
     - _data_agent_id_
-    - _event_type_
     - _error_message_
-    - _span_id_
-    - _session_id_
     geometry:
       top: 132
       left: 610
@@ -2095,55 +2092,34 @@ pages:
         left: 610
         width: 578
         height: 320
-      table:
+      barChart:
         dataset:
           datasourceId: 4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc
           columns:
-          - id: d0
-            fieldName: _is_error_
-            displayName: Is Error
-          - id: d1
+          - id: dim
             fieldName: _data_agent_id_
             displayName: Data Agent
-          - id: d2
-            fieldName: _event_type_
-            displayName: Event Type
-          - id: d3
-            fieldName: _error_message_
-            displayName: Error Message
           - id: m0
-            fieldName: _span_id_
-            displayName: Events
+            fieldName: _error_message_
+            displayName: Error Events
             aggregation: COUNT
-          - id: m1
-            fieldName: _session_id_
-            displayName: Sessions
-            aggregation: COUNT_DISTINCT
         fields:
-          dimensionIds:
-          - d0
-          - d1
-          - d2
-          - d3
-          metricIds:
-          - m0
-          - m1
-          sort:
-          - sortDir: DESC
-            sortFieldId: m0
-          limit: 100
+          primaryAxis:
+            fieldId: dim
+            sort:
+            - sortDir: DESC
+              sortFieldId: m0
+            limit: 15
+            includeOthers: false
+            reverseSortOrder: false
+          metricSeries:
+            metricIds:
+            - m0
         style:
-          columnWidths:
-          - 40.0
-          - 89.67
-          - 89.67
-          - 89.67
-          - 89.67
-          - 89.67
-          - 89.67
+          stackType: NONE
         title:
           showTitle: true
-          text: Error Breakdown by Data Agent, Event Type & Message
+          text: Error Events by Data Agent
 - index: 7
   id: p_b87a335e
   encoded_page_id: p_b87a335e
@@ -2165,7 +2141,7 @@ pages:
     category: chart
     component_type: simple-table
     chart_type: table
-    title: Turn-Level Prompt, Response & Extracted SQL
+    title: Event-Level Prompt, Response & Extracted SQL
     datasource_id: 4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc
     data_source_alias: ds0
     dimensions:
@@ -2285,7 +2261,7 @@ pages:
           - 94.33
         title:
           showTitle: true
-          text: Turn-Level Prompt, Response & Extracted SQL
+          text: Event-Level Prompt, Response & Extracted SQL
 components:
 - *id001
 - *id002

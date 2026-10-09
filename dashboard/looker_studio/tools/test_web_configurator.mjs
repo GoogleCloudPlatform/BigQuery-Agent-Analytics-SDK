@@ -1466,6 +1466,22 @@ assert.throws(
   () => validateQualifiedTableId("xsentinelbqaaevents.my_dataset.my_table", bqcaProfile),
   (error) => error.segment === "project",
 );
+assert.throws(
+  () => validateQualifiedTableId("", bqcaProfile),
+  (error) =>
+    error.field === "tableId" &&
+    error.segment === null &&
+    /BQCA logging table ID/.test(error.message),
+  "BQCA empty tableId error names BQCA logging table ID",
+);
+assert.throws(
+  () => validateQualifiedTableId("", adkProfile),
+  (error) =>
+    error.field === "tableId" &&
+    error.segment === null &&
+    /BQAA table ID/.test(error.message),
+  "ADK empty tableId error names BQAA table ID",
+);
 assert.deepEqual(
   validateQualifiedTableId("my-project.my_dataset.my_table", bqcaProfile),
   qualifiedTableId,
@@ -1631,6 +1647,16 @@ assert.match(
   bqcaPageSource,
   /Create my BQCA dashboard/,
   "the BQCA CTA button names the BQCA dashboard",
+);
+assert.match(
+  bqcaPageSource,
+  /id="report-not-shared"[\s\S]*?pull\/515" data-profile-only="bqca">[\s\S]*?Self-Hosted Streamlit BQCA Dashboard/,
+  "the BQCA #report-not-shared explainer links PR #515 and the Self-Hosted Streamlit BQCA Dashboard",
+);
+assert.match(
+  bqcaPageSource,
+  /No generated views required\.[\s\S]*?<span data-profile-only="bqca">BQCA logging table<\/span>/,
+  "the BQCA No-generated-views notice names the BQCA logging table",
 );
 assert.match(bqcaPageSource, /https:\/\/googlecloudplatform\.github\.io\/BigQuery-Agent-Analytics-SDK\/bqca\//);
 

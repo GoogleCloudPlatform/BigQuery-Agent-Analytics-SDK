@@ -19,12 +19,12 @@ generated_report_credential_gate:
   observed_initial_mode: OWNERS
   required_before_sharing: VIEWERS
   verification_path: Resource > Manage added data sources > Edit
-link_access: PUBLIC
+link_access: PENDING_PUBLIC_SHARING_ALLOWLIST
 publishing_mode: MANUAL
 
 reviewed_template_sql:
   path: sql/bqca_events_v1.template.sql
-  sha256: 9edf20a0b52e4cc96e4e559805b9e9372f0d789f0429fdd9308faeea95d15d46
+  sha256: a6e4a2614839f1a6633d0188b1b21fc94f4dfaa3202d90e581177afc3db399b2
 
 # Required settings on the published Looker Studio BlockDatasource (`ds0`).
 # `_event_date_`, `_timestamp_`, and `_event_hour_` must keep native date/time
@@ -55,9 +55,9 @@ block_datasource:
 # `spec/bqca_chart_manifest.yaml`, so mutating any component or metric fails CI.
 live_template_verification:
   verified_date: "2026-10-08"
-  repository_sql_sha256: 9edf20a0b52e4cc96e4e559805b9e9372f0d789f0429fdd9308faeea95d15d46
-  pages_sha256: 40cb6b25379611da8f8b05db9345245a9928fa1e149c39466f092b15029c0279
-  manifest_sha256: f41be518adf4a64b75532ebec348f3fd5533ede0af28cc0433ab51d324a4b074
+  repository_sql_sha256: a6e4a2614839f1a6633d0188b1b21fc94f4dfaa3202d90e581177afc3db399b2
+  pages_sha256: 61f7867111ab1efe08d41c74c00c2af4fcc88d04e6d8d96d52c4c629ba0549cc
+  manifest_sha256: 35b5a26d2784be02f4059db4626b8b36d2d87f05e8423db4094f27ba3be6d963
   method:
     - data_studio_web_service_publish_datasource
     - data_studio_web_service_get_block_datasource
@@ -66,8 +66,8 @@ live_template_verification:
   publish_datasource:
     health: HEALTHY
     versions:
-      hydrated_bqca_table: 1791494305139
-      canonical_sentinel_table: 1791494402606
+      hydrated_bqca_table: 1791503488088
+      canonical_sentinel_table: 1791503611559
   execute_query:
     # hydrated_bqca_table is a sanitized live BQCA Prompt & Response Logging
     # table conforming to the 15-column BQAA base schema with recent events
@@ -156,7 +156,7 @@ known_live_issues:
     scope: external_non_owner_identities
     reported_date: "2026-10-08"
     cause_isolation: >-
-      Owner-side provisioning, 40-field BlockDatasource native date/time
+      Owner-side provisioning, 41-field BlockDatasource native date/time
       remediation, and all 7 pages / 34 components passed live verification on
       2026-10-08; external `allUsers` link sharing and the out-of-domain copy
       canary remain gated on public-sharing allowlist approval. While

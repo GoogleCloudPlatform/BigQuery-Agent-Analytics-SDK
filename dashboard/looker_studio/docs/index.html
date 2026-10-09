@@ -258,15 +258,16 @@
         sharing policy can also block receiving Looker Studio assets from
         external domains — try a personal account if you can. If the dialog
         still persists, the template’s copy path is blocked —
-        <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/445">
-          report it on issue #445</a> — say only whether the signed-in
+        <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/445" data-profile-only="adk">
+          report it on issue #445</a><a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/515" data-profile-only="bqca" hidden>
+          track public-sharing allowlist progress on #515</a> — say only whether the signed-in
         account is personal or part of an organization; do not post the
         account’s email address. The repository’s CLI preflight can still
         validate your table, but it copies the same template, so it is not
         a workaround;
         while the template is blocked, use the
-        <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/dashboards/grafana">
-          Grafana dashboard</a>.
+        <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/dashboards/grafana" data-profile-only="adk">
+          Grafana dashboard</a><span data-profile-only="bqca" hidden><a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/dashboards/streamlit">Self-Hosted Streamlit BQCA Dashboard</a> or <code>hydrate_dashboard.py --profile bqca --custom-sql-out</code></span>.
       </aside>
 
       <aside class="notice notice-warning">
@@ -312,10 +313,12 @@
 
       <aside class="notice">
         <strong>No generated views required.</strong>
-        The dashboard reads the configured BQAA event table directly. A
-        separate billing project is available under Advanced settings. For a
-        location override or verified preflight, use the repository’s CLI
-        helper.
+        The dashboard reads the configured
+        <span data-profile-only="adk">BQAA event table</span>
+        <span data-profile-only="bqca" hidden>BQCA logging table</span>
+        directly. A separate billing project is available under Advanced
+        settings. For a location override or verified preflight, use the
+        repository’s CLI helper.
       </aside>
 
       <aside class="notice" aria-labelledby="viewing-support-title">

@@ -246,8 +246,10 @@ separate, dedicated 7-page tool-free Looker Studio report template
 - **Consumer chart manifest**: `spec/bqca_chart_manifest.yaml` is the BQCA
   counterpart to `spec/chart_manifest.yaml`, recording every component's
   Looker Studio `component_id` (`cd-...`), `given_id`, page assignment,
-  fixed-layout geometry (`top`, `left`, `width`, `height`), dimensions,
-  metrics, and the 40-field remediated `BlockDatasource` schema.
+  responsive 12-column section geometry (`DASHBOARD_LAYOUT_MODE_RESPONSIVE`
+  with explicit `top`, `left`, `width`, `height` coordinates inside
+  12-column page sections), dimensions, metrics, and the 41-field remediated
+  `BlockDatasource` schema.
 - **Report template binding**: `bindings/bqca_report_template.yaml` and
   `bindings/bqca_template_bindings.yaml` pin the report ID, `ds0` alias,
   sentinel replacement identifiers, `reviewed_template_sql.sha256`,
@@ -282,7 +284,7 @@ On the published `BlockDatasource` (`4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc`):
 2. `_event_date_` (`DATE` / `YEAR_MONTH_DAY`), `_timestamp_` (`TIMESTAMP` /
    `YEAR_MONTH_DAY_SECOND`), and `_event_hour_` (`TIMESTAMP` /
    `YEAR_MONTH_DAY_HOUR`) must retain `use_native_date_time: true` across the
-   40-field schema.
+   41-field schema.
 
 ### Fallback paths
 

@@ -1003,6 +1003,7 @@ def reset_bqca_filters() -> None:
   st.session_state.pop("_bqca_applied", None)
   st.session_state.pop("_bqca_filter_options", None)
   st.session_state.pop("_bqca_selected_turn", None)
+  st.session_state.pop("_bqca_turn_select", None)
   for key in _BQCA_WIDGET_KEYS.values():
     st.session_state.pop(key, None)
 
@@ -1269,9 +1270,8 @@ def row_bqca_kpis(state: BqcaFilterState, ctx: Context) -> None:
     # Events exist but none belongs to a turn: the token totals are real, the
     # turn-based figures are undefined, and the reader should be told why.
     st.caption(
-        "0 attributed turns (all events in scope have missing or blank"
-        " invocation_id); token totals include unattributed LLM_RESPONSE"
-        " events."
+        "0 attributed turns (all events in scope have no invocation_id);"
+        " token totals include unattributed LLM_RESPONSE events."
     )
 
 
@@ -1487,8 +1487,10 @@ def _render_bqca_turn(turn: Any, state: BqcaFilterState, ctx: Context) -> None:
     st.error(bqca_models.inert_markdown(turn.error_message))
 
   if not turn.invocation_id or not turn.invocation_id.strip():
-    # The timeline is keyed on the invocation id, and the query builder
-    # rejects a blank one, so there is nothing to look up for this turn.
+    # The timeline is keyed on the turn key (the invocation id, or the
+    # timestamp key the query synthesizes for a turn logged with an empty id),
+    # and the query builder rejects a blank one. The turns query lists only
+    # turns that have a key, so this guards a malformed frame, not real data.
     st.caption("No valid invocation ID is associated with this turn.")
   else:
     timeline = bqca_queries.fetch_panel(
@@ -1534,14 +1536,23 @@ def row_bqca_explorer(state: BqcaFilterState, ctx: Context) -> None:
   st.markdown("**Turn detail**")
   labels = {row.invocation_id: _bqca_turn_label(row) for row in rows}
   ids = list(labels)
-  # `_bqca_selected_turn` must stay a non-widget key (not passed as key=...),
-  # so a dynamically computed index cannot conflict with the widget's own
-  # state when the options change between queries.
+  # The picker is a keyed widget, so Streamlit tells it apart by its key. It
+  # must not be given an `index=`: an index is part of the identity of an
+  # unkeyed selectbox, so feeding the previous choice back as the index made
+  # every second selection reset to the first option. The widget's own state
+  # holds the choice. It is seeded here only when it is absent or no longer one
+  # of the options (new filters, or a switch of tab that dropped the widget),
+  # from the last turn opened when that turn is still listed.
+  # `_bqca_selected_turn` stays a plain session key that remembers that turn.
   previous = st.session_state.get("_bqca_selected_turn")
+  if st.session_state.get("_bqca_turn_select") not in ids:
+    st.session_state["_bqca_turn_select"] = (
+        previous if previous in ids else ids[0]
+    )
   chosen = st.selectbox(
       "Turn",
       options=ids,
-      index=ids.index(previous) if previous in ids else 0,
+      key="_bqca_turn_select",
       format_func=lambda invocation_id: labels[invocation_id],
   )
   st.session_state["_bqca_selected_turn"] = chosen

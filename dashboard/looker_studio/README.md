@@ -46,7 +46,7 @@ billing project is supported as an optional advanced setting.
 |---|---|
 | `spec/chart_manifest.yaml` | Reviewed consumer snapshot: 37 chart records, 9 non-data elements, controls, listener matrix, layout, and oracle mappings |
 | `spec/product_contract.yaml` | Current product-layer titles, layout, filters, live fixes, and intentional divergences from the pinned block |
-| `spec/bqca_chart_manifest.yaml` | Consumer snapshot of the dedicated 7-page tool-free BQCA template: 7 pages, 34 components (21 scorecards + 13 charts/tables), fixed-layout geometry, and 40-field `BlockDatasource` schema |
+| `spec/bqca_chart_manifest.yaml` | Consumer snapshot of the dedicated 7-page tool-free BQCA template: 7 pages, 34 components (21 scorecards + 13 charts/tables), responsive 12-column section geometry (`DASHBOARD_LAYOUT_MODE_RESPONSIVE`), and 41-field `BlockDatasource` schema |
 | `spec/bqca_product_contract.yaml` | Product contract for the dedicated 7-page tool-free BQCA template (`1ffb0888-20ea-451f-aeb8-69fc37973335`, alias `ds0`) |
 | `sql/events_v1.sql.tmpl` | Reviewed base-table query (**generated** by `tools/gen_events_tmpl.py`) |
 | `sql/events_v1.template.sql` | Sentinel-rendered SQL embedded in the canonical report (**generated** by `tools/render_template.py`) |
@@ -311,13 +311,14 @@ and tool-error charts are omitted from the template:
 - **Token Consumption** (`p_539b9240`) — total, input, output, thoughts, and
   cached tokens over time and by `data_agent_id`;
 - **Data Agents & Turns** (`p_a89cfece`) — active data agents (`data_agent_id`),
-  total turns (`session_id`), completed turns (`turn_latency_ms`), generated SQL
-  queries (`extracted_sql`), and volume/latency/errors by `data_agent_id`
-  (session counts are turn counts because every BQCA turn starts a new session);
+  total turns (`invocation_id`), completed turns (`completed_turn_id`), generated
+  SQL queries (`extracted_sql`), and volume/latency/errors by `data_agent_id`
+  (session counts are turn counts because every BQCA turn starts a new session,
+  and `invocation_id` is normalized with a timestamp fallback for blank strings);
 - **LLM Interactions & Embedding Suggestions** (`p_97efe693`) — model calls
   (`llm_latency_ms`), average LLM call latency, average time to first token
   (`ttft_ms`), suggested columns proposed (`similar_queries_count`), and token /
-  suggestion trends by `model_version` and `embedding_suggestion_reason`;
+  suggested-column trends by `model_version` and `embedding_suggestion_reason`;
 - **User & Persona Analytics** (`p_edf06c14`) — distinct personas (`persona`),
   distinct user IDs (`user_id`), distinct conversations (`conversation_id`), and
   activity by `persona` and `data_agent_id`;
@@ -327,8 +328,9 @@ and tool-error charts are omitted from the template:
   (`fast_path_label`);
 - **Errors (BQCA 3-Condition)** (`p_88bcf5f8`) — errors across all three BQCA
   error conditions (`is_error`), attributed by `data_agent_id`, `event_type`, and
-  `error_message`;
-- **Prompt, Response & SQL Inspector** (`p_b87a335e`) — turn-by-turn table of
+  `error_message` (synthesizing `[EVENT_TYPE: status=STATUS]` when `is_error` is
+  true and `error_message` is null/blank);
+- **Prompt, Response & SQL Inspector** (`p_b87a335e`) — event-level table of
   `event_date`, `session_id`, `data_agent_id`, `persona`, `event_type`,
   `fast_path_label`, `user_prompt_text`, `extracted_sql`, `summary_text`,
   `error_message`, `total_latency_ms`, and `total_tokens`.
@@ -341,15 +343,15 @@ logs, in one date-pruned scan of your table, and adds:
 
 | Column | Meaning |
 |---|---|
-| `data_agent_id`, `conversation_id` | From `attributes.session_metadata.state`, never from `agent`, `user_id`, or `session_id` |
-| `persona` | `custom_labels.persona`, else the local part of a well-formed email `user_id`, else the data agent, else `unattributed` |
-| `fast_path`, `fast_path_label` | Whether the turn took the fast path |
-| `is_error` | Any of: status `ERROR`, a non-null `error_message`, or an `_ERROR` event type |
-| `is_turn_start`, `is_turn_complete` | `INVOCATION_STARTING` / `INVOCATION_COMPLETED` rows; a start without a completion is a failed or abandoned turn |
+| `data_agent_id`, `conversation_id` | From `attributes.session_metadata.state`, propagated across all events of the turn, never from `agent`, `user_id`, or `session_id` |
+| `persona` | `custom_labels.persona`, else the local part of a well-formed email `user_id`, else the data agent, else `unattributed`, propagated across the turn |
+| `fast_path`, `fast_path_label` | Whether any event in the turn took the fast path (`LOGICAL_OR` over the turn) |
+| `is_error` | Any of: status `ERROR`, a non-null/non-blank `error_message`, or an `_ERROR` event type |
+| `is_turn_start`, `is_turn_complete`, `completed_turn_id` | `INVOCATION_STARTING` / deduplicated `INVOCATION_COMPLETED` rows and turn ID; a start without a completion is a failed or abandoned turn |
 | `turn_latency_ms`, `llm_latency_ms`, `ttft_ms`, `total_latency_ms` | Turn, model-call, time-to-first-token, and per-row latency |
 | `model_name`, `model_version`, `input_tokens`, `output_tokens`, `thoughts_tokens`, `cached_tokens`, `total_tokens` | Model usage on `LLM_RESPONSE` rows |
 | `user_prompt_text`, `agent_response_text` | Every text part of a prompt in offset order, and every markdown part of a response in order |
-| `extracted_sql`, `summary_text` | The first fenced SQL block of an `AGENT_RESPONSE`, and a 2,000-character text summary |
+| `extracted_sql`, `summary_text` | The first fenced SQL block of the final `AGENT_RESPONSE` of each turn, and a 2,000-character text summary |
 | `similar_queries_count`, `is_embedding_hit`, `embedding_suggestion_reason` | Suggested-column / suggestion count (`$.suggested_columns` first in `COALESCE`, before `$.similar_queries_count` and `$.suggestions`), non-empty indicator, and `$.reason` on `EMBEDDING_SUGGESTION` rows |
 
 Every generated file is deterministic and CI-checked for drift. After

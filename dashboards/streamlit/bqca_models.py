@@ -1,6 +1,6 @@
 """Data models and constants for the BQCA Prompt & Response Logging dashboard.
 
-BQCA is Conversational Analytics (Macchiato) prompt and response logging: a
+BQCA is BigQuery Conversational Analytics prompt and response logging: a
 BigQuery table written with the BigQuery Agent Analytics schema, restricted to
 nine public event types. This module holds everything the BQCA surface shares
 that is not SQL or drawing code:
@@ -61,7 +61,12 @@ BQCA_ALLOWED_EVENT_TYPES: tuple[str, ...] = (
 )
 
 # Fast-path turns answer from a saved query: no LLM call, no tokens. The
-# plugin tags every event of such a turn with ``attributes.fast_path``.
+# producer logs ``attributes.fast_path = "true"`` on the turn's AGENT_RESPONSE
+# event only; INVOCATION_COMPLETED and the other events of the turn do not
+# carry it. The query layer therefore resolves the flag once per turn
+# (``LOGICAL_OR`` over the turn's events, read case-insensitively), so a turn is
+# on the fast path when any of its events is tagged and every row of the turn,
+# its completion included, then reports the same path.
 FAST_PATH_ALL = "All"
 FAST_PATH_ONLY = "Fast Path Only"
 STANDARD_ONLY = "Standard NL2SQL Only"
@@ -378,8 +383,10 @@ class BqcaTurnRow:
 
   Attributes:
     timestamp: When the turn started.
-    invocation_id: The turn's invocation id, whitespace-trimmed. Empty when
-      the row carries none; such a turn has no timeline to open.
+    invocation_id: The turn's key, whitespace-trimmed: its invocation id, or,
+      for a turn whose events were logged with an empty id, the timestamp key
+      the query synthesizes for it. Empty only when a malformed frame carries
+      none; such a turn has no timeline to open.
     session_id: Session the turn belongs to.
     conversation_id: Conversational Analytics conversation id.
     data_agent_id: Data agent that served the turn.

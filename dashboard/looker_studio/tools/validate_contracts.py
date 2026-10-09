@@ -67,6 +67,8 @@ _EXPECTED_CHART_METRIC_AGGREGATIONS = {
     "ttft_ms": "AVG",
     "total_latency_ms": "AVG",
     "session_id": "COUNT_DISTINCT",
+    "invocation_id": "COUNT_DISTINCT",
+    "completed_turn_id": "COUNT_DISTINCT",
     "error_message": "COUNT",
     "span_id": "COUNT",
     "extracted_sql": "COUNT",
@@ -140,7 +142,10 @@ def _infer_sql_expr_data_type(expr: str, base_types: dict[str, str]) -> str:
   if re.match(r"^TIMESTAMP(?:_TRUNC)?\s*\(", cleaned, re.IGNORECASE):
     return "TIMESTAMP"
   if (
-      re.search(r"=\s*'true'\s*,\s*FALSE\s*\)$", cleaned, re.IGNORECASE)
+      cleaned == "raw_is_error"
+      or re.match(r"^LOGICAL_(?:OR|AND)\s*\(", cleaned, re.IGNORECASE)
+      or re.search(r"=\s*'true'\s*,\s*FALSE\s*\)$", cleaned, re.IGNORECASE)
+      or re.search(r"=\s*1\s*,\s*FALSE\s*\)$", cleaned, re.IGNORECASE)
       or re.search(r">\s*0\s*,\s*FALSE\s*\)$", cleaned, re.IGNORECASE)
       or re.search(
           r"ENDS_WITH\s*\([^)]*'_ERROR'\)\s*\)$", cleaned, re.IGNORECASE
@@ -170,7 +175,7 @@ def extract_sql_projected_columns(
     base_types.update(base_table_types)
 
   cte_match = re.search(
-      r"bqca_fields\s+AS\s*\(\s*SELECT\b(.*?)\bFROM\s+bqca_events\s*\)",
+      r"bqca_fields\s+AS\s*\(\s*SELECT\b(.*?)\bFROM\s+(?:bqca_events|raw_events)\s*\)",
       sql_text,
       re.IGNORECASE | re.DOTALL,
   )
@@ -190,6 +195,15 @@ def extract_sql_projected_columns(
     for item in _split_top_level_csv(body):
       if item == "*":
         cols.extend(known)
+        continue
+      except_match = re.match(
+          r"^\*\s+EXCEPT\s*\(([^)]+)\)\s*$", item, re.IGNORECASE
+      )
+      if except_match:
+        excluded = {
+            c.strip() for c in except_match.group(1).split(",") if c.strip()
+        }
+        cols.extend((k, v) for k, v in known if k not in excluded)
         continue
       alias_match = re.search(
           r"^(.*?)\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\s*$",
@@ -503,10 +517,10 @@ def validate_bqca(
         "bqca_report_template chart_manifest must be spec/bqca_chart_manifest.yaml"
     )
 
-  # 2. Datasource 40-field schema, SQL column projection parity, & native datetime invariants
+  # 2. Datasource 41-field schema, SQL column projection parity, & native datetime invariants
   ds_fields = ds.get("fields", [])
-  if ds.get("field_count") != 40 or len(ds_fields) != 40:
-    errors.append(f"bqca manifest expected 40 SQL fields, got {len(ds_fields)}")
+  if ds.get("field_count") != 41 or len(ds_fields) != 41:
+    errors.append(f"bqca manifest expected 41 SQL fields, got {len(ds_fields)}")
   if ds.get("use_datetime_type") is not True:
     errors.append("bqca manifest datasource.use_datetime_type must be True")
   if ds.get("parameter_configuration") != ["DS_START_DATE", "DS_END_DATE"]:

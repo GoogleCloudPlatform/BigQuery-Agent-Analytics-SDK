@@ -133,12 +133,12 @@ pages:
     purpose: "Track active BQCA data agents, turn volume, completed turns, and generated SQL queries using session_metadata.state.\"data-agent-id\" attribution."
     scorecards:
       - {id: kpi_distinct_agents, label: "Active Data Agents", field: data_agent_id, aggregation: COUNT_DISTINCT}
-      - {id: kpi_total_sessions, label: "Total Turns (Sessions)", field: session_id, aggregation: COUNT_DISTINCT}
-      - {id: kpi_turn_completes, label: "Completed Turns", field: turn_latency_ms, aggregation: COUNT}
+      - {id: kpi_total_sessions, label: "Total Turns", field: invocation_id, aggregation: COUNT_DISTINCT}
+      - {id: kpi_turn_completes, label: "Completed Turns", field: completed_turn_id, aggregation: COUNT_DISTINCT}
       - {id: kpi_extracted_sql_count, label: "Generated SQL Queries", field: extracted_sql, aggregation: COUNT}
     charts:
-      - {id: chart_turns_by_agent, type: bar_chart, title: "Turns by Data Agent", dimensions: [data_agent_id], metrics: [session_id]}
-      - {id: chart_events_by_agent, type: table, title: "Data Agent Volume, Latency & Errors", dimensions: [data_agent_id], metrics: [session_id, turn_latency_ms, total_tokens, error_message]}
+      - {id: chart_turns_by_agent, type: bar_chart, title: "Turns by Data Agent", dimensions: [data_agent_id], metrics: [invocation_id]}
+      - {id: chart_events_by_agent, type: table, title: "Data Agent Volume, Latency & Errors", dimensions: [data_agent_id], metrics: [invocation_id, turn_latency_ms, total_tokens, error_message]}
 
   - index: 3
     id: p_97efe693
@@ -153,7 +153,7 @@ pages:
       - {id: kpi_similar_queries, label: "Suggested Columns Proposed", field: similar_queries_count, aggregation: SUM}
     charts:
       - {id: chart_tokens_by_model, type: bar_chart, title: "Tokens by Model Version", dimensions: [model_version], metrics: [total_tokens]}
-      - {id: chart_embedding_reasons, type: bar_chart, title: "Embedding Suggestions by Reason", dimensions: [embedding_suggestion_reason], metrics: [similar_queries_count]}
+      - {id: chart_embedding_reasons, type: bar_chart, title: "Suggested Columns by Reason", dimensions: [embedding_suggestion_reason], metrics: [similar_queries_count]}
 
   - index: 4
     id: p_edf06c14
@@ -166,8 +166,8 @@ pages:
       - {id: kpi_distinct_users, label: "Distinct User IDs", field: user_id, aggregation: COUNT_DISTINCT}
       - {id: kpi_distinct_conversations, label: "Distinct Conversations", field: conversation_id, aggregation: COUNT_DISTINCT}
     charts:
-      - {id: chart_turns_by_persona, type: bar_chart, title: "Turns by Persona", dimensions: [persona], metrics: [session_id]}
-      - {id: chart_persona_breakdown, type: table, title: "Persona & Data Agent Activity", dimensions: [persona, data_agent_id], metrics: [session_id, total_tokens, turn_latency_ms]}
+      - {id: chart_turns_by_persona, type: bar_chart, title: "Turns by Persona", dimensions: [persona], metrics: [invocation_id]}
+      - {id: chart_persona_breakdown, type: table, title: "Persona & Data Agent Activity", dimensions: [persona, data_agent_id], metrics: [invocation_id, total_tokens, turn_latency_ms]}
 
   - index: 5
     id: p_08774fec
@@ -180,7 +180,7 @@ pages:
       - {id: kpi_llm_latency_p5, label: "Avg LLM Latency (ms)", field: llm_latency_ms, aggregation: AVG}
       - {id: kpi_total_latency_avg, label: "Avg Event Latency (ms)", field: total_latency_ms, aggregation: AVG}
     charts:
-      - {id: chart_fast_path_pie, type: pie_chart, title: "Fast-Path vs Standard NL2SQL Turns", dimensions: [fast_path_label], metrics: [session_id]}
+      - {id: chart_fast_path_pie, type: pie_chart, title: "Fast-Path vs Standard NL2SQL Turns", dimensions: [fast_path_label], metrics: [invocation_id]}
       - {id: chart_latency_by_fast_path, type: bar_chart, title: "Avg Turn Latency: Fast-Path vs Standard NL2SQL", dimensions: [fast_path_label], metrics: [turn_latency_ms]}
 
   - index: 6
@@ -190,18 +190,18 @@ pages:
     component_count: 4
     purpose: "Triage BQCA errors detected via the 3-condition error predicate (status = 'ERROR', non-null error_message, or *_ERROR event type) across data agents and event types."
     scorecards:
-      - {id: kpi_total_errors, label: "Error Events (with Message)", field: error_message, aggregation: COUNT}
+      - {id: kpi_total_errors, label: "Error Events (3-Condition)", field: error_message, aggregation: COUNT}
       - {id: kpi_distinct_errors, label: "Distinct Error Messages", field: error_message, aggregation: COUNT_DISTINCT}
     charts:
       - {id: chart_errors_by_event_type, type: bar_chart, title: "Error Events by BQCA Event Type", dimensions: [event_type], metrics: [error_message]}
-      - {id: chart_errors_by_agent, type: table, title: "Error Breakdown by Data Agent, Event Type & Message", dimensions: [is_error, data_agent_id, event_type, error_message], metrics: [span_id, session_id]}
+      - {id: chart_errors_by_agent, type: bar_chart, title: "Error Events by Data Agent", dimensions: [data_agent_id], metrics: [error_message]}
 
   - index: 7
     id: p_b87a335e
     encoded_page_id: p_b87a335e
     name: "Prompt, Response & SQL Inspector"
     component_count: 1
-    purpose: "Inspect individual turns end-to-end: user prompt, extracted SQL, agent response summary, execution path, latency, tokens, and error messages."
+    purpose: "Inspect individual events and turns end-to-end: user prompt, extracted SQL, agent response summary, execution path, latency, tokens, and error messages."
     scorecards: []
     charts:
-      - {id: tbl_prompt_response_sql, type: table, title: "Turn-Level Prompt, Response & Extracted SQL", dimensions: [event_date, session_id, data_agent_id, persona, event_type, fast_path_label, user_prompt_text, extracted_sql, summary_text, error_message], metrics: [total_latency_ms, total_tokens]}
+      - {id: tbl_prompt_response_sql, type: table, title: "Event-Level Prompt, Response & Extracted SQL", dimensions: [event_date, session_id, data_agent_id, persona, event_type, fast_path_label, user_prompt_text, extracted_sql, summary_text, error_message], metrics: [total_latency_ms, total_tokens]}

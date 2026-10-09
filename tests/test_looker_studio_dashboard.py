@@ -1126,6 +1126,11 @@ def test_googlecloudplatform_pages_configuration():
       "actions/deploy-pages@"
       "d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e" in workflow
   )
+  workflow_yaml = yaml.safe_load(workflow)
+  assert (
+      workflow_yaml["jobs"]["deploy"].get("if")
+      == "github.ref == 'refs/heads/main'"
+  ), "P1-4: deploy job must be gated to refs/heads/main"
 
 
 # BQCA Prompt & Response Logging (dashboard Slice 1): a second profile over
@@ -1317,7 +1322,7 @@ def test_bqca_profile_reuses_the_published_template_bindings():
   assert bqca["datasource_id"] == BQCA_DATASOURCE_ID
   assert bqca["product_contract"] == "spec/bqca_product_contract.yaml"
   assert bqca["chart_manifest"] == "spec/bqca_chart_manifest.yaml"
-  assert bqca["link_access"] == "PUBLIC"
+  assert bqca["link_access"] == "PENDING_PUBLIC_SHARING_ALLOWLIST"
   assert bqca["publishing_mode"] == "MANUAL"
   assert (
       bqca["generated_report_credential_gate"]
@@ -1438,9 +1443,9 @@ def test_bqca_query_reads_only_bqca_events_with_canonical_extractions():
   )
   # #153: an error is any of three signals, never status = 'ERROR' alone.
   assert (
-      "IFNULL(UPPER(status) = 'ERROR', FALSE)\n"
-      "      OR error_message IS NOT NULL\n"
-      "      OR ENDS_WITH(event_type, '_ERROR')"
+      "IFNULL(UPPER(TRIM(status)) = 'ERROR', FALSE)\n"
+      "      OR NULLIF(TRIM(error_message), '') IS NOT NULL\n"
+      "      OR ENDS_WITH(UPPER(TRIM(IFNULL(event_type, ''))), '_ERROR')"
   ) in logical
   # #155: every markdown part of the response, in order, and a persona
   # only from an explicit label or a well-formed email local part.
@@ -1464,6 +1469,7 @@ def test_bqca_query_reads_only_bqca_events_with_canonical_extractions():
       "is_error",
       "is_turn_start",
       "is_turn_complete",
+      "completed_turn_id",
       "total_latency_ms",
       "ttft_ms",
       "turn_latency_ms",
@@ -1510,23 +1516,17 @@ def test_bqca_query_reads_only_bqca_events_with_canonical_extractions():
   )
   assert re.search(r",\s*0\s*\)", similar_coalesce), similar_coalesce
 
-  # R2-P2-3: is_turn_complete and turn_latency_ms deduplicate multiple
-  # INVOCATION_COMPLETED rows per non-blank invocation_id via ROW_NUMBER().
-  assert logical.count("NULLIF(TRIM(invocation_id), '') IS NOT NULL") == 2
-  assert (
-      logical.count("PARTITION BY NULLIF(TRIM(invocation_id), ''), event_type")
-      == 2
-  )
-  assert (
-      len(
-          re.findall(
-              r"ORDER BY\s+SAFE_CAST\(JSON_VALUE\(latency_ms,"
-              r" '\$\.total_ms'\) AS FLOAT64\) DESC NULLS LAST,\s+timestamp"
-              r" DESC,\s+span_id",
-              logical,
-          )
-      )
-      == 2
+  # R2-P2-3 & R3-P1-3: is_turn_complete, completed_turn_id, and turn_latency_ms
+  # deduplicate multiple INVOCATION_COMPLETED rows per non-blank invocation_id
+  # via raw_turn_complete_rn = 1.
+  assert "AS raw_turn_complete_rn" in logical
+  assert "IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id" in logical
+  assert "IFNULL(raw_turn_complete_rn = 1, FALSE) AS is_turn_complete" in logical
+  assert re.search(
+      r"ORDER BY\s+SAFE_CAST\(JSON_VALUE\(latency_ms,"
+      r" '\$\.total_ms'\) AS FLOAT64\) DESC NULLS LAST,\s+timestamp"
+      r" DESC,\s+span_id",
+      logical,
   )
 
   # P2-2: generator docstring reflects that rejected drafts are suppressed and
@@ -1711,8 +1711,8 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
       "publish_datasource": {
           "health": "HEALTHY",
           "versions": {
-              "hydrated_bqca_table": 1791494305139,
-              "canonical_sentinel_table": 1791494402606,
+              "hydrated_bqca_table": 1791503488088,
+              "canonical_sentinel_table": 1791503611559,
           },
       },
       "execute_query": {
@@ -1837,8 +1837,8 @@ def test_bqca_chart_manifest_and_contract_mutation_detection():
   assert manifest["meta"]["scorecard_count"] == 21
   assert manifest["meta"]["chart_count"] == 13
   assert manifest["meta"]["total_component_count"] == 34
-  assert manifest["datasource"]["field_count"] == 40
-  assert len(manifest["datasource"]["fields"]) == 40
+  assert manifest["datasource"]["field_count"] == 41
+  assert len(manifest["datasource"]["fields"]) == 41
   assert len(manifest["pages"]) == 7
   assert len(manifest["components"]) == 34
 
@@ -2365,6 +2365,7 @@ def test_bqca_profile_is_documented_for_contributors_and_users():
       "spec/bqca_chart_manifest.yaml",
       "all tool-usage pages, tool-latency series, and tool-error charts are omitted",
       "session counts are turn counts",
+      "total turns (`invocation_id`), completed turns (`completed_turn_id`)",
   ):
     assert fragment in readme, f"README.md must document {fragment!r}"
   for fragment in (
@@ -2393,3 +2394,162 @@ def test_bqca_profile_is_documented_for_contributors_and_users():
   for relative, text in (("README.md", readme), ("USER_MANUAL.md", manual)):
     for event_type in BQCA_UNLOGGED_EVENT_TYPES:
       assert event_type not in text, f"{relative} names {event_type}"
+
+
+def test_staleness_parser_rejects_malformed_or_nested_attestations():
+  """P2-5: stdlib attestation parser must reject missing keys and ignore nested child keys."""
+  spec = importlib.util.spec_from_file_location(
+      "check_external_access_staleness",
+      ROOT / "scripts" / "check_external_access_staleness.py",
+  )
+  assert spec is not None and spec.loader is not None
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+
+  # Nested 6-space `status:` inside `controls:` must not shadow the 2-space
+  # `status:` under `external_access_verification:`.
+  nested_yaml = (
+      "external_access_verification:\n"
+      "  controls:\n"
+      "    - method: check\n"
+      "      status: CHILD_STATUS_MUST_BE_IGNORED\n"
+      '  next_due_date: "2026-11-08"\n'
+      "  status: PENDING_PUBLIC_SHARING_ALLOWLIST\n"
+      "  tracking_issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#515\n"
+      "known_live_issues: []\n"
+  )
+  assert module.read_attestation_fields(nested_yaml) == {
+      "next_due_date": "2026-11-08",
+      "status": "PENDING_PUBLIC_SHARING_ALLOWLIST",
+      "tracking_issue": "GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#515",
+  }
+
+  # Missing `external_access_verification:` section raises SystemExit.
+  with pytest.raises(SystemExit, match="external_access_verification"):
+    module.read_attestation_fields("report_id: 123\n")
+
+  # Missing required 2-space key (`tracking_issue`) raises SystemExit.
+  with pytest.raises(SystemExit, match="tracking_issue"):
+    module.read_attestation_fields(
+        "external_access_verification:\n"
+        '  next_due_date: "2026-11-08"\n'
+        "  status: FAILING\n"
+        "known_live_issues: []\n"
+    )
+
+
+def test_bqca_events_sql_semantic_turn_and_error_edge_cases():
+  """P2-5: verify Looker Studio BQCA SQL turn-grain, deduplication, error, and final-SQL semantics."""
+  logical = (DASHBOARD / "sql/bqca_events_v1.sql.tmpl").read_text()
+  contract = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_product_contract.yaml").read_text()
+  )
+  manifest = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text()
+  )
+
+  # (1) Multi-turn single-session_id turns: turn_id/turn_partition_key partition
+  # by invocation_id (falling back to timestamp string for blank invocation_id),
+  # and Page 2/4/5 turn KPIs & charts use COUNT_DISTINCT(invocation_id) /
+  # COUNT_DISTINCT(completed_turn_id).
+  assert (
+      "IF(\n"
+      "      invocation_id IS NULL,\n"
+      "      NULL,\n"
+      "      IFNULL(NULLIF(TRIM(invocation_id), ''), CAST(timestamp AS STRING))\n"
+      "    ) AS turn_id"
+  ) in logical
+  assert (
+      "IF(\n"
+      "      invocation_id IS NULL,\n"
+      "      CONCAT(\n"
+      "        '__null_inv_',\n"
+      "        CAST(timestamp AS STRING),\n"
+      "        '_',\n"
+      "        IFNULL(span_id, ''),\n"
+      "        '_',\n"
+      "        IFNULL(event_type, '')\n"
+      "      ),\n"
+      "      IFNULL(NULLIF(TRIM(invocation_id), ''), CAST(timestamp AS STRING))\n"
+      "    ) AS turn_partition_key"
+  ) in logical
+  assert "IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id" in logical
+
+  comp_by_id = {c["id"]: c for c in manifest["components"]}
+  assert comp_by_id["kpi_total_sessions"]["field"] == "invocation_id"
+  assert comp_by_id["kpi_total_sessions"]["aggregation"] == "COUNT_DISTINCT"
+  assert comp_by_id["kpi_turn_completes"]["field"] == "completed_turn_id"
+  assert comp_by_id["kpi_turn_completes"]["aggregation"] == "COUNT_DISTINCT"
+  for turn_chart_id in (
+      "chart_turns_by_agent",
+      "chart_turns_by_persona",
+      "chart_persona_breakdown",
+      "chart_fast_path_pie",
+  ):
+    assert "invocation_id" in comp_by_id[turn_chart_id]["metrics"], turn_chart_id
+
+  # (2) Turn-grain fast_path and data_agent_id/conversation_id/persona propagation
+  # across all events in a turn so INVOCATION_COMPLETED and LLM_RESPONSE rows
+  # inherit turn-level metadata and fast_path.
+  assert (
+      "LOGICAL_OR(raw_fast_path) OVER (\n"
+      "      PARTITION BY turn_partition_key\n"
+      "    ) AS fast_path"
+  ) in logical
+  for attr_col in (
+      "raw_data_agent_id",
+      "raw_conversation_id",
+      "raw_explicit_persona",
+      "raw_email_persona",
+  ):
+    assert (
+        f"FIRST_VALUE({attr_col} IGNORE NULLS) OVER (\n"
+        "        PARTITION BY turn_partition_key"
+        in logical
+        or f"FIRST_VALUE({attr_col} IGNORE NULLS) OVER (\n"
+        "      PARTITION BY turn_partition_key"
+        in logical
+    ), attr_col
+
+  # (3) 3-condition error_message synthesis: status='ERROR' with NULL error_message
+  # or *_ERROR events synthesize '[<event_type>: status=<status>]' so Looker Studio
+  # COUNT(error_message) and COUNT_DISTINCT(error_message) count all 3 conditions,
+  # and chart_errors_by_agent is a bar_chart on error_message COUNT.
+  assert (
+      "IF(\n"
+      "      raw_is_error,\n"
+      "      COALESCE(\n"
+      "        NULLIF(TRIM(error_message), ''),\n"
+      "        CONCAT(\n"
+      "          '[',\n"
+      "          IFNULL(NULLIF(TRIM(event_type), ''), 'UNKNOWN_EVENT'),\n"
+      "          ': status=',\n"
+      "          IFNULL(NULLIF(TRIM(status), ''), 'ERROR'),\n"
+      "          ']'\n"
+      "        )\n"
+      "      ),\n"
+      "      NULL\n"
+      "    ) AS error_message"
+  ) in logical
+  assert comp_by_id["chart_errors_by_agent"]["chart_type"] == "bar_chart"
+  assert comp_by_id["chart_errors_by_agent"]["dimensions"] == ["data_agent_id"]
+  assert comp_by_id["chart_errors_by_agent"]["metrics"] == ["error_message"]
+
+  # (4) Accepted draft followed by workflow-nudged final AGENT_RESPONSE:
+  # raw_agent_response_rn orders AGENT_RESPONSE events by timestamp DESC, span_id DESC
+  # within each turn and extracted_sql only populates on raw_agent_response_rn = 1,
+  # while raw_agent_response_rn is excluded from the outer projection.
+  assert (
+      "ORDER BY timestamp DESC, span_id DESC\n"
+      "      ),\n"
+      "      NULL\n"
+      "    ) AS raw_agent_response_rn"
+  ) in logical
+  assert (
+      "IF(\n"
+      "    event_type = 'AGENT_RESPONSE' AND raw_agent_response_rn = 1,\n"
+      "    REGEXP_EXTRACT(agent_response_text, r'(?is)```sql\\s*(.*?)"
+  ) in logical
+  assert "SELECT\n  * EXCEPT (raw_agent_response_rn)," in logical
+  assert len(contract["pages"]) == 7
+

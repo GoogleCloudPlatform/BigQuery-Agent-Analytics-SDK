@@ -49,6 +49,8 @@ export const BILLING_PROJECT_MESSAGE = VALIDATION_MESSAGES.billingProject;
 const TABLE_ID_MESSAGES = Object.freeze({
   empty:
     "Enter the fully qualified BQAA table ID as project.dataset.table.",
+  emptyBqca:
+    "Enter the fully qualified BQCA logging table ID as project.dataset.table.",
   unparseable:
     "Enter the fully qualified ID as project.dataset.table — exactly three dot-separated segments.",
   link:
@@ -341,7 +343,11 @@ export function parseTableReferenceForInput(value) {
 export function validateQualifiedTableId(value, config = REPORT_CONFIG) {
   const raw = String(value ?? "").trim();
   if (!raw) {
-    throw new ConfigurationError("tableId", TABLE_ID_MESSAGES.empty);
+    const emptyMessage =
+      config?.id === "bqca"
+        ? TABLE_ID_MESSAGES.emptyBqca
+        : TABLE_ID_MESSAGES.empty;
+    throw new ConfigurationError("tableId", emptyMessage);
   }
   // The URL branch uses the structural extractor, not the strict public
   // parser: a supported-host link that unambiguously names one table but

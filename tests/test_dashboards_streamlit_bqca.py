@@ -15,6 +15,7 @@ import collections
 import contextlib
 import dataclasses
 import datetime as dt
+import itertools
 import os
 from pathlib import Path
 import re
@@ -911,10 +912,12 @@ def test_user_text_never_reaches_sql_text(panel):
 def test_errors_only_keeps_whole_turns_that_hold_an_error(panel):
   narrowed = _sql(panel, dataclasses.replace(STATE, errors_only=True))
   assert "turn_has_error" not in _sql(panel)
-  # A turn that has an error somewhere keeps every one of its events ...
+  # A turn that has an error somewhere keeps every one of its events: the
+  # verdict is read over the turn's partition, where an event with no turn at
+  # all is the only row of a partition of its own ...
   assert (
-      "IF(invocation_id IS NULL, is_error, LOGICAL_OR(is_error) OVER"
-      " (PARTITION BY invocation_id)) AS turn_has_error"
+      "LOGICAL_OR(is_error) OVER (PARTITION BY "
+      f"{SPEC_TURN_KEY}) AS turn_has_error"
   ) in narrowed
   # ... where "an error" is still the one canonical three-condition predicate.
   assert f"{bqca_queries.IS_ERROR_EXPR} AS is_error" in narrowed
@@ -953,14 +956,18 @@ def test_attribution_keys_on_the_data_agent_id_label_not_the_agent_column():
 
 
 def test_persona_falls_back_from_label_to_user_handle_to_data_agent():
-  persona = bqca_queries.PERSONA_EXPR
-  order = [
-      persona.index("custom_labels.persona"),
-      persona.index("REGEXP_EXTRACT(TRIM(user_id)"),
-      persona.index('"data-agent-id"'),
-      persona.index("'unattributed'"),
-  ]
-  assert order == sorted(order)
+  # Each tier is its own per-row expression ...
+  assert "custom_labels.persona" in bqca_queries.RAW_EXPLICIT_PERSONA_EXPR
+  assert "REGEXP_EXTRACT(TRIM(user_id)" in bqca_queries.RAW_EMAIL_PERSONA_EXPR
+  assert '"data-agent-id"' in bqca_queries.DATA_AGENT_ID_EXPR
+  # ... and a turn's persona is the first tier it carries, in that order,
+  # with the fallback last.
+  for panel in SCOPED_PANELS:
+    events = _cte_body(_sql(panel), "events")
+    assert (
+        "COALESCE(first_explicit_persona, first_email_persona,"
+        " first_data_agent_id, 'unattributed') AS persona"
+    ) in events, panel
 
 
 # The Looker Studio BQCA profile (a sibling deliverable) extracts the same
@@ -988,9 +995,9 @@ def _persona_regex() -> str:
   """The regular expression the persona expression applies to ``user_id``."""
   match = re.search(
       r"REGEXP_EXTRACT\(TRIM\(user_id\), r'([^']+)'\)",
-      bqca_queries.PERSONA_EXPR,
+      bqca_queries.RAW_EMAIL_PERSONA_EXPR,
   )
-  assert match, bqca_queries.PERSONA_EXPR
+  assert match, bqca_queries.RAW_EMAIL_PERSONA_EXPR
   return match.group(1)
 
 
@@ -1003,17 +1010,20 @@ def _email_handle(user_id: str | None) -> str | None:
 
 
 def test_persona_regex_sits_in_a_raw_sql_string_and_has_no_split_shortcut():
-  persona = bqca_queries.PERSONA_EXPR
+  email = bqca_queries.RAW_EMAIL_PERSONA_EXPR
   pattern = _persona_regex()
-  assert "SPLIT(" not in persona
-  assert f"r'{pattern}'" in persona
+  assert "SPLIT(" not in email
+  assert f"r'{pattern}'" in email
   # Single backslashes: a doubled one would match a literal backslash.
   assert "\\\\" not in pattern
   assert pattern.count("\\.") == 2
   for panel in ALL_PANELS:
     assert "SPLIT(TRIM(user_id)" not in _sql(panel), panel
+  # Both persona tiers that come from the row itself are read by every panel
+  # that filters or lists personas, through their one canonical expression.
   for panel in ("filter_options", *SCOPED_PANELS):
-    assert persona in _sql(panel), panel
+    assert email in _sql(panel), panel
+    assert bqca_queries.RAW_EXPLICIT_PERSONA_EXPR in _sql(panel), panel
 
 
 @pytest.mark.parametrize(
@@ -1380,7 +1390,9 @@ def test_explorer_serves_the_last_agent_response_with_the_sql_it_carries():
         (
             "timeline",
             [
-                "NULLIF(TRIM(invocation_id), '') = @invocation_id",
+                "IF(invocation_id IS NULL, NULL, IFNULL(NULLIF("
+                "TRIM(invocation_id), ''), CAST(timestamp AS STRING)))"
+                " = @invocation_id",
                 "ORDER BY timestamp, event_type",
                 "LIMIT 200",
                 "SUBSTR(",
@@ -1652,27 +1664,49 @@ def test_an_agent_without_a_completed_turn_shows_a_dash_not_a_zero_rate():
 
 
 # --------------------------------------------------------------------------- #
-# Review fixes, round 2: blank turn ids, attribution filters that keep whole   #
-# turns, the string-MAX fallback bias                                          #
+# Review fixes, rounds 2 and 3: blank turn ids, attribution filters that keep #
+# whole turns, the string-MAX fallback bias, persona precedence               #
 # --------------------------------------------------------------------------- #
 
 # What every scoped panel reads per row, before ``events`` resolves it across
-# the turn. ``events_raw`` is the only stage that touches the table.
+# the turn. ``events_raw`` is the only stage that touches the table. The persona
+# is read as its two separate tiers, the explicit label and the email handle of
+# ``user_id``; the data agent is the third.
 RAW_TURN_COLUMNS = {
     "raw_data_agent_id": bqca_queries.DATA_AGENT_ID_EXPR,
-    "raw_persona": bqca_queries.PERSONA_EXPR,
+    "raw_explicit_persona": bqca_queries.RAW_EXPLICIT_PERSONA_EXPR,
+    "raw_email_persona": bqca_queries.RAW_EMAIL_PERSONA_EXPR,
     "raw_fast_path": bqca_queries.FAST_PATH_EXPR,
 }
+# What ``events`` resolves across the turn from the tiers above: each resolved
+# column, and the per-row column it is the first real value of.
+FIRST_TIERS = {
+    "first_data_agent_id": "raw_data_agent_id",
+    "first_explicit_persona": "raw_explicit_persona",
+    "first_email_persona": "raw_email_persona",
+}
+# The partition every turn-resolving window runs over, spelled out so that
+# editing it in the query breaks a test: the turn key, except that an event
+# with no ``invocation_id`` at all gets a key of its own.
+SPEC_TURN_KEY = (
+    "IF(invocation_id IS NULL, CONCAT('__null_inv_', CAST(timestamp AS"
+    " STRING), '_', IFNULL(span_id, ''), '_', event_type), invocation_id)"
+)
 ERRORS_ONLY = dataclasses.replace(STATE, errors_only=True)
 
 
-def test_a_blank_invocation_id_is_not_a_turn():
-  # Blank and whitespace-only ids become NULL; a padded id is trimmed.
-  assert bqca_queries.INVOCATION_ID_EXPR == "NULLIF(TRIM(invocation_id), '')"
+def test_a_blank_invocation_id_is_a_turn_of_its_own_keyed_by_its_timestamp():
+  # NULL stays NULL (no turn at all). A blank or whitespace-only id becomes the
+  # text of the event's timestamp: a non-NULL key that every turn-grain panel
+  # keeps and the timeline can open. A padded id is trimmed.
+  assert bqca_queries.INVOCATION_ID_EXPR == (
+      "IF(invocation_id IS NULL, NULL,"
+      " IFNULL(NULLIF(TRIM(invocation_id), ''), CAST(timestamp AS STRING)))"
+  )
   for panel in SCOPED_PANELS:
     sql = _sql(panel)
     # The raw column is read in exactly one place and always normalized, so
-    # every later ``IS NOT NULL`` and ``COUNT(DISTINCT ...)`` ignores blanks.
+    # every later ``IS NOT NULL`` and ``COUNT(DISTINCT ...)`` sees the key.
     raw = _cte_body(sql, "events_raw")
     assert f"{bqca_queries.INVOCATION_ID_EXPR} AS invocation_id" in raw, panel
     assert sql.count("TRIM(invocation_id)") == 1, panel
@@ -1712,24 +1746,34 @@ def test_attribution_is_resolved_across_the_turn_before_any_filter_runs(panel):
   # Stage 1 only *reads* each per-row value, with the canonical expression.
   for alias, expression in RAW_TURN_COLUMNS.items():
     assert f"{expression} AS {alias}" in raw, alias
-  # Stage 2 resolves them across the turn and hides the per-row columns.
-  assert "* EXCEPT (raw_data_agent_id, raw_persona, raw_fast_path)" in events
-  for column, alias in (
-      ("raw_data_agent_id", "data_agent_id"),
-      ("raw_persona", "persona"),
-  ):
+  # Stage 2 resolves every tier across the turn and hides the per-row columns.
+  assert (
+      "* EXCEPT (raw_data_agent_id, raw_explicit_persona, raw_email_persona,"
+      " raw_fast_path)"
+  ) in events
+  for alias, column in FIRST_TIERS.items():
     assert (
-        f"IF(invocation_id IS NULL, {column}, COALESCE("
-        f"FIRST_VALUE(NULLIF({column}, 'unattributed') IGNORE NULLS)"
-        " OVER (PARTITION BY invocation_id"
+        f"FIRST_VALUE({column} IGNORE NULLS)"
+        f" OVER (PARTITION BY {SPEC_TURN_KEY}"
         f" ORDER BY timestamp ASC, event_type ASC, {column} ASC"
-        " ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),"
-        f" 'unattributed')) AS {alias}"
+        " ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)"
+        f" AS {alias}"
     ) in events, alias
   assert (
-      "IF(invocation_id IS NULL, raw_fast_path,"
-      " LOGICAL_OR(raw_fast_path) OVER (PARTITION BY invocation_id))"
+      f"LOGICAL_OR(raw_fast_path) OVER (PARTITION BY {SPEC_TURN_KEY})"
       " AS fast_path"
+  ) in events
+  # Only then does it choose between the tiers, and name the fast path.
+  assert (
+      "COALESCE(first_data_agent_id, 'unattributed') AS data_agent_id"
+  ) in events
+  assert (
+      "COALESCE(first_explicit_persona, first_email_persona,"
+      " first_data_agent_id, 'unattributed') AS persona"
+  ) in events
+  assert (
+      "* EXCEPT (first_data_agent_id, first_explicit_persona,"
+      " first_email_persona)"
   ) in events
   assert (
       "IF(fast_path, 'fast_path', 'standard_nl2sql') AS fast_path_label"
@@ -1747,22 +1791,116 @@ def test_attribution_is_resolved_across_the_turn_before_any_filter_runs(panel):
 
 @pytest.mark.parametrize("panel", SCOPED_PANELS)
 def test_rows_without_a_turn_are_judged_on_their_own(panel):
+  # An event with no ``invocation_id`` at all (NULL) would otherwise fall into
+  # one shared NULL partition and inherit the attribution or the verdict of
+  # unrelated rows. It gets a partition key of its own instead, and every
+  # window runs over that key.
+  assert bqca_queries._TURN_PARTITION_KEY == SPEC_TURN_KEY
   events = _cte_body(_sql(panel, ERRORS_ONLY), "events")
-  # A row with no turn would otherwise fall into one shared NULL partition and
-  # inherit the verdict of unrelated rows.
-  for column in (
-      "raw_data_agent_id",
-      "raw_persona",
-      "raw_fast_path",
-      "is_error",
-  ):
-    assert f"IF(invocation_id IS NULL, {column}, " in events, column
+  # Three first-real-value windows, the fast-path "any" and the error "any".
+  assert events.count("PARTITION BY") == 5
+  assert events.count(f"PARTITION BY {SPEC_TURN_KEY}") == 5
+  assert "PARTITION BY invocation_id" not in events
 
 
-def _normalize_invocation_id(logged: str | None) -> str | None:
+@pytest.mark.parametrize("panel", SCOPED_PANELS)
+def test_a_persona_is_the_first_tier_the_turn_carries_in_every_panel(panel):
+  # Label, then the email handle of ``user_id``, then the data agent, then the
+  # fallback: each tier a per-row expression that is NULL when the row does not
+  # carry it, so no tier can hide behind a fallback label.
+  assert "custom_labels.persona" in bqca_queries.RAW_EXPLICIT_PERSONA_EXPR
+  assert "REGEXP_EXTRACT(TRIM(user_id)" in bqca_queries.RAW_EMAIL_PERSONA_EXPR
+  assert "'unattributed'" not in bqca_queries.RAW_EXPLICIT_PERSONA_EXPR
+  assert "'unattributed'" not in bqca_queries.RAW_EMAIL_PERSONA_EXPR
+  assert "'unattributed'" not in bqca_queries.DATA_AGENT_ID_EXPR
+  events = _cte_body(_sql(panel), "events")
+  chain = _coalesce_chain(events, "persona")
+  assert chain == [
+      "first_explicit_persona",
+      "first_email_persona",
+      "first_data_agent_id",
+      "'unattributed'",
+  ]
+
+
+FAST_PATH_SPELLINGS = [
+    ("true", True),
+    ("True", True),
+    ("TRUE", True),
+    ("tRuE", True),
+    (True, True),
+    ("false", False),
+    ("FALSE", False),
+    ("yes", False),
+    ("1", False),
+    ("", False),
+    (None, False),
+    (["true"], False),
+]
+
+
+def _fast_path_flag(payload: dict[str, Any]) -> bool:
+  """Evaluates ``FAST_PATH_EXPR`` over an ``attributes`` payload."""
+  match = re.fullmatch(
+      r"IFNULL\((?P<value>LOWER\()?JSON_VALUE\(attributes, '\$\.(?P<key>\w+)'\)"
+      r"\)? = '(?P<wanted>\w+)', FALSE\)",
+      bqca_queries.FAST_PATH_EXPR,
+  )
+  assert match, bqca_queries.FAST_PATH_EXPR
+  # Only a case-insensitive comparison reads every spelling of "true".
+  assert match["value"], bqca_queries.FAST_PATH_EXPR
+  text = _json_value(payload, match["key"])
+  return text is not None and text.lower() == match["wanted"]
+
+
+@pytest.mark.parametrize(("logged", "tagged"), FAST_PATH_SPELLINGS)
+def test_the_fast_path_tag_is_read_case_insensitively(logged, tagged):
+  assert _fast_path_flag({"fast_path": logged}) is tagged
+
+
+def test_an_event_without_a_fast_path_attribute_is_not_tagged():
+  assert _fast_path_flag({}) is False
+  assert _fast_path_flag({"unrelated": "value"}) is False
+
+
+@pytest.mark.parametrize("panel", ALL_PANELS)
+def test_every_panel_reads_the_fast_path_tag_the_same_way(panel):
+  assert bqca_queries.FAST_PATH_EXPR == (
+      "IFNULL(LOWER(JSON_VALUE(attributes, '$.fast_path')) = 'true', FALSE)"
+  )
+  # Not only the turn-grain panels: the sidebar's own queries and the timeline
+  # read the attribute too, and a spelling one of them misses is a spelling
+  # none of them may count.
+  assert bqca_queries.FAST_PATH_EXPR in _sql(panel), panel
+  assert "JSON_VALUE(attributes, '$.fast_path') = 'true'" not in _sql(panel)
+
+
+def test_the_models_comment_says_which_event_carries_the_fast_path_tag():
+  source = (DASHBOARDS_DIR / "bqca_models.py").read_text(encoding="utf-8")
+  lines = source.splitlines()
+  declared = lines.index('FAST_PATH_ALL = "All"')
+  comment = []
+  for line in reversed(lines[:declared]):
+    if not line.startswith("#"):
+      break
+    comment.append(line.lstrip("# ").rstrip())
+  text = " ".join(reversed(comment))
+  # The producer does not stamp every event of a fast-path turn ...
+  assert "tags every event" not in text
+  # ... it tags the response, and the query layer spreads that over the turn.
+  assert "AGENT_RESPONSE" in text
+  assert "LOGICAL_OR" in text
+
+
+def _normalize_invocation_id(logged: str | None, timestamp: Any) -> str | None:
   """What ``INVOCATION_ID_EXPR`` makes of a logged ``invocation_id``."""
-  assert bqca_queries.INVOCATION_ID_EXPR == "NULLIF(TRIM(invocation_id), '')"
-  return None if logged is None else (logged.strip() or None)
+  assert bqca_queries.INVOCATION_ID_EXPR == (
+      "IF(invocation_id IS NULL, NULL,"
+      " IFNULL(NULLIF(TRIM(invocation_id), ''), CAST(timestamp AS STRING)))"
+  )
+  if logged is None:
+    return None
+  return logged.strip() or str(timestamp)
 
 
 def _asc(value: Any) -> tuple[bool, Any]:
@@ -1773,12 +1911,11 @@ def _asc(value: Any) -> tuple[bool, Any]:
 def _window_rule(events: str, column: str, alias: str) -> dict[str, Any]:
   """Reads a first-real-value window expression back out of ``events``."""
   match = re.search(
-      rf"IF\(invocation_id IS NULL, {column}, COALESCE\("
-      rf"FIRST_VALUE\(NULLIF\({column}, '(?P<fallback>[^']+)'\) IGNORE NULLS\)"
-      r" OVER \(PARTITION BY (?P<partition>\w+)"
+      rf"FIRST_VALUE\({column} IGNORE NULLS\)"
+      r" OVER \(PARTITION BY (?P<partition>.+?)"
       r" ORDER BY (?P<order>[\w ,]+)"
-      r" ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\),"
-      rf" '(?P<default>[^']+)'\)\) AS {alias}\b",
+      r" ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\)"
+      rf" AS {alias}\b",
       events,
   )
   assert match, f"{alias} is no longer a first-real-value window: {events}"
@@ -1787,31 +1924,41 @@ def _window_rule(events: str, column: str, alias: str) -> dict[str, Any]:
   return {
       "partition": match["partition"],
       "order": [name for name, _ in keys],
-      "fallback": match["fallback"],
-      "default": match["default"],
   }
+
+
+def _coalesce_chain(events: str, alias: str) -> list[str]:
+  """Reads the terms of ``COALESCE(...) AS alias`` back out of ``events``."""
+  match = re.search(rf"COALESCE\((?P<args>[^()]+)\) AS {alias}\b", events)
+  assert match, f"{alias} is no longer a COALESCE chain: {events}"
+  return [term.strip() for term in match["args"].split(",")]
 
 
 def _resolve_attribution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
   """Applies the turn-resolving ``events`` stage to synthetic raw rows.
 
-  Each window expression is read back out of the generated SQL (the sort keys,
-  the fallback label it ignores, the label a turn with nothing real gets) and
-  applied the way BigQuery applies it, so editing the SQL changes the answer
-  here exactly as it changes it there.
+  Each window expression is read back out of the generated SQL (the partition,
+  the sort keys, the order of the tiers a result is chosen from, the label a
+  turn with nothing real gets) and applied the way BigQuery applies it, so
+  editing the SQL changes the answer here exactly as it changes it there.
   """
   events = _cte_body(_sql("kpis", ERRORS_ONLY), "events")
-  agent = _window_rule(events, "raw_data_agent_id", "data_agent_id")
-  persona = _window_rule(events, "raw_persona", "persona")
-  assert agent["partition"] == persona["partition"] == "invocation_id"
+  windows = {
+      alias: _window_rule(events, column, alias)
+      for alias, column in FIRST_TIERS.items()
+  }
+  for rule in windows.values():
+    assert rule["partition"] == SPEC_TURN_KEY
+  agent_chain = _coalesce_chain(events, "data_agent_id")
+  persona_chain = _coalesce_chain(events, "persona")
   # An unrecognized shape fails loudly instead of being guessed at.
   assert (
-      "IF(invocation_id IS NULL, raw_fast_path, LOGICAL_OR(raw_fast_path)"
-      " OVER (PARTITION BY invocation_id)) AS fast_path"
+      f"LOGICAL_OR(raw_fast_path) OVER (PARTITION BY {SPEC_TURN_KEY})"
+      " AS fast_path"
   ) in events
   assert (
-      "IF(invocation_id IS NULL, is_error, LOGICAL_OR(is_error)"
-      " OVER (PARTITION BY invocation_id)) AS turn_has_error"
+      f"LOGICAL_OR(is_error) OVER (PARTITION BY {SPEC_TURN_KEY})"
+      " AS turn_has_error"
   ) in events
   label = re.search(
       r"IF\(fast_path, '(?P<yes>\w+)', '(?P<no>\w+)'\) AS fast_path_label",
@@ -1821,37 +1968,58 @@ def _resolve_attribution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
   assert (label["yes"], label["no"]) == bqca_models.FAST_PATH_LABELS
 
   normalized = [
-      {**row, "invocation_id": _normalize_invocation_id(row["invocation_id"])}
+      {
+          **row,
+          "invocation_id": _normalize_invocation_id(
+              row["invocation_id"], row["timestamp"]
+          ),
+      }
       for row in rows
   ]
-  turns: dict[str, list[dict[str, Any]]] = {}
-  for row in normalized:
-    if row["invocation_id"] is not None:
-      turns.setdefault(row["invocation_id"], []).append(row)
 
-  def first_real(row: dict[str, Any], rule: dict[str, Any], column: str):
-    if row["invocation_id"] is None:
-      return row[column]
+  def partition(row: dict[str, Any]) -> Any:
+    # An event with no id at all is the only row of a partition of its own.
+    if row["invocation_id"] is not None:
+      return row["invocation_id"]
+    return ("no-turn", row["timestamp"], row["span_id"], row["event_type"])
+
+  turns: dict[Any, list[dict[str, Any]]] = {}
+  for row in normalized:
+    turns.setdefault(partition(row), []).append(row)
+
+  def first_real(row: dict[str, Any], alias: str, column: str) -> str | None:
     ordered = sorted(
-        turns[row["invocation_id"]],
-        key=lambda other: tuple(_asc(other[key]) for key in rule["order"]),
+        turns[partition(row)],
+        key=lambda other: tuple(
+            _asc(other[key]) for key in windows[alias]["order"]
+        ),
     )
-    real = (
-        other[column]
-        for other in ordered
-        if other[column] not in (None, rule["fallback"])
+    return next(
+        (other[column] for other in ordered if other[column] is not None),
+        None,
     )
-    return next(real, rule["default"])
+
+  def choose(chain: list[str], firsts: dict[str, str | None]) -> str:
+    for term in chain:
+      if term.startswith("'"):
+        return term.strip("'")
+      if firsts[term] is not None:
+        return firsts[term]
+    raise AssertionError(f"no default at the end of the chain: {chain}")
 
   resolved = []
   for row in normalized:
-    turn = turns.get(row["invocation_id"], [row])
+    turn = turns[partition(row)]
+    firsts = {
+        alias: first_real(row, alias, column)
+        for alias, column in FIRST_TIERS.items()
+    }
     fast_path = any(other["raw_fast_path"] for other in turn)
     resolved.append(
         {
             **row,
-            "data_agent_id": first_real(row, agent, "raw_data_agent_id"),
-            "persona": first_real(row, persona, "raw_persona"),
+            "data_agent_id": choose(agent_chain, firsts),
+            "persona": choose(persona_chain, firsts),
             "fast_path": fast_path,
             "fast_path_label": label["yes"] if fast_path else label["no"],
             "turn_has_error": any(other["is_error"] for other in turn),
@@ -1860,22 +2028,47 @@ def _resolve_attribution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
   return resolved
 
 
+_SPAN_IDS = itertools.count(1)
+
+
 def _event(
     second: int,
     event_type: str,
     *,
     turn: str | None = "inv-1",
     persona: str | None = None,
+    email: str | None = None,
     agent: str | None = None,
     fast: bool = False,
     error: bool = False,
 ) -> dict[str, Any]:
-  """One ``events_raw`` row; a persona that is not set is the fallback label."""
+  """One ``events_raw`` row.
+
+  ``persona`` is the persona custom label, ``email`` the handle taken from
+  ``user_id`` and ``agent`` the data agent. Each is NULL when the row does not
+  carry it, as in the query. Every event has a span of its own, as in real
+  data.
+
+  Args:
+    second: The event's timestamp.
+    event_type: The event type.
+    turn: The logged ``invocation_id`` (``None``: no id at all).
+    persona: The persona custom label the row carries, if any.
+    email: The email handle of the row's ``user_id``, if any.
+    agent: The data agent the row names, if any.
+    fast: Whether the row is tagged as a fast-path event.
+    error: Whether the row is an error event.
+
+  Returns:
+    The synthetic row.
+  """
   return {
       "timestamp": second,
       "event_type": event_type,
+      "span_id": f"span-{next(_SPAN_IDS)}",
       "invocation_id": turn,
-      "raw_persona": persona or "unattributed",
+      "raw_explicit_persona": persona,
+      "raw_email_persona": email,
       "raw_data_agent_id": agent,
       "raw_fast_path": fast,
       "is_error": error,
@@ -1905,9 +2098,10 @@ def test_a_persona_filter_keeps_every_event_of_the_turns_it_matches():
   assert kept == TURN_EVENT_TYPES
   # ... where the per-row value kept the prompt alone and made the turn look
   # unfinished.
-  assert [r["event_type"] for r in rows if r["raw_persona"] == "analyst"] == [
-      "USER_MESSAGE_RECEIVED"
+  per_row = [
+      r["event_type"] for r in rows if r["raw_explicit_persona"] == "analyst"
   ]
+  assert per_row == ["USER_MESSAGE_RECEIVED"]
 
 
 def test_a_data_agent_filter_keeps_every_event_of_the_turns_it_matches():
@@ -1965,32 +2159,135 @@ def test_the_first_real_attribution_wins_whatever_order_rows_arrive_in():
     assert [got[id(row)] for row in rows] == expected
 
 
-def test_rows_without_a_turn_keep_their_own_attribution_and_verdict():
+def test_rows_with_no_invocation_id_keep_their_own_attribution_and_verdict():
   rows = [
       _event(0, "LLM_ERROR", turn=None, persona="alice", error=True),
-      _event(1, "LLM_RESPONSE", turn="   ", persona="bob"),
-      _event(2, "AGENT_RESPONSE", turn="", fast=True),
+      _event(1, "LLM_RESPONSE", turn=None, email="bob"),
+      _event(2, "AGENT_RESPONSE", turn=None, fast=True),
       _event(3, "LLM_RESPONSE", turn=None),
+      # Same timestamp and type, different spans: two rows, not one turn.
+      _event(3, "LLM_RESPONSE", turn=None, agent="DA-9"),
       _event(0, "USER_MESSAGE_RECEIVED", persona="carol"),
       _event(1, "AGENT_ERROR", error=True),
       _event(2, "INVOCATION_COMPLETED"),
   ]
   resolved = _resolve_attribution(rows)
-  orphans, turn = resolved[:4], resolved[4:]
-  assert [r["invocation_id"] for r in orphans] == [None] * 4
+  orphans, turn = resolved[:5], resolved[5:]
+  assert [r["invocation_id"] for r in orphans] == [None] * 5
   # Nothing is shared between unrelated rows ...
   assert [r["persona"] for r in orphans] == [
       "alice",
       "bob",
       "unattributed",
       "unattributed",
+      "DA-9",
   ]
-  assert [r["fast_path"] for r in orphans] == [False, False, True, False]
+  assert [r["data_agent_id"] for r in orphans] == (
+      ["unattributed"] * 4 + ["DA-9"]
+  )
+  assert [r["fast_path"] for r in orphans] == [False, False, True, False, False]
   # ... and an error among them does not make the others "turns with an error".
-  assert [r["turn_has_error"] for r in orphans] == [True, False, False, False]
+  assert [r["turn_has_error"] for r in orphans] == [
+      True,
+      False,
+      False,
+      False,
+      False,
+  ]
   # A real turn still shares everything across its rows.
   assert [r["persona"] for r in turn] == ["carol"] * 3
   assert [r["turn_has_error"] for r in turn] == [True] * 3
+
+
+def test_rows_with_a_blank_invocation_id_are_turns_keyed_by_their_timestamp():
+  rows = [
+      _event(10, "USER_MESSAGE_RECEIVED", turn="", persona="dana"),
+      _event(10, "INVOCATION_COMPLETED", turn="   ", agent="DA-1"),
+      _event(
+          20, "USER_MESSAGE_RECEIVED", turn="\t", persona="erin", error=True
+      ),
+      _event(0, "USER_MESSAGE_RECEIVED", turn=None, persona="orphan"),
+  ]
+  resolved = _resolve_attribution(rows)
+  # A blank id is a turn, not a missing one: events logged together share the
+  # key of their timestamp, events logged at another time do not, and the row
+  # with no id at all still belongs to no turn.
+  assert [r["invocation_id"] for r in resolved] == ["10", "10", "20", None]
+  assert [r["persona"] for r in resolved] == ["dana", "dana", "erin", "orphan"]
+  assert [r["data_agent_id"] for r in resolved] == [
+      "DA-1",
+      "DA-1",
+      "unattributed",
+      "unattributed",
+  ]
+  assert [r["turn_has_error"] for r in resolved] == [False, False, True, False]
+
+
+def test_a_scope_shaped_like_the_live_fixture_counts_its_blank_id_turns():
+  # Ordinary turns, turns whose events were logged with an empty id, and
+  # lifecycle events with no id at all, in the proportions of the live check
+  # the README cites (there: 286 + 3 = 289 turns).
+  rows = []
+  for turn in range(4):
+    base = 100 * (turn + 1)
+    rows += [
+        _event(base, "USER_MESSAGE_RECEIVED", turn=f"inv-{turn}"),
+        _event(base + 1, "INVOCATION_COMPLETED", turn=f"inv-{turn}"),
+    ]
+  for second in (1000, 2000, 3000):
+    rows += [
+        _event(second, "USER_MESSAGE_RECEIVED", turn=""),
+        _event(second, "INVOCATION_COMPLETED", turn=" "),
+    ]
+  rows += [
+      _event(5000, "INVOCATION_STARTING", turn=None),
+      _event(5000, "INVOCATION_COMPLETED", turn=None),
+  ]
+  resolved = _resolve_attribution(rows)
+  # The per-turn relations keep ``invocation_id IS NOT NULL`` rows and count
+  # distinct ids: four named turns and three blank ones, nothing more.
+  keys = {r["invocation_id"] for r in resolved if r["invocation_id"]}
+  assert keys == {"inv-0", "inv-1", "inv-2", "inv-3", "1000", "2000", "3000"}
+  assert sum(r["invocation_id"] is None for r in resolved) == 2
+
+
+def test_a_persona_is_the_first_tier_the_turn_carries_not_the_first_event():
+  # The persona label beats an email handle, which beats the data agent,
+  # whichever event of the turn carries which: each tier is resolved across
+  # the whole turn before the tiers are compared.
+  rows = [
+      # A label logged last still beats an agent and a handle logged first.
+      _event(0, "INVOCATION_STARTING", turn="inv-A", agent="DA-1"),
+      _event(1, "USER_MESSAGE_RECEIVED", turn="inv-A", email="bob"),
+      _event(2, "AGENT_RESPONSE", turn="inv-A", persona="analyst"),
+      # No label: the handle beats the agent that was logged before it.
+      _event(0, "INVOCATION_STARTING", turn="inv-B", agent="DA-2"),
+      _event(1, "USER_MESSAGE_RECEIVED", turn="inv-B", email="carol"),
+      # Only an agent: the persona falls back to it.
+      _event(0, "INVOCATION_STARTING", turn="inv-C", agent="DA-3"),
+      _event(1, "LLM_RESPONSE", turn="inv-C"),
+      # Nothing at all.
+      _event(0, "INVOCATION_STARTING", turn="inv-D"),
+      # Within one tier the earliest event wins, whatever the value.
+      _event(5, "USER_MESSAGE_RECEIVED", turn="inv-E", email="zed"),
+      _event(4, "INVOCATION_STARTING", turn="inv-E", email="amy"),
+  ]
+  resolved = _resolve_attribution(rows)
+  assert [(r["invocation_id"], r["persona"]) for r in resolved] == [
+      *[("inv-A", "analyst")] * 3,
+      *[("inv-B", "carol")] * 2,
+      *[("inv-C", "DA-3")] * 2,
+      ("inv-D", "unattributed"),
+      *[("inv-E", "amy")] * 2,
+  ]
+  # The data agent column is the turn's own first agent, whichever persona won.
+  assert [r["data_agent_id"] for r in resolved] == (
+      ["DA-1"] * 3 + ["DA-2"] * 2 + ["DA-3"] * 2 + ["unattributed"] * 3
+  )
+  # So a persona filter matches the winner of a turn and never a loser: "bob"
+  # was only ever a handle that lost to a label.
+  matching = {r["invocation_id"] for r in resolved if r["persona"] == "bob"}
+  assert matching == set()
 
 
 def test_an_id_padded_with_whitespace_is_the_same_turn():
@@ -2061,6 +2358,59 @@ def test_the_breakdown_panels_group_by_the_resolved_columns(panel, columns):
     assert expression not in scoped_onward
   for column in columns:
     assert f"GROUP BY {column}" in scoped_onward
+
+
+def test_filter_options_offer_what_the_turn_resolved_filters_can_match():
+  sql = _sql("filter_options")
+  options_events = _cte_body(sql, "events")
+  # One read of the table, through the very ``events`` stage every panel
+  # filters on: what the sidebar offers is what a filter can match.
+  assert sql.count(TABLE) == 1
+  assert options_events == _cte_body(_sql("kpis"), "events")
+  assert "FROM events_raw" in options_events
+  assert "event_type IN UNNEST(@allowed_event_types)" in _cte_body(
+      sql, "events_raw"
+  )
+  # A turn without a data agent or a persona is offered as 'unattributed',
+  # which the filters match. The per-row values are not offered at all: no
+  # filter could ever match a persona that only one event of a turn carries.
+  assert (
+      "COALESCE(first_data_agent_id, 'unattributed') AS data_agent_id"
+  ) in options_events
+  assert "STRUCT('data_agent_id' AS kind, e.data_agent_id AS value)" in sql
+  assert "STRUCT('persona', e.persona)" in sql
+  assert "STRUCT('event_type', e.event_type)" in sql
+  assert "FROM events AS e" in sql
+  assert "e.raw_" not in sql
+  assert "WHERE o.value IS NOT NULL" in sql
+
+
+def test_filter_options_ignore_every_sidebar_filter():
+  every_filter = dataclasses.replace(
+      STATE,
+      data_agent_ids=("DA1",),
+      personas=("alice",),
+      event_types=("LLM_ERROR",),
+      fast_path_mode=bqca_models.FAST_PATH_ONLY,
+      session_search="s1",
+      prompt_search="orders",
+      errors_only=True,
+  )
+  sql = _sql("filter_options", every_filter)
+  # Picking one value must not hide the others, and "errors only" must not
+  # turn the lists into the lists of the failing turns.
+  assert sql == _sql("filter_options")
+  assert "scoped" not in sql
+  assert "turn_has_error" not in sql
+  assert _referenced("filter_options") == {"allowed_event_types"}
+
+
+def test_filter_options_are_capped_and_ordered_per_kind():
+  sql = _sql("filter_options")
+  assert "GROUP BY o.kind, o.value" in sql
+  assert "PARTITION BY o.kind ORDER BY MAX(e.timestamp) DESC" in sql
+  assert f"<= {models.FILTER_OPTIONS_LIMIT}" in sql
+  assert "ORDER BY o.kind, o.value" in sql
 
 
 @pytest.mark.parametrize(
@@ -2155,6 +2505,29 @@ def test_timeline_binds_the_invocation_and_never_embeds_it():
   assert "inv-secret" not in sql
   assert "DROP TABLE" not in sql
   assert f"{bqca_queries.INVOCATION_ID_EXPR} = @invocation_id" in sql
+
+
+@pytest.mark.parametrize(
+    "key", ["2026-10-05 09:00:00+00", "2026-10-05 09:00:00.123456+00"]
+)
+def test_timeline_opens_a_turn_by_the_timestamp_key_made_for_an_empty_id(key):
+  sql = bqca_queries.build_bqca_turn_timeline_sql(STATE, key, window=WINDOW)
+  # The key is bound as data, never part of the query text ...
+  assert key not in sql
+  # ... and is compared with the very expression that makes the key the turn
+  # table lists: an empty id is keyed by the text of its timestamp.
+  assert f"AND {bqca_queries.INVOCATION_ID_EXPR} = @invocation_id" in sql
+  assert "CAST(timestamp AS STRING)" in bqca_queries.INVOCATION_ID_EXPR
+
+  seen: dict[str, Any] = {}
+
+  def fake(sql, params, ctx_, label):
+    seen.update(params={p.name: p for p in params})
+    return models.QueryResult(pd.DataFrame())
+
+  with mock.patch.object(bqca_queries, "fetch_bqca", side_effect=fake):
+    bqca_queries.fetch_panel("timeline", STATE, _ctx(), invocation_id=key)
+  assert seen["params"]["invocation_id"].value == key
 
 
 def test_timeline_honors_only_the_event_type_selection():
@@ -3432,6 +3805,90 @@ def test_turn_picker_switches_the_detail_and_its_timeline(bqca_app, bq):
   assert _selectbox(at, "Turn").value == "inv3"
 
 
+def _detail_caption(at: AppTest) -> str:
+  """The one-line identity of the turn the explorer is showing."""
+  [caption] = [c for c in _captions(at) if c.startswith("Data agent ")]
+  return caption
+
+
+def test_the_turn_picker_is_a_keyed_widget_seeded_from_the_first_turn(
+    bqca_app,
+):
+  at = bqca_app.run()
+  assert not at.exception
+  picker = at.selectbox(key="_bqca_turn_select")
+  assert picker.label == "Turn"
+  assert picker.value == "inv1"
+  assert at.session_state["_bqca_selected_turn"] == "inv1"
+
+
+def test_every_consecutive_turn_selection_sticks(bqca_app, bq):
+  # The picker used to be handed the previous choice as its ``index``, which
+  # changed its identity: the second selection in a row snapped back to the
+  # turn chosen before it.
+  at = bqca_app.run()
+  assert bq.last("Turn timeline").params["invocation_id"] == "inv1"
+  for index, turn in ((2, "inv3"), (0, "inv1"), (3, "inv4"), (1, "inv2")):
+    _selectbox(at, "Turn").select_index(index).run()
+    assert not at.exception
+    assert _selectbox(at, "Turn").value == turn
+    assert at.session_state["_bqca_turn_select"] == turn
+    assert at.session_state["_bqca_selected_turn"] == turn
+    assert f"invocation `{turn}`" in _detail_caption(at)
+    assert bq.last("Turn timeline").params["invocation_id"] == turn
+
+
+def test_the_picker_falls_back_when_its_turn_is_no_longer_listed(bqca_app, bq):
+  at = bqca_app.run()
+  _selectbox(at, "Turn").select_index(2).run()
+  assert at.session_state["_bqca_turn_select"] == "inv3"
+
+  # Another scope (a new window or filter) no longer lists inv3.
+  bq.frames["Turns"] = _turns_frame().iloc[[0, 1]].reset_index(drop=True)
+  at.run()
+  assert not at.exception
+  assert _selectbox(at, "Turn").value == "inv1"
+  assert at.session_state["_bqca_turn_select"] == "inv1"
+  assert at.session_state["_bqca_selected_turn"] == "inv1"
+  assert bq.last("Turn timeline").params["invocation_id"] == "inv1"
+
+
+def test_the_picker_remembers_its_turn_across_a_tab_switch(
+    monkeypatch, bqca_app, bq
+):
+  # Lazy tabs render only the active tab, so leaving the explorer drops the
+  # picker's own state; the plain key that remembers the turn seeds it again.
+  monkeypatch.setenv("STREAMLIT_LAZY_TABS", "true")
+  explorer, elsewhere = BQCA_TABS[2], BQCA_TABS[4]
+  at = bqca_app.run()
+  at.segmented_control(key="_bqca_active_tab").set_value(explorer).run()
+  _selectbox(at, "Turn").select_index(2).run()
+  assert at.session_state["_bqca_selected_turn"] == "inv3"
+
+  at.segmented_control(key="_bqca_active_tab").set_value(elsewhere).run()
+  assert not at.exception
+  at.segmented_control(key="_bqca_active_tab").set_value(explorer).run()
+  assert not at.exception
+  assert _selectbox(at, "Turn").value == "inv3"
+  assert bq.last("Turn timeline").params["invocation_id"] == "inv3"
+
+
+def test_a_new_connection_resets_the_turn_picker(bqca_app, bq):
+  at = bqca_app.run()
+  _selectbox(at, "Turn").select_index(2).run()
+  assert at.session_state["_bqca_turn_select"] == "inv3"
+
+  at.sidebar.text_input(key="bqca_dataset").input("other_dataset")
+  _sidebar_button(at, "Connect").click().run()
+  assert not at.exception
+  # The picker's state and the key that remembers its turn were both cleared,
+  # so the new connection opens on its first turn, not on a stale one.
+  assert at.session_state["_bqca_turn_select"] == "inv1"
+  assert at.session_state["_bqca_selected_turn"] == "inv1"
+  assert bq.last("Turn timeline").ctx.refs.dataset == "other_dataset"
+  assert bq.last("Turn timeline").params["invocation_id"] == "inv1"
+
+
 def test_fast_path_turn_is_labelled_and_has_no_token_counts(bqca_app):
   at = bqca_app.run()
   _selectbox(at, "Turn").select_index(1).run()
@@ -3854,7 +4311,7 @@ NO_TURN_ID_NOTE = "No valid invocation ID is associated with this turn."
 
 
 def _zero_turn_kpi_frame() -> pd.DataFrame:
-  """A KPI row for a scope whose events all lack a usable ``invocation_id``.
+  """A KPI row for a scope whose events all lack an ``invocation_id``.
 
   The tokens are real (they come from events outside any turn); everything that
   is defined per turn is zero, or an undefined (NULL) rate.
@@ -3874,6 +4331,8 @@ def _zero_turn_kpi_frame() -> pd.DataFrame:
 def test_a_turn_without_a_usable_invocation_id_opens_without_a_timeline(
     bqca_app, bq
 ):
+  # The turns query never lists a blank key any more (an empty id is keyed by
+  # its timestamp), so this guards a malformed frame, not data the SQL returns.
   turns = _turns_frame()
   turns.loc[0, "invocation_id"] = "   "
   bq.frames["Turns"] = turns
@@ -3890,6 +4349,35 @@ def test_a_turn_without_a_usable_invocation_id_opens_without_a_timeline(
   assert bq.last("Turn timeline").params["invocation_id"] == "inv2"
 
 
+SYNTHESIZED_TURN_KEY = "2026-10-05 09:00:00.250000+00"
+
+
+def test_a_turn_logged_with_an_empty_id_opens_by_its_timestamp_key(
+    bqca_app, bq
+):
+  turns = _turns_frame()
+  turns.loc[0, "invocation_id"] = SYNTHESIZED_TURN_KEY
+  bq.frames["Turns"] = turns
+  at = bqca_app.run()
+  assert not at.exception
+  # The key is a turn like any other: listed, selectable and expandable.
+  assert NO_TURN_ID_NOTE not in _captions(at)
+  assert _selectbox(at, "Turn").value == SYNTHESIZED_TURN_KEY
+  assert bq.last("Turn timeline").params["invocation_id"] == (
+      SYNTHESIZED_TURN_KEY
+  )
+  assert f"invocation `{SYNTHESIZED_TURN_KEY}`" in _detail_caption(at)
+
+  # And it stays selectable between real ids.
+  _selectbox(at, "Turn").select_index(1).run()
+  assert bq.last("Turn timeline").params["invocation_id"] == "inv2"
+  _selectbox(at, "Turn").select_index(0).run()
+  assert not at.exception
+  assert bq.last("Turn timeline").params["invocation_id"] == (
+      SYNTHESIZED_TURN_KEY
+  )
+
+
 def test_a_scope_without_turns_shows_a_dash_and_explains_the_tokens(
     bqca_app, bq
 ):
@@ -3903,7 +4391,10 @@ def test_a_scope_without_turns_shows_a_dash_and_explains_the_tokens(
   # The tokens are real, and the caption says where they come from.
   assert metrics["Total Tokens"] == "130"
   [note] = [c for c in _captions(at) if c.startswith("0 attributed turns")]
-  assert "missing or blank invocation_id" in note
+  # A blank id is a turn of its own now: only an event with no id at all is
+  # left without one.
+  assert "have no invocation_id" in note
+  assert "blank" not in note and "missing" not in note
   assert "token totals include unattributed LLM_RESPONSE events" in note
   # The "turns completed" line only ever speaks of real turns.
   assert _completion_notes(at) == []
@@ -4292,6 +4783,54 @@ def test_streamlit_readme_orders_the_table_variables(docs):
   # default table the same sentence names.
   assert events_table.index("BQCA_TABLE_ID") < events_table.index("BQ_TABLE_ID")
   assert "bqca_prompt_response_logs" in events_table
+
+
+README_VERIFICATION_HEADING = "### Verification against a live logging table"
+
+
+def test_streamlit_readme_documents_the_live_table_verification(docs):
+  section = _markdown_section(docs["readme"], README_VERIFICATION_HEADING)
+  # It sits inside the BQCA section, so the event-type rules cover it too.
+  assert section in docs["readme_bqca"]
+  # The five tabs and the nine tiles the check looked at, and its figures.
+  for needle in (*BQCA_TABS, *KPI_LABELS, "15-column", "1,685", "289"):
+    assert needle in section, needle
+  # A blank id is told apart from a missing one: the first is still a turn.
+  assert "empty `invocation_id`" in section
+
+
+def test_streamlit_readme_verification_names_no_real_project(docs):
+  section = _markdown_section(docs["readme"], README_VERIFICATION_HEADING)
+  # No address, no project id (they end in digits) and no table path other than
+  # the placeholder: the table that was checked is not named.
+  assert "@" not in section
+  project_id = re.compile(r"\b[a-z][a-z0-9]*(?:-[a-z0-9]+)*-\d{3,}\b")
+  assert project_id.findall(section) == []
+  paths = re.findall(r"`([^`\s]*\.[^`\s]*\.[^`\s]*)`", section)
+  assert set(paths) <= {"<project>.<dataset>.<table>"}, paths
+
+
+def test_streamlit_readme_says_what_counts_as_a_turn(docs):
+  section = _markdown_section(docs["readme"], "### What you see")
+  # An empty id is a turn of its own, identified by its timestamp; an event
+  # with no id at all belongs to no turn.
+  for needle in (
+      "empty `invocation_id` counts as a turn of its own",
+      "identified by its timestamp",
+      "no `invocation_id` at all belongs to no turn",
+  ):
+    assert needle in section, needle
+
+
+def test_streamlit_readme_documents_the_per_turn_attribution(docs):
+  section = docs["readme_bqca"]
+  for needle in (
+      "across all the events of the turn",
+      "wins over a handle logged by an earlier one",
+      "*unattributed* included",
+      "ignore every filter",
+  ):
+    assert needle in section, needle
 
 
 def test_manual_section_7_4_documents_the_review_fixes(docs):

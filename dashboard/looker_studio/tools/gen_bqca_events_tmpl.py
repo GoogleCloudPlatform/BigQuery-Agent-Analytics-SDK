@@ -13,19 +13,32 @@ Extraction notes (the facts behind each expression):
 * Attribution reads session state, never ``agent``, ``user_id``, or
   ``session_id``: ``agent`` is always the root agent and every turn is a new
   session, so ``data_agent_id`` and ``conversation_id`` come from
-  ``attributes.session_metadata.state``.
+  ``attributes.session_metadata.state`` and are propagated across all rows of
+  the same turn (partitioned by ``turn_partition_key``).
 * ``persona`` prefers the explicit ``custom_labels.persona`` label, then the
   local part of ``user_id`` only when ``user_id`` is a well-formed email
   (optionally followed by a ``:``-delimited memory suffix). Unresolved callers
   write ``''`` and older rows carry opaque IDs, so neither may become a
-  persona; the data agent is the next fallback, then ``'unattributed'``.
+  persona; the data agent is the next fallback, then ``'unattributed'``,
+  propagated across all rows of the turn.
+* ``fast_path`` is propagated across all rows of the turn via
+  ``LOGICAL_OR(raw_fast_path) OVER (PARTITION BY turn_partition_key)`` so turn
+  counts and turn latency grouped by ``fast_path_label`` reflect turn-grain
+  fast-path execution even when ``$.fast_path`` is logged on only one event.
 * ``is_error`` uses three conditions (``status``, ``error_message``, and an
-  ``_ERROR`` event type), never ``status = 'ERROR'`` alone.
+  ``_ERROR`` event type), never ``status = 'ERROR'`` alone. When ``is_error``
+  is true and ``error_message`` is null or blank, ``error_message`` is
+  synthesized as ``[EVENT_TYPE: status=STATUS]`` so ``COUNT(error_message)``
+  and ``COUNT_DISTINCT(error_message)`` include every 3-condition error row.
+* ``completed_turn_id`` emits ``turn_id`` on the deduplicated
+  ``INVOCATION_COMPLETED`` row regardless of whether ``latency_ms.total_ms``
+  is present, while ``turn_latency_ms`` stays ``FLOAT64`` (null when latency
+  is absent).
 * ``agent_response_text`` joins every markdown part of ``content.response`` in
   order. Rejected drafts are suppressed before logging; a turn logs a second
   AGENT_RESPONSE only when an earlier accepted draft is discarded by a
-  workflow nudge, so a turn can still carry more than one response and SQL
-  can appear in any of them.
+  workflow nudge, so ``extracted_sql`` is extracted only from the final
+  ``AGENT_RESPONSE`` row of each turn (``raw_agent_response_rn = 1``).
 * ``model_name`` falls back to ``attributes.model_version``, the model field
   BQCA logs on LLM_RESPONSE.
 * Token counts read ``attributes.usage_metadata`` and the plugin's
@@ -78,7 +91,7 @@ HEADER = """\
 -- with the end date inclusive.
 """
 
-BODY = r"""WITH bqca_events AS (
+BODY = r"""WITH raw_events AS (
   SELECT
     timestamp,
     event_type,
@@ -94,7 +107,95 @@ BODY = r"""WITH bqca_events AS (
     latency_ms,
     status,
     error_message,
-    is_truncated
+    is_truncated,
+    IF(
+      invocation_id IS NULL,
+      NULL,
+      IFNULL(NULLIF(TRIM(invocation_id), ''), CAST(timestamp AS STRING))
+    ) AS turn_id,
+    IF(
+      invocation_id IS NULL,
+      CONCAT(
+        '__null_inv_',
+        CAST(timestamp AS STRING),
+        '_',
+        IFNULL(span_id, ''),
+        '_',
+        IFNULL(event_type, '')
+      ),
+      IFNULL(NULLIF(TRIM(invocation_id), ''), CAST(timestamp AS STRING))
+    ) AS turn_partition_key,
+    NULLIF(
+      JSON_VALUE(attributes, '$.session_metadata.state."conversation-id"'),
+      ''
+    ) AS raw_conversation_id,
+    NULLIF(
+      JSON_VALUE(attributes, '$.session_metadata.state."data-agent-id"'),
+      ''
+    ) AS raw_data_agent_id,
+    NULLIF(
+      JSON_VALUE(
+        attributes, '$.session_metadata.state.custom_labels.persona'
+      ),
+      ''
+    ) AS raw_explicit_persona,
+    NULLIF(
+      REGEXP_EXTRACT(
+        TRIM(user_id),
+        r'^([A-Za-z0-9._%+-]+)@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?::|$)'
+      ),
+      ''
+    ) AS raw_email_persona,
+    IFNULL(
+      LOWER(JSON_VALUE(attributes, '$.fast_path')) = 'true',
+      FALSE
+    ) AS raw_fast_path,
+    (
+      IFNULL(UPPER(TRIM(status)) = 'ERROR', FALSE)
+      OR NULLIF(TRIM(error_message), '') IS NOT NULL
+      OR ENDS_WITH(UPPER(TRIM(IFNULL(event_type, ''))), '_ERROR')
+    ) AS raw_is_error,
+    IF(
+      event_type = 'INVOCATION_COMPLETED' AND invocation_id IS NOT NULL,
+      ROW_NUMBER() OVER (
+        PARTITION BY
+          IF(
+            invocation_id IS NULL,
+            CONCAT(
+              '__null_inv_',
+              CAST(timestamp AS STRING),
+              '_',
+              IFNULL(span_id, '')
+            ),
+            IFNULL(NULLIF(TRIM(invocation_id), ''), CAST(timestamp AS STRING))
+          ),
+          IF(event_type = 'INVOCATION_COMPLETED', 1, 0)
+        ORDER BY
+          SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64) DESC NULLS LAST,
+          timestamp DESC,
+          span_id DESC
+      ),
+      NULL
+    ) AS raw_turn_complete_rn,
+    IF(
+      event_type = 'AGENT_RESPONSE',
+      ROW_NUMBER() OVER (
+        PARTITION BY
+          IF(
+            invocation_id IS NULL,
+            CONCAT(
+              '__null_inv_',
+              CAST(timestamp AS STRING),
+              '_',
+              IFNULL(span_id, '')
+            ),
+            IFNULL(NULLIF(TRIM(invocation_id), ''), CAST(timestamp AS STRING))
+          ),
+          IF(event_type = 'AGENT_RESPONSE', 1, 0)
+        ORDER BY timestamp DESC, span_id DESC
+      ),
+      NULL
+    ) AS raw_agent_response_rn
   FROM `{{PROJECT}}.{{DATASET}}.{{TABLE}}`
   WHERE timestamp >= TIMESTAMP(
           PARSE_DATE('%Y%m%d', @DS_START_DATE), 'UTC'
@@ -125,55 +226,66 @@ bqca_fields AS (
     TIMESTAMP_TRUNC(timestamp, HOUR, 'UTC') AS event_hour,
     event_type,
     agent,
-    session_id,
-    invocation_id,
+    COALESCE(NULLIF(TRIM(session_id), ''), turn_id) AS session_id,
+    turn_id AS invocation_id,
     user_id,
     trace_id,
     span_id,
     parent_span_id,
-    NULLIF(
-      JSON_VALUE(attributes, '$.session_metadata.state."data-agent-id"'),
-      ''
+    COALESCE(
+      FIRST_VALUE(raw_data_agent_id IGNORE NULLS) OVER (
+        PARTITION BY turn_partition_key
+        ORDER BY timestamp ASC, event_type ASC, span_id ASC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+      ),
+      'unattributed'
     ) AS data_agent_id,
-    NULLIF(
-      JSON_VALUE(attributes, '$.session_metadata.state."conversation-id"'),
-      ''
+    FIRST_VALUE(raw_conversation_id IGNORE NULLS) OVER (
+      PARTITION BY turn_partition_key
+      ORDER BY timestamp ASC, event_type ASC, span_id ASC
+      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
     ) AS conversation_id,
     COALESCE(
-      NULLIF(
-        JSON_VALUE(
-          attributes, '$.session_metadata.state.custom_labels.persona'
-        ),
-        ''
+      FIRST_VALUE(raw_explicit_persona IGNORE NULLS) OVER (
+        PARTITION BY turn_partition_key
+        ORDER BY timestamp ASC, event_type ASC, span_id ASC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
       ),
-      REGEXP_EXTRACT(
-        TRIM(user_id),
-        r'^([A-Za-z0-9._%+-]+)@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?::|$)'
+      FIRST_VALUE(raw_email_persona IGNORE NULLS) OVER (
+        PARTITION BY turn_partition_key
+        ORDER BY timestamp ASC, event_type ASC, span_id ASC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
       ),
-      NULLIF(
-        JSON_VALUE(attributes, '$.session_metadata.state."data-agent-id"'),
-        ''
+      FIRST_VALUE(raw_data_agent_id IGNORE NULLS) OVER (
+        PARTITION BY turn_partition_key
+        ORDER BY timestamp ASC, event_type ASC, span_id ASC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
       ),
       'unattributed'
     ) AS persona,
-    IFNULL(JSON_VALUE(attributes, '$.fast_path') = 'true', FALSE) AS fast_path,
+    LOGICAL_OR(raw_fast_path) OVER (
+      PARTITION BY turn_partition_key
+    ) AS fast_path,
     status,
-    error_message,
-    (
-      IFNULL(UPPER(status) = 'ERROR', FALSE)
-      OR error_message IS NOT NULL
-      OR ENDS_WITH(event_type, '_ERROR')
-    ) AS is_error,
+    IF(
+      raw_is_error,
+      COALESCE(
+        NULLIF(TRIM(error_message), ''),
+        CONCAT(
+          '[',
+          IFNULL(NULLIF(TRIM(event_type), ''), 'UNKNOWN_EVENT'),
+          ': status=',
+          IFNULL(NULLIF(TRIM(status), ''), 'ERROR'),
+          ']'
+        )
+      ),
+      NULL
+    ) AS error_message,
+    raw_is_error AS is_error,
     is_truncated,
     event_type = 'INVOCATION_STARTING' AS is_turn_start,
-    (
-      event_type = 'INVOCATION_COMPLETED'
-      AND NULLIF(TRIM(invocation_id), '') IS NOT NULL
-      AND ROW_NUMBER() OVER (
-        PARTITION BY NULLIF(TRIM(invocation_id), ''), event_type
-        ORDER BY SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64) DESC NULLS LAST, timestamp DESC, span_id
-      ) = 1
-    ) AS is_turn_complete,
+    IFNULL(raw_turn_complete_rn = 1, FALSE) AS is_turn_complete,
+    IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id,
     SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64)
       AS total_latency_ms,
     IF(
@@ -184,12 +296,7 @@ bqca_fields AS (
       NULL
     ) AS ttft_ms,
     IF(
-      event_type = 'INVOCATION_COMPLETED'
-        AND NULLIF(TRIM(invocation_id), '') IS NOT NULL
-        AND ROW_NUMBER() OVER (
-          PARTITION BY NULLIF(TRIM(invocation_id), ''), event_type
-          ORDER BY SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64) DESC NULLS LAST, timestamp DESC, span_id
-        ) = 1,
+      raw_turn_complete_rn = 1,
       SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64),
       NULL
     ) AS turn_latency_ms,
@@ -339,15 +446,16 @@ bqca_fields AS (
       event_type = 'EMBEDDING_SUGGESTION',
       NULLIF(JSON_VALUE(content, '$.reason'), ''),
       NULL
-    ) AS embedding_suggestion_reason
-  FROM bqca_events
+    ) AS embedding_suggestion_reason,
+    raw_agent_response_rn
+  FROM raw_events
 )
 SELECT
-  *,
+  * EXCEPT (raw_agent_response_rn),
   IF(fast_path, 'fast_path', 'standard_nl2sql') AS fast_path_label,
   IFNULL(similar_queries_count > 0, FALSE) AS is_embedding_hit,
   IF(
-    event_type = 'AGENT_RESPONSE',
+    event_type = 'AGENT_RESPONSE' AND raw_agent_response_rn = 1,
     REGEXP_EXTRACT(agent_response_text, r'(?is)```sql\s*(.*?)\s*```'),
     NULL
   ) AS extracted_sql,

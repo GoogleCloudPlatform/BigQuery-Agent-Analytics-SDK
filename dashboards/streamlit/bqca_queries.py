@@ -14,11 +14,13 @@ Governance (the BQCA SQL contract):
 * Attribution never keys on the ``agent``, ``user_id`` or ``session_id``
   columns: a row's data agent is
   ``attributes.session_metadata.state."data-agent-id"``. (``user_id`` only
-  feeds the *last-resort* persona fallback.)
+  feeds the email-handle tier of the persona.)
 * An error is the three-condition predicate ``IS_ERROR_EXPR``, never
   ``status = 'ERROR'`` alone.
-* A turn is a distinct *non-blank* ``invocation_id`` (``INVOCATION_ID_EXPR``):
-  a blank or whitespace-only value names no turn and reads as missing.
+* A turn is a distinct ``invocation_id`` (``INVOCATION_ID_EXPR``): an id padded
+  with whitespace is trimmed, an event logged with a *blank* id is a turn of
+  its own keyed by its timestamp (the BQCA customer notebook's rule), and only
+  an event with no id at all (NULL) belongs to no turn.
 * The data-agent, persona and fast-path filters decide at *turn* grain. The
   plugin does not stamp every event of a turn with the same attribution, so
   ``_prelude`` resolves each value across the turn's events before any filter
@@ -84,11 +86,19 @@ CONVERSATION_ID_EXPR = (
     "NULLIF(JSON_VALUE(attributes,"
     " '$.session_metadata.state.\"conversation-id\"'), '')"
 )
-# A turn is a distinct ``invocation_id``. A blank or whitespace-only value names
-# no turn (the explorer could not open its timeline), so it reads as missing,
-# and an id padded with whitespace is trimmed so the turn table and the
-# timeline spell it the same way.
-INVOCATION_ID_EXPR = "NULLIF(TRIM(invocation_id), '')"
+# A turn is a distinct ``invocation_id``. An id padded with whitespace is
+# trimmed, so the turn table and the timeline spell it the same way. An event
+# logged with a *blank* id (``''`` or only whitespace) is a turn of its own,
+# keyed by ``CAST(timestamp AS STRING)``: a non-NULL key that is distinct per
+# event timestamp, the rule the BQCA customer notebook uses, so the turn table
+# lists it and the timeline opens it by the very same key instead of dropping
+# it. Only an event with no id at all (NULL) belongs to no turn: the per-turn
+# panels leave it out, and ``_TURN_PARTITION_KEY`` keeps it from merging with
+# other NULL-id rows.
+INVOCATION_ID_EXPR = (
+    "IF(invocation_id IS NULL, NULL,"
+    " IFNULL(NULLIF(TRIM(invocation_id), ''), CAST(timestamp AS STRING)))"
+)
 # ``user_id`` is often an opaque id (a service-account name, a numeric id), and
 # the text before an ``@`` in it must not become a persona. Only a real email
 # address yields a handle; an optional ``:suffix`` after the address is
@@ -98,20 +108,28 @@ _EMAIL_HANDLE_PATTERN = (
     r"^([A-Za-z0-9._%+-]+)@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*"
     r"\.[A-Za-z]{2,}(?::|$)"
 )
-PERSONA_EXPR = (
-    "COALESCE("
-    "NULLIF(JSON_VALUE(attributes,"
-    " '$.session_metadata.state.custom_labels.persona'), ''),"
-    f" NULLIF(REGEXP_EXTRACT(TRIM(user_id), r'{_EMAIL_HANDLE_PATTERN}'), ''),"
-    " NULLIF(JSON_VALUE(attributes,"
-    " '$.session_metadata.state.\"data-agent-id\"'), ''),"
-    " 'unattributed')"
+_USER_ID_EMAIL_HANDLE = (
+    f"REGEXP_EXTRACT(TRIM(user_id), r'{_EMAIL_HANDLE_PATTERN}')"
 )
+# A persona has three tiers, in this order of precedence: the persona custom
+# label, the email handle of ``user_id``, and the data agent
+# (``DATA_AGENT_ID_EXPR``); a turn with none of them is ``'unattributed'``. Each
+# tier is read per row here, as NULL when the row does not carry it, and
+# ``_prelude`` resolves each one across the whole turn *before* choosing between
+# them, so a label logged by a later event still beats an email handle logged by
+# an earlier one.
+RAW_EXPLICIT_PERSONA_EXPR = (
+    "NULLIF(JSON_VALUE(attributes,"
+    " '$.session_metadata.state.custom_labels.persona'), '')"
+)
+RAW_EMAIL_PERSONA_EXPR = f"NULLIF({_USER_ID_EMAIL_HANDLE}, '')"
 IS_ERROR_EXPR = (
     "(UPPER(status) = 'ERROR' OR error_message IS NOT NULL"
     " OR ENDS_WITH(event_type, '_ERROR'))"
 )
-FAST_PATH_EXPR = "IFNULL(JSON_VALUE(attributes, '$.fast_path') = 'true', FALSE)"
+FAST_PATH_EXPR = (
+    "IFNULL(LOWER(JSON_VALUE(attributes, '$.fast_path')) = 'true', FALSE)"
+)
 MODEL_NAME_EXPR = (
     "COALESCE(NULLIF(JSON_VALUE(attributes, '$.model'), ''),"
     " NULLIF(JSON_VALUE(attributes, '$.model_version'), ''))"
@@ -219,11 +237,13 @@ EMBEDDING_REASON_EXPR = (
 # Raw columns every panel needs, and the canonical dimensions every panel
 # filters on. Derived here once so the filters apply identically everywhere.
 # ``invocation_id`` is not a raw column here: it is the turn key and always
-# goes through ``INVOCATION_ID_EXPR``.
+# goes through ``INVOCATION_ID_EXPR``. ``span_id`` is only read to tell apart
+# the events that belong to no turn (see ``_TURN_PARTITION_KEY``).
 _BASE_RAW: tuple[str, ...] = (
     "timestamp",
     "event_type",
     "session_id",
+    "span_id",
 )
 # Facts that belong to one row, however many rows the turn has.
 _ROW_DIMENSIONS: tuple[tuple[str, str], ...] = (
@@ -233,11 +253,35 @@ _ROW_DIMENSIONS: tuple[tuple[str, str], ...] = (
 # Facts that belong to a *turn*, but that the plugin may not stamp on every one
 # of the turn's events. They are read per row as ``raw_<name>`` and resolved
 # across the turn by ``_prelude``; the panels and the filters only ever see the
-# resolved ``<name>`` columns.
+# resolved ``<name>`` columns. The persona is read as its separate tiers
+# (explicit label, email handle) plus the data agent, so each can be resolved
+# across the turn before the tiers are chosen between.
 _TURN_DIMENSIONS: tuple[tuple[str, str], ...] = (
     ("raw_data_agent_id", DATA_AGENT_ID_EXPR),
-    ("raw_persona", PERSONA_EXPR),
+    ("raw_explicit_persona", RAW_EXPLICIT_PERSONA_EXPR),
+    ("raw_email_persona", RAW_EMAIL_PERSONA_EXPR),
     ("raw_fast_path", FAST_PATH_EXPR),
+)
+# What ``_prelude`` resolves per turn from the tiers above, as ``(resolved
+# alias, raw column)`` pairs, before it decides the turn's ``data_agent_id`` and
+# ``persona``.
+_FIRST_TIERS: tuple[tuple[str, str], ...] = (
+    ("first_data_agent_id", "raw_data_agent_id"),
+    ("first_explicit_persona", "raw_explicit_persona"),
+    ("first_email_persona", "raw_email_persona"),
+)
+# The partition every turn-resolving window runs over, evaluated on
+# ``events_raw`` where ``invocation_id`` is already ``INVOCATION_ID_EXPR``: the
+# turn key, except that an event with no ``invocation_id`` at all (NULL) gets a
+# key of its own. Left alone, every such event would fall into one shared NULL
+# partition and inherit the attribution or the error verdict of unrelated
+# events; with its own key it is judged alone, and the per-turn panels still
+# leave it out because its ``invocation_id`` stays NULL.
+_TURN_PARTITION_KEY = (
+    "IF(invocation_id IS NULL,"
+    " CONCAT('__null_inv_', CAST(timestamp AS STRING), '_',"
+    " IFNULL(span_id, ''), '_', event_type),"
+    " invocation_id)"
 )
 
 _MAX_LIMIT = 1000
@@ -322,15 +366,15 @@ def _scope_sql(*, honor_event_types: bool = False) -> str:
 def _first_attributed(column: str) -> str:
   """Renders the earliest real value of ``column`` across a row's turn.
 
-  NULL and ``'unattributed'`` (the fallback ``PERSONA_EXPR`` ends in) both mean
-  "this event carries no attribution", so neither may win over a real value
-  that another event of the same turn does carry. ``FIRST_VALUE ... IGNORE
-  NULLS`` takes the first real value in time order; ``event_type`` and then the
-  value itself break ties, so the answer never depends on row order; and the
-  frame spans the whole turn, so *every* row of it (not only the rows after the
-  first real value) gets the same answer. A turn with no real value anywhere is
-  ``'unattributed'``. A row with no turn (a missing or blank ``invocation_id``)
-  has nothing to resolve against and keeps its own value.
+  A real value is a non-NULL one: ``FIRST_VALUE ... IGNORE NULLS`` takes the
+  first of them in time order, whichever event of the turn carries it.
+  ``event_type`` and then the value itself break ties, so the answer never
+  depends on row order; and the frame spans the whole turn, so *every* row of
+  it (not only the rows after the first real value) gets the same answer. A
+  turn that carries no real value anywhere is NULL: the caller (``_prelude``)
+  chooses the fallback, which keeps each persona tier separate until all three
+  have been resolved. An event with no turn is the only row of its own
+  partition (``_TURN_PARTITION_KEY``), so it keeps its own value.
 
   Args:
     column: The per-row ``raw_*`` column of ``events_raw`` to resolve.
@@ -339,21 +383,20 @@ def _first_attributed(column: str) -> str:
     A SQL expression over ``events_raw``.
   """
   return (
-      f"IF(invocation_id IS NULL, {column},"
-      f" COALESCE(FIRST_VALUE(NULLIF({column}, 'unattributed') IGNORE NULLS)"
-      " OVER (PARTITION BY invocation_id"
+      f"FIRST_VALUE({column} IGNORE NULLS)"
+      f" OVER (PARTITION BY {_TURN_PARTITION_KEY}"
       f" ORDER BY timestamp ASC, event_type ASC, {column} ASC"
-      " ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),"
-      " 'unattributed'))"
+      " ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)"
   )
 
 
 def _turn_any(column: str) -> str:
   """Renders whether *any* event of a row's turn satisfies a boolean column.
 
-  A row with no turn (a missing or blank ``invocation_id``) is judged on its
-  own: every such row would otherwise fall into one shared NULL partition and
-  inherit the verdict of an unrelated row.
+  An event with no turn (a NULL ``invocation_id``) is judged on its own: it is
+  the only row of its own partition (``_TURN_PARTITION_KEY``), where all such
+  rows would otherwise share one NULL partition and inherit the verdict of an
+  unrelated row.
 
   Args:
     column: A boolean column of ``events_raw``.
@@ -361,10 +404,7 @@ def _turn_any(column: str) -> str:
   Returns:
     A SQL expression over ``events_raw``.
   """
-  return (
-      f"IF(invocation_id IS NULL, {column},"
-      f" LOGICAL_OR({column}) OVER (PARTITION BY invocation_id))"
-  )
+  return f"LOGICAL_OR({column}) OVER (PARTITION BY {_TURN_PARTITION_KEY})"
 
 
 def _prelude(
@@ -375,6 +415,7 @@ def _prelude(
     derived: Sequence[tuple[str, str]] = (),
     honor_event_types: bool = False,
     extra_scope: Sequence[str] = (),
+    apply_filters: bool = True,
 ) -> str:
   """Renders the ``events_raw``, ``events`` and ``scoped`` CTEs of every panel.
 
@@ -384,14 +425,21 @@ def _prelude(
   and any panel-specific columns, all computed once.
 
   ``events`` then resolves the turn-grain dimensions across each turn's rows
-  (see ``_first_attributed`` and ``_turn_any``): ``data_agent_id`` and
-  ``persona`` are the turn's first real value, ``fast_path`` is "any event of
-  the turn is tagged", and ``fast_path_label`` names that path. Resolving
-  before filtering is the point: the plugin does not stamp every event of a turn
-  with the same attribution, so a row-level filter would keep a turn's prompt
-  but drop its completion and make the turn look unfinished. With
-  ``state.errors_only`` it also adds ``turn_has_error``, so *every* event of a
-  turn that has an error somewhere survives, not just the error events.
+  (see ``_first_attributed`` and ``_turn_any``): ``data_agent_id`` is the
+  turn's first logged data agent, ``persona`` is the first tier the turn
+  carries (the persona custom label, else the email handle of ``user_id``,
+  else the data agent), ``fast_path`` is "any event of the turn is tagged", and
+  ``fast_path_label`` names that path. A turn with no data agent is
+  ``'unattributed'``, and so is the persona of a turn with none of the three
+  tiers. Each tier is resolved across the *whole* turn before the tiers are
+  compared, so a label logged by a later event still beats a handle logged by
+  an earlier one. Resolving before filtering is the point: the plugin does not
+  stamp every event of a turn with the same attribution, so a row-level filter
+  would keep a turn's prompt but drop its completion and make the turn look
+  unfinished. With ``state.errors_only`` it also adds ``turn_has_error``, so
+  *every* event of a turn that has an error somewhere survives, not just the
+  error events. An event with no ``invocation_id`` at all (NULL) has no turn:
+  it is resolved on its own (``_TURN_PARTITION_KEY``).
 
   ``scoped`` applies the sidebar filters to the resolved columns, a separate
   step because BigQuery cannot reference a select-list alias in ``WHERE``.
@@ -403,10 +451,14 @@ def _prelude(
     derived: Extra ``(alias, expression)`` columns the panel needs.
     honor_event_types: Whether to apply the event-type multi-select.
     extra_scope: Extra predicates AND-ed into ``scoped``.
+    apply_filters: Whether to apply the sidebar filters at all. ``False``
+      renders only ``events_raw`` and ``events`` (no ``scoped``, and no
+      ``turn_has_error`` even with ``state.errors_only``); the sidebar's own
+      option lists use that, because they must ignore every filter.
 
   Returns:
-    ``WITH events_raw AS (...), events AS (...), scoped AS (...)`` with no
-    trailing newline.
+    ``WITH events_raw AS (...), events AS (...)``, followed by
+    ``, scoped AS (...)`` when ``apply_filters``, with no trailing newline.
   """
   table = _validate_ident(state.project_id, state.dataset_id, state.table_id)
   columns = [
@@ -425,12 +477,12 @@ def _prelude(
       )
   ]
   resolved = [
-      f"      {_first_attributed('raw_data_agent_id')} AS data_agent_id",
-      f"      {_first_attributed('raw_persona')} AS persona",
-      f"      {_turn_any('raw_fast_path')} AS fast_path",
+      f"      {_first_attributed(raw_column)} AS {alias}"
+      for alias, raw_column in _FIRST_TIERS
   ]
+  resolved.append(f"      {_turn_any('raw_fast_path')} AS fast_path")
   where = [_scope_sql(honor_event_types=honor_event_types)]
-  if state.errors_only:
+  if apply_filters and state.errors_only:
     # Turn-level: keep *every* event of a turn that has an error somewhere,
     # not just the error events themselves.
     resolved.append(f"      {_turn_any('is_error')} AS turn_has_error")
@@ -438,8 +490,10 @@ def _prelude(
   where.extend(extra_scope)
   select = ",\n".join(items)
   turn_select = ",\n".join(resolved)
+  raw_turn_columns = ", ".join(alias for alias, _ in _TURN_DIMENSIONS)
+  first_columns = ", ".join(alias for alias, _ in _FIRST_TIERS)
   predicates = "\n    AND ".join(where)
-  return f"""
+  prelude = f"""
 WITH events_raw AS (
   SELECT
 {select}
@@ -449,20 +503,28 @@ WITH events_raw AS (
 ),
 events AS (
   SELECT
-    *,
+    * EXCEPT ({first_columns}),
+    COALESCE(first_data_agent_id, 'unattributed') AS data_agent_id,
+    COALESCE(
+      first_explicit_persona, first_email_persona, first_data_agent_id,
+      'unattributed'
+    ) AS persona,
     IF(fast_path, 'fast_path', 'standard_nl2sql') AS fast_path_label
   FROM (
     SELECT
-      * EXCEPT (raw_data_agent_id, raw_persona, raw_fast_path),
+      * EXCEPT ({raw_turn_columns}),
 {turn_select}
     FROM events_raw
   )
-),
+)"""
+  if apply_filters:
+    prelude += f""",
 scoped AS (
   SELECT *
   FROM events
   WHERE {predicates}
-)""".strip()
+)"""
+  return prelude.strip()
 
 
 def build_bqca_filter_options_sql(
@@ -470,31 +532,29 @@ def build_bqca_filter_options_sql(
 ) -> str:
   """Builds the sidebar option lists: data agents, personas, event types.
 
-  One pass over the raw table: crossing the rows with a literal array of
+  The lists come from the same turn-resolved ``events`` CTE every panel
+  filters on (see ``_prelude``): a persona is the turn's resolved persona, and
+  ``'unattributed'`` is offered, for a data agent or a persona, when some turn
+  has none. Offering the per-row values instead would list a persona no filter
+  can ever match and could never offer ``'unattributed'`` at all.
+
+  Still one pass over the raw table: crossing the rows with a literal array of
   structs pivots the three columns into ``(kind, value)`` rows, so the whole
   sidebar costs one scan rather than three.
 
   Args:
-    f: Active connection (filters are deliberately ignored: picking one
-      data agent must not hide the others).
+    f: Active connection (every sidebar filter is deliberately ignored, the
+      errors-only switch included: picking one data agent must not hide the
+      others).
     window: Query window; resolved from ``f`` when omitted.
 
   Returns:
     The SQL query string.
   """
-  table = _validate_ident(f.project_id, f.dataset_id, f.table_id)
   window = _window(f, window)
+  prelude = _prelude(f, window, apply_filters=False)
   return f"""
-WITH events AS (
-  SELECT
-    timestamp,
-    event_type,
-    {DATA_AGENT_ID_EXPR} AS data_agent_id,
-    {PERSONA_EXPR} AS persona
-  FROM {table}
-  WHERE {queries.time_bounds(window)}
-    AND event_type IN UNNEST(@allowed_event_types)
-)
+{prelude}
 SELECT
   o.kind,
   o.value,
@@ -537,9 +597,10 @@ def build_bqca_kpis_sql(
   keeps the no-data contract: an unaggregated SELECT over aggregates always
   emits a row, so an empty filter intersection would otherwise report a
   confident "0 turns, 0% errors". When events exist but none belongs to a turn
-  (every ``invocation_id`` is missing or blank) the row reads 0 turns, an
-  *undefined* (NULL) error rate and the orphan events' token totals; the app
-  shows the rate as a dash and says why.
+  (every ``invocation_id`` is NULL; an empty one is a turn of its own, see
+  ``INVOCATION_ID_EXPR``) the row reads 0 turns, an *undefined* (NULL) error
+  rate and the orphan events' token totals; the app shows the rate as a dash
+  and says why.
 
   Args:
     f: Active filters and connection.
@@ -1157,11 +1218,13 @@ def build_bqca_turn_timeline_sql(
   """Builds the ordered event timeline of one turn (panel P9).
 
   The invocation is bound as ``@invocation_id`` and compared with the same
-  normalized turn key the explorer lists (``INVOCATION_ID_EXPR``); this builder
-  only checks it is non-blank. The sidebar's event-type selection narrows the
-  timeline, but the other filters do not: once a turn is picked, every one of
-  its events belongs in the picture. The query is still bounded by the window,
-  so partition pruning keeps it cheap.
+  normalized turn key the explorer lists (``INVOCATION_ID_EXPR``), so a turn
+  whose events were logged with an empty ``invocation_id`` opens by the
+  timestamp key the explorer shows for it; this builder only checks the key is
+  not blank. The sidebar's event-type selection narrows the timeline, but the
+  other filters do not: once a turn is picked, every one of its events belongs
+  in the picture. The query is still bounded by the window, so partition
+  pruning keeps it cheap.
 
   Args:
     f: Active connection and event-type selection.
