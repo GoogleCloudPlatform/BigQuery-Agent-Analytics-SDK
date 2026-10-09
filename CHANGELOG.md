@@ -7,47 +7,184 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-08
+
+### Release highlights
+
+A minor release: it adds public API, and the per-event views change what
+they select and which tables they deploy over (see Changed). In the wheel:
+span-level OpenTelemetry correlation (#312 / #510). `Span` gains
+`otel_span_id`, `otel_trace_id` and `source_event_id`; every per-event
+view selects `otel_span_id` and `otel_trace_id`; and
+`ViewManager(denied_columns=...)`, with a matching `--denied-column` flag
+on the `views` CLI, deploys views over an events table written with the
+plugin's `payload_column_denylist` (#321). Two view changes matter when
+you upgrade: the event-specific columns now come two positions later, and
+over an events table with no `attributes` column the per-event views
+deploy only with `denied_columns=["attributes"]`. Unused imports are
+dropped from 11 modules (#504). No public API is removed or renamed, and
+the wheel's dependencies are unchanged. Around the wheel: an agent memory
+demo built from `agent_events` (#512) and a BigQuery Conversational
+Analytics (BQCA) Prompt & Response Logging starter notebook and manual
+(#507) land under `examples/` and `docs/`; SDK.md gains a trace and span
+correlation guide (#510) and a `compaction_windows` limitation note
+(#502), and the EvalBench guide documents its `import_version` pin (#508);
+two deploy scripts keep IAM-retry stderr in a private temp file (#506);
+and tests, a hash lock and the tracing producer get small cleanups (#505,
+#509, #513).
+
 ### Added
 
-- **Span-level OpenTelemetry correlation (#312)** — `Span` gains
-  `otel_span_id`, `otel_trace_id` and `source_event_id`.
+- **Span-level OpenTelemetry correlation (#312 / #510)** — `Span` gains
+  `otel_span_id`, `otel_trace_id` and `source_event_id` after its
+  existing fields, so positional construction is unchanged.
   `Span.from_bigquery_row()` reads them from same-named columns, or else
   from `attributes.otel` and `attributes.adk` (or the legacy
-  `attributes.source_event_id`); they stay `None` on rows without those
-  keys, and the span tree is still built from `span_id` /
-  `parent_span_id`. Every per-event view also projects `otel_span_id` and
-  `otel_trace_id`, which are `NULL` unless the ADK plugin runs with
-  `BigQueryLoggerConfig(enable_otel_correlation=True)`
+  `attributes.source_event_id`), ignoring non-string values in
+  `attributes`; they stay `None` on rows without those columns or keys,
+  and the span tree is still built from `span_id` / `parent_span_id`.
+  Every per-event view also projects
+  `otel_span_id` and `otel_trace_id`, which are `NULL` unless the ADK
+  plugin runs with `BigQueryLoggerConfig(enable_otel_correlation=True)`
   (`google-adk>=2.4.0`).
-- **`ViewManager(denied_columns=...)` (#321)** — for an events table
-  written with the plugin's `payload_column_denylist`. Denying
-  `attributes` drops the two OpenTelemetry columns, and a view whose own
-  SQL reads a denied column is skipped by `create_all_views()` (with a
-  warning) and rejected by `create_view()`. With
+- **`ViewManager(denied_columns=...)` (#321 / #510)** — a keyword-only
+  argument for an events table written with the plugin's
+  `payload_column_denylist`. Denying `attributes` drops the two
+  OpenTelemetry columns, and a view whose own SQL reads a denied column
+  is skipped by `create_all_views()` (with a warning) and rejected by
+  `create_view()` with `ValueError` before any query runs. With
   `denied_columns=["attributes"]` the six per-event views that read
-  `attributes` and `compaction_windows` are skipped; the other 19
-  per-event views deploy. Names other than `content`, `content_parts`,
-  `attributes` and `latency_ms` raise `ValueError`.
+  `attributes` (`LLM_REQUEST`, `LLM_RESPONSE`, `TOOL_COMPLETED`,
+  `STATE_DELTA`, `A2A_INTERACTION`, `TOOL_PAUSED`) and
+  `compaction_windows` are skipped; the other 19 per-event views deploy.
+  Only `content`, `content_parts`, `attributes` and `latency_ms` (exact
+  case) are accepted: any other name raises `ValueError`, and a single
+  string instead of a collection raises `TypeError`.
   `bq-agent-sdk views create-all` and `views create` take the same names
-  as a repeatable `--denied-column` flag.
-- **Trace and span correlation guide (#209, #220, #320)** — SDK.md
+  as a repeatable `--denied-column` flag and exit 2 on an invalid name.
+
+### Changed
+
+- **Per-event views select two more columns (#312 / #510)** — every
+  per-event `CREATE OR REPLACE VIEW` statement now selects the nullable
+  `otel_span_id` and `otel_trace_id` between the standard headers and the
+  event-specific columns. Existing columns keep their names and types,
+  but the event-specific columns now come two positions later: update
+  anything that reads view columns by position, such as
+  `INSERT INTO ... SELECT *` from a view. Re-run `create_all_views()` to
+  pick up the new columns. Over an events table without an `attributes`
+  column, every per-event view now fails to deploy unless you pass
+  `ViewManager(denied_columns=["attributes"])` or
+  `bq-agent-sdk views create-all --denied-column=attributes`; with it,
+  the same 19 per-event views deploy as before and the other six are
+  skipped.
+
+### Removed
+
+- **Unused imports (#504)** — import lines only, in 11 modules; no logic,
+  signature or exported name changes. Module attributes that existed only
+  as these imports are gone: `ai_ml_integration.timedelta`,
+  `eval_validator.field`, `extractor_compilation.diagnostics.Any`,
+  `extractor_compilation.measurement.CompileResult` (import it from
+  `extractor_compilation` or the package root), `feedback.dataclass`,
+  `feedback.field`, `feedback.json`, `insights.asyncio`,
+  `insights.dataclass`, `insights.json`,
+  `ontology_materializer.ResolvedProperty` (defined in `resolved_spec`),
+  `ontology_models.Any`, `ttl_importer.XSD` (present only with `rdflib`
+  installed; use `rdflib.XSD`) and
+  `bigquery_ontology.graph_ddl_compiler.PropertyBinding` (exported from
+  `bigquery_ontology`). None of these names was exported from the
+  package or documented.
+
+### Examples and guides (repo side, not in the wheel)
+
+- **Agent memory demo (#511 / #512)** — `examples/agent_memory/` reads
+  three memory layers back from the `agent_events` rows that the ADK
+  `BigQueryAgentAnalyticsPlugin` writes, with `Client.list_traces`:
+  short-term (per-session conversations), long-term (the version history
+  of ADK `user:` state, plus entities) and reasoning (one trace per
+  invocation with its model turns, tool calls and outcome). It combines
+  them in a `get_context()` prompt block whose lines name their source
+  rows. The demo runs offline on a committed synthetic fixture, through
+  the real `Client` and a fail-closed stand-in for `bigquery.Client`, or
+  live with `--project-id` / `--dataset-id`. `analyst_agent.py` runs a
+  live ADK data-analyst agent (`gemini-3.8-flash`) over
+  `bigquery-public-data.thelook_ecommerce`; `memory_consolidation.py`
+  extracts facts and entities from each logged user message with
+  `AI.GENERATE` and embeds it with `AI.EMBED`, and recall ranks similar
+  past tasks with `ML.DISTANCE`. The recorded run of 2026-10-07 (36
+  sessions with memory and 6 without, 1,606 logged rows), a static web
+  view and a narrated video are committed. Its tests in
+  `tests/examples/test_agent_memory_*.py` (182 cases) run without network
+  or credentials.
+- **BQCA Prompt & Response Logging starter notebook and manual (#507)** —
+  `examples/bqca_prompt_response_logging_customer_notebook.ipynb` and
+  `docs/guides/bqca-prompt-response-logging-manual.md` evaluate BigQuery
+  Conversational Analytics Prompt & Response Logging tables with this SDK,
+  in eight sections: schema and Vertex AI health (`doctor()` plus an
+  `AI.GENERATE` ping), a conversation explorer, sentiment and UX triage,
+  question topics, semantic drift and golden-question coverage, golden Q&A
+  grading, FinOps, and operational health. Two non-destructive compatibility
+  views, one for the SDK and one for SQL and BI, flatten BQCA's nested
+  `AGENT_RESPONSE` JSON. The notebook's SDK adapters are notebook code, not
+  wheel changes, and its install cell installs
+  `bigquery-agent-analytics[llm]==0.5.4` when the SDK is missing or older
+  than 0.5.4. `README.md` and `examples/README.md` link both.
+
+### Documentation
+
+- **Trace and span correlation guide (#209, #220, #320 / #510)** — SDK.md
   documents the three correlation layers, the plugin's
   `enable_otel_correlation`, `custom_metadata_allowlist` and
   `payload_column_denylist` options, the OpenTelemetry span each plugin
   callback records, and two partition-pruned SQL recipes that join the
   events table to an `otel_spans` table.
+- **`compaction_windows` partition limitation in SDK.md (#502)** — the
+  view's reference section now states the known limitation recorded in
+  0.5.4 (no event `timestamp` column, so no partition pruning, and a
+  failure on tables that set `require_partition_filter`) and points
+  time-bounded queries at the `adk_event_compactions` per-event view,
+  which is not a drop-in replacement. A test ties the note to the view.
+- **EvalBench drill-down `import_version` pin (#508)** —
+  `docs/evalbench.md` now says that `EvalBenchSession.trace_selector()`
+  also returns `import_version` and that
+  `EvalBenchImportSessions.trace_filter()` sets
+  `TraceFilter(import_version=...)`. The pin is redundant for imports
+  converted from EvalBench source tables, but it is what isolates one
+  version of a native `agent_events` import (#463).
 
-### Changed
+### Security (repo side, not in the wheel)
 
-- **Per-event views select two more columns (#312)** — every per-event
-  `CREATE OR REPLACE VIEW` statement now selects the nullable
-  `otel_span_id` and `otel_trace_id` between the standard headers and the
-  event-specific columns; existing columns keep their names and types.
-  Re-run `create_all_views()` to pick them up. Over an events table
-  without an `attributes` column, every per-event view now fails to deploy
-  unless you pass `ViewManager(denied_columns=["attributes"])` or
-  `bq-agent-sdk views create-all --denied-column=attributes`; with it, the
-  same 19 per-event views deploy as before and the other six are skipped.
+- **IAM-retry stderr goes to a private temp file (#506)** — `_retry_iam` in
+  `deploy/skill_evolution_job/deploy.sh` and
+  `examples/context_graph/periodic_materialization/deploy_cloud_run_job.sh`
+  wrote each IAM grant's stderr to `/tmp/_iam_err.$$`, a name another local
+  user can predict: the redirect truncated the target of a symlink planted
+  there, and the file was world-readable under a 022 umask. Both scripts now
+  capture it in a `mktemp` file (mode 0600, random name) that is removed on
+  every return path; retries are unchanged.
+
+### CI, tests and build locks (repo side, not in the wheel)
+
+- **Compiled-only deploy-script test stays offline (#505)** —
+  `test_compiled_only_now_accepted_by_validator` shadows `python3`, `bq`
+  and `gcloud` on the subprocess `PATH`, so `deploy_cloud_run_job.sh` no
+  longer pip-installs from PyPI or calls BigQuery during the unit test,
+  and the test now asserts that the script reached its first deploy
+  step. The deploy script is unchanged.
+- **Browser smoke readiness budget (#513)** — `browser_smoke.sh` reads
+  its readiness budget from `SMOKE_READY_POLLS` (default 20 polls, 0.5 s
+  apart, so the real check is unchanged) and rejects an invalid value
+  before it starts a server or browser. The self-test's
+  alive-but-unready fixture uses 4 polls, about 8 s less per self-test
+  run.
+- **Dead private helpers and a drifted hash lock (#509)** — removes the
+  tracing producer's unused OTLP writer helper `_str` (under
+  `producers/`, which ships on `tracing-v*` tags; no tracing release
+  includes it yet) and an unused test helper, with no behavior change,
+  and regenerates `deploy/otlp_receiver/requirements.lock` for upstream
+  PyPI drift (newer pins such as `google-cloud-bigquery` 3.46.1,
+  `google-auth` 2.60.0, `cryptography` 50.0.2 and OpenTelemetry 1.45.1).
 
 ## [0.5.4] - 2026-09-29
 

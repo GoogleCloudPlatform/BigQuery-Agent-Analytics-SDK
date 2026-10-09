@@ -3572,14 +3572,19 @@ class Client:
     determine coverage percentage and identify gaps.
 
     Args:
-        golden_dataset: Table name containing golden questions
-            (must have a ``question`` column).
+        golden_dataset: Name of the table in this client's dataset that
+            holds the golden questions (must have a ``question``
+            column).
         filters: Optional filters for production traces.
         dataset: Optional events table override.
         embedding_model: Optional model for semantic matching.
 
     Returns:
         DriftReport with coverage metrics.
+
+    Raises:
+        ValueError: If *golden_dataset* is not one BigQuery table name,
+            for example a dotted path or a name containing a backtick.
     """
     table = dataset or self.table_id
     filt = filters or TraceFilter()
