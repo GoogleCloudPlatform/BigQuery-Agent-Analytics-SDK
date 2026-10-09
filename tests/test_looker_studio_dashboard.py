@@ -1126,3 +1126,1749 @@ def test_googlecloudplatform_pages_configuration():
       "actions/deploy-pages@"
       "d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e" in workflow
   )
+  workflow_yaml = yaml.safe_load(workflow)
+  assert (
+      workflow_yaml["jobs"]["deploy"].get("if")
+      == "github.ref == 'refs/heads/main'"
+  ), "P1-4: deploy job must be gated to refs/heads/main"
+
+
+# BQCA Prompt & Response Logging (dashboard Slice 1): a second profile over
+# the shared, published template plus a BQCA reporting query.
+
+BQCA_EVENT_TYPES = (
+    "INVOCATION_STARTING",
+    "USER_MESSAGE_RECEIVED",
+    "AGENT_RESPONSE",
+    "INVOCATION_COMPLETED",
+    "LLM_RESPONSE",
+    "EMBEDDING_SUGGESTION",
+    "INVOCATION_ERROR",
+    "AGENT_ERROR",
+    "LLM_ERROR",
+)
+# #310: BQCA never logs these, so no BQCA artifact may name them.
+BQCA_UNLOGGED_EVENT_TYPES = (
+    "TOOL_STARTING",
+    "TOOL_COMPLETED",
+    "TOOL_ERROR",
+    "LLM_REQUEST",
+)
+BQCA_SQL_FILES = (
+    "sql/bqca_events_v1.sql.tmpl",
+    "sql/bqca_events_v1.template.sql",
+    "sql/bqca_preflight.sql.tmpl",
+    "sql/bqca_preflight.template.sql",
+)
+BQCA_REPORT_ID = "1ffb0888-20ea-451f-aeb8-69fc37973335"
+BQCA_DATASOURCE_ID = "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc"
+BQCA_DATASOURCE_ALIAS = "ds0"
+BQCA_DEFAULT_TABLE = "bqca_prompt_response_logs"
+SHARED_SENTINELS = (
+    "test-project-0728-467323",
+    "bqaa_fixture_adk_1_27_0",
+    "sentinelbqaaevents",
+)
+# The Looker Studio query reads both date parameters itself; a parameter that
+# was replaced by '' left PARSE_DATE('%Y%m%d', '') in the published data
+# source, which BigQuery rejects (the report showed "User Configuration
+# Error").
+BQCA_EVENTS_SQL_FILES = (
+    "sql/bqca_events_v1.sql.tmpl",
+    "sql/bqca_events_v1.template.sql",
+)
+BQCA_DATE_PARAMETERS = ("DS_START_DATE", "DS_END_DATE")
+BQCA_EMPTY_DATE_LITERAL = "PARSE_DATE('%Y%m%d', '')"
+# The embedded BlockDatasource's date fields, as verified against the live
+# data source after the 2026-10-08 republish.
+BQCA_BLOCK_DATASOURCE_FIELDS = {
+    "_event_date_": {"data_type": "DATE", "semantic_type": "YEAR_MONTH_DAY"},
+    "_timestamp_": {
+        "data_type": "TIMESTAMP",
+        "semantic_type": "YEAR_MONTH_DAY_SECOND",
+    },
+    "_event_hour_": {
+        "data_type": "TIMESTAMP",
+        "semantic_type": "YEAR_MONTH_DAY_HOUR",
+    },
+}
+
+
+def _web_report_config():
+  source = (DASHBOARD / "docs/report-config.mjs").read_text()
+  payload = source.split("Object.freeze(", 1)[1].rsplit(");", 1)[0]
+  return json.loads(payload)
+
+
+def _link_parameters(link):
+  parsed = urllib.parse.urlparse(link)
+  assert (parsed.scheme, parsed.netloc, parsed.path) == (
+      "https",
+      "lookerstudio.google.com",
+      "/reporting/create",
+  )
+  return urllib.parse.parse_qs(parsed.query)
+
+
+def _fake_bq_query(responses):
+  """Return (fake bq_query, recorded calls) answering from `responses`."""
+  calls = []
+
+  def fake(project, location, sql, maximum_bytes_billed=None):
+    calls.append(
+        {
+            "project": project,
+            "location": location,
+            "sql": sql,
+            "maximum_bytes_billed": maximum_bytes_billed,
+        }
+    )
+    response = responses[len(calls) - 1]
+    if isinstance(response, Exception):
+      raise response
+    return response
+
+  return fake, calls
+
+
+def _profile_rows(events, attributed, fast_path=0):
+  rows = [
+      {
+          "event_type": event_type,
+          "events_30d": "0",
+          "events_with_data_agent_id": "0",
+          "data_agent_id_coverage": None,
+          "fast_path_events": "0",
+      }
+      for event_type in BQCA_EVENT_TYPES
+  ]
+  rows[0].update(
+      events_30d=str(events),
+      events_with_data_agent_id=str(attributed),
+      fast_path_events=str(fast_path),
+  )
+  return rows
+
+
+def test_bqca_generated_artifacts_cannot_drift(tmp_path):
+  generator = _load_dashboard_module("gen_bqca_events_tmpl")
+  renderer = _load_dashboard_module("render_template")
+  web = _load_dashboard_module("render_web_config")
+  validator = _load_dashboard_module("validate_contracts")
+
+  assert generator.BQCA_EVENT_TYPES == BQCA_EVENT_TYPES
+  logical = generator.generate()
+  assert logical == (DASHBOARD / "sql/bqca_events_v1.sql.tmpl").read_text()
+  assert generator.main(["--check"]) == 0
+  stale = tmp_path / "bqca_events_v1.sql.tmpl"
+  stale.write_text(logical + "-- hand edit\n")
+  assert generator.main(["--check", "--output", str(stale)]) == 1
+
+  bqca_bindings = yaml.safe_load(
+      (DASHBOARD / "bindings/bqca_template_bindings.yaml").read_text()
+  )["placeholders"]
+  expected = {
+      "sql/bqca_events_v1.template.sql": renderer.render_text(
+          logical, bqca_bindings, "sql/bqca_events_v1.sql.tmpl"
+      ),
+      "sql/bqca_preflight.template.sql": renderer.render_text(
+          (DASHBOARD / "sql/bqca_preflight.sql.tmpl").read_text(),
+          bqca_bindings,
+          "sql/bqca_preflight.sql.tmpl",
+      ),
+  }
+  assert renderer.render_profile("bqca") == expected
+  for path, rendered in expected.items():
+    assert (DASHBOARD / path).read_text() == rendered, path
+  # The profile split leaves the ADK pairs, and their outputs, untouched.
+  assert renderer.PAIRS == renderer.PROFILES["adk"]["pairs"]
+  for path, rendered in renderer.render_profile("adk").items():
+    assert (DASHBOARD / path).read_text() == rendered, path
+  assert renderer.main(["--check"]) == 0
+  assert renderer.main(["--profile", "bqca", "--check"]) == 0
+
+  for path, rendered in web.outputs().items():
+    assert (DASHBOARD / path).read_text() == rendered, path
+  assert web.main(["--check"]) == 0
+  assert web.main(["--profile", "bqca", "--check"]) == 0
+  assert web.main(["--profile", "adk", "--check"]) == 0
+  assert web.main(["--profile", "all", "--check"]) == 0
+
+  assert validator.main(["--profile", "bqca"]) == 0
+  assert validator.main(["--profile", "adk"]) == 0
+  assert validator.main(["--profile", "all"]) == 0
+
+
+def test_bqca_profile_reuses_the_published_template_bindings():
+  shared = yaml.safe_load(
+      (DASHBOARD / "bindings/report_template.yaml").read_text()
+  )
+  bqca = yaml.safe_load(
+      (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+  )
+  adk_placeholders = yaml.safe_load(
+      (DASHBOARD / "bindings/template_bindings.yaml").read_text()
+  )["placeholders"]
+  bqca_placeholders = yaml.safe_load(
+      (DASHBOARD / "bindings/bqca_template_bindings.yaml").read_text()
+  )["placeholders"]
+
+  # BQCA uses its own dedicated 7-page tool-free report template and ds0 alias
+  # while keeping the same three sentinel strings in sql/bqca_events_v1.template.sql.
+  assert "shared_template" not in bqca
+  assert bqca["report_id"] == BQCA_REPORT_ID
+  assert bqca["report_id"] != shared["report_id"]
+  assert bqca["data_source_alias"] == BQCA_DATASOURCE_ALIAS
+  assert bqca["datasource_id"] == BQCA_DATASOURCE_ID
+  assert bqca["product_contract"] == "spec/bqca_product_contract.yaml"
+  assert bqca["chart_manifest"] == "spec/bqca_chart_manifest.yaml"
+  assert bqca["link_access"] == "PENDING_PUBLIC_SHARING_ALLOWLIST"
+  assert bqca["publishing_mode"] == "MANUAL"
+  assert (
+      bqca["generated_report_credential_gate"]
+      == shared["generated_report_credential_gate"]
+  )
+  assert bqca["source_contract"] == shared["source_contract"]
+  assert bqca["governance"] == shared["governance"]
+  assert bqca["default_date_range"] == shared["default_date_range"]
+  assert bqca["product_verification"]["pages"] == 7
+  assert bqca["product_verification"]["component_count"] == 34
+  assert bqca["product_verification"]["scorecard_count"] == 21
+  assert bqca["product_verification"]["chart_count"] == 13
+  assert bqca["product_verification"]["result"] == "PASSED"
+  assert bqca_placeholders == adk_placeholders
+  assert (
+      tuple(bqca_placeholders[name] for name in ("PROJECT", "DATASET", "TABLE"))
+      == SHARED_SENTINELS
+  )
+  assert (
+      bqca["default_report_name"] == "BigQuery Conversational Analytics (BQCA)"
+  )
+  assert bqca["default_table"] == BQCA_DEFAULT_TABLE
+  assert bqca["datasource_name_prefix"] == "BQCA"
+  assert bqca["custom_query_template"] == "sql/bqca_events_v1.template.sql"
+  assert (DASHBOARD / bqca["custom_query_template"]).is_file()
+  assert bqca["reviewed_template_sql"] == {
+      "path": "sql/bqca_events_v1.template.sql",
+      "sha256": hashlib.sha256(
+          (DASHBOARD / "sql/bqca_events_v1.template.sql").read_bytes()
+      ).hexdigest(),
+  }
+
+  contract = yaml.safe_load((DASHBOARD / bqca["product_contract"]).read_text())
+  assert contract["surface"]["canonical_report_id"] == BQCA_REPORT_ID
+  assert contract["surface"]["datasource_id"] == BQCA_DATASOURCE_ID
+  assert contract["surface"]["data_source_alias"] == BQCA_DATASOURCE_ALIAS
+  assert (
+      contract["surface"]["source_parity_contract"]
+      == "spec/bqca_chart_manifest.yaml"
+  )
+  assert tuple(contract["allowed_event_types"]) == BQCA_EVENT_TYPES
+  assert [page["id"] for page in contract["pages"]] == [
+      "p_539b9240",
+      "p_a89cfece",
+      "p_97efe693",
+      "p_edf06c14",
+      "p_08774fec",
+      "p_88bcf5f8",
+      "p_b87a335e",
+  ]
+  assert sum(page["component_count"] for page in contract["pages"]) == 34
+  assert contract["excluded_adk_surfaces"]["tool_pages_included"] is False
+  assert contract["excluded_adk_surfaces"]["tool_scorecards_included"] is False
+  assert contract["excluded_adk_surfaces"]["tool_charts_included"] is False
+
+  web = _web_report_config()
+  assert list(web["profiles"]) == ["adk", "bqca"]
+  adk_profile = web["profiles"]["adk"]
+  for key in ("reportId", "dataSourceAlias", "sentinels", "defaultTable"):
+    assert web[key] == adk_profile[key], key
+  assert adk_profile["reportName"] == shared["default_report_name"]
+  assert adk_profile["datasourceName"] == "BQAA"
+  assert web["profiles"]["bqca"] == {
+      "id": "bqca",
+      "label": "BQCA Prompt & Response Logging",
+      "reportId": bqca["report_id"],
+      "dataSourceAlias": bqca["data_source_alias"],
+      "sentinels": {
+          "project": bqca_placeholders["PROJECT"],
+          "dataset": bqca_placeholders["DATASET"],
+          "table": bqca_placeholders["TABLE"],
+      },
+      "defaultTable": bqca["default_table"],
+      "reportName": bqca["default_report_name"],
+      "datasourceName": bqca["datasource_name_prefix"],
+  }
+
+  # The Python tools resolve the same files for each profile.
+  hydration = _load_hydration_module()
+  renderer = _load_dashboard_module("render_template")
+  for profile in ("adk", "bqca"):
+    assert (
+        hydration.PROFILES[profile]["bindings"]
+        == renderer.PROFILES[profile]["bindings"]
+    )
+  assert hydration.PROFILES["bqca"]["report"] == (
+      "bindings/bqca_report_template.yaml"
+  )
+
+
+def test_bqca_query_reads_only_bqca_events_with_canonical_extractions():
+  logical = (DASHBOARD / "sql/bqca_events_v1.sql.tmpl").read_text()
+  rendered = (DASHBOARD / "sql/bqca_events_v1.template.sql").read_text()
+  adk = (DASHBOARD / "sql/events_v1.sql.tmpl").read_text()
+
+  # One base-table scan inside the ADK query's exact UTC date window,
+  # restricted to the nine event types BQCA logs.
+  assert logical.count("FROM `{{PROJECT}}.{{DATASET}}.{{TABLE}}`") == 1
+  window = (
+      "WHERE timestamp >= TIMESTAMP( PARSE_DATE('%Y%m%d', @DS_START_DATE),"
+      " 'UTC' ) AND timestamp < TIMESTAMP( DATE_ADD( PARSE_DATE('%Y%m%d',"
+      " @DS_END_DATE), INTERVAL 1 DAY ), 'UTC' )"
+  )
+  assert window in " ".join(logical.split())
+  assert window in " ".join(adk.split())
+  filters = re.findall(r"AND event_type IN \(([^)]*)\)", logical)
+  assert len(filters) == 1
+  assert tuple(re.findall(r"'([A-Z_]+)'", filters[0])) == BQCA_EVENT_TYPES
+
+  # #125: attribution reads session state, never agent/user_id/session_id.
+  assert (
+      "JSON_VALUE(attributes, '$.session_metadata.state.\"data-agent-id\"')"
+      in logical
+  )
+  assert (
+      "JSON_VALUE(attributes, '$.session_metadata.state.\"conversation-id\"')"
+      in logical
+  )
+  # #153: an error is any of three signals, never status = 'ERROR' alone.
+  assert (
+      "IFNULL(UPPER(TRIM(status)) = 'ERROR', FALSE)\n"
+      "      OR NULLIF(TRIM(error_message), '') IS NOT NULL\n"
+      "      OR ENDS_WITH(UPPER(TRIM(IFNULL(event_type, ''))), '_ERROR')"
+  ) in logical
+  # #155: every markdown part of the response, in order, and a persona
+  # only from an explicit label or a well-formed email local part.
+  assert "JSON_QUERY_ARRAY(content, '$.response.parts')" in logical
+  assert "ORDER BY part_offset" in logical
+  assert "'\\n\\n'" in logical
+  assert "custom_labels.persona" in logical
+  assert "REGEXP_EXTRACT(\n        TRIM(user_id)," in logical
+  assert r"r'^([A-Za-z0-9._%+-]+)@" in logical
+  assert "LIKE '%@%'" not in logical
+  assert "SPLIT(user_id" not in logical
+  assert "'unattributed'" in logical
+
+  for column in (
+      "event_date",
+      "event_hour",
+      "data_agent_id",
+      "conversation_id",
+      "persona",
+      "fast_path",
+      "is_error",
+      "is_turn_start",
+      "is_turn_complete",
+      "completed_turn_id",
+      "total_latency_ms",
+      "ttft_ms",
+      "turn_latency_ms",
+      "llm_latency_ms",
+      "model_name",
+      "model_version",
+      "input_tokens",
+      "output_tokens",
+      "thoughts_tokens",
+      "cached_tokens",
+      "total_tokens",
+      "user_prompt_text",
+      "agent_response_text",
+      "similar_queries_count",
+      "embedding_suggestion_reason",
+      "fast_path_label",
+      "is_embedding_hit",
+      "extracted_sql",
+      "summary_text",
+  ):
+    assert re.search(rf"\bAS {column}\b", logical), column
+  assert "tfft_ms" not in logical
+
+  # F1: user_prompt_text joins all text parts in offset order BEFORE falling
+  # back to $.parts[0].text so multipart user messages are never truncated.
+  prompt_coalesce = logical.split(
+      "event_type IN ('USER_MESSAGE_RECEIVED', 'INVOCATION_STARTING')", 1
+  )[1].split("AS user_prompt_text", 1)[0]
+  assert prompt_coalesce.index(
+      "JSON_QUERY_ARRAY(content, '$.parts')"
+  ) < prompt_coalesce.index("JSON_VALUE(content, '$.parts[0].text')")
+
+  # P1-B & R2-P3-3: EMBEDDING_SUGGESTION emits {reason, suggested_columns} at
+  # HEAD, so $.suggested_columns must appear FIRST in the COALESCE for
+  # similar_queries_count, ahead of $.similar_queries_count and $.suggestions,
+  # with a trailing 0 fallback so reason-only EMBEDDING_SUGGESTION rows emit 0.
+  similar_coalesce = logical.split("event_type = 'EMBEDDING_SUGGESTION'", 1)[
+      1
+  ].split("AS similar_queries_count", 1)[0]
+  assert (
+      similar_coalesce.index("$.suggested_columns")
+      < similar_coalesce.index("$.similar_queries_count")
+      < similar_coalesce.index("$.suggestions")
+  )
+  assert re.search(r",\s*0\s*\)", similar_coalesce), similar_coalesce
+
+  # R2-P2-3 & R3-P1-3: is_turn_complete, completed_turn_id, and turn_latency_ms
+  # deduplicate multiple INVOCATION_COMPLETED rows per non-blank invocation_id
+  # via raw_turn_complete_rn = 1.
+  assert "AS raw_turn_complete_rn" in logical
+  assert (
+      "IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id"
+      in logical
+  )
+  assert (
+      "IFNULL(raw_turn_complete_rn = 1, FALSE) AS is_turn_complete" in logical
+  )
+  assert re.search(
+      r"ORDER BY\s+SAFE_CAST\(JSON_VALUE\(latency_ms,"
+      r" '\$\.total_ms'\) AS FLOAT64\) DESC NULLS LAST,\s+timestamp"
+      r" DESC,\s+span_id",
+      logical,
+  )
+
+  # P2-2: generator docstring reflects that rejected drafts are suppressed and
+  # a second AGENT_RESPONSE only happens when an accepted draft is discarded
+  # by a workflow nudge.
+  gen_source = (DASHBOARD / "tools/gen_bqca_events_tmpl.py").read_text()
+  assert "Rejected drafts are suppressed" in gen_source
+  assert "workflow nudge" in gen_source
+  assert "including rejected drafts" not in gen_source
+
+  # The rendered template binds the three shared sentinels exactly once.
+  assert rendered.startswith(
+      "-- GENERATED by tools/render_template.py from"
+      " sql/bqca_events_v1.sql.tmpl — do not hand-edit.\n"
+  )
+  assert "{{" not in rendered
+  assert rendered.count("FROM `{}.{}.{}`".format(*SHARED_SENTINELS)) == 1
+
+  # The data profile runs through the bq CLI, so it takes no Looker Studio
+  # date parameters, and it reports every allowlisted type, zero or not.
+  profile = (DASHBOARD / "sql/bqca_preflight.sql.tmpl").read_text()
+  assert profile.count("FROM `{{PROJECT}}.{{DATASET}}.{{TABLE}}`") == 1
+  assert "@DS_" not in profile
+  assert "INTERVAL 30 DAY" in profile
+  assert "LEFT JOIN recent" in profile
+  allowlist = re.search(r"UNNEST\(\[([^\]]*)\]\)", profile)
+  assert allowlist
+  assert tuple(re.findall(r"'([A-Z_]+)'", allowlist.group(1))) == (
+      BQCA_EVENT_TYPES
+  )
+  for name in (
+      "events_30d",
+      "events_with_data_agent_id",
+      "data_agent_id_coverage",
+      "fast_path_events",
+  ):
+    assert f"AS {name}" in profile, name
+
+
+def _bqca_date_window_defects(sql):
+  """Return how `sql` misreads the Looker Studio date window (empty if right).
+
+  The query must parse exactly the `@DS_START_DATE` and `@DS_END_DATE`
+  parameters with PARSE_DATE('%Y%m%d', ...) and read no other `@DS_`
+  parameter. The text is checked as written, comments included.
+  """
+  defects = []
+  if re.search(
+      r"PARSE_DATE\s*\([^()]*,\s*(?:''|\"\")\s*\)", sql, re.IGNORECASE
+  ):
+    defects.append("PARSE_DATE parses an empty string literal")
+  calls = sorted(
+      re.sub(r"\s+", "", call)
+      for call in re.findall(r"PARSE_DATE\s*(\([^()]*\))", sql, re.IGNORECASE)
+  )
+  expected = sorted(f"('%Y%m%d',@{name})" for name in BQCA_DATE_PARAMETERS)
+  if calls != expected:
+    defects.append(f"PARSE_DATE calls {calls} are not exactly {expected}")
+  parameters = sorted(set(re.findall(r"@(DS_[A-Z_]+)", sql)))
+  if parameters != sorted(BQCA_DATE_PARAMETERS):
+    defects.append(
+        f"@DS_ parameters {parameters} are not {sorted(BQCA_DATE_PARAMETERS)}"
+    )
+  return defects
+
+
+@pytest.mark.parametrize("relative", BQCA_EVENTS_SQL_FILES)
+def test_bqca_events_sql_reads_both_date_parameters(relative):
+  """The published report failed because both date parameters became ''.
+
+  The embedded data source ran `PARSE_DATE('%Y%m%d', '')` instead of reading
+  `@DS_START_DATE`/`@DS_END_DATE`; BigQuery rejects that as an invalid date
+  and Looker Studio showed "User Configuration Error". Both the logical
+  template and the rendered query that gets published must keep reading the
+  parameters.
+  """
+  sql = (DASHBOARD / relative).read_text()
+
+  assert BQCA_EMPTY_DATE_LITERAL not in sql
+  assert _bqca_date_window_defects(sql) == []
+
+
+BQCA_START_DATE_PARSE = "PARSE_DATE('%Y%m%d', @DS_START_DATE)"
+BQCA_END_DATE_PARSE = "PARSE_DATE('%Y%m%d', @DS_END_DATE)"
+# Ways the rendered query's date window can break, as replacements applied to
+# the real file (each replaced text occurs exactly once in it).
+BQCA_BROKEN_DATE_WINDOWS = {
+    # The published query as it was found: both parameters blanked.
+    "both-parameters-blanked": (
+        (BQCA_START_DATE_PARSE, BQCA_EMPTY_DATE_LITERAL),
+        (BQCA_END_DATE_PARSE, BQCA_EMPTY_DATE_LITERAL),
+    ),
+    "start-parameter-blanked": (
+        (BQCA_START_DATE_PARSE, BQCA_EMPTY_DATE_LITERAL),
+    ),
+    "end-parameter-blanked-in-another-spelling": (
+        (BQCA_END_DATE_PARSE, 'parse_date(\n    "%Y%m%d",\n    ""\n  )'),
+    ),
+    "start-date-hard-coded": (
+        (BQCA_START_DATE_PARSE, "PARSE_DATE('%Y%m%d', '20200101')"),
+    ),
+    "end-date-reads-the-start-parameter": (
+        (BQCA_END_DATE_PARSE, BQCA_START_DATE_PARSE),
+    ),
+    "start-bound-dropped": ((BQCA_START_DATE_PARSE, "DATE '2026-01-01'"),),
+    "end-date-reads-an-unknown-parameter": (
+        (BQCA_END_DATE_PARSE, "PARSE_DATE('%Y%m%d', @DS_OTHER_DATE)"),
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "replacements",
+    list(BQCA_BROKEN_DATE_WINDOWS.values()),
+    ids=list(BQCA_BROKEN_DATE_WINDOWS),
+)
+def test_bqca_date_window_check_rejects_broken_queries(replacements):
+  """The date-window check must fail for each way the window can break."""
+  sql = (DASHBOARD / "sql/bqca_events_v1.template.sql").read_text()
+  assert _bqca_date_window_defects(sql) == []
+  for old, new in replacements:
+    assert sql.count(old) == 1, old
+    sql = sql.replace(old, new)
+
+  assert _bqca_date_window_defects(sql)
+
+
+def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
+  """The published data source's required settings and live proof are pinned.
+
+  Looker Studio runs the embedded query only when the data source declares
+  both date parameters and types its date fields natively. The report is
+  external and mutable, so both artifacts record those settings and the
+  digest of the SQL they were verified against: changing the query, the
+  pages, or a setting fails here until the data source is republished,
+  verified again, and the records are updated.
+  """
+  validator = _load_dashboard_module("validate_contracts")
+  bqca = yaml.safe_load(
+      (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+  )
+  contract = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_product_contract.yaml").read_text()
+  )
+  manifest_bytes = (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_bytes()
+  bundle_bytes = (DASHBOARD / "spec/bqca_dashboard_template.json").read_bytes()
+  rendered = (DASHBOARD / "sql/bqca_events_v1.template.sql").read_bytes()
+  digest = hashlib.sha256(rendered).hexdigest()
+  pages_digest = validator.canonical_pages_sha256(contract["pages"])
+  manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
+  bundle_digest = hashlib.sha256(bundle_bytes).hexdigest()
+
+  invariants = {
+      "use_datetime_type": True,
+      "parameter_configuration": list(BQCA_DATE_PARAMETERS),
+      "fields": BQCA_BLOCK_DATASOURCE_FIELDS,
+  }
+  assert bqca["block_datasource"] == invariants
+  block = dict(contract["block_datasource"])
+  assert block.pop("sql") == {
+      "path": "sql/bqca_events_v1.template.sql",
+      "forbidden_literals": [BQCA_EMPTY_DATE_LITERAL],
+  }
+  assert block == invariants
+  # The declared parameters are exactly the ones the reviewed query reads.
+  assert set(re.findall(r"@(DS_[A-Z_]+)", rendered.decode())) == set(
+      bqca["block_datasource"]["parameter_configuration"]
+  )
+
+  # The live evidence names the exact SQL, pages, manifest, and JSON bundle it was gathered for.
+  assert bqca["reviewed_template_sql"]["sha256"] == digest
+  evidence = bqca["live_template_verification"]
+  assert evidence == {
+      "verified_date": "2026-10-09",
+      "repository_sql_sha256": digest,
+      "pages_sha256": pages_digest,
+      "manifest_sha256": manifest_digest,
+      "template_bundle_sha256": bundle_digest,
+      "method": [
+          "data_studio_web_service_publish_datasource",
+          "data_studio_web_service_get_block_datasource",
+          "lego_midtier_service_execute_query",
+          "lego_midtier_service_render_dashboard_pdf",
+      ],
+      "publish_datasource": {
+          "health": "HEALTHY",
+          "versions": {
+              "hydrated_bqca_table": 1791578476993,
+              "canonical_sentinel_table": 1791578549613,
+          },
+      },
+      "execute_query": {
+          "hydrated_bqca_table": {
+              "schema": "bqaa_base_table_15_columns",
+              "date_range": "default_dates",
+              "code": 0,
+              "pages": [page["id"] for page in contract["pages"]],
+              "non_empty": True,
+          },
+          "canonical_sentinel_table": [
+              {"date_range": "default_dates", "code": 0, "size": 0},
+              {"date_range": "20200101..20261231", "code": 0, "size": 57891},
+          ],
+      },
+      "render_dashboard_pdf": {
+          "hydrated_bqca_table": {
+              "code": 0,
+              "contains_user_configuration_error": False,
+          },
+      },
+      "result": "PASSED",
+      "limitation": "mutable_external_report_requires_reverification_after_changes",
+  }
+  verified = datetime.date.fromisoformat(evidence["verified_date"])
+  assert (
+      datetime.date.fromisoformat(bqca["published_date"])
+      <= verified
+      <= datetime.date.today()
+  )
+
+  # The contract states the gate to pass after every publish, and points at
+  # the evidence of the last run.
+  assert contract["live_verification"] == {
+      "gate": [
+          {
+              "rpc": "DataStudioWebService.PublishDatasource",
+              "expect": {"health": "HEALTHY"},
+          },
+          {
+              "rpc": "LegoMidtierService.ExecuteQuery",
+              "expect": {"code": 0, "pages": "all_report_pages"},
+          },
+          {
+              "rpc": "LegoMidtierService.RenderDashboardPdf",
+              "expect": {
+                  "code": 0,
+                  "contains_user_configuration_error": False,
+              },
+          },
+      ],
+      "last_attested_date": contract["live_verification"]["last_attested_date"],
+      "evidence": (
+          "bindings/bqca_report_template.yaml#live_template_verification"
+      ),
+  }
+  assert (
+      datetime.date.fromisoformat(
+          contract["live_verification"]["last_attested_date"]
+      )
+      <= verified
+  )
+
+  # External-access attestation in bqca_report_template.yaml is stdlib-parseable
+  # by scripts/check_external_access_staleness.py and included in default checks.
+  staleness_spec = importlib.util.spec_from_file_location(
+      "check_external_access_staleness",
+      ROOT / "scripts" / "check_external_access_staleness.py",
+  )
+  assert staleness_spec is not None and staleness_spec.loader is not None
+  staleness_mod = importlib.util.module_from_spec(staleness_spec)
+  staleness_spec.loader.exec_module(staleness_mod)
+  assert staleness_mod.DEFAULT_ATTESTATION_PATHS == (
+      staleness_mod.ATTESTATION_PATH,
+      staleness_mod.BQCA_ATTESTATION_PATH,
+  )
+  bqca_raw = (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+  bqca_ext = bqca["external_access_verification"]
+  assert staleness_mod.read_attestation_fields(bqca_raw) == {
+      "next_due_date": bqca_ext["next_due_date"],
+      "status": bqca_ext["status"],
+      "tracking_issue": bqca_ext["tracking_issue"],
+  }
+  assert (
+      staleness_mod.main(
+          [
+              "--today",
+              bqca_ext["next_due_date"],
+              "--attestation-path",
+              str(staleness_mod.BQCA_ATTESTATION_PATH),
+          ]
+      )
+      == 0
+  )
+  overdue_day = (
+      datetime.date.fromisoformat(bqca_ext["next_due_date"])
+      + datetime.timedelta(days=1)
+  ).isoformat()
+  assert (
+      staleness_mod.main(
+          [
+              "--today",
+              overdue_day,
+              "--attestation-path",
+              str(staleness_mod.BQCA_ATTESTATION_PATH),
+          ]
+      )
+      == 1
+  )
+
+
+def test_bqca_chart_manifest_and_contract_mutation_detection():
+  """F6 & R2-P3-6: mutating any scorecard, chart, embedded spec, or SQL column fails."""
+  validator = _load_dashboard_module("validate_contracts")
+  assert validator.validate_bqca() == []
+
+  contract = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_product_contract.yaml").read_text()
+  )
+  manifest = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text()
+  )
+  binding = yaml.safe_load(
+      (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+  )
+  sql_text = (DASHBOARD / "sql/bqca_events_v1.template.sql").read_text()
+  assert manifest["meta"]["page_count"] == 7
+  assert manifest["meta"]["scorecard_count"] == 21
+  assert manifest["meta"]["chart_count"] == 13
+  assert manifest["meta"]["total_component_count"] == 34
+  assert manifest["datasource"]["field_count"] == 41
+  assert len(manifest["datasource"]["fields"]) == 41
+  assert len(manifest["pages"]) == 7
+  assert len(manifest["components"]) == 34
+
+  def _recomputed_binding(m_override=None, c_override=None, s_override=None):
+    b_copy = json.loads(json.dumps(binding))
+    if m_override is not None:
+      b_copy["live_template_verification"]["manifest_sha256"] = hashlib.sha256(
+          yaml.safe_dump(m_override, sort_keys=False).encode("utf-8")
+      ).hexdigest()
+    if c_override is not None:
+      b_copy["live_template_verification"]["pages_sha256"] = (
+          validator.canonical_pages_sha256(c_override["pages"])
+      )
+    if s_override is not None:
+      s_sha = hashlib.sha256(s_override.encode("utf-8")).hexdigest()
+      b_copy["reviewed_template_sql"]["sha256"] = s_sha
+      b_copy["live_template_verification"]["repository_sql_sha256"] = s_sha
+    return b_copy
+
+  # Mutating a scorecard field in contract["pages"] invalidates pages_sha256
+  # and contract-vs-manifest parity.
+  mutated_contract = json.loads(json.dumps(contract))
+  mutated_contract["pages"][0]["scorecards"][0]["field"] = "input_tokens"
+  errors = validator.validate_bqca(contract_override=mutated_contract)
+  assert any("pages_sha256" in e for e in errors), errors
+  assert any("kpi_total_tokens" in e for e in errors), errors
+
+  # Mutating a chart metric in contract["pages"] invalidates pages_sha256.
+  mutated_chart_contract = json.loads(json.dumps(contract))
+  mutated_chart_contract["pages"][0]["charts"][0]["metric"] = "input_tokens"
+  chart_errors = validator.validate_bqca(
+      contract_override=mutated_chart_contract
+  )
+  assert any("pages_sha256" in e for e in chart_errors), chart_errors
+
+  # Mutating a component title in manifest invalidates manifest_sha256 and
+  # contract-vs-manifest parity.
+  mutated_manifest = json.loads(json.dumps(manifest))
+  mutated_manifest["pages"][0]["components"][0]["label"] = "Tampered Label"
+  m_errors = validator.validate_bqca(manifest_override=mutated_manifest)
+  assert any("manifest_sha256" in e for e in m_errors), m_errors
+  assert any("kpi_total_tokens" in e for e in m_errors), m_errors
+
+  # R2-P3-6 (a): mutating an embedded spec fieldName is caught even when
+  # manifest_sha256 is recomputed.
+  bad_spec_field = json.loads(json.dumps(manifest))
+  bad_spec_field["pages"][0]["components"][0]["spec"]["scorecard"]["dataset"][
+      "columns"
+  ][0]["fieldName"] = "_nonexistent_field_"
+  spec_field_errors = validator.validate_bqca(
+      manifest_override=bad_spec_field,
+      binding_override=_recomputed_binding(m_override=bad_spec_field),
+  )
+  assert any(
+      "unknown fieldName" in e for e in spec_field_errors
+  ), spec_field_errors
+
+  # R2-P3-6 (b): mutating an embedded spec aggregation (on either a scorecard
+  # or a chart) is caught even when manifest_sha256 is recomputed.
+  bad_spec_agg = json.loads(json.dumps(manifest))
+  bad_spec_agg["pages"][0]["components"][5]["spec"]["barChart"]["dataset"][
+      "columns"
+  ][1]["aggregation"] = "AVG"
+  spec_agg_errors = validator.validate_bqca(
+      manifest_override=bad_spec_agg,
+      binding_override=_recomputed_binding(m_override=bad_spec_agg),
+  )
+  assert any(
+      "chart_tokens_by_agent" in e and "aggregation" in e
+      for e in spec_agg_errors
+  ), spec_agg_errors
+
+  # R2-P3-6 (c): mutating a manifest field's data_type (e.g. total_tokens from
+  # INT64 to STRING) is caught against SQL projected types even when
+  # manifest_sha256 is recomputed.
+  bad_dtype_manifest = json.loads(json.dumps(manifest))
+  for field_entry in bad_dtype_manifest["datasource"]["fields"]:
+    if field_entry["display_name"] == "total_tokens":
+      field_entry["data_type"] = "STRING"
+      field_entry["semantic_type"] = "TEXT"
+  dtype_errors = validator.validate_bqca(
+      manifest_override=bad_dtype_manifest,
+      binding_override=_recomputed_binding(m_override=bad_dtype_manifest),
+  )
+  assert any(
+      "total_tokens" in e and "data_type" in e for e in dtype_errors
+  ), dtype_errors
+
+  # R2-P3-6 (d): renaming a projected column in SQL is caught against
+  # manifest["datasource"]["fields"] even when SQL SHA-256 is recomputed.
+  drifted_sql = sql_text.replace(") AS persona,", ") AS persona_idx,", 1)
+  sql_drift_errors = validator.validate_bqca(
+      sql_override=drifted_sql,
+      binding_override=_recomputed_binding(s_override=drifted_sql),
+  )
+  assert any(
+      "SQL projected columns do not match manifest" in e
+      for e in sql_drift_errors
+  ), sql_drift_errors
+
+
+def test_bqca_artifacts_never_name_event_types_bqca_does_not_log():
+  for relative in (
+      *BQCA_SQL_FILES,
+      "tools/gen_bqca_events_tmpl.py",
+      "tools/hydrate_dashboard.py",
+      "bindings/bqca_report_template.yaml",
+      "bindings/bqca_template_bindings.yaml",
+      "spec/bqca_product_contract.yaml",
+      "spec/bqca_chart_manifest.yaml",
+      "spec/bqca_dashboard_template.json",
+      "docs/index.html",
+      "docs/bqca/index.html",
+      "docs/app.mjs",
+      "docs/configurator.mjs",
+      "docs/report-config.mjs",
+  ):
+    text = (DASHBOARD / relative).read_text()
+    for event_type in BQCA_UNLOGGED_EVENT_TYPES:
+      assert event_type not in text, f"{relative} names {event_type}"
+
+
+def test_bqca_deep_link_page_is_published_with_the_site():
+  page = (DASHBOARD / "docs/index.html").read_text()
+  bqca_page = (DASHBOARD / "docs/bqca/index.html").read_text()
+  styles = (DASHBOARD / "docs/styles.css").read_text()
+
+  assert bqca_page.startswith(
+      "<!doctype html>\n<!-- Generated by tools/render_web_config.py from"
+      " docs/index.html; do not edit. -->\n"
+  )
+  assert '<html lang="en" data-bqca-default-profile="bqca">' in bqca_page
+  assert 'src="../app.mjs"' in bqca_page
+  assert 'href="../styles.css"' in bqca_page
+  assert 'href="../favicon.svg"' in bqca_page
+  assert (
+      'href="https://googlecloudplatform.github.io/'
+      'BigQuery-Agent-Analytics-SDK/bqca/"' in bqca_page
+  )
+  assert 'id="profile-bqca" aria-pressed="true"' in bqca_page
+  assert 'placeholder="my-project.my_dataset.bqca_prompt_response_logs"' in (
+      bqca_page
+  )
+  for source in (page, bqca_page):
+    assert "data-bqaa-app-initialized" not in source
+  assert re.findall(r'\bid="([^"]+)"', bqca_page) == re.findall(
+      r'\bid="([^"]+)"', page
+  )
+
+  # The BQCA hero, fact pills, CTA button, and notice describe the dedicated
+  # 7-page tool-free BQCA Looker Studio template while keeping CLI flags out of
+  # the primary hero lede and prominently warning about pending external access.
+  assert "7-page tool-free BQCA Looker Studio dashboard" in bqca_page
+  assert "34 BQCA-native charts &amp; KPIs" in bqca_page
+  assert "7 tool-free report pages" in bqca_page
+  assert "Self-Hosted Streamlit BQCA Dashboard" in bqca_page
+  assert "Create my BQCA dashboard" in bqca_page
+  hero_lede = bqca_page.split('<p class="lede" data-profile-only="bqca">', 1)[
+      1
+  ].split("</p>", 1)[0]
+  assert "--custom-sql-out" not in hero_lede
+  assert "sql/bqca_events_v1.sql.tmpl" not in hero_lede
+  assert 'id="profile-adk" aria-pressed="true"' in page
+  assert 'id="bqca-template-note"' in page
+  note = page.split('id="bqca-template-note"', 1)[1].split("</aside>", 1)[0]
+  assert 'data-profile-only="bqca" hidden>' in note
+  assert "Template not yet publicly shared for external accounts" in note
+  assert "Dedicated 7-page tool-free BQCA Looker Studio template" in note
+  assert '<details class="advanced-bqca-options">' in note
+  assert BQCA_REPORT_ID in note
+  assert "dashboard/looker_studio/sql/bqca_events_v1.sql.tmpl" in note
+  assert "--profile bqca --custom-sql-out" in note
+  assert "dashboards/streamlit" in note
+  bqca_note_tag = bqca_page.split('id="bqca-template-note"', 1)[1]
+  assert (
+      bqca_note_tag.split(">", 1)[0]
+      .rstrip()
+      .endswith('data-profile-only="bqca"')
+  ), "the /bqca/ page shows the disclosure before app.mjs runs"
+  assert re.search(
+      r"#form-status\s*\{[^}]*overflow-wrap:\s*anywhere", styles
+  ), "P3-7: #form-status must wrap long identifiers on 375px viewports"
+
+
+def test_bqca_hydration_link_names_and_defaults():
+  hydration = _load_hydration_module()
+  assert hydration.profile_default_table("adk") == "agent_events"
+  assert hydration.profile_default_table("bqca") == BQCA_DEFAULT_TABLE
+  assert (
+      hydration.default_report_name("agent_analytics")
+      == "BigQuery Agent Analytics — agent_analytics"
+  )
+  assert (
+      hydration.default_report_name("ca_logs", "bqca")
+      == "BigQuery Conversational Analytics (BQCA) — ca_logs"
+  )
+
+  adk_link = hydration.build_link(
+      "customer-project-123",
+      "agent_analytics",
+      "agent_events",
+      "billing-project-123",
+      "Customer BQAA",
+  )
+  assert adk_link == hydration.build_link(
+      "customer-project-123",
+      "agent_analytics",
+      "agent_events",
+      "billing-project-123",
+      "Customer BQAA",
+      profile="adk",
+  )
+  assert _link_parameters(adk_link)["ds.ds230.datasourceName"] == [
+      "BQAA Events — agent_analytics"
+  ]
+
+  parameters = _link_parameters(
+      hydration.build_link(
+          "customer-project-123",
+          "ca_logs",
+          BQCA_DEFAULT_TABLE,
+          "billing-project-123",
+          "Customer BQCA",
+          profile="bqca",
+      )
+  )
+  assert parameters == {
+      "c.reportId": [BQCA_REPORT_ID],
+      "c.mode": ["view"],
+      "r.reportName": ["Customer BQCA"],
+      "ds.ds0.datasourceName": ["BQCA Events — ca_logs"],
+      "ds.ds0.billingProjectId": ["billing-project-123"],
+      "ds.ds0.sqlReplace": [
+          ",".join(
+              [
+                  SHARED_SENTINELS[0],
+                  "customer-project-123",
+                  SHARED_SENTINELS[1],
+                  "ca_logs",
+                  SHARED_SENTINELS[2],
+                  BQCA_DEFAULT_TABLE,
+              ]
+          )
+      ],
+      "ds.ds0.refreshFields": ["false"],
+  }
+  with pytest.raises(ValueError, match="reserved template sentinel"):
+    hydration.build_link(
+        "xsentinelbqaaevents",
+        "ca_logs",
+        BQCA_DEFAULT_TABLE,
+        "billing-project-123",
+        "Customer BQCA",
+        profile="bqca",
+    )
+
+  custom = hydration.custom_query_sql(
+      "customer-project-123", "ca_logs", BQCA_DEFAULT_TABLE, "bqca"
+  )
+  assert custom.startswith(
+      "-- Generated by tools/hydrate_dashboard.py --profile bqca from"
+      " sql/bqca_events_v1.sql.tmpl for"
+      " customer-project-123.ca_logs.bqca_prompt_response_logs.\n"
+  )
+  assert "{{" not in custom
+  assert (
+      custom.count(
+          "FROM `customer-project-123.ca_logs.bqca_prompt_response_logs`"
+      )
+      == 1
+  )
+  assert "@DS_START_DATE" in custom
+  assert hydration.custom_query_sql(
+      "customer-project-123", "agent_analytics", "agent_events"
+  ).startswith(
+      "-- Generated by tools/hydrate_dashboard.py --profile adk from"
+      " sql/events_v1.sql.tmpl"
+  )
+  assert (
+      hydration.data_profile_sql(
+          "customer-project-123", "agent_analytics", "agent_events", "adk"
+      )
+      is None
+  )
+
+
+def test_bqca_data_profile_summary_warns_on_empty_or_unattributed_data():
+  hydration = _load_hydration_module()
+
+  summary, warnings = hydration.summarize_data_profile(
+      _profile_rows(events=40, attributed=30, fast_path=5)
+  )
+  assert summary[0].startswith(
+      "BQCA data profile (last 30 days): 40 events (INVOCATION_STARTING=40,"
+  )
+  assert "data-agent attribution: 30 of 40 events (75.0%)" in summary[1]
+  assert "fast-path events: 5" in summary[1]
+  assert warnings == []
+
+  _, warnings = hydration.summarize_data_profile(_profile_rows(0, 0))
+  assert len(warnings) == 1
+  assert "no BQCA Prompt & Response Logging events" in warnings[0]
+
+  _, warnings = hydration.summarize_data_profile(_profile_rows(12, 0))
+  assert len(warnings) == 1
+  assert "data-agent-id" in warnings[0]
+
+
+def test_bqca_hydration_gates_then_runs_a_capped_data_profile(
+    monkeypatch, capsys, tmp_path
+):
+  hydration = _load_hydration_module()
+  fake, calls = _fake_bq_query([[], _profile_rows(40, 30, fast_path=5)])
+  monkeypatch.setattr(hydration, "bq_query", fake)
+  sql_out = tmp_path / "bqca_custom_query.sql"
+
+  assert (
+      hydration.main(
+          [
+              "--project",
+              "customer-project-123",
+              "--dataset",
+              "ca_logs",
+              "--profile",
+              "bqca",
+              "--custom-sql-out",
+              str(sql_out),
+          ]
+      )
+      == 0
+  )
+  out, err = capsys.readouterr()
+
+  # The shared structural gate runs uncapped first; the advisory data
+  # profile follows under the default 10 GiB byte cap.
+  assert [call["maximum_bytes_billed"] for call in calls] == [
+      None,
+      10 * 1024**3,
+  ]
+  assert calls[0]["sql"] == hydration.table_preflight_sql(
+      "customer-project-123", "ca_logs", BQCA_DEFAULT_TABLE
+  )
+  assert calls[1]["sql"] == hydration.data_profile_sql(
+      "customer-project-123", "ca_logs", BQCA_DEFAULT_TABLE
+  )
+  assert "{{" not in calls[1]["sql"]
+  assert {(call["project"], call["location"]) for call in calls} == {
+      ("customer-project-123", "US")
+  }
+  assert "BQCA preflight OK: base event table is compatible" in err
+  assert "BQCA data profile (last 30 days): 40 events" in err
+  assert "WARNING" not in err
+  assert "NOTE: BQCA uses the dedicated 7-page tool-free BQCA template" in err
+  assert "SECURITY: keep the new report private" in err
+
+  parameters = _link_parameters(out.strip())
+  assert parameters["r.reportName"] == [
+      "BigQuery Conversational Analytics (BQCA) — ca_logs"
+  ]
+  assert parameters["ds.ds0.datasourceName"] == ["BQCA Events — ca_logs"]
+  assert parameters["ds.ds0.sqlReplace"][0].split(",")[-1] == (
+      BQCA_DEFAULT_TABLE
+  )
+  assert sql_out.read_text() == hydration.custom_query_sql(
+      "customer-project-123", "ca_logs", BQCA_DEFAULT_TABLE, "bqca"
+  )
+
+
+def test_bqca_data_profile_failure_or_skip_never_blocks_the_link(
+    monkeypatch, capsys
+):
+  hydration = _load_hydration_module()
+  arguments = [
+      "--project",
+      "customer-project-123",
+      "--dataset",
+      "ca_logs",
+      "--profile",
+      "bqca",
+      "--table",
+      "logs",
+  ]
+
+  fake, calls = _fake_bq_query(
+      [[], RuntimeError("BigQuery preflight failed: bytes billed exceeded")]
+  )
+  monkeypatch.setattr(hydration, "bq_query", fake)
+  assert hydration.main([*arguments, "--maximum-bytes-billed", "1048576"]) == 0
+  out, err = capsys.readouterr()
+  assert calls[1]["maximum_bytes_billed"] == 1048576
+  assert "WARNING: BQCA data profile not run" in err
+  assert _link_parameters(out.strip())["ds.ds0.sqlReplace"][0].endswith(",logs")
+
+  fake, calls = _fake_bq_query([[], _profile_rows(0, 0)])
+  monkeypatch.setattr(hydration, "bq_query", fake)
+  assert hydration.main(arguments) == 0
+  out, err = capsys.readouterr()
+  assert "WARNING: no BQCA Prompt & Response Logging events" in err
+  assert out.startswith("https://lookerstudio.google.com/reporting/create?")
+
+  fake, calls = _fake_bq_query([[]])
+  monkeypatch.setattr(hydration, "bq_query", fake)
+  assert hydration.main([*arguments, "--skip-data-profile"]) == 0
+  out, err = capsys.readouterr()
+  assert len(calls) == 1
+  assert "BQCA data profile skipped" in err
+  assert out.startswith("https://lookerstudio.google.com/reporting/create?")
+
+  # The structural gate stays blocking: no data profile, no link.
+  fake, calls = _fake_bq_query(
+      [
+          [
+              {
+                  "problem": "MISSING_COLUMN",
+                  "column_name": "attributes",
+                  "expected_type": "JSON",
+                  "observed_type": None,
+              }
+          ]
+      ]
+  )
+  monkeypatch.setattr(hydration, "bq_query", fake)
+  assert hydration.main(arguments) == 1
+  out, err = capsys.readouterr()
+  assert len(calls) == 1
+  assert out == ""
+  assert "is not a compatible BQAA base table" in err
+
+
+def test_adk_hydration_path_is_unchanged_by_the_bqca_profile(
+    monkeypatch, capsys
+):
+  hydration = _load_hydration_module()
+  fake, calls = _fake_bq_query([[]])
+  monkeypatch.setattr(hydration, "bq_query", fake)
+
+  assert (
+      hydration.main(
+          ["--project", "customer-project-123", "--dataset", "agent_analytics"]
+      )
+      == 0
+  )
+  out, err = capsys.readouterr()
+  assert calls == [
+      {
+          "project": "customer-project-123",
+          "location": "US",
+          "sql": hydration.table_preflight_sql(
+              "customer-project-123", "agent_analytics", "agent_events"
+          ),
+          "maximum_bytes_billed": None,
+      }
+  ]
+  assert err.splitlines() == [
+      "BQAA preflight OK: base event table is compatible; no views required",
+      "SECURITY: keep the new report private until Resource > Manage added"
+      " data sources > Edit shows Data credentials: Viewer",
+  ]
+  assert out == (
+      hydration.build_link(
+          "customer-project-123",
+          "agent_analytics",
+          "agent_events",
+          "customer-project-123",
+          "BigQuery Agent Analytics — agent_analytics",
+      )
+      + "\n"
+  )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--maximum-bytes-billed", "0"],
+        ["--maximum-bytes-billed", "-5"],
+        ["--table", "bad,table"],
+        ["--project", "xsentinelbqaaevents"],
+    ],
+)
+def test_bqca_hydration_rejects_invalid_arguments_before_querying(
+    monkeypatch, capsys, extra
+):
+  hydration = _load_hydration_module()
+  fake, calls = _fake_bq_query([])
+  monkeypatch.setattr(hydration, "bq_query", fake)
+  arguments = [
+      "--project",
+      "customer-project-123",
+      "--dataset",
+      "ca_logs",
+      "--profile",
+      "bqca",
+      *extra,
+  ]
+  assert hydration.main(arguments) == 2
+  assert calls == []
+  assert capsys.readouterr().err.startswith("ERROR: ")
+
+  with pytest.raises(SystemExit):
+    hydration.main([*arguments[:4], "--profile", "langchain"])
+  assert calls == []
+
+
+def test_bqca_profile_is_documented_for_contributors_and_users():
+  readme = " ".join((DASHBOARD / "README.md").read_text().split())
+  manual = " ".join((DASHBOARD / "USER_MANUAL.md").read_text().split())
+  impl = " ".join(
+      (DASHBOARD / "docs/dashboard-implementation.md").read_text().split()
+  )
+  for fragment in (
+      "## BQCA Prompt & Response Logging profile",
+      "BigQuery-Agent-Analytics-SDK/bqca/",
+      "&profile=bqca",
+      "--profile bqca",
+      "--custom-sql-out",
+      "--maximum-bytes-billed",
+      "--skip-data-profile",
+      "sql/bqca_events_v1.template.sql",
+      "tools/gen_bqca_events_tmpl.py",
+      "tools/render_web_config.py",
+      "tools/validate_contracts.py",
+      "BQCA uses a dedicated 7-page tool-free template",
+      BQCA_REPORT_ID,
+      "spec/bqca_product_contract.yaml",
+      "spec/bqca_chart_manifest.yaml",
+      "Offline Looker Studio report layout & datasource specification bundle",
+      "PENDING_PUBLIC_SHARING_ALLOWLIST",
+      "all tool-usage pages, tool-latency series, and tool-error charts are omitted",
+      "turns are keyed by `invocation_id`",
+      "total turns (`invocation_id`), completed turns (`completed_turn_id`)",
+      "Distinct Error Signatures",
+  ):
+    assert fragment in readme, f"README.md must document {fragment!r}"
+  assert "session counts are turn counts" not in readme
+  for fragment in (
+      "## BQCA Prompt & Response Logging",
+      "BigQuery-Agent-Analytics-SDK/bqca/",
+      "&profile=bqca",
+      "--profile bqca",
+      "--skip-data-profile",
+      "dedicated 7-page tool-free BQCA Looker Studio template",
+      BQCA_REPORT_ID,
+      "turns are keyed by `invocation_id`",
+      "Distinct Error Signatures",
+      "Event-Level Prompt, Response & Extracted SQL",
+  ):
+    assert fragment in manual, f"USER_MANUAL.md must document {fragment!r}"
+  assert "session counts are turn counts" not in manual
+  for fragment in (
+      "## Dedicated 7-page BQCA Prompt & Response Logging template",
+      BQCA_REPORT_ID,
+      BQCA_DATASOURCE_ID,
+      "spec/bqca_product_contract.yaml",
+      "spec/bqca_chart_manifest.yaml",
+      "tools/validate_contracts.py --profile bqca",
+      "dashboards/streamlit/",
+  ):
+    assert (
+        fragment in impl
+    ), f"docs/dashboard-implementation.md must document {fragment!r}"
+  for relative, text in (("README.md", readme), ("USER_MANUAL.md", manual)):
+    for event_type in BQCA_UNLOGGED_EVENT_TYPES:
+      assert event_type not in text, f"{relative} names {event_type}"
+
+
+def test_staleness_parser_rejects_malformed_or_nested_attestations(capsys):
+  """P2-5 & N5 & M08: stdlib attestation parser rejects missing keys, missing files (rc=2), and unverified PASSING status."""
+  spec = importlib.util.spec_from_file_location(
+      "check_external_access_staleness",
+      ROOT / "scripts" / "check_external_access_staleness.py",
+  )
+  assert spec is not None and spec.loader is not None
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+
+  # Nested 6-space `status:` inside `controls:` must not shadow the 2-space
+  # `status:` under `external_access_verification:`.
+  nested_yaml = (
+      "external_access_verification:\n"
+      "  controls:\n"
+      "    - method: check\n"
+      "      status: CHILD_STATUS_MUST_BE_IGNORED\n"
+      '  next_due_date: "2026-11-08"\n'
+      "  status: PENDING_PUBLIC_SHARING_ALLOWLIST\n"
+      "  tracking_issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#515\n"
+      "known_live_issues: []\n"
+  )
+  assert module.read_attestation_fields(nested_yaml) == {
+      "next_due_date": "2026-11-08",
+      "status": "PENDING_PUBLIC_SHARING_ALLOWLIST",
+      "tracking_issue": "GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#515",
+  }
+
+  # M08: status: PASSING without link_access: PUBLIC and dated link_access_verified_date fails.
+  with pytest.raises(SystemExit, match="link_access: PUBLIC"):
+    module.read_attestation_fields(
+        "link_access: PENDING_PUBLIC_SHARING_ALLOWLIST\n"
+        "external_access_verification:\n"
+        "  controls:\n"
+        "    - method: external_identity_link_access_check\n"
+        "      link_access_verified_date: null\n"
+        '  next_due_date: "2026-11-08"\n'
+        "  status: PASSING\n"
+        "  tracking_issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#515\n"
+    )
+
+  # N5: missing --attestation-path returns exit code 2 with stderr message and no traceback.
+  rc = module.main(
+      ["--attestation-path", "/tmp/nonexistent_attestation_515.yaml"]
+  )
+  captured = capsys.readouterr()
+  assert rc == 2
+  assert "ERROR: attestation file not found:" in captured.err
+
+  # N5: workflow issue title and body cover both ADK (#445) and BQCA (#515).
+  wf_text = (
+      ROOT / ".github" / "workflows" / "external-access-staleness.yml"
+  ).read_text()
+  assert 'title="External access attestation overdue"' in wf_text
+  assert "bqca_report_template.yaml (#515)" in wf_text
+
+  # Missing `external_access_verification:` section raises SystemExit.
+  with pytest.raises(SystemExit, match="external_access_verification"):
+    module.read_attestation_fields("report_id: 123\n")
+
+  # Missing required 2-space key (`tracking_issue`) raises SystemExit.
+  with pytest.raises(SystemExit, match="tracking_issue"):
+    module.read_attestation_fields(
+        "external_access_verification:\n"
+        '  next_due_date: "2026-11-08"\n'
+        "  status: FAILING\n"
+        "known_live_issues: []\n"
+    )
+
+
+def test_bqca_events_sql_semantic_turn_and_error_edge_cases():
+  """P2-5 & N1/R3-1 & R3-N2 & N4 & R4-1..R4-5: verify Looker Studio BQCA SQL turn-grain, deduplication, error, and final-SQL semantics."""
+  logical = (DASHBOARD / "sql/bqca_events_v1.sql.tmpl").read_text()
+  contract = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_product_contract.yaml").read_text()
+  )
+  manifest = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text()
+  )
+  styles_css = (DASHBOARD / "docs/styles.css").read_text()
+
+  # (1) Multi-turn single-session_id & blank/NULL invocation_id turns (R4-1, R4-2):
+  # trace_resolved inherits any non-blank invocation_id on the same trace_id
+  # before falling back to trace_id -> session_id -> timestamp while preserving
+  # NULL when invocation_id IS NULL, and turn_partition_key isolates NULL
+  # invocation_id rows via SHA256 digest.
+  assert "WITH trace_resolved AS (" in logical
+  assert (
+      "IF(\n"
+      "      invocation_id IS NULL,\n"
+      "      NULL,\n"
+      "      COALESCE(\n"
+      "        NULLIF(TRIM(invocation_id), ''),\n"
+      "        IF(\n"
+      "          NULLIF(TRIM(trace_id), '') IS NULL,\n"
+      "          NULL,\n"
+      "          FIRST_VALUE(NULLIF(TRIM(invocation_id), '') IGNORE NULLS) OVER (\n"
+      "            PARTITION BY NULLIF(TRIM(trace_id), '')\n"
+      "            ORDER BY timestamp ASC, event_type ASC, NULLIF(TRIM(invocation_id), '') ASC\n"
+      "            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING\n"
+      "          )\n"
+      "        ),\n"
+      "        NULLIF(TRIM(trace_id), ''),\n"
+      "        NULLIF(TRIM(session_id), ''),\n"
+      "        CAST(timestamp AS STRING)\n"
+      "      )\n"
+      "    ) AS turn_id"
+  ) in logical
+  assert (
+      "event_type = 'INVOCATION_COMPLETED' AND turn_id IS NOT NULL," in logical
+  )
+  assert (
+      "PARTITION BY\n"
+      "          turn_id,\n"
+      "          IF(event_type = 'INVOCATION_COMPLETED', 1, 0)" in logical
+  )
+  assert "TO_HEX(\n          SHA256(" in logical
+  assert "'__null_invocation__:'" in logical
+  assert (
+      "IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id"
+      in logical
+  )
+
+  # R4-3, R4-N1, P3-2: raw_conversation_id, raw_data_agent_id, and
+  # raw_explicit_persona trim whitespace before NULLIF(..., '').
+  for json_path in (
+      '$.session_metadata.state."conversation-id"',
+      '$.session_metadata.state."data-agent-id"',
+      "$.session_metadata.state.custom_labels.persona",
+  ):
+    assert (
+        f"NULLIF(\n      TRIM(\n        JSON_VALUE(attributes, '{json_path}')\n      ),\n      ''\n    )"
+        in logical
+        or f"NULLIF(\n      TRIM(\n        JSON_VALUE(\n          attributes, '{json_path}'\n        )\n      ),\n      ''\n    )"
+        in logical
+    ), json_path
+
+  # R4-5: #bqca-template-note body font size is 1rem (16px).
+  assert (
+      "#bqca-template-note {\n"
+      "  margin: 0 0 16px;\n"
+      "  padding: 13px 15px;\n"
+      "  border-radius: 10px;\n"
+      "  font-size: 1rem;\n"
+      "  line-height: 1.5;"
+  ) in styles_css
+
+  comp_by_id = {c["id"]: c for c in manifest["components"]}
+  assert comp_by_id["kpi_total_sessions"]["field"] == "invocation_id"
+  assert comp_by_id["kpi_total_sessions"]["aggregation"] == "COUNT_DISTINCT"
+  assert comp_by_id["kpi_turn_completes"]["field"] == "completed_turn_id"
+  assert comp_by_id["kpi_turn_completes"]["aggregation"] == "COUNT_DISTINCT"
+  assert (
+      comp_by_id["kpi_distinct_errors"]["label"] == "Distinct Error Signatures"
+  )
+  assert (
+      comp_by_id["kpi_distinct_errors"]["title"] == "Distinct Error Signatures"
+  )
+  for turn_chart_id in (
+      "chart_turns_by_agent",
+      "chart_turns_by_persona",
+      "chart_persona_breakdown",
+      "chart_fast_path_pie",
+  ):
+    assert (
+        "invocation_id" in comp_by_id[turn_chart_id]["metrics"]
+    ), turn_chart_id
+
+  # (2) Turn-grain fast_path and data_agent_id/conversation_id/persona propagation
+  # across all events in a non-null turn while short-circuiting turn_id IS NULL.
+  assert (
+      "IF(\n"
+      "      turn_id IS NULL,\n"
+      "      raw_fast_path,\n"
+      "      LOGICAL_OR(raw_fast_path) OVER (\n"
+      "        PARTITION BY turn_partition_key\n"
+      "      )\n"
+      "    ) AS fast_path"
+  ) in logical
+  for attr_col in (
+      "raw_data_agent_id",
+      "raw_conversation_id",
+      "raw_explicit_persona",
+      "raw_email_persona",
+  ):
+    assert (
+        f"FIRST_VALUE({attr_col} IGNORE NULLS) OVER (\n"
+        "          PARTITION BY turn_partition_key" in logical
+        or f"FIRST_VALUE({attr_col} IGNORE NULLS) OVER (\n"
+        "        PARTITION BY turn_partition_key" in logical
+    ), attr_col
+
+  # (3) 3-condition error_message synthesis: status='ERROR' with NULL error_message
+  # or *_ERROR events synthesize '[<event_type>: status=<status>]' so Looker Studio
+  # COUNT(error_message) and COUNT_DISTINCT(error_message) count all 3 conditions,
+  # and chart_errors_by_agent is a bar_chart on error_message COUNT.
+  assert (
+      "IF(\n"
+      "      raw_is_error,\n"
+      "      COALESCE(\n"
+      "        NULLIF(TRIM(error_message), ''),\n"
+      "        CONCAT(\n"
+      "          '[',\n"
+      "          IFNULL(NULLIF(TRIM(event_type), ''), 'UNKNOWN_EVENT'),\n"
+      "          ': status=',\n"
+      "          IFNULL(NULLIF(TRIM(status), ''), 'ERROR'),\n"
+      "          ']'\n"
+      "        )\n"
+      "      ),\n"
+      "      NULL\n"
+      "    ) AS error_message"
+  ) in logical
+  assert comp_by_id["chart_errors_by_agent"]["chart_type"] == "bar_chart"
+  assert comp_by_id["chart_errors_by_agent"]["dimensions"] == ["data_agent_id"]
+  assert comp_by_id["chart_errors_by_agent"]["metrics"] == ["error_message"]
+
+  # (4) Accepted draft followed by workflow-nudged final AGENT_RESPONSE:
+  # raw_agent_response_rn orders AGENT_RESPONSE events by timestamp DESC, span_id DESC
+  # within each turn and extracted_sql only populates on raw_agent_response_rn = 1,
+  # while raw_agent_response_rn is excluded from the outer projection.
+  assert (
+      "ORDER BY timestamp DESC, span_id DESC\n"
+      "      ),\n"
+      "      NULL\n"
+      "    ) AS raw_agent_response_rn"
+  ) in logical
+  assert (
+      "IF(\n"
+      "    event_type = 'AGENT_RESPONSE' AND raw_agent_response_rn = 1,\n"
+      "    REGEXP_EXTRACT(agent_response_text, r'(?is)```sql\\s*(.*?)"
+  ) in logical
+  assert "SELECT\n  * EXCEPT (raw_agent_response_rn)," in logical
+  assert len(contract["pages"]) == 7
+
+
+def test_bqca_json_template_bundle_and_compatibility_profile_parity():
+  """Verify the portable Looker Studio JSON template bundle, BQCA compatibility profile, and M03/M04/M07/M08/M12/M14/M15/M16/R4-N2/N8 mutation guards."""
+  validator = _load_dashboard_module("validate_contracts")
+  adk_compat = json.loads(
+      (DASHBOARD / "spec/compatibility_profile.json").read_text()
+  )
+  bqca_compat = json.loads(
+      (DASHBOARD / "spec/bqca_compatibility_profile.json").read_text()
+  )
+  bundle = json.loads(
+      (DASHBOARD / "spec/bqca_dashboard_template.json").read_text()
+  )
+  manifest = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text()
+  )
+  contract = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_product_contract.yaml").read_text()
+  )
+  binding = yaml.safe_load(
+      (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+  )
+  sql_text = (DASHBOARD / "sql/bqca_events_v1.template.sql").read_text()
+
+  # 1. Compatibility profile parity
+  assert bqca_compat["source_object"] == BQCA_DEFAULT_TABLE
+  assert bqca_compat["source_object_type"] == "BASE TABLE"
+  assert bqca_compat["generated_views_required"] is False
+  assert bqca_compat["required_columns"] == adk_compat["required_columns"]
+  assert len(bqca_compat["required_columns"]) == 15
+  assert tuple(bqca_compat["allowed_event_types"]) == BQCA_EVENT_TYPES
+  assert tuple(bqca_compat["excluded_event_types"]) == BQCA_UNLOGGED_EVENT_TYPES
+
+  # 2. JSON template bundle structure & parity with bqca_chart_manifest.yaml
+  assert bundle["report_id"] == BQCA_REPORT_ID
+  assert bundle["datasource_id"] == BQCA_DATASOURCE_ID
+  assert bundle["data_source_alias"] == BQCA_DATASOURCE_ALIAS
+  assert bundle["page_count"] == 7
+  assert bundle["scorecard_count"] == 21
+  assert bundle["chart_count"] == 13
+  assert bundle["total_component_count"] == 34
+  assert len(bundle["pages"]) == 7
+  assert len(bundle["components"]) == 34
+  assert bundle["datasource"]["field_count"] == 41
+  assert bundle["datasource"]["fields"] == manifest["datasource"]["fields"]
+  assert any(
+      f["name"] == "_completed_turn_id_" for f in bundle["datasource"]["fields"]
+  )
+  assert (
+      contract["surface"]["dashboard_template_bundle"]
+      == "spec/bqca_dashboard_template.json"
+  )
+  assert (
+      contract["surface"]["compatibility_profile"]
+      == "spec/bqca_compatibility_profile.json"
+  )
+
+  # 3. Mutation detection on bundle (title, label/field/aggregation M12, and N8 grid_position)
+  tampered_bundle = json.loads(json.dumps(bundle))
+  tampered_bundle["pages"][0]["components"][0]["title"] = "Tampered Title"
+  bundle_errors = validator.validate_bqca(bundle_override=tampered_bundle)
+  assert any("kpi_total_tokens" in e for e in bundle_errors), bundle_errors
+  assert any(
+      "template_bundle_sha256" in e for e in bundle_errors
+  ), bundle_errors
+
+  # M12: mutating scorecard field/aggregation/label on bundle is caught even if sha is ignored
+  tampered_m12 = json.loads(json.dumps(bundle))
+  tampered_m12["pages"][0]["components"][0]["aggregation"] = "AVG"
+  m12_errors = validator.validate_bqca(bundle_override=tampered_m12)
+  assert any(
+      "kpi_total_tokens" in e and "'aggregation'" in e for e in m12_errors
+  ), m12_errors
+
+  # N8: overlapping grid_position cells or out-of-bounds columns are caught
+  tampered_grid = json.loads(json.dumps(bundle))
+  tampered_grid["pages"][0]["components"][1]["grid_position"] = dict(
+      tampered_grid["pages"][0]["components"][0]["grid_position"]
+  )
+  grid_errors = validator.validate_bqca(bundle_override=tampered_grid)
+  assert any(
+      "grid cell" in e and "overlap" in e for e in grid_errors
+  ), grid_errors
+
+  # M03, M04, M07, M14, M15, M16, R4-N2, r4-22, r4-23, r4-24, r3-08, R4-1..R4-3:
+  # mutating SQL semantic expressions is caught by validate_bqca even when all
+  # SHA-256 digests are re-pinned to the mutated SQL and bundle.
+  def _validate_with_repinned_sql_sha(mutated_sql: str) -> list[str]:
+    new_sql_sha = hashlib.sha256(mutated_sql.encode("utf-8")).hexdigest()
+    repinned_bundle = json.loads(json.dumps(bundle))
+    repinned_bundle["datasource"]["sql_sha256"] = new_sql_sha
+    new_bundle_sha = hashlib.sha256(
+        (json.dumps(repinned_bundle, indent=2) + "\n").encode("utf-8")
+    ).hexdigest()
+    repinned_binding = json.loads(json.dumps(binding))
+    repinned_binding["reviewed_template_sql"]["sha256"] = new_sql_sha
+    repinned_binding["live_template_verification"][
+        "repository_sql_sha256"
+    ] = new_sql_sha
+    repinned_binding["live_template_verification"][
+        "template_bundle_sha256"
+    ] = new_bundle_sha
+    return validator.validate_bqca(
+        sql_override=mutated_sql,
+        bundle_override=repinned_bundle,
+        binding_override=repinned_binding,
+    )
+
+  for mut_label, old_frag, new_frag in (
+      (
+          "fast_path attribute extraction",
+          "LOWER(JSON_VALUE(attributes, '$.fast_path')) = 'true'",
+          "LOWER(JSON_VALUE(attributes, '$.wrong_fast_path')) = 'true'",
+      ),
+      (
+          "turn_latency_ms deduplication gate",
+          "IF(\n      raw_turn_complete_rn = 1,\n      SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64),\n      NULL\n    ) AS turn_latency_ms",
+          "SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64) AS turn_latency_ms",
+      ),
+      (
+          "data_agent_id turn-window propagation",
+          "FIRST_VALUE(raw_data_agent_id IGNORE NULLS) OVER (",
+          "LAST_VALUE(raw_data_agent_id IGNORE NULLS) OVER (",
+      ),
+      (
+          "M14 (raw_turn_complete_rn >= 1)",
+          "raw_turn_complete_rn = 1",
+          "raw_turn_complete_rn >= 1",
+      ),
+      (
+          "M15 (DESC NULLS LAST -> ASC NULLS LAST)",
+          "DESC NULLS LAST",
+          "ASC NULLS LAST",
+      ),
+      (
+          "M16 (drop trace_id fallback)",
+          "NULLIF(TRIM(trace_id), ''),\n        NULLIF(TRIM(session_id), '')",
+          "NULLIF(TRIM(session_id), '')",
+      ),
+      (
+          "R4-N2a (completed_turn_id NULL when rn=1)",
+          "IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id",
+          "IF(raw_turn_complete_rn = 1, NULL, turn_id) AS completed_turn_id",
+      ),
+      (
+          "R4-N2b (turn_latency_ms 0.0 when rn=1)",
+          "IF(\n      raw_turn_complete_rn = 1,\n      SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64),\n      NULL\n    ) AS turn_latency_ms",
+          "IF(raw_turn_complete_rn = 1, 0.0, SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64)) AS turn_latency_ms",
+      ),
+      (
+          "r4-22 (comment-spoofed completed_turn_id gate)",
+          "IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id",
+          "-- IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id\n    IF(TRUE, turn_id, NULL) AS completed_turn_id",
+      ),
+      (
+          "r4-23 (comment-spoofed turn_latency_ms gate)",
+          "IF(\n      raw_turn_complete_rn = 1,\n      SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64),\n      NULL\n    ) AS turn_latency_ms",
+          "-- IF( raw_turn_complete_rn = 1, SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64), NULL ) AS turn_latency_ms\n    IF(TRUE, SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64), NULL) AS turn_latency_ms",
+      ),
+      (
+          "R4-1 (drop per-trace invocation_id inheritance)",
+          "FIRST_VALUE(NULLIF(TRIM(invocation_id), '') IGNORE NULLS)",
+          "FIRST_VALUE(NULL IGNORE NULLS)",
+      ),
+      (
+          "R4-2 (drop turn_id IS NOT NULL on raw_turn_complete_rn)",
+          "event_type = 'INVOCATION_COMPLETED' AND turn_id IS NOT NULL",
+          "event_type = 'INVOCATION_COMPLETED'",
+      ),
+      (
+          "R4-3 (drop TRIM on raw_data_agent_id)",
+          "TRIM(\n        JSON_VALUE(attributes, '$.session_metadata.state.\"data-agent-id\"')\n      )",
+          "JSON_VALUE(attributes, '$.session_metadata.state.\"data-agent-id\"')",
+      ),
+      (
+          "r4-24 (drop ENDS_WITH _ERROR from raw_is_error)",
+          "OR ENDS_WITH(UPPER(TRIM(IFNULL(event_type, ''))), '_ERROR')",
+          "OR FALSE",
+      ),
+      (
+          "R4-N2c (partition raw_turn_complete_rn by session_id instead of"
+          " turn_id)",
+          "PARTITION BY\n          turn_id,\n          IF(event_type ="
+          " 'INVOCATION_COMPLETED', 1, 0)",
+          "PARTITION BY\n          session_id,\n          IF(event_type ="
+          " 'INVOCATION_COMPLETED', 1, 0)",
+      ),
+  ):
+    mut_sql = sql_text.replace(old_frag, new_frag)
+    assert mut_sql != sql_text, mut_label
+    sql_mut_errors = _validate_with_repinned_sql_sha(mut_sql)
+    assert sql_mut_errors, (mut_label, "expected errors with repinned SHA-256")
+    assert any("behavioral oracle" in e for e in sql_mut_errors), (
+        mut_label,
+        sql_mut_errors,
+    )
+
+  # r3-08: dropping SHA256 payload digest from null-invocation partition key is caught
+  r3_08_sql = re.sub(
+      r"TO_HEX\(\s*SHA256\(\s*CONCAT\(.*?error_message,\s*''\)\s*\)\s*\)\s*\)",
+      "'static_no_hash'",
+      sql_text,
+      flags=re.DOTALL,
+  )
+  assert r3_08_sql != sql_text
+  r3_08_errors = _validate_with_repinned_sql_sha(r3_08_sql)
+  assert any("behavioral oracle" in e for e in r3_08_errors), r3_08_errors
+
+  # M08: setting external_access_verification.status = "PASSING" while link_access != "PUBLIC" fails
+  tampered_binding = json.loads(json.dumps(binding))
+  tampered_binding["external_access_verification"]["status"] = "PASSING"
+  m08_errors = validator.validate_bqca(binding_override=tampered_binding)
+  assert any(
+      "external_access_verification.status is PASSING" in e for e in m08_errors
+  ), m08_errors
+
+  tampered_compat = json.loads(json.dumps(bqca_compat))
+  tampered_compat["allowed_event_types"].append("TOOL_COMPLETED")
+  compat_errors = validator.validate_bqca(compat_override=tampered_compat)
+  assert any("allowed_event_types" in e for e in compat_errors), compat_errors

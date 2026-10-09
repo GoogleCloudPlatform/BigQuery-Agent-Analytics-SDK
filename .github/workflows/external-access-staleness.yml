@@ -73,10 +73,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MESSAGE: ${{ needs.check.outputs.message }}
         run: |
-          title="External access attestation overdue (report_template.yaml)"
+          title="External access attestation overdue"
           body="$MESSAGE
 
-          Protocol: dashboard/looker_studio/bindings/report_template.yaml -> external_access_verification. Context: #445."
+          Protocol: dashboard/looker_studio/bindings/report_template.yaml (#445) and dashboard/looker_studio/bindings/bqca_report_template.yaml (#515) -> external_access_verification."
           existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
             --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
           if [ -n "$existing" ]; then

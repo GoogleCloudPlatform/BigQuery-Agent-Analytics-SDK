@@ -1,8 +1,11 @@
 import {
   BILLING_PROJECT_MESSAGE,
+  DEFAULT_PROFILE,
+  PROFILES,
   PROJECT_RE,
   buildDashboardUrl,
   buildSetupUrl,
+  resolveProfileConfig,
   validateQualifiedTableId,
 } from "./configurator.mjs";
 
@@ -17,6 +20,67 @@ const tableIdError = document.querySelector("#table-id-error");
 const advancedSettings = document.querySelector("#advanced-settings");
 const billingInput = document.querySelector("#billing-project");
 const billingError = document.querySelector("#billing-project-error");
+// Surface toggle (ADK Agents / BQCA Prompt & Response Logging). Optional:
+// every use is guarded so a page or harness without the toggle still runs.
+const profileButtons = new Map(
+  PROFILES.map((id) => [id, document.querySelector(`#profile-${id}`)]),
+);
+const query = new URLSearchParams(window.location.search);
+
+function normalizeProfile(value) {
+  const id = String(value ?? "").trim().toLowerCase();
+  return PROFILES.includes(id) ? id : null;
+}
+
+// The surface a page shows without a ?profile= override: the /bqca/ page
+// declares it on <html>; its path is the fallback signal.
+function pageDefaultProfile() {
+  const root = document.documentElement;
+  const declared =
+    normalizeProfile(root?.getAttribute?.("data-bqca-default-profile")) ??
+    normalizeProfile(root?.dataset?.bqcaDefaultProfile);
+  if (declared) {
+    return declared;
+  }
+  const path = window.location?.pathname ?? "";
+  return /\/bqca(?:\/(?:index\.html)?)?$/.test(path) ? "bqca" : DEFAULT_PROFILE;
+}
+
+const defaultProfile = pageDefaultProfile();
+let activeProfile = normalizeProfile(query.get("profile")) ?? defaultProfile;
+let activeProfileConfig = resolveProfileConfig(activeProfile);
+
+function applyProfile(profile) {
+  activeProfile = profile;
+  activeProfileConfig = resolveProfileConfig(profile);
+  document.documentElement?.setAttribute?.("data-bqaa-profile", profile);
+  for (const [id, button] of profileButtons) {
+    button?.setAttribute?.("aria-pressed", String(id === profile));
+  }
+  for (const element of document.querySelectorAll?.("[data-profile-only]") ?? []) {
+    element.hidden = element.dataset?.profileOnly !== profile;
+  }
+  tableIdInput.setAttribute(
+    "placeholder",
+    `my-project.my_dataset.${activeProfileConfig.defaultTable}`,
+  );
+}
+
+// Keeps the address bar shareable after a toggle without reloading; the
+// toggle state stays authoritative if the History API is unavailable.
+function syncProfileQuery(profile) {
+  try {
+    const url = new URL(window.location.href);
+    if (profile === defaultProfile) {
+      url.searchParams.delete("profile");
+    } else {
+      url.searchParams.set("profile", profile);
+    }
+    window.history?.replaceState?.(window.history.state, "", url.toString());
+  } catch {
+    // Ignore: an unshareable address bar must never block configuration.
+  }
+}
 
 // #448 field state. `derived` is the parsed triple behind the last valid
 // field value; `lastValidRaw` is that value verbatim, so any mutation away
@@ -90,7 +154,7 @@ function refresh() {
   statusEpoch += 1;
   let parsed;
   try {
-    parsed = validateQualifiedTableId(tableIdInput.value);
+    parsed = validateQualifiedTableId(tableIdInput.value, activeProfileConfig);
     clearTableError();
   } catch (error) {
     derived = null;
@@ -119,11 +183,16 @@ function refresh() {
     createLink.href = buildDashboardUrl({
       ...derived,
       billingProject: billingOverride(),
+      profile: activeProfile,
     });
     createLink.removeAttribute("aria-disabled");
     copyButton.disabled = false;
+    const readySuffix =
+      activeProfile === "bqca"
+        ? " Opens the dedicated 7-page tool-free BQCA Looker Studio template (public link sharing for external accounts is pending verification — see note below)."
+        : "";
     setStatus(
-      `Ready for ${derived.project}.${derived.dataset}.${derived.table}.`,
+      `Ready for ${derived.project}.${derived.dataset}.${derived.table}.${readySuffix}`,
       "ready",
     );
   } catch (error) {
@@ -165,7 +234,7 @@ tableIdInput.addEventListener("paste", (event) => {
   event.preventDefault();
   let parsed = null;
   try {
-    parsed = validateQualifiedTableId(text);
+    parsed = validateQualifiedTableId(text, activeProfileConfig);
   } catch {
     parsed = null;
   }
@@ -248,8 +317,9 @@ copyButton.addEventListener("click", async () => {
   const epoch = ++statusEpoch;
   try {
     const setupUrl = buildSetupUrl(
-      { ...derived, billingProject: billingOverride() },
+      { ...derived, billingProject: billingOverride(), profile: activeProfile },
       window.location.href,
+      { pageDefaultProfile: defaultProfile },
     );
     await navigator.clipboard.writeText(setupUrl);
     if (epoch === statusEpoch) {
@@ -279,10 +349,25 @@ checklistButton.addEventListener("click", async () => {
   }
 });
 
+// The surface is applied before any prefill so validation and both links
+// target it from the first render. Switching keeps the typed table ID and
+// revalidates it; a pristine field stays pristine.
+applyProfile(activeProfile);
+for (const [id, button] of profileButtons) {
+  button?.addEventListener?.("click", () => {
+    if (id === activeProfile) {
+      return;
+    }
+    applyProfile(id);
+    syncProfileQuery(id);
+    refresh();
+  });
+}
+
 // Setup-link prefill keeps the existing three-parameter contract: all three
 // identifier parameters compose the fully qualified ID and validate
-// immediately; anything less leaves the field pristine.
-const query = new URLSearchParams(window.location.search);
+// immediately; anything less leaves the field pristine. An optional
+// `profile` parameter (read above) selects the surface.
 if (query.has("billingProject")) {
   billingInput.value = query.get("billingProject");
 }

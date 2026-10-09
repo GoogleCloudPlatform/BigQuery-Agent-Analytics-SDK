@@ -7,5 +7,35 @@ export const REPORT_CONFIG = Object.freeze({
     "dataset": "bqaa_fixture_adk_1_27_0",
     "table": "sentinelbqaaevents"
   },
-  "defaultTable": "agent_events"
+  "defaultTable": "agent_events",
+  "profiles": {
+    "adk": {
+      "id": "adk",
+      "label": "ADK Agents",
+      "reportId": "5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40",
+      "dataSourceAlias": "ds230",
+      "sentinels": {
+        "project": "test-project-0728-467323",
+        "dataset": "bqaa_fixture_adk_1_27_0",
+        "table": "sentinelbqaaevents"
+      },
+      "defaultTable": "agent_events",
+      "reportName": "BigQuery Agent Analytics",
+      "datasourceName": "BQAA"
+    },
+    "bqca": {
+      "id": "bqca",
+      "label": "BQCA Prompt & Response Logging",
+      "reportId": "1ffb0888-20ea-451f-aeb8-69fc37973335",
+      "dataSourceAlias": "ds0",
+      "sentinels": {
+        "project": "test-project-0728-467323",
+        "dataset": "bqaa_fixture_adk_1_27_0",
+        "table": "sentinelbqaaevents"
+      },
+      "defaultTable": "bqca_prompt_response_logs",
+      "reportName": "BigQuery Conversational Analytics (BQCA)",
+      "datasourceName": "BQCA"
+    }
+  }
 });

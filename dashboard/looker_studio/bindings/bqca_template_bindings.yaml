@@ -1,0 +1,14 @@
+# Executable sentinel bindings for the BQCA profile.
+#
+# The dedicated 7-page BQCA Looker Studio template (report_id
+# 1ffb0888-20ea-451f-aeb8-69fc37973335, data source alias ds0) embeds
+# sql/bqca_events_v1.template.sql rendered with these sentinel identifiers.
+# At hydration time, the Linking API sqlReplace parameter rewrites these
+# sentinel strings on ds0 to the customer's project, dataset, and table.
+#
+# tools/render_template.py --profile bqca renders sql/bqca_*.sql.tmpl with
+# these values, and tests/test_looker_studio_dashboard.py verifies no drift.
+placeholders:
+  PROJECT: test-project-0728-467323
+  DATASET: bqaa_fixture_adk_1_27_0
+  TABLE: sentinelbqaaevents
