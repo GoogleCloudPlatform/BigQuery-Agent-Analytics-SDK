@@ -9,6 +9,8 @@ data_source_alias: ds0
 datasource_id: 4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc
 product_contract: spec/bqca_product_contract.yaml
 chart_manifest: spec/bqca_chart_manifest.yaml
+dashboard_template_bundle: spec/bqca_dashboard_template.json
+compatibility_profile: spec/bqca_compatibility_profile.json
 default_report_name: BigQuery Conversational Analytics (BQCA)
 default_table: bqca_prompt_response_logs
 datasource_name_prefix: BQCA
@@ -51,13 +53,15 @@ block_datasource:
 # publishing the data source with `DS_START_DATE`/`DS_END_DATE` enabled and
 # native date/time types on `_event_date_`, `_timestamp_`, and `_event_hour_`.
 # `pages_sha256` pins the canonical JSON digest of `contract["pages"]` (all 7
-# pages, 21 scorecards, and 13 charts/tables) and `manifest_sha256` pins
-# `spec/bqca_chart_manifest.yaml`, so mutating any component or metric fails CI.
+# pages, 21 scorecards, and 13 charts/tables), `manifest_sha256` pins
+# `spec/bqca_chart_manifest.yaml`, and `template_bundle_sha256` pins
+# `spec/bqca_dashboard_template.json`, so mutating any component or metric fails CI.
 live_template_verification:
   verified_date: "2026-10-08"
   repository_sql_sha256: a6e4a2614839f1a6633d0188b1b21fc94f4dfaa3202d90e581177afc3db399b2
   pages_sha256: 61f7867111ab1efe08d41c74c00c2af4fcc88d04e6d8d96d52c4c629ba0549cc
   manifest_sha256: 35b5a26d2784be02f4059db4626b8b36d2d87f05e8423db4094f27ba3be6d963
+  template_bundle_sha256: 035f308b9d4d445f388e815124b339a18d5344de16a6a4795aa01ae17089ad5f
   method:
     - data_studio_web_service_publish_datasource
     - data_studio_web_service_get_block_datasource

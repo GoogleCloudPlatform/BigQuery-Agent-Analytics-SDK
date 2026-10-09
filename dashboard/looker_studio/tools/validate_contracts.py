@@ -448,6 +448,8 @@ def validate_bqca(
     manifest_override: dict[str, Any] | None = None,
     binding_override: dict[str, Any] | None = None,
     sql_override: str | None = None,
+    compat_override: dict[str, Any] | None = None,
+    bundle_override: dict[str, Any] | None = None,
 ) -> list[str]:
   """Return a list of contract validation errors for the BQCA profile."""
   errors: list[str] = []
@@ -455,6 +457,8 @@ def validate_bqca(
   contract_path = root / "spec/bqca_product_contract.yaml"
   binding_path = root / "bindings/bqca_report_template.yaml"
   sql_path = root / "sql/bqca_events_v1.template.sql"
+  compat_path = root / "spec/bqca_compatibility_profile.json"
+  bundle_path = root / "spec/bqca_dashboard_template.json"
 
   manifest = (
       manifest_override
@@ -476,45 +480,124 @@ def validate_bqca(
       if sql_override is not None
       else sql_path.read_text(encoding="utf-8")
   )
+  compat = (
+      compat_override
+      if compat_override is not None
+      else json.loads(compat_path.read_text(encoding="utf-8"))
+  )
+  bundle = (
+      bundle_override
+      if bundle_override is not None
+      else json.loads(bundle_path.read_text(encoding="utf-8"))
+  )
 
-  # 1. Surface & ID parity across all three files
+  # 1. Surface & ID parity across binding, contract, manifest, and JSON bundle
   report_id = binding.get("report_id")
   datasource_id = binding.get("datasource_id")
   alias = binding.get("data_source_alias")
   surface = contract.get("surface", {})
   meta = manifest.get("meta", {})
   ds = manifest.get("datasource", {})
+  bundle_ds = bundle.get("datasource", {})
 
   if (
       surface.get("canonical_report_id") != report_id
       or meta.get("report_id") != report_id
+      or bundle.get("report_id") != report_id
   ):
     errors.append(
-        "bqca report_id mismatch across binding, contract, and manifest"
+        "bqca report_id mismatch across binding, contract, manifest, and bundle"
     )
   if (
       surface.get("datasource_id") != datasource_id
       or meta.get("datasource_id") != datasource_id
       or ds.get("datasource_id") != datasource_id
+      or bundle.get("datasource_id") != datasource_id
+      or bundle_ds.get("datasource_id") != datasource_id
   ):
     errors.append(
-        "bqca datasource_id mismatch across binding, contract, and manifest"
+        "bqca datasource_id mismatch across binding, contract, manifest, and"
+        " bundle"
     )
   if (
       surface.get("data_source_alias") != alias
       or meta.get("data_source_alias") != alias
       or ds.get("data_source_alias") != alias
+      or bundle.get("data_source_alias") != alias
+      or bundle_ds.get("data_source_alias") != alias
   ):
     errors.append(
-        "bqca data_source_alias mismatch across binding, contract, and manifest"
+        "bqca data_source_alias mismatch across binding, contract, manifest,"
+        " and bundle"
     )
   if surface.get("source_parity_contract") != "spec/bqca_chart_manifest.yaml":
     errors.append(
-        "bqca product_contract surface.source_parity_contract must be spec/bqca_chart_manifest.yaml"
+        "bqca product_contract surface.source_parity_contract must be"
+        " spec/bqca_chart_manifest.yaml"
     )
   if binding.get("chart_manifest") != "spec/bqca_chart_manifest.yaml":
     errors.append(
-        "bqca_report_template chart_manifest must be spec/bqca_chart_manifest.yaml"
+        "bqca_report_template chart_manifest must be"
+        " spec/bqca_chart_manifest.yaml"
+    )
+  if (
+      surface.get("dashboard_template_bundle")
+      != "spec/bqca_dashboard_template.json"
+      or binding.get("dashboard_template_bundle")
+      != "spec/bqca_dashboard_template.json"
+  ):
+    errors.append(
+        "bqca dashboard_template_bundle must be"
+        " spec/bqca_dashboard_template.json"
+    )
+  if (
+      surface.get("compatibility_profile")
+      != "spec/bqca_compatibility_profile.json"
+      or binding.get("compatibility_profile")
+      != "spec/bqca_compatibility_profile.json"
+  ):
+    errors.append(
+        "bqca compatibility_profile must be"
+        " spec/bqca_compatibility_profile.json"
+    )
+
+  # 1b. Compatibility profile parity against base table and event allowlist
+  expected_cols = {
+      col["name"]: col["type"]
+      for col in contract.get("base_table_contract", {}).get(
+          "required_columns", []
+      )
+      if isinstance(col, dict) and "name" in col and "type" in col
+  }
+  if compat.get("source_object") != binding.get("default_table"):
+    errors.append("bqca compatibility_profile.source_object mismatch")
+  if compat.get("source_object_type") != "BASE TABLE":
+    errors.append(
+        "bqca compatibility_profile.source_object_type must be BASE TABLE"
+    )
+  if compat.get("generated_views_required") is not False:
+    errors.append(
+        "bqca compatibility_profile.generated_views_required must be False"
+    )
+  if (
+      compat.get("required_columns") != expected_cols
+      or len(expected_cols) != 15
+  ):
+    errors.append(
+        "bqca compatibility_profile.required_columns does not match 15-column"
+        " base_table_contract"
+    )
+  if compat.get("allowed_event_types") != contract.get(
+      "allowed_event_types", []
+  ):
+    errors.append(
+        "bqca compatibility_profile.allowed_event_types does not match"
+        " product_contract"
+    )
+  if compat.get("excluded_event_types") != list(BQCA_UNLOGGED_EVENT_TYPES):
+    errors.append(
+        "bqca compatibility_profile.excluded_event_types does not match"
+        " BQCA_UNLOGGED_EVENT_TYPES"
     )
 
   # 2. Datasource 41-field schema, SQL column projection parity, & native datetime invariants
@@ -526,6 +609,17 @@ def validate_bqca(
   if ds.get("parameter_configuration") != ["DS_START_DATE", "DS_END_DATE"]:
     errors.append(
         "bqca manifest parameter_configuration must be [DS_START_DATE, DS_END_DATE]"
+    )
+  if (
+      bundle_ds.get("field_count") != 41
+      or bundle_ds.get("fields") != ds_fields
+      or bundle_ds.get("use_datetime_type") is not True
+      or bundle_ds.get("parameter_configuration")
+      != ["DS_START_DATE", "DS_END_DATE"]
+  ):
+    errors.append(
+        "bqca dashboard_template_bundle datasource schema diverges from"
+        " bqca_chart_manifest"
     )
 
   field_by_display = {f["display_name"]: f for f in ds_fields}
@@ -600,38 +694,89 @@ def validate_bqca(
   c_pages = contract.get("pages", [])
   m_pages = manifest.get("pages", [])
   m_comps = manifest.get("components", [])
-  if len(c_pages) != 7 or len(m_pages) != 7:
+  b_pages = bundle.get("pages", [])
+  b_comps = bundle.get("components", [])
+  if len(c_pages) != 7 or len(m_pages) != 7 or len(b_pages) != 7:
     errors.append(
-        f"bqca expected 7 pages, got contract={len(c_pages)}, manifest={len(m_pages)}"
+        f"bqca expected 7 pages, got contract={len(c_pages)},"
+        f" manifest={len(m_pages)}, bundle={len(b_pages)}"
     )
-  if len(m_comps) != 34:
-    errors.append(f"bqca manifest expected 34 components, got {len(m_comps)}")
+  if len(m_comps) != 34 or len(b_comps) != 34:
+    errors.append(
+        f"bqca expected 34 components, got manifest={len(m_comps)},"
+        f" bundle={len(b_comps)}"
+    )
 
   total_sc = 0
   total_ch = 0
   flat_from_pages: list[dict[str, Any]] = []
-  for c_page, m_page in zip(c_pages, m_pages):
-    if c_page.get("id") != m_page.get("id") or c_page.get("name") != m_page.get(
-        "name"
+  flat_from_bundle_pages: list[dict[str, Any]] = []
+  for c_page, m_page, b_page in zip(c_pages, m_pages, b_pages):
+    if (
+        c_page.get("id") != m_page.get("id")
+        or c_page.get("name") != m_page.get("name")
+        or b_page.get("id") != m_page.get("id")
+        or b_page.get("name") != m_page.get("name")
     ):
       errors.append(
-          f"bqca page mismatch: {c_page.get('id')} vs {m_page.get('id')}"
+          f"bqca page mismatch: {c_page.get('id')} vs {m_page.get('id')} vs"
+          f" {b_page.get('id')}"
       )
     c_scs = c_page.get("scorecards", [])
     c_chs = c_page.get("charts", [])
     if len(c_scs) + len(c_chs) != c_page.get("component_count"):
       errors.append(f"bqca page {c_page.get('id')} component_count mismatch")
-    if m_page.get("component_count") != c_page.get("component_count"):
+    if m_page.get("component_count") != c_page.get(
+        "component_count"
+    ) or b_page.get("component_count") != c_page.get("component_count"):
       errors.append(
-          f"bqca manifest page {m_page.get('id')} component_count mismatch"
+          f"bqca manifest/bundle page {m_page.get('id')} component_count"
+          " mismatch"
       )
 
     page_m_comps = m_page.get("components", [])
-    if len(page_m_comps) != c_page.get("component_count"):
+    page_b_comps = b_page.get("components", [])
+    if len(page_m_comps) != c_page.get("component_count") or len(
+        page_b_comps
+    ) != c_page.get("component_count"):
       errors.append(
-          f"bqca manifest page {m_page.get('id')} components length mismatch"
+          f"bqca manifest/bundle page {m_page.get('id')} components length"
+          " mismatch"
       )
     flat_from_pages.extend(page_m_comps)
+    flat_from_bundle_pages.extend(page_b_comps)
+
+    for m_comp, b_comp in zip(page_m_comps, page_b_comps):
+      for shared_key in (
+          "id",
+          "given_id",
+          "component_id",
+          "page_id",
+          "page_title",
+          "category",
+          "component_type",
+          "chart_type",
+          "title",
+          "datasource_id",
+          "data_source_alias",
+          "dimensions",
+          "metrics",
+          "columns",
+          "geometry",
+          "spec",
+      ):
+        if b_comp.get(shared_key) != m_comp.get(shared_key):
+          errors.append(
+              f"bqca bundle component {m_comp.get('id')} key {shared_key!r}"
+              " diverges from manifest"
+          )
+      if not b_comp.get("responsive_section") or not isinstance(
+          b_comp.get("grid_position"), dict
+      ):
+        errors.append(
+            f"bqca bundle component {m_comp.get('id')} missing"
+            " responsive_section or grid_position"
+        )
 
     for comp in page_m_comps:
       errors.extend(
@@ -713,8 +858,12 @@ def validate_bqca(
     errors.append(
         "bqca manifest top-level components list does not match page components"
     )
+  if flat_from_bundle_pages != b_comps:
+    errors.append(
+        "bqca bundle top-level components list does not match page components"
+    )
 
-  # 4. SHA-256 digests (SQL, contract pages, and manifest)
+  # 4. SHA-256 digests (SQL, contract pages, manifest, and JSON template bundle)
   sql_bytes = (
       sql_override.encode("utf-8")
       if sql_override is not None
@@ -728,6 +877,17 @@ def validate_bqca(
     ).hexdigest()
   else:
     manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+  if bundle_override is not None:
+    bundle_sha = hashlib.sha256(
+        (json.dumps(bundle_override, indent=2) + "\n").encode("utf-8")
+    ).hexdigest()
+  else:
+    bundle_sha = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
+
+  if bundle_ds.get("sql_sha256") != sql_sha:
+    errors.append(
+        "bqca dashboard_template_bundle datasource.sql_sha256 mismatch"
+    )
 
   live = binding.get("live_template_verification", {})
   if binding.get("reviewed_template_sql", {}).get("sha256") != sql_sha:
@@ -744,11 +904,17 @@ def validate_bqca(
     errors.append(
         f"bqca live_template_verification.manifest_sha256 mismatch: expected {manifest_sha}, got {live.get('manifest_sha256')}"
     )
+  if live.get("template_bundle_sha256") != bundle_sha:
+    errors.append(
+        "bqca live_template_verification.template_bundle_sha256 mismatch:"
+        f" expected {bundle_sha}, got {live.get('template_bundle_sha256')}"
+    )
 
   # 5. Forbidden unlogged event types check
   for rel in (
       "spec/bqca_chart_manifest.yaml",
       "spec/bqca_product_contract.yaml",
+      "spec/bqca_dashboard_template.json",
       "bindings/bqca_report_template.yaml",
       "sql/bqca_events_v1.template.sql",
   ):

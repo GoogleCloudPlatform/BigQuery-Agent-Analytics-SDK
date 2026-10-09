@@ -22,6 +22,8 @@ surface:
   data_source_name: "BQCA Prompt & Response Logs (Template)"
   template_sql: "sql/bqca_events_v1.template.sql"
   source_parity_contract: "spec/bqca_chart_manifest.yaml"
+  dashboard_template_bundle: "spec/bqca_dashboard_template.json"
+  compatibility_profile: "spec/bqca_compatibility_profile.json"
   credential_mode: VIEWERS
   default_date_window_days: 90
   timezone: UTC

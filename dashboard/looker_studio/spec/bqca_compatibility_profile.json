@@ -1,0 +1,51 @@
+{
+  "comment": "Machine-readable source contract for the portable BQCA Prompt & Response Logging Looker Studio dashboard.",
+  "source_object": "bqca_prompt_response_logs",
+  "source_object_type": "BASE TABLE",
+  "generated_views_required": false,
+  "required_columns": {
+    "timestamp": "TIMESTAMP",
+    "event_type": "STRING",
+    "agent": "STRING",
+    "session_id": "STRING",
+    "invocation_id": "STRING",
+    "user_id": "STRING",
+    "trace_id": "STRING",
+    "span_id": "STRING",
+    "parent_span_id": "STRING",
+    "content": "JSON",
+    "attributes": "JSON",
+    "latency_ms": "JSON",
+    "status": "STRING",
+    "error_message": "STRING",
+    "is_truncated": "BOOL"
+  },
+  "allowed_event_types": [
+    "INVOCATION_STARTING",
+    "USER_MESSAGE_RECEIVED",
+    "AGENT_RESPONSE",
+    "INVOCATION_COMPLETED",
+    "LLM_RESPONSE",
+    "EMBEDDING_SUGGESTION",
+    "INVOCATION_ERROR",
+    "AGENT_ERROR",
+    "LLM_ERROR"
+  ],
+  "excluded_event_types": [
+    "TOOL_STARTING",
+    "TOOL_COMPLETED",
+    "TOOL_ERROR",
+    "LLM_REQUEST"
+  ],
+  "event_scope": "9 allowlisted BQCA prompt-and-response event types in the selected date range",
+  "specialized_extractions": [
+    "USER_MESSAGE_RECEIVED",
+    "AGENT_RESPONSE",
+    "INVOCATION_COMPLETED",
+    "LLM_RESPONSE",
+    "EMBEDDING_SUGGESTION",
+    "INVOCATION_ERROR",
+    "AGENT_ERROR",
+    "LLM_ERROR"
+  ]
+}

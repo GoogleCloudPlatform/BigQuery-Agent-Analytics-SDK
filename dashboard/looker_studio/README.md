@@ -46,8 +46,11 @@ billing project is supported as an optional advanced setting.
 |---|---|
 | `spec/chart_manifest.yaml` | Reviewed consumer snapshot: 37 chart records, 9 non-data elements, controls, listener matrix, layout, and oracle mappings |
 | `spec/product_contract.yaml` | Current product-layer titles, layout, filters, live fixes, and intentional divergences from the pinned block |
+| `spec/compatibility_profile.json` | Machine-readable ADK source contract: one base table, 15 required columns, no generated views |
 | `spec/bqca_chart_manifest.yaml` | Consumer snapshot of the dedicated 7-page tool-free BQCA template: 7 pages, 34 components (21 scorecards + 13 charts/tables), responsive 12-column section geometry (`DASHBOARD_LAYOUT_MODE_RESPONSIVE`), and 41-field `BlockDatasource` schema |
 | `spec/bqca_product_contract.yaml` | Product contract for the dedicated 7-page tool-free BQCA template (`1ffb0888-20ea-451f-aeb8-69fc37973335`, alias `ds0`) |
+| `spec/bqca_dashboard_template.json` | Portable Looker Studio JSON template bundle for the 7-page BQCA report, 34 component specs, responsive grid layout, and 41-field `BlockDatasource` schema |
+| `spec/bqca_compatibility_profile.json` | Machine-readable BQCA source contract: `bqca_prompt_response_logs` base table, 15 required columns, 9 allowlisted BQCA event types, 4 excluded tool/request event types |
 | `sql/events_v1.sql.tmpl` | Reviewed base-table query (**generated** by `tools/gen_events_tmpl.py`) |
 | `sql/events_v1.template.sql` | Sentinel-rendered SQL embedded in the canonical report (**generated** by `tools/render_template.py`) |
 | `sql/preflight.sql.tmpl` / `.template.sql` | Structural compatibility check, run by the hydration helper before emitting a link |

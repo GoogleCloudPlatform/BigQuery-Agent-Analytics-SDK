@@ -1,0 +1,6065 @@
+{
+  "schema_version": 1,
+  "profile": "bqca",
+  "surface": "bqca_prompt_response_logging_looker_studio",
+  "report_id": "1ffb0888-20ea-451f-aeb8-69fc37973335",
+  "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+  "data_source_alias": "ds0",
+  "title": "BigQuery Conversational Analytics (BQCA) \u2014 Prompt & Response Logging",
+  "dashboard_url": "https://lookerstudio.google.com/reporting/1ffb0888-20ea-451f-aeb8-69fc37973335",
+  "layout_mode": "DASHBOARD_LAYOUT_MODE_RESPONSIVE",
+  "navigation_style": "DASHBOARD_NAVIGATION_STYLE_TAB",
+  "page_count": 7,
+  "scorecard_count": 21,
+  "chart_count": 13,
+  "total_component_count": 34,
+  "datasource": {
+    "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+    "data_source_alias": "ds0",
+    "display_name": "BQCA Prompt & Response Logs (Template)",
+    "connector_type": "BIGQUERY_CUSTOM_QUERY",
+    "credential_mode": "VIEWERS",
+    "sql_path": "sql/bqca_events_v1.template.sql",
+    "sql_sha256": "a6e4a2614839f1a6633d0188b1b21fc94f4dfaa3202d90e581177afc3db399b2",
+    "sentinels": {
+      "project": "test-project-0728-467323",
+      "dataset": "bqaa_fixture_adk_1_27_0",
+      "table": "sentinelbqaaevents"
+    },
+    "use_datetime_type": true,
+    "parameter_configuration": [
+      "DS_START_DATE",
+      "DS_END_DATE"
+    ],
+    "field_count": 41,
+    "system_fields": [
+      {
+        "name": "datastudio_record_count_system_field_id_98323387",
+        "display_name": "Record Count",
+        "data_type": "INT64",
+        "semantic_type": "NUMBER",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_METRIC"
+      }
+    ],
+    "fields": [
+      {
+        "name": "_timestamp_",
+        "display_name": "timestamp",
+        "data_type": "TIMESTAMP",
+        "semantic_type": "YEAR_MONTH_DAY_SECOND",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION",
+        "use_native_date_time": true
+      },
+      {
+        "name": "_event_date_",
+        "display_name": "event_date",
+        "data_type": "DATE",
+        "semantic_type": "YEAR_MONTH_DAY",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION",
+        "use_native_date_time": true
+      },
+      {
+        "name": "_event_hour_",
+        "display_name": "event_hour",
+        "data_type": "TIMESTAMP",
+        "semantic_type": "YEAR_MONTH_DAY_HOUR",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION",
+        "use_native_date_time": true
+      },
+      {
+        "name": "_event_type_",
+        "display_name": "event_type",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_agent_",
+        "display_name": "agent",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_session_id_",
+        "display_name": "session_id",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_invocation_id_",
+        "display_name": "invocation_id",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_user_id_",
+        "display_name": "user_id",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_trace_id_",
+        "display_name": "trace_id",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_span_id_",
+        "display_name": "span_id",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_parent_span_id_",
+        "display_name": "parent_span_id",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_data_agent_id_",
+        "display_name": "data_agent_id",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_conversation_id_",
+        "display_name": "conversation_id",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_persona_",
+        "display_name": "persona",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_fast_path_",
+        "display_name": "fast_path",
+        "data_type": "BOOL",
+        "semantic_type": "BOOLEAN",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_status_",
+        "display_name": "status",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_error_message_",
+        "display_name": "error_message",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_is_error_",
+        "display_name": "is_error",
+        "data_type": "BOOL",
+        "semantic_type": "BOOLEAN",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_is_truncated_",
+        "display_name": "is_truncated",
+        "data_type": "BOOL",
+        "semantic_type": "BOOLEAN",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_is_turn_start_",
+        "display_name": "is_turn_start",
+        "data_type": "BOOL",
+        "semantic_type": "BOOLEAN",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_is_turn_complete_",
+        "display_name": "is_turn_complete",
+        "data_type": "BOOL",
+        "semantic_type": "BOOLEAN",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_completed_turn_id_",
+        "display_name": "completed_turn_id",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_total_latency_ms_",
+        "display_name": "total_latency_ms",
+        "data_type": "DOUBLE",
+        "semantic_type": "NUMBER",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_ttft_ms_",
+        "display_name": "ttft_ms",
+        "data_type": "DOUBLE",
+        "semantic_type": "NUMBER",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_turn_latency_ms_",
+        "display_name": "turn_latency_ms",
+        "data_type": "DOUBLE",
+        "semantic_type": "NUMBER",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_llm_latency_ms_",
+        "display_name": "llm_latency_ms",
+        "data_type": "DOUBLE",
+        "semantic_type": "NUMBER",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_model_name_",
+        "display_name": "model_name",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_model_version_",
+        "display_name": "model_version",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_input_tokens_",
+        "display_name": "input_tokens",
+        "data_type": "INT64",
+        "semantic_type": "NUMBER",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_output_tokens_",
+        "display_name": "output_tokens",
+        "data_type": "INT64",
+        "semantic_type": "NUMBER",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_thoughts_tokens_",
+        "display_name": "thoughts_tokens",
+        "data_type": "INT64",
+        "semantic_type": "NUMBER",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_cached_tokens_",
+        "display_name": "cached_tokens",
+        "data_type": "INT64",
+        "semantic_type": "NUMBER",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_total_tokens_",
+        "display_name": "total_tokens",
+        "data_type": "INT64",
+        "semantic_type": "NUMBER",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_user_prompt_text_",
+        "display_name": "user_prompt_text",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_agent_response_text_",
+        "display_name": "agent_response_text",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_similar_queries_count_",
+        "display_name": "similar_queries_count",
+        "data_type": "INT64",
+        "semantic_type": "NUMBER",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_embedding_suggestion_reason_",
+        "display_name": "embedding_suggestion_reason",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_fast_path_label_",
+        "display_name": "fast_path_label",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_is_embedding_hit_",
+        "display_name": "is_embedding_hit",
+        "data_type": "BOOL",
+        "semantic_type": "BOOLEAN",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_extracted_sql_",
+        "display_name": "extracted_sql",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      },
+      {
+        "name": "_summary_text_",
+        "display_name": "summary_text",
+        "data_type": "STRING",
+        "semantic_type": "TEXT",
+        "concept_type": "DATASOURCE_FIELD_CONCEPT_TYPE_DIMENSION"
+      }
+    ]
+  },
+  "pages": [
+    {
+      "index": 1,
+      "id": "p_539b9240",
+      "page_id": "p_539b9240",
+      "encoded_page_id": "p_539b9240",
+      "name": "Token Consumption",
+      "title": "Token Consumption",
+      "layout_mode": "DASHBOARD_LAYOUT_MODE_RESPONSIVE",
+      "component_count": 7,
+      "scorecard_count": 5,
+      "chart_count": 2,
+      "component_ids": [
+        "cd-vWRq2EdpQyI",
+        "cd-gQM6-qRztkI",
+        "cd-tGVUrOkdidM",
+        "cd-mNCe2wVAOSU",
+        "cd-q_nXnTUZkLs",
+        "cd-kctXIOqrPyQ",
+        "cd-kM4cFH3pweE"
+      ],
+      "given_ids": [
+        "kpi_total_tokens",
+        "kpi_input_tokens",
+        "kpi_output_tokens",
+        "kpi_thoughts_tokens",
+        "kpi_cached_tokens",
+        "chart_tokens_by_agent",
+        "chart_tokens_over_time"
+      ],
+      "components": [
+        {
+          "id": "kpi_total_tokens",
+          "given_id": "kpi_total_tokens",
+          "component_id": "cd-vWRq2EdpQyI",
+          "page_id": "p_539b9240",
+          "page_title": "Token Consumption",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Total Tokens",
+          "title": "Total Tokens",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "total_tokens",
+          "aggregation": "SUM",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "total_tokens",
+              "aggregation": "SUM",
+              "display_name": "Total Tokens"
+            }
+          ],
+          "columns": [
+            "_total_tokens_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 1,
+            "row_span": 1,
+            "column_span": 2
+          },
+          "geometry": {
+            "top": 16,
+            "left": 16,
+            "width": 182,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-vWRq2EdpQyI",
+            "fixedLayout": {
+              "top": 16,
+              "left": 16,
+              "width": 182,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_total_tokens_",
+                    "displayName": "Total Tokens",
+                    "aggregation": "SUM"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Total Tokens"
+              }
+            }
+          }
+        },
+        {
+          "id": "kpi_input_tokens",
+          "given_id": "kpi_input_tokens",
+          "component_id": "cd-gQM6-qRztkI",
+          "page_id": "p_539b9240",
+          "page_title": "Token Consumption",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Input Tokens",
+          "title": "Input Tokens",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "input_tokens",
+          "aggregation": "SUM",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "input_tokens",
+              "aggregation": "SUM",
+              "display_name": "Input Tokens"
+            }
+          ],
+          "columns": [
+            "_input_tokens_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 3,
+            "row_span": 1,
+            "column_span": 2
+          },
+          "geometry": {
+            "top": 16,
+            "left": 214,
+            "width": 182,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-gQM6-qRztkI",
+            "fixedLayout": {
+              "top": 16,
+              "left": 214,
+              "width": 182,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_input_tokens_",
+                    "displayName": "Input Tokens",
+                    "aggregation": "SUM"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Input Tokens"
+              }
+            }
+          }
+        },
+        {
+          "id": "kpi_output_tokens",
+          "given_id": "kpi_output_tokens",
+          "component_id": "cd-tGVUrOkdidM",
+          "page_id": "p_539b9240",
+          "page_title": "Token Consumption",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Output Tokens",
+          "title": "Output Tokens",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "output_tokens",
+          "aggregation": "SUM",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "output_tokens",
+              "aggregation": "SUM",
+              "display_name": "Output Tokens"
+            }
+          ],
+          "columns": [
+            "_output_tokens_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 6,
+            "row_span": 1,
+            "column_span": 2
+          },
+          "geometry": {
+            "top": 16,
+            "left": 511,
+            "width": 182,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-tGVUrOkdidM",
+            "fixedLayout": {
+              "top": 16,
+              "left": 511,
+              "width": 182,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_output_tokens_",
+                    "displayName": "Output Tokens",
+                    "aggregation": "SUM"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Output Tokens"
+              }
+            }
+          }
+        },
+        {
+          "id": "kpi_thoughts_tokens",
+          "given_id": "kpi_thoughts_tokens",
+          "component_id": "cd-mNCe2wVAOSU",
+          "page_id": "p_539b9240",
+          "page_title": "Token Consumption",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Thinking Tokens",
+          "title": "Thinking Tokens",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "thoughts_tokens",
+          "aggregation": "SUM",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "thoughts_tokens",
+              "aggregation": "SUM",
+              "display_name": "Thinking Tokens"
+            }
+          ],
+          "columns": [
+            "_thoughts_tokens_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 8,
+            "row_span": 1,
+            "column_span": 2
+          },
+          "geometry": {
+            "top": 16,
+            "left": 709,
+            "width": 182,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-mNCe2wVAOSU",
+            "fixedLayout": {
+              "top": 16,
+              "left": 709,
+              "width": 182,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_thoughts_tokens_",
+                    "displayName": "Thinking Tokens",
+                    "aggregation": "SUM"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Thinking Tokens"
+              }
+            }
+          }
+        },
+        {
+          "id": "kpi_cached_tokens",
+          "given_id": "kpi_cached_tokens",
+          "component_id": "cd-q_nXnTUZkLs",
+          "page_id": "p_539b9240",
+          "page_title": "Token Consumption",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Cached Tokens",
+          "title": "Cached Tokens",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "cached_tokens",
+          "aggregation": "SUM",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "cached_tokens",
+              "aggregation": "SUM",
+              "display_name": "Cached Tokens"
+            }
+          ],
+          "columns": [
+            "_cached_tokens_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 11,
+            "row_span": 1,
+            "column_span": 2
+          },
+          "geometry": {
+            "top": 16,
+            "left": 1006,
+            "width": 182,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-q_nXnTUZkLs",
+            "fixedLayout": {
+              "top": 16,
+              "left": 1006,
+              "width": 182,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_cached_tokens_",
+                    "displayName": "Cached Tokens",
+                    "aggregation": "SUM"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Cached Tokens"
+              }
+            }
+          }
+        },
+        {
+          "id": "chart_tokens_by_agent",
+          "given_id": "chart_tokens_by_agent",
+          "component_id": "cd-kctXIOqrPyQ",
+          "page_id": "p_539b9240",
+          "page_title": "Token Consumption",
+          "category": "chart",
+          "component_type": "simple-barchart",
+          "chart_type": "bar_chart",
+          "title": "Token Usage by Data Agent",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "dimensions": [
+            "data_agent_id"
+          ],
+          "metrics": [
+            "total_tokens"
+          ],
+          "columns": [
+            "_data_agent_id_",
+            "_total_tokens_"
+          ],
+          "responsive_section": "chart_row",
+          "grid_position": {
+            "row": 2,
+            "column": 1,
+            "row_span": 3,
+            "column_span": 6
+          },
+          "geometry": {
+            "top": 132,
+            "left": 16,
+            "width": 578,
+            "height": 320
+          },
+          "spec": {
+            "id": "cd-kctXIOqrPyQ",
+            "fixedLayout": {
+              "top": 132,
+              "left": 16,
+              "width": 578,
+              "height": 320
+            },
+            "barChart": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "dim",
+                    "fieldName": "_data_agent_id_",
+                    "displayName": "Data Agent"
+                  },
+                  {
+                    "id": "m0",
+                    "fieldName": "_total_tokens_",
+                    "displayName": "Total Tokens",
+                    "aggregation": "SUM"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryAxis": {
+                  "fieldId": "dim",
+                  "sort": [
+                    {
+                      "sortDir": "DESC",
+                      "sortFieldId": "m0"
+                    }
+                  ],
+                  "limit": 15,
+                  "includeOthers": false,
+                  "reverseSortOrder": false
+                },
+                "metricSeries": {
+                  "metricIds": [
+                    "m0"
+                  ]
+                }
+              },
+              "style": {
+                "stackType": "NONE"
+              },
+              "title": {
+                "showTitle": true,
+                "text": "Token Usage by Data Agent"
+              }
+            }
+          }
+        },
+        {
+          "id": "chart_tokens_over_time",
+          "given_id": "chart_tokens_over_time",
+          "component_id": "cd-kM4cFH3pweE",
+          "page_id": "p_539b9240",
+          "page_title": "Token Consumption",
+          "category": "chart",
+          "component_type": "simple-barchart",
+          "chart_type": "bar_chart",
+          "title": "Daily Token Usage (Input / Output / Thinking)",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "dimensions": [
+            "event_date"
+          ],
+          "metrics": [
+            "input_tokens",
+            "output_tokens",
+            "thoughts_tokens"
+          ],
+          "columns": [
+            "_event_date_",
+            "_input_tokens_",
+            "_output_tokens_",
+            "_thoughts_tokens_"
+          ],
+          "responsive_section": "chart_row",
+          "grid_position": {
+            "row": 2,
+            "column": 7,
+            "row_span": 3,
+            "column_span": 6
+          },
+          "geometry": {
+            "top": 132,
+            "left": 610,
+            "width": 578,
+            "height": 320
+          },
+          "spec": {
+            "id": "cd-kM4cFH3pweE",
+            "fixedLayout": {
+              "top": 132,
+              "left": 610,
+              "width": 578,
+              "height": 320
+            },
+            "barChart": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "dim",
+                    "fieldName": "_event_date_",
+                    "displayName": "Event Date"
+                  },
+                  {
+                    "id": "m0",
+                    "fieldName": "_input_tokens_",
+                    "displayName": "Input Tokens",
+                    "aggregation": "SUM"
+                  },
+                  {
+                    "id": "m1",
+                    "fieldName": "_output_tokens_",
+                    "displayName": "Output Tokens",
+                    "aggregation": "SUM"
+                  },
+                  {
+                    "id": "m2",
+                    "fieldName": "_thoughts_tokens_",
+                    "displayName": "Thinking Tokens",
+                    "aggregation": "SUM"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryAxis": {
+                  "fieldId": "dim",
+                  "sort": [
+                    {
+                      "sortDir": "ASC",
+                      "sortFieldId": "dim"
+                    }
+                  ],
+                  "limit": 90,
+                  "includeOthers": false,
+                  "reverseSortOrder": false
+                },
+                "metricSeries": {
+                  "metricIds": [
+                    "m0",
+                    "m1",
+                    "m2"
+                  ]
+                }
+              },
+              "style": {
+                "stackType": "NONE"
+              },
+              "title": {
+                "showTitle": true,
+                "text": "Daily Token Usage (Input / Output / Thinking)"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "id": "p_a89cfece",
+      "page_id": "p_a89cfece",
+      "encoded_page_id": "p_a89cfece",
+      "name": "Data Agents & Turns",
+      "title": "Data Agents & Turns",
+      "layout_mode": "DASHBOARD_LAYOUT_MODE_RESPONSIVE",
+      "component_count": 6,
+      "scorecard_count": 4,
+      "chart_count": 2,
+      "component_ids": [
+        "cd-soVsNR_PepA",
+        "cd-jzLBUUj5DHY",
+        "cd-i7aDBnf14Bo",
+        "cd-lGEjuCElXpw",
+        "cd-mfKlsOmAHaM",
+        "cd-rVzCGnjYxo0"
+      ],
+      "given_ids": [
+        "kpi_distinct_agents",
+        "kpi_total_sessions",
+        "kpi_turn_completes",
+        "kpi_extracted_sql_count",
+        "chart_turns_by_agent",
+        "chart_events_by_agent"
+      ],
+      "components": [
+        {
+          "id": "kpi_distinct_agents",
+          "given_id": "kpi_distinct_agents",
+          "component_id": "cd-soVsNR_PepA",
+          "page_id": "p_a89cfece",
+          "page_title": "Data Agents & Turns",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Active Data Agents",
+          "title": "Active Data Agents",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "data_agent_id",
+          "aggregation": "COUNT_DISTINCT",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "data_agent_id",
+              "aggregation": "COUNT_DISTINCT",
+              "display_name": "Active Data Agents"
+            }
+          ],
+          "columns": [
+            "_data_agent_id_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 1,
+            "row_span": 1,
+            "column_span": 3
+          },
+          "geometry": {
+            "top": 16,
+            "left": 16,
+            "width": 281,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-soVsNR_PepA",
+            "fixedLayout": {
+              "top": 16,
+              "left": 16,
+              "width": 281,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_data_agent_id_",
+                    "displayName": "Active Data Agents",
+                    "aggregation": "COUNT_DISTINCT"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Active Data Agents"
+              }
+            }
+          }
+        },
+        {
+          "id": "kpi_total_sessions",
+          "given_id": "kpi_total_sessions",
+          "component_id": "cd-jzLBUUj5DHY",
+          "page_id": "p_a89cfece",
+          "page_title": "Data Agents & Turns",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Total Turns",
+          "title": "Total Turns",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "invocation_id",
+          "aggregation": "COUNT_DISTINCT",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "invocation_id",
+              "aggregation": "COUNT_DISTINCT",
+              "display_name": "Total Turns"
+            }
+          ],
+          "columns": [
+            "_invocation_id_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 4,
+            "row_span": 1,
+            "column_span": 3
+          },
+          "geometry": {
+            "top": 16,
+            "left": 313,
+            "width": 281,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-jzLBUUj5DHY",
+            "fixedLayout": {
+              "top": 16,
+              "left": 313,
+              "width": 281,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_invocation_id_",
+                    "displayName": "Total Turns",
+                    "aggregation": "COUNT_DISTINCT"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Total Turns"
+              }
+            }
+          }
+        },
+        {
+          "id": "kpi_turn_completes",
+          "given_id": "kpi_turn_completes",
+          "component_id": "cd-i7aDBnf14Bo",
+          "page_id": "p_a89cfece",
+          "page_title": "Data Agents & Turns",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Completed Turns",
+          "title": "Completed Turns",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "completed_turn_id",
+          "aggregation": "COUNT_DISTINCT",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "completed_turn_id",
+              "aggregation": "COUNT_DISTINCT",
+              "display_name": "Completed Turns"
+            }
+          ],
+          "columns": [
+            "_completed_turn_id_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 7,
+            "row_span": 1,
+            "column_span": 3
+          },
+          "geometry": {
+            "top": 16,
+            "left": 610,
+            "width": 281,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-i7aDBnf14Bo",
+            "fixedLayout": {
+              "top": 16,
+              "left": 610,
+              "width": 281,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_completed_turn_id_",
+                    "displayName": "Completed Turns",
+                    "aggregation": "COUNT_DISTINCT"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Completed Turns"
+              }
+            }
+          }
+        },
+        {
+          "id": "kpi_extracted_sql_count",
+          "given_id": "kpi_extracted_sql_count",
+          "component_id": "cd-lGEjuCElXpw",
+          "page_id": "p_a89cfece",
+          "page_title": "Data Agents & Turns",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Generated SQL Queries",
+          "title": "Generated SQL Queries",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "extracted_sql",
+          "aggregation": "COUNT",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "extracted_sql",
+              "aggregation": "COUNT",
+              "display_name": "Generated SQL Queries"
+            }
+          ],
+          "columns": [
+            "_extracted_sql_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 10,
+            "row_span": 1,
+            "column_span": 3
+          },
+          "geometry": {
+            "top": 16,
+            "left": 907,
+            "width": 281,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-lGEjuCElXpw",
+            "fixedLayout": {
+              "top": 16,
+              "left": 907,
+              "width": 281,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_extracted_sql_",
+                    "displayName": "Generated SQL Queries",
+                    "aggregation": "COUNT"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Generated SQL Queries"
+              }
+            }
+          }
+        },
+        {
+          "id": "chart_turns_by_agent",
+          "given_id": "chart_turns_by_agent",
+          "component_id": "cd-mfKlsOmAHaM",
+          "page_id": "p_a89cfece",
+          "page_title": "Data Agents & Turns",
+          "category": "chart",
+          "component_type": "simple-barchart",
+          "chart_type": "bar_chart",
+          "title": "Turns by Data Agent",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "dimensions": [
+            "data_agent_id"
+          ],
+          "metrics": [
+            "invocation_id"
+          ],
+          "columns": [
+            "_data_agent_id_",
+            "_invocation_id_"
+          ],
+          "responsive_section": "chart_row",
+          "grid_position": {
+            "row": 2,
+            "column": 1,
+            "row_span": 3,
+            "column_span": 6
+          },
+          "geometry": {
+            "top": 132,
+            "left": 16,
+            "width": 578,
+            "height": 320
+          },
+          "spec": {
+            "id": "cd-mfKlsOmAHaM",
+            "fixedLayout": {
+              "top": 132,
+              "left": 16,
+              "width": 578,
+              "height": 320
+            },
+            "barChart": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "dim",
+                    "fieldName": "_data_agent_id_",
+                    "displayName": "Data Agent"
+                  },
+                  {
+                    "id": "m0",
+                    "fieldName": "_invocation_id_",
+                    "displayName": "Turns",
+                    "aggregation": "COUNT_DISTINCT"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryAxis": {
+                  "fieldId": "dim",
+                  "sort": [
+                    {
+                      "sortDir": "DESC",
+                      "sortFieldId": "m0"
+                    }
+                  ],
+                  "limit": 15,
+                  "includeOthers": false,
+                  "reverseSortOrder": false
+                },
+                "metricSeries": {
+                  "metricIds": [
+                    "m0"
+                  ]
+                }
+              },
+              "style": {
+                "stackType": "NONE"
+              },
+              "title": {
+                "showTitle": true,
+                "text": "Turns by Data Agent"
+              }
+            }
+          }
+        },
+        {
+          "id": "chart_events_by_agent",
+          "given_id": "chart_events_by_agent",
+          "component_id": "cd-rVzCGnjYxo0",
+          "page_id": "p_a89cfece",
+          "page_title": "Data Agents & Turns",
+          "category": "chart",
+          "component_type": "simple-table",
+          "chart_type": "table",
+          "title": "Data Agent Volume, Latency & Errors",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "dimensions": [
+            "data_agent_id"
+          ],
+          "metrics": [
+            "invocation_id",
+            "turn_latency_ms",
+            "total_tokens",
+            "error_message"
+          ],
+          "columns": [
+            "_data_agent_id_",
+            "_invocation_id_",
+            "_turn_latency_ms_",
+            "_total_tokens_",
+            "_error_message_"
+          ],
+          "responsive_section": "chart_row",
+          "grid_position": {
+            "row": 2,
+            "column": 7,
+            "row_span": 3,
+            "column_span": 6
+          },
+          "geometry": {
+            "top": 132,
+            "left": 610,
+            "width": 578,
+            "height": 320
+          },
+          "spec": {
+            "id": "cd-rVzCGnjYxo0",
+            "fixedLayout": {
+              "top": 132,
+              "left": 610,
+              "width": 578,
+              "height": 320
+            },
+            "table": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "d0",
+                    "fieldName": "_data_agent_id_",
+                    "displayName": "Data Agent"
+                  },
+                  {
+                    "id": "m0",
+                    "fieldName": "_invocation_id_",
+                    "displayName": "Turns",
+                    "aggregation": "COUNT_DISTINCT"
+                  },
+                  {
+                    "id": "m1",
+                    "fieldName": "_turn_latency_ms_",
+                    "displayName": "Avg Turn Latency (ms)",
+                    "aggregation": "AVG"
+                  },
+                  {
+                    "id": "m2",
+                    "fieldName": "_total_tokens_",
+                    "displayName": "Total Tokens",
+                    "aggregation": "SUM"
+                  },
+                  {
+                    "id": "m3",
+                    "fieldName": "_error_message_",
+                    "displayName": "Error Events",
+                    "aggregation": "COUNT"
+                  }
+                ]
+              },
+              "fields": {
+                "dimensionIds": [
+                  "d0"
+                ],
+                "metricIds": [
+                  "m0",
+                  "m1",
+                  "m2",
+                  "m3"
+                ],
+                "sort": [
+                  {
+                    "sortDir": "DESC",
+                    "sortFieldId": "m0"
+                  }
+                ],
+                "limit": 100
+              },
+              "style": {
+                "columnWidths": [
+                  40.0,
+                  107.6,
+                  107.6,
+                  107.6,
+                  107.6,
+                  107.6
+                ]
+              },
+              "title": {
+                "showTitle": true,
+                "text": "Data Agent Volume, Latency & Errors"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "id": "p_97efe693",
+      "page_id": "p_97efe693",
+      "encoded_page_id": "p_97efe693",
+      "name": "LLM Interactions & Embedding Suggestions",
+      "title": "LLM Interactions & Embedding Suggestions",
+      "layout_mode": "DASHBOARD_LAYOUT_MODE_RESPONSIVE",
+      "component_count": 6,
+      "scorecard_count": 4,
+      "chart_count": 2,
+      "component_ids": [
+        "cd-ldwCpp7xYjA",
+        "cd-qiFfbAM3qa0",
+        "cd-vvYZt2if5WY",
+        "cd-gc3G-O-taBE",
+        "cd-hqCAkMPqIPw",
+        "cd-sL-0J4IkqLU"
+      ],
+      "given_ids": [
+        "kpi_llm_calls",
+        "kpi_llm_latency_avg",
+        "kpi_ttft_avg",
+        "kpi_similar_queries",
+        "chart_tokens_by_model",
+        "chart_embedding_reasons"
+      ],
+      "components": [
+        {
+          "id": "kpi_llm_calls",
+          "given_id": "kpi_llm_calls",
+          "component_id": "cd-ldwCpp7xYjA",
+          "page_id": "p_97efe693",
+          "page_title": "LLM Interactions & Embedding Suggestions",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "LLM Responses",
+          "title": "LLM Responses",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "llm_latency_ms",
+          "aggregation": "COUNT",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "llm_latency_ms",
+              "aggregation": "COUNT",
+              "display_name": "LLM Responses"
+            }
+          ],
+          "columns": [
+            "_llm_latency_ms_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 1,
+            "row_span": 1,
+            "column_span": 3
+          },
+          "geometry": {
+            "top": 16,
+            "left": 16,
+            "width": 281,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-ldwCpp7xYjA",
+            "fixedLayout": {
+              "top": 16,
+              "left": 16,
+              "width": 281,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_llm_latency_ms_",
+                    "displayName": "LLM Responses",
+                    "aggregation": "COUNT"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "LLM Responses"
+              }
+            }
+          }
+        },
+        {
+          "id": "kpi_llm_latency_avg",
+          "given_id": "kpi_llm_latency_avg",
+          "component_id": "cd-qiFfbAM3qa0",
+          "page_id": "p_97efe693",
+          "page_title": "LLM Interactions & Embedding Suggestions",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Avg LLM Call Latency (ms)",
+          "title": "Avg LLM Call Latency (ms)",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "llm_latency_ms",
+          "aggregation": "AVG",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "llm_latency_ms",
+              "aggregation": "AVG",
+              "display_name": "Avg LLM Call Latency (ms)"
+            }
+          ],
+          "columns": [
+            "_llm_latency_ms_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 4,
+            "row_span": 1,
+            "column_span": 3
+          },
+          "geometry": {
+            "top": 16,
+            "left": 313,
+            "width": 281,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-qiFfbAM3qa0",
+            "fixedLayout": {
+              "top": 16,
+              "left": 313,
+              "width": 281,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_llm_latency_ms_",
+                    "displayName": "Avg LLM Call Latency (ms)",
+                    "aggregation": "AVG"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Avg LLM Call Latency (ms)"
+              }
+            }
+          }
+        },
+        {
+          "id": "kpi_ttft_avg",
+          "given_id": "kpi_ttft_avg",
+          "component_id": "cd-vvYZt2if5WY",
+          "page_id": "p_97efe693",
+          "page_title": "LLM Interactions & Embedding Suggestions",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Avg Time to First Token (ms)",
+          "title": "Avg Time to First Token (ms)",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "ttft_ms",
+          "aggregation": "AVG",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "ttft_ms",
+              "aggregation": "AVG",
+              "display_name": "Avg Time to First Token (ms)"
+            }
+          ],
+          "columns": [
+            "_ttft_ms_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 7,
+            "row_span": 1,
+            "column_span": 3
+          },
+          "geometry": {
+            "top": 16,
+            "left": 610,
+            "width": 281,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-vvYZt2if5WY",
+            "fixedLayout": {
+              "top": 16,
+              "left": 610,
+              "width": 281,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_ttft_ms_",
+                    "displayName": "Avg Time to First Token (ms)",
+                    "aggregation": "AVG"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Avg Time to First Token (ms)"
+              }
+            }
+          }
+        },
+        {
+          "id": "kpi_similar_queries",
+          "given_id": "kpi_similar_queries",
+          "component_id": "cd-gc3G-O-taBE",
+          "page_id": "p_97efe693",
+          "page_title": "LLM Interactions & Embedding Suggestions",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Suggested Columns Proposed",
+          "title": "Suggested Columns Proposed",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "similar_queries_count",
+          "aggregation": "SUM",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "similar_queries_count",
+              "aggregation": "SUM",
+              "display_name": "Suggested Columns Proposed"
+            }
+          ],
+          "columns": [
+            "_similar_queries_count_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 10,
+            "row_span": 1,
+            "column_span": 3
+          },
+          "geometry": {
+            "top": 16,
+            "left": 907,
+            "width": 281,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-gc3G-O-taBE",
+            "fixedLayout": {
+              "top": 16,
+              "left": 907,
+              "width": 281,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_similar_queries_count_",
+                    "displayName": "Suggested Columns Proposed",
+                    "aggregation": "SUM"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Suggested Columns Proposed"
+              }
+            }
+          }
+        },
+        {
+          "id": "chart_tokens_by_model",
+          "given_id": "chart_tokens_by_model",
+          "component_id": "cd-hqCAkMPqIPw",
+          "page_id": "p_97efe693",
+          "page_title": "LLM Interactions & Embedding Suggestions",
+          "category": "chart",
+          "component_type": "simple-barchart",
+          "chart_type": "bar_chart",
+          "title": "Tokens by Model Version",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "dimensions": [
+            "model_version"
+          ],
+          "metrics": [
+            "total_tokens"
+          ],
+          "columns": [
+            "_model_version_",
+            "_total_tokens_"
+          ],
+          "responsive_section": "chart_row",
+          "grid_position": {
+            "row": 2,
+            "column": 1,
+            "row_span": 3,
+            "column_span": 6
+          },
+          "geometry": {
+            "top": 132,
+            "left": 16,
+            "width": 578,
+            "height": 320
+          },
+          "spec": {
+            "id": "cd-hqCAkMPqIPw",
+            "fixedLayout": {
+              "top": 132,
+              "left": 16,
+              "width": 578,
+              "height": 320
+            },
+            "barChart": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "dim",
+                    "fieldName": "_model_version_",
+                    "displayName": "Model Version"
+                  },
+                  {
+                    "id": "m0",
+                    "fieldName": "_total_tokens_",
+                    "displayName": "Total Tokens",
+                    "aggregation": "SUM"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryAxis": {
+                  "fieldId": "dim",
+                  "sort": [
+                    {
+                      "sortDir": "DESC",
+                      "sortFieldId": "m0"
+                    }
+                  ],
+                  "limit": 15,
+                  "includeOthers": false,
+                  "reverseSortOrder": false
+                },
+                "metricSeries": {
+                  "metricIds": [
+                    "m0"
+                  ]
+                }
+              },
+              "style": {
+                "stackType": "NONE"
+              },
+              "title": {
+                "showTitle": true,
+                "text": "Tokens by Model Version"
+              }
+            }
+          }
+        },
+        {
+          "id": "chart_embedding_reasons",
+          "given_id": "chart_embedding_reasons",
+          "component_id": "cd-sL-0J4IkqLU",
+          "page_id": "p_97efe693",
+          "page_title": "LLM Interactions & Embedding Suggestions",
+          "category": "chart",
+          "component_type": "simple-barchart",
+          "chart_type": "bar_chart",
+          "title": "Suggested Columns by Reason",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "dimensions": [
+            "embedding_suggestion_reason"
+          ],
+          "metrics": [
+            "similar_queries_count"
+          ],
+          "columns": [
+            "_embedding_suggestion_reason_",
+            "_similar_queries_count_"
+          ],
+          "responsive_section": "chart_row",
+          "grid_position": {
+            "row": 2,
+            "column": 7,
+            "row_span": 3,
+            "column_span": 6
+          },
+          "geometry": {
+            "top": 132,
+            "left": 610,
+            "width": 578,
+            "height": 320
+          },
+          "spec": {
+            "id": "cd-sL-0J4IkqLU",
+            "fixedLayout": {
+              "top": 132,
+              "left": 610,
+              "width": 578,
+              "height": 320
+            },
+            "barChart": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "dim",
+                    "fieldName": "_embedding_suggestion_reason_",
+                    "displayName": "Suggestion Reason"
+                  },
+                  {
+                    "id": "m0",
+                    "fieldName": "_similar_queries_count_",
+                    "displayName": "Suggested Columns",
+                    "aggregation": "SUM"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryAxis": {
+                  "fieldId": "dim",
+                  "sort": [
+                    {
+                      "sortDir": "DESC",
+                      "sortFieldId": "m0"
+                    }
+                  ],
+                  "limit": 15,
+                  "includeOthers": false,
+                  "reverseSortOrder": false
+                },
+                "metricSeries": {
+                  "metricIds": [
+                    "m0"
+                  ]
+                }
+              },
+              "style": {
+                "stackType": "NONE"
+              },
+              "title": {
+                "showTitle": true,
+                "text": "Suggested Columns by Reason"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "index": 4,
+      "id": "p_edf06c14",
+      "page_id": "p_edf06c14",
+      "encoded_page_id": "p_edf06c14",
+      "name": "User & Persona Analytics",
+      "title": "User & Persona Analytics",
+      "layout_mode": "DASHBOARD_LAYOUT_MODE_RESPONSIVE",
+      "component_count": 5,
+      "scorecard_count": 3,
+      "chart_count": 2,
+      "component_ids": [
+        "cd-oQfDfyi8Lv0",
+        "cd-uRA2-9wgZ2Y",
+        "cd-g1BkEGfLfKs",
+        "cd-raUF_PPS3LM",
+        "cd-rMs1c5cC9Fw"
+      ],
+      "given_ids": [
+        "kpi_distinct_personas",
+        "kpi_distinct_users",
+        "kpi_distinct_conversations",
+        "chart_turns_by_persona",
+        "chart_persona_breakdown"
+      ],
+      "components": [
+        {
+          "id": "kpi_distinct_personas",
+          "given_id": "kpi_distinct_personas",
+          "component_id": "cd-oQfDfyi8Lv0",
+          "page_id": "p_edf06c14",
+          "page_title": "User & Persona Analytics",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Distinct Personas",
+          "title": "Distinct Personas",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "persona",
+          "aggregation": "COUNT_DISTINCT",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "persona",
+              "aggregation": "COUNT_DISTINCT",
+              "display_name": "Distinct Personas"
+            }
+          ],
+          "columns": [
+            "_persona_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 1,
+            "row_span": 1,
+            "column_span": 4
+          },
+          "geometry": {
+            "top": 16,
+            "left": 16,
+            "width": 380,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-oQfDfyi8Lv0",
+            "fixedLayout": {
+              "top": 16,
+              "left": 16,
+              "width": 380,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_persona_",
+                    "displayName": "Distinct Personas",
+                    "aggregation": "COUNT_DISTINCT"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Distinct Personas"
+              }
+            }
+          }
+        },
+        {
+          "id": "kpi_distinct_users",
+          "given_id": "kpi_distinct_users",
+          "component_id": "cd-uRA2-9wgZ2Y",
+          "page_id": "p_edf06c14",
+          "page_title": "User & Persona Analytics",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Distinct User IDs",
+          "title": "Distinct User IDs",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "user_id",
+          "aggregation": "COUNT_DISTINCT",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "user_id",
+              "aggregation": "COUNT_DISTINCT",
+              "display_name": "Distinct User IDs"
+            }
+          ],
+          "columns": [
+            "_user_id_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 5,
+            "row_span": 1,
+            "column_span": 4
+          },
+          "geometry": {
+            "top": 16,
+            "left": 412,
+            "width": 380,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-uRA2-9wgZ2Y",
+            "fixedLayout": {
+              "top": 16,
+              "left": 412,
+              "width": 380,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_user_id_",
+                    "displayName": "Distinct User IDs",
+                    "aggregation": "COUNT_DISTINCT"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Distinct User IDs"
+              }
+            }
+          }
+        },
+        {
+          "id": "kpi_distinct_conversations",
+          "given_id": "kpi_distinct_conversations",
+          "component_id": "cd-g1BkEGfLfKs",
+          "page_id": "p_edf06c14",
+          "page_title": "User & Persona Analytics",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Distinct Conversations",
+          "title": "Distinct Conversations",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "conversation_id",
+          "aggregation": "COUNT_DISTINCT",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "conversation_id",
+              "aggregation": "COUNT_DISTINCT",
+              "display_name": "Distinct Conversations"
+            }
+          ],
+          "columns": [
+            "_conversation_id_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 9,
+            "row_span": 1,
+            "column_span": 4
+          },
+          "geometry": {
+            "top": 16,
+            "left": 808,
+            "width": 380,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-g1BkEGfLfKs",
+            "fixedLayout": {
+              "top": 16,
+              "left": 808,
+              "width": 380,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_conversation_id_",
+                    "displayName": "Distinct Conversations",
+                    "aggregation": "COUNT_DISTINCT"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Distinct Conversations"
+              }
+            }
+          }
+        },
+        {
+          "id": "chart_turns_by_persona",
+          "given_id": "chart_turns_by_persona",
+          "component_id": "cd-raUF_PPS3LM",
+          "page_id": "p_edf06c14",
+          "page_title": "User & Persona Analytics",
+          "category": "chart",
+          "component_type": "simple-barchart",
+          "chart_type": "bar_chart",
+          "title": "Turns by Persona",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "dimensions": [
+            "persona"
+          ],
+          "metrics": [
+            "invocation_id"
+          ],
+          "columns": [
+            "_persona_",
+            "_invocation_id_"
+          ],
+          "responsive_section": "chart_row",
+          "grid_position": {
+            "row": 2,
+            "column": 1,
+            "row_span": 3,
+            "column_span": 6
+          },
+          "geometry": {
+            "top": 132,
+            "left": 16,
+            "width": 578,
+            "height": 320
+          },
+          "spec": {
+            "id": "cd-raUF_PPS3LM",
+            "fixedLayout": {
+              "top": 132,
+              "left": 16,
+              "width": 578,
+              "height": 320
+            },
+            "barChart": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "dim",
+                    "fieldName": "_persona_",
+                    "displayName": "Persona"
+                  },
+                  {
+                    "id": "m0",
+                    "fieldName": "_invocation_id_",
+                    "displayName": "Turns",
+                    "aggregation": "COUNT_DISTINCT"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryAxis": {
+                  "fieldId": "dim",
+                  "sort": [
+                    {
+                      "sortDir": "DESC",
+                      "sortFieldId": "m0"
+                    }
+                  ],
+                  "limit": 15,
+                  "includeOthers": false,
+                  "reverseSortOrder": false
+                },
+                "metricSeries": {
+                  "metricIds": [
+                    "m0"
+                  ]
+                }
+              },
+              "style": {
+                "stackType": "NONE"
+              },
+              "title": {
+                "showTitle": true,
+                "text": "Turns by Persona"
+              }
+            }
+          }
+        },
+        {
+          "id": "chart_persona_breakdown",
+          "given_id": "chart_persona_breakdown",
+          "component_id": "cd-rMs1c5cC9Fw",
+          "page_id": "p_edf06c14",
+          "page_title": "User & Persona Analytics",
+          "category": "chart",
+          "component_type": "simple-table",
+          "chart_type": "table",
+          "title": "Persona & Data Agent Activity",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "dimensions": [
+            "persona",
+            "data_agent_id"
+          ],
+          "metrics": [
+            "invocation_id",
+            "total_tokens",
+            "turn_latency_ms"
+          ],
+          "columns": [
+            "_persona_",
+            "_data_agent_id_",
+            "_invocation_id_",
+            "_total_tokens_",
+            "_turn_latency_ms_"
+          ],
+          "responsive_section": "chart_row",
+          "grid_position": {
+            "row": 2,
+            "column": 7,
+            "row_span": 3,
+            "column_span": 6
+          },
+          "geometry": {
+            "top": 132,
+            "left": 610,
+            "width": 578,
+            "height": 320
+          },
+          "spec": {
+            "id": "cd-rMs1c5cC9Fw",
+            "fixedLayout": {
+              "top": 132,
+              "left": 610,
+              "width": 578,
+              "height": 320
+            },
+            "table": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "d0",
+                    "fieldName": "_persona_",
+                    "displayName": "Persona"
+                  },
+                  {
+                    "id": "d1",
+                    "fieldName": "_data_agent_id_",
+                    "displayName": "Data Agent"
+                  },
+                  {
+                    "id": "m0",
+                    "fieldName": "_invocation_id_",
+                    "displayName": "Turns",
+                    "aggregation": "COUNT_DISTINCT"
+                  },
+                  {
+                    "id": "m1",
+                    "fieldName": "_total_tokens_",
+                    "displayName": "Total Tokens",
+                    "aggregation": "SUM"
+                  },
+                  {
+                    "id": "m2",
+                    "fieldName": "_turn_latency_ms_",
+                    "displayName": "Avg Turn Latency (ms)",
+                    "aggregation": "AVG"
+                  }
+                ]
+              },
+              "fields": {
+                "dimensionIds": [
+                  "d0",
+                  "d1"
+                ],
+                "metricIds": [
+                  "m0",
+                  "m1",
+                  "m2"
+                ],
+                "sort": [
+                  {
+                    "sortDir": "DESC",
+                    "sortFieldId": "m0"
+                  }
+                ],
+                "limit": 100
+              },
+              "style": {
+                "columnWidths": [
+                  40.0,
+                  107.6,
+                  107.6,
+                  107.6,
+                  107.6,
+                  107.6
+                ]
+              },
+              "title": {
+                "showTitle": true,
+                "text": "Persona & Data Agent Activity"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "index": 5,
+      "id": "p_08774fec",
+      "page_id": "p_08774fec",
+      "encoded_page_id": "p_08774fec",
+      "name": "Latency & Fast-Path ROI",
+      "title": "Latency & Fast-Path ROI",
+      "layout_mode": "DASHBOARD_LAYOUT_MODE_RESPONSIVE",
+      "component_count": 5,
+      "scorecard_count": 3,
+      "chart_count": 2,
+      "component_ids": [
+        "cd-vHrTArr4HTQ",
+        "cd-siIPn3A0DhI",
+        "cd-l9SJjy2jR-o",
+        "cd-lC6BhR7QWAA",
+        "cd-i2nWigxiP7g"
+      ],
+      "given_ids": [
+        "kpi_turn_latency_avg",
+        "kpi_llm_latency_p5",
+        "kpi_total_latency_avg",
+        "chart_fast_path_pie",
+        "chart_latency_by_fast_path"
+      ],
+      "components": [
+        {
+          "id": "kpi_turn_latency_avg",
+          "given_id": "kpi_turn_latency_avg",
+          "component_id": "cd-vHrTArr4HTQ",
+          "page_id": "p_08774fec",
+          "page_title": "Latency & Fast-Path ROI",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Avg End-to-End Turn Latency (ms)",
+          "title": "Avg End-to-End Turn Latency (ms)",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "turn_latency_ms",
+          "aggregation": "AVG",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "turn_latency_ms",
+              "aggregation": "AVG",
+              "display_name": "Avg End-to-End Turn Latency (ms)"
+            }
+          ],
+          "columns": [
+            "_turn_latency_ms_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 1,
+            "row_span": 1,
+            "column_span": 4
+          },
+          "geometry": {
+            "top": 16,
+            "left": 16,
+            "width": 380,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-vHrTArr4HTQ",
+            "fixedLayout": {
+              "top": 16,
+              "left": 16,
+              "width": 380,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_turn_latency_ms_",
+                    "displayName": "Avg End-to-End Turn Latency (ms)",
+                    "aggregation": "AVG"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Avg End-to-End Turn Latency (ms)"
+              }
+            }
+          }
+        },
+        {
+          "id": "kpi_llm_latency_p5",
+          "given_id": "kpi_llm_latency_p5",
+          "component_id": "cd-siIPn3A0DhI",
+          "page_id": "p_08774fec",
+          "page_title": "Latency & Fast-Path ROI",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Avg LLM Latency (ms)",
+          "title": "Avg LLM Latency (ms)",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "llm_latency_ms",
+          "aggregation": "AVG",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "llm_latency_ms",
+              "aggregation": "AVG",
+              "display_name": "Avg LLM Latency (ms)"
+            }
+          ],
+          "columns": [
+            "_llm_latency_ms_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 5,
+            "row_span": 1,
+            "column_span": 4
+          },
+          "geometry": {
+            "top": 16,
+            "left": 412,
+            "width": 380,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-siIPn3A0DhI",
+            "fixedLayout": {
+              "top": 16,
+              "left": 412,
+              "width": 380,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_llm_latency_ms_",
+                    "displayName": "Avg LLM Latency (ms)",
+                    "aggregation": "AVG"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Avg LLM Latency (ms)"
+              }
+            }
+          }
+        },
+        {
+          "id": "kpi_total_latency_avg",
+          "given_id": "kpi_total_latency_avg",
+          "component_id": "cd-l9SJjy2jR-o",
+          "page_id": "p_08774fec",
+          "page_title": "Latency & Fast-Path ROI",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Avg Event Latency (ms)",
+          "title": "Avg Event Latency (ms)",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "total_latency_ms",
+          "aggregation": "AVG",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "total_latency_ms",
+              "aggregation": "AVG",
+              "display_name": "Avg Event Latency (ms)"
+            }
+          ],
+          "columns": [
+            "_total_latency_ms_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 9,
+            "row_span": 1,
+            "column_span": 4
+          },
+          "geometry": {
+            "top": 16,
+            "left": 808,
+            "width": 380,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-l9SJjy2jR-o",
+            "fixedLayout": {
+              "top": 16,
+              "left": 808,
+              "width": 380,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_total_latency_ms_",
+                    "displayName": "Avg Event Latency (ms)",
+                    "aggregation": "AVG"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Avg Event Latency (ms)"
+              }
+            }
+          }
+        },
+        {
+          "id": "chart_fast_path_pie",
+          "given_id": "chart_fast_path_pie",
+          "component_id": "cd-lC6BhR7QWAA",
+          "page_id": "p_08774fec",
+          "page_title": "Latency & Fast-Path ROI",
+          "category": "chart",
+          "component_type": "simple-piechart",
+          "chart_type": "pie_chart",
+          "title": "Fast-Path vs Standard NL2SQL Turns",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "dimensions": [
+            "fast_path_label"
+          ],
+          "metrics": [
+            "invocation_id"
+          ],
+          "columns": [
+            "_fast_path_label_",
+            "_invocation_id_"
+          ],
+          "responsive_section": "chart_row",
+          "grid_position": {
+            "row": 2,
+            "column": 1,
+            "row_span": 3,
+            "column_span": 6
+          },
+          "geometry": {
+            "top": 132,
+            "left": 16,
+            "width": 578,
+            "height": 320
+          },
+          "spec": {
+            "id": "cd-lC6BhR7QWAA",
+            "fixedLayout": {
+              "top": 132,
+              "left": 16,
+              "width": 578,
+              "height": 320
+            },
+            "pieChart": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "dim",
+                    "fieldName": "_fast_path_label_",
+                    "displayName": "Execution Path"
+                  },
+                  {
+                    "id": "met",
+                    "fieldName": "_invocation_id_",
+                    "displayName": "Turns",
+                    "aggregation": "COUNT_DISTINCT"
+                  }
+                ]
+              },
+              "fields": {
+                "dimensionId": "dim",
+                "metricId": "met",
+                "sort": [
+                  {
+                    "sortDir": "DESC",
+                    "sortFieldId": "met"
+                  }
+                ],
+                "limit": 10,
+                "includeOthers": false,
+                "reverseSortOrder": false
+              },
+              "title": {
+                "showTitle": true,
+                "text": "Fast-Path vs Standard NL2SQL Turns"
+              }
+            }
+          }
+        },
+        {
+          "id": "chart_latency_by_fast_path",
+          "given_id": "chart_latency_by_fast_path",
+          "component_id": "cd-i2nWigxiP7g",
+          "page_id": "p_08774fec",
+          "page_title": "Latency & Fast-Path ROI",
+          "category": "chart",
+          "component_type": "simple-barchart",
+          "chart_type": "bar_chart",
+          "title": "Avg Turn Latency: Fast-Path vs Standard NL2SQL",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "dimensions": [
+            "fast_path_label"
+          ],
+          "metrics": [
+            "turn_latency_ms"
+          ],
+          "columns": [
+            "_fast_path_label_",
+            "_turn_latency_ms_"
+          ],
+          "responsive_section": "chart_row",
+          "grid_position": {
+            "row": 2,
+            "column": 7,
+            "row_span": 3,
+            "column_span": 6
+          },
+          "geometry": {
+            "top": 132,
+            "left": 610,
+            "width": 578,
+            "height": 320
+          },
+          "spec": {
+            "id": "cd-i2nWigxiP7g",
+            "fixedLayout": {
+              "top": 132,
+              "left": 610,
+              "width": 578,
+              "height": 320
+            },
+            "barChart": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "dim",
+                    "fieldName": "_fast_path_label_",
+                    "displayName": "Execution Path"
+                  },
+                  {
+                    "id": "m0",
+                    "fieldName": "_turn_latency_ms_",
+                    "displayName": "Avg Turn Latency (ms)",
+                    "aggregation": "AVG"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryAxis": {
+                  "fieldId": "dim",
+                  "sort": [
+                    {
+                      "sortDir": "DESC",
+                      "sortFieldId": "m0"
+                    }
+                  ],
+                  "limit": 15,
+                  "includeOthers": false,
+                  "reverseSortOrder": false
+                },
+                "metricSeries": {
+                  "metricIds": [
+                    "m0"
+                  ]
+                }
+              },
+              "style": {
+                "stackType": "NONE"
+              },
+              "title": {
+                "showTitle": true,
+                "text": "Avg Turn Latency: Fast-Path vs Standard NL2SQL"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "index": 6,
+      "id": "p_88bcf5f8",
+      "page_id": "p_88bcf5f8",
+      "encoded_page_id": "p_88bcf5f8",
+      "name": "Errors (BQCA 3-Condition)",
+      "title": "Errors (BQCA 3-Condition)",
+      "layout_mode": "DASHBOARD_LAYOUT_MODE_RESPONSIVE",
+      "component_count": 4,
+      "scorecard_count": 2,
+      "chart_count": 2,
+      "component_ids": [
+        "cd-piLo6w29Khs",
+        "cd-m7c2OcIbUxo",
+        "cd-oZj1Bbl96QQ",
+        "cd-tSjvZNK6aLc"
+      ],
+      "given_ids": [
+        "kpi_total_errors",
+        "kpi_distinct_errors",
+        "chart_errors_by_event_type",
+        "chart_errors_by_agent"
+      ],
+      "components": [
+        {
+          "id": "kpi_total_errors",
+          "given_id": "kpi_total_errors",
+          "component_id": "cd-piLo6w29Khs",
+          "page_id": "p_88bcf5f8",
+          "page_title": "Errors (BQCA 3-Condition)",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Error Events (3-Condition)",
+          "title": "Error Events (3-Condition)",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "error_message",
+          "aggregation": "COUNT",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "error_message",
+              "aggregation": "COUNT",
+              "display_name": "Error Events (3-Condition)"
+            }
+          ],
+          "columns": [
+            "_error_message_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 1,
+            "row_span": 1,
+            "column_span": 6
+          },
+          "geometry": {
+            "top": 16,
+            "left": 16,
+            "width": 578,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-piLo6w29Khs",
+            "fixedLayout": {
+              "top": 16,
+              "left": 16,
+              "width": 578,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_error_message_",
+                    "displayName": "Error Events (3-Condition)",
+                    "aggregation": "COUNT"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Error Events (3-Condition)"
+              }
+            }
+          }
+        },
+        {
+          "id": "kpi_distinct_errors",
+          "given_id": "kpi_distinct_errors",
+          "component_id": "cd-m7c2OcIbUxo",
+          "page_id": "p_88bcf5f8",
+          "page_title": "Errors (BQCA 3-Condition)",
+          "category": "scorecard",
+          "component_type": "kpi-metric",
+          "chart_type": "SCORECARD",
+          "label": "Distinct Error Messages",
+          "title": "Distinct Error Messages",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "field": "error_message",
+          "aggregation": "COUNT_DISTINCT",
+          "dimensions": [],
+          "metrics": [
+            {
+              "field": "error_message",
+              "aggregation": "COUNT_DISTINCT",
+              "display_name": "Distinct Error Messages"
+            }
+          ],
+          "columns": [
+            "_error_message_"
+          ],
+          "responsive_section": "kpi_row",
+          "grid_position": {
+            "row": 1,
+            "column": 7,
+            "row_span": 1,
+            "column_span": 6
+          },
+          "geometry": {
+            "top": 16,
+            "left": 610,
+            "width": 578,
+            "height": 100
+          },
+          "spec": {
+            "id": "cd-m7c2OcIbUxo",
+            "fixedLayout": {
+              "top": 16,
+              "left": 610,
+              "width": 578,
+              "height": 100
+            },
+            "scorecard": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "met",
+                    "fieldName": "_error_message_",
+                    "displayName": "Distinct Error Messages",
+                    "aggregation": "COUNT_DISTINCT"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryMetricId": "met"
+              },
+              "title": {
+                "showTitle": false,
+                "text": "Distinct Error Messages"
+              }
+            }
+          }
+        },
+        {
+          "id": "chart_errors_by_event_type",
+          "given_id": "chart_errors_by_event_type",
+          "component_id": "cd-oZj1Bbl96QQ",
+          "page_id": "p_88bcf5f8",
+          "page_title": "Errors (BQCA 3-Condition)",
+          "category": "chart",
+          "component_type": "simple-barchart",
+          "chart_type": "bar_chart",
+          "title": "Error Events by BQCA Event Type",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "dimensions": [
+            "event_type"
+          ],
+          "metrics": [
+            "error_message"
+          ],
+          "columns": [
+            "_event_type_",
+            "_error_message_"
+          ],
+          "responsive_section": "chart_row",
+          "grid_position": {
+            "row": 2,
+            "column": 1,
+            "row_span": 3,
+            "column_span": 6
+          },
+          "geometry": {
+            "top": 132,
+            "left": 16,
+            "width": 578,
+            "height": 320
+          },
+          "spec": {
+            "id": "cd-oZj1Bbl96QQ",
+            "fixedLayout": {
+              "top": 132,
+              "left": 16,
+              "width": 578,
+              "height": 320
+            },
+            "barChart": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "dim",
+                    "fieldName": "_event_type_",
+                    "displayName": "Event Type"
+                  },
+                  {
+                    "id": "m0",
+                    "fieldName": "_error_message_",
+                    "displayName": "Error Events",
+                    "aggregation": "COUNT"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryAxis": {
+                  "fieldId": "dim",
+                  "sort": [
+                    {
+                      "sortDir": "DESC",
+                      "sortFieldId": "m0"
+                    }
+                  ],
+                  "limit": 15,
+                  "includeOthers": false,
+                  "reverseSortOrder": false
+                },
+                "metricSeries": {
+                  "metricIds": [
+                    "m0"
+                  ]
+                }
+              },
+              "style": {
+                "stackType": "NONE"
+              },
+              "title": {
+                "showTitle": true,
+                "text": "Error Events by BQCA Event Type"
+              }
+            }
+          }
+        },
+        {
+          "id": "chart_errors_by_agent",
+          "given_id": "chart_errors_by_agent",
+          "component_id": "cd-tSjvZNK6aLc",
+          "page_id": "p_88bcf5f8",
+          "page_title": "Errors (BQCA 3-Condition)",
+          "category": "chart",
+          "component_type": "simple-barchart",
+          "chart_type": "bar_chart",
+          "title": "Error Events by Data Agent",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "dimensions": [
+            "data_agent_id"
+          ],
+          "metrics": [
+            "error_message"
+          ],
+          "columns": [
+            "_data_agent_id_",
+            "_error_message_"
+          ],
+          "responsive_section": "chart_row",
+          "grid_position": {
+            "row": 2,
+            "column": 7,
+            "row_span": 3,
+            "column_span": 6
+          },
+          "geometry": {
+            "top": 132,
+            "left": 610,
+            "width": 578,
+            "height": 320
+          },
+          "spec": {
+            "id": "cd-tSjvZNK6aLc",
+            "fixedLayout": {
+              "top": 132,
+              "left": 610,
+              "width": 578,
+              "height": 320
+            },
+            "barChart": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "dim",
+                    "fieldName": "_data_agent_id_",
+                    "displayName": "Data Agent"
+                  },
+                  {
+                    "id": "m0",
+                    "fieldName": "_error_message_",
+                    "displayName": "Error Events",
+                    "aggregation": "COUNT"
+                  }
+                ]
+              },
+              "fields": {
+                "primaryAxis": {
+                  "fieldId": "dim",
+                  "sort": [
+                    {
+                      "sortDir": "DESC",
+                      "sortFieldId": "m0"
+                    }
+                  ],
+                  "limit": 15,
+                  "includeOthers": false,
+                  "reverseSortOrder": false
+                },
+                "metricSeries": {
+                  "metricIds": [
+                    "m0"
+                  ]
+                }
+              },
+              "style": {
+                "stackType": "NONE"
+              },
+              "title": {
+                "showTitle": true,
+                "text": "Error Events by Data Agent"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "index": 7,
+      "id": "p_b87a335e",
+      "page_id": "p_b87a335e",
+      "encoded_page_id": "p_b87a335e",
+      "name": "Prompt, Response & SQL Inspector",
+      "title": "Prompt, Response & SQL Inspector",
+      "layout_mode": "DASHBOARD_LAYOUT_MODE_RESPONSIVE",
+      "component_count": 1,
+      "scorecard_count": 0,
+      "chart_count": 1,
+      "component_ids": [
+        "cd-oUw97rpumWM"
+      ],
+      "given_ids": [
+        "tbl_prompt_response_sql"
+      ],
+      "components": [
+        {
+          "id": "tbl_prompt_response_sql",
+          "given_id": "tbl_prompt_response_sql",
+          "component_id": "cd-oUw97rpumWM",
+          "page_id": "p_b87a335e",
+          "page_title": "Prompt, Response & SQL Inspector",
+          "category": "chart",
+          "component_type": "simple-table",
+          "chart_type": "table",
+          "title": "Event-Level Prompt, Response & Extracted SQL",
+          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "data_source_alias": "ds0",
+          "dimensions": [
+            "event_date",
+            "session_id",
+            "data_agent_id",
+            "persona",
+            "event_type",
+            "fast_path_label",
+            "user_prompt_text",
+            "extracted_sql",
+            "summary_text",
+            "error_message"
+          ],
+          "metrics": [
+            "total_latency_ms",
+            "total_tokens"
+          ],
+          "columns": [
+            "_event_date_",
+            "_session_id_",
+            "_data_agent_id_",
+            "_persona_",
+            "_event_type_",
+            "_fast_path_label_",
+            "_user_prompt_text_",
+            "_extracted_sql_",
+            "_summary_text_",
+            "_error_message_",
+            "_total_latency_ms_",
+            "_total_tokens_"
+          ],
+          "responsive_section": "inspector_table",
+          "grid_position": {
+            "row": 1,
+            "column": 1,
+            "row_span": 5,
+            "column_span": 12
+          },
+          "geometry": {
+            "top": 16,
+            "left": 16,
+            "width": 1172,
+            "height": 500
+          },
+          "spec": {
+            "id": "cd-oUw97rpumWM",
+            "fixedLayout": {
+              "top": 16,
+              "left": 16,
+              "width": 1172,
+              "height": 500
+            },
+            "table": {
+              "dataset": {
+                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "columns": [
+                  {
+                    "id": "d0",
+                    "fieldName": "_event_date_",
+                    "displayName": "Event Date"
+                  },
+                  {
+                    "id": "d1",
+                    "fieldName": "_session_id_",
+                    "displayName": "Session ID"
+                  },
+                  {
+                    "id": "d2",
+                    "fieldName": "_data_agent_id_",
+                    "displayName": "Data Agent"
+                  },
+                  {
+                    "id": "d3",
+                    "fieldName": "_persona_",
+                    "displayName": "Persona"
+                  },
+                  {
+                    "id": "d4",
+                    "fieldName": "_event_type_",
+                    "displayName": "Event Type"
+                  },
+                  {
+                    "id": "d5",
+                    "fieldName": "_fast_path_label_",
+                    "displayName": "Path"
+                  },
+                  {
+                    "id": "d6",
+                    "fieldName": "_user_prompt_text_",
+                    "displayName": "User Prompt"
+                  },
+                  {
+                    "id": "d7",
+                    "fieldName": "_extracted_sql_",
+                    "displayName": "Extracted SQL"
+                  },
+                  {
+                    "id": "d8",
+                    "fieldName": "_summary_text_",
+                    "displayName": "Response Summary"
+                  },
+                  {
+                    "id": "d9",
+                    "fieldName": "_error_message_",
+                    "displayName": "Error Message"
+                  },
+                  {
+                    "id": "m0",
+                    "fieldName": "_total_latency_ms_",
+                    "displayName": "Latency (ms)",
+                    "aggregation": "AVG"
+                  },
+                  {
+                    "id": "m1",
+                    "fieldName": "_total_tokens_",
+                    "displayName": "Tokens",
+                    "aggregation": "SUM"
+                  }
+                ]
+              },
+              "fields": {
+                "dimensionIds": [
+                  "d0",
+                  "d1",
+                  "d2",
+                  "d3",
+                  "d4",
+                  "d5",
+                  "d6",
+                  "d7",
+                  "d8",
+                  "d9"
+                ],
+                "metricIds": [
+                  "m0",
+                  "m1"
+                ],
+                "sort": [
+                  {
+                    "sortDir": "DESC",
+                    "sortFieldId": "d0"
+                  }
+                ],
+                "limit": 100
+              },
+              "style": {
+                "columnWidths": [
+                  40.0,
+                  94.33,
+                  94.33,
+                  94.33,
+                  94.33,
+                  94.33,
+                  94.33,
+                  94.33,
+                  94.33,
+                  94.33,
+                  94.33,
+                  94.33,
+                  94.33
+                ]
+              },
+              "title": {
+                "showTitle": true,
+                "text": "Event-Level Prompt, Response & Extracted SQL"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "components": [
+    {
+      "id": "kpi_total_tokens",
+      "given_id": "kpi_total_tokens",
+      "component_id": "cd-vWRq2EdpQyI",
+      "page_id": "p_539b9240",
+      "page_title": "Token Consumption",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Total Tokens",
+      "title": "Total Tokens",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "total_tokens",
+      "aggregation": "SUM",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "total_tokens",
+          "aggregation": "SUM",
+          "display_name": "Total Tokens"
+        }
+      ],
+      "columns": [
+        "_total_tokens_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 1,
+        "row_span": 1,
+        "column_span": 2
+      },
+      "geometry": {
+        "top": 16,
+        "left": 16,
+        "width": 182,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-vWRq2EdpQyI",
+        "fixedLayout": {
+          "top": 16,
+          "left": 16,
+          "width": 182,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_total_tokens_",
+                "displayName": "Total Tokens",
+                "aggregation": "SUM"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Total Tokens"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_input_tokens",
+      "given_id": "kpi_input_tokens",
+      "component_id": "cd-gQM6-qRztkI",
+      "page_id": "p_539b9240",
+      "page_title": "Token Consumption",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Input Tokens",
+      "title": "Input Tokens",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "input_tokens",
+      "aggregation": "SUM",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "input_tokens",
+          "aggregation": "SUM",
+          "display_name": "Input Tokens"
+        }
+      ],
+      "columns": [
+        "_input_tokens_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 3,
+        "row_span": 1,
+        "column_span": 2
+      },
+      "geometry": {
+        "top": 16,
+        "left": 214,
+        "width": 182,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-gQM6-qRztkI",
+        "fixedLayout": {
+          "top": 16,
+          "left": 214,
+          "width": 182,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_input_tokens_",
+                "displayName": "Input Tokens",
+                "aggregation": "SUM"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Input Tokens"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_output_tokens",
+      "given_id": "kpi_output_tokens",
+      "component_id": "cd-tGVUrOkdidM",
+      "page_id": "p_539b9240",
+      "page_title": "Token Consumption",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Output Tokens",
+      "title": "Output Tokens",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "output_tokens",
+      "aggregation": "SUM",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "output_tokens",
+          "aggregation": "SUM",
+          "display_name": "Output Tokens"
+        }
+      ],
+      "columns": [
+        "_output_tokens_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 6,
+        "row_span": 1,
+        "column_span": 2
+      },
+      "geometry": {
+        "top": 16,
+        "left": 511,
+        "width": 182,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-tGVUrOkdidM",
+        "fixedLayout": {
+          "top": 16,
+          "left": 511,
+          "width": 182,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_output_tokens_",
+                "displayName": "Output Tokens",
+                "aggregation": "SUM"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Output Tokens"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_thoughts_tokens",
+      "given_id": "kpi_thoughts_tokens",
+      "component_id": "cd-mNCe2wVAOSU",
+      "page_id": "p_539b9240",
+      "page_title": "Token Consumption",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Thinking Tokens",
+      "title": "Thinking Tokens",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "thoughts_tokens",
+      "aggregation": "SUM",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "thoughts_tokens",
+          "aggregation": "SUM",
+          "display_name": "Thinking Tokens"
+        }
+      ],
+      "columns": [
+        "_thoughts_tokens_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 8,
+        "row_span": 1,
+        "column_span": 2
+      },
+      "geometry": {
+        "top": 16,
+        "left": 709,
+        "width": 182,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-mNCe2wVAOSU",
+        "fixedLayout": {
+          "top": 16,
+          "left": 709,
+          "width": 182,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_thoughts_tokens_",
+                "displayName": "Thinking Tokens",
+                "aggregation": "SUM"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Thinking Tokens"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_cached_tokens",
+      "given_id": "kpi_cached_tokens",
+      "component_id": "cd-q_nXnTUZkLs",
+      "page_id": "p_539b9240",
+      "page_title": "Token Consumption",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Cached Tokens",
+      "title": "Cached Tokens",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "cached_tokens",
+      "aggregation": "SUM",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "cached_tokens",
+          "aggregation": "SUM",
+          "display_name": "Cached Tokens"
+        }
+      ],
+      "columns": [
+        "_cached_tokens_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 11,
+        "row_span": 1,
+        "column_span": 2
+      },
+      "geometry": {
+        "top": 16,
+        "left": 1006,
+        "width": 182,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-q_nXnTUZkLs",
+        "fixedLayout": {
+          "top": 16,
+          "left": 1006,
+          "width": 182,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_cached_tokens_",
+                "displayName": "Cached Tokens",
+                "aggregation": "SUM"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Cached Tokens"
+          }
+        }
+      }
+    },
+    {
+      "id": "chart_tokens_by_agent",
+      "given_id": "chart_tokens_by_agent",
+      "component_id": "cd-kctXIOqrPyQ",
+      "page_id": "p_539b9240",
+      "page_title": "Token Consumption",
+      "category": "chart",
+      "component_type": "simple-barchart",
+      "chart_type": "bar_chart",
+      "title": "Token Usage by Data Agent",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "dimensions": [
+        "data_agent_id"
+      ],
+      "metrics": [
+        "total_tokens"
+      ],
+      "columns": [
+        "_data_agent_id_",
+        "_total_tokens_"
+      ],
+      "responsive_section": "chart_row",
+      "grid_position": {
+        "row": 2,
+        "column": 1,
+        "row_span": 3,
+        "column_span": 6
+      },
+      "geometry": {
+        "top": 132,
+        "left": 16,
+        "width": 578,
+        "height": 320
+      },
+      "spec": {
+        "id": "cd-kctXIOqrPyQ",
+        "fixedLayout": {
+          "top": 132,
+          "left": 16,
+          "width": 578,
+          "height": 320
+        },
+        "barChart": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "dim",
+                "fieldName": "_data_agent_id_",
+                "displayName": "Data Agent"
+              },
+              {
+                "id": "m0",
+                "fieldName": "_total_tokens_",
+                "displayName": "Total Tokens",
+                "aggregation": "SUM"
+              }
+            ]
+          },
+          "fields": {
+            "primaryAxis": {
+              "fieldId": "dim",
+              "sort": [
+                {
+                  "sortDir": "DESC",
+                  "sortFieldId": "m0"
+                }
+              ],
+              "limit": 15,
+              "includeOthers": false,
+              "reverseSortOrder": false
+            },
+            "metricSeries": {
+              "metricIds": [
+                "m0"
+              ]
+            }
+          },
+          "style": {
+            "stackType": "NONE"
+          },
+          "title": {
+            "showTitle": true,
+            "text": "Token Usage by Data Agent"
+          }
+        }
+      }
+    },
+    {
+      "id": "chart_tokens_over_time",
+      "given_id": "chart_tokens_over_time",
+      "component_id": "cd-kM4cFH3pweE",
+      "page_id": "p_539b9240",
+      "page_title": "Token Consumption",
+      "category": "chart",
+      "component_type": "simple-barchart",
+      "chart_type": "bar_chart",
+      "title": "Daily Token Usage (Input / Output / Thinking)",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "dimensions": [
+        "event_date"
+      ],
+      "metrics": [
+        "input_tokens",
+        "output_tokens",
+        "thoughts_tokens"
+      ],
+      "columns": [
+        "_event_date_",
+        "_input_tokens_",
+        "_output_tokens_",
+        "_thoughts_tokens_"
+      ],
+      "responsive_section": "chart_row",
+      "grid_position": {
+        "row": 2,
+        "column": 7,
+        "row_span": 3,
+        "column_span": 6
+      },
+      "geometry": {
+        "top": 132,
+        "left": 610,
+        "width": 578,
+        "height": 320
+      },
+      "spec": {
+        "id": "cd-kM4cFH3pweE",
+        "fixedLayout": {
+          "top": 132,
+          "left": 610,
+          "width": 578,
+          "height": 320
+        },
+        "barChart": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "dim",
+                "fieldName": "_event_date_",
+                "displayName": "Event Date"
+              },
+              {
+                "id": "m0",
+                "fieldName": "_input_tokens_",
+                "displayName": "Input Tokens",
+                "aggregation": "SUM"
+              },
+              {
+                "id": "m1",
+                "fieldName": "_output_tokens_",
+                "displayName": "Output Tokens",
+                "aggregation": "SUM"
+              },
+              {
+                "id": "m2",
+                "fieldName": "_thoughts_tokens_",
+                "displayName": "Thinking Tokens",
+                "aggregation": "SUM"
+              }
+            ]
+          },
+          "fields": {
+            "primaryAxis": {
+              "fieldId": "dim",
+              "sort": [
+                {
+                  "sortDir": "ASC",
+                  "sortFieldId": "dim"
+                }
+              ],
+              "limit": 90,
+              "includeOthers": false,
+              "reverseSortOrder": false
+            },
+            "metricSeries": {
+              "metricIds": [
+                "m0",
+                "m1",
+                "m2"
+              ]
+            }
+          },
+          "style": {
+            "stackType": "NONE"
+          },
+          "title": {
+            "showTitle": true,
+            "text": "Daily Token Usage (Input / Output / Thinking)"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_distinct_agents",
+      "given_id": "kpi_distinct_agents",
+      "component_id": "cd-soVsNR_PepA",
+      "page_id": "p_a89cfece",
+      "page_title": "Data Agents & Turns",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Active Data Agents",
+      "title": "Active Data Agents",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "data_agent_id",
+      "aggregation": "COUNT_DISTINCT",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "data_agent_id",
+          "aggregation": "COUNT_DISTINCT",
+          "display_name": "Active Data Agents"
+        }
+      ],
+      "columns": [
+        "_data_agent_id_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 1,
+        "row_span": 1,
+        "column_span": 3
+      },
+      "geometry": {
+        "top": 16,
+        "left": 16,
+        "width": 281,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-soVsNR_PepA",
+        "fixedLayout": {
+          "top": 16,
+          "left": 16,
+          "width": 281,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_data_agent_id_",
+                "displayName": "Active Data Agents",
+                "aggregation": "COUNT_DISTINCT"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Active Data Agents"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_total_sessions",
+      "given_id": "kpi_total_sessions",
+      "component_id": "cd-jzLBUUj5DHY",
+      "page_id": "p_a89cfece",
+      "page_title": "Data Agents & Turns",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Total Turns",
+      "title": "Total Turns",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "invocation_id",
+      "aggregation": "COUNT_DISTINCT",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "invocation_id",
+          "aggregation": "COUNT_DISTINCT",
+          "display_name": "Total Turns"
+        }
+      ],
+      "columns": [
+        "_invocation_id_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 4,
+        "row_span": 1,
+        "column_span": 3
+      },
+      "geometry": {
+        "top": 16,
+        "left": 313,
+        "width": 281,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-jzLBUUj5DHY",
+        "fixedLayout": {
+          "top": 16,
+          "left": 313,
+          "width": 281,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_invocation_id_",
+                "displayName": "Total Turns",
+                "aggregation": "COUNT_DISTINCT"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Total Turns"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_turn_completes",
+      "given_id": "kpi_turn_completes",
+      "component_id": "cd-i7aDBnf14Bo",
+      "page_id": "p_a89cfece",
+      "page_title": "Data Agents & Turns",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Completed Turns",
+      "title": "Completed Turns",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "completed_turn_id",
+      "aggregation": "COUNT_DISTINCT",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "completed_turn_id",
+          "aggregation": "COUNT_DISTINCT",
+          "display_name": "Completed Turns"
+        }
+      ],
+      "columns": [
+        "_completed_turn_id_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 7,
+        "row_span": 1,
+        "column_span": 3
+      },
+      "geometry": {
+        "top": 16,
+        "left": 610,
+        "width": 281,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-i7aDBnf14Bo",
+        "fixedLayout": {
+          "top": 16,
+          "left": 610,
+          "width": 281,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_completed_turn_id_",
+                "displayName": "Completed Turns",
+                "aggregation": "COUNT_DISTINCT"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Completed Turns"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_extracted_sql_count",
+      "given_id": "kpi_extracted_sql_count",
+      "component_id": "cd-lGEjuCElXpw",
+      "page_id": "p_a89cfece",
+      "page_title": "Data Agents & Turns",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Generated SQL Queries",
+      "title": "Generated SQL Queries",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "extracted_sql",
+      "aggregation": "COUNT",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "extracted_sql",
+          "aggregation": "COUNT",
+          "display_name": "Generated SQL Queries"
+        }
+      ],
+      "columns": [
+        "_extracted_sql_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 10,
+        "row_span": 1,
+        "column_span": 3
+      },
+      "geometry": {
+        "top": 16,
+        "left": 907,
+        "width": 281,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-lGEjuCElXpw",
+        "fixedLayout": {
+          "top": 16,
+          "left": 907,
+          "width": 281,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_extracted_sql_",
+                "displayName": "Generated SQL Queries",
+                "aggregation": "COUNT"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Generated SQL Queries"
+          }
+        }
+      }
+    },
+    {
+      "id": "chart_turns_by_agent",
+      "given_id": "chart_turns_by_agent",
+      "component_id": "cd-mfKlsOmAHaM",
+      "page_id": "p_a89cfece",
+      "page_title": "Data Agents & Turns",
+      "category": "chart",
+      "component_type": "simple-barchart",
+      "chart_type": "bar_chart",
+      "title": "Turns by Data Agent",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "dimensions": [
+        "data_agent_id"
+      ],
+      "metrics": [
+        "invocation_id"
+      ],
+      "columns": [
+        "_data_agent_id_",
+        "_invocation_id_"
+      ],
+      "responsive_section": "chart_row",
+      "grid_position": {
+        "row": 2,
+        "column": 1,
+        "row_span": 3,
+        "column_span": 6
+      },
+      "geometry": {
+        "top": 132,
+        "left": 16,
+        "width": 578,
+        "height": 320
+      },
+      "spec": {
+        "id": "cd-mfKlsOmAHaM",
+        "fixedLayout": {
+          "top": 132,
+          "left": 16,
+          "width": 578,
+          "height": 320
+        },
+        "barChart": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "dim",
+                "fieldName": "_data_agent_id_",
+                "displayName": "Data Agent"
+              },
+              {
+                "id": "m0",
+                "fieldName": "_invocation_id_",
+                "displayName": "Turns",
+                "aggregation": "COUNT_DISTINCT"
+              }
+            ]
+          },
+          "fields": {
+            "primaryAxis": {
+              "fieldId": "dim",
+              "sort": [
+                {
+                  "sortDir": "DESC",
+                  "sortFieldId": "m0"
+                }
+              ],
+              "limit": 15,
+              "includeOthers": false,
+              "reverseSortOrder": false
+            },
+            "metricSeries": {
+              "metricIds": [
+                "m0"
+              ]
+            }
+          },
+          "style": {
+            "stackType": "NONE"
+          },
+          "title": {
+            "showTitle": true,
+            "text": "Turns by Data Agent"
+          }
+        }
+      }
+    },
+    {
+      "id": "chart_events_by_agent",
+      "given_id": "chart_events_by_agent",
+      "component_id": "cd-rVzCGnjYxo0",
+      "page_id": "p_a89cfece",
+      "page_title": "Data Agents & Turns",
+      "category": "chart",
+      "component_type": "simple-table",
+      "chart_type": "table",
+      "title": "Data Agent Volume, Latency & Errors",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "dimensions": [
+        "data_agent_id"
+      ],
+      "metrics": [
+        "invocation_id",
+        "turn_latency_ms",
+        "total_tokens",
+        "error_message"
+      ],
+      "columns": [
+        "_data_agent_id_",
+        "_invocation_id_",
+        "_turn_latency_ms_",
+        "_total_tokens_",
+        "_error_message_"
+      ],
+      "responsive_section": "chart_row",
+      "grid_position": {
+        "row": 2,
+        "column": 7,
+        "row_span": 3,
+        "column_span": 6
+      },
+      "geometry": {
+        "top": 132,
+        "left": 610,
+        "width": 578,
+        "height": 320
+      },
+      "spec": {
+        "id": "cd-rVzCGnjYxo0",
+        "fixedLayout": {
+          "top": 132,
+          "left": 610,
+          "width": 578,
+          "height": 320
+        },
+        "table": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "d0",
+                "fieldName": "_data_agent_id_",
+                "displayName": "Data Agent"
+              },
+              {
+                "id": "m0",
+                "fieldName": "_invocation_id_",
+                "displayName": "Turns",
+                "aggregation": "COUNT_DISTINCT"
+              },
+              {
+                "id": "m1",
+                "fieldName": "_turn_latency_ms_",
+                "displayName": "Avg Turn Latency (ms)",
+                "aggregation": "AVG"
+              },
+              {
+                "id": "m2",
+                "fieldName": "_total_tokens_",
+                "displayName": "Total Tokens",
+                "aggregation": "SUM"
+              },
+              {
+                "id": "m3",
+                "fieldName": "_error_message_",
+                "displayName": "Error Events",
+                "aggregation": "COUNT"
+              }
+            ]
+          },
+          "fields": {
+            "dimensionIds": [
+              "d0"
+            ],
+            "metricIds": [
+              "m0",
+              "m1",
+              "m2",
+              "m3"
+            ],
+            "sort": [
+              {
+                "sortDir": "DESC",
+                "sortFieldId": "m0"
+              }
+            ],
+            "limit": 100
+          },
+          "style": {
+            "columnWidths": [
+              40.0,
+              107.6,
+              107.6,
+              107.6,
+              107.6,
+              107.6
+            ]
+          },
+          "title": {
+            "showTitle": true,
+            "text": "Data Agent Volume, Latency & Errors"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_llm_calls",
+      "given_id": "kpi_llm_calls",
+      "component_id": "cd-ldwCpp7xYjA",
+      "page_id": "p_97efe693",
+      "page_title": "LLM Interactions & Embedding Suggestions",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "LLM Responses",
+      "title": "LLM Responses",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "llm_latency_ms",
+      "aggregation": "COUNT",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "llm_latency_ms",
+          "aggregation": "COUNT",
+          "display_name": "LLM Responses"
+        }
+      ],
+      "columns": [
+        "_llm_latency_ms_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 1,
+        "row_span": 1,
+        "column_span": 3
+      },
+      "geometry": {
+        "top": 16,
+        "left": 16,
+        "width": 281,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-ldwCpp7xYjA",
+        "fixedLayout": {
+          "top": 16,
+          "left": 16,
+          "width": 281,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_llm_latency_ms_",
+                "displayName": "LLM Responses",
+                "aggregation": "COUNT"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "LLM Responses"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_llm_latency_avg",
+      "given_id": "kpi_llm_latency_avg",
+      "component_id": "cd-qiFfbAM3qa0",
+      "page_id": "p_97efe693",
+      "page_title": "LLM Interactions & Embedding Suggestions",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Avg LLM Call Latency (ms)",
+      "title": "Avg LLM Call Latency (ms)",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "llm_latency_ms",
+      "aggregation": "AVG",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "llm_latency_ms",
+          "aggregation": "AVG",
+          "display_name": "Avg LLM Call Latency (ms)"
+        }
+      ],
+      "columns": [
+        "_llm_latency_ms_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 4,
+        "row_span": 1,
+        "column_span": 3
+      },
+      "geometry": {
+        "top": 16,
+        "left": 313,
+        "width": 281,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-qiFfbAM3qa0",
+        "fixedLayout": {
+          "top": 16,
+          "left": 313,
+          "width": 281,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_llm_latency_ms_",
+                "displayName": "Avg LLM Call Latency (ms)",
+                "aggregation": "AVG"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Avg LLM Call Latency (ms)"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_ttft_avg",
+      "given_id": "kpi_ttft_avg",
+      "component_id": "cd-vvYZt2if5WY",
+      "page_id": "p_97efe693",
+      "page_title": "LLM Interactions & Embedding Suggestions",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Avg Time to First Token (ms)",
+      "title": "Avg Time to First Token (ms)",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "ttft_ms",
+      "aggregation": "AVG",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "ttft_ms",
+          "aggregation": "AVG",
+          "display_name": "Avg Time to First Token (ms)"
+        }
+      ],
+      "columns": [
+        "_ttft_ms_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 7,
+        "row_span": 1,
+        "column_span": 3
+      },
+      "geometry": {
+        "top": 16,
+        "left": 610,
+        "width": 281,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-vvYZt2if5WY",
+        "fixedLayout": {
+          "top": 16,
+          "left": 610,
+          "width": 281,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_ttft_ms_",
+                "displayName": "Avg Time to First Token (ms)",
+                "aggregation": "AVG"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Avg Time to First Token (ms)"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_similar_queries",
+      "given_id": "kpi_similar_queries",
+      "component_id": "cd-gc3G-O-taBE",
+      "page_id": "p_97efe693",
+      "page_title": "LLM Interactions & Embedding Suggestions",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Suggested Columns Proposed",
+      "title": "Suggested Columns Proposed",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "similar_queries_count",
+      "aggregation": "SUM",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "similar_queries_count",
+          "aggregation": "SUM",
+          "display_name": "Suggested Columns Proposed"
+        }
+      ],
+      "columns": [
+        "_similar_queries_count_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 10,
+        "row_span": 1,
+        "column_span": 3
+      },
+      "geometry": {
+        "top": 16,
+        "left": 907,
+        "width": 281,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-gc3G-O-taBE",
+        "fixedLayout": {
+          "top": 16,
+          "left": 907,
+          "width": 281,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_similar_queries_count_",
+                "displayName": "Suggested Columns Proposed",
+                "aggregation": "SUM"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Suggested Columns Proposed"
+          }
+        }
+      }
+    },
+    {
+      "id": "chart_tokens_by_model",
+      "given_id": "chart_tokens_by_model",
+      "component_id": "cd-hqCAkMPqIPw",
+      "page_id": "p_97efe693",
+      "page_title": "LLM Interactions & Embedding Suggestions",
+      "category": "chart",
+      "component_type": "simple-barchart",
+      "chart_type": "bar_chart",
+      "title": "Tokens by Model Version",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "dimensions": [
+        "model_version"
+      ],
+      "metrics": [
+        "total_tokens"
+      ],
+      "columns": [
+        "_model_version_",
+        "_total_tokens_"
+      ],
+      "responsive_section": "chart_row",
+      "grid_position": {
+        "row": 2,
+        "column": 1,
+        "row_span": 3,
+        "column_span": 6
+      },
+      "geometry": {
+        "top": 132,
+        "left": 16,
+        "width": 578,
+        "height": 320
+      },
+      "spec": {
+        "id": "cd-hqCAkMPqIPw",
+        "fixedLayout": {
+          "top": 132,
+          "left": 16,
+          "width": 578,
+          "height": 320
+        },
+        "barChart": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "dim",
+                "fieldName": "_model_version_",
+                "displayName": "Model Version"
+              },
+              {
+                "id": "m0",
+                "fieldName": "_total_tokens_",
+                "displayName": "Total Tokens",
+                "aggregation": "SUM"
+              }
+            ]
+          },
+          "fields": {
+            "primaryAxis": {
+              "fieldId": "dim",
+              "sort": [
+                {
+                  "sortDir": "DESC",
+                  "sortFieldId": "m0"
+                }
+              ],
+              "limit": 15,
+              "includeOthers": false,
+              "reverseSortOrder": false
+            },
+            "metricSeries": {
+              "metricIds": [
+                "m0"
+              ]
+            }
+          },
+          "style": {
+            "stackType": "NONE"
+          },
+          "title": {
+            "showTitle": true,
+            "text": "Tokens by Model Version"
+          }
+        }
+      }
+    },
+    {
+      "id": "chart_embedding_reasons",
+      "given_id": "chart_embedding_reasons",
+      "component_id": "cd-sL-0J4IkqLU",
+      "page_id": "p_97efe693",
+      "page_title": "LLM Interactions & Embedding Suggestions",
+      "category": "chart",
+      "component_type": "simple-barchart",
+      "chart_type": "bar_chart",
+      "title": "Suggested Columns by Reason",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "dimensions": [
+        "embedding_suggestion_reason"
+      ],
+      "metrics": [
+        "similar_queries_count"
+      ],
+      "columns": [
+        "_embedding_suggestion_reason_",
+        "_similar_queries_count_"
+      ],
+      "responsive_section": "chart_row",
+      "grid_position": {
+        "row": 2,
+        "column": 7,
+        "row_span": 3,
+        "column_span": 6
+      },
+      "geometry": {
+        "top": 132,
+        "left": 610,
+        "width": 578,
+        "height": 320
+      },
+      "spec": {
+        "id": "cd-sL-0J4IkqLU",
+        "fixedLayout": {
+          "top": 132,
+          "left": 610,
+          "width": 578,
+          "height": 320
+        },
+        "barChart": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "dim",
+                "fieldName": "_embedding_suggestion_reason_",
+                "displayName": "Suggestion Reason"
+              },
+              {
+                "id": "m0",
+                "fieldName": "_similar_queries_count_",
+                "displayName": "Suggested Columns",
+                "aggregation": "SUM"
+              }
+            ]
+          },
+          "fields": {
+            "primaryAxis": {
+              "fieldId": "dim",
+              "sort": [
+                {
+                  "sortDir": "DESC",
+                  "sortFieldId": "m0"
+                }
+              ],
+              "limit": 15,
+              "includeOthers": false,
+              "reverseSortOrder": false
+            },
+            "metricSeries": {
+              "metricIds": [
+                "m0"
+              ]
+            }
+          },
+          "style": {
+            "stackType": "NONE"
+          },
+          "title": {
+            "showTitle": true,
+            "text": "Suggested Columns by Reason"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_distinct_personas",
+      "given_id": "kpi_distinct_personas",
+      "component_id": "cd-oQfDfyi8Lv0",
+      "page_id": "p_edf06c14",
+      "page_title": "User & Persona Analytics",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Distinct Personas",
+      "title": "Distinct Personas",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "persona",
+      "aggregation": "COUNT_DISTINCT",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "persona",
+          "aggregation": "COUNT_DISTINCT",
+          "display_name": "Distinct Personas"
+        }
+      ],
+      "columns": [
+        "_persona_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 1,
+        "row_span": 1,
+        "column_span": 4
+      },
+      "geometry": {
+        "top": 16,
+        "left": 16,
+        "width": 380,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-oQfDfyi8Lv0",
+        "fixedLayout": {
+          "top": 16,
+          "left": 16,
+          "width": 380,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_persona_",
+                "displayName": "Distinct Personas",
+                "aggregation": "COUNT_DISTINCT"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Distinct Personas"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_distinct_users",
+      "given_id": "kpi_distinct_users",
+      "component_id": "cd-uRA2-9wgZ2Y",
+      "page_id": "p_edf06c14",
+      "page_title": "User & Persona Analytics",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Distinct User IDs",
+      "title": "Distinct User IDs",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "user_id",
+      "aggregation": "COUNT_DISTINCT",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "user_id",
+          "aggregation": "COUNT_DISTINCT",
+          "display_name": "Distinct User IDs"
+        }
+      ],
+      "columns": [
+        "_user_id_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 5,
+        "row_span": 1,
+        "column_span": 4
+      },
+      "geometry": {
+        "top": 16,
+        "left": 412,
+        "width": 380,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-uRA2-9wgZ2Y",
+        "fixedLayout": {
+          "top": 16,
+          "left": 412,
+          "width": 380,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_user_id_",
+                "displayName": "Distinct User IDs",
+                "aggregation": "COUNT_DISTINCT"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Distinct User IDs"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_distinct_conversations",
+      "given_id": "kpi_distinct_conversations",
+      "component_id": "cd-g1BkEGfLfKs",
+      "page_id": "p_edf06c14",
+      "page_title": "User & Persona Analytics",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Distinct Conversations",
+      "title": "Distinct Conversations",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "conversation_id",
+      "aggregation": "COUNT_DISTINCT",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "conversation_id",
+          "aggregation": "COUNT_DISTINCT",
+          "display_name": "Distinct Conversations"
+        }
+      ],
+      "columns": [
+        "_conversation_id_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 9,
+        "row_span": 1,
+        "column_span": 4
+      },
+      "geometry": {
+        "top": 16,
+        "left": 808,
+        "width": 380,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-g1BkEGfLfKs",
+        "fixedLayout": {
+          "top": 16,
+          "left": 808,
+          "width": 380,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_conversation_id_",
+                "displayName": "Distinct Conversations",
+                "aggregation": "COUNT_DISTINCT"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Distinct Conversations"
+          }
+        }
+      }
+    },
+    {
+      "id": "chart_turns_by_persona",
+      "given_id": "chart_turns_by_persona",
+      "component_id": "cd-raUF_PPS3LM",
+      "page_id": "p_edf06c14",
+      "page_title": "User & Persona Analytics",
+      "category": "chart",
+      "component_type": "simple-barchart",
+      "chart_type": "bar_chart",
+      "title": "Turns by Persona",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "dimensions": [
+        "persona"
+      ],
+      "metrics": [
+        "invocation_id"
+      ],
+      "columns": [
+        "_persona_",
+        "_invocation_id_"
+      ],
+      "responsive_section": "chart_row",
+      "grid_position": {
+        "row": 2,
+        "column": 1,
+        "row_span": 3,
+        "column_span": 6
+      },
+      "geometry": {
+        "top": 132,
+        "left": 16,
+        "width": 578,
+        "height": 320
+      },
+      "spec": {
+        "id": "cd-raUF_PPS3LM",
+        "fixedLayout": {
+          "top": 132,
+          "left": 16,
+          "width": 578,
+          "height": 320
+        },
+        "barChart": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "dim",
+                "fieldName": "_persona_",
+                "displayName": "Persona"
+              },
+              {
+                "id": "m0",
+                "fieldName": "_invocation_id_",
+                "displayName": "Turns",
+                "aggregation": "COUNT_DISTINCT"
+              }
+            ]
+          },
+          "fields": {
+            "primaryAxis": {
+              "fieldId": "dim",
+              "sort": [
+                {
+                  "sortDir": "DESC",
+                  "sortFieldId": "m0"
+                }
+              ],
+              "limit": 15,
+              "includeOthers": false,
+              "reverseSortOrder": false
+            },
+            "metricSeries": {
+              "metricIds": [
+                "m0"
+              ]
+            }
+          },
+          "style": {
+            "stackType": "NONE"
+          },
+          "title": {
+            "showTitle": true,
+            "text": "Turns by Persona"
+          }
+        }
+      }
+    },
+    {
+      "id": "chart_persona_breakdown",
+      "given_id": "chart_persona_breakdown",
+      "component_id": "cd-rMs1c5cC9Fw",
+      "page_id": "p_edf06c14",
+      "page_title": "User & Persona Analytics",
+      "category": "chart",
+      "component_type": "simple-table",
+      "chart_type": "table",
+      "title": "Persona & Data Agent Activity",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "dimensions": [
+        "persona",
+        "data_agent_id"
+      ],
+      "metrics": [
+        "invocation_id",
+        "total_tokens",
+        "turn_latency_ms"
+      ],
+      "columns": [
+        "_persona_",
+        "_data_agent_id_",
+        "_invocation_id_",
+        "_total_tokens_",
+        "_turn_latency_ms_"
+      ],
+      "responsive_section": "chart_row",
+      "grid_position": {
+        "row": 2,
+        "column": 7,
+        "row_span": 3,
+        "column_span": 6
+      },
+      "geometry": {
+        "top": 132,
+        "left": 610,
+        "width": 578,
+        "height": 320
+      },
+      "spec": {
+        "id": "cd-rMs1c5cC9Fw",
+        "fixedLayout": {
+          "top": 132,
+          "left": 610,
+          "width": 578,
+          "height": 320
+        },
+        "table": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "d0",
+                "fieldName": "_persona_",
+                "displayName": "Persona"
+              },
+              {
+                "id": "d1",
+                "fieldName": "_data_agent_id_",
+                "displayName": "Data Agent"
+              },
+              {
+                "id": "m0",
+                "fieldName": "_invocation_id_",
+                "displayName": "Turns",
+                "aggregation": "COUNT_DISTINCT"
+              },
+              {
+                "id": "m1",
+                "fieldName": "_total_tokens_",
+                "displayName": "Total Tokens",
+                "aggregation": "SUM"
+              },
+              {
+                "id": "m2",
+                "fieldName": "_turn_latency_ms_",
+                "displayName": "Avg Turn Latency (ms)",
+                "aggregation": "AVG"
+              }
+            ]
+          },
+          "fields": {
+            "dimensionIds": [
+              "d0",
+              "d1"
+            ],
+            "metricIds": [
+              "m0",
+              "m1",
+              "m2"
+            ],
+            "sort": [
+              {
+                "sortDir": "DESC",
+                "sortFieldId": "m0"
+              }
+            ],
+            "limit": 100
+          },
+          "style": {
+            "columnWidths": [
+              40.0,
+              107.6,
+              107.6,
+              107.6,
+              107.6,
+              107.6
+            ]
+          },
+          "title": {
+            "showTitle": true,
+            "text": "Persona & Data Agent Activity"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_turn_latency_avg",
+      "given_id": "kpi_turn_latency_avg",
+      "component_id": "cd-vHrTArr4HTQ",
+      "page_id": "p_08774fec",
+      "page_title": "Latency & Fast-Path ROI",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Avg End-to-End Turn Latency (ms)",
+      "title": "Avg End-to-End Turn Latency (ms)",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "turn_latency_ms",
+      "aggregation": "AVG",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "turn_latency_ms",
+          "aggregation": "AVG",
+          "display_name": "Avg End-to-End Turn Latency (ms)"
+        }
+      ],
+      "columns": [
+        "_turn_latency_ms_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 1,
+        "row_span": 1,
+        "column_span": 4
+      },
+      "geometry": {
+        "top": 16,
+        "left": 16,
+        "width": 380,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-vHrTArr4HTQ",
+        "fixedLayout": {
+          "top": 16,
+          "left": 16,
+          "width": 380,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_turn_latency_ms_",
+                "displayName": "Avg End-to-End Turn Latency (ms)",
+                "aggregation": "AVG"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Avg End-to-End Turn Latency (ms)"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_llm_latency_p5",
+      "given_id": "kpi_llm_latency_p5",
+      "component_id": "cd-siIPn3A0DhI",
+      "page_id": "p_08774fec",
+      "page_title": "Latency & Fast-Path ROI",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Avg LLM Latency (ms)",
+      "title": "Avg LLM Latency (ms)",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "llm_latency_ms",
+      "aggregation": "AVG",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "llm_latency_ms",
+          "aggregation": "AVG",
+          "display_name": "Avg LLM Latency (ms)"
+        }
+      ],
+      "columns": [
+        "_llm_latency_ms_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 5,
+        "row_span": 1,
+        "column_span": 4
+      },
+      "geometry": {
+        "top": 16,
+        "left": 412,
+        "width": 380,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-siIPn3A0DhI",
+        "fixedLayout": {
+          "top": 16,
+          "left": 412,
+          "width": 380,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_llm_latency_ms_",
+                "displayName": "Avg LLM Latency (ms)",
+                "aggregation": "AVG"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Avg LLM Latency (ms)"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_total_latency_avg",
+      "given_id": "kpi_total_latency_avg",
+      "component_id": "cd-l9SJjy2jR-o",
+      "page_id": "p_08774fec",
+      "page_title": "Latency & Fast-Path ROI",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Avg Event Latency (ms)",
+      "title": "Avg Event Latency (ms)",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "total_latency_ms",
+      "aggregation": "AVG",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "total_latency_ms",
+          "aggregation": "AVG",
+          "display_name": "Avg Event Latency (ms)"
+        }
+      ],
+      "columns": [
+        "_total_latency_ms_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 9,
+        "row_span": 1,
+        "column_span": 4
+      },
+      "geometry": {
+        "top": 16,
+        "left": 808,
+        "width": 380,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-l9SJjy2jR-o",
+        "fixedLayout": {
+          "top": 16,
+          "left": 808,
+          "width": 380,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_total_latency_ms_",
+                "displayName": "Avg Event Latency (ms)",
+                "aggregation": "AVG"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Avg Event Latency (ms)"
+          }
+        }
+      }
+    },
+    {
+      "id": "chart_fast_path_pie",
+      "given_id": "chart_fast_path_pie",
+      "component_id": "cd-lC6BhR7QWAA",
+      "page_id": "p_08774fec",
+      "page_title": "Latency & Fast-Path ROI",
+      "category": "chart",
+      "component_type": "simple-piechart",
+      "chart_type": "pie_chart",
+      "title": "Fast-Path vs Standard NL2SQL Turns",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "dimensions": [
+        "fast_path_label"
+      ],
+      "metrics": [
+        "invocation_id"
+      ],
+      "columns": [
+        "_fast_path_label_",
+        "_invocation_id_"
+      ],
+      "responsive_section": "chart_row",
+      "grid_position": {
+        "row": 2,
+        "column": 1,
+        "row_span": 3,
+        "column_span": 6
+      },
+      "geometry": {
+        "top": 132,
+        "left": 16,
+        "width": 578,
+        "height": 320
+      },
+      "spec": {
+        "id": "cd-lC6BhR7QWAA",
+        "fixedLayout": {
+          "top": 132,
+          "left": 16,
+          "width": 578,
+          "height": 320
+        },
+        "pieChart": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "dim",
+                "fieldName": "_fast_path_label_",
+                "displayName": "Execution Path"
+              },
+              {
+                "id": "met",
+                "fieldName": "_invocation_id_",
+                "displayName": "Turns",
+                "aggregation": "COUNT_DISTINCT"
+              }
+            ]
+          },
+          "fields": {
+            "dimensionId": "dim",
+            "metricId": "met",
+            "sort": [
+              {
+                "sortDir": "DESC",
+                "sortFieldId": "met"
+              }
+            ],
+            "limit": 10,
+            "includeOthers": false,
+            "reverseSortOrder": false
+          },
+          "title": {
+            "showTitle": true,
+            "text": "Fast-Path vs Standard NL2SQL Turns"
+          }
+        }
+      }
+    },
+    {
+      "id": "chart_latency_by_fast_path",
+      "given_id": "chart_latency_by_fast_path",
+      "component_id": "cd-i2nWigxiP7g",
+      "page_id": "p_08774fec",
+      "page_title": "Latency & Fast-Path ROI",
+      "category": "chart",
+      "component_type": "simple-barchart",
+      "chart_type": "bar_chart",
+      "title": "Avg Turn Latency: Fast-Path vs Standard NL2SQL",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "dimensions": [
+        "fast_path_label"
+      ],
+      "metrics": [
+        "turn_latency_ms"
+      ],
+      "columns": [
+        "_fast_path_label_",
+        "_turn_latency_ms_"
+      ],
+      "responsive_section": "chart_row",
+      "grid_position": {
+        "row": 2,
+        "column": 7,
+        "row_span": 3,
+        "column_span": 6
+      },
+      "geometry": {
+        "top": 132,
+        "left": 610,
+        "width": 578,
+        "height": 320
+      },
+      "spec": {
+        "id": "cd-i2nWigxiP7g",
+        "fixedLayout": {
+          "top": 132,
+          "left": 610,
+          "width": 578,
+          "height": 320
+        },
+        "barChart": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "dim",
+                "fieldName": "_fast_path_label_",
+                "displayName": "Execution Path"
+              },
+              {
+                "id": "m0",
+                "fieldName": "_turn_latency_ms_",
+                "displayName": "Avg Turn Latency (ms)",
+                "aggregation": "AVG"
+              }
+            ]
+          },
+          "fields": {
+            "primaryAxis": {
+              "fieldId": "dim",
+              "sort": [
+                {
+                  "sortDir": "DESC",
+                  "sortFieldId": "m0"
+                }
+              ],
+              "limit": 15,
+              "includeOthers": false,
+              "reverseSortOrder": false
+            },
+            "metricSeries": {
+              "metricIds": [
+                "m0"
+              ]
+            }
+          },
+          "style": {
+            "stackType": "NONE"
+          },
+          "title": {
+            "showTitle": true,
+            "text": "Avg Turn Latency: Fast-Path vs Standard NL2SQL"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_total_errors",
+      "given_id": "kpi_total_errors",
+      "component_id": "cd-piLo6w29Khs",
+      "page_id": "p_88bcf5f8",
+      "page_title": "Errors (BQCA 3-Condition)",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Error Events (3-Condition)",
+      "title": "Error Events (3-Condition)",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "error_message",
+      "aggregation": "COUNT",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "error_message",
+          "aggregation": "COUNT",
+          "display_name": "Error Events (3-Condition)"
+        }
+      ],
+      "columns": [
+        "_error_message_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 1,
+        "row_span": 1,
+        "column_span": 6
+      },
+      "geometry": {
+        "top": 16,
+        "left": 16,
+        "width": 578,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-piLo6w29Khs",
+        "fixedLayout": {
+          "top": 16,
+          "left": 16,
+          "width": 578,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_error_message_",
+                "displayName": "Error Events (3-Condition)",
+                "aggregation": "COUNT"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Error Events (3-Condition)"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_distinct_errors",
+      "given_id": "kpi_distinct_errors",
+      "component_id": "cd-m7c2OcIbUxo",
+      "page_id": "p_88bcf5f8",
+      "page_title": "Errors (BQCA 3-Condition)",
+      "category": "scorecard",
+      "component_type": "kpi-metric",
+      "chart_type": "SCORECARD",
+      "label": "Distinct Error Messages",
+      "title": "Distinct Error Messages",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "field": "error_message",
+      "aggregation": "COUNT_DISTINCT",
+      "dimensions": [],
+      "metrics": [
+        {
+          "field": "error_message",
+          "aggregation": "COUNT_DISTINCT",
+          "display_name": "Distinct Error Messages"
+        }
+      ],
+      "columns": [
+        "_error_message_"
+      ],
+      "responsive_section": "kpi_row",
+      "grid_position": {
+        "row": 1,
+        "column": 7,
+        "row_span": 1,
+        "column_span": 6
+      },
+      "geometry": {
+        "top": 16,
+        "left": 610,
+        "width": 578,
+        "height": 100
+      },
+      "spec": {
+        "id": "cd-m7c2OcIbUxo",
+        "fixedLayout": {
+          "top": 16,
+          "left": 610,
+          "width": 578,
+          "height": 100
+        },
+        "scorecard": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "met",
+                "fieldName": "_error_message_",
+                "displayName": "Distinct Error Messages",
+                "aggregation": "COUNT_DISTINCT"
+              }
+            ]
+          },
+          "fields": {
+            "primaryMetricId": "met"
+          },
+          "title": {
+            "showTitle": false,
+            "text": "Distinct Error Messages"
+          }
+        }
+      }
+    },
+    {
+      "id": "chart_errors_by_event_type",
+      "given_id": "chart_errors_by_event_type",
+      "component_id": "cd-oZj1Bbl96QQ",
+      "page_id": "p_88bcf5f8",
+      "page_title": "Errors (BQCA 3-Condition)",
+      "category": "chart",
+      "component_type": "simple-barchart",
+      "chart_type": "bar_chart",
+      "title": "Error Events by BQCA Event Type",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "dimensions": [
+        "event_type"
+      ],
+      "metrics": [
+        "error_message"
+      ],
+      "columns": [
+        "_event_type_",
+        "_error_message_"
+      ],
+      "responsive_section": "chart_row",
+      "grid_position": {
+        "row": 2,
+        "column": 1,
+        "row_span": 3,
+        "column_span": 6
+      },
+      "geometry": {
+        "top": 132,
+        "left": 16,
+        "width": 578,
+        "height": 320
+      },
+      "spec": {
+        "id": "cd-oZj1Bbl96QQ",
+        "fixedLayout": {
+          "top": 132,
+          "left": 16,
+          "width": 578,
+          "height": 320
+        },
+        "barChart": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "dim",
+                "fieldName": "_event_type_",
+                "displayName": "Event Type"
+              },
+              {
+                "id": "m0",
+                "fieldName": "_error_message_",
+                "displayName": "Error Events",
+                "aggregation": "COUNT"
+              }
+            ]
+          },
+          "fields": {
+            "primaryAxis": {
+              "fieldId": "dim",
+              "sort": [
+                {
+                  "sortDir": "DESC",
+                  "sortFieldId": "m0"
+                }
+              ],
+              "limit": 15,
+              "includeOthers": false,
+              "reverseSortOrder": false
+            },
+            "metricSeries": {
+              "metricIds": [
+                "m0"
+              ]
+            }
+          },
+          "style": {
+            "stackType": "NONE"
+          },
+          "title": {
+            "showTitle": true,
+            "text": "Error Events by BQCA Event Type"
+          }
+        }
+      }
+    },
+    {
+      "id": "chart_errors_by_agent",
+      "given_id": "chart_errors_by_agent",
+      "component_id": "cd-tSjvZNK6aLc",
+      "page_id": "p_88bcf5f8",
+      "page_title": "Errors (BQCA 3-Condition)",
+      "category": "chart",
+      "component_type": "simple-barchart",
+      "chart_type": "bar_chart",
+      "title": "Error Events by Data Agent",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "dimensions": [
+        "data_agent_id"
+      ],
+      "metrics": [
+        "error_message"
+      ],
+      "columns": [
+        "_data_agent_id_",
+        "_error_message_"
+      ],
+      "responsive_section": "chart_row",
+      "grid_position": {
+        "row": 2,
+        "column": 7,
+        "row_span": 3,
+        "column_span": 6
+      },
+      "geometry": {
+        "top": 132,
+        "left": 610,
+        "width": 578,
+        "height": 320
+      },
+      "spec": {
+        "id": "cd-tSjvZNK6aLc",
+        "fixedLayout": {
+          "top": 132,
+          "left": 610,
+          "width": 578,
+          "height": 320
+        },
+        "barChart": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "dim",
+                "fieldName": "_data_agent_id_",
+                "displayName": "Data Agent"
+              },
+              {
+                "id": "m0",
+                "fieldName": "_error_message_",
+                "displayName": "Error Events",
+                "aggregation": "COUNT"
+              }
+            ]
+          },
+          "fields": {
+            "primaryAxis": {
+              "fieldId": "dim",
+              "sort": [
+                {
+                  "sortDir": "DESC",
+                  "sortFieldId": "m0"
+                }
+              ],
+              "limit": 15,
+              "includeOthers": false,
+              "reverseSortOrder": false
+            },
+            "metricSeries": {
+              "metricIds": [
+                "m0"
+              ]
+            }
+          },
+          "style": {
+            "stackType": "NONE"
+          },
+          "title": {
+            "showTitle": true,
+            "text": "Error Events by Data Agent"
+          }
+        }
+      }
+    },
+    {
+      "id": "tbl_prompt_response_sql",
+      "given_id": "tbl_prompt_response_sql",
+      "component_id": "cd-oUw97rpumWM",
+      "page_id": "p_b87a335e",
+      "page_title": "Prompt, Response & SQL Inspector",
+      "category": "chart",
+      "component_type": "simple-table",
+      "chart_type": "table",
+      "title": "Event-Level Prompt, Response & Extracted SQL",
+      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "data_source_alias": "ds0",
+      "dimensions": [
+        "event_date",
+        "session_id",
+        "data_agent_id",
+        "persona",
+        "event_type",
+        "fast_path_label",
+        "user_prompt_text",
+        "extracted_sql",
+        "summary_text",
+        "error_message"
+      ],
+      "metrics": [
+        "total_latency_ms",
+        "total_tokens"
+      ],
+      "columns": [
+        "_event_date_",
+        "_session_id_",
+        "_data_agent_id_",
+        "_persona_",
+        "_event_type_",
+        "_fast_path_label_",
+        "_user_prompt_text_",
+        "_extracted_sql_",
+        "_summary_text_",
+        "_error_message_",
+        "_total_latency_ms_",
+        "_total_tokens_"
+      ],
+      "responsive_section": "inspector_table",
+      "grid_position": {
+        "row": 1,
+        "column": 1,
+        "row_span": 5,
+        "column_span": 12
+      },
+      "geometry": {
+        "top": 16,
+        "left": 16,
+        "width": 1172,
+        "height": 500
+      },
+      "spec": {
+        "id": "cd-oUw97rpumWM",
+        "fixedLayout": {
+          "top": 16,
+          "left": 16,
+          "width": 1172,
+          "height": 500
+        },
+        "table": {
+          "dataset": {
+            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "columns": [
+              {
+                "id": "d0",
+                "fieldName": "_event_date_",
+                "displayName": "Event Date"
+              },
+              {
+                "id": "d1",
+                "fieldName": "_session_id_",
+                "displayName": "Session ID"
+              },
+              {
+                "id": "d2",
+                "fieldName": "_data_agent_id_",
+                "displayName": "Data Agent"
+              },
+              {
+                "id": "d3",
+                "fieldName": "_persona_",
+                "displayName": "Persona"
+              },
+              {
+                "id": "d4",
+                "fieldName": "_event_type_",
+                "displayName": "Event Type"
+              },
+              {
+                "id": "d5",
+                "fieldName": "_fast_path_label_",
+                "displayName": "Path"
+              },
+              {
+                "id": "d6",
+                "fieldName": "_user_prompt_text_",
+                "displayName": "User Prompt"
+              },
+              {
+                "id": "d7",
+                "fieldName": "_extracted_sql_",
+                "displayName": "Extracted SQL"
+              },
+              {
+                "id": "d8",
+                "fieldName": "_summary_text_",
+                "displayName": "Response Summary"
+              },
+              {
+                "id": "d9",
+                "fieldName": "_error_message_",
+                "displayName": "Error Message"
+              },
+              {
+                "id": "m0",
+                "fieldName": "_total_latency_ms_",
+                "displayName": "Latency (ms)",
+                "aggregation": "AVG"
+              },
+              {
+                "id": "m1",
+                "fieldName": "_total_tokens_",
+                "displayName": "Tokens",
+                "aggregation": "SUM"
+              }
+            ]
+          },
+          "fields": {
+            "dimensionIds": [
+              "d0",
+              "d1",
+              "d2",
+              "d3",
+              "d4",
+              "d5",
+              "d6",
+              "d7",
+              "d8",
+              "d9"
+            ],
+            "metricIds": [
+              "m0",
+              "m1"
+            ],
+            "sort": [
+              {
+                "sortDir": "DESC",
+                "sortFieldId": "d0"
+              }
+            ],
+            "limit": 100
+          },
+          "style": {
+            "columnWidths": [
+              40.0,
+              94.33,
+              94.33,
+              94.33,
+              94.33,
+              94.33,
+              94.33,
+              94.33,
+              94.33,
+              94.33,
+              94.33,
+              94.33,
+              94.33
+            ]
+          },
+          "title": {
+            "showTitle": true,
+            "text": "Event-Level Prompt, Response & Extracted SQL"
+          }
+        }
+      }
+    }
+  ]
+}

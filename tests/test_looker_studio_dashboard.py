@@ -1677,10 +1677,12 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
       (DASHBOARD / "spec/bqca_product_contract.yaml").read_text()
   )
   manifest_bytes = (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_bytes()
+  bundle_bytes = (DASHBOARD / "spec/bqca_dashboard_template.json").read_bytes()
   rendered = (DASHBOARD / "sql/bqca_events_v1.template.sql").read_bytes()
   digest = hashlib.sha256(rendered).hexdigest()
   pages_digest = validator.canonical_pages_sha256(contract["pages"])
   manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
+  bundle_digest = hashlib.sha256(bundle_bytes).hexdigest()
 
   invariants = {
       "use_datetime_type": True,
@@ -1699,7 +1701,7 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
       bqca["block_datasource"]["parameter_configuration"]
   )
 
-  # The live evidence names the exact SQL, pages, and manifest it was gathered for.
+  # The live evidence names the exact SQL, pages, manifest, and JSON bundle it was gathered for.
   assert bqca["reviewed_template_sql"]["sha256"] == digest
   evidence = bqca["live_template_verification"]
   assert evidence == {
@@ -1707,6 +1709,7 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
       "repository_sql_sha256": digest,
       "pages_sha256": pages_digest,
       "manifest_sha256": manifest_digest,
+      "template_bundle_sha256": bundle_digest,
       "method": [
           "data_studio_web_service_publish_datasource",
           "data_studio_web_service_get_block_datasource",
@@ -1954,6 +1957,7 @@ def test_bqca_artifacts_never_name_event_types_bqca_does_not_log():
       "bindings/bqca_template_bindings.yaml",
       "spec/bqca_product_contract.yaml",
       "spec/bqca_chart_manifest.yaml",
+      "spec/bqca_dashboard_template.json",
       "docs/index.html",
       "docs/bqca/index.html",
       "docs/app.mjs",
@@ -2560,3 +2564,70 @@ def test_bqca_events_sql_semantic_turn_and_error_edge_cases():
   ) in logical
   assert "SELECT\n  * EXCEPT (raw_agent_response_rn)," in logical
   assert len(contract["pages"]) == 7
+
+
+def test_bqca_json_template_bundle_and_compatibility_profile_parity():
+  """Verify the portable Looker Studio JSON template bundle and BQCA compatibility profile."""
+  validator = _load_dashboard_module("validate_contracts")
+  adk_compat = json.loads(
+      (DASHBOARD / "spec/compatibility_profile.json").read_text()
+  )
+  bqca_compat = json.loads(
+      (DASHBOARD / "spec/bqca_compatibility_profile.json").read_text()
+  )
+  bundle = json.loads(
+      (DASHBOARD / "spec/bqca_dashboard_template.json").read_text()
+  )
+  manifest = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text()
+  )
+  contract = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_product_contract.yaml").read_text()
+  )
+
+  # 1. Compatibility profile parity
+  assert bqca_compat["source_object"] == BQCA_DEFAULT_TABLE
+  assert bqca_compat["source_object_type"] == "BASE TABLE"
+  assert bqca_compat["generated_views_required"] is False
+  assert bqca_compat["required_columns"] == adk_compat["required_columns"]
+  assert len(bqca_compat["required_columns"]) == 15
+  assert tuple(bqca_compat["allowed_event_types"]) == BQCA_EVENT_TYPES
+  assert tuple(bqca_compat["excluded_event_types"]) == BQCA_UNLOGGED_EVENT_TYPES
+
+  # 2. JSON template bundle structure & parity with bqca_chart_manifest.yaml
+  assert bundle["report_id"] == BQCA_REPORT_ID
+  assert bundle["datasource_id"] == BQCA_DATASOURCE_ID
+  assert bundle["data_source_alias"] == BQCA_DATASOURCE_ALIAS
+  assert bundle["page_count"] == 7
+  assert bundle["scorecard_count"] == 21
+  assert bundle["chart_count"] == 13
+  assert bundle["total_component_count"] == 34
+  assert len(bundle["pages"]) == 7
+  assert len(bundle["components"]) == 34
+  assert bundle["datasource"]["field_count"] == 41
+  assert bundle["datasource"]["fields"] == manifest["datasource"]["fields"]
+  assert any(
+      f["name"] == "_completed_turn_id_" for f in bundle["datasource"]["fields"]
+  )
+  assert (
+      contract["surface"]["dashboard_template_bundle"]
+      == "spec/bqca_dashboard_template.json"
+  )
+  assert (
+      contract["surface"]["compatibility_profile"]
+      == "spec/bqca_compatibility_profile.json"
+  )
+
+  # 3. Mutation detection on bundle and compatibility profile
+  tampered_bundle = json.loads(json.dumps(bundle))
+  tampered_bundle["pages"][0]["components"][0]["title"] = "Tampered Title"
+  bundle_errors = validator.validate_bqca(bundle_override=tampered_bundle)
+  assert any("kpi_total_tokens" in e for e in bundle_errors), bundle_errors
+  assert any(
+      "template_bundle_sha256" in e for e in bundle_errors
+  ), bundle_errors
+
+  tampered_compat = json.loads(json.dumps(bqca_compat))
+  tampered_compat["allowed_event_types"].append("TOOL_COMPLETED")
+  compat_errors = validator.validate_bqca(compat_override=tampered_compat)
+  assert any("allowed_event_types" in e for e in compat_errors), compat_errors
