@@ -240,6 +240,14 @@ the constant `@start_ts` / `@end_ts` bounds, which prune partitions and satisfy
 `require_partition_filter`. The ±1 hour window in the join condition refers to
 the other table, so it narrows the matches but prunes nothing.
 
+The receiver writes `otel_spans` at least once: a retried or replayed export
+adds another row for the same span, with the same `idempotency_key` (the span's
+`trace_id` followed by its `span_id`) and a later `ingest_time`. Each `spans`
+CTE therefore keeps only the newest row per `idempotency_key`, the same rule as
+the receiver's `otel_spans_dedup` view. Without it, each `events` row that
+matches a duplicated span comes back once per copy. `QUALIFY` is evaluated
+after `WHERE`, so the constant bounds still prune partitions.
+
 Rows from the synchronous callbacks join directly on
 `attributes.otel.span_id`. Use a `LEFT JOIN`, since unsampled spans are missing
 from `otel_spans`:
@@ -266,6 +274,10 @@ spans AS (
   FROM `my-project.my_dataset.otel_spans`
   WHERE timestamp BETWEEN @start_ts AND @end_ts
     AND trace_id = @trace_id
+  -- At-least-once writes: keep the newest row of each span.
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY idempotency_key ORDER BY ingest_time DESC
+  ) = 1
 )
 SELECT
   e.timestamp,
@@ -315,6 +327,10 @@ spans AS (
   FROM `my-project.my_dataset.otel_spans`
   WHERE timestamp BETWEEN @start_ts AND @end_ts
     AND trace_id = @trace_id
+  -- At-least-once writes: keep the newest row of each span.
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY idempotency_key ORDER BY ingest_time DESC
+  ) = 1
 )
 SELECT
   e.timestamp,
