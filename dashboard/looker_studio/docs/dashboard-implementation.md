@@ -231,9 +231,15 @@ former 365-day default. The same exact-query check verified that events dated
 
 BigQuery Conversational Analytics (BQCA) Prompt & Response Logging uses a
 separate, dedicated 7-page tool-free Looker Studio report template
-(`1ffb0888-20ea-451f-aeb8-69fc37973335`, data source alias `ds0`, embedded
+(`42e79a1f-a979-4de8-911f-80d5a99543d5`, data source alias `ds0`, embedded
 `BlockDatasource` ID `4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc`) rather than the
-8-page ADK template (`5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40`).
+8-page ADK template (`5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40`). The report is a
+copy that its owner made on 2026-10-09 of the first published BQCA template,
+whose organization allowed sharing only inside the organization. The
+`BlockDatasource` ID and the live verification evidence were recorded on that
+source report and have not been re-recorded for the copy. The owner turned on
+public link sharing for the copy on 2026-10-09; the copy check from a signed-in
+outside Google account is still pending.
 
 ### Contract and manifest artifacts
 
@@ -289,8 +295,8 @@ On the published `BlockDatasource` (`4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc`):
 ### Fallback paths
 
 When a user's Workspace organization blocks external Looker Studio templates or
-while public-sharing allowlist completion is in progress (`#515`), users have
-two alternatives over the same 15-column BQAA base schema:
+while the outside-account copy check of the publicly shared template is pending
+(`#515`), users have two alternatives over the same 15-column BQAA base schema:
 
 1. **Self-Hosted Streamlit BQCA Dashboard** (`dashboards/streamlit/`) — renders
    5 BQCA tabs and 9 KPI tiles locally or on Cloud Run using its own

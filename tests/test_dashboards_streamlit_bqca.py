@@ -5139,7 +5139,7 @@ def test_manual_section_7_4_documents_the_review_fixes(docs):
       "INVOCATION_COMPLETED",
       "completed turns only",
       "the last response of the turn",
-      "PENDING_PUBLIC_SHARING_ALLOWLIST",
+      "PENDING_EXTERNAL_IDENTITY_CHECK",
       "--custom-sql-out",
   ):
     assert needle in section, needle

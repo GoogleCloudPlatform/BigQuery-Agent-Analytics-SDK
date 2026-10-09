@@ -1160,7 +1160,14 @@ BQCA_SQL_FILES = (
     "sql/bqca_preflight.sql.tmpl",
     "sql/bqca_preflight.template.sql",
 )
-BQCA_REPORT_ID = "1ffb0888-20ea-451f-aeb8-69fc37973335"
+BQCA_REPORT_ID = "42e79a1f-a979-4de8-911f-80d5a99543d5"
+BQCA_REPORT_URL = f"https://lookerstudio.google.com/reporting/{BQCA_REPORT_ID}"
+# SHA-256 of the retired BQCA report ID, whose organization allowed sharing
+# only inside the organization. Stored as a digest so the test that bans the
+# ID does not reintroduce it.
+RETIRED_BQCA_REPORT_ID_SHA256 = (
+    "46a7af104c8dc574723ce15ef4a0d8667efd22fa3c6c38267840abde407b1809"
+)
 BQCA_DATASOURCE_ID = "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc"
 BQCA_DATASOURCE_ALIAS = "ds0"
 BQCA_DEFAULT_TABLE = "bqca_prompt_response_logs"
@@ -1322,7 +1329,7 @@ def test_bqca_profile_reuses_the_published_template_bindings():
   assert bqca["datasource_id"] == BQCA_DATASOURCE_ID
   assert bqca["product_contract"] == "spec/bqca_product_contract.yaml"
   assert bqca["chart_manifest"] == "spec/bqca_chart_manifest.yaml"
-  assert bqca["link_access"] == "PENDING_PUBLIC_SHARING_ALLOWLIST"
+  assert bqca["link_access"] == "PUBLIC"
   assert bqca["publishing_mode"] == "MANUAL"
   assert (
       bqca["generated_report_credential_gate"]
@@ -1411,6 +1418,102 @@ def test_bqca_profile_reuses_the_published_template_bindings():
   assert hydration.PROFILES["bqca"]["report"] == (
       "bindings/bqca_report_template.yaml"
   )
+
+
+def test_bqca_surfaces_link_the_same_report_url():
+  contract = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_product_contract.yaml").read_text()
+  )
+  manifest = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text()
+  )
+  bundle = json.loads(
+      (DASHBOARD / "spec/bqca_dashboard_template.json").read_text()
+  )
+  assert contract["surface"]["canonical_report_url"] == BQCA_REPORT_URL
+  assert manifest["meta"]["report_id"] == BQCA_REPORT_ID
+  assert manifest["meta"]["dashboard_url"] == BQCA_REPORT_URL
+  assert bundle["dashboard_url"] == BQCA_REPORT_URL
+  for relative in ("README.md", "docs/index.html", "docs/bqca/index.html"):
+    assert BQCA_REPORT_URL in (DASHBOARD / relative).read_text(), relative
+
+
+def test_retired_bqca_report_id_appears_nowhere_in_the_repository():
+  """No tracked file may point at the retired BQCA report.
+
+  Its organization allowed sharing only inside the organization, so external
+  accounts could never copy it; a leftover reference in a doc, spec,
+  generated configurator file, or test would send someone back to it.
+  """
+  listing = subprocess.run(
+      ["git", "ls-files", "-z"], cwd=ROOT, check=True, capture_output=True
+  ).stdout
+  uuid = re.compile(rb"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+  hits = []
+  for name in filter(None, listing.split(b"\0")):
+    path = ROOT / os.fsdecode(name)
+    if not path.is_file():
+      continue
+    for token in set(uuid.findall(path.read_bytes())):
+      digest = hashlib.sha256(token.lower()).hexdigest()
+      if digest == RETIRED_BQCA_REPORT_ID_SHA256:
+        hits.append(os.fsdecode(name))
+  assert not hits, f"retired BQCA report ID still referenced in {hits}"
+
+
+def test_bqca_sharing_records_owner_public_link_but_no_outside_check():
+  """Public link sharing is on, but no outside account has verified it.
+
+  On 2026-10-09 the owner turned on link sharing for anyone with the link.
+  link_access records that owner-side intent, as for the ADK template; only
+  the external-identity copy canary shows that an outside account can copy
+  the report, and it has not run, so nothing may claim verified access.
+  """
+  bqca = yaml.safe_load(
+      (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+  )
+  assert bqca["link_access"] == "PUBLIC"
+  attestation = bqca["external_access_verification"]
+  assert attestation["status"] == "PENDING_EXTERNAL_IDENTITY_CHECK"
+  controls = {c["method"]: c for c in attestation["controls"]}
+  assert set(controls) == {
+      "permissions_api_link_role_check",
+      "external_identity_link_access_check",
+  }
+  for control in controls.values():
+    assert control["last_result"] == "NOT_RUN"
+    assert control["last_observed_date"] is None
+  canary = controls["external_identity_link_access_check"]
+  assert canary["link_access_verified_date"] is None
+  assert canary["last_identity_class"] == "unknown"
+  assert [
+      issue["status"]
+      for issue in bqca["known_live_issues"]
+      if issue["issue"] == attestation["tracking_issue"]
+  ] == ["OPEN"]
+
+  # The user-facing copy agrees: sharing turned on 2026-10-09, copy check
+  # still pending, and no trace of the retired allowlist state.
+  documents = [DASHBOARD / "README.md", DASHBOARD / "USER_MANUAL.md"]
+  documents += [
+      DASHBOARD / "docs" / name
+      for name in (
+          "index.html",
+          "bqca/index.html",
+          "dashboard-implementation.md",
+      )
+  ]
+  documents.append(ROOT / "docs/guides/bqca-prompt-response-logging-manual.md")
+  for path in documents:
+    text = " ".join(path.read_text().split())
+    assert "2026-10-09" in text, path
+    assert "copy check" in text, path
+    for stale in (
+        "PENDING_PUBLIC_SHARING_ALLOWLIST",
+        "allowlist approval",
+        "allowlisting",
+    ):
+      assert stale not in text, f"{path} still says {stale!r}"
 
 
 def test_bqca_query_reads_only_bqca_events_with_canonical_extractions():
@@ -2019,7 +2122,11 @@ def test_bqca_deep_link_page_is_published_with_the_site():
   assert 'id="bqca-template-note"' in page
   note = page.split('id="bqca-template-note"', 1)[1].split("</aside>", 1)[0]
   assert 'data-profile-only="bqca" hidden>' in note
-  assert "Template not yet publicly shared for external accounts" in note
+  assert (
+      "Public link sharing is on; the outside-account copy check is pending"
+      in note
+  )
+  assert "2026-10-09" in note
   assert "Dedicated 7-page tool-free BQCA Looker Studio template" in note
   assert '<details class="advanced-bqca-options">' in note
   assert BQCA_REPORT_ID in note
@@ -2206,6 +2313,9 @@ def test_bqca_hydration_gates_then_runs_a_capped_data_profile(
   assert "BQCA data profile (last 30 days): 40 events" in err
   assert "WARNING" not in err
   assert "NOTE: BQCA uses the dedicated 7-page tool-free BQCA template" in err
+  assert f"(report {BQCA_REPORT_ID}, alias ds0)" in err
+  assert "the outside-account copy check is pending (#515)" in err
+  assert "allowlist" not in err
   assert "SECURITY: keep the new report private" in err
 
   parameters = _link_parameters(out.strip())
@@ -2379,7 +2489,7 @@ def test_bqca_profile_is_documented_for_contributors_and_users():
       "spec/bqca_product_contract.yaml",
       "spec/bqca_chart_manifest.yaml",
       "Offline Looker Studio report layout & datasource specification bundle",
-      "PENDING_PUBLIC_SHARING_ALLOWLIST",
+      "PENDING_EXTERNAL_IDENTITY_CHECK",
       "all tool-usage pages, tool-latency series, and tool-error charts are omitted",
       "turns are keyed by `invocation_id`",
       "total turns (`invocation_id`), completed turns (`completed_turn_id`)",
@@ -2436,28 +2546,35 @@ def test_staleness_parser_rejects_malformed_or_nested_attestations(capsys):
       "    - method: check\n"
       "      status: CHILD_STATUS_MUST_BE_IGNORED\n"
       '  next_due_date: "2026-11-08"\n'
-      "  status: PENDING_PUBLIC_SHARING_ALLOWLIST\n"
+      "  status: PENDING_EXTERNAL_IDENTITY_CHECK\n"
       "  tracking_issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#515\n"
       "known_live_issues: []\n"
   )
   assert module.read_attestation_fields(nested_yaml) == {
       "next_due_date": "2026-11-08",
-      "status": "PENDING_PUBLIC_SHARING_ALLOWLIST",
+      "status": "PENDING_EXTERNAL_IDENTITY_CHECK",
       "tracking_issue": "GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#515",
   }
 
-  # M08: status: PASSING without link_access: PUBLIC and dated link_access_verified_date fails.
-  with pytest.raises(SystemExit, match="link_access: PUBLIC"):
-    module.read_attestation_fields(
-        "link_access: PENDING_PUBLIC_SHARING_ALLOWLIST\n"
-        "external_access_verification:\n"
-        "  controls:\n"
-        "    - method: external_identity_link_access_check\n"
-        "      link_access_verified_date: null\n"
-        '  next_due_date: "2026-11-08"\n'
-        "  status: PASSING\n"
-        "  tracking_issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#515\n"
-    )
+  # M08: status: PASSING needs both link_access: PUBLIC and a dated
+  # link_access_verified_date. The second case is the BQCA template's current
+  # state: the owner turned on public link sharing but no canary has passed.
+  for link_access, verified_date in (
+      ("PRIVATE", '"2026-10-09"'),
+      ("PUBLIC", "null"),
+  ):
+    with pytest.raises(SystemExit, match="link_access: PUBLIC"):
+      module.read_attestation_fields(
+          f"link_access: {link_access}\n"
+          "external_access_verification:\n"
+          "  controls:\n"
+          "    - method: external_identity_link_access_check\n"
+          f"      link_access_verified_date: {verified_date}\n"
+          '  next_due_date: "2026-11-08"\n'
+          "  status: PASSING\n"
+          "  tracking_issue:"
+          " GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#515\n"
+      )
 
   # N5: missing --attestation-path returns exit code 2 with stderr message and no traceback.
   rc = module.main(
@@ -2860,13 +2977,31 @@ def test_bqca_json_template_bundle_and_compatibility_profile_parity():
   r3_08_errors = _validate_with_repinned_sql_sha(r3_08_sql)
   assert any("behavioral oracle" in e for e in r3_08_errors), r3_08_errors
 
-  # M08: setting external_access_verification.status = "PASSING" while link_access != "PUBLIC" fails
+  # M08: setting external_access_verification.status = "PASSING" fails while
+  # the copy canary is unverified, even though link_access is PUBLIC.
   tampered_binding = json.loads(json.dumps(binding))
   tampered_binding["external_access_verification"]["status"] = "PASSING"
   m08_errors = validator.validate_bqca(binding_override=tampered_binding)
   assert any(
       "external_access_verification.status is PASSING" in e for e in m08_errors
   ), m08_errors
+  # Once both controls pass and the incident is resolved, PASSING validates,
+  # and still requires link_access: PUBLIC.
+  verified_binding = json.loads(json.dumps(tampered_binding))
+  for control in verified_binding["external_access_verification"]["controls"]:
+    if control["method"] == "permissions_api_link_role_check":
+      control["last_result"] = "LINK_VIEWER_ALLUSERS_PRESENT"
+    else:
+      control["last_result"] = "PASSED"
+      control["link_access_verified_date"] = "2026-10-09"
+  for issue in verified_binding["known_live_issues"]:
+    issue["status"] = "RESOLVED"
+  assert validator.validate_bqca(binding_override=verified_binding) == []
+  verified_binding["link_access"] = "PRIVATE"
+  assert any(
+      "external_access_verification.status is PASSING" in e
+      for e in validator.validate_bqca(binding_override=verified_binding)
+  )
 
   tampered_compat = json.loads(json.dumps(bqca_compat))
   tampered_compat["allowed_event_types"].append("TOOL_COMPLETED")

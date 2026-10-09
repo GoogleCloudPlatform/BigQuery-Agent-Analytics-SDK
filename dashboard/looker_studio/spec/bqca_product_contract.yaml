@@ -15,8 +15,8 @@ profile: bqca
 surface:
   platform: Looker Studio
   report_title: "BigQuery Conversational Analytics (BQCA) — Prompt & Response Logging"
-  canonical_report_id: "1ffb0888-20ea-451f-aeb8-69fc37973335"
-  canonical_report_url: "https://lookerstudio.google.com/reporting/1ffb0888-20ea-451f-aeb8-69fc37973335"
+  canonical_report_id: "42e79a1f-a979-4de8-911f-80d5a99543d5"
+  canonical_report_url: "https://lookerstudio.google.com/reporting/42e79a1f-a979-4de8-911f-80d5a99543d5"
   datasource_id: "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc"
   data_source_alias: "ds0"
   data_source_name: "BQCA Prompt & Response Logs (Template)"

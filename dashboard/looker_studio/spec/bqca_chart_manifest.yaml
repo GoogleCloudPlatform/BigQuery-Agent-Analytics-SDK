@@ -1,13 +1,13 @@
 # Consumer snapshot of the dedicated 7-page tool-free BQCA Looker Studio template.
 # Captures the 7 pages, 34 components (21 scorecards + 13 charts/tables), and
-# 41-field remediated BlockDatasource schema of report 1ffb0888-20ea-451f-aeb8-69fc37973335.
+# 41-field remediated BlockDatasource schema of report 42e79a1f-a979-4de8-911f-80d5a99543d5.
 meta:
   surface: bqca_prompt_response_logging_looker_studio
-  report_id: 1ffb0888-20ea-451f-aeb8-69fc37973335
+  report_id: 42e79a1f-a979-4de8-911f-80d5a99543d5
   datasource_id: 4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc
   data_source_alias: ds0
   title: BigQuery Conversational Analytics (BQCA) — Prompt & Response Logging
-  dashboard_url: https://lookerstudio.google.com/reporting/1ffb0888-20ea-451f-aeb8-69fc37973335
+  dashboard_url: https://lookerstudio.google.com/reporting/42e79a1f-a979-4de8-911f-80d5a99543d5
   layout_mode: DASHBOARD_LAYOUT_MODE_RESPONSIVE
   navigation_style: DASHBOARD_NAVIGATION_STYLE_TAB
   page_count: 7
