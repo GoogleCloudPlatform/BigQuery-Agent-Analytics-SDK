@@ -226,3 +226,75 @@ hits and billed zero additional bytes. The absolute 90-day measurement is
 environment-specific; it does not imply a linear cost reduction from the
 former 365-day default. The same exact-query check verified that events dated
 2026-08-11 were included, preserving the include-today contract.
+
+## Dedicated 7-page BQCA Prompt & Response Logging template
+
+BigQuery Conversational Analytics (BQCA) Prompt & Response Logging uses a
+separate, dedicated 7-page tool-free Looker Studio report template
+(`1ffb0888-20ea-451f-aeb8-69fc37973335`, data source alias `ds0`, embedded
+`BlockDatasource` ID `4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc`) rather than the
+8-page ADK template (`5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40`).
+
+### Contract and manifest artifacts
+
+- **Product contract**: `spec/bqca_product_contract.yaml` defines the surface
+  metadata, the nine allowed BQCA event types (`INVOCATION_STARTING`,
+  `USER_MESSAGE_RECEIVED`, `AGENT_RESPONSE`, `INVOCATION_COMPLETED`,
+  `LLM_RESPONSE`, `EMBEDDING_SUGGESTION`, `INVOCATION_ERROR`, `AGENT_ERROR`,
+  `LLM_ERROR`), the 7 report pages, and all 34 components (21 scorecards and
+  13 charts/tables).
+- **Consumer chart manifest**: `spec/bqca_chart_manifest.yaml` is the BQCA
+  counterpart to `spec/chart_manifest.yaml`, recording every component's
+  Looker Studio `component_id` (`cd-...`), `given_id`, page assignment,
+  responsive 12-column section geometry (`DASHBOARD_LAYOUT_MODE_RESPONSIVE`
+  with explicit `top`, `left`, `width`, `height` coordinates inside
+  12-column page sections), dimensions, metrics, and the 41-field remediated
+  `BlockDatasource` schema.
+- **Report template binding**: `bindings/bqca_report_template.yaml` and
+  `bindings/bqca_template_bindings.yaml` pin the report ID, `ds0` alias,
+  sentinel replacement identifiers, `reviewed_template_sql.sha256`,
+  `live_template_verification` (`repository_sql_sha256`, `pages_sha256`,
+  `manifest_sha256`), and `external_access_verification`.
+- **Contract validator**: `python3 tools/validate_contracts.py --profile bqca`
+  verifies 1:1 parity across `spec/bqca_product_contract.yaml`,
+  `spec/bqca_chart_manifest.yaml`, and `bindings/bqca_report_template.yaml`.
+
+### 7 pages and 34 tool-free components
+
+| Page | Page ID | Scorecards | Charts / Tables | Total |
+|---|---|---|---|---|
+| 1. Token Consumption | `p_539b9240` | 5 (`kpi_total_tokens`, `kpi_input_tokens`, `kpi_output_tokens`, `kpi_thoughts_tokens`, `kpi_cached_tokens`) | 2 (`chart_tokens_by_agent`, `chart_tokens_over_time`) | 7 |
+| 2. Data Agents & Turns | `p_a89cfece` | 4 (`kpi_distinct_agents`, `kpi_total_sessions`, `kpi_turn_completes`, `kpi_extracted_sql_count`) | 2 (`chart_turns_by_agent`, `chart_events_by_agent`) | 6 |
+| 3. LLM Interactions & Embedding Suggestions | `p_97efe693` | 4 (`kpi_llm_calls`, `kpi_llm_latency_avg`, `kpi_ttft_avg`, `kpi_similar_queries`) | 2 (`chart_tokens_by_model`, `chart_embedding_reasons`) | 6 |
+| 4. User & Persona Analytics | `p_edf06c14` | 3 (`kpi_distinct_personas`, `kpi_distinct_users`, `kpi_distinct_conversations`) | 2 (`chart_turns_by_persona`, `chart_persona_breakdown`) | 5 |
+| 5. Latency & Fast-Path ROI | `p_08774fec` | 3 (`kpi_turn_latency_avg`, `kpi_llm_latency_p5`, `kpi_total_latency_avg`) | 2 (`chart_fast_path_pie`, `chart_latency_by_fast_path`) | 5 |
+| 6. Errors (BQCA 3-Condition) | `p_88bcf5f8` | 2 (`kpi_total_errors`, `kpi_distinct_errors`) | 2 (`chart_errors_by_event_type`, `chart_errors_by_agent`) | 4 |
+| 7. Prompt, Response & SQL Inspector | `p_b87a335e` | 0 | 1 (`tbl_prompt_response_sql`) | 1 |
+| **Total** | **7 pages** | **21 scorecards** | **13 charts/tables** | **34 components** |
+
+### BlockDatasource native date/time and parameter invariants
+
+The embedded `CUSTOM_QUERY` (`sql/bqca_events_v1.template.sql`) filters `timestamp`
+using `PARSE_DATE('%Y%m%d', @DS_START_DATE)` and `PARSE_DATE('%Y%m%d', @DS_END_DATE)`.
+On the published `BlockDatasource` (`4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc`):
+
+1. `use_datetime_type: true` and `parameter_configuration: [DS_START_DATE, DS_END_DATE]`
+   must remain enabled so Looker Studio binds the report date window instead of
+   substituting `''`.
+2. `_event_date_` (`DATE` / `YEAR_MONTH_DAY`), `_timestamp_` (`TIMESTAMP` /
+   `YEAR_MONTH_DAY_SECOND`), and `_event_hour_` (`TIMESTAMP` /
+   `YEAR_MONTH_DAY_HOUR`) must retain `use_native_date_time: true` across the
+   41-field schema.
+
+### Fallback paths
+
+When a user's Workspace organization blocks external Looker Studio templates or
+while public-sharing allowlist completion is in progress (`#515`), users have
+two alternatives over the same 15-column BQAA base schema:
+
+1. **Self-Hosted Streamlit BQCA Dashboard** (`dashboards/streamlit/`) — renders
+   5 BQCA tabs and 9 KPI tiles locally or on Cloud Run using its own
+   parameterized BigQuery SQL builders (`dashboards/streamlit/bqca_queries.py`).
+2. **Bound custom query export** — `python3 tools/hydrate_dashboard.py --profile bqca --project PROJECT --dataset DATASET --custom-sql-out /tmp/bqca_events.sql`
+   writes the validated single-scan BQCA query bound to the user's table.
+

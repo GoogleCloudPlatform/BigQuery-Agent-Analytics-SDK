@@ -13,7 +13,12 @@
 # additional failure triggers.
 #
 # Usage:
-#   browser_smoke.sh              run the check against ../docs
+#   browser_smoke.sh              run the check against ../docs: index.html
+#                                 and, when the docs ship it, the generated
+#                                 BQCA deep link bqca/ (a second browser
+#                                 pass with the same healthy baseline, plus
+#                                 the surface app.mjs must apply on each
+#                                 page: adk on index.html, bqca on bqca/)
 #   browser_smoke.sh --self-test  run the fixtures and require each stated
 #                                 outcome. The negative fixtures must each
 #                                 FAIL: an immediate console error, an
@@ -28,8 +33,10 @@
 #                                 a decoy zero-error element beside a marker
 #                                 recording a real error, a non-bind server
 #                                 startup failure, a pinned port under a
-#                                 bind conflict, and an alive-but-unready
-#                                 server. The positive fixture must PASS: a
+#                                 bind conflict, an alive-but-unready
+#                                 server, and a BQCA deep link whose module
+#                                 path is broken beside a healthy main page.
+#                                 The positive fixture must PASS: a
 #                                 real bind collision on the first attempt
 #                                 is retried on fresh ports to success,
 #                                 with two to five server spawns and one
@@ -40,7 +47,8 @@
 # data-bqaa-app-initialized marker (set by script, never static), an
 # aria-disabled action, and no aria-invalid anywhere — so each fixture's
 # injected fault is the sole reason it fails. The server-startup fixtures
-# inject their fault before any page is loaded.
+# inject their fault before any page is loaded. Single-page fixtures ship
+# no bqca/ page, so the surface assertions never apply to them.
 #
 # Env: CHROME_BIN, SMOKE_PORT, SMOKE_DOCS_DIR override discovery. A pinned
 # SMOKE_PORT disables the port retry (exactly one attempt on that port),
@@ -519,6 +527,35 @@ SHIM
     fail "self-test 13 FAILED: the diagnostic must include the captured server output"
   echo "self-test 13 OK: readiness timeout with a live child fails immediately, no retry"
 
+  # 14. The real site with a BQCA deep link whose module path is broken
+  #     (./app.mjs from the bqca/ subdirectory 404s) while the main page
+  #     stays healthy: only the second, bqca/ browser pass can catch it,
+  #     and the diagnostic must name that page.
+  if [ -f "$DOCS_DIR/bqca/index.html" ]; then
+    BROKEN_BQCA="$OUT_DIR/fixture-broken-bqca-module"
+    BROKEN_BQCA_ERR="$OUT_DIR/fixture14-stderr.txt"
+    mkdir -p "$BROKEN_BQCA"
+    cp -R "$DOCS_DIR/." "$BROKEN_BQCA/"
+    python3 - "$BROKEN_BQCA/bqca/index.html" <<'EOF'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+source = path.read_text()
+good = '<script type="module" src="../app.mjs"></script>'
+assert source.count(good) == 1, "bqca/index.html must load ../app.mjs exactly once"
+path.write_text(source.replace(good, good.replace("../app.mjs", "./app.mjs")))
+EOF
+    if SMOKE_DOCS_DIR="$BROKEN_BQCA" "$SCRIPT_PATH" >/dev/null 2>"$BROKEN_BQCA_ERR"; then
+      fail "self-test 14 FAILED: a BQCA page whose module never loads passed"
+    fi
+    grep -Fq "browser smoke: bqca/index.html: " "$BROKEN_BQCA_ERR" ||
+      fail "self-test 14 FAILED: the failure must come from the bqca/ pass (stderr: $(tr '\n' ' ' < "$BROKEN_BQCA_ERR"))"
+    echo "self-test 14 OK: a broken BQCA deep link fails the bqca/ pass while the main page passes"
+  else
+    echo "self-test 14 SKIPPED: the docs ship no bqca/index.html"
+  fi
+
   echo "browser smoke self-test OK: every negative fixture fails as required, and the bind-collision retry recovers"
   exit 0
 fi
@@ -530,16 +567,22 @@ CHROME_BIN="$(find_chrome)"
 [ -n "$CHROME_BIN" ] || fail "no Chrome/Chromium binary found (set CHROME_BIN)"
 
 # Instrumented copy of the site: the injected script runs before the module
-# and records everything the page throws.
+# and records everything the page throws. A site that ships the generated
+# BQCA deep link (bqca/index.html) gets the same instrumentation there and a
+# second browser pass below; fixtures without it keep the one-page check.
 SITE="$OUT_DIR/site"
 mkdir -p "$SITE"
 cp -R "$DOCS_DIR/." "$SITE/"
-python3 - "$SITE/index.html" <<'EOF'
+PAGES=("$SITE/index.html")
+BQCA_PAGE=""
+if [ -f "$DOCS_DIR/bqca/index.html" ]; then
+  BQCA_PAGE=1
+  PAGES+=("$SITE/bqca/index.html")
+fi
+python3 - "${PAGES[@]}" <<'EOF'
 import pathlib
 import sys
 
-path = pathlib.Path(sys.argv[1])
-source = path.read_text()
 instrument = """<script>
 window.__smokeErrors = [];
 (function () {
@@ -575,6 +618,22 @@ window.__smokeErrors = [];
       "data-copy-disabled",
       copy ? String(copy.disabled) : "MISSING"
     );
+    // Surface snapshot: the profile app.mjs applied, the placeholder it
+    // wrote, and how many profile-only elements disagree with it.
+    var active = document.documentElement.getAttribute("data-bqaa-profile");
+    var scoped = document.querySelectorAll("[data-profile-only]");
+    var mismatches = 0;
+    for (var i = 0; i < scoped.length; i += 1) {
+      if (scoped[i].hidden !== (scoped[i].getAttribute("data-profile-only") !== active)) {
+        mismatches += 1;
+      }
+    }
+    marker.setAttribute("data-profile", String(active));
+    marker.setAttribute(
+      "data-placeholder",
+      table ? String(table.getAttribute("placeholder")) : "MISSING"
+    );
+    marker.setAttribute("data-profile-mismatches", String(mismatches));
   };
   var record = function (message) {
     window.__smokeErrors.push(String(message));
@@ -606,8 +665,11 @@ window.__smokeErrors = [];
 })();
 </script>"""
 marker = "<body>"
-assert marker in source, "index.html has no <body> tag to instrument"
-path.write_text(source.replace(marker, marker + instrument, 1))
+for name in sys.argv[1:]:
+  path = pathlib.Path(name)
+  source = path.read_text()
+  assert marker in source, f"{name} has no <body> tag to instrument"
+  path.write_text(source.replace(marker, marker + instrument, 1))
 EOF
 
 # The server must provably be OURS: readiness is a nonce round-trip, not a
@@ -697,91 +759,139 @@ done
 # after a healthy-looking DOM was written. The only exempt exit is the
 # deliberate timeout kill below — and only when this script's own kill
 # succeeded, so a racing natural exit still surfaces its real status.
-"$CHROME_BIN" --headless=new --disable-gpu --no-first-run --no-sandbox \
-  --user-data-dir="$OUT_DIR/profile" --enable-logging=stderr \
-  --virtual-time-budget=5000 --dump-dom "http://127.0.0.1:$PORT/index.html" \
-  > "$OUT_DIR/dom.html" 2> "$OUT_DIR/console.log" &
-CHROME_PID=$!
+#
+# dump_dom URL DOM_OUT CONSOLE_OUT USER_DATA_DIR LABEL
+dump_dom() {
+  "$CHROME_BIN" --headless=new --disable-gpu --no-first-run --no-sandbox \
+    --user-data-dir="$4" --enable-logging=stderr \
+    --virtual-time-budget=5000 --dump-dom "$1" \
+    > "$2" 2> "$3" &
+  CHROME_PID=$!
 
-for _ in $(seq 1 45); do
-  if ! kill -0 "$CHROME_PID" 2>/dev/null; then
-    break
+  for _ in $(seq 1 45); do
+    if ! kill -0 "$CHROME_PID" 2>/dev/null; then
+      break
+    fi
+    if [ -s "$2" ]; then
+      break
+    fi
+    sleep 1
+  done
+  # Grace window: let a browser that already produced output finish and
+  # report its real status instead of assuming success.
+  for _ in $(seq 1 10); do
+    if ! kill -0 "$CHROME_PID" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  TIMED_OUT_KILL=""
+  if kill -0 "$CHROME_PID" 2>/dev/null; then
+    if kill "$CHROME_PID" 2>/dev/null; then
+      TIMED_OUT_KILL=1
+    fi
   fi
-  if [ -s "$OUT_DIR/dom.html" ]; then
-    break
+  wait "$CHROME_PID" && CHROME_STATUS=0 || CHROME_STATUS=$?
+  CHROME_PID=""
+  if [ -z "$TIMED_OUT_KILL" ] && [ "$CHROME_STATUS" -ne 0 ]; then
+    fail "${5:-}browser exited with status $CHROME_STATUS"
   fi
-  sleep 1
-done
-# Grace window: let a browser that already produced output finish and
-# report its real status instead of assuming success.
-for _ in $(seq 1 10); do
-  if ! kill -0 "$CHROME_PID" 2>/dev/null; then
-    break
-  fi
-  sleep 1
-done
-TIMED_OUT_KILL=""
-if kill -0 "$CHROME_PID" 2>/dev/null; then
-  if kill "$CHROME_PID" 2>/dev/null; then
-    TIMED_OUT_KILL=1
-  fi
-fi
-wait "$CHROME_PID" && CHROME_STATUS=0 || CHROME_STATUS=$?
-CHROME_PID=""
-if [ -z "$TIMED_OUT_KILL" ] && [ "$CHROME_STATUS" -ne 0 ]; then
-  fail "browser exited with status $CHROME_STATUS"
-fi
+}
 
-# Extract THE instrumentation marker first and scope every marker-borne
-# assertion to that one tag: an unrelated element carrying data-errors="0"
-# must never mask a nonzero count on the real marker (#449 review).
-FLAT_DOM="$(tr '\n' ' ' < "$OUT_DIR/dom.html")"
-MARKER_TAG="$(printf '%s' "$FLAT_DOM" | grep -o '<div[^>]*id="smoke-result"[^>]*>' | head -1)"
-[ -n "$MARKER_TAG" ] \
-  || fail "instrumentation marker missing — the page never finished loading"
-case "$MARKER_TAG" in
-  *'data-errors="0"'*) : ;;
-  *)
-    DETAIL="$(printf '%s' "$MARKER_TAG" | grep -o 'data-detail="[^"]*"' | head -1)"
-    fail "page-level errors recorded: ${DETAIL:-unknown}"
-    ;;
-esac
-# The app-initialized marker is written only at runtime by the module, so
-# its presence in the live DOM — and its absence from the static source —
-# proves app.mjs executed (#448; replaces the pre-#448 initial-error proof).
-# Match the marker only as a static tag attribute: a fixture's inline
-# script may name it in setAttribute() without shipping it statically.
-if grep -Eq '<[A-Za-z!][^>]*data-bqaa-app-initialized' "$DOCS_DIR/index.html"; then
-  fail "the app-initialized marker must not appear in static HTML"
-fi
-grep -q 'data-bqaa-app-initialized="true"' "$OUT_DIR/dom.html" \
-  || fail "app-initialized marker missing — app.mjs did not execute in the browser"
-# With no query parameters the first load is the pristine state (#448):
-# assert the exact LIVE states via the instrumentation snapshot — Chrome's
-# dump-dom does not reflect the value property into a value attribute, so
-# serialized-markup checks cannot prove the field is empty (#449 review).
-case "$MARKER_TAG" in
-  *'data-table-value=""'*) : ;;
-  *) fail "pristine table-id field must have an empty live value" ;;
-esac
-case "$MARKER_TAG" in
-  *'data-create-aria-disabled="true"'*) : ;;
-  *) fail "pristine create link must be aria-disabled" ;;
-esac
-case "$MARKER_TAG" in
-  *'data-create-has-href="false"'*) : ;;
-  *) fail "pristine create link must carry no URL" ;;
-esac
-case "$MARKER_TAG" in
-  *'data-copy-disabled="true"'*) : ;;
-  *) fail "pristine copy button must be disabled (live property)" ;;
-esac
-if printf '%s' "$FLAT_DOM" | grep -q 'aria-invalid='; then
-  fail "pristine first load must not mark any field invalid"
-fi
-# Belt and braces: anything Chrome itself logs as an error still fails.
-if grep -Eiq 'CONSOLE.*\b(error|blocked|failed|uncaught)\b' "$OUT_DIR/console.log"; then
-  fail "browser stderr reported console errors"
-fi
+# assert_live_page DOM CONSOLE STATIC_HTML LABEL [PROFILE DEFAULT_TABLE]
+# The healthy baseline every served page must meet; PROFILE additionally
+# requires app.mjs to have applied that surface.
+assert_live_page() {
+  local dom="$1" console_log="$2" static_html="$3" label="$4"
+  local profile="${5:-}" default_table="${6:-}"
+  local flat_dom marker_tag detail
+  # Extract THE instrumentation marker first and scope every marker-borne
+  # assertion to that one tag: an unrelated element carrying data-errors="0"
+  # must never mask a nonzero count on the real marker (#449 review).
+  flat_dom="$(tr '\n' ' ' < "$dom")"
+  marker_tag="$(printf '%s' "$flat_dom" | grep -o '<div[^>]*id="smoke-result"[^>]*>' | head -1 || true)"
+  [ -n "$marker_tag" ] \
+    || fail "${label}instrumentation marker missing — the page never finished loading"
+  case "$marker_tag" in
+    *'data-errors="0"'*) : ;;
+    *)
+      detail="$(printf '%s' "$marker_tag" | grep -o 'data-detail="[^"]*"' | head -1 || true)"
+      fail "${label}page-level errors recorded: ${detail:-unknown}"
+      ;;
+  esac
+  # The app-initialized marker is written only at runtime by the module, so
+  # its presence in the live DOM — and its absence from the static source —
+  # proves app.mjs executed (#448; replaces the pre-#448 initial-error proof).
+  # Match the marker only as a static tag attribute: a fixture's inline
+  # script may name it in setAttribute() without shipping it statically.
+  if grep -Eq '<[A-Za-z!][^>]*data-bqaa-app-initialized' "$static_html"; then
+    fail "${label}the app-initialized marker must not appear in static HTML"
+  fi
+  grep -q 'data-bqaa-app-initialized="true"' "$dom" \
+    || fail "${label}app-initialized marker missing — app.mjs did not execute in the browser"
+  # With no query parameters the first load is the pristine state (#448):
+  # assert the exact LIVE states via the instrumentation snapshot — Chrome's
+  # dump-dom does not reflect the value property into a value attribute, so
+  # serialized-markup checks cannot prove the field is empty (#449 review).
+  case "$marker_tag" in
+    *'data-table-value=""'*) : ;;
+    *) fail "${label}pristine table-id field must have an empty live value" ;;
+  esac
+  case "$marker_tag" in
+    *'data-create-aria-disabled="true"'*) : ;;
+    *) fail "${label}pristine create link must be aria-disabled" ;;
+  esac
+  case "$marker_tag" in
+    *'data-create-has-href="false"'*) : ;;
+    *) fail "${label}pristine create link must carry no URL" ;;
+  esac
+  case "$marker_tag" in
+    *'data-copy-disabled="true"'*) : ;;
+    *) fail "${label}pristine copy button must be disabled (live property)" ;;
+  esac
+  if printf '%s' "$flat_dom" | grep -q 'aria-invalid='; then
+    fail "${label}pristine first load must not mark any field invalid"
+  fi
+  if [ -n "$profile" ]; then
+    case "$marker_tag" in
+      *"data-profile=\"$profile\""*) : ;;
+      *) fail "${label}app.mjs must apply the $profile surface" ;;
+    esac
+    case "$marker_tag" in
+      *"data-placeholder=\"my-project.my_dataset.$default_table\""*) : ;;
+      *) fail "${label}the table-id placeholder must name $default_table" ;;
+    esac
+    case "$marker_tag" in
+      *'data-profile-mismatches="0"'*) : ;;
+      *) fail "${label}only the $profile surface copy may be visible" ;;
+    esac
+  fi
+  # Belt and braces: anything Chrome itself logs as an error still fails.
+  if grep -Eiq 'CONSOLE.*\b(error|blocked|failed|uncaught)\b' "$console_log"; then
+    fail "${label}browser stderr reported console errors"
+  fi
+}
 
-echo "browser smoke OK: module initialized, zero page-level errors, pristine first load"
+dump_dom "http://127.0.0.1:$PORT/index.html" \
+  "$OUT_DIR/dom.html" "$OUT_DIR/console.log" "$OUT_DIR/profile" ""
+if [ -z "$BQCA_PAGE" ]; then
+  assert_live_page "$OUT_DIR/dom.html" "$OUT_DIR/console.log" \
+    "$DOCS_DIR/index.html" ""
+  echo "browser smoke OK: module initialized, zero page-level errors, pristine first load"
+  exit 0
+fi
+assert_live_page "$OUT_DIR/dom.html" "$OUT_DIR/console.log" \
+  "$DOCS_DIR/index.html" "" adk agent_events
+
+# The BQCA deep link is served from a subdirectory, so it alone proves its
+# ../ module and stylesheet paths resolve in a real browser, and that its
+# declared default surface is the one app.mjs applies. Loaded by directory
+# URL, exactly as GitHub Pages serves it.
+dump_dom "http://127.0.0.1:$PORT/bqca/" \
+  "$OUT_DIR/dom-bqca.html" "$OUT_DIR/console-bqca.log" \
+  "$OUT_DIR/profile-bqca" "bqca/index.html: "
+assert_live_page "$OUT_DIR/dom-bqca.html" "$OUT_DIR/console-bqca.log" \
+  "$DOCS_DIR/bqca/index.html" "bqca/index.html: " \
+  bqca bqca_prompt_response_logs
+
+echo "browser smoke OK: module initialized, zero page-level errors, pristine first load (index.html: adk surface; bqca/: bqca surface)"

@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import {
+  ConfigurationError,
+  DEFAULT_PROFILE,
+  PROFILES,
   buildDashboardUrl,
   buildSetupUrl,
   parseBigQueryConsoleTableUrl,
   parseQualifiedTableIdForInput,
   parseTableReference,
   parseTableReferenceForInput,
+  resolveProfileConfig,
   splitQualifiedTableId,
   validateConfiguration,
   validateQualifiedTableId,
@@ -1316,6 +1320,661 @@ assert.equal(
 assertActionsDisabled("invalid billing prefill");
 assertFieldClean("table field during invalid billing prefill");
 
+// BQCA Prompt & Response Logging profile (Slice 1). The configurator can
+// target BQCA tables through a second profile that reuses the published
+// template; every ADK output must stay byte-identical.
+assert.deepEqual([...PROFILES], ["adk", "bqca"]);
+assert.ok(Object.isFrozen(PROFILES), "the profile list is immutable");
+assert.equal(DEFAULT_PROFILE, "adk");
+assert.ok(Object.isFrozen(REPORT_CONFIG), "REPORT_CONFIG stays one frozen object");
+
+const adkProfile = resolveProfileConfig();
+assert.equal(adkProfile, REPORT_CONFIG.profiles.adk);
+assert.equal(resolveProfileConfig("adk"), adkProfile);
+assert.equal(resolveProfileConfig(""), adkProfile, "a blank profile is ADK");
+assert.equal(adkProfile.id, "adk");
+assert.equal(adkProfile.label, "ADK Agents");
+assert.equal(adkProfile.reportId, REPORT_CONFIG.reportId);
+assert.equal(adkProfile.dataSourceAlias, REPORT_CONFIG.dataSourceAlias);
+assert.deepEqual(adkProfile.sentinels, REPORT_CONFIG.sentinels);
+assert.equal(adkProfile.defaultTable, REPORT_CONFIG.defaultTable);
+assert.equal(adkProfile.defaultTable, "agent_events");
+assert.equal(adkProfile.reportName, "BigQuery Agent Analytics");
+assert.equal(adkProfile.datasourceName, "BQAA");
+
+const bqcaProfile = resolveProfileConfig("bqca");
+assert.equal(bqcaProfile, REPORT_CONFIG.profiles.bqca);
+assert.equal(bqcaProfile.id, "bqca");
+assert.equal(bqcaProfile.label, "BQCA Prompt & Response Logging");
+assert.equal(bqcaProfile.reportId, "1ffb0888-20ea-451f-aeb8-69fc37973335");
+assert.equal(bqcaProfile.dataSourceAlias, "ds0");
+assert.deepEqual(
+  bqcaProfile.sentinels,
+  {
+    project: "test-project-0728-467323",
+    dataset: "bqaa_fixture_adk_1_27_0",
+    table: "sentinelbqaaevents",
+  },
+  "the BQCA template's sentinels match the rendered bqca_events_v1.template.sql",
+);
+assert.equal(bqcaProfile.defaultTable, "bqca_prompt_response_logs");
+assert.equal(bqcaProfile.reportName, "BigQuery Conversational Analytics (BQCA)");
+assert.equal(bqcaProfile.datasourceName, "BQCA");
+
+for (const unknown of ["langchain", "BQCA", "adk "]) {
+  assert.throws(
+    () => resolveProfileConfig(unknown),
+    (error) =>
+      error instanceof ConfigurationError &&
+      error.field === "profile" &&
+      error.message.includes(unknown),
+    `${JSON.stringify(unknown)} is not a builder profile id`,
+  );
+  assert.throws(
+    () => buildDashboardUrl({ ...values, profile: unknown }),
+    (error) => error.field === "profile",
+  );
+}
+
+// A pre-profile REPORT_CONFIG (top-level ADK bindings only) still resolves
+// ADK — producing the identical URL — and cannot silently serve BQCA.
+const legacyConfig = Object.freeze({
+  reportId: REPORT_CONFIG.reportId,
+  dataSourceAlias: REPORT_CONFIG.dataSourceAlias,
+  sentinels: REPORT_CONFIG.sentinels,
+  defaultTable: REPORT_CONFIG.defaultTable,
+});
+assert.deepEqual(
+  { ...resolveProfileConfig("adk", legacyConfig) },
+  { ...adkProfile },
+  "the legacy fallback reproduces the generated ADK profile",
+);
+assert.equal(
+  buildDashboardUrl(values, legacyConfig),
+  buildDashboardUrl(values),
+  "a pre-profile config still yields the same ADK URL",
+);
+assert.throws(
+  () => resolveProfileConfig("bqca", legacyConfig),
+  /no “bqca” profile/,
+);
+
+// ADK: an explicit profile is byte-identical to no profile, and both equal
+// the URL the pre-profile configurator produced.
+const adkGoldenUrl =
+  "https://lookerstudio.google.com/reporting/create?" +
+  "c.reportId=5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40&c.mode=view" +
+  "&r.reportName=BigQuery+Agent+Analytics+%E2%80%94+agent_analytics.agent_events" +
+  "&ds.ds230.datasourceName=BQAA+%E2%80%94+customer-project-123.agent_analytics.agent_events" +
+  "&ds.ds230.billingProjectId=customer-project-123" +
+  "&ds.ds230.sqlReplace=test-project-0728-467323%2Ccustomer-project-123" +
+  "%2Cbqaa_fixture_adk_1_27_0%2Cagent_analytics%2Csentinelbqaaevents%2Cagent_events" +
+  "&ds.ds230.refreshFields=false";
+assert.equal(buildDashboardUrl(values), adkGoldenUrl);
+assert.equal(buildDashboardUrl({ ...values, profile: "adk" }), adkGoldenUrl);
+assert.deepEqual(
+  validateConfiguration({ ...values, profile: "bqca" }),
+  values,
+  "validated values never carry the profile",
+);
+
+const bqcaDashboard = new URL(buildDashboardUrl({ ...values, profile: "bqca" }));
+assert.equal(bqcaDashboard.origin, "https://lookerstudio.google.com");
+assert.equal(bqcaDashboard.pathname, "/reporting/create");
+assert.equal(
+  bqcaDashboard.searchParams.get("c.reportId"),
+  "1ffb0888-20ea-451f-aeb8-69fc37973335",
+);
+assert.equal(bqcaDashboard.searchParams.get("c.mode"), "view");
+assert.equal(
+  bqcaDashboard.searchParams.get("r.reportName"),
+  "BigQuery Conversational Analytics (BQCA) — agent_analytics.agent_events",
+);
+assert.equal(
+  bqcaDashboard.searchParams.get("ds.ds0.datasourceName"),
+  "BQCA — customer-project-123.agent_analytics.agent_events",
+);
+assert.equal(
+  bqcaDashboard.searchParams.get("ds.ds0.sqlReplace"),
+  dashboard.searchParams.get("ds.ds230.sqlReplace"),
+  "BQCA rebinds the same three sentinels to the customer's table",
+);
+assert.equal(
+  bqcaDashboard.searchParams.get("ds.ds0.billingProjectId"),
+  "customer-project-123",
+);
+assert.equal(bqcaDashboard.searchParams.get("ds.ds0.refreshFields"), "false");
+assert.deepEqual(
+  [...bqcaDashboard.searchParams.keys()],
+  [...dashboard.searchParams.keys()].map((key) =>
+    key.replace("ds.ds230.", "ds.ds0."),
+  ),
+  "BQCA uses the Linking API parameter set with its ds0 alias",
+);
+assert.equal(
+  new URL(
+    buildDashboardUrl({ ...advanced, profile: "bqca" }),
+  ).searchParams.get("ds.ds0.billingProjectId"),
+  "billing-project-123",
+);
+assert.throws(
+  () => buildDashboardUrl({ ...values, profile: "bqca", project: "xsentinelbqaaevents" }),
+  (error) => error.field === "tableId" && error.segment === "project",
+  "BQCA keeps the sentinel-collision guard",
+);
+assert.throws(
+  () => validateQualifiedTableId("xsentinelbqaaevents.my_dataset.my_table", bqcaProfile),
+  (error) => error.segment === "project",
+);
+assert.throws(
+  () => validateQualifiedTableId("", bqcaProfile),
+  (error) =>
+    error.field === "tableId" &&
+    error.segment === null &&
+    /BQCA logging table ID/.test(error.message),
+  "BQCA empty tableId error names BQCA logging table ID",
+);
+assert.throws(
+  () => validateQualifiedTableId("", adkProfile),
+  (error) =>
+    error.field === "tableId" &&
+    error.segment === null &&
+    /BQAA table ID/.test(error.message),
+  "ADK empty tableId error names BQAA table ID",
+);
+assert.deepEqual(
+  validateQualifiedTableId("my-project.my_dataset.my_table", bqcaProfile),
+  qualifiedTableId,
+);
+
+// Setup links: BQCA always names its profile; ADK keeps the
+// three-parameter format unless copied from a page that defaults to BQCA.
+assert.deepEqual(
+  Object.fromEntries(
+    new URL(
+      buildSetupUrl(
+        { ...values, profile: "bqca" },
+        "https://example.test/configure?stale=yes#old",
+      ),
+    ).searchParams,
+  ),
+  {
+    project: values.project,
+    dataset: values.dataset,
+    table: values.table,
+    profile: "bqca",
+  },
+);
+assert.equal(
+  new URL(
+    buildSetupUrl(
+      { ...values, profile: "bqca" },
+      "https://example.test/bqca/",
+      { pageDefaultProfile: "bqca" },
+    ),
+  ).searchParams.get("profile"),
+  "bqca",
+  "a BQCA link copied from /bqca/ stays BQCA when opened on the main page",
+);
+assert.equal(
+  new URL(
+    buildSetupUrl(
+      { ...values, profile: "adk" },
+      "https://example.test/bqca/",
+      { pageDefaultProfile: "bqca" },
+    ),
+  ).searchParams.get("profile"),
+  "adk",
+  "an ADK link copied from /bqca/ cannot reopen as BQCA",
+);
+assert.equal(
+  buildSetupUrl({ ...values, profile: "adk" }, "https://example.test/configure"),
+  buildSetupUrl(values, "https://example.test/configure"),
+  "an ADK link from the main page keeps the three-parameter format",
+);
+assert.equal(
+  new URL(
+    buildSetupUrl(
+      { ...advanced, profile: "bqca" },
+      "https://example.test/configure",
+    ),
+  ).search,
+  "?project=customer-project-123&dataset=agent_analytics&table=agent_events" +
+    "&billingProject=billing-project-123&profile=bqca",
+);
+
+// The generated /bqca/ page is index.html with the BQCA surface preselected:
+// same ids, assets one level up, the BQCA copy visible, no runtime marker.
+const bqcaPageSource = readFileSync(
+  new URL("../docs/bqca/index.html", import.meta.url),
+  "utf8",
+);
+assert.match(
+  bqcaPageSource,
+  /^<!doctype html>\n<!-- Generated by tools\/render_web_config\.py from docs\/index\.html; do not edit\. -->\n/,
+);
+assert.match(bqcaPageSource, /<html lang="en" data-bqca-default-profile="bqca">/);
+assert.doesNotMatch(pageSource, /data-bqca-default-profile/);
+assert.match(bqcaPageSource, /<script type="module" src="\.\.\/app\.mjs"><\/script>/);
+assert.match(bqcaPageSource, /<link rel="stylesheet" href="\.\.\/styles\.css">/);
+assert.doesNotMatch(bqcaPageSource, /src="\.\/app\.mjs"|href="\.\/styles\.css"/);
+for (const source of [pageSource, bqcaPageSource]) {
+  assert.doesNotMatch(
+    source,
+    /data-bqaa-app-initialized/,
+    "the runtime marker must never be committed to static HTML",
+  );
+}
+assert.match(pageSource, /id="profile-adk" aria-pressed="true"/);
+assert.match(pageSource, /id="profile-bqca" aria-pressed="false"/);
+assert.match(bqcaPageSource, /id="profile-adk" aria-pressed="false"/);
+assert.match(bqcaPageSource, /id="profile-bqca" aria-pressed="true"/);
+assert.match(pageSource, /placeholder="my-project\.my_dataset\.agent_events"/);
+assert.match(
+  bqcaPageSource,
+  /placeholder="my-project\.my_dataset\.bqca_prompt_response_logs"/,
+);
+assert.doesNotMatch(bqcaPageSource, /placeholder="my-project\.my_dataset\.agent_events"/);
+assert.match(pageSource, /role="group" aria-label="Dashboard surface"/);
+const idsOf = (source) =>
+  [...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]).sort();
+assert.deepEqual(idsOf(bqcaPageSource), idsOf(pageSource));
+const profileOnlyMarkers = (source, profile) =>
+  [...source.matchAll(new RegExp(`data-profile-only="${profile}"( hidden)?>`, "g"))]
+    .map((match) => Boolean(match[1]));
+for (const [source, visible] of [
+  [pageSource, "adk"],
+  [bqcaPageSource, "bqca"],
+]) {
+  for (const profile of PROFILES) {
+    const markers = profileOnlyMarkers(source, profile);
+    assert.ok(markers.length > 0, `${profile} copy exists on the ${visible} page`);
+    assert.ok(
+      markers.every((hidden) => hidden === (profile !== visible)),
+      `only the ${visible} copy is visible before app.mjs runs`,
+    );
+  }
+}
+assert.equal(
+  (pageSource.match(/data-profile-only="/g) ?? []).length,
+  (bqcaPageSource.match(/data-profile-only="/g) ?? []).length,
+);
+assert.match(
+  pageSource,
+  /id="bqca-template-note"[^>]*data-profile-only="bqca" hidden>/s,
+  "the BQCA template note ships with the BQCA surface",
+);
+assert.match(
+  pageSource,
+  /dashboard\/looker_studio\/sql\/bqca_events_v1\.sql\.tmpl/,
+  "the BQCA note links the BQCA custom query",
+);
+assert.match(
+  bqcaPageSource,
+  /<aside[^>]*class="notice notice-warning"[^>]*id="bqca-template-note"[^>]*>.*Template not yet publicly shared for external accounts.*<details class="advanced-bqca-options">/s,
+  "the BQCA note prominently warns about pending external link sharing and collapses advanced CLI/Streamlit options",
+);
+const bqcaHeroLedeMatch = bqcaPageSource.match(
+  /<p class="lede" data-profile-only="bqca">([\s\S]*?)<\/p>/,
+);
+assert.ok(bqcaHeroLedeMatch, "the BQCA hero lede paragraph exists");
+assert.doesNotMatch(
+  bqcaHeroLedeMatch[1],
+  /--custom-sql-out|sql\/bqca_events_v1\.sql\.tmpl|dashboards\/streamlit/,
+  "the BQCA hero lede keeps CLI flags and repo file paths out of the primary copy",
+);
+assert.match(
+  bqcaPageSource,
+  /7-page tool-free BQCA Looker Studio dashboard/,
+  "the BQCA hero describes the dedicated 7-page tool-free BQCA Looker Studio dashboard",
+);
+assert.match(
+  bqcaPageSource,
+  /34 BQCA-native charts &amp; KPIs/,
+  "the BQCA hero fact pill lists 34 BQCA-native charts & KPIs",
+);
+assert.match(
+  bqcaPageSource,
+  /7 tool-free report pages/,
+  "the BQCA hero fact pill lists 7 tool-free report pages",
+);
+assert.match(
+  bqcaPageSource,
+  /Self-Hosted Streamlit BQCA Dashboard/,
+  "the BQCA hero links the Self-Hosted Streamlit BQCA Dashboard",
+);
+assert.match(
+  bqcaPageSource,
+  /Create my BQCA dashboard/,
+  "the BQCA CTA button names the BQCA dashboard",
+);
+assert.match(
+  bqcaPageSource,
+  /id="report-not-shared"[\s\S]*?<span data-profile-only="bqca">[\s\S]*?pull\/515"[\s\S]*?Self-Hosted Streamlit BQCA Dashboard/,
+  "the BQCA #report-not-shared explainer links PR #515 and the Self-Hosted Streamlit BQCA Dashboard",
+);
+assert.match(
+  bqcaPageSource,
+  /No generated views required\.[\s\S]*?<span data-profile-only="bqca">BQCA logging table<\/span>/,
+  "the BQCA No-generated-views notice names the BQCA logging table",
+);
+assert.match(bqcaPageSource, /https:\/\/googlecloudplatform\.github\.io\/BigQuery-Agent-Analytics-SDK\/bqca\//);
+
+// #310: BQCA never logs tool or LLM-request events, so the page copy and
+// the browser modules must not name them.
+for (const [name, source] of [
+  ["docs/index.html", pageSource],
+  ["docs/bqca/index.html", bqcaPageSource],
+  ["docs/app.mjs", appSource],
+  [
+    "docs/configurator.mjs",
+    readFileSync(new URL("../docs/configurator.mjs", import.meta.url), "utf8"),
+  ],
+  [
+    "docs/report-config.mjs",
+    readFileSync(new URL("../docs/report-config.mjs", import.meta.url), "utf8"),
+  ],
+]) {
+  assert.doesNotMatch(
+    source,
+    /TOOL_STARTING|TOOL_COMPLETED|TOOL_ERROR|LLM_REQUEST/,
+    `${name} must not name event types BQCA never logs`,
+  );
+}
+
+// DOM: the surface toggle, ?profile= override, and page default. Each
+// re-import rebinds every listener to the fake elements below.
+const profileAdkButton = new FakeElement();
+const profileBqcaButton = new FakeElement();
+fakeElements.set("#profile-adk", profileAdkButton);
+fakeElements.set("#profile-bqca", profileBqcaButton);
+const profileOnlyElements = [
+  { dataset: { profileOnly: "adk" }, hidden: false },
+  { dataset: { profileOnly: "adk" }, hidden: false },
+  { dataset: { profileOnly: "bqca" }, hidden: true },
+];
+globalThis.document.querySelectorAll = (selector) =>
+  selector === "[data-profile-only]" ? profileOnlyElements : [];
+let replacedUrls = [];
+
+function resetPageState(search, href = "https://example.test/configure") {
+  window.location.search = search;
+  window.location.href = href;
+  field.value = "";
+  field.attributes.delete("aria-invalid");
+  fieldError.textContent = "";
+  billing.value = "";
+  billing.attributes.delete("aria-invalid");
+  billingErrorEl.textContent = "";
+  formStatus.textContent = "";
+  formStatus.dataset.kind = "";
+  copiedText = "";
+}
+
+function assertSurface(profile, context) {
+  assert.equal(
+    fakeDocumentElement.attributes.get("data-bqaa-profile"),
+    profile,
+    `${context}: <html> names the active surface`,
+  );
+  assert.equal(
+    profileAdkButton.attributes.get("aria-pressed"),
+    String(profile === "adk"),
+    `${context}: ADK toggle state`,
+  );
+  assert.equal(
+    profileBqcaButton.attributes.get("aria-pressed"),
+    String(profile === "bqca"),
+    `${context}: BQCA toggle state`,
+  );
+  assert.equal(
+    field.attributes.get("placeholder"),
+    `my-project.my_dataset.${resolveProfileConfig(profile).defaultTable}`,
+    `${context}: placeholder names the surface's default table`,
+  );
+  for (const element of profileOnlyElements) {
+    assert.equal(
+      element.hidden,
+      element.dataset.profileOnly !== profile,
+      `${context}: only ${profile} copy is visible`,
+    );
+  }
+}
+
+function assertPristine(context) {
+  assert.equal(field.value, "", `${context}: the field is empty`);
+  assertFieldClean(context);
+  assertActionsDisabled(context);
+  assert.equal(formStatus.textContent, "", `${context}: no status`);
+}
+
+// ?profile=bqca on the main page selects BQCA before anything renders.
+resetPageState("?profile=bqca", "https://example.test/configure?profile=bqca");
+fakeDocumentElement.attributes.delete("data-bqaa-app-initialized");
+await import("../docs/app.mjs?profile=bqca");
+assertSurface("bqca", "?profile=bqca");
+assertPristine("?profile=bqca");
+assert.equal(
+  fakeDocumentElement.attributes.get("data-bqaa-app-initialized"),
+  "true",
+  "the BQCA surface still writes the runtime marker",
+);
+
+typeIntoField("my-project.my_dataset.bqca_prompt_response_logs");
+assert.match(
+  formStatus.textContent,
+  /^Ready for my-project\.my_dataset\.bqca_prompt_response_logs\./,
+);
+assert.match(
+  formStatus.textContent,
+  /dedicated 7-page tool-free BQCA Looker Studio template \(public link sharing for external accounts is pending verification/,
+  "BQCA Ready status describes the dedicated 7-page tool-free BQCA template and pending public sharing notice",
+);
+assert.doesNotMatch(
+  formStatus.textContent,
+  /--custom-sql-out|sql\/bqca_events_v1\.sql\.tmpl|dashboards\/streamlit/,
+  "BQCA Ready status keeps raw CLI flags and repo paths out of the inline status line",
+);
+assert.equal(
+  createLink.href,
+  buildDashboardUrl({
+    project: "my-project",
+    dataset: "my_dataset",
+    table: "bqca_prompt_response_logs",
+    billingProject: "",
+    profile: "bqca",
+  }),
+  "the BQCA surface builds the BQCA Linking API URL",
+);
+assert.equal(
+  new URL(createLink.href).searchParams.get("r.reportName"),
+  "BigQuery Conversational Analytics (BQCA) — my_dataset.bqca_prompt_response_logs",
+);
+await copyButton.listeners.click();
+assert.equal(
+  new URL(copiedText).search,
+  "?project=my-project&dataset=my_dataset&table=bqca_prompt_response_logs&profile=bqca",
+  "a BQCA setup link names its profile",
+);
+
+// Switching keeps the typed ID, revalidates it, and retargets both actions;
+// a missing History API never blocks the switch.
+assert.equal(window.history, undefined);
+profileAdkButton.listeners.click();
+assertSurface("adk", "toggle to ADK");
+assert.equal(field.value, "my-project.my_dataset.bqca_prompt_response_logs");
+assert.equal(formStatus.dataset.kind, "ready");
+assert.equal(
+  formStatus.textContent,
+  "Ready for my-project.my_dataset.bqca_prompt_response_logs.",
+  "ADK Ready status stays byte-identical",
+);
+assert.equal(
+  createLink.href,
+  buildDashboardUrl({
+    project: "my-project",
+    dataset: "my_dataset",
+    table: "bqca_prompt_response_logs",
+    billingProject: "",
+  }),
+  "after the toggle the create link is the unchanged ADK URL",
+);
+copiedText = "";
+await copyButton.listeners.click();
+assert.equal(
+  new URL(copiedText).search,
+  "?project=my-project&dataset=my_dataset&table=bqca_prompt_response_logs",
+  "an ADK link from the main page keeps the three-parameter format",
+);
+
+window.history = {
+  state: null,
+  replaceState(state, title, url) {
+    replacedUrls.push(url);
+  },
+};
+profileBqcaButton.listeners.click();
+assertSurface("bqca", "toggle back to BQCA");
+assert.deepEqual(
+  replacedUrls,
+  ["https://example.test/configure?profile=bqca"],
+  "a non-default surface is mirrored into the address bar",
+);
+assert.equal(
+  new URL(createLink.href).searchParams.get("ds.ds0.datasourceName"),
+  "BQCA — my-project.my_dataset.bqca_prompt_response_logs",
+);
+const statusBeforeNoop = formStatus.textContent;
+profileBqcaButton.listeners.click();
+assert.equal(replacedUrls.length, 1, "re-selecting the active surface is a no-op");
+assert.equal(formStatus.textContent, statusBeforeNoop);
+profileAdkButton.listeners.click();
+assert.equal(
+  replacedUrls.at(-1),
+  "https://example.test/configure",
+  "returning to the page default drops ?profile=",
+);
+
+// The surface override is case-insensitive; an unknown value falls back to
+// the page default instead of failing the page.
+for (const [search, expected] of [
+  ["?profile=BQCA", "bqca"],
+  ["?profile=%20bqca%20", "bqca"],
+  ["?profile=langchain", "adk"],
+  ["?profile=", "adk"],
+]) {
+  resetPageState(search);
+  await import(`../docs/app.mjs?profile-override=${encodeURIComponent(search)}`);
+  assertSurface(expected, search);
+  assertPristine(search);
+}
+
+// A setup link with ?profile=bqca prefills and validates on the BQCA surface.
+resetPageState(
+  "?project=my-project&dataset=my_dataset&table=bqca_prompt_response_logs&profile=bqca",
+);
+await import("../docs/app.mjs?prefill=bqca");
+assertSurface("bqca", "BQCA setup-link prefill");
+assert.equal(field.value, "my-project.my_dataset.bqca_prompt_response_logs");
+assert.match(formStatus.textContent, /^Ready for /);
+assert.equal(
+  new URL(createLink.href).searchParams.get("r.reportName"),
+  "BigQuery Conversational Analytics (BQCA) — my_dataset.bqca_prompt_response_logs",
+);
+await copyButton.listeners.click();
+assert.equal(
+  new URL(copiedText).search,
+  "?project=my-project&dataset=my_dataset&table=bqca_prompt_response_logs&profile=bqca",
+  "the regenerated BQCA setup link is identical",
+);
+
+// The /bqca/ page declares its default on <html>: BQCA without ?profile=,
+// and a pristine toggle to ADK stays pristine but becomes shareable.
+fakeDocumentElement.dataset.bqcaDefaultProfile = "bqca";
+resetPageState("", "https://example.test/bqca/");
+replacedUrls = [];
+await import("../docs/app.mjs?page-default=attribute");
+assertSurface("bqca", "/bqca/ page default");
+assertPristine("/bqca/ page default");
+profileAdkButton.listeners.click();
+assertSurface("adk", "/bqca/ page toggled to ADK");
+assertPristine("/bqca/ page toggled to ADK");
+assert.deepEqual(replacedUrls, ["https://example.test/bqca/?profile=adk"]);
+typeIntoField("my-project.my_dataset.agent_events");
+await copyButton.listeners.click();
+assert.equal(
+  new URL(copiedText).searchParams.get("profile"),
+  "adk",
+  "an ADK link copied from /bqca/ names its profile",
+);
+resetPageState("?profile=adk", "https://example.test/bqca/?profile=adk");
+await import("../docs/app.mjs?page-default=attribute-override");
+assertSurface("adk", "/bqca/ page with ?profile=adk");
+delete fakeDocumentElement.dataset.bqcaDefaultProfile;
+
+// Without the attribute, the /bqca/ path is the fallback signal.
+for (const [pathname, expected] of [
+  ["/BigQuery-Agent-Analytics-SDK/bqca/", "bqca"],
+  ["/BigQuery-Agent-Analytics-SDK/bqca", "bqca"],
+  ["/BigQuery-Agent-Analytics-SDK/bqca/index.html", "bqca"],
+  ["/BigQuery-Agent-Analytics-SDK/", "adk"],
+  ["/BigQuery-Agent-Analytics-SDK/notbqca/", "adk"],
+  ["/BigQuery-Agent-Analytics-SDK/bqca-old/", "adk"],
+]) {
+  resetPageState("");
+  window.location.pathname = pathname;
+  await import(`../docs/app.mjs?page-default=${encodeURIComponent(pathname)}`);
+  assertSurface(expected, pathname);
+}
+delete window.location.pathname;
+delete window.history;
+resetPageState("");
+
+// N6 & P3-6: Verify in both index.html and bqca/index.html that
+// #bqca-template-note is placed inside <form id="configurator"> above
+// #create-dashboard, and that the BQCA-specific #report-not-shared copy does
+// not tell BQCA users to try a personal account, report account class, or read
+// raw CLI flags outside <details class="advanced-bqca-options">.
+for (const [relPath, html] of [
+  ["docs/index.html", pageSource],
+  ["docs/bqca/index.html", bqcaPageSource],
+]) {
+  const formBlock = html.split('id="configurator"', 2)[1].split("</form>", 1)[0];
+  const noteIdx = formBlock.indexOf('id="bqca-template-note"');
+  const ctaIdx = formBlock.indexOf('id="create-dashboard"');
+  assert.ok(
+    noteIdx !== -1 && ctaIdx !== -1 && noteIdx < ctaIdx,
+    `${relPath}: #bqca-template-note must precede #create-dashboard inside #configurator`,
+  );
+
+  const reportNotShared = html
+    .split('id="report-not-shared">', 2)[1]
+    .split("</aside>", 1)[0];
+  const bqcaSpanMatch = reportNotShared.match(
+    /<span data-profile-only="bqca"[^>]*>([\s\S]*?)<\/span>/,
+  );
+  assert.ok(
+    bqcaSpanMatch,
+    `${relPath}: #report-not-shared must include BQCA-scoped span`,
+  );
+  const bqcaCopy = bqcaSpanMatch[1];
+  assert.doesNotMatch(
+    bqcaCopy,
+    /try a personal account/i,
+    `${relPath}: BQCA #report-not-shared must not advise trying a personal account`,
+  );
+  assert.doesNotMatch(
+    bqcaCopy,
+    /personal or part of an organization/i,
+    `${relPath}: BQCA #report-not-shared must not ask for personal vs org account class`,
+  );
+  assert.doesNotMatch(
+    bqcaCopy,
+    /--custom-sql-out/,
+    `${relPath}: BQCA #report-not-shared must keep raw CLI flags inside the collapsed details block`,
+  );
+}
+
 console.log(
-  "web configurator OK: single-field states, error classes, and Linking API URL deterministic",
+  "web configurator OK: single-field states, error classes, Linking API URL deterministic, and ADK/BQCA profiles",
 );

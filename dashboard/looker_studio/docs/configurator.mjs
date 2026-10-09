@@ -49,6 +49,8 @@ export const BILLING_PROJECT_MESSAGE = VALIDATION_MESSAGES.billingProject;
 const TABLE_ID_MESSAGES = Object.freeze({
   empty:
     "Enter the fully qualified BQAA table ID as project.dataset.table.",
+  emptyBqca:
+    "Enter the fully qualified BQCA logging table ID as project.dataset.table.",
   unparseable:
     "Enter the fully qualified ID as project.dataset.table — exactly three dot-separated segments.",
   link:
@@ -71,6 +73,46 @@ export class ConfigurationError extends Error {
     this.field = field;
     this.segment = segment;
   }
+}
+
+// Dashboard surfaces the configurator can target. `adk` is the published
+// BQAA dashboard for ADK agents; `bqca` targets BigQuery Conversational
+// Analytics Prompt & Response Logging tables. Every builder defaults to
+// `adk`, so callers that never pass a profile keep their exact output.
+export const PROFILES = Object.freeze(["adk", "bqca"]);
+export const DEFAULT_PROFILE = "adk";
+
+// The pre-profile REPORT_CONFIG shape carried only the ADK bindings at the
+// top level; these names reproduce the URLs that shape always produced.
+const ADK_FALLBACK_NAMES = Object.freeze({
+  label: "ADK Agents",
+  reportName: "BigQuery Agent Analytics",
+  datasourceName: "BQAA",
+});
+
+export function resolveProfileConfig(
+  profile = DEFAULT_PROFILE,
+  config = REPORT_CONFIG,
+) {
+  const id = profile || DEFAULT_PROFILE;
+  if (!PROFILES.includes(id)) {
+    throw new ConfigurationError("profile", `Unknown dashboard profile “${id}”.`);
+  }
+  const resolved = config.profiles?.[id];
+  if (resolved) {
+    return resolved;
+  }
+  if (id !== DEFAULT_PROFILE) {
+    throw new Error(`The dashboard configuration has no “${id}” profile.`);
+  }
+  return Object.freeze({
+    id,
+    ...ADK_FALLBACK_NAMES,
+    reportId: config.reportId,
+    dataSourceAlias: config.dataSourceAlias,
+    sentinels: config.sentinels,
+    defaultTable: config.defaultTable,
+  });
 }
 
 function requireValue(field, value, pattern) {
@@ -105,7 +147,11 @@ function rejectSentinelCollisions(values, config) {
   }
 }
 
+// `input.profile` (default "adk") selects whose sentinels guard the values;
+// the returned shape never includes it, so validated values stay a pure
+// description of the table and billing project.
 export function validateConfiguration(input, config = REPORT_CONFIG) {
+  const profile = resolveProfileConfig(input.profile, config);
   const project = requireValue("project", input.project, PROJECT_RE);
   const values = {
     project,
@@ -117,27 +163,28 @@ export function validateConfiguration(input, config = REPORT_CONFIG) {
       PROJECT_RE,
     ),
   };
-  rejectSentinelCollisions(values, config);
+  rejectSentinelCollisions(values, profile);
   return Object.freeze(values);
 }
 
 export function buildDashboardUrl(input, config = REPORT_CONFIG) {
+  const profile = resolveProfileConfig(input.profile, config);
   const values = validateConfiguration(input, config);
-  const alias = config.dataSourceAlias;
+  const alias = profile.dataSourceAlias;
   const replacements = [
-    config.sentinels.project,
+    profile.sentinels.project,
     values.project,
-    config.sentinels.dataset,
+    profile.sentinels.dataset,
     values.dataset,
-    config.sentinels.table,
+    profile.sentinels.table,
     values.table,
   ];
   const params = new URLSearchParams({
-    "c.reportId": config.reportId,
+    "c.reportId": profile.reportId,
     "c.mode": "view",
-    "r.reportName": `BigQuery Agent Analytics — ${values.dataset}.${values.table}`,
+    "r.reportName": `${profile.reportName} — ${values.dataset}.${values.table}`,
     [`ds.${alias}.datasourceName`]:
-      `BQAA — ${values.project}.${values.dataset}.${values.table}`,
+      `${profile.datasourceName} — ${values.project}.${values.dataset}.${values.table}`,
     [`ds.${alias}.billingProjectId`]: values.billingProject,
     [`ds.${alias}.sqlReplace`]: replacements.join(","),
     [`ds.${alias}.refreshFields`]: "false",
@@ -145,7 +192,13 @@ export function buildDashboardUrl(input, config = REPORT_CONFIG) {
   return `https://lookerstudio.google.com/reporting/create?${params.toString()}`;
 }
 
-export function buildSetupUrl(input, pageUrl) {
+// A setup link names its profile whenever reopening it could otherwise land
+// on another surface: always for a non-ADK profile, and for ADK when the page
+// it is copied from defaults to another profile (the /bqca/ page). An ADK
+// link copied from the main page keeps the three-parameter format.
+export function buildSetupUrl(input, pageUrl, options = {}) {
+  const profile = resolveProfileConfig(input.profile).id;
+  const pageDefaultProfile = options.pageDefaultProfile || DEFAULT_PROFILE;
   const values = validateConfiguration(input);
   const url = new URL(pageUrl);
   const params = {
@@ -155,6 +208,9 @@ export function buildSetupUrl(input, pageUrl) {
   };
   if (values.billingProject !== values.project) {
     params.billingProject = values.billingProject;
+  }
+  if (profile !== DEFAULT_PROFILE || profile !== pageDefaultProfile) {
+    params.profile = profile;
   }
   url.search = new URLSearchParams(params).toString();
   url.hash = "";
@@ -287,7 +343,11 @@ export function parseTableReferenceForInput(value) {
 export function validateQualifiedTableId(value, config = REPORT_CONFIG) {
   const raw = String(value ?? "").trim();
   if (!raw) {
-    throw new ConfigurationError("tableId", TABLE_ID_MESSAGES.empty);
+    const emptyMessage =
+      config?.id === "bqca"
+        ? TABLE_ID_MESSAGES.emptyBqca
+        : TABLE_ID_MESSAGES.empty;
+    throw new ConfigurationError("tableId", emptyMessage);
   }
   // The URL branch uses the structural extractor, not the strict public
   // parser: a supported-host link that unambiguously names one table but

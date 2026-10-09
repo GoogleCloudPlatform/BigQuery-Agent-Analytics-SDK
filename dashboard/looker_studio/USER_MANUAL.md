@@ -6,6 +6,11 @@ and you want charts. You do not need to install anything, write SQL, or read
 the rest of this repository. If you want to change or validate the dashboard
 itself, see the [contributor README](README.md) instead.
 
+**Logging BigQuery Conversational Analytics data agents?** If your BQCA data
+agents write Prompt & Response Logging to BigQuery, the same configurator
+works on that table — see
+[BQCA Prompt & Response Logging](#bqca-prompt--response-logging).
+
 **What you get:** your own copy of an 8-page Looker Studio dashboard — token
 consumption, sessions, tool usage, LLM calls, user analytics, latency, tool
 errors, and a trace inspector — built on the `agent_events` table your agents
@@ -124,6 +129,73 @@ That's it — you now have your own dashboard.
 
 ---
 
+## BQCA Prompt & Response Logging
+
+If your BigQuery Conversational Analytics (BQCA) data agents log their turns
+with Prompt & Response Logging, create the dashboard over that logging table
+the same way:
+
+1. Open the configurator's BQCA page:
+   **<https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/bqca/>**
+   — or open the main configurator and choose **BQCA Prompt & Response
+   Logging** at the top of the page.
+2. Enter the fully qualified ID of your logging table, for example
+   `my-project.my_dataset.bqca_prompt_response_logs`.
+3. Continue with Step 2 and Step 3 above, including the Viewer's credentials
+   step.
+
+Your copy is named **BigQuery Conversational Analytics (BQCA) —
+dataset.table**. On the BQCA page, **Copy setup link** produces a link that
+ends in `&profile=bqca`, so teammates who open it land on the BQCA page too.
+
+**What you get on BQCA.** The 1-click button opens your logging table in the
+**dedicated 7-page tool-free BQCA Looker Studio template**
+(`1ffb0888-20ea-451f-aeb8-69fc37973335`, data source alias `ds0`) built over
+`sql/bqca_events_v1.template.sql`. Public external link sharing (`allUsers`
+`LINK_VIEWER`) on `1ffb0888-20ea-451f-aeb8-69fc37973335` is currently pending
+public-sharing allowlist approval
+([#515](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/515));
+external Google accounts that see `"This report isn't shared with you"` should
+run the
+[Self-Hosted Streamlit BQCA Dashboard](../../dashboards/streamlit/)
+(`dashboards/streamlit/`) or export the custom query with `--custom-sql-out`
+into their own Looker Studio report. Because BQCA logs no tool calls, all
+tool-usage pages, tool-latency charts, and tool-error panels are omitted:
+
+- **Token Consumption** — total, input, output, thoughts, and cached tokens
+  over time and by data agent;
+- **Data Agents & Turns** — active data agents (`data_agent_id`), total turns
+  (`invocation_id`), completed turns (`completed_turn_id`), and generated SQL
+  queries (`extracted_sql`), where turns are keyed by `invocation_id` (when an
+  event's `invocation_id` is blank, it inherits any non-blank `invocation_id` on
+  the same `trace_id` before falling back to `trace_id`, `session_id`, then
+  `timestamp`, so multiple blank-ID turns that also lack a `trace_id` in the
+  same `session_id` count as one session-level turn) because a session can span
+  multiple turns;
+- **LLM Interactions & Embedding Suggestions** — model calls, embedding
+  suggestions, hit counts, and suggested-column counts;
+- **User & Persona Analytics** — activity by resolved persona and data agent;
+- **Latency & Fast-Path ROI** — turn latency, LLM latency, TTFT, and Fast-Path
+  vs standard NL2SQL comparison;
+- **Errors (BQCA 3-Condition)** — error events and **Distinct Error
+  Signatures** across all three BQCA error signals (`status = 'ERROR'`,
+  non-empty `error_message`, or `*_ERROR` event type, synthesizing
+  `[EVENT_TYPE: status=STATUS]` when `error_message` is blank), broken down by
+  data agent and event type;
+- **Prompt, Response & SQL Inspector** — **Event-Level Prompt, Response &
+  Extracted SQL** table across `event_date`, `session_id`, `data_agent_id`,
+  `persona`, `event_type`, `fast_path_label`, `user_prompt_text`,
+  `extracted_sql`, `summary_text`, `error_message`, `total_latency_ms`, and
+  `total_tokens`.
+
+You can also run the
+[Self-Hosted Streamlit BQCA Dashboard](../../dashboards/streamlit/)
+(`dashboards/streamlit/`) or export `sql/bqca_events_v1.sql.tmpl`
+(`--custom-sql-out`) per the
+[contributor README](README.md#bqca-prompt--response-logging-profile).
+
+---
+
 ## Reading the dashboard
 
 ### The eight pages
@@ -224,6 +296,14 @@ python3 tools/hydrate_dashboard.py \
 
 It verifies the required columns and prints the same kind of creation URL the
 configurator produces.
+
+For a BQCA Prompt & Response Logging table, add `--profile bqca` (the table
+then defaults to `bqca_prompt_response_logs`). After the column check passes,
+the helper also prints a summary of your BQCA events from the last 30 days —
+counts per event type and how many carry a data-agent ID — and warns if
+there are none. That summary reads table data (capped at 10 GiB billed by
+default); add `--skip-data-profile` to skip it. It never stops the link from
+being printed.
 
 ---
 
