@@ -1854,7 +1854,7 @@ def validate_bqca(
   if ext_status not in {
       "PASSING",
       "FAILING",
-      "PENDING_PUBLIC_SHARING_ALLOWLIST",
+      "PENDING_EXTERNAL_IDENTITY_CHECK",
   }:
     errors.append(
         f"bqca external_access_verification.status {ext_status!r} invalid"

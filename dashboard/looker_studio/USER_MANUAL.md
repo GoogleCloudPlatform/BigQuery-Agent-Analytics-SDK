@@ -150,13 +150,13 @@ ends in `&profile=bqca`, so teammates who open it land on the BQCA page too.
 
 **What you get on BQCA.** The 1-click button opens your logging table in the
 **dedicated 7-page tool-free BQCA Looker Studio template**
-(`1ffb0888-20ea-451f-aeb8-69fc37973335`, data source alias `ds0`) built over
-`sql/bqca_events_v1.template.sql`. Public external link sharing (`allUsers`
-`LINK_VIEWER`) on `1ffb0888-20ea-451f-aeb8-69fc37973335` is currently pending
-public-sharing allowlist approval
-([#515](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/515));
-external Google accounts that see `"This report isn't shared with you"` should
-run the
+(`42e79a1f-a979-4de8-911f-80d5a99543d5`, data source alias `ds0`) built over
+`sql/bqca_events_v1.template.sql`. The report owner turned on public link
+sharing (anyone with the link) for this template on 2026-10-09, but the copy
+check from a signed-in outside Google account has not run yet
+([#515](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/515)),
+so external access is not yet verified. External Google accounts that see
+`"This report isn't shared with you"` should run the
 [Self-Hosted Streamlit BQCA Dashboard](../../dashboards/streamlit/)
 (`dashboards/streamlit/`) or export the custom query with `--custom-sql-out`
 into their own Looker Studio report. Because BQCA logs no tool calls, all

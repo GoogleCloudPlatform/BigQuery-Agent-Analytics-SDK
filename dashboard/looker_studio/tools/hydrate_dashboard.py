@@ -409,9 +409,10 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "NOTE: BQCA uses the dedicated 7-page tool-free BQCA template"
         f" (report {load_yaml(ROOT / PROFILES['bqca']['report'])['report_id']},"
-        " alias ds0) over sql/bqca_events_v1.template.sql; public external"
-        " link sharing (allUsers) is pending allowlist approval (#515) — use"
-        " --custom-sql-out or dashboards/streamlit/ for external accounts",
+        " alias ds0) over sql/bqca_events_v1.template.sql; the owner turned"
+        " on public link sharing, but the outside-account copy check is"
+        " pending (#515) — if the link says the report isn't shared with you,"
+        " use --custom-sql-out or dashboards/streamlit/",
         file=sys.stderr,
     )
   print(
