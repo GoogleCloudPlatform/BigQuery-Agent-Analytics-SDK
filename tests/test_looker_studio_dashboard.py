@@ -1719,8 +1719,8 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
       "publish_datasource": {
           "health": "HEALTHY",
           "versions": {
-              "hydrated_bqca_table": 1791503488088,
-              "canonical_sentinel_table": 1791503611559,
+              "hydrated_bqca_table": 1791564609624,
+              "canonical_sentinel_table": 1791564700330,
           },
       },
       "execute_query": {
@@ -2372,11 +2372,15 @@ def test_bqca_profile_is_documented_for_contributors_and_users():
       BQCA_REPORT_ID,
       "spec/bqca_product_contract.yaml",
       "spec/bqca_chart_manifest.yaml",
+      "Offline Looker Studio report layout & datasource specification bundle",
+      "PENDING_PUBLIC_SHARING_ALLOWLIST",
       "all tool-usage pages, tool-latency series, and tool-error charts are omitted",
-      "session counts are turn counts",
+      "turns are keyed by `invocation_id`",
       "total turns (`invocation_id`), completed turns (`completed_turn_id`)",
+      "Distinct Error Signatures",
   ):
     assert fragment in readme, f"README.md must document {fragment!r}"
+  assert "session counts are turn counts" not in readme
   for fragment in (
       "## BQCA Prompt & Response Logging",
       "BigQuery-Agent-Analytics-SDK/bqca/",
@@ -2385,9 +2389,12 @@ def test_bqca_profile_is_documented_for_contributors_and_users():
       "--skip-data-profile",
       "dedicated 7-page tool-free BQCA Looker Studio template",
       BQCA_REPORT_ID,
-      "session counts are turn counts",
+      "turns are keyed by `invocation_id`",
+      "Distinct Error Signatures",
+      "Event-Level Prompt, Response & Extracted SQL",
   ):
     assert fragment in manual, f"USER_MANUAL.md must document {fragment!r}"
+  assert "session counts are turn counts" not in manual
   for fragment in (
       "## Dedicated 7-page BQCA Prompt & Response Logging template",
       BQCA_REPORT_ID,
@@ -2405,8 +2412,8 @@ def test_bqca_profile_is_documented_for_contributors_and_users():
       assert event_type not in text, f"{relative} names {event_type}"
 
 
-def test_staleness_parser_rejects_malformed_or_nested_attestations():
-  """P2-5: stdlib attestation parser must reject missing keys and ignore nested child keys."""
+def test_staleness_parser_rejects_malformed_or_nested_attestations(capsys):
+  """P2-5 & N5 & M08: stdlib attestation parser rejects missing keys, missing files (rc=2), and unverified PASSING status."""
   spec = importlib.util.spec_from_file_location(
       "check_external_access_staleness",
       ROOT / "scripts" / "check_external_access_staleness.py",
@@ -2433,6 +2440,34 @@ def test_staleness_parser_rejects_malformed_or_nested_attestations():
       "tracking_issue": "GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#515",
   }
 
+  # M08: status: PASSING without link_access: PUBLIC and dated link_access_verified_date fails.
+  with pytest.raises(SystemExit, match="link_access: PUBLIC"):
+    module.read_attestation_fields(
+        "link_access: PENDING_PUBLIC_SHARING_ALLOWLIST\n"
+        "external_access_verification:\n"
+        "  controls:\n"
+        "    - method: external_identity_link_access_check\n"
+        "      link_access_verified_date: null\n"
+        '  next_due_date: "2026-11-08"\n'
+        "  status: PASSING\n"
+        "  tracking_issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#515\n"
+    )
+
+  # N5: missing --attestation-path returns exit code 2 with stderr message and no traceback.
+  rc = module.main(
+      ["--attestation-path", "/tmp/nonexistent_attestation_515.yaml"]
+  )
+  captured = capsys.readouterr()
+  assert rc == 2
+  assert "ERROR: attestation file not found:" in captured.err
+
+  # N5: workflow issue title and body cover both ADK (#445) and BQCA (#515).
+  wf_text = (
+      ROOT / ".github" / "workflows" / "external-access-staleness.yml"
+  ).read_text()
+  assert 'title="External access attestation overdue"' in wf_text
+  assert "bqca_report_template.yaml (#515)" in wf_text
+
   # Missing `external_access_verification:` section raises SystemExit.
   with pytest.raises(SystemExit, match="external_access_verification"):
     module.read_attestation_fields("report_id: 123\n")
@@ -2448,7 +2483,7 @@ def test_staleness_parser_rejects_malformed_or_nested_attestations():
 
 
 def test_bqca_events_sql_semantic_turn_and_error_edge_cases():
-  """P2-5: verify Looker Studio BQCA SQL turn-grain, deduplication, error, and final-SQL semantics."""
+  """P2-5 & N1/R3-1 & R3-N2 & N4: verify Looker Studio BQCA SQL turn-grain, deduplication, error, and final-SQL semantics."""
   logical = (DASHBOARD / "sql/bqca_events_v1.sql.tmpl").read_text()
   contract = yaml.safe_load(
       (DASHBOARD / "spec/bqca_product_contract.yaml").read_text()
@@ -2457,31 +2492,24 @@ def test_bqca_events_sql_semantic_turn_and_error_edge_cases():
       (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text()
   )
 
-  # (1) Multi-turn single-session_id turns: turn_id/turn_partition_key partition
-  # by invocation_id (falling back to timestamp string for blank invocation_id),
-  # and Page 2/4/5 turn KPIs & charts use COUNT_DISTINCT(invocation_id) /
-  # COUNT_DISTINCT(completed_turn_id).
+  # (1) Multi-turn single-session_id & blank/NULL invocation_id turns:
+  # turn_id falls back to trace_id -> session_id -> timestamp when invocation_id
+  # is blank while preserving NULL when invocation_id IS NULL, and
+  # turn_partition_key isolates NULL invocation_id rows via SHA256 digest.
   assert (
       "IF(\n"
       "      invocation_id IS NULL,\n"
       "      NULL,\n"
-      "      IFNULL(NULLIF(TRIM(invocation_id), ''), CAST(timestamp AS STRING))\n"
+      "      COALESCE(\n"
+      "        NULLIF(TRIM(invocation_id), ''),\n"
+      "        NULLIF(TRIM(trace_id), ''),\n"
+      "        NULLIF(TRIM(session_id), ''),\n"
+      "        CAST(timestamp AS STRING)\n"
+      "      )\n"
       "    ) AS turn_id"
   ) in logical
-  assert (
-      "IF(\n"
-      "      invocation_id IS NULL,\n"
-      "      CONCAT(\n"
-      "        '__null_inv_',\n"
-      "        CAST(timestamp AS STRING),\n"
-      "        '_',\n"
-      "        IFNULL(span_id, ''),\n"
-      "        '_',\n"
-      "        IFNULL(event_type, '')\n"
-      "      ),\n"
-      "      IFNULL(NULLIF(TRIM(invocation_id), ''), CAST(timestamp AS STRING))\n"
-      "    ) AS turn_partition_key"
-  ) in logical
+  assert "TO_HEX(\n          SHA256(" in logical
+  assert "'__null_invocation__:'" in logical
   assert (
       "IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id"
       in logical
@@ -2492,6 +2520,12 @@ def test_bqca_events_sql_semantic_turn_and_error_edge_cases():
   assert comp_by_id["kpi_total_sessions"]["aggregation"] == "COUNT_DISTINCT"
   assert comp_by_id["kpi_turn_completes"]["field"] == "completed_turn_id"
   assert comp_by_id["kpi_turn_completes"]["aggregation"] == "COUNT_DISTINCT"
+  assert (
+      comp_by_id["kpi_distinct_errors"]["label"] == "Distinct Error Signatures"
+  )
+  assert (
+      comp_by_id["kpi_distinct_errors"]["title"] == "Distinct Error Signatures"
+  )
   for turn_chart_id in (
       "chart_turns_by_agent",
       "chart_turns_by_persona",
@@ -2503,11 +2537,14 @@ def test_bqca_events_sql_semantic_turn_and_error_edge_cases():
     ), turn_chart_id
 
   # (2) Turn-grain fast_path and data_agent_id/conversation_id/persona propagation
-  # across all events in a turn so INVOCATION_COMPLETED and LLM_RESPONSE rows
-  # inherit turn-level metadata and fast_path.
+  # across all events in a non-null turn while short-circuiting turn_id IS NULL.
   assert (
-      "LOGICAL_OR(raw_fast_path) OVER (\n"
-      "      PARTITION BY turn_partition_key\n"
+      "IF(\n"
+      "      turn_id IS NULL,\n"
+      "      raw_fast_path,\n"
+      "      LOGICAL_OR(raw_fast_path) OVER (\n"
+      "        PARTITION BY turn_partition_key\n"
+      "      )\n"
       "    ) AS fast_path"
   ) in logical
   for attr_col in (
@@ -2518,9 +2555,9 @@ def test_bqca_events_sql_semantic_turn_and_error_edge_cases():
   ):
     assert (
         f"FIRST_VALUE({attr_col} IGNORE NULLS) OVER (\n"
-        "        PARTITION BY turn_partition_key" in logical
+        "          PARTITION BY turn_partition_key" in logical
         or f"FIRST_VALUE({attr_col} IGNORE NULLS) OVER (\n"
-        "      PARTITION BY turn_partition_key" in logical
+        "        PARTITION BY turn_partition_key" in logical
     ), attr_col
 
   # (3) 3-condition error_message synthesis: status='ERROR' with NULL error_message
@@ -2567,7 +2604,7 @@ def test_bqca_events_sql_semantic_turn_and_error_edge_cases():
 
 
 def test_bqca_json_template_bundle_and_compatibility_profile_parity():
-  """Verify the portable Looker Studio JSON template bundle and BQCA compatibility profile."""
+  """Verify the portable Looker Studio JSON template bundle, BQCA compatibility profile, and M03/M04/M07/M08/M12/N8 mutation guards."""
   validator = _load_dashboard_module("validate_contracts")
   adk_compat = json.loads(
       (DASHBOARD / "spec/compatibility_profile.json").read_text()
@@ -2584,6 +2621,10 @@ def test_bqca_json_template_bundle_and_compatibility_profile_parity():
   contract = yaml.safe_load(
       (DASHBOARD / "spec/bqca_product_contract.yaml").read_text()
   )
+  binding = yaml.safe_load(
+      (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+  )
+  sql_text = (DASHBOARD / "sql/bqca_events_v1.template.sql").read_text()
 
   # 1. Compatibility profile parity
   assert bqca_compat["source_object"] == BQCA_DEFAULT_TABLE
@@ -2618,7 +2659,7 @@ def test_bqca_json_template_bundle_and_compatibility_profile_parity():
       == "spec/bqca_compatibility_profile.json"
   )
 
-  # 3. Mutation detection on bundle and compatibility profile
+  # 3. Mutation detection on bundle (title, label/field/aggregation M12, and N8 grid_position)
   tampered_bundle = json.loads(json.dumps(bundle))
   tampered_bundle["pages"][0]["components"][0]["title"] = "Tampered Title"
   bundle_errors = validator.validate_bqca(bundle_override=tampered_bundle)
@@ -2626,6 +2667,58 @@ def test_bqca_json_template_bundle_and_compatibility_profile_parity():
   assert any(
       "template_bundle_sha256" in e for e in bundle_errors
   ), bundle_errors
+
+  # M12: mutating scorecard field/aggregation/label on bundle is caught even if sha is ignored
+  tampered_m12 = json.loads(json.dumps(bundle))
+  tampered_m12["pages"][0]["components"][0]["aggregation"] = "AVG"
+  m12_errors = validator.validate_bqca(bundle_override=tampered_m12)
+  assert any(
+      "kpi_total_tokens" in e and "'aggregation'" in e for e in m12_errors
+  ), m12_errors
+
+  # N8: overlapping grid_position cells or out-of-bounds columns are caught
+  tampered_grid = json.loads(json.dumps(bundle))
+  tampered_grid["pages"][0]["components"][1]["grid_position"] = dict(
+      tampered_grid["pages"][0]["components"][0]["grid_position"]
+  )
+  grid_errors = validator.validate_bqca(bundle_override=tampered_grid)
+  assert any(
+      "grid cell" in e and "overlap" in e for e in grid_errors
+  ), grid_errors
+
+  # M03, M04, M07: mutating SQL semantic expressions is caught by validate_bqca
+  for mut_label, old_frag, new_frag in (
+      (
+          "fast_path attribute extraction",
+          "LOWER(JSON_VALUE(attributes, '$.fast_path')) = 'true'",
+          "LOWER(JSON_VALUE(attributes, '$.wrong_fast_path')) = 'true'",
+      ),
+      (
+          "turn_latency_ms deduplication gate",
+          "IF(\n      raw_turn_complete_rn = 1,\n      SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64),\n      NULL\n    ) AS turn_latency_ms",
+          "SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS FLOAT64) AS turn_latency_ms",
+      ),
+      (
+          "data_agent_id turn-window propagation",
+          "FIRST_VALUE(raw_data_agent_id IGNORE NULLS) OVER (",
+          "LAST_VALUE(raw_data_agent_id IGNORE NULLS) OVER (",
+      ),
+  ):
+    mut_sql = sql_text.replace(old_frag, new_frag, 1)
+    assert mut_sql != sql_text, mut_label
+    sql_mut_errors = validator.validate_bqca(sql_override=mut_sql)
+    assert any(mut_label in e for e in sql_mut_errors), (
+        mut_label,
+        sql_mut_errors,
+    )
+
+  # M08: setting external_access_verification.status = "PASSING" while link_access != "PUBLIC" fails
+  tampered_binding = json.loads(json.dumps(binding))
+  tampered_binding["external_access_verification"]["status"] = "PASSING"
+  m08_errors = validator.validate_bqca(binding_override=tampered_binding)
+  assert any(
+      "external_access_verification.status is PASSING" in e for e in m08_errors
+  ), m08_errors
 
   tampered_compat = json.loads(json.dumps(bqca_compat))
   tampered_compat["allowed_event_types"].append("TOOL_COMPLETED")

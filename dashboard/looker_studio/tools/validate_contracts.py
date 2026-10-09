@@ -143,7 +143,7 @@ def _infer_sql_expr_data_type(expr: str, base_types: dict[str, str]) -> str:
     return "TIMESTAMP"
   if (
       cleaned == "raw_is_error"
-      or re.match(r"^LOGICAL_(?:OR|AND)\s*\(", cleaned, re.IGNORECASE)
+      or re.search(r"\bLOGICAL_(?:OR|AND)\s*\(", cleaned, re.IGNORECASE)
       or re.search(r"=\s*'true'\s*,\s*FALSE\s*\)$", cleaned, re.IGNORECASE)
       or re.search(r"=\s*1\s*,\s*FALSE\s*\)$", cleaned, re.IGNORECASE)
       or re.search(r">\s*0\s*,\s*FALSE\s*\)$", cleaned, re.IGNORECASE)
@@ -746,6 +746,7 @@ def validate_bqca(
     flat_from_pages.extend(page_m_comps)
     flat_from_bundle_pages.extend(page_b_comps)
 
+    occupied_cells: dict[tuple[int, int], str] = {}
     for m_comp, b_comp in zip(page_m_comps, page_b_comps):
       for shared_key in (
           "id",
@@ -756,7 +757,10 @@ def validate_bqca(
           "category",
           "component_type",
           "chart_type",
+          "label",
           "title",
+          "field",
+          "aggregation",
           "datasource_id",
           "data_source_alias",
           "dimensions",
@@ -770,12 +774,78 @@ def validate_bqca(
               f"bqca bundle component {m_comp.get('id')} key {shared_key!r}"
               " diverges from manifest"
           )
-      if not b_comp.get("responsive_section") or not isinstance(
-          b_comp.get("grid_position"), dict
-      ):
+      gp = b_comp.get("grid_position")
+      if not b_comp.get("responsive_section") or not isinstance(gp, dict):
         errors.append(
             f"bqca bundle component {m_comp.get('id')} missing"
             " responsive_section or grid_position"
+        )
+      else:
+        row = gp.get("row")
+        row_span = gp.get("row_span")
+        col = gp.get("column")
+        col_span = gp.get("column_span")
+        if (
+            not all(isinstance(v, int) for v in (row, row_span, col, col_span))
+            or row < 1
+            or row_span < 1
+            or col < 1
+            or col_span < 1
+            or col + col_span - 1 > 12
+        ):
+          errors.append(
+              f"bqca bundle component {b_comp.get('id')} invalid"
+              f" grid_position {gp}"
+          )
+        else:
+          for r_idx in range(row, row + row_span):
+            for c_idx in range(col, col + col_span):
+              cell = (r_idx, c_idx)
+              if cell in occupied_cells:
+                errors.append(
+                    f"bqca bundle page {b_page.get('id')} grid cell {cell}"
+                    f" overlap between {occupied_cells[cell]} and"
+                    f" {b_comp.get('id')}"
+                )
+              else:
+                occupied_cells[cell] = str(b_comp.get("id"))
+
+    if all(
+        isinstance(c.get("grid_position"), dict)
+        and isinstance(c.get("geometry"), dict)
+        and all(
+            k in c["grid_position"]
+            for k in ("row", "column", "row_span", "column_span")
+        )
+        and all(k in c["geometry"] for k in ("top", "left"))
+        for c in page_b_comps
+    ):
+      by_grid = [
+          c["id"]
+          for c in sorted(
+              page_b_comps,
+              key=lambda c: (
+                  c["grid_position"]["row"],
+                  c["grid_position"]["column"],
+                  c["id"],
+              ),
+          )
+      ]
+      by_geom = [
+          c["id"]
+          for c in sorted(
+              page_b_comps,
+              key=lambda c: (
+                  c["geometry"]["top"],
+                  c["geometry"]["left"],
+                  c["id"],
+              ),
+          )
+      ]
+      if by_grid != by_geom:
+        errors.append(
+            f"bqca bundle page {b_page.get('id')} grid_position reading order"
+            f" {by_grid} diverges from geometry order {by_geom}"
         )
 
     for comp in page_m_comps:
@@ -910,7 +980,96 @@ def validate_bqca(
         f" expected {bundle_sha}, got {live.get('template_bundle_sha256')}"
     )
 
-  # 5. Forbidden unlogged event types check
+  # 5. Semantic SQL invariants (M03, M04, M07) & external-access attestation guard (M08)
+  sql_norm = " ".join(sql_text.split())
+  required_sql_fragments = {
+      "fast_path attribute extraction": (
+          "LOWER(JSON_VALUE(attributes, '$.fast_path')) = 'true'"
+      ),
+      "fast_path turn-window propagation": (
+          "IF( turn_id IS NULL, raw_fast_path, LOGICAL_OR(raw_fast_path) OVER ("
+          " PARTITION BY turn_partition_key ) ) AS fast_path"
+      ),
+      "fast_path_label derivation": (
+          "IF(fast_path, 'fast_path', 'standard_nl2sql') AS fast_path_label"
+      ),
+      "INVOCATION_COMPLETED deduplication window": (
+          "event_type = 'INVOCATION_COMPLETED' AND invocation_id IS NOT NULL,"
+          " ROW_NUMBER() OVER ("
+      ),
+      "completed_turn_id deduplication gate": (
+          "IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id"
+      ),
+      "turn_latency_ms deduplication gate": (
+          "IF( raw_turn_complete_rn = 1, SAFE_CAST(JSON_VALUE(latency_ms,"
+          " '$.total_ms') AS FLOAT64), NULL ) AS turn_latency_ms"
+      ),
+      "invocation_id blank fallback chain": (
+          "COALESCE( NULLIF(TRIM(invocation_id), ''), NULLIF(TRIM(trace_id),"
+          " ''), NULLIF(TRIM(session_id), ''), CAST(timestamp AS STRING) )"
+      ),
+      "null invocation_id SHA256 partition isolation": "TO_HEX( SHA256(",
+      "data_agent_id turn-window propagation": (
+          "IF( turn_id IS NULL, COALESCE(raw_data_agent_id, 'unattributed'),"
+          " COALESCE( FIRST_VALUE(raw_data_agent_id IGNORE NULLS) OVER ("
+          " PARTITION BY turn_partition_key"
+      ),
+      "conversation_id turn-window propagation": (
+          "IF( turn_id IS NULL, raw_conversation_id,"
+          " FIRST_VALUE(raw_conversation_id IGNORE NULLS) OVER ( PARTITION BY"
+          " turn_partition_key"
+      ),
+      "explicit persona turn-window propagation": (
+          "FIRST_VALUE(raw_explicit_persona IGNORE NULLS) OVER ( PARTITION BY"
+          " turn_partition_key"
+      ),
+      "email persona turn-window propagation": (
+          "FIRST_VALUE(raw_email_persona IGNORE NULLS) OVER ( PARTITION BY"
+          " turn_partition_key"
+      ),
+  }
+  for label, fragment in required_sql_fragments.items():
+    if fragment not in sql_norm:
+      errors.append(f"bqca SQL missing required {label} ({fragment!r})")
+
+  ext = binding.get("external_access_verification", {})
+  ext_status = ext.get("status")
+  if ext_status not in {
+      "PASSING",
+      "FAILING",
+      "PENDING_PUBLIC_SHARING_ALLOWLIST",
+  }:
+    errors.append(
+        f"bqca external_access_verification.status {ext_status!r} invalid"
+    )
+  elif ext_status == "PASSING":
+    controls = {
+        c.get("method"): c
+        for c in ext.get("controls", [])
+        if isinstance(c, dict)
+    }
+    api_ctrl = controls.get("permissions_api_link_role_check", {})
+    canary_ctrl = controls.get("external_identity_link_access_check", {})
+    open_tracked = any(
+        isinstance(i, dict)
+        and i.get("issue") == ext.get("tracking_issue")
+        and i.get("status") == "OPEN"
+        for i in binding.get("known_live_issues", [])
+    )
+    if (
+        binding.get("link_access") != "PUBLIC"
+        or api_ctrl.get("last_result") != "LINK_VIEWER_ALLUSERS_PRESENT"
+        or canary_ctrl.get("last_result") not in {"PASSED", "PASSING"}
+        or not canary_ctrl.get("link_access_verified_date")
+        or open_tracked
+    ):
+      errors.append(
+          "bqca external_access_verification.status is PASSING without PUBLIC"
+          " link_access, passing controls, link_access_verified_date, and"
+          " resolved known_live_issues"
+      )
+
+  # 6. Forbidden unlogged event types check
   for rel in (
       "spec/bqca_chart_manifest.yaml",
       "spec/bqca_product_contract.yaml",

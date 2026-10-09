@@ -1964,8 +1964,8 @@ pages:
     category: scorecard
     component_type: kpi-metric
     chart_type: SCORECARD
-    label: Distinct Error Messages
-    title: Distinct Error Messages
+    label: Distinct Error Signatures
+    title: Distinct Error Signatures
     datasource_id: 4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc
     data_source_alias: ds0
     field: error_message
@@ -1974,7 +1974,7 @@ pages:
     metrics:
     - field: error_message
       aggregation: COUNT_DISTINCT
-      display_name: Distinct Error Messages
+      display_name: Distinct Error Signatures
     columns:
     - _error_message_
     geometry:
@@ -1995,13 +1995,13 @@ pages:
           columns:
           - id: met
             fieldName: _error_message_
-            displayName: Distinct Error Messages
+            displayName: Distinct Error Signatures
             aggregation: COUNT_DISTINCT
         fields:
           primaryMetricId: met
         title:
           showTitle: false
-          text: Distinct Error Messages
+          text: Distinct Error Signatures
   - &id032
     id: chart_errors_by_event_type
     given_id: chart_errors_by_event_type

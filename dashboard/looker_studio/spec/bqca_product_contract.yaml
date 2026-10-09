@@ -193,7 +193,7 @@ pages:
     purpose: "Triage BQCA errors detected via the 3-condition error predicate (status = 'ERROR', non-null error_message, or *_ERROR event type) across data agents and event types."
     scorecards:
       - {id: kpi_total_errors, label: "Error Events (3-Condition)", field: error_message, aggregation: COUNT}
-      - {id: kpi_distinct_errors, label: "Distinct Error Messages", field: error_message, aggregation: COUNT_DISTINCT}
+      - {id: kpi_distinct_errors, label: "Distinct Error Signatures", field: error_message, aggregation: COUNT_DISTINCT}
     charts:
       - {id: chart_errors_by_event_type, type: bar_chart, title: "Error Events by BQCA Event Type", dimensions: [event_type], metrics: [error_message]}
       - {id: chart_errors_by_agent, type: bar_chart, title: "Error Events by Data Agent", dimensions: [data_agent_id], metrics: [error_message]}

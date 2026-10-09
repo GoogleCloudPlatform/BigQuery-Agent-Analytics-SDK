@@ -133,6 +133,41 @@
           </details>
 
           <p id="form-status" role="status" aria-live="polite"></p>
+          <aside
+            class="notice notice-warning"
+            id="bqca-template-note"
+            aria-labelledby="bqca-template-title"
+            data-profile-only="bqca">
+            <strong id="bqca-template-title">Dedicated 7-page tool-free BQCA Looker Studio template — Template not yet publicly shared for external accounts.</strong>
+            Public link sharing (<code>allUsers</code>) for the dedicated 7-page
+            tool-free BQCA report template
+            (<code>1ffb0888-20ea-451f-aeb8-69fc37973335</code>, data source alias
+            <code>ds0</code>) is currently pending cross-organization allowlisting
+            and external copy verification. Until external link sharing is active,
+            opening the 1-click Looker Studio link from an external Google account
+            can show <em>“This report isn’t shared with you”</em>; use the
+            <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/dashboards/streamlit">
+              Self-Hosted Streamlit BQCA Dashboard</a>
+            or the standalone custom SQL query below to explore your BQCA logs
+            immediately. The template covers Token Consumption, Data Agents &amp;
+            Turns, LLM Interactions &amp; Embedding Suggestions, User &amp; Persona
+            Analytics, Latency &amp; Fast-Path ROI, Errors (BQCA 3-Condition), and
+            Prompt, Response &amp; SQL Inspector (all tool-usage pages, tool-latency
+            series, and tool-error charts are omitted).
+            <details class="advanced-bqca-options">
+              <summary>Advanced CLI &amp; self-hosted options</summary>
+              <p>
+                Run the
+                <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/dashboards/streamlit">
+                  Self-Hosted Streamlit BQCA Dashboard</a>
+                (<code>dashboards/streamlit/</code>) or export the
+                <a id="custom-query-link" href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/dashboard/looker_studio/sql/bqca_events_v1.sql.tmpl">
+                  BQCA reporting query</a>
+                bound to your table with
+                <code>hydrate_dashboard.py --profile bqca --custom-sql-out</code>.
+              </p>
+            </details>
+          </aside>
           <div class="actions">
             <a
               class="button button-primary"
@@ -211,41 +246,6 @@
         </article>
       </section>
 
-      <aside
-        class="notice notice-warning"
-        id="bqca-template-note"
-        aria-labelledby="bqca-template-title"
-        data-profile-only="bqca">
-        <strong id="bqca-template-title">Dedicated 7-page tool-free BQCA Looker Studio template — Template not yet publicly shared for external accounts.</strong>
-        Public link sharing (<code>allUsers</code>) for the dedicated 7-page
-        tool-free BQCA report template
-        (<code>1ffb0888-20ea-451f-aeb8-69fc37973335</code>, data source alias
-        <code>ds0</code>) is currently pending cross-organization allowlisting
-        and external copy verification. Until external link sharing is active,
-        opening the 1-click Looker Studio link from an external Google account
-        can show <em>“This report isn’t shared with you”</em>; use the
-        self-hosted Streamlit dashboard or standalone custom SQL query below to
-        explore your BQCA logs immediately. The template covers Token
-        Consumption, Data Agents &amp; Turns, LLM Interactions &amp; Embedding
-        Suggestions, User &amp; Persona Analytics, Latency &amp; Fast-Path ROI,
-        Errors (BQCA 3-Condition), and Prompt, Response &amp; SQL Inspector
-        (all tool-usage pages, tool-latency series, and tool-error charts are
-        omitted).
-        <details class="advanced-bqca-options">
-          <summary>Advanced CLI &amp; self-hosted options</summary>
-          <p>
-            Run the
-            <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/dashboards/streamlit">
-              Self-Hosted Streamlit BQCA Dashboard</a>
-            (<code>dashboards/streamlit/</code>) or export the
-            <a id="custom-query-link" href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/dashboard/looker_studio/sql/bqca_events_v1.sql.tmpl">
-              BQCA reporting query</a>
-            bound to your table with
-            <code>hydrate_dashboard.py --profile bqca --custom-sql-out</code>.
-          </p>
-        </details>
-      </aside>
-
       <aside class="notice notice-warning" id="report-not-shared">
         <strong>“This report isn’t shared with you” is not a setup error.</strong>
         That dialog is terminal — it offers <em>Reload</em> / <em>Return to
@@ -253,22 +253,30 @@
         by waiting. It means the shared dashboard template is unavailable to
         the Google account signed in to that tab; nothing is wrong with your
         project, dataset, table, IAM setup, or the identifiers you entered.
-        First confirm the tab is using the account you intend (Looker Studio
+        <span data-profile-only="adk" hidden>First confirm the tab is using the account you intend (Looker Studio
         uses the browser’s default Google account). If you are signed in
         with an organization-managed account, your own organization’s
         sharing policy can also block receiving Looker Studio assets from
         external domains — try a personal account if you can. If the dialog
         still persists, the template’s copy path is blocked —
-        <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/445" data-profile-only="adk" hidden>
-          report it on issue #445</a><a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/515" data-profile-only="bqca">
-          track public-sharing allowlist progress on #515</a> — say only whether the signed-in
+        <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/445">
+          report it on issue #445</a> — say only whether the signed-in
         account is personal or part of an organization; do not post the
         account’s email address. The repository’s CLI preflight can still
         validate your table, but it copies the same template, so it is not
-        a workaround;
-        while the template is blocked, use the
-        <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/dashboards/grafana" data-profile-only="adk" hidden>
-          Grafana dashboard</a><span data-profile-only="bqca"><a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/dashboards/streamlit">Self-Hosted Streamlit BQCA Dashboard</a> or <code>hydrate_dashboard.py --profile bqca --custom-sql-out</code></span>.
+        a workaround; while the template is blocked, use the
+        <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/dashboards/grafana">
+          Grafana dashboard</a>.</span><span data-profile-only="bqca">For the BQCA profile, public link sharing (<code>allUsers</code>) on the
+        dedicated 7-page template (<code>1ffb0888-20ea-451f-aeb8-69fc37973335</code>)
+        is not yet enabled for external Google accounts while allowlist
+        approval is tracked on
+        <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/515">
+          PR #515</a>. While public link sharing is pending, use the
+        <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/dashboards/streamlit">
+          Self-Hosted Streamlit BQCA Dashboard</a>
+        or open <strong>Advanced CLI &amp; self-hosted options</strong> above to
+        export the standalone BQCA custom SQL query into your own Looker Studio
+        report.</span>
       </aside>
 
       <aside class="notice notice-warning">

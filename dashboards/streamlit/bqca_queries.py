@@ -78,26 +78,31 @@ _PARAM_RE = re.compile(r"@([A-Za-z_][A-Za-z0-9_]*)")
 # never disagree with another about what "persona" or "error" means. Each is
 # a plain expression over the raw table's columns.
 
+SESSION_ID_EXPR = "NULLIF(TRIM(session_id), '')"
 DATA_AGENT_ID_EXPR = (
-    "NULLIF(JSON_VALUE(attributes,"
-    " '$.session_metadata.state.\"data-agent-id\"'), '')"
+    "NULLIF(TRIM(JSON_VALUE(attributes,"
+    " '$.session_metadata.state.\"data-agent-id\"')), '')"
 )
 CONVERSATION_ID_EXPR = (
-    "NULLIF(JSON_VALUE(attributes,"
-    " '$.session_metadata.state.\"conversation-id\"'), '')"
+    "NULLIF(TRIM(JSON_VALUE(attributes,"
+    " '$.session_metadata.state.\"conversation-id\"')), '')"
 )
 # A turn is a distinct ``invocation_id``. An id padded with whitespace is
 # trimmed, so the turn table and the timeline spell it the same way. An event
-# logged with a *blank* id (``''`` or only whitespace) is a turn of its own,
-# keyed by ``CAST(timestamp AS STRING)``: a non-NULL key that is distinct per
-# event timestamp, the rule the BQCA customer notebook uses, so the turn table
-# lists it and the timeline opens it by the very same key instead of dropping
-# it. Only an event with no id at all (NULL) belongs to no turn: the per-turn
-# panels leave it out, and ``_TURN_PARTITION_KEY`` keeps it from merging with
-# other NULL-id rows.
+# logged with a *blank* id (``''`` or only whitespace) falls back to its
+# trimmed ``trace_id``, else its trimmed ``session_id``, else
+# ``CAST(timestamp AS STRING)``: a non-NULL key that keeps multi-event turns
+# sharing a trace or session together while still giving a single timestamped
+# event a turn key of its own, so the turn table lists it and the timeline
+# opens it by the very same key instead of dropping it. Only an event with no
+# id at all (NULL) belongs to no turn: the per-turn panels leave it out, and
+# ``_TURN_PARTITION_KEY`` keeps it from merging with other NULL-id rows.
 INVOCATION_ID_EXPR = (
     "IF(invocation_id IS NULL, NULL,"
-    " IFNULL(NULLIF(TRIM(invocation_id), ''), CAST(timestamp AS STRING)))"
+    " COALESCE(NULLIF(TRIM(invocation_id), ''),"
+    " NULLIF(TRIM(trace_id), ''),"
+    " NULLIF(TRIM(session_id), ''),"
+    " CAST(timestamp AS STRING)))"
 )
 # ``user_id`` is often an opaque id (a service-account name, a numeric id), and
 # the text before an ``@`` in it must not become a persona. Only a real email
@@ -119,13 +124,14 @@ _USER_ID_EMAIL_HANDLE = (
 # them, so a label logged by a later event still beats an email handle logged by
 # an earlier one.
 RAW_EXPLICIT_PERSONA_EXPR = (
-    "NULLIF(JSON_VALUE(attributes,"
-    " '$.session_metadata.state.custom_labels.persona'), '')"
+    "NULLIF(TRIM(JSON_VALUE(attributes,"
+    " '$.session_metadata.state.custom_labels.persona')), '')"
 )
 RAW_EMAIL_PERSONA_EXPR = f"NULLIF({_USER_ID_EMAIL_HANDLE}, '')"
 IS_ERROR_EXPR = (
-    "(UPPER(status) = 'ERROR' OR error_message IS NOT NULL"
-    " OR ENDS_WITH(event_type, '_ERROR'))"
+    "(UPPER(TRIM(status)) = 'ERROR'"
+    " OR NULLIF(TRIM(error_message), '') IS NOT NULL"
+    " OR ENDS_WITH(UPPER(TRIM(event_type)), '_ERROR'))"
 )
 FAST_PATH_EXPR = (
     "IFNULL(LOWER(JSON_VALUE(attributes, '$.fast_path')) = 'true', FALSE)"
@@ -236,20 +242,17 @@ EMBEDDING_REASON_EXPR = (
 
 # Raw columns every panel needs, and the canonical dimensions every panel
 # filters on. Derived here once so the filters apply identically everywhere.
-# ``invocation_id`` is not a raw column here: it is the turn key and always
-# goes through ``INVOCATION_ID_EXPR``. ``span_id`` is only read to tell apart
-# the events that belong to no turn (see ``_TURN_PARTITION_KEY``).
+# ``invocation_id`` and ``session_id`` are not raw columns here: ``invocation_id``
+# is the turn key (``INVOCATION_ID_EXPR``) and ``session_id`` is resolved across
+# the turn (``SESSION_ID_EXPR``). ``span_id`` is only read to tell apart the
+# events that belong to no turn (see ``_TURN_PARTITION_KEY``).
 _BASE_RAW: tuple[str, ...] = (
     "timestamp",
     "event_type",
-    "session_id",
     "span_id",
 )
 # Facts that belong to one row, however many rows the turn has.
-_ROW_DIMENSIONS: tuple[tuple[str, str], ...] = (
-    ("conversation_id", CONVERSATION_ID_EXPR),
-    ("is_error", IS_ERROR_EXPR),
-)
+_ROW_DIMENSIONS: tuple[tuple[str, str], ...] = (("is_error", IS_ERROR_EXPR),)
 # Facts that belong to a *turn*, but that the plugin may not stamp on every one
 # of the turn's events. They are read per row as ``raw_<name>`` and resolved
 # across the turn by ``_prelude``; the panels and the filters only ever see the
@@ -257,6 +260,8 @@ _ROW_DIMENSIONS: tuple[tuple[str, str], ...] = (
 # (explicit label, email handle) plus the data agent, so each can be resolved
 # across the turn before the tiers are chosen between.
 _TURN_DIMENSIONS: tuple[tuple[str, str], ...] = (
+    ("raw_session_id", SESSION_ID_EXPR),
+    ("raw_conversation_id", CONVERSATION_ID_EXPR),
     ("raw_data_agent_id", DATA_AGENT_ID_EXPR),
     ("raw_explicit_persona", RAW_EXPLICIT_PERSONA_EXPR),
     ("raw_email_persona", RAW_EMAIL_PERSONA_EXPR),
@@ -266,21 +271,35 @@ _TURN_DIMENSIONS: tuple[tuple[str, str], ...] = (
 # alias, raw column)`` pairs, before it decides the turn's ``data_agent_id`` and
 # ``persona``.
 _FIRST_TIERS: tuple[tuple[str, str], ...] = (
+    ("session_id", "raw_session_id"),
+    ("conversation_id", "raw_conversation_id"),
     ("first_data_agent_id", "raw_data_agent_id"),
     ("first_explicit_persona", "raw_explicit_persona"),
     ("first_email_persona", "raw_email_persona"),
 )
+_INTERMEDIATE_FIRST_COLUMNS: tuple[str, ...] = (
+    "first_data_agent_id",
+    "first_explicit_persona",
+    "first_email_persona",
+)
 # The partition every turn-resolving window runs over, evaluated on
 # ``events_raw`` where ``invocation_id`` is already ``INVOCATION_ID_EXPR``: the
 # turn key, except that an event with no ``invocation_id`` at all (NULL) gets a
-# key of its own. Left alone, every such event would fall into one shared NULL
-# partition and inherit the attribution or the error verdict of unrelated
-# events; with its own key it is judged alone, and the per-turn panels still
-# leave it out because its ``invocation_id`` stays NULL.
+# key of its own that includes all of its per-row turn dimensions and error
+# verdict. Even when two orphan rows share a timestamp, a NULL ``span_id``, and
+# an ``event_type``, they cannot collide and borrow each other's attribution,
+# fast-path flag, or error verdict.
 _TURN_PARTITION_KEY = (
     "IF(invocation_id IS NULL,"
     " CONCAT('__null_inv_', CAST(timestamp AS STRING), '_',"
-    " IFNULL(span_id, ''), '_', event_type),"
+    " IFNULL(span_id, ''), '_', event_type, '_',"
+    " IFNULL(raw_session_id, ''), '_',"
+    " IFNULL(raw_conversation_id, ''), '_',"
+    " IFNULL(raw_data_agent_id, ''), '_',"
+    " IFNULL(raw_explicit_persona, ''), '_',"
+    " IFNULL(raw_email_persona, ''), '_',"
+    " IFNULL(CAST(raw_fast_path AS STRING), 'false'), '_',"
+    " IFNULL(CAST(is_error AS STRING), 'false')),"
     " invocation_id)"
 )
 
@@ -464,7 +483,7 @@ def _prelude(
   columns = [
       column
       for column in dict.fromkeys((*_BASE_RAW, *raw))
-      if column != "invocation_id"
+      if column not in ("invocation_id", "session_id")
   ]
   items = [f"    {column}" for column in columns]
   items.append(f"    {INVOCATION_ID_EXPR} AS invocation_id")
@@ -491,7 +510,7 @@ def _prelude(
   select = ",\n".join(items)
   turn_select = ",\n".join(resolved)
   raw_turn_columns = ", ".join(alias for alias, _ in _TURN_DIMENSIONS)
-  first_columns = ", ".join(alias for alias, _ in _FIRST_TIERS)
+  first_columns = ", ".join(_INTERMEDIATE_FIRST_COLUMNS)
   predicates = "\n    AND ".join(where)
   prelude = f"""
 WITH events_raw AS (
@@ -1178,7 +1197,7 @@ per_turn AS (
       IGNORE NULLS ORDER BY timestamp DESC LIMIT 1
     )[SAFE_OFFSET(0)] AS served_response,
     COUNTIF(event_type = 'AGENT_RESPONSE') AS agent_response_count,
-    STRING_AGG(DISTINCT error_message, ' | ') AS error_message
+    STRING_AGG(DISTINCT NULLIF(TRIM(error_message), ''), ' | ') AS error_message
   FROM scoped
   WHERE invocation_id IS NOT NULL
   GROUP BY invocation_id
@@ -1220,7 +1239,7 @@ def build_bqca_turn_timeline_sql(
   The invocation is bound as ``@invocation_id`` and compared with the same
   normalized turn key the explorer lists (``INVOCATION_ID_EXPR``), so a turn
   whose events were logged with an empty ``invocation_id`` opens by the
-  timestamp key the explorer shows for it; this builder only checks the key is
+  key the explorer shows for it; this builder only checks the key is
   not blank. The sidebar's event-type selection narrows the timeline, but the
   other filters do not: once a turn is picked, every one of its events belongs
   in the picture. The query is still bounded by the window, so partition
@@ -1245,7 +1264,7 @@ def build_bqca_turn_timeline_sql(
       "SUBSTR(COALESCE("
       f"{USER_PROMPT_TEXT_EXPR},"
       f" {AGENT_RESPONSE_TEXT_EXPR},"
-      " error_message,"
+      " NULLIF(TRIM(error_message), ''),"
       " IF(content IS NULL, NULL, TO_JSON_STRING(content)),"
       " ''), 1, 500)"
   )
@@ -1257,7 +1276,7 @@ WITH events AS (
     span_id,
     parent_span_id,
     status,
-    error_message,
+    NULLIF(TRIM(error_message), '') AS error_message,
     {TOTAL_LATENCY_MS_EXPR} AS total_latency_ms,
     {TFFT_MS_EXPR} AS tfft_ms,
     {MODEL_NAME_EXPR} AS model_name,

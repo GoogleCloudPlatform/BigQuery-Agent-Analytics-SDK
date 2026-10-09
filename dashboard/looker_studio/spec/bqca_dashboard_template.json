@@ -20,7 +20,7 @@
     "connector_type": "BIGQUERY_CUSTOM_QUERY",
     "credential_mode": "VIEWERS",
     "sql_path": "sql/bqca_events_v1.template.sql",
-    "sql_sha256": "a6e4a2614839f1a6633d0188b1b21fc94f4dfaa3202d90e581177afc3db399b2",
+    "sql_sha256": "dba90a442905d21535f3787842fee801a1e59c593572aaac11e559af90ac812d",
     "sentinels": {
       "project": "test-project-0728-467323",
       "dataset": "bqaa_fixture_adk_1_27_0",
@@ -2854,8 +2854,8 @@
           "category": "scorecard",
           "component_type": "kpi-metric",
           "chart_type": "SCORECARD",
-          "label": "Distinct Error Messages",
-          "title": "Distinct Error Messages",
+          "label": "Distinct Error Signatures",
+          "title": "Distinct Error Signatures",
           "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
           "data_source_alias": "ds0",
           "field": "error_message",
@@ -2865,7 +2865,7 @@
             {
               "field": "error_message",
               "aggregation": "COUNT_DISTINCT",
-              "display_name": "Distinct Error Messages"
+              "display_name": "Distinct Error Signatures"
             }
           ],
           "columns": [
@@ -2899,7 +2899,7 @@
                   {
                     "id": "met",
                     "fieldName": "_error_message_",
-                    "displayName": "Distinct Error Messages",
+                    "displayName": "Distinct Error Signatures",
                     "aggregation": "COUNT_DISTINCT"
                   }
                 ]
@@ -2909,7 +2909,7 @@
               },
               "title": {
                 "showTitle": false,
-                "text": "Distinct Error Messages"
+                "text": "Distinct Error Signatures"
               }
             }
           }
@@ -5643,8 +5643,8 @@
       "category": "scorecard",
       "component_type": "kpi-metric",
       "chart_type": "SCORECARD",
-      "label": "Distinct Error Messages",
-      "title": "Distinct Error Messages",
+      "label": "Distinct Error Signatures",
+      "title": "Distinct Error Signatures",
       "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
       "data_source_alias": "ds0",
       "field": "error_message",
@@ -5654,7 +5654,7 @@
         {
           "field": "error_message",
           "aggregation": "COUNT_DISTINCT",
-          "display_name": "Distinct Error Messages"
+          "display_name": "Distinct Error Signatures"
         }
       ],
       "columns": [
@@ -5688,7 +5688,7 @@
               {
                 "id": "met",
                 "fieldName": "_error_message_",
-                "displayName": "Distinct Error Messages",
+                "displayName": "Distinct Error Signatures",
                 "aggregation": "COUNT_DISTINCT"
               }
             ]
@@ -5698,7 +5698,7 @@
           },
           "title": {
             "showTitle": false,
-            "text": "Distinct Error Messages"
+            "text": "Distinct Error Signatures"
           }
         }
       }

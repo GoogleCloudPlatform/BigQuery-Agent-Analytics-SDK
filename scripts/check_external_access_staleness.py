@@ -73,6 +73,22 @@ def read_attestation_fields(
           f" block of {source}"
       )
     fields[name] = match.group(1)
+  if fields["status"] == "PASSING":
+    has_public_link = bool(
+        re.search(r"^link_access:\s*PUBLIC\s*$", text, re.MULTILINE)
+    )
+    has_verified_date = bool(
+        re.search(
+            r'^\s+link_access_verified_date:\s*"?\d{4}-\d{2}-\d{2}"?\s*$',
+            text,
+            re.MULTILINE,
+        )
+    )
+    if not (has_public_link and has_verified_date):
+      raise SystemExit(
+          f"external_access_verification status PASSING in {source} requires"
+          " link_access: PUBLIC and a dated link_access_verified_date"
+      )
   return fields
 
 
@@ -139,7 +155,15 @@ def main(argv: list[str] | None = None) -> int:
         if raw_path.is_absolute() or raw_path.exists()
         else REPOSITORY_ROOT / raw_path
     )
-    fields = read_attestation_fields(path.read_text(), source=path)
+    try:
+      raw_text = path.read_text(encoding="utf-8")
+    except OSError:
+      print(
+          f"ERROR: attestation file not found: {raw_path}",
+          file=sys.stderr,
+      )
+      return 2
+    fields = read_attestation_fields(raw_text, source=path)
     code, message = staleness(fields, today, source=path)
     print(message, file=sys.stderr if code else sys.stdout)
     if code != 0:

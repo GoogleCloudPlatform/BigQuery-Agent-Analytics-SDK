@@ -11,17 +11,19 @@ persona, fast path, errors, tokens, prompts, responses, and SQL.
 Extraction notes (the facts behind each expression):
 
 * Attribution reads session state, never ``agent``, ``user_id``, or
-  ``session_id``: ``agent`` is always the root agent and every turn is a new
-  session, so ``data_agent_id`` and ``conversation_id`` come from
-  ``attributes.session_metadata.state`` and are propagated across all rows of
-  the same turn (partitioned by ``turn_partition_key``).
+  ``session_id``: ``agent`` is always the root agent and turns are keyed by
+  ``invocation_id`` (falling back to ``trace_id``, ``session_id``, then
+  ``timestamp`` when ``invocation_id`` is blank, while preserving ``NULL`` when
+  ``invocation_id IS NULL``), so ``data_agent_id`` and ``conversation_id`` come
+  from ``attributes.session_metadata.state`` and are propagated across all rows
+  of the same non-null turn (partitioned by ``turn_partition_key``).
 * ``persona`` prefers the explicit ``custom_labels.persona`` label, then the
   local part of ``user_id`` only when ``user_id`` is a well-formed email
   (optionally followed by a ``:``-delimited memory suffix). Unresolved callers
   write ``''`` and older rows carry opaque IDs, so neither may become a
   persona; the data agent is the next fallback, then ``'unattributed'``,
   propagated across all rows of the turn.
-* ``fast_path`` is propagated across all rows of the turn via
+* ``fast_path`` is propagated across all rows of a non-null turn via
   ``LOGICAL_OR(raw_fast_path) OVER (PARTITION BY turn_partition_key)`` so turn
   counts and turn latency grouped by ``fast_path_label`` reflect turn-grain
   fast-path execution even when ``$.fast_path`` is logged on only one event.
@@ -84,7 +86,8 @@ HEADER = """\
 --
 -- Only the nine event types BQCA logs are read. Attribution uses session
 -- state, never the agent, user_id, or session_id columns: agent is always the
--- root agent and every turn is a new session.
+-- root agent and turns are keyed by invocation_id (with trace_id/session_id
+-- fallbacks when blank).
 --
 -- Date-range parameters must be enabled on the Looker Studio data source.
 -- Timezone is UTC; @DS_START_DATE/@DS_END_DATE arrive as YYYYMMDD strings,
@@ -111,19 +114,43 @@ BODY = r"""WITH raw_events AS (
     IF(
       invocation_id IS NULL,
       NULL,
-      IFNULL(NULLIF(TRIM(invocation_id), ''), CAST(timestamp AS STRING))
+      COALESCE(
+        NULLIF(TRIM(invocation_id), ''),
+        NULLIF(TRIM(trace_id), ''),
+        NULLIF(TRIM(session_id), ''),
+        CAST(timestamp AS STRING)
+      )
     ) AS turn_id,
     IF(
       invocation_id IS NULL,
       CONCAT(
-        '__null_inv_',
+        '__null_invocation__:',
         CAST(timestamp AS STRING),
-        '_',
+        ':',
         IFNULL(span_id, ''),
-        '_',
-        IFNULL(event_type, '')
+        ':',
+        IFNULL(event_type, ''),
+        ':',
+        TO_HEX(
+          SHA256(
+            CONCAT(
+              IFNULL(TO_JSON_STRING(attributes), ''),
+              '|',
+              IFNULL(TO_JSON_STRING(content), ''),
+              '|',
+              IFNULL(status, ''),
+              '|',
+              IFNULL(error_message, '')
+            )
+          )
+        )
       ),
-      IFNULL(NULLIF(TRIM(invocation_id), ''), CAST(timestamp AS STRING))
+      COALESCE(
+        NULLIF(TRIM(invocation_id), ''),
+        NULLIF(TRIM(trace_id), ''),
+        NULLIF(TRIM(session_id), ''),
+        CAST(timestamp AS STRING)
+      )
     ) AS turn_partition_key,
     NULLIF(
       JSON_VALUE(attributes, '$.session_metadata.state."conversation-id"'),
@@ -159,15 +186,11 @@ BODY = r"""WITH raw_events AS (
       event_type = 'INVOCATION_COMPLETED' AND invocation_id IS NOT NULL,
       ROW_NUMBER() OVER (
         PARTITION BY
-          IF(
-            invocation_id IS NULL,
-            CONCAT(
-              '__null_inv_',
-              CAST(timestamp AS STRING),
-              '_',
-              IFNULL(span_id, '')
-            ),
-            IFNULL(NULLIF(TRIM(invocation_id), ''), CAST(timestamp AS STRING))
+          COALESCE(
+            NULLIF(TRIM(invocation_id), ''),
+            NULLIF(TRIM(trace_id), ''),
+            NULLIF(TRIM(session_id), ''),
+            CAST(timestamp AS STRING)
           ),
           IF(event_type = 'INVOCATION_COMPLETED', 1, 0)
         ORDER BY
@@ -184,12 +207,27 @@ BODY = r"""WITH raw_events AS (
           IF(
             invocation_id IS NULL,
             CONCAT(
-              '__null_inv_',
+              '__null_invocation__:',
               CAST(timestamp AS STRING),
-              '_',
-              IFNULL(span_id, '')
+              ':',
+              IFNULL(span_id, ''),
+              ':',
+              TO_HEX(
+                SHA256(
+                  CONCAT(
+                    IFNULL(TO_JSON_STRING(attributes), ''),
+                    '|',
+                    IFNULL(TO_JSON_STRING(content), '')
+                  )
+                )
+              )
             ),
-            IFNULL(NULLIF(TRIM(invocation_id), ''), CAST(timestamp AS STRING))
+            COALESCE(
+              NULLIF(TRIM(invocation_id), ''),
+              NULLIF(TRIM(trace_id), ''),
+              NULLIF(TRIM(session_id), ''),
+              CAST(timestamp AS STRING)
+            )
           ),
           IF(event_type = 'AGENT_RESPONSE', 1, 0)
         ORDER BY timestamp DESC, span_id DESC
@@ -232,39 +270,60 @@ bqca_fields AS (
     trace_id,
     span_id,
     parent_span_id,
-    COALESCE(
-      FIRST_VALUE(raw_data_agent_id IGNORE NULLS) OVER (
-        PARTITION BY turn_partition_key
-        ORDER BY timestamp ASC, event_type ASC, span_id ASC
-        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
-      ),
-      'unattributed'
+    IF(
+      turn_id IS NULL,
+      COALESCE(raw_data_agent_id, 'unattributed'),
+      COALESCE(
+        FIRST_VALUE(raw_data_agent_id IGNORE NULLS) OVER (
+          PARTITION BY turn_partition_key
+          ORDER BY timestamp ASC, event_type ASC, span_id ASC
+          ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+        ),
+        'unattributed'
+      )
     ) AS data_agent_id,
-    FIRST_VALUE(raw_conversation_id IGNORE NULLS) OVER (
-      PARTITION BY turn_partition_key
-      ORDER BY timestamp ASC, event_type ASC, span_id ASC
-      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    IF(
+      turn_id IS NULL,
+      raw_conversation_id,
+      FIRST_VALUE(raw_conversation_id IGNORE NULLS) OVER (
+        PARTITION BY turn_partition_key
+        ORDER BY timestamp ASC, event_type ASC, span_id ASC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+      )
     ) AS conversation_id,
-    COALESCE(
-      FIRST_VALUE(raw_explicit_persona IGNORE NULLS) OVER (
-        PARTITION BY turn_partition_key
-        ORDER BY timestamp ASC, event_type ASC, span_id ASC
-        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    IF(
+      turn_id IS NULL,
+      COALESCE(
+        raw_explicit_persona,
+        raw_email_persona,
+        raw_data_agent_id,
+        'unattributed'
       ),
-      FIRST_VALUE(raw_email_persona IGNORE NULLS) OVER (
-        PARTITION BY turn_partition_key
-        ORDER BY timestamp ASC, event_type ASC, span_id ASC
-        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
-      ),
-      FIRST_VALUE(raw_data_agent_id IGNORE NULLS) OVER (
-        PARTITION BY turn_partition_key
-        ORDER BY timestamp ASC, event_type ASC, span_id ASC
-        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
-      ),
-      'unattributed'
+      COALESCE(
+        FIRST_VALUE(raw_explicit_persona IGNORE NULLS) OVER (
+          PARTITION BY turn_partition_key
+          ORDER BY timestamp ASC, event_type ASC, span_id ASC
+          ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+        ),
+        FIRST_VALUE(raw_email_persona IGNORE NULLS) OVER (
+          PARTITION BY turn_partition_key
+          ORDER BY timestamp ASC, event_type ASC, span_id ASC
+          ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+        ),
+        FIRST_VALUE(raw_data_agent_id IGNORE NULLS) OVER (
+          PARTITION BY turn_partition_key
+          ORDER BY timestamp ASC, event_type ASC, span_id ASC
+          ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+        ),
+        'unattributed'
+      )
     ) AS persona,
-    LOGICAL_OR(raw_fast_path) OVER (
-      PARTITION BY turn_partition_key
+    IF(
+      turn_id IS NULL,
+      raw_fast_path,
+      LOGICAL_OR(raw_fast_path) OVER (
+        PARTITION BY turn_partition_key
+      )
     ) AS fast_path,
     status,
     IF(

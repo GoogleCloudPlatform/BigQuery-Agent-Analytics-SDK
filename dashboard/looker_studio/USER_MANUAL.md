@@ -151,23 +151,39 @@ ends in `&profile=bqca`, so teammates who open it land on the BQCA page too.
 **What you get on BQCA.** The 1-click button opens your logging table in the
 **dedicated 7-page tool-free BQCA Looker Studio template**
 (`1ffb0888-20ea-451f-aeb8-69fc37973335`, data source alias `ds0`) built over
-`sql/bqca_events_v1.template.sql`. Because BQCA logs no tool calls, all
+`sql/bqca_events_v1.template.sql`. Public external link sharing (`allUsers`
+`LINK_VIEWER`) on `1ffb0888-20ea-451f-aeb8-69fc37973335` is currently pending
+public-sharing allowlist approval
+([#515](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/515));
+external Google accounts that see `"This report isn't shared with you"` should
+run the
+[Self-Hosted Streamlit BQCA Dashboard](../../dashboards/streamlit/)
+(`dashboards/streamlit/`) or export the custom query with `--custom-sql-out`
+into their own Looker Studio report. Because BQCA logs no tool calls, all
 tool-usage pages, tool-latency charts, and tool-error panels are omitted:
 
 - **Token Consumption** — total, input, output, thoughts, and cached tokens
   over time and by data agent;
-- **Data Agents & Turns** — turns, completed turns, distinct data agents, and
-  conversations (session counts are turn counts — every BQCA turn starts a new
-  session);
+- **Data Agents & Turns** — active data agents (`data_agent_id`), total turns
+  (`invocation_id`), completed turns (`completed_turn_id`), and generated SQL
+  queries (`extracted_sql`), where turns are keyed by `invocation_id` (falling
+  back to `trace_id`, `session_id`, then `timestamp` when blank) because a
+  session can span multiple turns;
 - **LLM Interactions & Embedding Suggestions** — model calls, embedding
   suggestions, hit counts, and suggested-column counts;
 - **User & Persona Analytics** — activity by resolved persona and data agent;
 - **Latency & Fast-Path ROI** — turn latency, LLM latency, TTFT, and Fast-Path
   vs standard NL2SQL comparison;
-- **Errors (BQCA 3-Condition)** — errors across all three BQCA error signals,
-  broken down by data agent, event type, and error message;
-- **Prompt, Response & SQL Inspector** — full prompts, concatenated markdown
-  responses, and extracted SQL per turn.
+- **Errors (BQCA 3-Condition)** — error events and **Distinct Error
+  Signatures** across all three BQCA error signals (`status = 'ERROR'`,
+  non-empty `error_message`, or `*_ERROR` event type, synthesizing
+  `[EVENT_TYPE: status=STATUS]` when `error_message` is blank), broken down by
+  data agent and event type;
+- **Prompt, Response & SQL Inspector** — **Event-Level Prompt, Response &
+  Extracted SQL** table across `event_date`, `session_id`, `data_agent_id`,
+  `persona`, `event_type`, `fast_path_label`, `user_prompt_text`,
+  `extracted_sql`, `summary_text`, `error_message`, `total_latency_ms`, and
+  `total_tokens`.
 
 You can also run the
 [Self-Hosted Streamlit BQCA Dashboard](../../dashboards/streamlit/)

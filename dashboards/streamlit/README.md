@@ -127,7 +127,7 @@ The URL and the environment only choose the surface a session *starts* on; after
 
 ### What you see
 
-Nine KPI tiles sit above the tabs: **Total Turns**, **Turn Error Rate**, **P50 Turn Latency**, **P95 Turn Latency**, **Total Tokens**, **Thinking Tokens**, **Cached Tokens**, **Fast-Path Rate** and **Embedding Suggestion Coverage**. A turn is one invocation (`invocation_id`): an event logged with an empty `invocation_id` counts as a turn of its own, identified by its timestamp, while an event with no `invocation_id` at all belongs to no turn, so it is left out of the turn counts, rates and latencies (its tokens still count in the token totals). **Embedding Suggestion Coverage** is the share of all turns that received at least one `EMBEDDING_SUGGESTION` with suggested columns. A rate with nothing to divide by shows `—` rather than a misleading 0%.
+Nine KPI tiles sit above the tabs: **Total Turns**, **Turn Error Rate**, **P50 Turn Latency**, **P95 Turn Latency**, **Total Tokens**, **Thinking Tokens**, **Cached Tokens**, **Fast-Path Rate** and **Embedding Suggestion Coverage**. A turn is one invocation (`invocation_id`): an event logged with an empty `invocation_id` counts as a turn of its own, identified by its trimmed `trace_id`, else its trimmed `session_id`, else its timestamp (`COALESCE(NULLIF(TRIM(invocation_id), ''), NULLIF(TRIM(trace_id), ''), NULLIF(TRIM(session_id), ''), CAST(timestamp AS STRING))`), while an event with no `invocation_id` at all belongs to no turn, so it is left out of the turn counts, rates and latencies (its tokens still count in the token totals). **Embedding Suggestion Coverage** is the share of all turns that received at least one `EMBEDDING_SUGGESTION` with suggested columns. A rate with nothing to divide by shows `—` rather than a misleading 0%.
 
 A line under the tiles says how many turns completed (reached `INVOCATION_COMPLETED`). A turn that is still running, failed before completing, or was cut off by the time range counts toward **Total Turns**, the error rate and the token totals, but not toward the latency percentiles or **Fast-Path Rate**, which cover completed turns only. A turn counts once in a latency percentile even if its completion was logged more than once, and the **Data Agents & Personas** tab follows the same rule: an agent's fast-path rate and latency cover its completed turns, so an agent with none shows `—` rather than 0%.
 
@@ -159,8 +159,8 @@ The **Data agent** and **Persona** lists offer the values the filters match: eac
 ### Data governance
 
 * **Nine event types, nothing else.** Every query reads only `INVOCATION_STARTING`, `USER_MESSAGE_RECEIVED`, `AGENT_RESPONSE`, `INVOCATION_COMPLETED`, `LLM_RESPONSE`, `EMBEDDING_SUGGESTION`, `INVOCATION_ERROR`, `AGENT_ERROR` and `LLM_ERROR`. The allowlist is bound as a query parameter on every query, so any other event type in the table is never read or counted.
-* **Attribution** comes from the `data-agent-id` entry of the logged session metadata, never from the `agent`, `user_id` or `session_id` columns. Turns without one are grouped as *unattributed*. **Persona** is the `persona` custom label, else the handle of the user (the part before the `@`, only when `user_id` is an email address, optionally followed by `:suffix`), else the data agent. Each of the three is looked up across all the events of the turn, so a label logged by any event wins over a handle logged by an earlier one, and a turn that carries none of them is *unattributed*. An opaque user id such as a service-account name or a number is never turned into a persona.
-* **Errors.** An event is an error when its status is `ERROR`, it carries an error message, or its event type ends in `_ERROR`. **Turn Error Rate** is the share of turns with at least one such event.
+* **Attribution** comes from the `data-agent-id` entry of the logged session metadata, never from the `agent`, `user_id` or `session_id` columns. Turns without one are grouped as *unattributed*. **Persona** is the `persona` custom label, else the handle of the user (the part before the `@`, only when `user_id` is an email address, optionally followed by `:suffix`), else the data agent. Each of the three, along with `session_id` and `conversation-id`, is looked up across all the events of the turn, so a label logged by any event wins over a handle logged by an earlier one, a session or conversation filter keeps every event of a matching turn, and a turn that carries none of the persona tiers is *unattributed*. An opaque user id such as a service-account name or a number is never turned into a persona.
+* **Errors.** An event is an error when its trimmed status is `ERROR`, it carries a non-blank error message, or its trimmed event type ends in `_ERROR`. **Turn Error Rate** is the share of turns with at least one such event.
 * **Filter values never reach the SQL text.** Data agent, persona, event type, fast path, session and prompt filters are bound as query parameters. Only the validated table identifier and the generated time bounds are part of the SQL.
 
 ### Cost and safety notes
@@ -171,17 +171,21 @@ The **Data agent** and **Persona** lists offer the values the filters match: eac
 
 ### Verification against a live logging table
 
-The surface was checked end to end against a live Conversational Analytics logging table in a test project (its project, dataset and table names are left out here). To repeat the check on your own table, connect it as described above and compare what the dashboard shows with what the table holds:
+Run the reproducible hermetic test suite to verify the SQL builders, turn-resolution semantics, chart builders, and Streamlit UI end to end without contacting BigQuery:
 
-| Check     | What was seen                                                                                                                                                                                                              |
+```bash
+pytest tests/test_dashboards_streamlit_bqca.py -q
+```
+
+To verify against your own live Conversational Analytics logging table, connect `<project>.<dataset>.<table>` as described above and check the surface against the table:
+
+| Check     | What to verify                                                                                                                                                                                                             |
 | :-------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Source    | A 15-column base event schema, read directly from `<project>.<dataset>.<table>`; no typed views were created                                                                                                               |
-| Tabs      | All 5 tabs rendered: **Overview & Latency**, **Data Agents & Personas**, **Prompt, Response & SQL Explorer**, **Tokens & Embedding Suggestions** and **Error Attribution**                                                 |
-| KPI tiles | All 9 tiles rendered: **Total Turns**, **Turn Error Rate**, **P50 Turn Latency**, **P95 Turn Latency**, **Total Tokens**, **Thinking Tokens**, **Cached Tokens**, **Fast-Path Rate** and **Embedding Suggestion Coverage** |
-| Turns     | 289 turns across 1,685 events in the selected range                                                                                                                                                                        |
-| Empty IDs | 3 of those 289 turns were logged with an empty `invocation_id`; each is counted as a turn, keyed by its timestamp                                                                                                          |
-
-These figures are a snapshot of one table at one time, not a promise for yours. With no filters applied and the nine event types above in the selected range, **Total Turns** should equal the number of distinct non-empty `invocation_id` values (trimmed of surrounding whitespace), plus one turn for each distinct timestamp among the events logged with an empty `invocation_id`.
+| Source    | A 15-column base event schema, read directly from `<project>.<dataset>.<table>`; no typed views are created                                                                                                                |
+| Tabs      | All 5 tabs render: **Overview & Latency**, **Data Agents & Personas**, **Prompt, Response & SQL Explorer**, **Tokens & Embedding Suggestions** and **Error Attribution**                                                   |
+| KPI tiles | All 9 tiles render: **Total Turns**, **Turn Error Rate**, **P50 Turn Latency**, **P95 Turn Latency**, **Total Tokens**, **Thinking Tokens**, **Cached Tokens**, **Fast-Path Rate** and **Embedding Suggestion Coverage**   |
+| Turns     | With no filters applied and the nine allowlisted event types in the selected range, **Total Turns** equals `COUNT(DISTINCT COALESCE(NULLIF(TRIM(invocation_id), ''), NULLIF(TRIM(trace_id), ''), NULLIF(TRIM(session_id), ''), CAST(timestamp AS STRING)))` over rows where `invocation_id IS NOT NULL` |
+| Empty IDs | Events logged with an empty `invocation_id` fall back to `trace_id`, then `session_id`, then `CAST(timestamp AS STRING)` so multi-event turns sharing a trace or session stay grouped as one turn while `NULL` rows remain outside any turn |
 
 ### Related docs
 

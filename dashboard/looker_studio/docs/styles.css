@@ -360,6 +360,23 @@ input:focus-visible {
   border-left-color: var(--warning);
 }
 
+#bqca-template-note {
+  margin: 0 0 16px;
+  padding: 13px 15px;
+  border-radius: 10px;
+  font-size: 0.78rem;
+  line-height: 1.48;
+  overflow-wrap: anywhere;
+}
+
+#bqca-template-note .advanced-bqca-options {
+  margin-top: 8px;
+}
+
+#bqca-template-note .advanced-bqca-options p {
+  margin: 6px 0 0;
+}
+
 /* Critical recovery guidance must read as body text, not fine print
    (#445): failure diagnosis and privacy instructions stay at >= 16px. */
 #report-not-shared {

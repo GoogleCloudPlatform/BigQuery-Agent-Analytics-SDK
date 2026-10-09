@@ -26,7 +26,7 @@ publishing_mode: MANUAL
 
 reviewed_template_sql:
   path: sql/bqca_events_v1.template.sql
-  sha256: a6e4a2614839f1a6633d0188b1b21fc94f4dfaa3202d90e581177afc3db399b2
+  sha256: dba90a442905d21535f3787842fee801a1e59c593572aaac11e559af90ac812d
 
 # Required settings on the published Looker Studio BlockDatasource (`ds0`).
 # `_event_date_`, `_timestamp_`, and `_event_hour_` must keep native date/time
@@ -58,10 +58,10 @@ block_datasource:
 # `spec/bqca_dashboard_template.json`, so mutating any component or metric fails CI.
 live_template_verification:
   verified_date: "2026-10-08"
-  repository_sql_sha256: a6e4a2614839f1a6633d0188b1b21fc94f4dfaa3202d90e581177afc3db399b2
-  pages_sha256: 61f7867111ab1efe08d41c74c00c2af4fcc88d04e6d8d96d52c4c629ba0549cc
-  manifest_sha256: 35b5a26d2784be02f4059db4626b8b36d2d87f05e8423db4094f27ba3be6d963
-  template_bundle_sha256: 035f308b9d4d445f388e815124b339a18d5344de16a6a4795aa01ae17089ad5f
+  repository_sql_sha256: dba90a442905d21535f3787842fee801a1e59c593572aaac11e559af90ac812d
+  pages_sha256: b3c14c7dfc8ed51690f7f3e0ac6d24506c31dc63038591f479c51362715a89c4
+  manifest_sha256: fb75d8fe9bc046bb2e494b58ff11e0d71297a11843463915533faae1506884a9
+  template_bundle_sha256: 1c094fd9f45b137639901a6065d86d72e35c8d5acfe5c85ceb3039bc93e0e94c
   method:
     - data_studio_web_service_publish_datasource
     - data_studio_web_service_get_block_datasource
@@ -70,8 +70,8 @@ live_template_verification:
   publish_datasource:
     health: HEALTHY
     versions:
-      hydrated_bqca_table: 1791503488088
-      canonical_sentinel_table: 1791503611559
+      hydrated_bqca_table: 1791564609624
+      canonical_sentinel_table: 1791564700330
   execute_query:
     # hydrated_bqca_table is a sanitized live BQCA Prompt & Response Logging
     # table conforming to the 15-column BQAA base schema with recent events

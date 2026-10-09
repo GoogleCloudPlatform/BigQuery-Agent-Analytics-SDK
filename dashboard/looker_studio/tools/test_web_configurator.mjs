@@ -1650,7 +1650,7 @@ assert.match(
 );
 assert.match(
   bqcaPageSource,
-  /id="report-not-shared"[\s\S]*?pull\/515" data-profile-only="bqca">[\s\S]*?Self-Hosted Streamlit BQCA Dashboard/,
+  /id="report-not-shared"[\s\S]*?<span data-profile-only="bqca">[\s\S]*?pull\/515"[\s\S]*?Self-Hosted Streamlit BQCA Dashboard/,
   "the BQCA #report-not-shared explainer links PR #515 and the Self-Hosted Streamlit BQCA Dashboard",
 );
 assert.match(
@@ -1929,6 +1929,51 @@ for (const [pathname, expected] of [
 delete window.location.pathname;
 delete window.history;
 resetPageState("");
+
+// N6 & P3-6: Verify in both index.html and bqca/index.html that
+// #bqca-template-note is placed inside <form id="configurator"> above
+// #create-dashboard, and that the BQCA-specific #report-not-shared copy does
+// not tell BQCA users to try a personal account, report account class, or read
+// raw CLI flags outside <details class="advanced-bqca-options">.
+for (const [relPath, html] of [
+  ["docs/index.html", pageSource],
+  ["docs/bqca/index.html", bqcaPageSource],
+]) {
+  const formBlock = html.split('id="configurator"', 2)[1].split("</form>", 1)[0];
+  const noteIdx = formBlock.indexOf('id="bqca-template-note"');
+  const ctaIdx = formBlock.indexOf('id="create-dashboard"');
+  assert.ok(
+    noteIdx !== -1 && ctaIdx !== -1 && noteIdx < ctaIdx,
+    `${relPath}: #bqca-template-note must precede #create-dashboard inside #configurator`,
+  );
+
+  const reportNotShared = html
+    .split('id="report-not-shared">', 2)[1]
+    .split("</aside>", 1)[0];
+  const bqcaSpanMatch = reportNotShared.match(
+    /<span data-profile-only="bqca"[^>]*>([\s\S]*?)<\/span>/,
+  );
+  assert.ok(
+    bqcaSpanMatch,
+    `${relPath}: #report-not-shared must include BQCA-scoped span`,
+  );
+  const bqcaCopy = bqcaSpanMatch[1];
+  assert.doesNotMatch(
+    bqcaCopy,
+    /try a personal account/i,
+    `${relPath}: BQCA #report-not-shared must not advise trying a personal account`,
+  );
+  assert.doesNotMatch(
+    bqcaCopy,
+    /personal or part of an organization/i,
+    `${relPath}: BQCA #report-not-shared must not ask for personal vs org account class`,
+  );
+  assert.doesNotMatch(
+    bqcaCopy,
+    /--custom-sql-out/,
+    `${relPath}: BQCA #report-not-shared must keep raw CLI flags inside the collapsed details block`,
+  );
+}
 
 console.log(
   "web configurator OK: single-field states, error classes, Linking API URL deterministic, and ADK/BQCA profiles",

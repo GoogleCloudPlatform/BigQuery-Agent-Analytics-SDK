@@ -49,7 +49,7 @@ billing project is supported as an optional advanced setting.
 | `spec/compatibility_profile.json` | Machine-readable ADK source contract: one base table, 15 required columns, no generated views |
 | `spec/bqca_chart_manifest.yaml` | Consumer snapshot of the dedicated 7-page tool-free BQCA template: 7 pages, 34 components (21 scorecards + 13 charts/tables), responsive 12-column section geometry (`DASHBOARD_LAYOUT_MODE_RESPONSIVE`), and 41-field `BlockDatasource` schema |
 | `spec/bqca_product_contract.yaml` | Product contract for the dedicated 7-page tool-free BQCA template (`1ffb0888-20ea-451f-aeb8-69fc37973335`, alias `ds0`) |
-| `spec/bqca_dashboard_template.json` | Portable Looker Studio JSON template bundle for the 7-page BQCA report, 34 component specs, responsive grid layout, and 41-field `BlockDatasource` schema |
+| `spec/bqca_dashboard_template.json` | Offline Looker Studio report layout & datasource specification bundle consumed by `tools/validate_contracts.py` and CI contract tests to verify 7-page, 34-component, 12-column responsive-grid, and 41-field `BlockDatasource` parity offline |
 | `spec/bqca_compatibility_profile.json` | Machine-readable BQCA source contract: `bqca_prompt_response_logs` base table, 15 required columns, 9 allowlisted BQCA event types, 4 excluded tool/request event types |
 | `sql/events_v1.sql.tmpl` | Reviewed base-table query (**generated** by `tools/gen_events_tmpl.py`) |
 | `sql/events_v1.template.sql` | Sentinel-rendered SQL embedded in the canonical report (**generated** by `tools/render_template.py`) |
@@ -307,7 +307,13 @@ opens your BQCA table in the dedicated
 [7-page tool-free BQCA template](https://lookerstudio.google.com/reporting/1ffb0888-20ea-451f-aeb8-69fc37973335)
 (`report_id: 1ffb0888-20ea-451f-aeb8-69fc37973335`, data source alias `ds0`)
 backed by `sql/bqca_events_v1.template.sql` (`spec/bqca_product_contract.yaml`,
-`spec/bqca_chart_manifest.yaml`).
+`spec/bqca_chart_manifest.yaml`). Public external link sharing (`allUsers`
+`LINK_VIEWER`) is currently pending allowlist approval (`link_access:
+PENDING_PUBLIC_SHARING_ALLOWLIST` in `bindings/bqca_report_template.yaml`,
+tracked on [#515](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/515));
+external non-owner Google accounts should use the
+[Self-Hosted Streamlit BQCA Dashboard](../../dashboards/streamlit/)
+(`dashboards/streamlit/`) or `--custom-sql-out` while public sharing is pending.
 Because BQCA never logs tool events, all tool-usage pages, tool-latency series,
 and tool-error charts are omitted from the template:
 
@@ -316,8 +322,10 @@ and tool-error charts are omitted from the template:
 - **Data Agents & Turns** (`p_a89cfece`) — active data agents (`data_agent_id`),
   total turns (`invocation_id`), completed turns (`completed_turn_id`), generated
   SQL queries (`extracted_sql`), and volume/latency/errors by `data_agent_id`
-  (session counts are turn counts because every BQCA turn starts a new session,
-  and `invocation_id` is normalized with a timestamp fallback for blank strings);
+  (turns are keyed by `invocation_id` — falling back to `trace_id`,
+  `session_id`, then `timestamp` when `invocation_id` is blank while preserving
+  `NULL` when `invocation_id IS NULL` — because a session can contain multiple
+  turns);
 - **LLM Interactions & Embedding Suggestions** (`p_97efe693`) — model calls
   (`llm_latency_ms`), average LLM call latency, average time to first token
   (`ttft_ms`), suggested columns proposed (`similar_queries_count`), and token /
@@ -329,10 +337,11 @@ and tool-error charts are omitted from the template:
   (`turn_latency_ms`), LLM latency (`llm_latency_ms`), event latency
   (`total_latency_ms`), and Fast-Path vs standard NL2SQL comparison
   (`fast_path_label`);
-- **Errors (BQCA 3-Condition)** (`p_88bcf5f8`) — errors across all three BQCA
-  error conditions (`is_error`), attributed by `data_agent_id`, `event_type`, and
-  `error_message` (synthesizing `[EVENT_TYPE: status=STATUS]` when `is_error` is
-  true and `error_message` is null/blank);
+- **Errors (BQCA 3-Condition)** (`p_88bcf5f8`) — error events and **Distinct
+  Error Signatures** across all three BQCA error conditions (`is_error`),
+  attributed by `data_agent_id`, `event_type`, and `error_message` (synthesizing
+  `[EVENT_TYPE: status=STATUS]` when `is_error` is true and `error_message` is
+  null/blank);
 - **Prompt, Response & SQL Inspector** (`p_b87a335e`) — event-level table of
   `event_date`, `session_id`, `data_agent_id`, `persona`, `event_type`,
   `fast_path_label`, `user_prompt_text`, `extracted_sql`, `summary_text`,
