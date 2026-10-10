@@ -59,10 +59,14 @@ def _isolate_env_and_query_state(monkeypatch: pytest.MonkeyPatch):
   queries._run_query_cached.clear()
   queries._SEEN_RUN_IDS.clear()
   queries._NEXT_RUN_ID = 0
+  st.sidebar._form_data = None
+  st._main._form_data = None
   yield
   queries._run_query_cached.clear()
   queries._SEEN_RUN_IDS.clear()
   queries._NEXT_RUN_ID = 0
+  st.sidebar._form_data = None
+  st._main._form_data = None
 
 
 @pytest.fixture
@@ -265,8 +269,7 @@ def test_sql_builders_and_scope(sample_refs, sample_window):
   )
   assert (
       "('___ALL___' IN UNNEST(@event_types) OR e.event_type IN"
-      " UNNEST(@event_types))"
-      in scope_aliased
+      " UNNEST(@event_types))" in scope_aliased
   )
 
   # 1. overview_totals (omits @event_types, includes llm_responses subquery)
@@ -780,9 +783,7 @@ def test_color_map():
     assert cm_coll["k2"] == theme.categorical[1]
 
     # Overflow past 8 slots wraps cleanly via modulo
-    cm_over = charts.color_map(
-        "overflow", [f"n_{i}" for i in range(12)], theme
-    )
+    cm_over = charts.color_map("overflow", [f"n_{i}" for i in range(12)], theme)
     assert len(cm_over) == 13
     assert cm_over["n_8"] == theme.categorical[8 % len(theme.categorical)]
 
@@ -911,6 +912,7 @@ def test_app_helpers_and_sidebar_connection(monkeypatch):
   monkeypatch.setenv("BQ_PROJECT_ID", "env-locked-project")
   monkeypatch.setenv("BQ_DATASET_ID", "env_dataset")
   with (
+      mock.patch.object(app.st.sidebar, "form", return_value=mock.MagicMock()),
       mock.patch.object(
           app.st,
           "text_input",
@@ -934,6 +936,7 @@ def test_app_helpers_and_sidebar_connection(monkeypatch):
   # 3. Blank dataset before Connect click does not render sidebar error
   monkeypatch.delenv("BQ_DATASET_ID", raising=False)
   with (
+      mock.patch.object(app.st.sidebar, "form", return_value=mock.MagicMock()),
       mock.patch.object(
           app.st, "text_input", side_effect=lambda label, value="", **kw: value
       ),
