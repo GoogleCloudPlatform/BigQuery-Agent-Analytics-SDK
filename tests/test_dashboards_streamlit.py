@@ -586,11 +586,12 @@ def test_job_stats_extraction_and_download_failure_recovery():
       total_bytes_processed=None,
       total_bytes_billed=None,
       ended=None,
+      cache_hit=False,
   )
   job_dead.reload.side_effect = RuntimeError("gone")
   assert queries._extract_job_stats(job_dead) is None
-  plain_exc = RuntimeError("download boom")
-  assert queries._query_failure(job_dead, plain_exc) is plain_exc
+  err = queries._query_failure("download boom", job_dead)
+  assert type(err) is RuntimeError and str(err) == "download boom"
 
   # 5. Result download failure retains job stats when known, or marks unknown
   mock_client = mock.MagicMock()
@@ -1152,7 +1153,23 @@ def test_apptest_sidebar_filters_and_connection_reset():
     assert at.session_state["applied_filters"].agents == ("agent-a",)
     assert at.session_state["applied_filters"].user_ids == ("user-1",)
 
-    # 3. Mutate BigQuery options to omit "agent-a" -> re-seeded and preserved
+    # 3. Clear selections while options are unchanged -> resets to ALL_SENTINEL
+    at.sidebar.multiselect(key="flt_agent").unselect("agent-a")
+    at.sidebar.multiselect(key="flt_user_id").unselect("user-1")
+    apply_btn = [b for b in at.sidebar.button if b.label == "Apply filters"][0]
+    apply_btn.click().run()
+    assert not at.exception
+    assert at.session_state["applied_filters"].agents == (models.ALL_SENTINEL,)
+    assert at.session_state["applied_filters"].user_ids == (
+        models.ALL_SENTINEL,
+    )
+
+    # 4. Re-select "agent-a", then mutate BigQuery options to omit "agent-a"
+    at.sidebar.multiselect(key="flt_agent").select("agent-a")
+    apply_btn = [b for b in at.sidebar.button if b.label == "Apply filters"][0]
+    apply_btn.click().run()
+    assert at.session_state["applied_filters"].agents == ("agent-a",)
+
     opts_state["opts"] = {
         "agent": ["agent-c", "agent-d"],
         "user_id": ["user-1", "user-2"],
@@ -1166,7 +1183,7 @@ def test_apptest_sidebar_filters_and_connection_reset():
     assert ms_agent.value == ["agent-a"]
     assert at.session_state["applied_filters"].agents == ("agent-a",)
 
-    # 4. Transient load_filter_options error reuses cached _filter_options
+    # 5. Transient load_filter_options error reuses cached _filter_options
     opts_state["opts"] = {}
     opts_state["res"] = models.QueryResult(
         df=pd.DataFrame(), error="Transient BQ failure"
@@ -1177,40 +1194,33 @@ def test_apptest_sidebar_filters_and_connection_reset():
         "agent-c",
         "agent-d",
     ]
+    assert at.session_state["applied_filters"].agents == ("agent-a",)
+    assert at.session_state["_selected_session_id"] == "sess-init-1"
+
+    # 6. Change Dataset ID -> resets all filters and session selection
     opts_state["opts"] = {
-        "agent": ["agent-c", "agent-d"],
+        "agent": ["agent-a", "agent-b"],
         "user_id": ["user-1", "user-2"],
         "event_type": ["start", "complete"],
         "session_id": ["sess-1", "sess-2"],
     }
     opts_state["res"] = empty_res
-
-    # 5. Apply a custom ID, then clear selection back to ALL_SENTINEL
-    at.sidebar.multiselect(key="flt_agent").set_value(["custom-agent-xyz"])
-    apply_btn = [b for b in at.sidebar.button if b.label == "Apply filters"][0]
-    apply_btn.click().run()
-    assert at.session_state["applied_filters"].agents == ("custom-agent-xyz",)
-
-    at.sidebar.multiselect(key="flt_agent").unselect("custom-agent-xyz")
-    apply_btn = [b for b in at.sidebar.button if b.label == "Apply filters"][0]
-    apply_btn.click().run()
-    assert at.session_state["applied_filters"].agents == (models.ALL_SENTINEL,)
-
-    # 6. Re-apply a filter, then change Dataset ID -> resets all filters
-    at.sidebar.multiselect(key="flt_agent").set_value(["agent-c"])
-    apply_btn = [b for b in at.sidebar.button if b.label == "Apply filters"][0]
-    apply_btn.click().run()
-    assert at.session_state["applied_filters"].agents == ("agent-c",)
-    assert at.session_state["_selected_session_id"] == "sess-init-1"
-
     [ti for ti in at.sidebar.text_input if ti.label == "Dataset ID"][0].input(
         "test_dataset_2"
     )
     [b for b in at.sidebar.button if b.label == "Connect"][0].click().run()
     assert not at.exception
     assert at.session_state["applied_filters"] == models.Filters()
+    assert at.session_state["flt_agent"] == []
     assert at.sidebar.multiselect(key="flt_agent").value == []
     assert "_selected_session_id" not in at.session_state
+
+    # 7. Apply a custom ID not in options on the freshly reset form
+    at.sidebar.multiselect(key="flt_agent").set_value(["custom-agent-xyz"])
+    apply_btn = [b for b in at.sidebar.button if b.label == "Apply filters"][0]
+    apply_btn.click().run()
+    assert not at.exception
+    assert at.session_state["applied_filters"].agents == ("custom-agent-xyz",)
 
 
 def test_apptest_lazy_tabs_and_session_trace_preservation(
@@ -1257,18 +1267,24 @@ def test_apptest_lazy_tabs_and_session_trace_preservation(
     assert "Overview stats" in fetched_labels
     assert not any(
         lbl in fetched_labels
-        for lbl in ("LLM totals", "Tool usage", "Recent sessions")
+        for lbl in ("LLM totals", "Tool invocations", "Recent sessions")
     )
 
     # 2. Switch across LLM & FinOps and Tools & Execution tabs
     fetched_labels.clear()
     controls[0].set_value("LLM & FinOps").run()
-    assert "LLM totals" in fetched_labels and "Tool usage" not in fetched_labels
+    assert (
+        "LLM totals" in fetched_labels
+        and "Tool invocations" not in fetched_labels
+    )
 
     fetched_labels.clear()
     controls = [c for c in at.segmented_control if c.label == "Dashboard"]
     controls[0].set_value("Tools & Execution").run()
-    assert "Tool usage" in fetched_labels and "LLM totals" not in fetched_labels
+    assert (
+        "Tool invocations" in fetched_labels
+        and "LLM totals" not in fetched_labels
+    )
 
     # 3. Switch to Sessions & Traces tab -> Session selectbox renders
     controls = [c for c in at.segmented_control if c.label == "Dashboard"]
