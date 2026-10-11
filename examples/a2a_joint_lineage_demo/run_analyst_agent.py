@@ -58,8 +58,6 @@ from google.adk.runners import InMemoryRunner
 from google.genai.types import Content
 from google.genai.types import Part
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-
 USER_ID = os.getenv("DEMO_USER_ID", "u-a2a-demo-analyst")
 PER_QUESTION_TIMEOUT_S = int(os.getenv("DEMO_ANALYST_TIMEOUT_S", "300"))
 

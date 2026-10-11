@@ -102,13 +102,10 @@ def _resolve(ontology: Ontology, binding: Binding) -> ResolvedGraph:
   """Produce a ``ResolvedGraph`` from validated ontology+binding inputs."""
   _reject_extends(ontology)
 
-  # Index ontology and binding by name so the per-entity / per-edge
+  # Index the ontology by name so the per-entity / per-edge
   # resolution steps are straight lookups rather than linear scans.
   entity_map: dict[str, Entity] = {e.name: e for e in ontology.entities}
   rel_map: dict[str, Relationship] = {r.name: r for r in ontology.relationships}
-  entity_binding_map: dict[str, EntityBinding] = {
-      eb.name: eb for eb in binding.entities
-  }
 
   # Build node tables first. Edge tables reference node tables by
   # alias/key-columns, so node tables have to exist before we can
