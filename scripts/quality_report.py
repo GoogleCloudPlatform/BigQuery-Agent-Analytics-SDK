@@ -52,11 +52,9 @@ warnings.filterwarnings("ignore")
 
 import argparse
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import json
 import logging
-import math
 import os
 import sys
 import time

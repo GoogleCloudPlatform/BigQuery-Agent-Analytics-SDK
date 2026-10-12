@@ -45,7 +45,6 @@ import asyncio
 import os
 import random
 import sys
-from typing import Any
 
 _DECISION_PROMPTS = (
     "We need an audience segment decision for the new "

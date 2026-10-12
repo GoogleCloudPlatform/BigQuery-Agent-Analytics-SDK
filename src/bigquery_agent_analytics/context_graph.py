@@ -386,13 +386,6 @@ DELETE FROM `{project}.{dataset}.{biz_table}`
 WHERE session_id IN UNNEST(@session_ids)
 """
 
-_INSERT_BIZ_NODES_QUERY = """\
-INSERT INTO `{project}.{dataset}.{biz_table}`
-  (biz_node_id, span_id, session_id, node_type, node_value, confidence)
-VALUES
-  {values}
-"""
-
 _CREATE_CROSS_LINKS_TABLE_QUERY = """\
 CREATE TABLE IF NOT EXISTS `{project}.{dataset}.{cross_links_table}` (
   link_id STRING,
@@ -616,20 +609,6 @@ SELECT
 FROM `{project}.{dataset}.{candidates_table}` c
 WHERE c.decision_id = @decision_id
 ORDER BY c.score DESC
-"""
-
-_CANDIDATES_FOR_SESSION_QUERY = """\
-SELECT
-  c.candidate_id,
-  c.decision_id,
-  c.session_id,
-  c.name,
-  c.score,
-  c.status,
-  c.rejection_rationale
-FROM `{project}.{dataset}.{candidates_table}` c
-WHERE c.session_id = @session_id
-ORDER BY c.decision_id, c.score DESC
 """
 
 _PROPERTY_GRAPH_DDL = """\

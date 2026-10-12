@@ -493,7 +493,6 @@ def resolve_from_graph_spec(spec) -> ResolvedGraph:
         )
         for p in e.properties
     )
-    session_col = getattr(e.binding, "from_session_column", None)
     # GraphSpec has already lost logical names — key_columns and
     # ontology_key_primary are both the physical column name.
     key_cols = tuple(e.keys.primary)
