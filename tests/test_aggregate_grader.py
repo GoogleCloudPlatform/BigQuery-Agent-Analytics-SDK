@@ -75,6 +75,41 @@ class TestWeightedStrategy:
     verdict = strategy.aggregate(results)
     assert verdict.passed is False
 
+  def test_score_equal_to_threshold_passes(self):
+    """The threshold is inclusive: a score exactly on it passes."""
+    strategy = WeightedStrategy(threshold=0.75)
+    results = [
+        GraderResult(grader_name="a", scores={"m": 1.0}, passed=True),
+        GraderResult(grader_name="b", scores={"m": 0.5}, passed=True),
+    ]
+    verdict = strategy.aggregate(results)
+    # (1.0 + 0.5) / 2 = 0.75, exact in binary floating point.
+    assert verdict.final_score == 0.75
+    assert verdict.passed is True
+
+  def test_zero_total_weight_scores_zero(self):
+    """All-zero weights give a failing 0.0 instead of dividing by zero."""
+    strategy = WeightedStrategy(weights={"a": 0.0, "b": 0.0}, threshold=0.5)
+    results = [
+        GraderResult(grader_name="a", scores={"m": 1.0}, passed=True),
+        GraderResult(grader_name="b", scores={"m": 1.0}, passed=True),
+    ]
+    verdict = strategy.aggregate(results)
+    assert verdict.final_score == 0.0
+    assert verdict.passed is False
+
+  def test_metric_scores_averaged_per_grader(self):
+    """A grader's metric scores are averaged, then weighted per grader."""
+    strategy = WeightedStrategy(weights={"a": 3.0, "b": 1.0})
+    results = [
+        GraderResult(grader_name="a", scores={"x": 1.0, "y": 0.0}, passed=True),
+        GraderResult(grader_name="b", scores={"z": 1.0}, passed=True),
+    ]
+    verdict = strategy.aggregate(results)
+    # a averages to 0.5: (0.5*3 + 1.0*1) / (3+1) = 0.625. Weighting each
+    # metric on its own would give (1.0*3 + 0.0*3 + 1.0*1) / 7 = 0.571.
+    assert verdict.final_score == pytest.approx(0.625)
+
   def test_empty_results(self):
     strategy = WeightedStrategy()
     verdict = strategy.aggregate([])

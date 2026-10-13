@@ -94,11 +94,6 @@ DEFAULT_COMPLETION_EVENT_TYPE = "AGENT_COMPLETED"
 # tables; same convention as other SDK-internal artifacts.
 DEFAULT_STATE_TABLE_NAME = "_bqaa_materialization_state"
 
-# Default property-graph name when the binding's ``ontology`` field
-# is the spec name. ``ontology-build`` falls back to the same name
-# unless ``--graph-name`` overrides it.
-_DEFAULT_GRAPH_NAME_SENTINEL = "<from-spec>"
-
 
 _STATE_TABLE_DDL = """\
 CREATE TABLE IF NOT EXISTS `{table_ref}` (

@@ -48,7 +48,7 @@ billing project is supported as an optional advanced setting.
 | `spec/product_contract.yaml` | Current product-layer titles, layout, filters, live fixes, and intentional divergences from the pinned block |
 | `spec/compatibility_profile.json` | Machine-readable ADK source contract: one base table, 15 required columns, no generated views |
 | `spec/bqca_chart_manifest.yaml` | Consumer snapshot of the dedicated 7-page tool-free BQCA template: 7 pages, 34 components (21 scorecards + 13 charts/tables), responsive 12-column section geometry (`DASHBOARD_LAYOUT_MODE_RESPONSIVE`), and 41-field `BlockDatasource` schema |
-| `spec/bqca_product_contract.yaml` | Product contract for the dedicated 7-page tool-free BQCA template (`1ffb0888-20ea-451f-aeb8-69fc37973335`, alias `ds0`) |
+| `spec/bqca_product_contract.yaml` | Product contract for the dedicated 7-page tool-free BQCA template (`42e79a1f-a979-4de8-911f-80d5a99543d5`, alias `ds0`) |
 | `spec/bqca_dashboard_template.json` | Offline Looker Studio report layout & datasource specification bundle consumed by `tools/validate_contracts.py` and CI contract tests to verify 7-page, 34-component, 12-column responsive-grid, and 41-field `BlockDatasource` parity offline |
 | `spec/bqca_compatibility_profile.json` | Machine-readable BQCA source contract: `bqca_prompt_response_logs` base table, 15 required columns, 9 allowlisted BQCA event types, 4 excluded tool/request event types |
 | `sql/events_v1.sql.tmpl` | Reviewed base-table query (**generated** by `tools/gen_events_tmpl.py`) |
@@ -58,7 +58,7 @@ billing project is supported as an optional advanced setting.
 | `sql/bqca_events_v1.template.sql` | Sentinel-rendered BQCA reporting query for a custom-query data source (**generated** by `tools/render_template.py --profile bqca`) |
 | `sql/bqca_preflight.sql.tmpl` / `.template.sql` | Advisory 30-day BQCA data profile, run by the hydration helper after the structural check |
 | `bindings/template_bindings.yaml` | Executable sentinel bindings (real fixture identifiers, not placeholders) |
-| `bindings/bqca_report_template.yaml` | BQCA profile: dedicated 7-page tool-free template (`1ffb0888-20ea-451f-aeb8-69fc37973335`, alias `ds0`), BQCA report and data-source names, default table, custom query |
+| `bindings/bqca_report_template.yaml` | BQCA profile: dedicated 7-page tool-free template (`42e79a1f-a979-4de8-911f-80d5a99543d5`, alias `ds0`), BQCA report and data-source names, default table, custom query |
 | `bindings/bqca_template_bindings.yaml` | BQCA sentinel bindings for the embedded `ds0` custom query, so `sqlReplace` can rebind them |
 | `tools/gen_events_tmpl.py` | Base-table reporting-query generator |
 | `tools/gen_bqca_events_tmpl.py` | BQCA reporting-query generator (nine-event allowlist, one base-table scan) |
@@ -113,7 +113,7 @@ Canonical published templates:
 - **ADK Agents (8 pages, alias `ds230`)**:
   [BigQuery Agent Analytics — Template](https://lookerstudio.google.com/reporting/5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40)
 - **BQCA Prompt & Response Logging (7 pages, tool-free, alias `ds0`)**:
-  [BigQuery Conversational Analytics (BQCA) — Prompt & Response Logging](https://lookerstudio.google.com/reporting/1ffb0888-20ea-451f-aeb8-69fc37973335)
+  [BigQuery Conversational Analytics (BQCA) — Prompt & Response Logging](https://lookerstudio.google.com/reporting/42e79a1f-a979-4de8-911f-80d5a99543d5)
 
 All eight report pages share one report-level date control. It defaults to a
 rolling 90-day window including today; changing the range on any page persists
@@ -304,16 +304,19 @@ table.
 
 **BQCA uses a dedicated 7-page tool-free template.** The 1-click button
 opens your BQCA table in the dedicated
-[7-page tool-free BQCA template](https://lookerstudio.google.com/reporting/1ffb0888-20ea-451f-aeb8-69fc37973335)
-(`report_id: 1ffb0888-20ea-451f-aeb8-69fc37973335`, data source alias `ds0`)
+[7-page tool-free BQCA template](https://lookerstudio.google.com/reporting/42e79a1f-a979-4de8-911f-80d5a99543d5)
+(`report_id: 42e79a1f-a979-4de8-911f-80d5a99543d5`, data source alias `ds0`)
 backed by `sql/bqca_events_v1.template.sql` (`spec/bqca_product_contract.yaml`,
-`spec/bqca_chart_manifest.yaml`). Public external link sharing (`allUsers`
-`LINK_VIEWER`) is currently pending allowlist approval (`link_access:
-PENDING_PUBLIC_SHARING_ALLOWLIST` in `bindings/bqca_report_template.yaml`,
-tracked on [#515](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/515));
-external non-owner Google accounts should use the
+`spec/bqca_chart_manifest.yaml`). The report owner turned on public link
+sharing (anyone with the link) on 2026-10-09 (`link_access: PUBLIC` in
+`bindings/bqca_report_template.yaml`), but the copy check from a signed-in
+outside Google account has not run yet (`external_access_verification.status:
+PENDING_EXTERNAL_IDENTITY_CHECK`, tracked on
+[#515](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/515)),
+so external access is not yet verified. External non-owner Google accounts
+that see "This report isn't shared with you" should use the
 [Self-Hosted Streamlit BQCA Dashboard](../../dashboards/streamlit/)
-(`dashboards/streamlit/`) or `--custom-sql-out` while public sharing is pending.
+(`dashboards/streamlit/`) or `--custom-sql-out`.
 Because BQCA never logs tool events, all tool-usage pages, tool-latency series,
 and tool-error charts are omitted from the template:
 

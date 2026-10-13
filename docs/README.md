@@ -90,3 +90,9 @@ deployed property graph.
 | [python_udf_support_design.md](python_udf_support_design.md) | BigQuery Python UDF architecture |
 | [remote_function_rationale.md](remote_function_rationale.md) | Cloud Run remote function rationale |
 | [implementation_plan_remote_function.md](implementation_plan_remote_function.md) | Remote function implementation plan |
+
+## Development
+
+| Document | Description |
+|----------|-------------|
+| [mutation_testing.md](mutation_testing.md) | Report-only mutation testing of the core scoring modules: run it locally, read the report, triage survivors. Never gates a merge |

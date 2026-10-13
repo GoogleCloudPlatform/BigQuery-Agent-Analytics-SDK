@@ -1,0 +1,9 @@
+# Report-only mutation testing: scripts/mutation_testing.py,
+# docs/mutation_testing.md. Not a pyproject.toml extra on purpose: neither the
+# package nor the regular test suite needs it.
+#
+#   pip install -e ".[dev]" -r scripts/requirements-mutation.txt
+#
+# Pinned exactly because the report reads mutmut's on-disk results
+# (mutants/*.meta) and mutant naming, which follow this version.
+mutmut==3.8.0

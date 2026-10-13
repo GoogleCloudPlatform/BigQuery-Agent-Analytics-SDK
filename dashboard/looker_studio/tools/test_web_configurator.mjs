@@ -1346,7 +1346,7 @@ const bqcaProfile = resolveProfileConfig("bqca");
 assert.equal(bqcaProfile, REPORT_CONFIG.profiles.bqca);
 assert.equal(bqcaProfile.id, "bqca");
 assert.equal(bqcaProfile.label, "BQCA Prompt & Response Logging");
-assert.equal(bqcaProfile.reportId, "1ffb0888-20ea-451f-aeb8-69fc37973335");
+assert.equal(bqcaProfile.reportId, "42e79a1f-a979-4de8-911f-80d5a99543d5");
 assert.equal(bqcaProfile.dataSourceAlias, "ds0");
 assert.deepEqual(
   bqcaProfile.sentinels,
@@ -1423,7 +1423,7 @@ assert.equal(bqcaDashboard.origin, "https://lookerstudio.google.com");
 assert.equal(bqcaDashboard.pathname, "/reporting/create");
 assert.equal(
   bqcaDashboard.searchParams.get("c.reportId"),
-  "1ffb0888-20ea-451f-aeb8-69fc37973335",
+  "42e79a1f-a979-4de8-911f-80d5a99543d5",
 );
 assert.equal(bqcaDashboard.searchParams.get("c.mode"), "view");
 assert.equal(
@@ -1611,8 +1611,8 @@ assert.match(
 );
 assert.match(
   bqcaPageSource,
-  /<aside[^>]*class="notice notice-warning"[^>]*id="bqca-template-note"[^>]*>.*Template not yet publicly shared for external accounts.*<details class="advanced-bqca-options">/s,
-  "the BQCA note prominently warns about pending external link sharing and collapses advanced CLI/Streamlit options",
+  /<aside[^>]*class="notice notice-warning"[^>]*id="bqca-template-note"[^>]*>.*Public link sharing is on; the outside-account copy check is pending\..*<details class="advanced-bqca-options">/s,
+  "the BQCA note says public link sharing is on but the outside-account copy check is pending, and collapses advanced CLI/Streamlit options",
 );
 const bqcaHeroLedeMatch = bqcaPageSource.match(
   /<p class="lede" data-profile-only="bqca">([\s\S]*?)<\/p>/,

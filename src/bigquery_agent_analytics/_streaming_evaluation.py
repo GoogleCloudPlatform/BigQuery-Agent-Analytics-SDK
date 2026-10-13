@@ -35,7 +35,6 @@ STREAMING_RESULTS_TABLE = "streaming_evaluation_results"
 STREAMING_STATE_TABLE = "_streaming_eval_state"
 STREAMING_RUNS_TABLE = "_streaming_eval_runs"
 
-DEFAULT_POLL_INTERVAL_MINUTES = 5
 DEFAULT_OVERLAP_MINUTES = 15
 DEFAULT_INITIAL_LOOKBACK_MINUTES = 30
 
@@ -139,15 +138,6 @@ def classify_trigger_kind(
   if status == "ERROR" and error_message is not None:
     return TRIGGER_KIND_ERROR_EVENT
   return None
-
-
-def is_launch_trigger_row(
-    event_type: str | None,
-    status: str | None = None,
-    error_message: str | None = None,
-) -> bool:
-  """Return ``True`` when a row qualifies for launch trigger handling."""
-  return classify_trigger_kind(event_type, status, error_message) is not None
 
 
 def build_trigger_dedupe_key(
