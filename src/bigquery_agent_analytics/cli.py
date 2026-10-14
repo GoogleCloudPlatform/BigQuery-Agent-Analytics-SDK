@@ -602,6 +602,31 @@ def evaluate(
 _FEEDBACK_SNIPPET_MAX = 120
 
 
+def _escaped_log_pieces(text: str, quote: bool = False) -> list[str]:
+  """Escape *text* for one CI log line, one piece per character.
+
+  A backslash, and a double quote when *quote* is set, gets a backslash.
+  A non-printable character, such as a line break or an ANSI escape,
+  becomes its Python escape (``\\n``, ``\\x1b``), and the ``[`` after
+  ``##`` becomes ``\\x5b``. Session IDs and judge feedback come from
+  outside the CI job, and the GitHub Actions runner runs a stdout or
+  stderr line as a workflow command when it starts with ``::name::`` or
+  contains ``##[name]``. The escaped text never breaks the line or
+  contains ``##[``.
+  """
+  pieces = []
+  for index, char in enumerate(text):
+    if char == "\\" or (quote and char == '"'):
+      pieces.append("\\" + char)
+    elif not char.isprintable():
+      pieces.append(ascii(char)[1:-1])
+    elif char == "[" and text[max(index - 2, 0) : index] == "##":
+      pieces.append("\\x5b")
+    else:
+      pieces.append(char)
+  return pieces
+
+
 def _format_feedback_snippet(
     feedback: Optional[str], max_chars: int = _FEEDBACK_SNIPPET_MAX
 ) -> Optional[str]:
@@ -610,8 +635,8 @@ def _format_feedback_snippet(
   Collapses internal whitespace runs (including newlines) to a single
   space so the snippet fits on one CI log line, then truncates to
   ``max_chars`` with a trailing ``…`` when the original was longer.
-  Escapes backslashes and double quotes so the result is safe inside the
-  emitted ``feedback="..."`` field.
+  Escapes it with :func:`_escaped_log_pieces`, double quotes included,
+  so the result is safe inside the emitted ``feedback="..."`` field.
   Returns ``None`` for empty / whitespace-only input so callers can
   cleanly skip the field.
   """
@@ -621,7 +646,8 @@ def _format_feedback_snippet(
   if not collapsed:
     return None
 
-  escaped = collapsed.replace("\\", "\\\\").replace('"', '\\"')
+  pieces = _escaped_log_pieces(collapsed, quote=True)
+  escaped = "".join(pieces)
 
   if len(escaped) <= max_chars:
     return escaped
@@ -631,12 +657,11 @@ def _format_feedback_snippet(
   parts = []
   length = 0
 
-  for char in collapsed:
-    escaped_char = char.replace("\\", "\\\\").replace('"', '\\"')
-    if length + len(escaped_char) > budget:
+  for piece in pieces:
+    if length + len(piece) > budget:
       break
-    parts.append(escaped_char)
-    length += len(escaped_char)
+    parts.append(piece)
+    length += len(piece)
 
   return "".join(parts).rstrip() + "\u2026"
 
@@ -653,7 +678,9 @@ def _emit_evaluate_failures(
   criteria). For LLM-judge failures the line also carries a bounded
   ``feedback="…"`` snippet drawn from ``SessionScore.llm_feedback``
   so CI logs explain *why* the judge said the session failed without
-  forcing the reader to chase the JSON output.
+  forcing the reader to chase the JSON output. The session ID and the
+  snippet are escaped with :func:`_escaped_log_pieces`, so event data
+  cannot break a FAIL line or put a workflow command in it.
 
   A failing session is guaranteed to produce at least one FAIL line —
   never just the summary header. Capped at ``max_sessions`` most-recent
@@ -670,6 +697,7 @@ def _emit_evaluate_failures(
   )
   shown = failed[:max_sessions]
   for s in shown:
+    session_id = "".join(_escaped_log_pieces(s.session_id))
     feedback_snippet = _format_feedback_snippet(s.llm_feedback)
     emitted_for_session = False
     for metric_name, score in s.scores.items():
@@ -694,7 +722,7 @@ def _emit_evaluate_failures(
 
       observed = detail.get("observed")
       budget = detail.get("budget")
-      parts = [f"FAIL session={s.session_id} metric={metric_name}"]
+      parts = [f"FAIL session={session_id} metric={metric_name}"]
       if observed is not None:
         if isinstance(observed, float):
           parts.append(f"observed={observed:.4g}")
@@ -728,7 +756,7 @@ def _emit_evaluate_failures(
     # while the session itself is flagged failed (a bug upstream) — we
     # still point the reader at the session id.
     if not emitted_for_session:
-      fallback = f"  FAIL session={s.session_id}"
+      fallback = f"  FAIL session={session_id}"
       if feedback_snippet is not None:
         fallback += f' feedback="{feedback_snippet}"'
       else:
