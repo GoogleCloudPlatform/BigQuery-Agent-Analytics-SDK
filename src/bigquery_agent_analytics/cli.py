@@ -598,7 +598,7 @@ def evaluate(
   except typer.Exit:
     raise
   except Exception as exc:
-    typer.echo(f"Error: {exc}", err=True)
+    _echo_error(exc)
     raise typer.Exit(code=2)
 
 
@@ -612,6 +612,17 @@ def _echo_report(report: EvaluationReport, fmt: str) -> None:
   writes its ``[`` as an escape that JSON and Python decode back to ``[``.
   """
   typer.echo(escape_encoded_log_text(format_output(report, fmt)))
+
+
+def _echo_error(exc: Exception) -> None:
+  """Print a gate's error on one line so a CI log cannot run text from it.
+
+  The error can quote stored data: BigQuery repeats the event value a
+  failed CAST read, and the EvalBench manifest checks quote the stored
+  values they reject. :func:`escape_log_text` escapes it like the FAIL
+  lines.
+  """
+  typer.echo(f"Error: {escape_log_text(str(exc))}", err=True)
 
 
 _FEEDBACK_SNIPPET_MAX = 120
@@ -2942,7 +2953,7 @@ def evalbench_score(
   except typer.Exit:
     raise
   except Exception as exc:  # noqa: BLE001
-    typer.echo(f"Error: {exc}", err=True)
+    _echo_error(exc)
     raise typer.Exit(code=2)
 
 

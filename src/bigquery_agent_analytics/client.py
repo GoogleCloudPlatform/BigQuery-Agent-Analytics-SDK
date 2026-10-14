@@ -59,6 +59,7 @@ from typing import Any, Optional
 from google.api_core import exceptions as gcp_exceptions
 from google.cloud import bigquery
 
+from ._ci_log import escape_log_text
 from ._telemetry import LabeledBigQueryClient
 from ._telemetry import make_bq_client
 from ._telemetry import with_sdk_labels
@@ -2708,8 +2709,13 @@ class Client:
           if not isinstance(score, SessionScore):
             raise TypeError("Evaluator must return a SessionScore")
         except Exception as exc:
+          # The session ID and the error can carry event data, and the
+          # CLI prints SDK warnings to stderr, which a CI runner parses
+          # for commands.
           logger.warning(
-              "Evaluation failed for session %s: %s", trace.session_id, exc
+              "Evaluation failed for session %s: %s",
+              escape_log_text(trace.session_id),
+              escape_log_text(str(exc)),
           )
           score = SessionScore(
               session_id=trace.session_id,

@@ -19,9 +19,9 @@ The GitHub Actions runner reads each stdout and stderr line of a step;
 workflow command when the line starts with ``::name::`` after leading
 whitespace, or when it contains ``##[name]`` anywhere (actions/runner
 ``ActionCommand.TryParseV2`` and ``TryParse``). Session IDs, judge
-replies and the metric names a judge chooses come from outside the CI
-job, so the evaluation gates escape them here before they print or log
-them.
+replies, the metric names a judge chooses and errors that quote stored
+data come from outside the CI job, so the evaluation gates escape them
+here before they print or log them.
 """
 
 from __future__ import annotations
