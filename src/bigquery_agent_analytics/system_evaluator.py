@@ -37,6 +37,8 @@ from typing import Any, Callable, Optional
 from pydantic import BaseModel
 from pydantic import Field
 
+from ._ci_log import escape_log_text
+
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 
@@ -107,7 +109,11 @@ class EvaluationReport(BaseModel):
     return self.passed_sessions / self.total_sessions
 
   def summary(self) -> str:
-    """Returns a human-readable summary."""
+    """Returns a human-readable summary.
+
+    Metric names are escaped with ``escape_log_text``: an LLM judge can
+    choose them, and the summary is printed into CI logs.
+    """
     lines = [
         f"Evaluation Report: {self.evaluator_name}",
         f"  Dataset: {self.dataset}",
@@ -118,7 +124,7 @@ class EvaluationReport(BaseModel):
     if self.aggregate_scores:
       lines.append("  Aggregate Scores:")
       for name, score in sorted(self.aggregate_scores.items()):
-        lines.append(f"    {name}: {score:.3f}")
+        lines.append(f"    {escape_log_text(name)}: {score:.3f}")
     return "\n".join(lines)
 
 
