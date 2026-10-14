@@ -109,6 +109,7 @@ def test_table_refs_and_validate_refs():
   refs = models.TableRefs("my-proj", "my_ds", "my_table", "custom_")
   assert refs.events == "`my-proj.my_ds.my_table`"
   assert refs.view("llm_responses") == "`my-proj.my_ds.custom_llm_responses`"
+  assert refs.view("tool_errors") == "`my-proj.my_ds.custom_tool_errors`"
 
   default_refs = models.TableRefs("my-proj", "my_ds", "my_table")
   assert default_refs.view_prefix == models.DEFAULT_VIEW_PREFIX
@@ -121,12 +122,15 @@ def test_table_refs_and_validate_refs():
       "valid-project-123", "valid_dataset", "valid_table_id", ""
   )
   assert errors == []
-  assert valid is not None
+  assert valid == models.TableRefs(
+      "valid-project-123", "valid_dataset", "valid_table_id", ""
+  )
   assert valid.view("llm") == "`valid-project-123.valid_dataset.llm`"
 
   # Boundary whitespace/newlines are stripped; raw regexes anchor with \Z
   assert not models._PROJECT_RE.match("proj\n")
   assert not models._NAME_RE.match("ds\n")
+  assert not models._NAME_RE.match("tbl\n")
   assert not models._PREFIX_RE.match("adk_\n")
   stripped, errors = models.validate_refs("proj\n", "ds\n", "tbl\n", "adk_\n")
   assert errors == [] and stripped == models.TableRefs(
@@ -136,8 +140,10 @@ def test_table_refs_and_validate_refs():
   # Invalid / injection-attempt identifiers are rejected
   for bad_args, expected_err in [
       (("-invalid", "ds", "tbl", "p_"), "Invalid project ID"),
+      (("proj with space", "ds", "tbl", "p_"), "Invalid project ID"),
       (("proj`inject", "ds", "tbl", "p_"), "Invalid project ID"),
       (("proj", "ds-dash", "tbl", "p_"), "Invalid dataset ID"),
+      (("proj", "ds with space", "tbl", "p_"), "Invalid dataset ID"),
       (("proj", "ds`inject", "tbl", "p_"), "Invalid dataset ID"),
       (("proj", "ds", "tbl-dash", "p_"), "Invalid table ID"),
       (("proj", "ds", "tbl`inject", "p_"), "Invalid table ID"),
@@ -206,13 +212,18 @@ def test_window_snap_and_time_bounds():
   assert models.snap(moment, seconds=-10) == moment.replace(microsecond=0)
 
   naive = dt.datetime(2026, 9, 1, 12, 34, 56, 789000)
-  assert models.snap(naive, seconds=0) == moment.replace(microsecond=0)
+  naive_zero = models.snap(naive, seconds=0)
+  assert naive_zero == moment.replace(microsecond=0)
+  assert naive_zero.tzinfo == dt.timezone.utc
   snapped_naive = models.snap(naive, seconds=300)
   assert snapped_naive == expected_snapped
   assert snapped_naive.tzinfo == dt.timezone.utc
 
   offset_tz = dt.timezone(dt.timedelta(hours=2))
   aware_offset = dt.datetime(2026, 9, 1, 14, 34, 56, 789000, tzinfo=offset_tz)
+  offset_zero = models.snap(aware_offset, seconds=0)
+  assert offset_zero == moment.replace(microsecond=0)
+  assert offset_zero.tzinfo == dt.timezone.utc
   snapped_offset = models.snap(aware_offset, seconds=300)
   assert snapped_offset == expected_snapped
   assert snapped_offset.tzinfo == dt.timezone.utc
@@ -330,40 +341,111 @@ def test_sql_builders_and_scope(sample_refs, sample_window):
 
   # 1. overview_totals (omits @event_types, includes llm_responses subquery)
   ov = queries.build_overview_totals_sql(sample_refs, sample_window)
-  assert f"FROM {sample_refs.view('llm_responses')} AS r" in ov
-  assert "HAVING COUNT(*) > 0" in ov
-  assert "@agents" in ov and "@event_types" not in ov
+  for frag in (
+      "COUNT(DISTINCT e.session_id) AS sessions",
+      "COUNT(*) AS events",
+      "SAFE_DIVIDE(COUNTIF(",
+      "ENDS_WITH(e.event_type, '_ERROR')",
+      "e.error_message IS NOT NULL",
+      "UPPER(e.status) = 'ERROR'",
+      "SELECT AVG(r.total_ms)",
+      f"FROM {sample_refs.view('llm_responses')} AS r",
+      f"FROM {sample_refs.events} AS e",
+      queries.time_bounds(sample_window, "e.timestamp"),
+      queries.time_bounds(sample_window, "r.timestamp"),
+      "HAVING COUNT(*) > 0",
+      "@agents",
+      "@user_ids",
+      "@session_ids",
+  ):
+    assert frag in ov
+  assert "@event_types" not in ov
 
   # 2. trace_detail (includes @event_types, newest first, coalesced model)
   tr = queries.build_trace_detail_sql(sample_refs, sample_window, limit=500)
-  assert "COALESCE(" in tr and "ORDER BY timestamp DESC" in tr
-  assert "LIMIT 500" in tr and "@event_types" in tr
+  for frag in (
+      f"FROM {sample_refs.events}",
+      queries.time_bounds(sample_window),
+      "ORDER BY timestamp DESC",
+      "LIMIT 500",
+      "JSON_VALUE(attributes, '$.model')",
+      "JSON_VALUE(attributes, '$.model_version')",
+      "JSON_VALUE(content, '$.tool') AS tool_name",
+      "SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms",
+      "error_message",
+      "COALESCE(",
+      "@event_types",
+      "@agents",
+      "@user_ids",
+      "@session_ids",
+  ):
+    assert frag in tr
 
   # 3. llm_calls_total (span deduplication + token sums, no SQL cost params)
   llm_tot = queries.build_llm_calls_total_sql(sample_refs, sample_window)
-  assert "COUNT(DISTINCT CONCAT(trace_id, '|', span_id))" in llm_tot
-  assert "IFNULL(SUM(usage_prompt_tokens), 0) AS prompt_tokens" in llm_tot
-  assert "@price_in" not in llm_tot and "estimated_cost_usd" not in llm_tot
+  for frag in (
+      f"FROM {sample_refs.view('llm_responses')}",
+      "COUNT(DISTINCT CONCAT(trace_id, '|', span_id))\n"
+      "    + COUNTIF(trace_id IS NULL OR span_id IS NULL) AS llm_calls",
+      "IFNULL(SUM(usage_prompt_tokens), 0) AS prompt_tokens",
+      "IFNULL(SUM(usage_completion_tokens), 0) AS completion_tokens",
+      "IFNULL(SUM(usage_total_tokens), 0) AS total_tokens",
+      queries.time_bounds(sample_window),
+      "HAVING COUNT(*) > 0",
+  ):
+    assert frag in llm_tot
+  assert (
+      "@price_in" not in llm_tot
+      and "@price_out" not in llm_tot
+      and "estimated_cost_usd" not in llm_tot
+  )
 
   # 4. recent_sessions (WHERE scoped by @session_ids, HAVING LOGICAL_OR)
   sess = queries.build_recent_sessions_sql(
       sample_refs, sample_window, limit=250
   )
-  assert "GROUP BY session_id" in sess
-  assert "HAVING LOGICAL_OR('___ALL___' IN UNNEST(@agents)" in sess
-  assert "AND LOGICAL_OR('___ALL___' IN UNNEST(@event_types)" in sess
-  assert "LIMIT 250" in sess
+  for frag in (
+      f"FROM {sample_refs.events}",
+      queries.time_bounds(sample_window),
+      "session_id IS NOT NULL",
+      "STRING_AGG(DISTINCT user_id, ', ' ORDER BY user_id)\n"
+      "    AS session_users_in_window",
+      "MIN(timestamp) AS started_in_window_at",
+      "MAX(timestamp) AS last_event_in_window_at",
+      "TIMESTAMP_DIFF(MAX(timestamp), MIN(timestamp), SECOND)\n"
+      "    AS duration_in_window_s",
+      "COUNT(DISTINCT agent) AS session_agents_in_window",
+      "COUNT(*) AS session_events_in_window",
+      "COUNTIF(ENDS_WITH(event_type, '_ERROR') OR error_message IS NOT NULL OR"
+      " UPPER(status) = 'ERROR') AS session_errors_in_window",
+      "AS session_input_tokens_in_window",
+      "AS session_output_tokens_in_window",
+      "GROUP BY session_id",
+      "HAVING LOGICAL_OR('___ALL___' IN UNNEST(@agents)",
+      "AND LOGICAL_OR('___ALL___' IN UNNEST(@user_ids)",
+      "AND LOGICAL_OR('___ALL___' IN UNNEST(@event_types)",
+      "ORDER BY last_event_in_window_at DESC",
+      "LIMIT 250",
+  ):
+    assert frag in sess
 
   # 5. tool_errors (UNION ALL of tool_errors and error tool_completions)
   terr = queries.build_tool_errors_sql(sample_refs, sample_window, limit=100)
-  assert f"FROM {sample_refs.view('tool_errors')}" in terr
-  assert "UNION ALL" in terr
-  assert f"FROM {sample_refs.view('tool_completions')}" in terr
+  for frag in (
+      f"FROM {sample_refs.view('tool_errors')}",
+      "UNION ALL",
+      f"FROM {sample_refs.view('tool_completions')}",
+      "AND (error_message IS NOT NULL OR UPPER(status) = 'ERROR')",
+      "ORDER BY timestamp DESC",
+      "LIMIT 100",
+  ):
+    assert frag in terr
 
   # 6. filter_options (single-pass UNNEST STRUCT pivot, exempt from Grafana)
   fopt = queries.build_filter_options_sql(sample_refs, sample_window)
   for expected_fragment in (
-      f"FROM {sample_refs.events} AS e",
+      f"FROM {sample_refs.events} AS e,",
+      "UNNEST([",
       "STRUCT('agent' AS kind, e.agent AS value)",
       "STRUCT('user_id', e.user_id)",
       "STRUCT('event_type', e.event_type)",
@@ -371,6 +453,7 @@ def test_sql_builders_and_scope(sample_refs, sample_window):
       queries.time_bounds(sample_window, "e.timestamp"),
       "AND f.value IS NOT NULL",
       "GROUP BY f.kind, f.value",
+      "QUALIFY ROW_NUMBER() OVER (",
       "PARTITION BY f.kind ORDER BY MAX(e.timestamp) DESC",
       f"<= {models.FILTER_OPTIONS_LIMIT}",
       "ORDER BY f.kind, f.value",
@@ -381,40 +464,67 @@ def test_sql_builders_and_scope(sample_refs, sample_window):
   bucket_expr = f"TIMESTAMP_TRUNC(timestamp, {sample_window.bucket}) AS bucket"
 
   ev_time = queries.build_events_over_time_sql(sample_refs, sample_window)
-  assert bucket_expr in ev_time
+  assert bucket_expr in ev_time and "COUNT(*) AS events" in ev_time
   assert "@event_types" in ev_time and "GROUP BY bucket, event_type" in ev_time
+  assert "ORDER BY bucket" in ev_time
 
   err_time = queries.build_errors_over_time_sql(sample_refs, sample_window)
-  assert bucket_expr in err_time
+  assert bucket_expr in err_time and "COUNT(*) AS errors" in err_time
   assert "@event_types" not in err_time
   assert "ENDS_WITH(event_type, '_ERROR')" in err_time
+  assert "GROUP BY bucket, event_type" in err_time
 
   by_agent = queries.build_events_by_agent_sql(sample_refs, sample_window)
   assert "IFNULL(agent, 'unknown') AS agent_name" in by_agent
+  assert (
+      "HAVING COUNT(*) > 0" in by_agent and "ORDER BY events DESC" in by_agent
+  )
   assert "@event_types" in by_agent
 
   top_err = queries.build_top_errors_sql(sample_refs, sample_window)
+  assert "COUNT(DISTINCT session_id) AS sessions" in top_err
+  assert "COUNT(DISTINCT agent) AS agents" in top_err
+  assert "MAX(timestamp) AS last_seen" in top_err
   assert "AND error_message IS NOT NULL" in top_err
   assert f"LIMIT {models.TOP_ERRORS_LIMIT}" in top_err
+  assert "LIMIT 42" in queries.build_top_errors_sql(
+      sample_refs, sample_window, limit=42
+  )
 
   tok_time = queries.build_llm_tokens_over_time_sql(sample_refs, sample_window)
   assert bucket_expr in tok_time
+  assert "IFNULL(SUM(usage_prompt_tokens), 0) AS prompt_tokens" in tok_time
+  assert "IFNULL(SUM(usage_total_tokens), 0) AS total_tokens" in tok_time
   assert f"FROM {sample_refs.view('llm_responses')}" in tok_time
 
   lat_pct = queries.build_llm_latency_percentiles_sql(
       sample_refs, sample_window
   )
   assert bucket_expr in lat_pct
-  assert "OFFSET(95)] AS p95_total_ms" in lat_pct
+  assert (
+      "APPROX_QUANTILES(total_ms, 100)[OFFSET(50)] AS p50_total_ms" in lat_pct
+  )
+  assert (
+      "APPROX_QUANTILES(total_ms, 100)[OFFSET(95)] AS p95_total_ms" in lat_pct
+  )
+  assert "APPROX_QUANTILES(ttft_ms, 100)[OFFSET(50)] AS p50_ttft_ms" in lat_pct
 
   tok_mod = queries.build_tokens_by_model_sql(sample_refs, sample_window)
   assert "IFNULL(model_version, 'unknown') AS model" in tok_mod
+  assert "COUNT(*) AS responses" in tok_mod
+  assert "ORDER BY total_tokens DESC" in tok_mod
 
   t_usage = queries.build_tool_usage_sql(sample_refs, sample_window)
+  assert "IFNULL(tool_name, 'unknown') AS tool_name" in t_usage
+  assert "COUNT(*) AS invocations" in t_usage
   assert f"FROM {sample_refs.view('tool_starts')}" in t_usage
 
   t_lat = queries.build_tool_latency_sql(sample_refs, sample_window)
+  assert "IFNULL(tool_name, 'unknown') AS tool_name" in t_lat
+  assert "AVG(total_ms) AS avg_ms" in t_lat
+  assert "APPROX_QUANTILES(total_ms, 100)[OFFSET(95)] AS p95_ms" in t_lat
   assert f"FROM {sample_refs.view('tool_completions')}" in t_lat
+  assert "ORDER BY p95_ms DESC" in t_lat
 
   minute_win = models.Window(
       sample_window.start, sample_window.start + dt.timedelta(hours=1)
@@ -493,7 +603,10 @@ def test_query_parameters_and_job_config():
 def test_explain_actionable_advice():
   """Verifies operator remediation messages retain original error details."""
   msg_auth = queries._explain(gauth_exc.DefaultCredentialsError("No creds"))
-  assert "gcloud auth application-default login" in msg_auth
+  assert (
+      "Run `gcloud auth application-default login` or set"
+      " `GOOGLE_APPLICATION_CREDENTIALS`." in msg_auth
+  )
   assert "No creds" in msg_auth
 
   msg_404 = queries._explain(gexc.NotFound("Dataset not found"))
@@ -504,8 +617,10 @@ def test_explain_actionable_advice():
   assert "roles/bigquery.jobUser" in msg_403
   assert "Access denied" in msg_403
 
-  msg_cap = queries._explain(Exception("bytesBilledLimitExceeded"))
-  assert "Raise the per-query scan cap" in msg_cap
+  msg_cap = queries._explain(
+      Exception("Query aborted: bytesBilledLimitExceeded error")
+  )
+  assert "Raise the per-query scan cap in the sidebar" in msg_cap
   assert "bytesBilledLimitExceeded" in msg_cap
 
   assert queries._explain(ValueError("plain error")) == "plain error"
@@ -534,7 +649,8 @@ def test_run_query_guardrail_and_dry_run_errors():
   mock_client.query.return_value = mock_probe
   with mock.patch.object(queries, "get_client", return_value=mock_client):
     res_guard = queries.run_query("SELECT * FROM big", filters, "proj", 1000)
-    assert res_guard.df.empty and "Guardrail:" in (res_guard.error or "")
+    assert res_guard.df.empty
+    assert "Guardrail: this query would scan" in (res_guard.error or "")
     assert (res_guard.bytes_processed, res_guard.bytes_billed) == (0, 0)
     assert res_guard.cache_hit is False
     assert res_guard.stats_known is True
@@ -605,6 +721,7 @@ def test_run_query_caching_and_deduplication(monkeypatch):
         True,
     )
     assert r2.stats_known is True
+    assert r2.error is None and list(r2.df["col"]) == [1]
 
     # Changing any of the 4 arguments (sql, filters, project, max_bytes) misses
     queries.run_query("SELECT 2", f1, "proj-1", 1_000_000)
@@ -639,6 +756,7 @@ def test_run_query_caching_and_deduplication(monkeypatch):
     r_dedup = queries.run_query("SELECT unk", f1, "proj-1", 1_000_000)
     assert r_dedup.cache_hit is True and r_dedup.bytes_billed == 0
     assert r_dedup.bytes_billed_known is True and r_dedup.stats_known is True
+    assert r_dedup.error is None and list(r_dedup.df["col"]) == [7]
 
     # Live job with total_bytes_processed=None also triggers reload()
     job_unk.total_bytes_processed, job_unk.total_bytes_billed = None, 200
@@ -647,7 +765,21 @@ def test_run_query_caching_and_deduplication(monkeypatch):
     assert (r_proc.bytes_processed, r_proc.bytes_processed_known) == (0, False)
     assert (r_proc.bytes_billed, r_proc.bytes_billed_known) == (200, True)
 
-  # _SEEN_RUN_IDS quarter eviction (max=8 -> evicts 8 // 4 == 2 oldest IDs)
+  # _SEEN_RUN_IDS quarter eviction at default max (10_000), small max (8), and floor (3)
+  queries._SEEN_RUN_IDS.clear()
+  queries._SEEN_RUN_IDS.update(range(queries._MAX_SEEN_RUN_IDS))
+  with mock.patch.object(
+      queries,
+      "_run_query_cached",
+      return_value=(pd.DataFrame(), 100, 100, False, True, True, 99999),
+  ):
+    queries.run_query("Q_default_max", f1, "proj", 1000)
+    assert (
+        len(queries._SEEN_RUN_IDS)
+        == queries._MAX_SEEN_RUN_IDS - (queries._MAX_SEEN_RUN_IDS // 4) + 1
+    )
+    assert 99999 in queries._SEEN_RUN_IDS
+
   queries._SEEN_RUN_IDS.clear()
   monkeypatch.setattr(queries, "_MAX_SEEN_RUN_IDS", 8)
   with mock.patch.object(
@@ -662,6 +794,17 @@ def test_run_query_caching_and_deduplication(monkeypatch):
     assert queries._SEEN_RUN_IDS == set(range(1, 9))
     queries.run_query("Q9", f1, "proj", 1000)
     assert queries._SEEN_RUN_IDS == {3, 4, 5, 6, 7, 8, 9}
+
+  queries._SEEN_RUN_IDS.clear()
+  queries._SEEN_RUN_IDS.update({1, 2, 3})
+  monkeypatch.setattr(queries, "_MAX_SEEN_RUN_IDS", 3)
+  with mock.patch.object(
+      queries,
+      "_run_query_cached",
+      return_value=(pd.DataFrame(), 100, 100, False, True, True, 4),
+  ):
+    queries.run_query("Q4", f1, "proj", 1000)
+  assert queries._SEEN_RUN_IDS == {2, 3, 4}
 
 
 def test_job_stats_extraction_and_download_failure_recovery():
@@ -691,6 +834,27 @@ def test_job_stats_extraction_and_download_failure_recovery():
       timeout=queries._JOB_RELOAD_TIMEOUT_SECONDS
   )
 
+  # Also reloads when total_bytes_processed is known but total_bytes_billed is None
+  job_reload_billed = mock.MagicMock(
+      total_bytes_processed=2048,
+      total_bytes_billed=None,
+      ended=dt.datetime.now(dt.timezone.utc),
+      cache_hit=False,
+  )
+  job_reload_billed.reload.side_effect = lambda **kw: setattr(
+      job_reload_billed, "total_bytes_billed", 10_485_760
+  )
+  assert queries._extract_job_stats(job_reload_billed) == (
+      2048,
+      10_485_760,
+      False,
+      True,
+      True,
+  )
+  job_reload_billed.reload.assert_called_once_with(
+      timeout=queries._JOB_RELOAD_TIMEOUT_SECONDS
+  )
+
   # 2. BigQuery cache_hit=True forces bytes_billed=0 and billed_known=True
   job_bq_cache = mock.MagicMock(
       total_bytes_processed=4096,
@@ -707,6 +871,7 @@ def test_job_stats_extraction_and_download_failure_recovery():
   )
 
   # 3. Partial stats after reload failure preserve whichever stat is known
+  #    both in _extract_job_stats and through _query_failure
   job_partial = mock.MagicMock(
       total_bytes_processed=2048,
       total_bytes_billed=None,
@@ -722,8 +887,31 @@ def test_job_stats_extraction_and_download_failure_recovery():
       False,
   )
   job_partial.reload.assert_called_once()
-  job_partial.total_bytes_processed, job_partial.cache_hit = None, True
-  assert queries._extract_job_stats(job_partial) == (0, 0, True, False, True)
+  err_partial = queries._query_failure("Failed to fetch", job_partial)
+  assert isinstance(err_partial, queries.QueryExecutionError)
+  assert (
+      err_partial.bytes_processed,
+      err_partial.bytes_billed,
+      err_partial.cache_hit,
+      err_partial.bytes_processed_known,
+      err_partial.bytes_billed_known,
+      err_partial.stats_known,
+  ) == (2048, 0, False, True, False, False)
+
+  job_partial_cached = mock.MagicMock(
+      total_bytes_processed=None,
+      total_bytes_billed=None,
+      ended=dt.datetime.now(dt.timezone.utc),
+      cache_hit=True,
+  )
+  job_partial_cached.reload.side_effect = RuntimeError("reload failed")
+  assert queries._extract_job_stats(job_partial_cached) == (
+      0,
+      0,
+      True,
+      False,
+      True,
+  )
 
   job_only_billed = mock.MagicMock(
       total_bytes_processed=None,
@@ -740,6 +928,16 @@ def test_job_stats_extraction_and_download_failure_recovery():
       True,
   )
   job_only_billed.reload.assert_called_once()
+  err_only_billed = queries._query_failure("Failed to fetch", job_only_billed)
+  assert isinstance(err_only_billed, queries.QueryExecutionError)
+  assert (
+      err_only_billed.bytes_processed,
+      err_only_billed.bytes_billed,
+      err_only_billed.cache_hit,
+      err_only_billed.bytes_processed_known,
+      err_only_billed.bytes_billed_known,
+      err_only_billed.stats_known,
+  ) == (0, 4096, False, False, True, False)
 
   # 4. Degraded job (neither stat known, ended=None, reload fails) -> None
   assert queries._extract_job_stats(None) is None
@@ -766,11 +964,15 @@ def test_job_stats_extraction_and_download_failure_recovery():
   mock_failed_dl.to_dataframe.side_effect = RuntimeError("Arrow stream broke")
   mock_cached_dl = mock.MagicMock(
       total_bytes_processed=8192,
-      total_bytes_billed=0,
+      total_bytes_billed=10_485_760,
       cache_hit=True,
       ended=dt.datetime.now(dt.timezone.utc),
   )
   mock_cached_dl.to_dataframe.side_effect = gexc.ServiceUnavailable("503 cache")
+  job_partial.to_dataframe.side_effect = RuntimeError("partial stream broke")
+  job_only_billed.to_dataframe.side_effect = RuntimeError(
+      "only billed stream broke"
+  )
   job_dead.to_dataframe.side_effect = gexc.BadRequest(
       "bytesBilledLimitExceeded"
   )
@@ -780,26 +982,35 @@ def test_job_stats_extraction_and_download_failure_recovery():
       mock_probe,
       mock_cached_dl,
       mock_probe,
+      job_partial,
+      mock_probe,
+      job_only_billed,
+      mock_probe,
       job_dead,
       mock_probe,
       job_bq_cache,
   ]
+  job_bq_cache.total_bytes_billed = 10_485_760
   job_bq_cache.to_dataframe.return_value = pd.DataFrame({"x": [1]})
 
   with mock.patch.object(queries, "get_client", return_value=mock_client):
     res = queries.run_query(
         "SELECT * FROM events", models.Filters(), "p", 10**8
     )
-    assert res.df.empty and res.error is not None
+    assert res.df.empty and "Arrow stream broke" in (res.error or "")
     assert (
         res.bytes_processed,
         res.bytes_billed,
         res.cache_hit,
+        res.bytes_processed_known,
+        res.bytes_billed_known,
         res.stats_known,
     ) == (
         20480,
         10_485_760,
         False,
+        True,
+        True,
         True,
     )
 
@@ -811,8 +1022,36 @@ def test_job_stats_extraction_and_download_failure_recovery():
         res_cached_dl.bytes_processed,
         res_cached_dl.bytes_billed,
         res_cached_dl.cache_hit,
+        res_cached_dl.bytes_processed_known,
+        res_cached_dl.bytes_billed_known,
         res_cached_dl.stats_known,
-    ) == (8192, 0, True, True)
+    ) == (8192, 0, True, True, True, True)
+
+    res_partial_dl = queries.run_query(
+        "SELECT * FROM partial_fail", models.Filters(), "p", 10**8
+    )
+    assert res_partial_dl.df.empty and res_partial_dl.error is not None
+    assert (
+        res_partial_dl.bytes_processed,
+        res_partial_dl.bytes_billed,
+        res_partial_dl.cache_hit,
+        res_partial_dl.bytes_processed_known,
+        res_partial_dl.bytes_billed_known,
+        res_partial_dl.stats_known,
+    ) == (2048, 0, False, True, False, False)
+
+    res_only_billed_dl = queries.run_query(
+        "SELECT * FROM only_billed_fail", models.Filters(), "p", 10**8
+    )
+    assert res_only_billed_dl.df.empty and res_only_billed_dl.error is not None
+    assert (
+        res_only_billed_dl.bytes_processed,
+        res_only_billed_dl.bytes_billed,
+        res_only_billed_dl.cache_hit,
+        res_only_billed_dl.bytes_processed_known,
+        res_only_billed_dl.bytes_billed_known,
+        res_only_billed_dl.stats_known,
+    ) == (0, 4096, False, False, True, False)
 
     res_dead = queries.run_query(
         "SELECT * FROM dead", models.Filters(), "p", 10**8
@@ -852,6 +1091,7 @@ def test_fetch_and_load_filter_options(sample_context):
           {"kind": "agent", "value": "agent-a"},
           {"kind": "agent", "value": "agent-b"},
           {"kind": "event_type", "value": "start"},
+          {"kind": "event_type", "value": "complete"},
           {"kind": "session_id", "value": "sess-1"},
           {"kind": "user_id", "value": "user-1"},
       ]
@@ -881,7 +1121,7 @@ def test_fetch_and_load_filter_options(sample_context):
     )
     assert options == {
         "agent": ["agent-a", "agent-b"],
-        "event_type": ["start"],
+        "event_type": ["start", "complete"],
         "session_id": ["sess-1"],
         "user_id": ["user-1"],
     }
@@ -1018,6 +1258,11 @@ def test_color_map():
 
 def test_chart_builders_data_shaping(sample_context):
   """Verifies theme selection, layout invariants, and data shaping in charts."""
+  assert models.LIGHT_THEME.surface == "#fcfcfb"
+  assert models.DARK_THEME.surface == "#1a1a19"
+  assert len(models.LIGHT_THEME.categorical) == 8
+  assert len(models.DARK_THEME.categorical) == 8
+
   # 0. active_theme() resolves st.context.theme.type and get_option fallback
   dark_ctx = types.SimpleNamespace(theme=types.SimpleNamespace(type="DARK"))
   none_ctx = types.SimpleNamespace(theme=types.SimpleNamespace(type=None))
@@ -1274,6 +1519,29 @@ def test_app_helpers_and_sidebar_connection(monkeypatch):
     assert app._pending("flt_empty_scalar") == []
     assert app._pending("flt_missing") == []
 
+    # Custom values beyond 1,000 bounded options (FILTER_OPTIONS_LIMIT)
+    bounded_1000 = [f"opt-{i:04d}" for i in range(models.FILTER_OPTIONS_LIMIT)]
+    for key, custom_val in (
+        ("flt_agent", "custom-agent-1001"),
+        ("flt_user_id", "custom-user-1001"),
+        ("flt_session_id", "custom-sess-1001"),
+    ):
+      state[key] = [custom_val]
+      merged_1001 = app._seed_options(key, bounded_1000, all_sentinel)
+      assert len(merged_1001) == models.FILTER_OPTIONS_LIMIT + 1
+      assert merged_1001[-1] == custom_val
+    state["flt_event_type"] = []
+    app._commit_filters()
+    bound_params = {
+        p.name: list(p.values)
+        for p in queries.query_parameters(
+            queries._scope(), state["applied_filters"]
+        )
+    }
+    assert bound_params["agents"] == ["custom-agent-1001"]
+    assert bound_params["user_ids"] == ["custom-user-1001"]
+    assert bound_params["session_ids"] == ["custom-sess-1001"]
+
   assert app._default_for(all_sentinel) == []
   assert app._default_for(("agent-x",)) == ["agent-x"]
 
@@ -1296,18 +1564,27 @@ def test_app_helpers_and_sidebar_connection(monkeypatch):
       mock.patch.object(app.st, "session_state", {}),
   ):
     refs, cap = app.sidebar_connection()
-    assert refs is not None and refs.project == "env-locked-project"
+    assert refs == models.TableRefs(
+        "env-locked-project", "env_dataset", "events", "adk_"
+    )
     assert cap == models.BYTES_CAPS["1 GB"]
 
     # 2. When BQ_PROJECT_ID is unset, sidebar uses the form's Project ID
     monkeypatch.delenv("BQ_PROJECT_ID", raising=False)
+    monkeypatch.setenv("BQ_TABLE_ID", "custom_events")
+    monkeypatch.setenv("BQ_VIEW_PREFIX", "custom_")
     refs_form, _ = app.sidebar_connection()
-    assert refs_form is not None and refs_form.project == "injected-proj"
+    assert refs_form == models.TableRefs(
+        "injected-proj", "env_dataset", "custom_events", "custom_"
+    )
     assert proj_disabled_flags == [True, False]
+    monkeypatch.delenv("BQ_TABLE_ID", raising=False)
+    monkeypatch.delenv("BQ_VIEW_PREFIX", raising=False)
 
   # 3. Blank dataset before Connect click does not render sidebar error,
   #    whereas invalid dataset after Connect click surfaces st.sidebar.error
   monkeypatch.delenv("BQ_DATASET_ID", raising=False)
+  monkeypatch.setenv("BQ_PROJECT_ID", "test-project")
   conn_state: dict[str, object] = {}
   with (
       mock.patch.object(app.st.sidebar, "form", return_value=mock.MagicMock()),
@@ -1326,7 +1603,6 @@ def test_app_helpers_and_sidebar_connection(monkeypatch):
     mock_error.assert_not_called()
 
     # Clicking Connect with an empty dataset sets _connect_attempted and errors
-    monkeypatch.setenv("BQ_PROJECT_ID", "test-project")
     mock_submit.return_value = True
     refs_empty_submit, _ = app.sidebar_connection()
     assert refs_empty_submit is None
@@ -1433,8 +1709,26 @@ def test_row_overview_and_llm_metrics(sample_context):
                   {
                       "sessions": 1234,
                       "events": 56789,
-                      "error_rate": float("nan"),
+                      "error_rate": None,
                       "avg_llm_latency_ms": None,
+                  }
+              ]
+          ),
+          [
+              (0, "Sessions", "1,234", None),
+              (1, "Events", "56,789", None),
+              (2, "Error rate", "—", err_help),
+              (3, "Avg LLM latency", "—", None),
+          ],
+      ),
+      (
+          pd.DataFrame(
+              [
+                  {
+                      "sessions": 1234,
+                      "events": 56789,
+                      "error_rate": float("nan"),
+                      "avg_llm_latency_ms": float("nan"),
                   }
               ]
           ),
@@ -1674,8 +1968,27 @@ def test_footer_byte_and_cache_accounting(sample_context):
     mock_divider.assert_called_once()
     assert mock_caption.call_count == 3
     text_uncached = mock_caption.call_args_list[0][0][0]
+    note_billing = mock_caption.call_args_list[1][0][0]
+    note_latency = mock_caption.call_args_list[2][0][0]
     assert "served from cache" not in text_uncached
+    assert "unavailable" not in text_uncached
     assert "per-query cap 1.0 GB · results cached for 5 min" in text_uncached
+    assert "10 MB minimum" in note_billing
+    assert "compute/capacity reservations" in note_billing
+    assert "metadata delivery latency" in note_latency
+    assert "billing telemetry" in note_latency
+    assert "unrecorded queries are excluded from the totals" in note_latency
+
+    mock_caption.reset_mock()
+    sample_context.scan_log = [
+        models.ScanEntry("q1", 10_485_760, 1024, False, True, True),
+        models.ScanEntry("q2", 0, 2048, True, True, True),
+    ]
+    app.footer(sample_context)
+    assert (
+        "1 served from cache (2.0 KB scan avoided via cache)"
+        in mock_caption.call_args_list[0][0][0]
+    )
 
     mock_caption.reset_mock()
     sample_context.scan_log = [
@@ -1683,10 +1996,21 @@ def test_footer_byte_and_cache_accounting(sample_context):
     ]
     app.footer(sample_context)
     text_zero = mock_caption.call_args_list[0][0][0]
-    assert "0 B billed (0 B processed)" in text_zero
+    assert text_zero.startswith(
+        "1 queries this run · 0 B billed (0 B processed)"
+    )
     assert "unavailable" not in text_zero
 
     # 3. Mixed live, cached, and unknown billing/scan entries (2 cached hits)
+    mock_caption.reset_mock()
+    sample_context.scan_log = [
+        models.ScanEntry("q3", 0, 512, False, False, True),
+    ]
+    app.footer(sample_context)
+    text_unk_billed = mock_caption.call_args_list[0][0][0]
+    assert "1 with unavailable billing data" in text_unk_billed
+    assert "unavailable scan data" not in text_unk_billed
+
     mock_caption.reset_mock()
     sample_context.scan_log = [
         models.ScanEntry("q1", 10_485_760, 1024, False, True, True),
@@ -1694,17 +2018,18 @@ def test_footer_byte_and_cache_accounting(sample_context):
         models.ScanEntry("q2b", 0, 1024, True, True, True),
         models.ScanEntry("q3", 0, 512, False, False, True),
         models.ScanEntry("q4", 10_485_760, 0, False, True, False),
+        models.ScanEntry("q5", 0, 0, False, True, False),
     ]
     app.footer(sample_context)
     assert mock_caption.call_count == 3
     text = mock_caption.call_args_list[0][0][0]
     assert (
-        f"5 queries this run · {models.humanize_bytes(20_971_520)} billed"
+        f"6 queries this run · {models.humanize_bytes(20_971_520)} billed"
         f" ({models.humanize_bytes(1536)} processed)" in text
     )
     assert "2 served from cache (3.0 KB scan avoided via cache)" in text
     assert "1 with unavailable billing data" in text
-    assert "1 with unavailable scan data" in text
+    assert "2 with unavailable scan data" in text
 
     # 4. Cached query with unrecorded scan size uses ≥ and does NOT count as
     #    "with unavailable scan data" (which is for fresh queries only)
@@ -1753,10 +2078,13 @@ def test_apptest_sidebar_filters_and_connection_reset():
       df=pd.DataFrame({"session_id": ["sess-init-1"]}), cache_hit=True
   )
   fetched_labels: list[str] = []
+  llm_prices: list[tuple[float, float]] = []
 
   def fake_fetch(sql, ctx, label):
     del sql
     fetched_labels.append(label)
+    if label == "LLM totals":
+      llm_prices.append((ctx.price_in, ctx.price_out))
     ctx.scan_log.append(models.ScanEntry(label, 0, 0, True, True, True))
     if label == "Recent sessions" and ctx.refs.dataset == "test_dataset":
       return sess_res
@@ -1783,6 +2111,7 @@ def test_apptest_sidebar_filters_and_connection_reset():
     # 1. Verify default time range, pricing, caption buckets, and accept_new_options flags
     assert at.sidebar.number_input(key="flt_price_in").value == 1.25
     assert at.sidebar.number_input(key="flt_price_out").value == 5.0
+    assert llm_prices[-1] == (1.25, 5.0)
     assert any("queries this run" in c.value for c in at.caption)
     range_sb = [s for s in at.sidebar.selectbox if s.label == "Range"][0]
     assert range_sb.value == "Last 24 hours"
@@ -1794,7 +2123,8 @@ def test_apptest_sidebar_filters_and_connection_reset():
         is False
     )
 
-    # 2. Unsubmitted widget edits do not mutate applied_filters until Apply
+    # 2. Unsubmitted widget edits do not mutate applied_filters until Apply;
+    #    changing applied selection to a second non-empty selection commits new values
     at.sidebar.multiselect(key="flt_agent").select("agent-a")
     at.sidebar.multiselect(key="flt_user_id").select("user-1")
     at.sidebar.multiselect(key="flt_event_type").select("start")
@@ -1811,32 +2141,99 @@ def test_apptest_sidebar_filters_and_connection_reset():
         session_ids=("sess-1",),
     )
 
-    # 3. Clear agent selection while options are unchanged -> resets to ALL_SENTINEL
-    at.sidebar.multiselect(key="flt_agent").unselect("agent-a")
+    at.sidebar.multiselect(key="flt_agent").set_value(["agent-b"])
+    at.sidebar.multiselect(key="flt_user_id").set_value(["user-2"])
+    at.sidebar.multiselect(key="flt_event_type").set_value(["complete"])
+    at.sidebar.multiselect(key="flt_session_id").set_value(["sess-2"])
     apply_btn = [b for b in at.sidebar.button if b.label == "Apply filters"][0]
     apply_btn.click().run()
     assert not at.exception
-    assert at.session_state["applied_filters"].agents == (models.ALL_SENTINEL,)
-    assert at.session_state["applied_filters"].user_ids == ("user-1",)
+    assert at.session_state["applied_filters"] == models.Filters(
+        agents=("agent-b",),
+        user_ids=("user-2",),
+        event_types=("complete",),
+        session_ids=("sess-2",),
+    )
 
-    # 4. Re-select "agent-a", then mutate BigQuery options to omit "agent-a"
-    at.sidebar.multiselect(key="flt_agent").select("agent-a")
+    # 3. Clear all 4 filter selections while options are unchanged -> resets all to ALL_SENTINEL
+    at.sidebar.multiselect(key="flt_agent").unselect("agent-b")
+    at.sidebar.multiselect(key="flt_user_id").unselect("user-2")
+    at.sidebar.multiselect(key="flt_event_type").unselect("complete")
+    at.sidebar.multiselect(key="flt_session_id").unselect("sess-2")
     apply_btn = [b for b in at.sidebar.button if b.label == "Apply filters"][0]
     apply_btn.click().run()
-    assert at.session_state["applied_filters"].agents == ("agent-a",)
+    assert not at.exception
+    assert at.session_state["applied_filters"] == models.Filters()
+    for key in ("flt_agent", "flt_user_id", "flt_event_type", "flt_session_id"):
+      assert at.session_state[key] == []
+      assert at.sidebar.multiselect(key=key).value == []
+
+    # 4. Re-select all 4 filters, then mutate BigQuery options to omit active selections
+    #    and later grow options while preserving applied selections
+    at.sidebar.multiselect(key="flt_agent").select("agent-a")
+    at.sidebar.multiselect(key="flt_user_id").select("user-1")
+    at.sidebar.multiselect(key="flt_event_type").select("start")
+    at.sidebar.multiselect(key="flt_session_id").select("sess-1")
+    apply_btn = [b for b in at.sidebar.button if b.label == "Apply filters"][0]
+    apply_btn.click().run()
+    assert at.session_state["applied_filters"] == models.Filters(
+        agents=("agent-a",),
+        user_ids=("user-1",),
+        event_types=("start",),
+        session_ids=("sess-1",),
+    )
 
     opts_state["opts"] = {
         "agent": ["agent-c", "agent-d"],
-        "user_id": ["user-1", "user-2"],
-        "event_type": ["start", "complete"],
-        "session_id": ["sess-1", "sess-2"],
+        "user_id": ["user-2"],
+        "event_type": ["complete"],
+        "session_id": ["sess-2"],
     }
     at.run()
     assert not at.exception
-    ms_agent = at.sidebar.multiselect(key="flt_agent")
-    assert ms_agent.options == ["agent-c", "agent-d", "agent-a"]
-    assert ms_agent.value == ["agent-a"]
-    assert at.session_state["applied_filters"].agents == ("agent-a",)
+    assert at.sidebar.multiselect(key="flt_agent").options == [
+        "agent-c",
+        "agent-d",
+        "agent-a",
+    ]
+    assert at.sidebar.multiselect(key="flt_user_id").options == [
+        "user-2",
+        "user-1",
+    ]
+    assert at.sidebar.multiselect(key="flt_event_type").options == [
+        "complete",
+        "start",
+    ]
+    assert at.sidebar.multiselect(key="flt_session_id").options == [
+        "sess-2",
+        "sess-1",
+    ]
+    assert at.sidebar.multiselect(key="flt_agent").value == ["agent-a"]
+    assert at.sidebar.multiselect(key="flt_user_id").value == ["user-1"]
+    assert at.sidebar.multiselect(key="flt_event_type").value == ["start"]
+    assert at.sidebar.multiselect(key="flt_session_id").value == ["sess-1"]
+    assert at.session_state["applied_filters"] == models.Filters(
+        agents=("agent-a",),
+        user_ids=("user-1",),
+        event_types=("start",),
+        session_ids=("sess-1",),
+    )
+
+    opts_state["opts"] = {
+        "agent": ["agent-c", "agent-d", "agent-e"],
+        "user_id": ["user-2"],
+        "event_type": ["complete"],
+        "session_id": ["sess-2"],
+    }
+    at.run()
+    assert not at.exception
+    assert at.sidebar.multiselect(key="flt_agent").options == [
+        "agent-c",
+        "agent-d",
+        "agent-e",
+        "agent-a",
+    ]
+    assert at.sidebar.multiselect(key="flt_agent").value == ["agent-a"]
 
     # 5. Transient error OR empty successful refresh reuses cached _filter_options
     for res_override in (
@@ -1850,12 +2247,14 @@ def test_apptest_sidebar_filters_and_connection_reset():
       assert at.session_state["_filter_options"]["agent"] == [
           "agent-c",
           "agent-d",
+          "agent-e",
       ]
       assert at.session_state["applied_filters"].agents == ("agent-a",)
       assert at.session_state["_selected_session_id"] == "sess-init-1"
       assert at.sidebar.multiselect(key="flt_agent").options == [
           "agent-c",
           "agent-d",
+          "agent-e",
           "agent-a",
       ]
 
@@ -1876,15 +2275,34 @@ def test_apptest_sidebar_filters_and_connection_reset():
     assert "_selected_session_id" not in at.session_state
     assert at.session_state["flt_price_in"] == 2.5
 
-    # 7. Apply a custom ID not in options on the freshly reset form
+    # 7. Apply custom IDs not in options on the freshly reset form, with
+    #    each dropdown at the 1,000-option bound
+    opts_state["opts"] = {
+        kind: [f"{kind}-{i:04d}" for i in range(models.FILTER_OPTIONS_LIMIT)]
+        for kind in ("agent", "user_id", "session_id")
+    }
     at.sidebar.multiselect(key="flt_agent").set_value(["custom-agent-xyz"])
+    at.sidebar.multiselect(key="flt_user_id").set_value(["custom-user-xyz"])
+    at.sidebar.multiselect(key="flt_session_id").set_value(["custom-sess-xyz"])
     apply_btn = [b for b in at.sidebar.button if b.label == "Apply filters"][0]
     apply_btn.click().run()
     assert not at.exception
-    assert at.session_state["applied_filters"].agents == ("custom-agent-xyz",)
+    assert at.session_state["applied_filters"] == models.Filters(
+        agents=("custom-agent-xyz",),
+        user_ids=("custom-user-xyz",),
+        session_ids=("custom-sess-xyz",),
+    )
+    for key, custom in (
+        ("flt_agent", "custom-agent-xyz"),
+        ("flt_user_id", "custom-user-xyz"),
+        ("flt_session_id", "custom-sess-xyz"),
+    ):
+      opts = at.sidebar.multiselect(key=key).options
+      assert len(opts) == models.FILTER_OPTIONS_LIMIT + 1
+      assert opts[-1] == custom
 
     # 8. Invalid dataset in sidebar stops main() with st.info prompt;
-    #    reconnecting to test_dataset_2 re-seeds widget from applied_filters
+    #    reconnecting to test_dataset_2 re-seeds widgets from applied_filters
     [ti for ti in at.sidebar.text_input if ti.label == "Dataset ID"][0].input(
         "bad-dataset!"
     )
@@ -1898,8 +2316,18 @@ def test_apptest_sidebar_filters_and_connection_reset():
     )
     [b for b in at.sidebar.button if b.label == "Connect"][0].click().run()
     assert not at.exception
-    assert at.session_state["applied_filters"].agents == ("custom-agent-xyz",)
+    assert at.session_state["applied_filters"] == models.Filters(
+        agents=("custom-agent-xyz",),
+        user_ids=("custom-user-xyz",),
+        session_ids=("custom-sess-xyz",),
+    )
     assert at.sidebar.multiselect(key="flt_agent").value == ["custom-agent-xyz"]
+    assert at.sidebar.multiselect(key="flt_user_id").value == [
+        "custom-user-xyz"
+    ]
+    assert at.sidebar.multiselect(key="flt_session_id").value == [
+        "custom-sess-xyz"
+    ]
 
 
 def test_apptest_lazy_tabs_and_session_trace_preservation(
@@ -1964,6 +2392,12 @@ def test_apptest_lazy_tabs_and_session_trace_preservation(
     # 1. Lazy tabs defaults to Overview; other tabs do not run until selected
     controls = [c for c in at.segmented_control if c.label == "Dashboard"]
     assert len(controls) == 1 and controls[0].value == "Overview"
+    assert controls[0].options == [
+        "Overview",
+        "LLM & FinOps",
+        "Tools & Execution",
+        "Sessions & Traces",
+    ]
     assert "Overview stats" in fetched_labels
     assert not any(
         lbl in fetched_labels
@@ -1991,6 +2425,7 @@ def test_apptest_lazy_tabs_and_session_trace_preservation(
     controls = [c for c in at.segmented_control if c.label == "Dashboard"]
     controls[0].set_value("Sessions & Traces").run()
     assert not at.exception
+    assert at.session_state["flt_agent"] == []
     sess_box = [s for s in at.selectbox if s.label == "Session"][0]
     assert sess_box.value == "sess-1"
     assert trace_filters[-1] == models.Filters(
@@ -2028,7 +2463,22 @@ def test_apptest_lazy_tabs_and_session_trace_preservation(
 
     # 6. If segmented_control returns None, lazy tabs falls back to Overview
     fetched_labels.clear()
-    with mock.patch.object(st, "segmented_control", return_value=None):
+    with mock.patch.object(
+        st, "segmented_control", return_value=None
+    ) as mock_seg:
       at.run()
     assert not at.exception
+    mock_seg.assert_called_once_with(
+        "Dashboard",
+        [
+            "Overview",
+            "LLM & FinOps",
+            "Tools & Execution",
+            "Sessions & Traces",
+        ],
+        default="Overview",
+        label_visibility="collapsed",
+        required=True,
+        key="_active_tab",
+    )
     assert "Overview stats" in fetched_labels

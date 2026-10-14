@@ -2,7 +2,7 @@
 
 import io
 from pathlib import Path
-import runpy
+import subprocess
 import sys
 from unittest.mock import patch
 
@@ -41,16 +41,23 @@ def test_baseline_check():
   stdout_capture = io.StringIO()
   with patch("sys.stderr", stderr_capture), patch("sys.stdout", stdout_capture):
     with pytest.raises(SystemExit) as exc_info:
-      runpy.run_path(
-          str(SCRIPTS_DIR / "check_streamlit_queries_sync.py"),
-          run_name="__main__",
-      )
+      check_streamlit_queries_sync.main()
     assert exc_info.value.code == 0
-  assert (
+  expected_msg = (
       f"All {len(check_streamlit_queries_sync.CANONICAL_QUERIES)} Streamlit"
       " dashboard queries match canonical Grafana SQL."
-      in stdout_capture.getvalue()
   )
+  assert expected_msg in stdout_capture.getvalue()
+
+  # Direct CLI entrypoint (__main__)
+  cli_res = subprocess.run(
+      [sys.executable, str(SCRIPTS_DIR / "check_streamlit_queries_sync.py")],
+      capture_output=True,
+      text=True,
+      check=False,
+  )
+  assert cli_res.returncode == 0
+  assert expected_msg in cli_res.stdout
 
 
 @pytest.mark.parametrize(
