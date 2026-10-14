@@ -12,12 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``--exit-code`` FAIL lines must not carry CI workflow commands.
+"""The ``--exit-code`` gates must not print CI workflow commands.
 
-``_emit_evaluate_failures`` writes one stderr line per failing session for
-CI logs (``evaluate`` and ``evalbench-score``). Two of its fields come from
-outside the CI job: ``session_id`` is read from the events table, where an
-ADK API client chooses it, and ``llm_feedback`` is judge-model text.
+``evaluate`` and ``evalbench-score`` run as CI gates. Their output carries
+text from outside the CI job: ``session_id`` is read from the events table,
+where an ADK API client chooses it; ``llm_feedback`` is judge-model text;
+and the ML judge tier names a metric after any numeric key in the judge's
+reply when the criterion's own key is missing. That text reaches stdout in
+the report, in every ``--format``, and stderr in the FAIL lines from
+``_emit_evaluate_failures`` and in the judge's warning (the CLI configures
+no logging, so ``logging.lastResort`` prints SDK warnings there).
 
 The GitHub Actions runner reads a step's stdout and stderr line by line
 (``\\n``, ``\\r`` and ``\\r\\n`` all end a line). It runs a line as a
@@ -30,19 +34,28 @@ The payloads below use ``debug``, which only shows in debug logs: pytest
 prints a failing value raw, and this suite itself runs in GitHub Actions.
 """
 
+import ast
+import asyncio
 from datetime import datetime
 from datetime import timezone
+import json
 import re
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
 
+from bigquery_agent_analytics import client as client_module
+from bigquery_agent_analytics import evalbench
+from bigquery_agent_analytics import evaluators
 from bigquery_agent_analytics.cli import _format_feedback_snippet
 from bigquery_agent_analytics.cli import app
 from bigquery_agent_analytics.evaluators import EvaluationReport
+from bigquery_agent_analytics.evaluators import LLMAsJudge
 from bigquery_agent_analytics.evaluators import SessionScore
+from bigquery_agent_analytics.trace import Trace
 
 runner = CliRunner()
 
@@ -229,3 +242,229 @@ def test_feedback_snippet_truncation_keeps_escapes_whole():
 def test_ordinary_feedback_is_unchanged():
   feedback = "Missed the #2 step [tool: search] in the user's request."
   assert _format_feedback_snippet(feedback) == feedback
+
+
+# The tests below run each gate on a real ``Client``. Only BigQuery is faked,
+# plus the trace read and the Gemini reply for the API judge, so the judge
+# tiers, the merged report and the CLI output are the shipped code.
+
+# A BigQuery ML model reference: the ML.GENERATE_TEXT judge tier runs first.
+_ML_JUDGE_ENDPOINT = "proj.ds.judge_model"
+
+_PINNED = evalbench.EvalBenchImportSessions(
+    job_id="job-1",
+    import_version="v1",
+    events_table="proj.ds.evalbench_agent_events",
+    scores_table="proj.ds.evalbench_scores_imported",
+    session_ids=("pinned-session",),
+    manifest={"job_id": "job-1", "import_version": "v1"},
+)
+
+_GATE_ARGS = {
+    "evaluate": [
+        "evaluate",
+        "--project-id=proj",
+        "--dataset-id=ds",
+        "--evaluator=llm-judge",
+        "--exit-code",
+    ],
+    "evalbench-score": [
+        "evalbench-score",
+        "--project-id=proj",
+        "--dataset-id=ds",
+        "--job-id=job-1",
+        "--exit-code",
+    ],
+}
+
+
+def _invoke_judge_gate(monkeypatch, command, fmt, bq_client, endpoint=None):
+  """Run *command* with ``--format=fmt`` against a fake BigQuery client."""
+  monkeypatch.setattr(
+      client_module, "make_bq_client", lambda *args, **kwargs: bq_client
+  )
+  monkeypatch.setattr(evalbench, "import_sessions", lambda **kwargs: _PINNED)
+  args = _GATE_ARGS[command] + [f"--format={fmt}"]
+  if endpoint is not None:
+    args.append(f"--endpoint={endpoint}")
+  result = runner.invoke(app, args)
+  assert result.exit_code == 1, result.output
+  return result
+
+
+def _ml_judge_client(session_id, evaluation):
+  """A BigQuery client whose ML.GENERATE_TEXT judge returns one row."""
+  bq_client = MagicMock()
+  bq_client.query.return_value.result.return_value = [
+      {"session_id": session_id, "evaluation": json.dumps(evaluation)}
+  ]
+  return bq_client
+
+
+def _decoded_report(stdout, fmt):
+  """Decode the report the way its reader would: JSON, or the table's reprs."""
+  if fmt == "json":
+    return json.loads(stdout)
+  values = {}
+  for line in stdout.splitlines():
+    key, _, value = line.partition(" ")
+    values[key] = value.strip()
+  return {
+      key: ast.literal_eval(values[key])
+      for key in ("aggregate_scores", "session_scores")
+  }
+
+
+@pytest.mark.parametrize("fmt", ["json", "table"])
+@pytest.mark.parametrize("command", ["evaluate", "evalbench-score"])
+@pytest.mark.parametrize(
+    "session_id, feedback",
+    [
+        ("s1##[debug]injected", "Wrong table joined."),
+        ("ordinary-session", "Wrong ##[debug]injected table."),
+    ],
+    ids=["session-id", "feedback"],
+)
+def test_report_on_stdout_cannot_carry_a_workflow_command(
+    monkeypatch, command, fmt, session_id, feedback
+):
+  bq_client = _ml_judge_client(
+      session_id, {"correctness": 2, "justification": feedback}
+  )
+
+  result = _invoke_judge_gate(
+      monkeypatch, command, fmt, bq_client, endpoint=_ML_JUDGE_ENDPOINT
+  )
+
+  assert _command_lines(result.stdout) == []
+  assert _command_lines(result.stderr) == []
+  # A reader decoding the JSON or the table's reprs still gets the
+  # original values.
+  (score,) = _decoded_report(result.stdout, fmt)["session_scores"]
+  assert (score["session_id"], score["llm_feedback"]) == (session_id, feedback)
+
+
+@pytest.mark.parametrize("fmt", ["json", "text", "table"])
+@pytest.mark.parametrize("command", ["evaluate", "evalbench-score"])
+@pytest.mark.parametrize(
+    "metric_name, rendered",
+    [
+        ("evil\n::debug::forged", "evil\\n::debug::forged"),
+        ("evil\r::debug::forged", "evil\\r::debug::forged"),
+        ("evil ##[debug]x", "evil ##\\x5bdebug]x"),
+    ],
+    ids=["lf", "cr", "legacy-marker"],
+)
+def test_judge_chosen_metric_name_cannot_carry_a_workflow_command(
+    monkeypatch, command, fmt, metric_name, rendered
+):
+  # The reply lacks the criterion's "correctness" key, so the ML judge tier
+  # names a metric after every numeric key, and the missing criterion fails
+  # the session.
+  bq_client = _ml_judge_client(
+      "ordinary-session", {metric_name: 0, "justification": "low"}
+  )
+
+  result = _invoke_judge_gate(
+      monkeypatch, command, fmt, bq_client, endpoint=_ML_JUDGE_ENDPOINT
+  )
+
+  assert _command_lines(result.stderr) == []
+  assert _command_lines(result.stdout) == []
+  fail_lines = [line for line in result.stderr.splitlines() if "FAIL" in line]
+  assert fail_lines == [
+      f"  FAIL session=ordinary-session metric={rendered} score=0"
+      ' feedback="low"'
+  ]
+  if fmt == "text":
+    assert f"    {rendered}: 0.000" in result.stdout.splitlines()
+  else:
+    report = _decoded_report(result.stdout, fmt)
+    assert report["aggregate_scores"] == {metric_name: 0.0}
+
+
+@pytest.mark.parametrize("command", ["evaluate", "evalbench-score"])
+@pytest.mark.parametrize(
+    "metric_name, rendered",
+    [
+        ("::debug::forged", "\\x3a:debug::forged"),
+        ("  ::debug::forged", "  \\x3a:debug::forged"),
+    ],
+    ids=["leading", "indented"],
+)
+def test_text_summary_metric_name_cannot_start_a_workflow_command(
+    monkeypatch, command, metric_name, rendered
+):
+  # The text summary starts a line with each metric name, after spaces
+  # that the runner trims.
+  bq_client = _ml_judge_client(
+      "ordinary-session", {metric_name: 0, "justification": "low"}
+  )
+
+  result = _invoke_judge_gate(
+      monkeypatch, command, "text", bq_client, endpoint=_ML_JUDGE_ENDPOINT
+  )
+
+  assert _command_lines(result.stdout) == []
+  assert _command_lines(result.stderr) == []
+  assert f"    {rendered}: 0.000" in result.stdout.splitlines()
+
+
+# The judge's score is a string, so float() fails and the warning quotes it.
+_JUDGE_REPLY = '{"correctness": "##[debug]injected", "justification": "bad"}'
+_JUDGE_WARNING = (
+    "LLM judge failed: could not convert string to float:"
+    " '##\\x5bdebug]injected'"
+)
+
+
+def _genai_client():
+  """A google-genai client whose judge model returns ``_JUDGE_REPLY``."""
+  genai_client = MagicMock()
+  genai_client.aio.models.generate_content = AsyncMock(
+      return_value=MagicMock(text=_JUDGE_REPLY)
+  )
+  return genai_client
+
+
+@pytest.mark.parametrize("fmt", ["json", "text", "table"])
+@pytest.mark.parametrize("command", ["evaluate", "evalbench-score"])
+def test_judge_warning_cannot_carry_a_workflow_command(
+    monkeypatch, command, fmt
+):
+  # The CLI configures no logging, so the warning reaches stderr through
+  # logging.lastResort. Keep pytest's root capture handler from taking it.
+  monkeypatch.setattr(evaluators.logger, "propagate", False)
+  # Both BigQuery judge tiers fail, so the Gemini API judge parses the reply.
+  bq_client = MagicMock()
+  bq_client.query.side_effect = RuntimeError("judge tier unavailable")
+  monkeypatch.setattr(
+      client_module.Client,
+      "_fetch_filtered_traces",
+      lambda self, **kwargs: [Trace(trace_id="t1", session_id="judged")],
+  )
+
+  with patch("google.genai.Client", return_value=_genai_client()):
+    result = _invoke_judge_gate(monkeypatch, command, fmt, bq_client)
+
+  assert _command_lines(result.stderr) == []
+  assert _command_lines(result.stdout) == []
+  assert _JUDGE_WARNING in result.stderr.splitlines()
+
+
+def test_judge_warning_is_escaped_when_logged(caplog):
+  with patch("google.genai.Client", return_value=_genai_client()):
+    score = asyncio.run(
+        LLMAsJudge.correctness().evaluate_session("trace", "response")
+    )
+
+  messages = [
+      record.getMessage()
+      for record in caplog.records
+      if record.name == evaluators.logger.name
+  ]
+  assert messages == [_JUDGE_WARNING]
+  # The score keeps the judge's text; each output path escapes it.
+  assert score.llm_feedback == (
+      "correctness: could not convert string to float: '##[debug]injected'"
+  )
