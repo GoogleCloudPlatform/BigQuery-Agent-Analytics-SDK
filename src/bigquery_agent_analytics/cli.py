@@ -45,6 +45,9 @@ from typing import Any, Optional
 
 import typer
 
+from ._ci_log import escape_encoded_log_text
+from ._ci_log import escape_log_text
+from ._ci_log import escaped_log_pieces
 from .evaluators import EvaluationReport
 from .evaluators import LLMAsJudge
 from .evaluators import SystemEvaluator
@@ -587,7 +590,7 @@ def evaluate(
         connection_id=connection_id,
     )
     report = client.evaluate(evaluator=ev, filters=filters, strict=strict)
-    typer.echo(format_output(report, fmt))
+    _echo_report(report, fmt)
 
     if exit_code and report.pass_rate < 1.0:
       _emit_evaluate_failures(report)
@@ -599,32 +602,19 @@ def evaluate(
     raise typer.Exit(code=2)
 
 
-_FEEDBACK_SNIPPET_MAX = 120
+def _echo_report(report: EvaluationReport, fmt: str) -> None:
+  """Print an evaluation report so a CI log cannot run text from it.
 
-
-def _escaped_log_pieces(text: str, quote: bool = False) -> list[str]:
-  """Escape *text* for one CI log line, one piece per character.
-
-  A backslash, and a double quote when *quote* is set, gets a backslash.
-  A non-printable character, such as a line break or an ANSI escape,
-  becomes its Python escape (``\\n``, ``\\x1b``), and the ``[`` after
-  ``##`` becomes ``\\x5b``. Session IDs and judge feedback come from
-  outside the CI job, and the GitHub Actions runner runs a stdout or
-  stderr line as a workflow command when it starts with ``::name::`` or
-  contains ``##[name]``. The escaped text never breaks the line or
-  contains ``##[``.
+  Session IDs, judge feedback and judge-chosen metric names come from
+  outside the CI job. JSON and the table's reprs already escape line
+  breaks inside them, and the text summary escapes metric names, so
+  ``##[`` is the one workflow command left. :func:`escape_encoded_log_text`
+  writes its ``[`` as an escape that JSON and Python decode back to ``[``.
   """
-  pieces = []
-  for index, char in enumerate(text):
-    if char == "\\" or (quote and char == '"'):
-      pieces.append("\\" + char)
-    elif not char.isprintable():
-      pieces.append(ascii(char)[1:-1])
-    elif char == "[" and text[max(index - 2, 0) : index] == "##":
-      pieces.append("\\x5b")
-    else:
-      pieces.append(char)
-  return pieces
+  typer.echo(escape_encoded_log_text(format_output(report, fmt)))
+
+
+_FEEDBACK_SNIPPET_MAX = 120
 
 
 def _format_feedback_snippet(
@@ -635,7 +625,7 @@ def _format_feedback_snippet(
   Collapses internal whitespace runs (including newlines) to a single
   space so the snippet fits on one CI log line, then truncates to
   ``max_chars`` with a trailing ``…`` when the original was longer.
-  Escapes it with :func:`_escaped_log_pieces`, double quotes included,
+  Escapes it with :func:`escaped_log_pieces`, double quotes included,
   so the result is safe inside the emitted ``feedback="..."`` field.
   Returns ``None`` for empty / whitespace-only input so callers can
   cleanly skip the field.
@@ -646,7 +636,7 @@ def _format_feedback_snippet(
   if not collapsed:
     return None
 
-  pieces = _escaped_log_pieces(collapsed, quote=True)
+  pieces = escaped_log_pieces(collapsed, quote=True)
   escaped = "".join(pieces)
 
   if len(escaped) <= max_chars:
@@ -678,9 +668,10 @@ def _emit_evaluate_failures(
   criteria). For LLM-judge failures the line also carries a bounded
   ``feedback="…"`` snippet drawn from ``SessionScore.llm_feedback``
   so CI logs explain *why* the judge said the session failed without
-  forcing the reader to chase the JSON output. The session ID and the
-  snippet are escaped with :func:`_escaped_log_pieces`, so event data
-  cannot break a FAIL line or put a workflow command in it.
+  forcing the reader to chase the JSON output. The session ID, the
+  metric name and the snippet are escaped with :func:`escape_log_text`,
+  so event data and judge replies cannot break a FAIL line or put a
+  workflow command in it.
 
   A failing session is guaranteed to produce at least one FAIL line —
   never just the summary header. Capped at ``max_sessions`` most-recent
@@ -697,7 +688,7 @@ def _emit_evaluate_failures(
   )
   shown = failed[:max_sessions]
   for s in shown:
-    session_id = "".join(_escaped_log_pieces(s.session_id))
+    session_id = escape_log_text(s.session_id)
     feedback_snippet = _format_feedback_snippet(s.llm_feedback)
     emitted_for_session = False
     for metric_name, score in s.scores.items():
@@ -722,7 +713,9 @@ def _emit_evaluate_failures(
 
       observed = detail.get("observed")
       budget = detail.get("budget")
-      parts = [f"FAIL session={session_id} metric={metric_name}"]
+      parts = [
+          f"FAIL session={session_id} metric={escape_log_text(metric_name)}"
+      ]
       if observed is not None:
         if isinstance(observed, float):
           parts.append(f"observed={observed:.4g}")
@@ -2941,7 +2934,7 @@ def evalbench_score(
         "events_table": pinned.events_table,
         "pinned_sessions": pinned.session_count,
     }
-    typer.echo(format_output(report, fmt))
+    _echo_report(report, fmt)
 
     if exit_code and report.pass_rate < 1.0:
       _emit_evaluate_failures(report)
