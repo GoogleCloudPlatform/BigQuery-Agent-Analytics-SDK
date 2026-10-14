@@ -47,17 +47,14 @@ def load_config() -> DemoConfig:
       load_dotenv(dotenv_path=_ENV_PATH)
     except ImportError:
       pass
-  try:
-    import google.auth
+  project_id = os.getenv("PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT")
+  if not project_id:
+    try:
+      import google.auth
 
-    _, auth_project = google.auth.default()
-  except Exception:
-    auth_project = None
-  project_id = (
-      os.getenv("PROJECT_ID")
-      or os.getenv("GOOGLE_CLOUD_PROJECT")
-      or auth_project
-  )
+      _, project_id = google.auth.default()
+    except Exception:
+      project_id = None
   if not project_id:
     raise RuntimeError(
         "PROJECT_ID is not set and no default Google Cloud project was found."
