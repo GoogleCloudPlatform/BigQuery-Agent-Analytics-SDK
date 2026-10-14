@@ -60,15 +60,10 @@ def _isolate_env_and_query_state(monkeypatch: pytest.MonkeyPatch):
   monkeypatch.setenv("STREAMLIT_LAZY_TABS", "false")
   queries._run_query_cached.clear()
   queries._SEEN_RUN_IDS.clear()
-  queries._NEXT_RUN_ID = 0
-  st.sidebar._form_data = None
-  st._main._form_data = None
+  monkeypatch.setattr(queries, "_NEXT_RUN_ID", 0)
   yield
   queries._run_query_cached.clear()
   queries._SEEN_RUN_IDS.clear()
-  queries._NEXT_RUN_ID = 0
-  st.sidebar._form_data = None
-  st._main._form_data = None
 
 
 @pytest.fixture
@@ -211,6 +206,7 @@ def test_window_snap_and_time_bounds():
   assert models.snap(moment, seconds=-10) == moment.replace(microsecond=0)
 
   naive = dt.datetime(2026, 9, 1, 12, 34, 56, 789000)
+  assert models.snap(naive, seconds=0) == moment.replace(microsecond=0)
   snapped_naive = models.snap(naive, seconds=300)
   assert snapped_naive == expected_snapped
   assert snapped_naive.tzinfo == dt.timezone.utc
@@ -249,6 +245,7 @@ def test_filters_humanize_bytes_and_context(sample_refs, sample_window):
   assert models.as_filter_values([]) == (models.ALL_SENTINEL,)
   assert models.as_filter_values(["a", "b"]) == ("a", "b")
 
+  assert models.humanize_bytes(-2048) == "-2.0 KB"
   assert models.humanize_bytes(500) == "500 B"
   assert models.humanize_bytes(1024) == "1.0 KB"
   assert models.humanize_bytes(10 * 1024**2) == "10.0 MB"
@@ -265,6 +262,7 @@ def test_filters_humanize_bytes_and_context(sample_refs, sample_window):
   assert ctx2.scan_log == []
 
   res = models.QueryResult(pd.DataFrame())
+  assert (res.bytes_processed, res.bytes_billed, res.cache_hit) == (0, 0, False)
   assert res.stats_known is True
   assert (
       models.QueryResult(pd.DataFrame(), bytes_billed_known=False).stats_known
@@ -461,7 +459,7 @@ def test_query_parameters_and_job_config():
       "event_types": ["LLM_RESPONSE"],
       "session_ids": ["sess_1"],
   }
-  assert queries.query_parameters("SELECT 1", filters) == []
+  assert queries.query_parameters("SELECT @agents_x", filters) == []
 
   live_cfg = queries.job_config(sql, filters, 5_000_000, dry_run=False)
   assert live_cfg.maximum_bytes_billed == 5_000_000
@@ -620,21 +618,34 @@ def test_run_query_caching_and_deduplication(monkeypatch):
     queries.run_query("SELECT 1", f1, "proj-1", 2_000_000)
     assert mock_client.query.call_count == 10
 
-    # Live job with total_bytes_billed=None calls reload(); if still None ->
-    # stats_known=False on first run, then True on @st.cache_data hit
+    # Live job with total_bytes_billed=None calls reload(); if reload raises ->
+    # rows and known scan bytes are retained, stats_known=False on first run,
+    # then True on @st.cache_data hit
     job_unk = mock.MagicMock(
         total_bytes_processed=100,
         total_bytes_billed=None,
         cache_hit=False,
     )
-    job_unk.to_dataframe.return_value = pd.DataFrame()
+    job_unk.to_dataframe.return_value = pd.DataFrame({"col": [7]})
+    job_unk.reload.side_effect = RuntimeError("metadata reload failed")
     mock_client.query.return_value = job_unk
     r_unk = queries.run_query("SELECT unk", f1, "proj-1", 1_000_000)
-    job_unk.reload.assert_called_once()
+    job_unk.reload.assert_called_once_with(
+        timeout=queries._JOB_RELOAD_TIMEOUT_SECONDS
+    )
+    assert r_unk.error is None and list(r_unk.df["col"]) == [7]
+    assert r_unk.bytes_processed == 100 and r_unk.bytes_processed_known is True
     assert r_unk.bytes_billed_known is False and r_unk.stats_known is False
     r_dedup = queries.run_query("SELECT unk", f1, "proj-1", 1_000_000)
     assert r_dedup.cache_hit is True and r_dedup.bytes_billed == 0
     assert r_dedup.bytes_billed_known is True and r_dedup.stats_known is True
+
+    # Live job with total_bytes_processed=None also triggers reload()
+    job_unk.total_bytes_processed, job_unk.total_bytes_billed = None, 200
+    r_proc = queries.run_query("SELECT unk_proc", f1, "proj-1", 1_000_000)
+    assert job_unk.reload.call_count == 2
+    assert (r_proc.bytes_processed, r_proc.bytes_processed_known) == (0, False)
+    assert (r_proc.bytes_billed, r_proc.bytes_billed_known) == (200, True)
 
   # _SEEN_RUN_IDS quarter eviction (max=8 -> evicts 8 // 4 == 2 oldest IDs)
   queries._SEEN_RUN_IDS.clear()
@@ -676,6 +687,9 @@ def test_job_stats_extraction_and_download_failure_recovery():
       True,
       True,
   )
+  job.reload.assert_called_once_with(
+      timeout=queries._JOB_RELOAD_TIMEOUT_SECONDS
+  )
 
   # 2. BigQuery cache_hit=True forces bytes_billed=0 and billed_known=True
   job_bq_cache = mock.MagicMock(
@@ -708,6 +722,8 @@ def test_job_stats_extraction_and_download_failure_recovery():
       False,
   )
   job_partial.reload.assert_called_once()
+  job_partial.total_bytes_processed, job_partial.cache_hit = None, True
+  assert queries._extract_job_stats(job_partial) == (0, 0, True, False, True)
 
   job_only_billed = mock.MagicMock(
       total_bytes_processed=None,
@@ -747,7 +763,7 @@ def test_job_stats_extraction_and_download_failure_recovery():
       cache_hit=False,
       ended=dt.datetime.now(dt.timezone.utc),
   )
-  mock_failed_dl.to_dataframe.side_effect = gexc.ServiceUnavailable("503")
+  mock_failed_dl.to_dataframe.side_effect = RuntimeError("Arrow stream broke")
   mock_cached_dl = mock.MagicMock(
       total_bytes_processed=8192,
       total_bytes_billed=0,
@@ -755,7 +771,9 @@ def test_job_stats_extraction_and_download_failure_recovery():
       ended=dt.datetime.now(dt.timezone.utc),
   )
   mock_cached_dl.to_dataframe.side_effect = gexc.ServiceUnavailable("503 cache")
-  job_dead.to_dataframe.side_effect = gexc.ServiceUnavailable("503 dead")
+  job_dead.to_dataframe.side_effect = gexc.BadRequest(
+      "bytesBilledLimitExceeded"
+  )
   mock_client.query.side_effect = [
       mock_probe,
       mock_failed_dl,
@@ -799,7 +817,14 @@ def test_job_stats_extraction_and_download_failure_recovery():
     res_dead = queries.run_query(
         "SELECT * FROM dead", models.Filters(), "p", 10**8
     )
-    assert res_dead.df.empty and res_dead.error is not None
+    assert res_dead.df.empty and "Raise the per-query scan cap" in (
+        res_dead.error or ""
+    )
+    assert (
+        res_dead.bytes_processed,
+        res_dead.bytes_billed,
+        res_dead.cache_hit,
+    ) == (0, 0, False)
     assert (
         res_dead.bytes_processed_known,
         res_dead.bytes_billed_known,
@@ -843,8 +868,10 @@ def test_fetch_and_load_filter_options(sample_context):
   with (
       mock.patch.object(queries, "run_query", return_value=ok_res) as mock_run,
       mock.patch.object(queries.st, "spinner") as mock_spinner,
+      mock.patch.object(queries.st, "error") as mock_ok_err,
   ):
     options, res = queries.load_filter_options(ctx)
+    mock_ok_err.assert_not_called()
     mock_spinner.assert_called_once_with("Loading Filter options...")
     mock_run.assert_called_once_with(
         queries.build_filter_options_sql(ctx.refs, ctx.window),
@@ -925,6 +952,7 @@ def test_fold_others():
   assert charts.fold_others(
       pd.DataFrame(columns=["cat", "val"]), "cat", "val"
   ).empty
+  assert charts.fold_others(pd.DataFrame(), "cat", "val").empty
 
   # Ties at the limit boundary preserve total sum and cap at limit
   df_ties = pd.DataFrame(
@@ -1051,7 +1079,7 @@ def test_chart_builders_data_shaping(sample_context):
     assert fig_stack.layout.showlegend is True
     assert fig_stack.layout.hovermode == "x unified"
 
-    # Single-category stacked_bars hides legend
+    # Single-category stacked_bars hides legend; 2 categories shows legend
     fig_single = charts.stacked_bars(
         pd.DataFrame({"bucket": ["2026-01-01"], "type": ["only"], "cnt": [3]}),
         "bucket",
@@ -1061,6 +1089,12 @@ def test_chart_builders_data_shaping(sample_context):
         "type",
     )
     assert fig_single.layout.showlegend is False
+    assert (
+        charts.stacked_bars(
+            df_stack.iloc[:2], "bucket", "type", "cnt", sample_context, "type"
+        ).layout.showlegend
+        is True
+    )
 
     # 2. ranked_bars keeps top N and sorts ascending for horizontal rendering
     df_rank = pd.DataFrame(
@@ -1246,15 +1280,17 @@ def test_app_helpers_and_sidebar_connection(monkeypatch):
   # 1. When BQ_PROJECT_ID is set in env, user input cannot override it
   monkeypatch.setenv("BQ_PROJECT_ID", "env-locked-project")
   monkeypatch.setenv("BQ_DATASET_ID", "env_dataset")
+  proj_disabled_flags: list[bool] = []
+
+  def _fake_text_input(label, value="", **kw):
+    if label == "Project ID":
+      proj_disabled_flags.append(bool(kw.get("disabled")))
+      return "injected-proj"
+    return value
+
   with (
       mock.patch.object(app.st.sidebar, "form", return_value=mock.MagicMock()),
-      mock.patch.object(
-          app.st,
-          "text_input",
-          side_effect=lambda label, value="", **kw: (
-              "injected-proj" if label == "Project ID" else value
-          ),
-      ),
+      mock.patch.object(app.st, "text_input", side_effect=_fake_text_input),
       mock.patch.object(app.st, "selectbox", return_value="1 GB"),
       mock.patch.object(app.st, "form_submit_button", return_value=False),
       mock.patch.object(app.st, "session_state", {}),
@@ -1267,6 +1303,7 @@ def test_app_helpers_and_sidebar_connection(monkeypatch):
     monkeypatch.delenv("BQ_PROJECT_ID", raising=False)
     refs_form, _ = app.sidebar_connection()
     assert refs_form is not None and refs_form.project == "injected-proj"
+    assert proj_disabled_flags == [True, False]
 
   # 3. Blank dataset before Connect click does not render sidebar error,
   #    whereas invalid dataset after Connect click surfaces st.sidebar.error
@@ -1297,7 +1334,13 @@ def test_app_helpers_and_sidebar_connection(monkeypatch):
     mock_error.assert_called_once_with("Invalid dataset ID: ''")
     mock_error.reset_mock()
 
+    # Next rerun (submit=False) still shows error while _connect_attempted is latched
     mock_submit.return_value = False
+    refs_latched, _ = app.sidebar_connection()
+    assert refs_latched is None
+    mock_error.assert_called_once_with("Invalid dataset ID: ''")
+    mock_error.reset_mock()
+
     conn_state.clear()
     monkeypatch.setenv("BQ_DATASET_ID", "bad-ds")
     refs_bad, _ = app.sidebar_connection()
@@ -1370,16 +1413,16 @@ def test_row_overview_and_llm_metrics(sample_context):
           pd.DataFrame(
               [
                   {
-                      "sessions": 12,
-                      "events": 340,
+                      "sessions": 1234,
+                      "events": 56789,
                       "error_rate": 0.0731,
                       "avg_llm_latency_ms": 1234.5,
                   }
               ]
           ),
           [
-              (0, "Sessions", "12", None),
-              (1, "Events", "340", None),
+              (0, "Sessions", "1,234", None),
+              (1, "Events", "56,789", None),
               (2, "Error rate", "7.31%", err_help),
               (3, "Avg LLM latency", "1,235 ms", None),
           ],
@@ -1388,16 +1431,16 @@ def test_row_overview_and_llm_metrics(sample_context):
           pd.DataFrame(
               [
                   {
-                      "sessions": 12,
-                      "events": 340,
+                      "sessions": 1234,
+                      "events": 56789,
                       "error_rate": float("nan"),
                       "avg_llm_latency_ms": None,
                   }
               ]
           ),
           [
-              (0, "Sessions", "12", None),
-              (1, "Events", "340", None),
+              (0, "Sessions", "1,234", None),
+              (1, "Events", "56,789", None),
               (2, "Error rate", "—", err_help),
               (3, "Avg LLM latency", "—", None),
           ],
@@ -1432,7 +1475,7 @@ def test_row_overview_and_llm_metrics(sample_context):
   df_llm = pd.DataFrame(
       [
           {
-              "llm_calls": 10,
+              "llm_calls": 1500,
               "prompt_tokens": 1_000_000,
               "completion_tokens": 500_000,
               "total_tokens": 1_500_000,
@@ -1492,7 +1535,7 @@ def test_row_overview_and_llm_metrics(sample_context):
               (
                   0,
                   "LLM calls",
-                  "10",
+                  "1,500",
                   (
                       "Counted per distinct span, so streaming chunks do not"
                       " inflate it."
@@ -1623,15 +1666,25 @@ def test_footer_byte_and_cache_accounting(sample_context):
     mock_caption.assert_not_called()
     mock_divider.assert_not_called()
 
-    # 2. Uncached-only run omits cache clause and includes cap + TTL
+    # 2. Uncached-only and known-zero guardrail runs omit cache/missing notes
     sample_context.scan_log = [
         models.ScanEntry("q1", 10_485_760, 1024, False, True, True),
     ]
     app.footer(sample_context)
+    mock_divider.assert_called_once()
     assert mock_caption.call_count == 3
     text_uncached = mock_caption.call_args_list[0][0][0]
     assert "served from cache" not in text_uncached
     assert "per-query cap 1.0 GB · results cached for 5 min" in text_uncached
+
+    mock_caption.reset_mock()
+    sample_context.scan_log = [
+        models.ScanEntry("q0", 0, 0, False, True, True),
+    ]
+    app.footer(sample_context)
+    text_zero = mock_caption.call_args_list[0][0][0]
+    assert "0 B billed (0 B processed)" in text_zero
+    assert "unavailable" not in text_zero
 
     # 3. Mixed live, cached, and unknown billing/scan entries (2 cached hits)
     mock_caption.reset_mock()
@@ -1645,9 +1698,8 @@ def test_footer_byte_and_cache_accounting(sample_context):
     app.footer(sample_context)
     assert mock_caption.call_count == 3
     text = mock_caption.call_args_list[0][0][0]
-    assert "5 queries this run" in text
     assert (
-        f"{models.humanize_bytes(20_971_520)} billed"
+        f"5 queries this run · {models.humanize_bytes(20_971_520)} billed"
         f" ({models.humanize_bytes(1536)} processed)" in text
     )
     assert "2 served from cache (3.0 KB scan avoided via cache)" in text
@@ -1664,6 +1716,7 @@ def test_footer_byte_and_cache_accounting(sample_context):
     app.footer(sample_context)
     assert mock_caption.call_count == 3
     text_unrec = mock_caption.call_args_list[0][0][0]
+    assert "0 B billed (0 B processed)" in text_unrec
     assert (
         "2 served from cache (≥ 1.0 MB scan avoided via cache; 1 query scan"
         " size unrecorded)" in text_unrec
@@ -1704,6 +1757,7 @@ def test_apptest_sidebar_filters_and_connection_reset():
   def fake_fetch(sql, ctx, label):
     del sql
     fetched_labels.append(label)
+    ctx.scan_log.append(models.ScanEntry(label, 0, 0, True, True, True))
     if label == "Recent sessions" and ctx.refs.dataset == "test_dataset":
       return sess_res
     return empty_res
@@ -1726,7 +1780,10 @@ def test_apptest_sidebar_filters_and_connection_reset():
         "Recent sessions",
     } <= set(fetched_labels)
 
-    # 1. Verify default time range, caption buckets, and accept_new_options flags
+    # 1. Verify default time range, pricing, caption buckets, and accept_new_options flags
+    assert at.sidebar.number_input(key="flt_price_in").value == 1.25
+    assert at.sidebar.number_input(key="flt_price_out").value == 5.0
+    assert any("queries this run" in c.value for c in at.caption)
     range_sb = [s for s in at.sidebar.selectbox if s.label == "Range"][0]
     assert range_sb.value == "Last 24 hours"
     assert any("hour buckets" in c.value for c in at.sidebar.caption)
@@ -1740,24 +1797,27 @@ def test_apptest_sidebar_filters_and_connection_reset():
     # 2. Unsubmitted widget edits do not mutate applied_filters until Apply
     at.sidebar.multiselect(key="flt_agent").select("agent-a")
     at.sidebar.multiselect(key="flt_user_id").select("user-1")
+    at.sidebar.multiselect(key="flt_event_type").select("start")
+    at.sidebar.multiselect(key="flt_session_id").select("sess-1")
     assert at.session_state["applied_filters"] == models.Filters()
 
     apply_btn = [b for b in at.sidebar.button if b.label == "Apply filters"][0]
     apply_btn.click().run()
     assert not at.exception
-    assert at.session_state["applied_filters"].agents == ("agent-a",)
-    assert at.session_state["applied_filters"].user_ids == ("user-1",)
+    assert at.session_state["applied_filters"] == models.Filters(
+        agents=("agent-a",),
+        user_ids=("user-1",),
+        event_types=("start",),
+        session_ids=("sess-1",),
+    )
 
-    # 3. Clear selections while options are unchanged -> resets to ALL_SENTINEL
+    # 3. Clear agent selection while options are unchanged -> resets to ALL_SENTINEL
     at.sidebar.multiselect(key="flt_agent").unselect("agent-a")
-    at.sidebar.multiselect(key="flt_user_id").unselect("user-1")
     apply_btn = [b for b in at.sidebar.button if b.label == "Apply filters"][0]
     apply_btn.click().run()
     assert not at.exception
     assert at.session_state["applied_filters"].agents == (models.ALL_SENTINEL,)
-    assert at.session_state["applied_filters"].user_ids == (
-        models.ALL_SENTINEL,
-    )
+    assert at.session_state["applied_filters"].user_ids == ("user-1",)
 
     # 4. Re-select "agent-a", then mutate BigQuery options to omit "agent-a"
     at.sidebar.multiselect(key="flt_agent").select("agent-a")
@@ -1778,28 +1838,30 @@ def test_apptest_sidebar_filters_and_connection_reset():
     assert ms_agent.value == ["agent-a"]
     assert at.session_state["applied_filters"].agents == ("agent-a",)
 
-    # 5. Transient load_filter_options error reuses cached _filter_options
-    opts_state["opts"] = {}
-    opts_state["res"] = models.QueryResult(
-        df=pd.DataFrame(), error="Transient BQ failure"
-    )
-    at.run()
-    assert not at.exception
-    assert at.session_state["_filter_options"]["agent"] == [
-        "agent-c",
-        "agent-d",
-    ]
-    assert at.session_state["applied_filters"].agents == ("agent-a",)
-    assert at.session_state["_selected_session_id"] == "sess-init-1"
+    # 5. Transient error OR empty successful refresh reuses cached _filter_options
+    for res_override in (
+        models.QueryResult(df=pd.DataFrame(), error="Transient BQ failure"),
+        empty_res,
+    ):
+      opts_state["opts"] = {}
+      opts_state["res"] = res_override
+      at.run()
+      assert not at.exception
+      assert at.session_state["_filter_options"]["agent"] == [
+          "agent-c",
+          "agent-d",
+      ]
+      assert at.session_state["applied_filters"].agents == ("agent-a",)
+      assert at.session_state["_selected_session_id"] == "sess-init-1"
+      assert at.sidebar.multiselect(key="flt_agent").options == [
+          "agent-c",
+          "agent-d",
+          "agent-a",
+      ]
 
-    # 6. Change Dataset ID -> resets filters/session selection, keeps pricing
+    # 6. Change Dataset ID -> resets filters, cached options, and session selection
     at.session_state["flt_price_in"] = 2.5
-    opts_state["opts"] = {
-        "agent": ["agent-a", "agent-b"],
-        "user_id": ["user-1", "user-2"],
-        "event_type": ["start", "complete"],
-        "session_id": ["sess-1", "sess-2"],
-    }
+    opts_state["opts"] = {}
     opts_state["res"] = empty_res
     [ti for ti in at.sidebar.text_input if ti.label == "Dataset ID"][0].input(
         "test_dataset_2"
@@ -1807,8 +1869,10 @@ def test_apptest_sidebar_filters_and_connection_reset():
     [b for b in at.sidebar.button if b.label == "Connect"][0].click().run()
     assert not at.exception
     assert at.session_state["applied_filters"] == models.Filters()
-    assert at.session_state["flt_agent"] == []
-    assert at.sidebar.multiselect(key="flt_agent").value == []
+    for key in ("flt_agent", "flt_user_id", "flt_event_type", "flt_session_id"):
+      assert at.session_state[key] == []
+      assert at.sidebar.multiselect(key=key).value == []
+    assert "_filter_options" not in at.session_state
     assert "_selected_session_id" not in at.session_state
     assert at.session_state["flt_price_in"] == 2.5
 
@@ -1818,6 +1882,24 @@ def test_apptest_sidebar_filters_and_connection_reset():
     apply_btn.click().run()
     assert not at.exception
     assert at.session_state["applied_filters"].agents == ("custom-agent-xyz",)
+
+    # 8. Invalid dataset in sidebar stops main() with st.info prompt;
+    #    reconnecting to test_dataset_2 re-seeds widget from applied_filters
+    [ti for ti in at.sidebar.text_input if ti.label == "Dataset ID"][0].input(
+        "bad-dataset!"
+    )
+    [b for b in at.sidebar.button if b.label == "Connect"][0].click().run()
+    assert not at.exception
+    assert any("Invalid dataset ID" in e.value for e in at.sidebar.error)
+    assert any("Set `BQ_PROJECT_ID`" in i.value for i in at.info)
+
+    [ti for ti in at.sidebar.text_input if ti.label == "Dataset ID"][0].input(
+        "test_dataset_2"
+    )
+    [b for b in at.sidebar.button if b.label == "Connect"][0].click().run()
+    assert not at.exception
+    assert at.session_state["applied_filters"].agents == ("custom-agent-xyz",)
+    assert at.sidebar.multiselect(key="flt_agent").value == ["custom-agent-xyz"]
 
 
 def test_apptest_lazy_tabs_and_session_trace_preservation(
@@ -1943,3 +2025,10 @@ def test_apptest_lazy_tabs_and_session_trace_preservation(
     assert at.session_state["_selected_session_id"] == "sess-brand-new"
     assert len(at.dataframe) == 1
     assert any("No events for this session" in c.value for c in at.caption)
+
+    # 6. If segmented_control returns None, lazy tabs falls back to Overview
+    fetched_labels.clear()
+    with mock.patch.object(st, "segmented_control", return_value=None):
+      at.run()
+    assert not at.exception
+    assert "Overview stats" in fetched_labels

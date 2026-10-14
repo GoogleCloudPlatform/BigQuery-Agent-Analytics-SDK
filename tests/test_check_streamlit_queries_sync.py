@@ -2,6 +2,7 @@
 
 import io
 from pathlib import Path
+import runpy
 import sys
 from unittest.mock import patch
 
@@ -40,7 +41,10 @@ def test_baseline_check():
   stdout_capture = io.StringIO()
   with patch("sys.stderr", stderr_capture), patch("sys.stdout", stdout_capture):
     with pytest.raises(SystemExit) as exc_info:
-      check_streamlit_queries_sync.main()
+      runpy.run_path(
+          str(SCRIPTS_DIR / "check_streamlit_queries_sync.py"),
+          run_name="__main__",
+      )
     assert exc_info.value.code == 0
   assert (
       f"All {len(check_streamlit_queries_sync.CANONICAL_QUERIES)} Streamlit"
@@ -105,6 +109,8 @@ def test_query_drift_detected(filename, old, new, expected_token):
   code, stderr = run_check_with_patch(filename, altered_sql)
   assert code == 1
   assert expected_token in stderr
+  if "missing required token column" not in expected_token:
+    assert "has drifted from Grafana" in stderr
 
 
 def test_unmapped_and_missing_query_guards(tmp_path):
@@ -388,23 +394,26 @@ def test_framework_adaptations_and_required_columns():
   original_llm = check_streamlit_queries_sync.get_streamlit_query(
       "llm_calls_total.sql"
   )
-  for col, snippet in [
+  for col, alias, snippet in [
       (
           "usage_prompt_tokens",
+          "prompt_tokens",
           "IFNULL(SUM(usage_prompt_tokens), 0) AS prompt_tokens,",
       ),
       (
           "usage_completion_tokens",
+          "completion_tokens",
           "IFNULL(SUM(usage_completion_tokens), 0) AS completion_tokens,",
       ),
       (
           "usage_total_tokens",
+          "total_tokens",
           "IFNULL(SUM(usage_total_tokens), 0) AS total_tokens",
       ),
   ]:
     bad_sql = original_llm.replace(snippet, "")
     with pytest.raises(
-        AssertionError, match=f"missing required token column {col}"
+        AssertionError, match=f"missing required token column {col} as {alias}"
     ):
       check_streamlit_queries_sync.assert_streamlit_query(
           "llm_calls_total.sql", bad_sql, window
