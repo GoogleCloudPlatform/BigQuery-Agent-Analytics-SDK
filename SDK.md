@@ -167,7 +167,7 @@ correlation identifiers:
 |---|---|---|
 | 1. Trace and execution tree | `trace_id`, `span_id`, `parent_span_id` (columns and `Span` fields) | `trace_id` is the OpenTelemetry trace ID whenever the run has an active span, so it matches Cloud Trace. `span_id` / `parent_span_id` are the plugin's own execution tree: they link rows of the events table to each other and drive `Trace` (for example `trace.render()`). They are **not** OpenTelemetry span IDs; only the root invocation row may reuse the active span ID. |
 | 2. OpenTelemetry span | `attributes.otel.span_id` / `attributes.otel.trace_id`; the `otel_span_id` / `otel_trace_id` [view columns](#otel-correlation-columns-and-denied_columns) and `Span` fields | The OpenTelemetry span that was active when the row was written. Recorded only when the plugin runs with `enable_otel_correlation=True`. A best-effort join key into Cloud Trace or an `otel_spans` table, not a foreign key: spans dropped by head sampling are never exported. |
-| 3. Source event | `attributes.adk.source_event_id` (and the legacy `attributes.source_event_id` on `AGENT_RESPONSE` rows); the `Span.source_event_id` field | The ADK `Event.id` behind a row written from the event stream. ADK 2.0 `invoke_node` spans list the IDs of the events their node yielded in the span attribute `gcp.vertex.agent.associated_event_ids`. |
+| 3. Source event | `attributes.adk.source_event_id` (and the legacy `attributes.source_event_id` on `AGENT_RESPONSE` rows written from the event stream); the `Span.source_event_id` field | The ADK `Event.id` behind a row written from the event stream. `AGENT_RESPONSE` rows from `after_tool_callback` (`final_response_tool_names`) carry no source event ID. ADK 2.0 `invoke_node` spans list the IDs of the events their node yielded in the span attribute `gcp.vertex.agent.associated_event_ids`. |
 
 #### Producer configuration
 
@@ -179,7 +179,7 @@ behavior.
 |---|---|---|
 | `enable_otel_correlation` | `False` | When `True`, each row records the active OpenTelemetry span context in `attributes.otel.span_id` (16 hex digits) and `attributes.otel.trace_id` (32 hex digits). A row written while no valid span is active gets no `attributes.otel`. The plugin does not create spans of its own. |
 | `custom_metadata_allowlist` | `None` | Keys of `Event.custom_metadata` to copy into `attributes.custom_metadata`: exact keys, or prefixes ending in `*` (for example `"a2a:*"`). `None` or empty keeps only the built-in `a2a:*` capture. |
-| `payload_column_denylist` | `None` | Payload columns to leave out of the events table. Only `content`, `content_parts`, `attributes` and `latency_ms` are accepted; any other name raises `ValueError`. Denying `attributes` removes layers 2 and 3 (`attributes.otel`, `attributes.adk`) as well as `attributes.custom_metadata`, and combining it with a non-empty `custom_metadata_allowlist` raises `ValueError`. |
+| `payload_column_denylist` | `None` | Payload columns the plugin does not write; it leaves them out of the events table only when it creates the table. Only `content`, `content_parts`, `attributes` and `latency_ms` are accepted; any other name raises `ValueError`. Denying `attributes` removes layers 2 and 3 (`attributes.otel`, `attributes.adk`) as well as `attributes.custom_metadata`, and combining it with a non-empty `custom_metadata_allowlist` raises `ValueError`. |
 
 ```python
 from google.adk.plugins.bigquery_agent_analytics_plugin import BigQueryAgentAnalyticsPlugin
@@ -203,7 +203,10 @@ an `otel_spans` table (for example by the
 columns when the row has them (for example a row read from a per-event view)
 and otherwise from `attributes`. They are `None` on rows that do not record
 them, such as rows written with `enable_otel_correlation=False` or by an older
-plugin. The span tree is still built from `span_id` / `parent_span_id` alone.
+plugin. The SDK's per-event views project neither `source_event_id` nor
+`attributes`, so `source_event_id` is always `None` on a view row; read it
+from rows of the events table itself, as `get_trace()` does. The span tree is
+still built from `span_id` / `parent_span_id` alone.
 
 ```python
 trace = client.get_trace("trace-abc-123")
@@ -228,7 +231,7 @@ into six groups. Older releases write fewer event types:
 | `before_agent_callback`, `after_agent_callback`, `on_agent_error_callback` | `AGENT_STARTING`, `AGENT_COMPLETED`, `AGENT_ERROR` | `invoke_agent {agent_name}` | Exact; the row's `span_id` is a plugin-only ID |
 | `before_model_callback`, `after_model_callback`, `on_model_error_callback` | `LLM_REQUEST`, `LLM_RESPONSE` (streaming partials and final), `LLM_ERROR` | `call_llm` (parent of `generate_content {model}`) as of google-adk 2.11. ADK's telemetry schema migration plans to remove `call_llm`; re-check this row after that change. | Exact; one ID for the request, every partial and the final response or error |
 | `before_tool_callback`, `after_tool_callback`, `on_tool_error_callback` | `TOOL_STARTING`, `TOOL_COMPLETED`, `TOOL_ERROR`, `AGENT_RESPONSE` (tools in `final_response_tool_names`) | `execute_tool {tool_name}`; for a tool used as a node in a `Workflow` (google-adk 2.11 runs these callbacks there too), the node's `invoke_node {node_name}` span | Exact; distinct for each parallel tool call |
-| `on_event_callback` | `STATE_DELTA`, `NODE_OUTPUT`, `NODE_ERROR`, `AGENT_TRANSFER`, `EVENT_COMPACTION`, `AGENT_STATE_CHECKPOINT`, `TOOL_PAUSED`, `HITL_*_REQUEST`, `A2A_INTERACTION`, `AGENT_RESPONSE` | The runner's root span, as in the rows above: the runner writes these rows outside the span of the node that produced the event | Coarse; for events yielded by function nodes or other nodes that are neither agents nor workflows, join on `source_event_id` instead (second recipe below) |
+| `on_event_callback` | `STATE_DELTA`, `NODE_OUTPUT`, `NODE_ERROR`, `AGENT_TRANSFER`, `EVENT_COMPACTION`, `AGENT_STATE_CHECKPOINT`, `TOOL_PAUSED`, `HITL_*_REQUEST`, `HITL_*_REQUEST_COMPLETED`, `A2A_INTERACTION`, `AGENT_RESPONSE` | The runner's root span, as in the rows above: the runner writes these rows outside the span of the node that produced the event | Coarse; for events yielded by function nodes or other nodes that are neither agents nor workflows, join on `source_event_id` instead (second recipe below) |
 
 #### Join recipes for an `otel_spans` table
 
@@ -363,11 +366,12 @@ These joins are best-effort:
   `LlmAgent` root, list their events on no span (`invoke_agent` spans carry no
   `gcp.vertex.agent.associated_event_ids`), so their rows have no match;
   narrow those by `trace_id` and time instead.
-- Before google-adk 2.8.0, a root agent that is not an `LlmAgent` (for
-  example a `SequentialAgent`) runs on the runner's classic path, where
+- A root agent that is not an `LlmAgent` (for example a `SequentialAgent`)
+  runs on the runner's classic path. There, before google-adk 2.8.0,
   `on_event_callback` rows record the span that was active where the agent
   yielded the event, such as an `invoke_agent` span, instead of the runner's
-  root span.
+  root span. Since 2.8.0, `BaseAgent.run_async` yields each event in its
+  caller's context.
 - A span that starts before `@start_ts`, such as a long root span, is
   filtered out of `spans`. Subtract a margin from `@start_ts` in that CTE; a
   constant expression still prunes partitions. The join condition compares
@@ -1642,10 +1646,14 @@ Every per-event view also projects `otel_span_id` and `otel_trace_id`, right
 after the standard headers, from `attributes.otel` (see
 [Trace & Span Correlation](#trace--span-correlation-trace_id-span_id-attributesotelspan_id-attributesadksource_event_id)).
 Both are `NULL` on rows written without `enable_otel_correlation=True`.
+Because both read `attributes`, `SELECT *` on any per-event view reads that
+column as well, unless `denied_columns` (below) includes `attributes`.
 
-If the plugin writes the events table with `payload_column_denylist`, pass the
-same column names as `denied_columns` so the views read only columns that
-exist:
+The plugin omits the columns in `payload_column_denylist` only from an events
+table it creates; its schema upgrade only adds columns, so an existing table
+keeps them. If payload columns are missing from the events table because the
+plugin projects them out, pass the same names as `denied_columns` so the views
+read only columns that exist:
 
 ```python
 vm = ViewManager(
@@ -1679,8 +1687,8 @@ created = vm.create_all_views()
 
 - `Client` read methods such as `get_trace()` select `content`,
   `content_parts`, `attributes` and `latency_ms` by name, so they fail on an
-  events table written with `payload_column_denylist`; `denied_columns` applies
-  only to the views.
+  events table that lacks any of them; `denied_columns` applies only to the
+  views.
 
 The plugin's own views (`BigQueryLoggerConfig(create_views=True)`) handle a
 denylist differently: they drop only the derived columns that read a denied
@@ -2426,7 +2434,7 @@ bq-agent-sdk categorical-views --project-id=P --dataset-id=D --prefix=adk_
 ```bash
 bq-agent-sdk views create-all --project-id=P --dataset-id=D --prefix=adk_
 
-# Events table written with payload_column_denylist=["attributes"]
+# Events table the plugin created with payload_column_denylist=["attributes"]
 # (repeat --denied-column for more columns; views create takes it too)
 bq-agent-sdk views create-all --project-id=P --dataset-id=D --denied-column=attributes
 ```

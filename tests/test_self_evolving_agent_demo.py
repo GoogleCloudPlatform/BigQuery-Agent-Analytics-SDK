@@ -28,6 +28,7 @@ _DEMO_DIR = (
 )
 sys.path.insert(0, str(_DEMO_DIR))
 
+from analytics.session_metrics import load_config  # noqa: E402
 from analytics.session_metrics import require_complete_session_metrics  # noqa: E402
 from analytics.session_metrics import summarize  # noqa: E402
 import analyze_and_evolve  # noqa: E402
@@ -66,6 +67,39 @@ def test_require_complete_session_metrics_rejects_zero_token_schema(
 
   with pytest.raises(RuntimeError, match="Token extraction produced zero"):
     require_complete_session_metrics(rows, ["s1"], label="baseline")
+
+
+def test_load_config_prefers_env_without_adc(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+  monkeypatch.setattr(
+      "analytics.session_metrics._ENV_PATH", str(tmp_path / "missing.env")
+  )
+  monkeypatch.setenv("PROJECT_ID", "demo-project")
+  monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+  calls = []
+
+  def fake_default():
+    calls.append("called")
+    return None, "adc-project"
+
+  monkeypatch.setattr("google.auth.default", fake_default)
+
+  assert load_config().project_id == "demo-project"
+  assert calls == []
+
+
+def test_load_config_falls_back_to_adc(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+  monkeypatch.setattr(
+      "analytics.session_metrics._ENV_PATH", str(tmp_path / "missing.env")
+  )
+  monkeypatch.delenv("PROJECT_ID", raising=False)
+  monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+  monkeypatch.setattr("google.auth.default", lambda: (None, "adc-project"))
+
+  assert load_config().project_id == "adc-project"
 
 
 def test_pct_delta_marks_zero_baseline_growth_as_not_applicable():

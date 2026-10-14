@@ -22,6 +22,7 @@ import math
 from typing import Any, Optional
 import warnings
 
+from ._ci_log import escape_log_text
 from .performance_evaluator import BigQueryTraceEvaluator
 from .performance_evaluator import PerformanceEvaluator
 from .system_evaluator import CodeEvaluator
@@ -259,7 +260,9 @@ class LLMAsJudge:
       logger.warning("google-genai not installed, skipping LLM judge.")
       return 0.0, "google-genai not installed"
     except Exception as e:
-      logger.warning("LLM judge failed: %s", e)
+      # The error can quote the judge's reply, and the CLI prints SDK
+      # warnings to stderr, which a CI runner parses for commands.
+      logger.warning("LLM judge failed: %s", escape_log_text(str(e)))
       return 0.0, str(e)
 
   # ---- Pre-built evaluators ---- #
