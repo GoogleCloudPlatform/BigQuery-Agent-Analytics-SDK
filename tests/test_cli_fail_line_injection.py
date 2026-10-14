@@ -20,8 +20,11 @@ where an ADK API client chooses it; ``llm_feedback`` is judge-model text;
 and the ML judge tier names a metric after any numeric key in the judge's
 reply when the criterion's own key is missing. That text reaches stdout in
 the report, in every ``--format``, and stderr in the FAIL lines from
-``_emit_evaluate_failures`` and in the judge's warning (the CLI configures
-no logging, so ``logging.lastResort`` prints SDK warnings there).
+``_emit_evaluate_failures``, in the judge's warning and in the API judge
+tier's warning for a trace it cannot judge (the CLI configures no logging,
+so ``logging.lastResort`` prints SDK warnings there). The ``Error:`` line
+on stderr quotes BigQuery errors, which repeat stored event values, and
+EvalBench manifest values.
 
 The GitHub Actions runner reads a step's stdout and stderr line by line
 (``\\n``, ``\\r`` and ``\\r\\n`` all end a line). It runs a line as a
@@ -36,6 +39,7 @@ prints a failing value raw, and this suite itself runs in GitHub Actions.
 
 import ast
 import asyncio
+import dataclasses
 from datetime import datetime
 from datetime import timezone
 import json
@@ -44,6 +48,7 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+from google.api_core.exceptions import BadRequest
 import pytest
 from typer.testing import CliRunner
 
@@ -278,12 +283,14 @@ _GATE_ARGS = {
 }
 
 
-def _invoke_judge_gate(monkeypatch, command, fmt, bq_client, endpoint=None):
+def _invoke_judge_gate(
+    monkeypatch, command, fmt, bq_client, endpoint=None, pinned=_PINNED
+):
   """Run *command* with ``--format=fmt`` against a fake BigQuery client."""
   monkeypatch.setattr(
       client_module, "make_bq_client", lambda *args, **kwargs: bq_client
   )
-  monkeypatch.setattr(evalbench, "import_sessions", lambda **kwargs: _PINNED)
+  monkeypatch.setattr(evalbench, "import_sessions", lambda **kwargs: pinned)
   args = _GATE_ARGS[command] + [f"--format={fmt}"]
   if endpoint is not None:
     args.append(f"--endpoint={endpoint}")
@@ -468,3 +475,215 @@ def test_judge_warning_is_escaped_when_logged(caplog):
   assert score.llm_feedback == (
       "correctness: could not convert string to float: '##[debug]injected'"
   )
+
+
+def _llm_response_row(session_id):
+  """A trace-listing row for an LLM_RESPONSE event whose response is a number.
+
+  Judging the trace fails: ``Span.summary`` calls ``len()`` on the number.
+  """
+  return {
+      "event_type": "LLM_RESPONSE",
+      "agent": "root_agent",
+      "timestamp": _NOW,
+      "session_id": session_id,
+      "invocation_id": "inv-1",
+      "user_id": "u1",
+      "trace_id": "trace-1",
+      "span_id": "span-1",
+      "parent_span_id": None,
+      "content": {"response": 7},
+      "content_parts": [],
+      "attributes": {"root_agent_name": "root_agent", "experiment_id": "job-1"},
+      "latency_ms": None,
+      "status": "OK",
+      "error_message": None,
+      "is_truncated": False,
+      "anchor_user_id": "u1",
+      "anchor_root_agent_name": "root_agent",
+      "attributes_type": "object",
+  }
+
+
+def _api_judge_tier_client(session_id):
+  """A BigQuery client whose judge model fails, so the API judge tier runs.
+
+  The tier lists the session's events from the same client.
+  """
+
+  def query(sql, **kwargs):
+    if "ML.GENERATE_TEXT" in sql:
+      raise RuntimeError("judge model unavailable")
+    job = MagicMock()
+    job.result.return_value = [_llm_response_row(session_id)]
+    return job
+
+  bq_client = MagicMock()
+  bq_client.query.side_effect = query
+  return bq_client
+
+
+@pytest.mark.parametrize("fmt", ["json", "text", "table"])
+@pytest.mark.parametrize("command", ["evaluate", "evalbench-score"])
+@pytest.mark.parametrize(
+    "session_id, rendered",
+    [
+        ("s1\n::debug::injected", "s1\\n::debug::injected"),
+        ("s2##[debug]injected", "s2##\\x5bdebug]injected"),
+    ],
+    ids=["lf", "legacy-marker"],
+)
+def test_failed_trace_warning_cannot_carry_a_workflow_command(
+    monkeypatch, command, fmt, session_id, rendered
+):
+  # Keep pytest's root capture handler from taking the warning, so it
+  # reaches stderr through logging.lastResort as in the CLI.
+  monkeypatch.setattr(client_module.logger, "propagate", False)
+  bq_client = _api_judge_tier_client(session_id)
+
+  result = _invoke_judge_gate(
+      monkeypatch,
+      command,
+      fmt,
+      bq_client,
+      endpoint=_ML_JUDGE_ENDPOINT,
+      pinned=dataclasses.replace(_PINNED, session_ids=(session_id,)),
+  )
+
+  assert _command_lines(result.stderr) == []
+  assert _command_lines(result.stdout) == []
+  assert result.stderr.splitlines() == [
+      f"Evaluation failed for session {rendered}:"
+      " object of type 'int' has no len()",
+      "",
+      "--exit-code: 1 session(s) failed (of 1 evaluated)",
+      f"  FAIL session={rendered} (no per-metric detail available)",
+  ]
+  # One judge-model query, then one trace listing.
+  assert bq_client.query.call_count == 2
+  if fmt != "text":
+    (score,) = _decoded_report(result.stdout, fmt)["session_scores"]
+    assert score["session_id"] == session_id
+    assert score["details"]["evaluation_error"] == (
+        "object of type 'int' has no len()"
+    )
+
+
+def test_failed_trace_warning_escapes_the_error_text(caplog):
+  # An evaluator's error can quote event data or a judge reply.
+  error = "bad score '##[debug]injected'\n::debug::forged"
+
+  async def evaluate_trace(trace):
+    raise ValueError(error)
+
+  client = client_module.Client(
+      project_id="proj",
+      dataset_id="ds",
+      verify_schema=False,
+      bq_client=MagicMock(),
+  )
+  (score,) = asyncio.run(
+      client._run_trace_evaluations(
+          [Trace(trace_id="t1", session_id="s1")], evaluate_trace
+      )
+  )
+
+  messages = [
+      record.getMessage()
+      for record in caplog.records
+      if record.name == client_module.logger.name
+  ]
+  assert messages == [
+      "Evaluation failed for session s1:"
+      " bad score '##\\x5bdebug]injected'\\n::debug::forged"
+  ]
+  # The score keeps the raw error; each output path escapes it.
+  assert score.details["evaluation_error"] == error
+
+
+def test_bigquery_error_line_cannot_carry_a_workflow_command(monkeypatch):
+  # The code evaluators CAST latency and token fields of the stored events.
+  # When a CAST fails, BigQuery's error repeats the stored value: live
+  # BigQuery escapes its line breaks but keeps "##[". The client adds the
+  # job location and ID on lines of their own.
+  bq_client = MagicMock()
+  bq_client.query.return_value.result.side_effect = BadRequest(
+      "Bad double value: ##[debug]injected; reason: invalidQuery,"
+      " location: query, message: Bad double value: ##[debug]injected"
+      "\n\nLocation: US\nJob ID: job-1\n"
+  )
+  monkeypatch.setattr(
+      client_module, "make_bq_client", lambda *args, **kwargs: bq_client
+  )
+
+  result = runner.invoke(
+      app,
+      [
+          "evaluate",
+          "--project-id=proj",
+          "--dataset-id=ds",
+          "--evaluator=latency",
+          "--exit-code",
+          "--format=text",
+      ],
+  )
+
+  assert result.exit_code == 2
+  assert _command_lines(result.stderr) == []
+  assert result.stderr.splitlines() == [
+      "Error: 400 Bad double value: ##\\x5bdebug]injected; reason:"
+      " invalidQuery, location: query, message: Bad double value:"
+      " ##\\x5bdebug]injected\\n\\nLocation: US\\nJob ID: job-1\\n"
+  ]
+
+
+@pytest.mark.parametrize(
+    "stored, rendered",
+    [
+        (
+            {"events_table": "proj.ds.evalbench_agent_events##[debug]x"},
+            "Error: EvalBench job 'job-1' import_version 'v1' manifest"
+            " events_table 'proj.ds.evalbench_agent_events##\\x5bdebug]x' is"
+            " invalid: events_table must contain only ASCII letters,"
+            " digits, '_' or '-'",
+        ),
+        (
+            {
+                "import_version": "v1##[debug]x",
+                "events_table": "proj.ds.other_events",
+            },
+            "Error: EvalBench job 'job-1' import_version 'v1##\\x5bdebug]x'"
+            " is published in 'proj.ds.other_events', not"
+            " 'proj.ds.evalbench_agent_events'; pass the events_table it"
+            " was published to",
+        ),
+    ],
+    ids=["events-table", "import-version"],
+)
+def test_evalbench_error_line_cannot_carry_a_workflow_command(
+    monkeypatch, stored, rendered
+):
+  # The scorer reads the job's latest manifest row as untrusted input, and
+  # the errors that reject it quote the stored values.
+  manifest = {
+      "job_id": "job-1",
+      "import_version": "v1",
+      "events_table": "proj.ds.evalbench_agent_events",
+      "scores_table": "proj.ds.evalbench_scores_imported",
+      "imported_at": _NOW,
+      "generation_id": "gen-1",
+      **stored,
+  }
+  bq_client = MagicMock()
+  bq_client.query.return_value.result.return_value = [manifest]
+  monkeypatch.setattr(
+      client_module, "make_bq_client", lambda *args, **kwargs: bq_client
+  )
+
+  result = runner.invoke(app, _GATE_ARGS["evalbench-score"])
+
+  assert result.exit_code == 2
+  assert _command_lines(result.stderr) == []
+  assert result.stderr.splitlines() == [rendered]
+  # Only the manifest was read.
+  assert bq_client.query.call_count == 1
