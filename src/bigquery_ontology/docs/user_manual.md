@@ -541,9 +541,12 @@ If you are starting a greenfield project with no existing BigQuery tables, `gm s
 ```bash
 gm scaffold \
   --ontology finance.ontology.yaml \
+  --project my-project \
   --dataset my_dataset \
   --out ./graph/
 ```
+
+All four flags are required. Table names in both files are project-qualified (`my-project.my_dataset.person`).
 
 This writes two files into the `--out` directory:
 
@@ -568,15 +571,15 @@ Use `--naming preserve` to keep identifiers verbatim.
 
 ```bash
 # 1. Generate tables and binding from the ontology
-gm scaffold --ontology finance.ontology.yaml --dataset my_dataset --out ./graph/
+gm scaffold --ontology finance.ontology.yaml --project my-project --dataset my_dataset --out ./graph/
 
 # 2. Create the tables in BigQuery
 bq query --use_legacy_sql=false < ./graph/table_ddl.sql
 
 # 3. Edit the binding or DDL as needed (add partitioning, clustering, etc.)
 
-# 4. Compile the property graph DDL
-gm compile ./graph/binding.yaml -o ./graph/graph_ddl.sql
+# 4. Compile the property graph DDL (--ontology: the ontology is not next to the binding)
+gm compile ./graph/binding.yaml --ontology finance.ontology.yaml -o ./graph/graph_ddl.sql
 
 # 5. Create the property graph
 bq query --use_legacy_sql=false < ./graph/graph_ddl.sql
@@ -928,16 +931,16 @@ Requires `rdflib`. Install with `pip install 'bigquery-agent-analytics[owl]'`.
 #### `gm scaffold`
 
 ```
-gm scaffold --ontology PATH --dataset NAME --out DIR [--naming {snake|preserve}] [--project ID] [--json]
+gm scaffold --ontology PATH --project ID --dataset NAME --out DIR [--naming {snake|preserve}] [--json]
 ```
 
 | Option | Required | Default | Description |
 |--------|----------|---------|-------------|
 | `--ontology PATH` | yes | — | Path to the ontology YAML file. |
+| `--project ID` | yes | — | BigQuery project ID. Table names are always project-qualified (`project.dataset.table`). |
 | `--dataset NAME` | yes | — | BigQuery dataset name for generated tables. |
 | `--out DIR` | yes | — | Output directory. Must not exist or must be empty. |
 | `--naming` | no | `snake` | `snake` converts to snake_case; `preserve` keeps ontology names verbatim. |
-| `--project ID` | no | omitted | BigQuery project ID. When set, table names are project-qualified. |
 | `--json` | no | false | Emit structured JSON errors on stderr. |
 
 Writes `table_ddl.sql` and `binding.yaml` to the output directory. Refuses to overwrite a non-empty directory.

@@ -1924,10 +1924,11 @@ filtered population are ignored.
 Treat context as trusted evaluator material subject to the same governance as
 your evaluation prompts. It is carried as query-parameter/model input and is
 redacted from context-aware error logs; it is never SQL text or a job label.
-The U4 API deliberately rejects `persist_results=True` with context until the
-U5 identity columns, writer, views, and cardinality migration land, preventing
-two identities that reuse a session ID from being persisted as indistinguishable
-rows.
+`persist_results=True` works with context: each row carries the trace identity
+(`user_id`, `root_agent_name`, `experiment_id`, `scope_key`, `identity_key`)
+and SDK-owned provenance (`context_applied`, `context_source`), so two
+identities that reuse a session ID stay distinct rows. The context itself, and
+any raw model response that could echo it, is never persisted.
 
 ### Step 3: Create Dashboard Views
 
@@ -2291,7 +2292,11 @@ pip install bigquery-agent-analytics
 
 ### Global Options
 
-Every command accepts:
+The commands below accept these options, except that `categorical-views`
+takes `--results-table` instead of `--table-id`, and `views create` and
+`views create-all` take no `--location`. Commands documented elsewhere, such
+as `export langsmith` and `evalbench-import`, have their own options;
+`bq-agent-sdk <command> --help` lists each command's set.
 
 | Option | Env Var | Default | Description |
 |--------|---------|---------|-------------|
