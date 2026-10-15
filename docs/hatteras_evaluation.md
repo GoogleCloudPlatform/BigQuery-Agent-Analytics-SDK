@@ -296,9 +296,9 @@ introducing a separate trace-by-trace Python-only path.
 > struct per exact `ResolvedTraceSelector`; AI.GENERATE, retry, and API fallback
 > keep that selector key unchanged. Legacy string context keys are accepted only
 > for an unambiguous evaluated session. The bare-session SQL below remains the
-> compatibility path when no context mapping is supplied. Persistence
-> cardinality is still U5: U4 context calls reject `persist_results=True` until
-> the results schema, writer, and views carry the same identity provenance.
+> compatibility path when no context mapping is supplied. Since U5, context
+> calls also accept `persist_results=True`: the results schema, writer, and
+> views carry the same identity provenance.
 
 ### Concrete SQL template
 
