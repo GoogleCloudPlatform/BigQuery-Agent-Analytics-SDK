@@ -57,8 +57,9 @@ Installed binary `gm`. Subcommand style is flat verb-noun hyphenated
   YAML (`gm import-owl` without `-o`), nothing on success
   (`gm validate`).
 - **stderr** — diagnostics, warnings, human-readable errors.
-- `-o <file>` / `--out <file>` — redirect stdout to a file. Where
-  applicable (`gm compile`, `gm import-owl`).
+- `-o <file>` — redirect stdout to a file. Where applicable: the long
+  form is `--output <file>` on `gm compile` and `--out <file>` on
+  `gm import-owl`.
 
 ### Exit codes
 
