@@ -1393,9 +1393,10 @@ def flatten_results_to_rows(
   """Flattens session results to persistence rows with identity provenance.
 
   Identity/scope fields are nullable for historical-compatible rows. Contextual
-  rows retain only SDK-owned provenance; their justification and raw response
-  are omitted so trusted judge/golden-answer context, including model echoes,
-  cannot be persisted.
+  rows retain only SDK-owned provenance and validated category labels; their
+  justification, raw response and any unrecognized category are omitted so
+  trusted judge/golden-answer context, including model echoes, cannot be
+  persisted.
 
   Args:
       report: The evaluation report to flatten.
@@ -1440,7 +1441,13 @@ def flatten_results_to_rows(
                   else None
               ),
               "metric_name": mr.metric_name,
-              "category": mr.category,
+              # An unrecognized category is unvalidated model text, so it can
+              # echo trusted judge context just like the justification.
+              "category": (
+                  mr.category
+                  if mr.passed_validation or not sr.context_applied
+                  else None
+              ),
               "justification": (
                   None if sr.context_applied else mr.justification
               ),
