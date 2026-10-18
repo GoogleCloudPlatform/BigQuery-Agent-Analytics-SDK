@@ -416,7 +416,6 @@ def split_expressions_and_trim(clause_text: str) -> str:
 
 
 def custom_clause_split(sql: str) -> str:
-  parts = []
   depth = 0
   current = ""
   i = 0
@@ -573,7 +572,6 @@ def main():
   )
   errors += check_unmapped_streamlit_builders()
 
-  refs = models.TableRefs("project", "dataset", "events", "adk_")
   window = DEFAULT_WINDOW
 
   for filename in CANONICAL_QUERIES:
