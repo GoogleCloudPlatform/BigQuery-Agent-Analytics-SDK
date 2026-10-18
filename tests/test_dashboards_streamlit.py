@@ -450,7 +450,7 @@ def test_sql_builders_and_scope(sample_refs, sample_window):
       "STRUCT('user_id', e.user_id)",
       "STRUCT('event_type', e.event_type)",
       "STRUCT('session_id', e.session_id)",
-      queries.time_bounds(sample_window, "e.timestamp"),
+      "WHERE " + queries.time_bounds(sample_window, "e.timestamp"),
       "AND f.value IS NOT NULL",
       "GROUP BY f.kind, f.value",
       "QUALIFY ROW_NUMBER() OVER (",
@@ -724,16 +724,31 @@ def test_run_query_caching_and_deduplication(monkeypatch):
     assert r2.error is None and list(r2.df["col"]) == [1]
 
     # Changing any of the 4 arguments (sql, filters, project, max_bytes) misses
-    queries.run_query("SELECT 2", f1, "proj-1", 1_000_000)
-    assert mock_client.query.call_count == 4
-    queries.run_query(
-        "SELECT 1", models.Filters(agents=("agent-2",)), "proj-1", 1_000_000
-    )
-    assert mock_client.query.call_count == 6
-    queries.run_query("SELECT 1", f1, "proj-2", 1_000_000)
-    assert mock_client.query.call_count == 8
-    queries.run_query("SELECT 1", f1, "proj-1", 2_000_000)
-    assert mock_client.query.call_count == 10
+    # and bills a fresh run under its own run ID; repeating those exact
+    # arguments is then a cache hit that bills nothing
+    f2 = models.Filters(agents=("agent-2",))
+    for expected_calls, args in (
+        (4, ("SELECT 2", f1, "proj-1", 1_000_000)),
+        (6, ("SELECT 1", f2, "proj-1", 1_000_000)),
+        (8, ("SELECT 1", f1, "proj-2", 1_000_000)),
+        (10, ("SELECT 1", f1, "proj-1", 2_000_000)),
+    ):
+      miss = queries.run_query(*args)
+      assert mock_client.query.call_count == expected_calls
+      assert (miss.bytes_processed, miss.bytes_billed, miss.cache_hit) == (
+          100,
+          200,
+          False,
+      )
+      assert miss.stats_known is True
+      hit = queries.run_query(*args)
+      assert mock_client.query.call_count == expected_calls
+      assert (hit.bytes_processed, hit.bytes_billed, hit.cache_hit) == (
+          100,
+          0,
+          True,
+      )
+    assert len(queries._SEEN_RUN_IDS) == 5
 
     # Live job with total_bytes_billed=None calls reload(); if reload raises ->
     # rows and known scan bytes are retained, stats_known=False on first run,
@@ -752,6 +767,7 @@ def test_run_query_caching_and_deduplication(monkeypatch):
     )
     assert r_unk.error is None and list(r_unk.df["col"]) == [7]
     assert r_unk.bytes_processed == 100 and r_unk.bytes_processed_known is True
+    assert (r_unk.bytes_billed, r_unk.cache_hit) == (0, False)
     assert r_unk.bytes_billed_known is False and r_unk.stats_known is False
     r_dedup = queries.run_query("SELECT unk", f1, "proj-1", 1_000_000)
     assert r_dedup.cache_hit is True and r_dedup.bytes_billed == 0
@@ -2001,15 +2017,26 @@ def test_footer_byte_and_cache_accounting(sample_context):
     )
     assert "unavailable" not in text_zero
 
-    # 3. Mixed live, cached, and unknown billing/scan entries (2 cached hits)
-    mock_caption.reset_mock()
-    sample_context.scan_log = [
-        models.ScanEntry("q3", 0, 512, False, False, True),
-    ]
-    app.footer(sample_context)
-    text_unk_billed = mock_caption.call_args_list[0][0][0]
-    assert "1 with unavailable billing data" in text_unk_billed
-    assert "unavailable scan data" not in text_unk_billed
+    # 3. A lone fresh entry missing billing or scan data is disclosed, then
+    #    mixed live, cached, and unknown billing/scan entries (2 cached hits)
+    for entry, disclosed, absent in (
+        (
+            models.ScanEntry("q3", 0, 512, False, False, True),
+            "1 with unavailable billing data",
+            "unavailable scan data",
+        ),
+        (
+            models.ScanEntry("q4", 10_485_760, 0, False, True, False),
+            "1 with unavailable scan data",
+            "unavailable billing data",
+        ),
+    ):
+      mock_caption.reset_mock()
+      sample_context.scan_log = [entry]
+      app.footer(sample_context)
+      text_unknown = mock_caption.call_args_list[0][0][0]
+      assert disclosed in text_unknown
+      assert absent not in text_unknown
 
     mock_caption.reset_mock()
     sample_context.scan_log = [
@@ -2328,6 +2355,26 @@ def test_apptest_sidebar_filters_and_connection_reset():
     assert at.sidebar.multiselect(key="flt_session_id").value == [
         "custom-sess-xyz"
     ]
+
+    # 9. In-progress (not yet applied) custom values stay selectable options
+    #    across a rerun and leave the applied filters untouched
+    pending = {
+        "flt_agent": "agent-pending",
+        "flt_user_id": "user-pending",
+        "flt_session_id": "sess-pending",
+    }
+    for key, value in pending.items():
+      at.session_state[key] = [value]
+    at.run()
+    assert not at.exception
+    for key, value in pending.items():
+      assert value in at.sidebar.multiselect(key=key).options
+      assert at.sidebar.multiselect(key=key).value == [value]
+    assert at.session_state["applied_filters"] == models.Filters(
+        agents=("custom-agent-xyz",),
+        user_ids=("custom-user-xyz",),
+        session_ids=("custom-sess-xyz",),
+    )
 
 
 def test_apptest_lazy_tabs_and_session_trace_preservation(
