@@ -705,7 +705,6 @@ class OntologyGraphManager:
       return self._extract_graph_impl(
           session_ids,
           run_structured=bool(self.extractors and use_ai_generate),
-          use_ai_generate=use_ai_generate,
           on_unhandled_span="ai_fallback" if use_ai_generate else "stub",
           emit_diagnostics=False,
       )
@@ -726,7 +725,6 @@ class OntologyGraphManager:
     return self._extract_graph_impl(
         session_ids,
         run_structured=run_structured,
-        use_ai_generate=use_ai_generate,
         on_unhandled_span=on_unhandled_span,
         emit_diagnostics=True,
     )
@@ -736,7 +734,6 @@ class OntologyGraphManager:
       session_ids: list[str],
       *,
       run_structured: bool,
-      use_ai_generate: bool,
       on_unhandled_span: str,
       emit_diagnostics: bool,
   ) -> ExtractedGraph:
