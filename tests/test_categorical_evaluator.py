@@ -1314,6 +1314,43 @@ class TestFlattenResultsToRows:
     assert row["raw_response"] is None
     assert secret not in json.dumps(row)
 
+  def test_contextual_rows_drop_unrecognized_category_echo(self):
+    config = _make_config()
+    context = "Expected answer: 991"
+    echo = json.dumps(
+        [
+            {
+                "metric_name": "tone",
+                "category": context,
+                "justification": context,
+            },
+            {"metric_name": "safety", "category": "safe"},
+        ]
+    )
+    contextual = CategoricalSessionResult(
+        session_id="s1",
+        context_applied=True,
+        context_source=CategoricalContextSource.GOLDEN_EXPECTED_ANSWER,
+        metrics=parse_classifications(echo, config),
+    )
+    plain = CategoricalSessionResult(
+        session_id="s2",
+        metrics=parse_classifications(echo, config),
+    )
+    report = build_categorical_report("test_ds", [contextual, plain], config)
+
+    tone, safety, plain_tone, _ = flatten_results_to_rows(
+        report, config, "gemini-2.5-flash"
+    )
+
+    assert tone["parse_error"] is True
+    assert tone["passed_validation"] is False
+    assert tone["category"] is None
+    assert safety["category"] == "safe"
+    assert context not in json.dumps([tone, safety])
+    # Without trusted context an unrecognized label stays diagnosable.
+    assert plain_tone["category"] == context
+
   def test_identity_key_separates_reused_session_and_legacy_rows_stay_nullable(
       self,
   ):

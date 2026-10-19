@@ -1843,6 +1843,62 @@ class TestEvaluateCategoricalIdentityBoundContext:
     assert secret not in repr(row)
     assert report.details["persisted"] is True
 
+  def test_context_persistence_drops_echoed_category_after_failed_retries(
+      self,
+  ):
+    client, mock_bq = self._client()
+    selector = self._selector()
+    context = "Expected answer: 991"
+    echo = (
+        '[{"metric_name":"tone","category":"Expected answer: 991",'
+        '"justification":"Expected answer: 991"}]'
+    )
+
+    def query_side_effect(sql, **kwargs):
+      result = MagicMock()
+      if "AI.GENERATE" in sql:
+        result.result.return_value = [
+            {
+                "evaluation_key": _resolved_selector_key(selector),
+                "session_id": "shared-session",
+                "transcript": "A transcript long enough to judge.",
+                "classifications": echo,
+            }
+        ]
+      else:
+        result.result.return_value = None
+      return result
+
+    mock_bq.query.side_effect = query_side_effect
+    mock_bq.insert_rows_json.return_value = []
+
+    with (
+        patch.object(
+            client,
+            "_fetch_filtered_traces",
+            return_value=[self._trace(selector)],
+        ),
+        patch(
+            "bigquery_agent_analytics.client.classify_sessions_via_api",
+            new=AsyncMock(side_effect=RuntimeError("API unavailable")),
+        ),
+        patch("bigquery_agent_analytics.client.time"),
+    ):
+      report = client.evaluate_categorical(
+          config=_make_categorical_config(persist_results=True),
+          per_session_context={selector: context},
+      )
+
+    # Every retry failed, so the echoed AI.GENERATE result is the one written.
+    assert report.details["retry"]["retry_unresolved"] == 1
+    row = mock_bq.insert_rows_json.call_args.args[1][0]
+    assert row["context_applied"] is True
+    assert row["parse_error"] is True
+    assert row["passed_validation"] is False
+    assert row["category"] is None
+    assert context not in repr(row)
+    assert report.details["persisted"] is True
+
   def test_context_persistence_migration_failure_skips_insert_and_redacts_error(
       self,
   ):
