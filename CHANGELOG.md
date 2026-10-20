@@ -7,6 +7,244 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-20
+
+### Release highlights
+
+A patch release. In the wheel: `Client.drift_detection()` and
+`bq-agent-sdk drift` refuse a golden table that is not one table name,
+which closes an identifier injection through the BigQuery remote
+function's `drift` operation (#516); the `evaluate` and `evalbench-score`
+`--exit-code` gates escape the outside text they print, so session IDs,
+judge replies and stored values cannot run CI workflow commands (#527);
+contextual categorical rows no longer persist an unrecognized category,
+which can echo the trusted judge context (#529); and unreferenced
+helpers, dead stores and unused private parameters are removed (#523,
+#533). Behavior changes only for the values these fixes refuse, escape or
+drop (see Security and Fixed). No exported or documented name is added,
+removed or renamed, and the wheel's dependencies are unchanged. Around
+the wheel: BigQuery Conversational Analytics (BQCA) Prompt & Response
+Logging dashboards land for Looker Studio and the self-hosted Streamlit
+dashboard (#515), with the Looker Studio template moved to a copy that
+has public link sharing turned on (#520) and a BQCA troubleshooting row
+in its manual (#521); the `agent_improvement_cycle` example grades with
+the SDK's canonical rubrics (#534), and the self-evolving demo reads its
+project from the environment before asking for credentials (#525);
+SDK.md and the ontology and evaluation docs are corrected against the
+code (#518, #526, #528); and CI gains a weekly, report-only
+mutation-testing workflow, alongside new and consolidated tests and a
+`dashboard_v2` lock bump (#517, #519, #522, #524, #532).
+
+### Security
+
+- **Drift golden tables must be one table name (#516)** —
+  `compute_drift()` formats the golden table into the query's quoted
+  `project.dataset.table` path, so a backtick in it ended the path. The
+  BigQuery remote function's `drift` operation passes its `golden_dataset`
+  param straight through, so a caller could append a `UNION` over any
+  table the function's service account can read (the rows came back in
+  `uncovered_questions`) or a second statement. `compute_drift()`, and
+  with it `Client.drift_detection()` and `drift_detection_async()`, now
+  raises `ValueError` before any query runs unless the value is one
+  BigQuery table name: Unicode letters, marks and numbers, connectors
+  such as `_`, dashes and spaces. A backtick, dot, backslash, line break,
+  empty value or non-string is refused; `bq-agent-sdk drift` prints the
+  error and exits 2, and the remote function returns a per-row `_error`
+  with code `ValueError` once it is redeployed from this release. Pass a
+  bare table name in the client's dataset: the client's project and
+  dataset are always prefixed, and the SDK.md example now does this
+  (`golden_dataset="qa_pairs_v3"`).
+- **The `--exit-code` gates escape outside text in CI logs (#527)** —
+  `bq-agent-sdk evaluate` and `evalbench-score` print session IDs (which
+  an ADK API client can choose), LLM-judge feedback, judge-chosen metric
+  names and errors that quote stored values. The GitHub Actions runner
+  runs a log line as a workflow command when it starts with `::name::`
+  after leading spaces or contains `##[name]` anywhere, and `\n`, `\r`
+  and `\r\n` all end a line, so a session ID with a line break, or judge
+  text with a `##[` marker, could run commands such as `add-mask` or
+  `stop-commands`. The new private module
+  `bigquery_agent_analytics._ci_log` escapes that text: a backslash (and,
+  in the quoted `feedback="..."` field, a double quote) gets a backslash,
+  a non-printable character becomes its Python escape (`\n`, `\x1b`), the
+  `[` after `##` becomes `\x5b`, and the first `:` of a leading `::`
+  becomes `\x3a`. This covers the FAIL lines' session ID, `metric=` and
+  feedback snippet; the gates' `Error:` line, which now stays on one
+  line; `EvaluationReport.summary()` metric names; and the `LLMAsJudge`
+  "LLM judge failed" and `Client` "Evaluation failed for session"
+  warnings. The report, in every `--format`, writes `##[` as `##\u005b`,
+  which JSON and Python string literals decode back to `[`, so JSON
+  output still decodes to the same values. Ordinary IDs, feedback and
+  metric names print as before, and scores keep the raw text.
+
+### Fixed
+
+- **Contextual categorical rows persist only validated categories
+  (#529)** — with `Client.evaluate_categorical(per_session_context=...)`
+  and `CategoricalEvaluationConfig(persist_results=True)`,
+  `flatten_results_to_rows()` already wrote `justification` and
+  `raw_response` as `NULL` on contextual rows but passed `category`
+  through. `parse_classifications()` keeps an unrecognized category
+  verbatim (`passed_validation=False`, `parse_error=True`), so when the
+  `AI.GENERATE` retries could not repair a row, or on the API fallback, a
+  model that answered with the judge context as its category had that
+  text written to the results table, although the docs say the context is
+  never persisted. A contextual row now keeps `category` only when it
+  matched one of the metric's categories; otherwise it is written as
+  `NULL`, and `parse_error` stays set. Those rows now count under a `NULL`
+  category in `categorical_daily_counts` and `categorical_hourly_counts`;
+  `categorical_operational_metrics`, the returned
+  `CategoricalEvaluationReport` and rows without context are unchanged.
+  SDK.md lists what a contextual row stores.
+
+### Removed
+
+- **Unreferenced helpers, dead stores and unused private parameters
+  (#523, #533)** — no behavior change. Removed module attributes:
+  `_streaming_evaluation.is_launch_trigger_row` and
+  `_streaming_evaluation.DEFAULT_POLL_INTERVAL_MINUTES` (the scheduler
+  cadence is `POLL_SCHEDULE` in `deploy/streaming_evaluation/setup.sh`),
+  `context_graph._INSERT_BIZ_NODES_QUERY`,
+  `context_graph._CANDIDATES_FOR_SESSION_QUERY` and
+  `materialize_window._DEFAULT_GRAPH_NAME_SENTINEL`. Dead locals go from
+  `resolved_spec.resolve_from_graph_spec`,
+  `bigquery_ontology.graph_ddl_compiler._resolve` and
+  `bigquery_ontology.owl_importer._yaml_scalar`, and never-read
+  parameters from the private `OntologyGraphManager._extract_graph_impl`
+  (`use_ai_generate`), `owl_importer._extract_relationships` (`entities`)
+  and `owl_importer._extract_skos_relationships` (`namespaces`), with
+  every call site updated. None of these names was exported from the
+  package or documented. Unused imports also go from
+  `scripts/quality_report.py`, `examples/e2e_demo.py` and
+  `examples/context_graph/run_agent.py`, and an unused `_HERE` from
+  `examples/a2a_joint_lineage_demo/run_analyst_agent.py` (repo side).
+
+### Dashboards (repo side, not in the wheel)
+
+- **BQCA Prompt & Response Logging dashboards (#515)** — the Looker
+  Studio template tools and the self-hosted Streamlit dashboard gain a
+  surface for BigQuery Conversational Analytics Prompt & Response Logging
+  tables:
+  - Looker Studio (`dashboard/looker_studio/`): a `bqca` profile
+    (`--profile bqca` on `hydrate_dashboard.py`, `render_template.py` and
+    `render_web_config.py`) for a dedicated template without tool pages,
+    with 7 pages and 34 components per `spec/bqca_chart_manifest.yaml`; a
+    custom-SQL generator (`tools/gen_bqca_events_tmpl.py`) and a preflight
+    query; an ADK Agents / BQCA surface toggle and a `bqca/` entry page in
+    the web configurator; and `tools/validate_contracts.py`, which checks
+    the template contracts. `scripts/check_external_access_staleness.py`
+    and its workflow now cover both templates' external-access
+    attestations, and the Pages deploy job runs only from `main`.
+  - Streamlit (`dashboards/streamlit/`): a BQCA surface
+    (`bqca_models.py`, `bqca_queries.py`, `bqca_charts.py`) with five
+    tabs (Overview & Latency; Data Agents & Personas; Prompt, Response &
+    SQL Explorer; Tokens & Embedding Suggestions; Error Attribution) over
+    nine allowlisted BQCA event types. Open it from the sidebar, with
+    `?profile=bqca` or with `BQAA_PROFILE`. Each BQCA query is dry-run
+    first and refused above the scan cap, and its job sets
+    `maximum_bytes_billed`.
+  - `README.md`, the Looker Studio README and USER_MANUAL,
+    `dashboards/streamlit/README.md` and the BQCA guide
+    (`docs/guides/bqca-prompt-response-logging-manual.md`) document both.
+- **BQCA Looker Studio template moves to a shareable copy (#520, #521)** —
+  the original template's organization allows sharing only inside it, so
+  every BQCA surface now points at report
+  `42e79a1f-a979-4de8-911f-80d5a99543d5`, a copy whose owner turned on
+  link sharing on 2026-10-09. External access is not verified yet:
+  `bindings/bqca_report_template.yaml` records `link_access: PUBLIC` as
+  owner-side intent, and its status stays
+  `PENDING_EXTERNAL_IDENTITY_CHECK` (next check due 2026-11-08) until an
+  outside account completes the copy flow. The Looker Studio
+  USER_MANUAL's "This report isn't shared with you" row now gives the
+  BQCA fallbacks: the self-hosted Streamlit BQCA dashboard, or the
+  `--custom-sql-out` query in your own Looker Studio report (#521).
+
+### Examples (repo side, not in the wheel)
+
+- **`agent_improvement_cycle` uses the canonical rubrics (#482 / #534)** —
+  the example's judge prompt is built from the `response_usefulness` and
+  `tool_usage` metrics of
+  `bigquery_agent_analytics.evaluation_rubrics.build_metrics()` instead
+  of a hand-written pass/fail rubric. Judge results record both
+  categories beside `pass`, and a `pass: true` verdict with any
+  recognized usefulness label other than `meaningful` now counts as a
+  failure. The improver agent selects failed sessions and formats their
+  trajectories with `partition_trajectories()` and `format_trajectory()`
+  from `scripts/skill_evolution.py`, and `examples/README.md` says how
+  `agent_improvement_cycle`, `self_evolving_agent_demo` and
+  `skill_evolution_lab` differ.
+- **The self-evolving demo reads its project from the environment first
+  (#525)** — `load_config()` in
+  `examples/self_evolving_agent_demo/analytics/session_metrics.py` called
+  `google.auth.default()` before reading `PROJECT_ID` /
+  `GOOGLE_CLOUD_PROJECT`, then discarded its project whenever either was
+  set. It now asks for Application Default Credentials only when both
+  are unset, and the returned config is unchanged. Two tests pin the
+  order.
+
+### Documentation
+
+- **`otel_spans` join recipes dedupe (#518)** — both join recipes in
+  SDK.md's trace and span correlation guide read the OTLP receiver's raw
+  `otel_spans` table, which the receiver writes at least once, so each
+  events row that matched a replayed span came back once per copy. Each
+  `spans` CTE now keeps only the newest row per `idempotency_key` (by
+  `ingest_time`), the rule of the receiver's `otel_spans_dedup` view,
+  after its constant timestamp filter, so partitions are still pruned.
+- **SDK.md producer details (#312 / #526)** — follow-ups from the #510
+  review: the legacy `attributes.source_event_id` key is only on
+  `AGENT_RESPONSE` rows written from the event stream; the per-event
+  views project neither `source_event_id` nor `attributes`, so
+  `Span.source_event_id` is `None` on a view row (read it from the events
+  table, as `get_trace()` does); `on_event_callback` also writes
+  `HITL_*_REQUEST_COMPLETED` rows; the google-adk 2.8.0 note now says
+  that 2.8.0 changed the span recorded by the `on_event_callback` rows of
+  a root agent that is not an `LlmAgent`; and the plugin leaves
+  `payload_column_denylist` columns out only of an events table it
+  creates, so an existing table keeps them.
+- **CLI and `gm` docs match the code (#528)** — `gm scaffold` requires
+  `--project` and `--out` (the docs called `--project` optional), so the
+  documented commands and the sample DDL and binding now carry the
+  project; the greenfield flow passes `--ontology` to `gm compile`;
+  `docs/ontology/cli.md` gives `--output` as `gm compile`'s long output
+  flag (`--out` is `gm import-owl`'s); SDK.md and
+  `docs/hatteras_evaluation.md` say that context calls accept
+  `persist_results=True` since U5 (#380); and SDK.md's global options
+  note that `categorical-views` takes `--results-table` instead of
+  `--table-id` and that `views create` and `views create-all` take no
+  `--location`. The ontology user manual it fixes
+  (`src/bigquery_ontology/docs/user_manual.md`) is excluded from the
+  wheel.
+
+### CI, tests and build locks (repo side, not in the wheel)
+
+- **Report-only mutation testing (#522)** — `scripts/mutation_testing.py`
+  mutates `udf_kernels.py`, `system_evaluator.py` and
+  `aggregate_grader.py` in a scratch copy (`pyproject.toml` is unchanged)
+  and writes a Markdown and a JSON report: the mutation score per module
+  and each surviving mutant. `mutation-testing.yml` runs it weekly
+  (Mondays 07:30 UTC) and on demand, never on pull requests; surviving
+  mutants never fail the run, and the report goes to the job summary and
+  a `mutation-report` artifact. The tool is pinned in
+  `scripts/requirements-mutation.txt`, not in a package extra, and
+  `docs/mutation_testing.md` covers running it and triaging survivors.
+- **`WeightedStrategy` rules pinned (#524)** — three tests in
+  `tests/test_aggregate_grader.py`: a weighted score exactly at the
+  threshold passes, all-zero weights give a failing 0.0 instead of a
+  `ZeroDivisionError`, and a grader's metric scores are averaged before
+  weighting.
+- **Streamlit dashboard tests consolidated (#519), and six lost checks
+  restored (#531 / #532)** — #519 merges the app, AppTest and chart
+  suites into `tests/test_dashboards_streamlit.py`, condenses
+  `tests/test_check_streamlit_queries_sync.py`, drops two unused locals
+  from `scripts/check_streamlit_queries_sync.py` and points
+  `streamlit-sync-check.yml` at the new files. #532 restores six checks
+  that the consolidation lost: effective filters across Apply, reconnect
+  and pending edits; two-value selections that survive a surface switch;
+  lazy tabs; the five-series line chart; color-map wrap-around; and
+  integer run IDs. Dashboard code is unchanged.
+- **`dashboard_v2` lock bump (#517)** — `source-map-js` 1.2.1 → 1.2.2, an
+  indirect dependency, in `dashboard_v2/package-lock.json`.
+
 ## [0.6.0] - 2026-10-08
 
 ### Release highlights
