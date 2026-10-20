@@ -740,7 +740,7 @@ def build_report_from_eval_results(eval_results_path: str) -> dict:
 
   sessions = []
   for r in results:
-    is_pass = r.get("pass", False)
+    is_pass = bool(r.get("pass", False))
     raw_category = str(r.get("response_usefulness") or "").strip().lower()
     category = (
         raw_category
@@ -749,6 +749,8 @@ def build_report_from_eval_results(eval_results_path: str) -> dict:
     )
     if not is_pass and category == pass_usefulness:
       category = fail_usefulness
+    elif category != pass_usefulness:
+      is_pass = False
     counts[category] += 1
     tools_called = r.get("tools_called", [])
     raw_tool_usage = str(r.get("tool_usage") or "").strip().lower()

@@ -164,7 +164,7 @@ class EvalRunner:
         ),
     )
     verdict = json.loads(judge_response.text)
-    passed = verdict.get("pass", False)
+    passed = bool(verdict.get("pass", False))
     pass_usefulness = USEFULNESS_CATEGORIES[0]
     fail_usefulness = USEFULNESS_CATEGORIES[1]
     raw_usefulness = (
@@ -177,6 +177,8 @@ class EvalRunner:
     )
     if not passed and usefulness == pass_usefulness:
       usefulness = fail_usefulness
+    elif usefulness != pass_usefulness:
+      passed = False
     tool_ok = not (expected_tool and expected_tool != "unknown") or (
         expected_tool in tools_called
     )
