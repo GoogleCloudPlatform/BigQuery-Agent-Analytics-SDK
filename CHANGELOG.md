@@ -33,7 +33,7 @@ project from the environment before asking for credentials (#525);
 SDK.md and the ontology and evaluation docs are corrected against the
 code (#518, #526, #528); and CI gains a weekly, report-only
 mutation-testing workflow, alongside new and consolidated tests and a
-`dashboard_v2` lock bump (#517, #519, #522, #524, #532).
+`dashboard_v2` lock bump (#517, #519, #522, #524, #532, #536).
 
 ### Security
 
@@ -244,6 +244,14 @@ mutation-testing workflow, alongside new and consolidated tests and a
   integer run IDs. Dashboard code is unchanged.
 - **`dashboard_v2` lock bump (#517)** — `source-map-js` 1.2.1 → 1.2.2, an
   indirect dependency, in `dashboard_v2/package-lock.json`.
+- **Browser smoke polls Chrome every 0.1 s (#536)** — `dump_dom()` in
+  `browser_smoke.sh` checks the background browser every 0.1 s instead
+  of every second, so a pass ends within 0.1 s of the browser exiting,
+  not on the next whole second; the output deadline (450 polls) and the
+  grace window (100 polls) keep their 45 s and 10 s of sleep. In CI,
+  self-test fixtures 2–14 together went from a median 21.6 s to 16.0 s.
+  A browser that never writes output now takes about 7 s longer to time
+  out on macOS, because every poll starts a `sleep` process.
 
 ## [0.6.0] - 2026-10-08
 
