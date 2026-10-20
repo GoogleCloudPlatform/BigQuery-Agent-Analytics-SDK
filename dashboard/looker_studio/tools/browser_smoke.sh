@@ -768,22 +768,25 @@ dump_dom() {
     > "$2" 2> "$3" &
   CHROME_PID=$!
 
-  for _ in $(seq 1 45); do
+  # Poll every 0.1 s so a pass ends within 0.1 s of the browser instead of
+  # on the next whole second. 450 polls (45 s of sleep) still bound the
+  # wait for output, and 100 polls (10 s) the grace window below.
+  for _ in $(seq 1 450); do
     if ! kill -0 "$CHROME_PID" 2>/dev/null; then
       break
     fi
     if [ -s "$2" ]; then
       break
     fi
-    sleep 1
+    sleep 0.1
   done
   # Grace window: let a browser that already produced output finish and
   # report its real status instead of assuming success.
-  for _ in $(seq 1 10); do
+  for _ in $(seq 1 100); do
     if ! kill -0 "$CHROME_PID" 2>/dev/null; then
       break
     fi
-    sleep 1
+    sleep 0.1
   done
   TIMED_OUT_KILL=""
   if kill -0 "$CHROME_PID" 2>/dev/null; then
