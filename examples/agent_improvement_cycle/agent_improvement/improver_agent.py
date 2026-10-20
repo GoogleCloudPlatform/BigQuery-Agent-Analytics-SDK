@@ -30,28 +30,43 @@ import json
 import logging
 import os
 import re
+import sys
 import warnings
 
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger(__name__)
 
+_SDK_SCRIPTS = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "scripts")
+)
+if _SDK_SCRIPTS not in sys.path:
+  sys.path.insert(0, _SDK_SCRIPTS)
+
 from agent_improvement.config import ImprovementConfig
 from agent_improvement.eval_runner import EvalRunner
 from agent_improvement.prompts import IMPROVER_PROMPT
+from agent_improvement.prompts import TOOL_USAGE_CATEGORIES
+from agent_improvement.prompts import USEFULNESS_CATEGORIES
 from agent_improvement.tool_introspection import format_tool_signatures
 from google import genai
-from google.adk.agents import Agent
-from google.adk.agents import LoopAgent
-from google.adk.models import Gemini
-from google.adk.runners import InMemoryRunner
-from google.adk.tools import exit_loop
 from google.genai import types
 from google.genai.types import Content
 from google.genai.types import GenerateContentConfig
 from google.genai.types import HttpOptions
 from google.genai.types import HttpRetryOptions
 from google.genai.types import Part
+from skill_evolution import format_trajectory  # noqa: E402
+from skill_evolution import partition_trajectories  # noqa: E402
+
+try:
+  from google.adk.agents import Agent
+  from google.adk.agents import LoopAgent
+  from google.adk.models import Gemini
+  from google.adk.runners import InMemoryRunner
+  from google.adk.tools import exit_loop
+except ImportError:  # pragma: no cover
+  Agent = LoopAgent = Gemini = InMemoryRunner = exit_loop = None  # type: ignore[assignment,misc]
 
 # ---------------------------------------------------------------------------
 # Shared state — set by run_improvement(), read by tool functions.
@@ -78,20 +93,22 @@ def read_quality_report() -> str:
   """
   report = _state.get("report", {})
   summary = report.get("summary", {})
+  _, failed_sessions = partition_trajectories(report)
 
   problem_sessions = []
-  for session in report.get("sessions", []):
+  for session in failed_sessions:
     metrics = session.get("metrics", {})
     usefulness = metrics.get("response_usefulness", {})
+    tool_usage = metrics.get("tool_usage", {})
     cat = usefulness.get("category", "unknown")
-    if cat not in ("unhelpful", "partial"):
-      continue
     problem_sessions.append(
         {
             "question": session.get("question", "?"),
             "response": session.get("response", "")[:300],
             "usefulness": cat,
+            "tool_usage": tool_usage.get("category", "unknown"),
             "justification": usefulness.get("justification", ""),
+            "trajectory": format_trajectory(session),
         }
     )
 
@@ -129,21 +146,12 @@ def _generate_via_gemini(
   """Generate an improved prompt using raw Gemini generation."""
   report = _state.get("report", {})
   summary = report.get("summary", {})
+  _, failed_sessions = partition_trajectories(report)
 
-  lines = []
-  for session in report.get("sessions", []):
-    metrics = session.get("metrics", {})
-    usefulness = metrics.get("response_usefulness", {})
-    cat = usefulness.get("category", "unknown")
-    if cat not in ("unhelpful", "partial"):
-      continue
-    lines.append(f"- Question: {session.get('question', '?')}")
-    resp = session.get("response", "")[:300]
-    lines.append(f"  Response: {resp}")
-    lines.append(f"  Usefulness: {cat}")
-    lines.append("")
-
-  problem_text = "\n".join(lines) or "No problem sessions found."
+  problem_text = (
+      "\n\n".join(format_trajectory(s) for s in failed_sessions)
+      or "No problem sessions found."
+  )
   tool_sigs = format_tool_signatures(config.agent_tools)
 
   prompt = IMPROVER_PROMPT.format(
@@ -269,13 +277,7 @@ async def _generate_via_vertex_optimizer(
   report = _state.get("report", {})
 
   # Collect failed sessions
-  failed = []
-  for session in report.get("sessions", []):
-    metrics = session.get("metrics", {})
-    usefulness = metrics.get("response_usefulness", {})
-    cat = usefulness.get("category", "unknown")
-    if cat in ("unhelpful", "partial"):
-      failed.append(session)
+  _, failed = partition_trajectories(report)
 
   if not failed:
     return json.dumps(
@@ -496,6 +498,8 @@ async def test_candidate(candidate_prompt: str) -> str:
               {
                   "case_id": r["case_id"],
                   "pass": r.get("pass", False),
+                  "response_usefulness": r.get("response_usefulness", ""),
+                  "tool_usage": r.get("tool_usage", ""),
                   "reason": r.get("reason", ""),
               }
               for r in results
@@ -610,14 +614,13 @@ def extract_failed_cases(
           An integer sets a hard cap with category-aware selection.
   """
   all_cases = []
-  for session in report.get("sessions", []):
+  _, failed_sessions = partition_trajectories(report)
+  for session in failed_sessions:
     cat = (
         session.get("metrics", {})
         .get("response_usefulness", {})
         .get("category", "")
     )
-    if cat not in ("unhelpful", "partial"):
-      continue
 
     question = session.get("question", "")
     if not question:
@@ -725,20 +728,47 @@ def build_report_from_eval_results(eval_results_path: str) -> dict:
     results = json.load(f)
 
   total = len(results)
-  passed = sum(1 for r in results if r.get("pass", False))
-  failed = total - passed
+  pass_usefulness = USEFULNESS_CATEGORIES[0]
+  fail_usefulness = USEFULNESS_CATEGORIES[1]
+  pass_tool_usage = TOOL_USAGE_CATEGORIES[0]
+  fail_tool_usage = (
+      TOOL_USAGE_CATEGORIES[2]
+      if len(TOOL_USAGE_CATEGORIES) > 2
+      else TOOL_USAGE_CATEGORIES[-1]
+  )
+  counts = {cat: 0 for cat in USEFULNESS_CATEGORIES}
 
   sessions = []
   for r in results:
     is_pass = r.get("pass", False)
+    category = r.get("response_usefulness") or (
+        pass_usefulness if is_pass else fail_usefulness
+    )
+    if not is_pass and category == pass_usefulness:
+      category = fail_usefulness
+    if category in counts:
+      counts[category] += 1
+    else:
+      counts[pass_usefulness if is_pass else fail_usefulness] += 1
+    tools_called = r.get("tools_called", [])
+    tool_usage_cat = r.get("tool_usage") or (
+        pass_tool_usage if is_pass else fail_tool_usage
+    )
     sessions.append(
         {
             "session_id": r.get("session_id", r.get("case_id", "?")),
             "question": r.get("question", ""),
             "response": r.get("response", ""),
+            "tool_calls_detail": [
+                {"name": t, "args": {}} for t in tools_called
+            ],
             "metrics": {
                 "response_usefulness": {
-                    "category": ("meaningful" if is_pass else "unhelpful"),
+                    "category": category,
+                    "justification": r.get("reason", ""),
+                },
+                "tool_usage": {
+                    "category": tool_usage_cat,
                     "justification": r.get("reason", ""),
                 },
                 "task_grounding": {
@@ -749,15 +779,15 @@ def build_report_from_eval_results(eval_results_path: str) -> dict:
         }
     )
 
+  meaningful = counts[pass_usefulness]
+  unhelpful = counts[fail_usefulness]
+  summary = {"total_sessions": total}
+  for cat, count in counts.items():
+    summary[cat] = count
+  summary["meaningful_rate"] = round(100 * meaningful / total) if total else 0
+  summary["unhelpful_rate"] = round(100 * unhelpful / total) if total else 0
   return {
-      "summary": {
-          "total_sessions": total,
-          "meaningful": passed,
-          "meaningful_rate": (round(100 * passed / total) if total else 0),
-          "partial": 0,
-          "unhelpful": failed,
-          "unhelpful_rate": (round(100 * failed / total) if total else 0),
-      },
+      "summary": summary,
       "sessions": sessions,
   }
 
@@ -873,14 +903,7 @@ async def run_improvement(
   # needs failures.  Dropping meaningful sessions avoids loading potentially X
   # of OK answers into memory and into the LLM context at scale.
   if "sessions" in report:
-    report["sessions"] = [
-        s
-        for s in report["sessions"]
-        if s.get("metrics", {})
-        .get("response_usefulness", {})
-        .get("category", "")
-        in ("unhelpful", "partial")
-    ]
+    _, report["sessions"] = partition_trajectories(report)
 
   _, old_version = config.prompt_adapter.read_prompt()
   rate = report["summary"]["meaningful_rate"]
