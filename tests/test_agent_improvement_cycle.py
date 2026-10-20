@@ -54,17 +54,31 @@ def test_judge_prompt_embeds_canonical_usefulness_and_tool_usage_rubrics():
   expected_tool_choices = " | ".join(
       f'"{c.name}"' for c in tool_usage.categories
   )
+  expected_pass_cat = usefulness.categories[0].name
+  expected_fail_cats = " or ".join(
+      f'"{c.name}"' for c in usefulness.categories[1:]
+  )
   assert expected_usefulness_choices in prompts.JUDGE_PROMPT
   assert expected_tool_choices in prompts.JUDGE_PROMPT
+  assert (
+      f'A response PASSES ("pass": true) when response_usefulness is'
+      f' "{expected_pass_cat}".' in prompts.JUDGE_PROMPT
+  )
+  assert (
+      f'A response FAILS ("pass": false) when response_usefulness is'
+      f" {expected_fail_cats}." in prompts.JUDGE_PROMPT
+  )
 
   rendered = prompts.JUDGE_PROMPT.format(
       question="How many PTO days?",
       response="You get 20 PTO days.",
-      tool_check="Expected tool 'get_pto' was called.",
-      tool_fail_rule="",
+      tool_check="SENTINEL_TOOL_CHECK",
+      tool_fail_rule="\nSENTINEL_TOOL_FAIL_RULE",
   )
   assert "Question: How many PTO days?" in rendered
   assert '"pass": true or false' in rendered
+  assert "SENTINEL_TOOL_CHECK" in rendered
+  assert "SENTINEL_TOOL_FAIL_RULE" in rendered
 
 
 @pytest.mark.asyncio
@@ -72,22 +86,46 @@ async def test_eval_runner_judge_case_records_canonical_categories(
     monkeypatch: pytest.MonkeyPatch,
 ):
   usefulness_cats, tool_usage_cats = prompts.get_rubric_categories()
-  partial_usefulness = usefulness_cats[-1]
-  partial_tool_usage = tool_usage_cats[1]
+  pass_usefulness, fail_usefulness, partial_usefulness = usefulness_cats[:3]
+  pass_tool_usage, partial_tool_usage, fail_tool_usage = tool_usage_cats[:3]
+
+  verdicts = iter(
+      [
+          {
+              "pass": False,
+              "response_usefulness": partial_usefulness,
+              "tool_usage": partial_tool_usage,
+              "reason": "Answered only half the question.",
+          },
+          {
+              "pass": False,
+              "response_usefulness": "  Partial ",
+              "tool_usage": " PROPER ",
+              "reason": "Capitalized labels from judge.",
+          },
+          {
+              "pass": False,
+              "response_usefulness": "off_vocab_label",
+              "tool_usage": "invented_tool_label",
+              "reason": "Off-vocabulary labels on failure.",
+          },
+          {
+              "pass": True,
+              "reason": "Missing category labels on pass.",
+          },
+          {
+              "pass": False,
+              "response_usefulness": pass_usefulness,
+              "tool_usage": pass_tool_usage,
+              "reason": "Failed despite meaningful label.",
+          },
+      ]
+  )
 
   class FakeModels:
 
     def generate_content(self, **kwargs):
-      return SimpleNamespace(
-          text=json.dumps(
-              {
-                  "pass": False,
-                  "response_usefulness": partial_usefulness,
-                  "tool_usage": partial_tool_usage,
-                  "reason": "Answered only half the question.",
-              }
-          )
-      )
+      return SimpleNamespace(text=json.dumps(next(verdicts)))
 
   class FakeClient:
 
@@ -102,19 +140,76 @@ async def test_eval_runner_judge_case_records_canonical_categories(
       "question": "What is the PTO and sick leave policy?",
       "expected_tool": "lookup_policy",
   }
-  result = {
-      "case_id": "case_1",
-      "question": case["question"],
-      "response": "PTO is 20 days.",
-      "tools_called": ["lookup_policy"],
-  }
 
-  scored = await runner.judge_case(case, result)
-
+  # 1. Exact canonical labels
+  scored = await runner.judge_case(
+      case,
+      {
+          "case_id": "case_1",
+          "question": case["question"],
+          "response": "PTO is 20 days.",
+          "tools_called": ["lookup_policy"],
+      },
+  )
   assert scored["pass"] is False
   assert scored["response_usefulness"] == partial_usefulness
   assert scored["tool_usage"] == partial_tool_usage
   assert scored["reason"] == "Answered only half the question."
+
+  # 2. Capitalized / whitespace-padded labels normalized to canonical lowercase
+  scored_caps = await runner.judge_case(
+      case,
+      {
+          "case_id": "case_1",
+          "question": case["question"],
+          "response": "PTO is 20 days.",
+          "tools_called": ["lookup_policy"],
+      },
+  )
+  assert scored_caps["response_usefulness"] == partial_usefulness
+  assert scored_caps["tool_usage"] == pass_tool_usage
+
+  # 3. Off-vocabulary labels fall back based on pass and tool_ok
+  scored_off = await runner.judge_case(
+      case,
+      {
+          "case_id": "case_1",
+          "question": case["question"],
+          "response": "I think it is 20 days.",
+          "tools_called": [],
+      },
+  )
+  assert scored_off["pass"] is False
+  assert scored_off["response_usefulness"] == fail_usefulness
+  assert scored_off["tool_usage"] == fail_tool_usage
+
+  # 4. Missing labels on pass with expected tool called fall back to pass categories
+  scored_pass = await runner.judge_case(
+      case,
+      {
+          "case_id": "case_1",
+          "question": case["question"],
+          "response": "PTO is 20 days and sick leave is 10 days.",
+          "tools_called": ["lookup_policy"],
+      },
+  )
+  assert scored_pass["pass"] is True
+  assert scored_pass["response_usefulness"] == pass_usefulness
+  assert scored_pass["tool_usage"] == pass_tool_usage
+
+  # 5. Contradictory pass=False + pass_usefulness overrides usefulness to fail_usefulness
+  scored_contradiction = await runner.judge_case(
+      case,
+      {
+          "case_id": "case_1",
+          "question": case["question"],
+          "response": "PTO is 20 days.",
+          "tools_called": ["lookup_policy"],
+      },
+  )
+  assert scored_contradiction["pass"] is False
+  assert scored_contradiction["response_usefulness"] == fail_usefulness
+  assert scored_contradiction["tool_usage"] == pass_tool_usage
 
 
 def test_build_report_from_eval_results_preserves_three_category_usefulness(
@@ -233,3 +328,358 @@ def test_read_quality_report_uses_partition_and_format_trajectory(
   assert "Justification: Deflected without tool call." in (
       problems[1]["trajectory"]
   )
+
+
+def test_build_report_from_eval_results_legacy_and_off_vocab_fallback(
+    tmp_path: Path,
+):
+  usefulness_cats, tool_usage_cats = prompts.get_rubric_categories()
+  pass_usefulness, fail_usefulness, partial_usefulness = usefulness_cats[:3]
+  proper_tool, _, missing_tool = tool_usage_cats[:3]
+
+  eval_path = tmp_path / "legacy_and_off_vocab.json"
+  eval_path.write_text(
+      json.dumps(
+          [
+              {
+                  "case_id": "legacy_pass",
+                  "question": "Legacy pass question",
+                  "response": "Legacy pass answer",
+                  "pass": True,
+                  "tools_called": ["get_pto"],
+                  "reason": "Legacy pass without category fields.",
+              },
+              {
+                  "case_id": "legacy_fail",
+                  "question": "Legacy fail question",
+                  "response": "Legacy fail answer",
+                  "pass": False,
+                  "tools_called": [],
+                  "reason": "Legacy fail without category fields.",
+              },
+              {
+                  "case_id": "caps_partial",
+                  "question": "Capitalized partial question",
+                  "response": "Half answer",
+                  "pass": False,
+                  "response_usefulness": "  Partial ",
+                  "tool_usage": " PROPER ",
+                  "tools_called": ["get_pto"],
+                  "reason": "Capitalized labels.",
+              },
+              {
+                  "case_id": "off_vocab_fail",
+                  "question": "Off-vocab fail question",
+                  "response": "Bad answer",
+                  "pass": False,
+                  "response_usefulness": "suboptimal",
+                  "tool_usage": "bad_tool_call",
+                  "tools_called": [],
+                  "reason": "Off-vocabulary labels.",
+              },
+              {
+                  "case_id": "contradictory_fail",
+                  "question": "Contradictory fail question",
+                  "response": "Ungrounded answer",
+                  "pass": False,
+                  "response_usefulness": pass_usefulness,
+                  "tool_usage": missing_tool,
+                  "tools_called": [],
+                  "reason": "Failed tool rule despite meaningful text.",
+              },
+          ]
+      )
+  )
+
+  report = improver_agent.build_report_from_eval_results(str(eval_path))
+
+  assert report["summary"] == {
+      "total_sessions": 5,
+      pass_usefulness: 1,
+      "meaningful_rate": 20,
+      partial_usefulness: 1,
+      fail_usefulness: 3,
+      "unhelpful_rate": 60,
+  }
+  categories = [
+      s["metrics"]["response_usefulness"]["category"]
+      for s in report["sessions"]
+  ]
+  assert categories == [
+      pass_usefulness,
+      fail_usefulness,
+      partial_usefulness,
+      fail_usefulness,
+      fail_usefulness,
+  ]
+  tool_categories = [
+      s["metrics"]["tool_usage"]["category"] for s in report["sessions"]
+  ]
+  assert tool_categories == [
+      proper_tool,
+      missing_tool,
+      proper_tool,
+      missing_tool,
+      missing_tool,
+  ]
+
+  # Every failed case (including legacy, capitalized, off-vocab, and
+  # contradictory) must survive partition_trajectories / extract_failed_cases.
+  extracted = improver_agent.extract_failed_cases(report, tools=[])
+  assert [c["question"] for c in extracted] == [
+      "Legacy fail question",
+      "Capitalized partial question",
+      "Off-vocab fail question",
+      "Contradictory fail question",
+  ]
+
+
+@pytest.mark.asyncio
+async def test_test_candidate_preserves_canonical_categories_in_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+  usefulness_cats, tool_usage_cats = prompts.get_rubric_categories()
+  pass_usefulness, _, partial_usefulness = usefulness_cats[:3]
+  proper_tool, partial_tool = tool_usage_cats[:2]
+
+  eval_cases_path = tmp_path / "eval_cases.json"
+  eval_cases_path.write_text(
+      json.dumps({"eval_cases": [{"id": "c1"}, {"id": "c2"}]})
+  )
+
+  class FakeEvalRunner:
+
+    def __init__(self, **kwargs):
+      pass
+
+    async def run_golden_eval(self, prompt: str, path: str):
+      return (
+          False,
+          1,
+          2,
+          [
+              {
+                  "case_id": "c1",
+                  "pass": True,
+                  "response_usefulness": pass_usefulness,
+                  "tool_usage": proper_tool,
+                  "reason": "OK",
+              },
+              {
+                  "case_id": "c2",
+                  "pass": False,
+                  "response_usefulness": partial_usefulness,
+                  "tool_usage": partial_tool,
+                  "reason": "Incomplete",
+              },
+          ],
+      )
+
+  monkeypatch.setattr(
+      "agent_improvement.improver_agent.EvalRunner", FakeEvalRunner
+  )
+  monkeypatch.setitem(
+      improver_agent._state,
+      "config",
+      SimpleNamespace(
+          eval_cases_path=str(eval_cases_path),
+          agent_factory=lambda p: None,
+          model_id="gemini-2.5-flash",
+          judge_prompt=None,
+      ),
+  )
+
+  payload = json.loads(await improver_agent.test_candidate("candidate prompt"))
+  assert payload["all_passed"] is False
+  assert payload["passed"] == 1
+  assert payload["total"] == 2
+  assert payload["results"] == [
+      {
+          "case_id": "c1",
+          "pass": True,
+          "response_usefulness": pass_usefulness,
+          "tool_usage": proper_tool,
+          "reason": "OK",
+      },
+      {
+          "case_id": "c2",
+          "pass": False,
+          "response_usefulness": partial_usefulness,
+          "tool_usage": partial_tool,
+          "reason": "Incomplete",
+      },
+  ]
+
+
+@pytest.mark.asyncio
+async def test_improver_call_sites_use_partition_and_format_trajectory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+  usefulness_cats, tool_usage_cats = prompts.get_rubric_categories()
+  pass_usefulness, fail_usefulness, partial_usefulness = usefulness_cats[:3]
+  missing_tool = tool_usage_cats[2]
+
+  sessions = [
+      {
+          "question": "Meaningful question",
+          "response": "Meaningful answer",
+          "metrics": {"response_usefulness": {"category": pass_usefulness}},
+      },
+      {
+          "question": "Parroted question",
+          "response": "Parroted answer",
+          "metrics": {"response_usefulness": {"category": pass_usefulness}},
+          "sub_trajectories": [{"outcome": "parroted"}],
+      },
+      {
+          "question": "Partial question",
+          "response": "Partial answer",
+          "metrics": {
+              "response_usefulness": {
+                  "category": partial_usefulness,
+                  "justification": "Missed detail.",
+              }
+          },
+      },
+      {
+          "question": "Unhelpful question",
+          "response": "Unhelpful answer",
+          "metrics": {
+              "response_usefulness": {
+                  "category": fail_usefulness,
+                  "justification": "Did not call tool.",
+              },
+              "tool_usage": {"category": missing_tool},
+          },
+      },
+  ]
+  report = {
+      "summary": {
+          "total_sessions": 4,
+          pass_usefulness: 2,
+          "meaningful_rate": 50,
+          partial_usefulness: 1,
+          fail_usefulness: 1,
+          "unhelpful_rate": 25,
+      },
+      "sessions": list(sessions),
+  }
+
+  # 1. extract_failed_cases uses partition_trajectories
+  extracted = improver_agent.extract_failed_cases(report, tools=[])
+  assert [c["question"] for c in extracted] == [
+      "Parroted question",
+      "Partial question",
+      "Unhelpful question",
+  ]
+
+  # 2. _generate_via_gemini uses partition_trajectories and format_trajectory
+  captured_prompts: list[str] = []
+
+  class FakeModels:
+
+    def generate_content(self, **kwargs):
+      captured_prompts.append(kwargs["contents"])
+      return SimpleNamespace(
+          text=json.dumps(
+              {"improved_prompt": "v2 prompt", "changes_summary": "updated"}
+          )
+      )
+
+  class FakeClient:
+
+    def __init__(self, *args, **kwargs):
+      self.models = FakeModels()
+
+  monkeypatch.setattr(
+      "agent_improvement.improver_agent.genai.Client", FakeClient
+  )
+  config = SimpleNamespace(
+      agent_tools=[],
+      model_id="gemini-2.5-flash",
+      eval_cases_path=str(tmp_path / "eval_cases.json"),
+      quality_threshold=0.9,
+      max_failure_extract="all",
+      prompt_adapter=SimpleNamespace(read_prompt=lambda: ("v1", 1)),
+  )
+  monkeypatch.setitem(improver_agent._state, "report", report)
+
+  improver_agent._generate_via_gemini(config, "v1 prompt", 1)
+  assert len(captured_prompts) == 1
+  gemini_prompt = captured_prompts[0]
+  assert "Question: Meaningful question" not in gemini_prompt
+  assert "Question: Parroted question" in gemini_prompt
+  assert "Question: Partial question" in gemini_prompt
+  assert "Justification: Missed detail." in gemini_prompt
+  assert "Question: Unhelpful question" in gemini_prompt
+  assert "Justification: Did not call tool." in gemini_prompt
+
+  # When only meaningful non-parroted sessions exist, fallback text is used
+  monkeypatch.setitem(
+      improver_agent._state,
+      "report",
+      {"summary": report["summary"], "sessions": [sessions[0]]},
+  )
+  improver_agent._generate_via_gemini(config, "v1 prompt", 1)
+  assert "No problem sessions found." in captured_prompts[-1]
+
+  # 3. _generate_via_vertex_optimizer uses partition_trajectories
+  fake_vertexai = SimpleNamespace(Client=object)
+  fake_common = SimpleNamespace(OptimizeConfig=object, OptimizeTarget=object)
+  monkeypatch.setitem(sys.modules, "pandas", SimpleNamespace(DataFrame=list))
+  monkeypatch.setitem(sys.modules, "vertexai", fake_vertexai)
+  monkeypatch.setitem(sys.modules, "vertexai._genai", SimpleNamespace())
+  monkeypatch.setitem(sys.modules, "vertexai._genai.types", SimpleNamespace())
+  monkeypatch.setitem(sys.modules, "vertexai._genai.types.common", fake_common)
+
+  # All meaningful -> early exit before _generate_ground_truth
+  no_problem_res = json.loads(
+      await improver_agent._generate_via_vertex_optimizer(config, "v1 prompt")
+  )
+  assert (
+      no_problem_res["changes_summary"]
+      == "No problem sessions to optimize against."
+  )
+
+  # Mixed sessions -> passes only partitioned failures to _generate_ground_truth
+  gt_called_with: list[dict] = []
+
+  async def fake_generate_ground_truth(cfg, failed_list):
+    gt_called_with.extend(failed_list)
+    return []
+
+  monkeypatch.setattr(
+      "agent_improvement.improver_agent._generate_ground_truth",
+      fake_generate_ground_truth,
+  )
+  monkeypatch.setitem(improver_agent._state, "report", report)
+  monkeypatch.setitem(improver_agent._state, "output_dir", str(tmp_path))
+
+  await improver_agent._generate_via_vertex_optimizer(config, "v1 prompt")
+  assert [s["question"] for s in gt_called_with] == [
+      "Parroted question",
+      "Partial question",
+      "Unhelpful question",
+  ]
+
+  # 4. run_improvement narrows report["sessions"] via partition_trajectories
+  run_report = {
+      "summary": {
+          "total_sessions": 4,
+          pass_usefulness: 4,
+          "meaningful_rate": 95,
+          partial_usefulness: 0,
+          fail_usefulness: 0,
+          "unhelpful_rate": 0,
+      },
+      "sessions": list(sessions),
+  }
+  result = await improver_agent.run_improvement(config, report=run_report)
+  assert result["improvement_result"] == "already_good"
+  assert [s["question"] for s in run_report["sessions"]] == [
+      "Parroted question",
+      "Partial question",
+      "Unhelpful question",
+  ]

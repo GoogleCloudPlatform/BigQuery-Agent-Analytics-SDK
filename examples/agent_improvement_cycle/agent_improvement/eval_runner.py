@@ -167,9 +167,13 @@ class EvalRunner:
     passed = verdict.get("pass", False)
     pass_usefulness = USEFULNESS_CATEGORIES[0]
     fail_usefulness = USEFULNESS_CATEGORIES[1]
-    usefulness = verdict.get(
-        "response_usefulness",
-        pass_usefulness if passed else fail_usefulness,
+    raw_usefulness = (
+        str(verdict.get("response_usefulness") or "").strip().lower()
+    )
+    usefulness = (
+        raw_usefulness
+        if raw_usefulness in USEFULNESS_CATEGORIES
+        else (pass_usefulness if passed else fail_usefulness)
     )
     if not passed and usefulness == pass_usefulness:
       usefulness = fail_usefulness
@@ -182,9 +186,11 @@ class EvalRunner:
         if len(TOOL_USAGE_CATEGORIES) > 2
         else TOOL_USAGE_CATEGORIES[-1]
     )
-    tool_usage = verdict.get(
-        "tool_usage",
-        pass_tool_usage if tool_ok else fail_tool_usage,
+    raw_tool_usage = str(verdict.get("tool_usage") or "").strip().lower()
+    tool_usage = (
+        raw_tool_usage
+        if raw_tool_usage in TOOL_USAGE_CATEGORIES
+        else (pass_tool_usage if tool_ok else fail_tool_usage)
     )
     result["pass"] = passed
     result["response_usefulness"] = usefulness
