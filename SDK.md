@@ -1927,8 +1927,11 @@ redacted from context-aware error logs; it is never SQL text or a job label.
 `persist_results=True` works with context: each row carries the trace identity
 (`user_id`, `root_agent_name`, `experiment_id`, `scope_key`, `identity_key`)
 and SDK-owned provenance (`context_applied`, `context_source`), so two
-identities that reuse a session ID stay distinct rows. The context itself, and
-any raw model response that could echo it, is never persisted.
+identities that reuse a session ID stay distinct rows. The context itself is
+never persisted, and neither is model text that could echo it: contextual rows
+write `justification` and `raw_response` as NULL and keep `category` only when
+it matched one of the metric's categories. An unrecognized category is written
+as NULL with `parse_error` set.
 
 ### Step 3: Create Dashboard Views
 
