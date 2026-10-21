@@ -22,6 +22,11 @@
 #     no tag of its own fails;
 #   - with the source ahead of the copy, a deleted, edited or no longer
 #     executable file in the copy fails, and the untouched copy passes;
+#   - the released files' list changed after a release: with a file added
+#     to it, the untouched copy still checks against the release; with a
+#     file dropped from it and deleted from the copy, the check fails (the
+#     copy is checked against what the tag's own build_dist.sh builds, as
+#     the release archived it);
 #   - a source lower than the copy, or not X.Y.Z, fails;
 #   - the release cycle (a tag, a fix after it, the copy synced from the
 #     tag's archive) passes, and so does its mod-dist-v tag; a mod-dist-v
@@ -118,6 +123,20 @@ git -C "$repo" checkout -q -- "$dist"
 chmod -x "$dist/setup.sh"
 check 'the source ahead: setup.sh no longer executable in the copy fails' fails checked
 chmod +x "$dist/setup.sh"
+# The released files' list changes after the release. The copy is still
+# what the release's own build_dist.sh archived.
+echo "A file shipped from the next release on." >"$src/NOTICE.md"
+sed -i.bak 's/^FILES=(\(.*\))$/FILES=(\1 NOTICE.md)/' "$src/build_dist.sh" && rm "$src/build_dist.sh.bak"
+grep -q '^FILES=(.* NOTICE.md)$' "$src/build_dist.sh" || { echo "not ok - the fixture's FILES edit did not apply"; exit 1; }
+git -C "$repo" add -A && commit "ship NOTICE.md from the next release"
+check 'a file added to the released files after the release: the untouched copy still checks against mod-v0.1.0' checked
+git -C "$repo" reset -q --hard HEAD~1
+sed -i.bak 's/^FILES=(\(.*\) QUICKSTART.md\(.*\))$/FILES=(\1\2)/' "$src/build_dist.sh" && rm "$src/build_dist.sh.bak"
+if grep -q '^FILES=(.*QUICKSTART.md' "$src/build_dist.sh"; then echo "not ok - the fixture's FILES edit did not apply"; exit 1; fi
+rm "$dist/QUICKSTART.md"
+git -C "$repo" add -A && commit "stop shipping QUICKSTART.md"
+check 'a file dropped from the released files and deleted from the copy fails: it is not what mod-v0.1.0 archived' fails checked
+git -C "$repo" reset -q --hard HEAD~1
 version "$src" 0.0.9
 check 'a source lower than the copy fails' fails checked
 version "$src" next

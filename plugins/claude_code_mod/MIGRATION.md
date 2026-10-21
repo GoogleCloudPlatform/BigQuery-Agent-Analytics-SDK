@@ -173,10 +173,21 @@ says
 `hooks module bigquery-agent-analytics-mod@bqaa-tracing not loaded: another plugin of that name loads first`.
 On a machine that had only the
 settings-hook tracer, the check is `/bqaa-status` naming the policy's table,
-and both write until the next step. Then set the earlier ids to `false`, as
-in step 3 above: the new mod loads from the next session. A machine that
-started no session between the two steps records from its second or third
-session after it.
+and both write until the next step. Then set the earlier ids to `false`,
+keeping this route's id on (not the folder's step 3, whose id this route
+never registers):
+
+```json
+"enabledPlugins": {
+  "bigquery-agent-analytics-mod@bqaa-tracing": true,
+  "bigquery-agent-analytics-mod@bigquery-agent-analytics-plugin": false,
+  "bigquery-agent-analytics-tracing@bigquery-agent-analytics-plugin": false,
+  "bigquery-agent-analytics-tracing@bqaa-tracing": false
+}
+```
+
+The new mod loads from the next session. A machine that started no session
+between the two steps records from its second or third session after it.
 
 To move to a later release, change `ref` to its `mod-dist-v` tag in both
 entries, for the pilot group first. Then, on each machine, right after the

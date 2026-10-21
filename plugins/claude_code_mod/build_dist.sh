@@ -23,12 +23,13 @@
 # With --check, verifies the committed copy:
 #   - the catalog entry's version is the copy's;
 #   - the source's version is not lower than the copy's;
-#   - the copy is exactly what the source built at the copy's release tag,
-#     mod-v<copy version>, whatever the source holds now: the same files,
-#     contents and executable bits. Only while no mod-v tag exists at all
-#     (before the first release) is it checked against what the source
-#     builds now, which must be at the same version; once any release is
-#     tagged, a copy whose own tag is missing fails;
+#   - the copy is exactly what the source at the copy's release tag,
+#     mod-v<copy version>, builds with that tag's own build_dist.sh (as the
+#     release workflow built its archive), whatever the source holds now:
+#     the same files, contents and executable bits. Only while no mod-v tag
+#     exists at all (before the first release) is it checked against what
+#     the source builds now, which must be at the same version; once any
+#     release is tagged, a copy whose own tag is missing fails;
 #   - every mod-dist-v<version> tag, the ref an organization registers this
 #     repository at, holds the copy and the catalog entry at <version>.
 # The tags need a full checkout (fetch-depth: 0): a shallow one fails.
@@ -110,8 +111,14 @@ tag="mod-v$dist_version"
 if git -C "$repo" rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null; then
   mkdir -p "$work/tagged"
   git -C "$repo" archive "$tag" plugins/claude_code_mod | tar -x -C "$work/tagged"
-  build "$work/tagged/plugins/claude_code_mod" "$work/built"
-  against="the source at $tag"
+  # With the tag's own build_dist.sh: its list of released files, not this one's.
+  if bash "$work/tagged/plugins/claude_code_mod/build_dist.sh" "$work/built" >/dev/null; then
+    against="the source at $tag, built by its own build_dist.sh"
+  else
+    echo "not ok - the source at $tag does not build with its own build_dist.sh"
+    rm -rf "$work/built"
+    status=1
+  fi
 elif [[ -n "$(git -C "$repo" tag -l 'mod-v*')" ]]; then
   echo "not ok - there is no tag $tag to check the copy against, though other mod-v releases are tagged: a copy is checked against its own release"
   status=1

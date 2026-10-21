@@ -534,7 +534,7 @@ with the drop-in, unless noted:
 | To... | Do | What happens |
 | --- | --- | --- |
 | Stop recording, keep the mod | Policy: `options.enabled: false` and `env` `BQAA_TRACE_ENABLED: "false"` | The mod loads and records nothing (`/bqaa-status`: `disabled`, `captured 0`) |
-| Unload the mod at once | Policy: `"bigquery-agent-analytics-mod@org-tools": false` | The mod does not load |
+| Unload the mod at once | Policy: the route's id `false`, `"bigquery-agent-analytics-mod@org-tools": false` for the folder or `"bigquery-agent-analytics-mod@bqaa-tracing": false` for this repository's marketplace | The mod does not load. On this repository's marketplace its copy is dropped too: turned back on, the first session adds it again and records nothing, and the next one records |
 | Roll back | The disable policy below, in the source that holds the policy, kept until the earlier installs are gone; then remove it from that source, and delete the folder | Nothing loads, and no tracer hook runs |
 | Revoke the writer's tokens | Disable the writer service account ([service-account auth](service-account-auth.md#offboarding)) | Tokens are refused, issued ones included (a check refused one with `401` within 15 seconds, live). Sessions show "no working Google credentials" and keep rows on disk |
 
