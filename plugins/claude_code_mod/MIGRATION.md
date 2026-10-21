@@ -175,16 +175,39 @@ started no session between the two steps records from its second or third
 session after it.
 
 To move to a later release, change `ref` to its `mod-dist-v` tag in both
-entries, for the pilot group first. Each machine fetches the marketplace
-again at the new tag, but keeps running the copy it installed. On each, run
-`claude plugin update bigquery-agent-analytics-mod@bqaa-tracing` as the
-person (or a script run as them), and check that `claude plugin list` shows
-the new `Version` (not `~/.claude/plugins/cache/`, which held both
-versions in one check). Checked in a container, with a test repository and
-`autoUpdate` off: the next session fetched the marketplace at the new tag,
-and three sessions after the ref moved the earlier version still ran.
-`plugin update` moved it ("updated from ... for scope managed"), and the
-next session ran it.
+entries, for the pilot group first. Then, on each machine, right after the
+new policy arrives, fetch the marketplace at that tag with the policy's
+sparse paths, then update. Run them as the person (or a script run as
+them), and require both to succeed:
+
+```bash
+claude plugin marketplace add "GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#mod-dist-vX.Y.Z" \
+  --sparse .claude-plugin plugins/claude_code_dist
+claude plugin update bigquery-agent-analytics-mod@bqaa-tracing
+```
+
+Until then the copy does not load, because the marketplace no longer
+matches the policy, and `plugin update` alone fails ("not found"). Without
+`--sparse`, the add itself is refused: its source would not match the
+policy's entry. Each release's tag carries its own version, which is what
+`plugin update` compares and `plugin list` shows. Check by commit instead
+of by version: `~/.claude/plugins/installed_plugins.json` records the
+copy's `gitCommitSha`, which is the tag's
+(`git ls-remote https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK mod-dist-vX.Y.Z`).
+The same two commands, at the policy's tag, are needed on a machine where
+the person added this marketplace themselves (the README's sparse add)
+before the policy arrived: until then its copy does not load.
+
+Checked in a container, with a test repository whose policy pins sparse
+paths, and `autoUpdate` off:
+
+- right after the ref moved, `plugin update` alone failed;
+- `marketplace add` at the new tag without `--sparse` was refused;
+- with the policy's sparse paths, `marketplace add` and then
+  `plugin update` both succeeded ("updated from ... for scope managed").
+  The recorded commit was the tag's, and the next session ran it;
+- a copy installed from another ref of the same marketplace did not load
+  once the policy arrived, until the same two commands.
 
 ## The earlier location
 
