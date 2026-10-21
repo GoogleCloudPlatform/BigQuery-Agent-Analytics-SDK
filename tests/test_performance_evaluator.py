@@ -398,7 +398,7 @@ class TestBigQueryTraceEvaluator:
     """Create evaluator with mock client."""
     return BigQueryTraceEvaluator(
         project_id="test-project",
-        dataset_id="test_dataset",
+        dataset_id="test-dataset",
         table_id="test-table",
         client=mock_client,
     )

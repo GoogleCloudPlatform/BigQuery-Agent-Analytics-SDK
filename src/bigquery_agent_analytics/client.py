@@ -91,8 +91,6 @@ from .evaluators import _render_ai_generate_judge_query as render_ai_generate_ju
 from .evaluators import _split_judge_prompt_template as split_judge_prompt_template
 from .evaluators import DEFAULT_ENDPOINT
 from .evaluators import LLMAsJudge
-from .feedback import _validate_dataset_id
-from .feedback import _validate_project_id
 from .feedback import AnalysisConfig
 from .feedback import compute_drift
 from .feedback import compute_question_distribution
@@ -521,8 +519,7 @@ class Client:
   operations, and BQML mechanics.
 
   Args:
-      project_id: Google Cloud project ID, optionally domain-scoped
-          (``example.com:my-project``).
+      project_id: Google Cloud project ID.
       dataset_id: BigQuery dataset containing agent events.
       table_id: Table name for agent events. Pass ``"auto"``
           to auto-detect (tries ``agent_events`` first, then
@@ -544,11 +541,6 @@ class Client:
           remote-function runtime sets ``"remote-function"``. Lets
           operators attribute spend and usage back to the entry-point
           surface in ``INFORMATION_SCHEMA.JOBS_BY_PROJECT``.
-
-  Raises:
-      ValueError: If *project_id* or *dataset_id* is not one project or
-          dataset ID. Checked before any query, including table
-          auto-detection and schema verification.
   """
 
   def __init__(
@@ -564,11 +556,6 @@ class Client:
       connection_id: Optional[str] = None,
       sdk_surface: str = "python",
   ) -> None:
-    # Table auto-detection and schema verification below format both
-    # values into SQL, and the BigQuery Remote Function takes them from
-    # the request's userDefinedContext, so refuse them before any query.
-    _validate_project_id(project_id)
-    _validate_dataset_id(dataset_id)
     self.project_id = project_id
     self.dataset_id = dataset_id
     self.location = location

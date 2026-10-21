@@ -1682,7 +1682,7 @@ mock_bq.query.return_value = mock_job
 
 client = Client(
     project_id="test-project",
-    dataset_id="test_dataset",
+    dataset_id="test-dataset",
     verify_schema=False,    # Skip schema verification query
     bq_client=mock_bq,
 )

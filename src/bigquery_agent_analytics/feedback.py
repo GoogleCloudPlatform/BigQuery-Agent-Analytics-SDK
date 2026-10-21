@@ -449,8 +449,7 @@ def _validate_project_id(project_id: Any) -> None:
   """Raises ``ValueError`` unless *project_id* is one project ID.
 
   Feedback formats the project into ``FROM `{project}.{dataset}.{table}```,
-  ``Client`` into its constructor's ``INFORMATION_SCHEMA`` queries, and
-  the BigQuery Remote Function takes it from the request's
+  and the BigQuery Remote Function takes it from the request's
   ``userDefinedContext``. A backtick that closes the quoted path, a quote,
   whitespace, a semicolon, ``#``, ``/*``, or a dot outside a domain-scoped
   project's domain is refused before a query is built. ``fullmatch`` (not
@@ -471,8 +470,7 @@ def _validate_dataset_id(dataset_id: Any) -> None:
   """Raises ``ValueError`` unless *dataset_id* is one BigQuery dataset ID.
 
   Feedback formats the dataset into ``FROM `{project}.{dataset}.{table}```,
-  ``Client`` into its constructor's ``INFORMATION_SCHEMA`` queries, and
-  the BigQuery Remote Function takes it from the request's
+  and the BigQuery Remote Function takes it from the request's
   ``userDefinedContext``. A dataset ID is ASCII letters, digits and
   underscores, so a backtick that closes the quoted path, a dot that adds
   a path segment, a quote, whitespace, a semicolon or a comment marker is
