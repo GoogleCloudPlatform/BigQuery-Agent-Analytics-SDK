@@ -85,6 +85,7 @@ from .categorical_evaluator import flatten_results_to_rows
 from .categorical_evaluator import parse_categorical_row
 from .categorical_evaluator import parse_classify_row
 from .evaluators import _AI_GENERATE_JUDGE_BATCH_QUERY_TEMPLATE as AI_GENERATE_JUDGE_BATCH_QUERY
+from .evaluators import _escape_sql_quoted
 from .evaluators import _LEGACY_LLM_JUDGE_BATCH_QUERY as LLM_JUDGE_BATCH_QUERY
 from .evaluators import _parse_json_from_text
 from .evaluators import _render_ai_generate_judge_query as render_ai_generate_judge_query
@@ -2639,12 +2640,14 @@ class Client:
         bq.ScalarQueryParameter("judge_prompt_suffix", "STRING", suffix),
     ]
 
+    # A legacy model reference is the client's endpoint, so keep it inside
+    # its backticks the way the AI.GENERATE path keeps it inside quotes.
     query = LLM_JUDGE_BATCH_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
         table=table,
         where=where,
-        model=text_model,
+        model=_escape_sql_quoted(text_model, quote="`"),
     )
     job_config = bq.QueryJobConfig(
         query_parameters=judge_params,
