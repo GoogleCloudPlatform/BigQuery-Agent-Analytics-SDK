@@ -56,8 +56,11 @@ checking the new mod on a pilot group before the earlier ids go off.
 ### The organization's folder (recommended)
 
 A folder that device management puts on each machine, owned by an
-administrator, holding the release archive and a catalog named
-`bqaa-tracing`, so the id is `bigquery-agent-analytics-mod@bqaa-tracing`.
+administrator, holding the release archive and a catalog with a name of its
+own, `org-tools` here, so the id is `bigquery-agent-analytics-mod@org-tools`.
+Not `bqaa-tracing`: under this repository's marketplace name, a machine
+where the person had added that marketplace ran the person's own copy, in
+the user tier, in its first session under the policy (checked).
 The host reads it in place and runs the mod as the organization's: from the
 first session, ahead of anything a person installed, under
 `allowManagedModsOnly` and `allowManagedHooksOnly` too, and with every event
@@ -73,7 +76,7 @@ first session, ahead of anything a person installed, under
    VERSION=X.Y.Z
    BASE="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/releases/download/mod-v${VERSION}"
    NAME="bigquery-agent-analytics-mod-${VERSION}"
-   DEST=/opt/org/bqaa-tracing
+   DEST=/opt/org/agent-plugins
    WORK=$(mktemp -d)
    curl -fsSL "$BASE/$NAME.tar.gz" -o "$WORK/$NAME.tar.gz"
    curl -fsSL "$BASE/SHA256SUMS" -o "$WORK/SHA256SUMS"
@@ -83,7 +86,7 @@ first session, ahead of anything a person installed, under
    mkdir -p "$DEST.new/.claude-plugin" "$DEST.new/plugins"
    cp -R "$WORK/$NAME" "$DEST.new/plugins/bigquery-agent-analytics-mod"
    cat >"$DEST.new/.claude-plugin/marketplace.json" <<'JSON'
-   { "name": "bqaa-tracing", "owner": { "name": "Your organization" },
+   { "name": "org-tools", "owner": { "name": "Your organization" },
      "plugins": [ { "name": "bigquery-agent-analytics-mod", "source": "./plugins/bigquery-agent-analytics-mod" } ] }
    JSON
    chmod -R go-w "$DEST.new"
@@ -96,18 +99,18 @@ first session, ahead of anything a person installed, under
    ```json
    {
      "extraKnownMarketplaces": {
-       "bqaa-tracing": { "source": { "source": "directory", "path": "/opt/org/bqaa-tracing" } }
+       "org-tools": { "source": { "source": "directory", "path": "/opt/org/agent-plugins" } }
      },
-     "enabledPlugins": { "bigquery-agent-analytics-mod@bqaa-tracing": true },
-     "pluginConfigs": { "bigquery-agent-analytics-mod@bqaa-tracing": { "options": { "...": "every option" } } }
+     "enabledPlugins": { "bigquery-agent-analytics-mod@org-tools": true },
+     "pluginConfigs": { "bigquery-agent-analytics-mod@org-tools": { "options": { "...": "every option" } } }
    }
    ```
 
    Move the policy's `pluginConfigs` to the new id: options under the old id
    no longer apply. On a pilot machine, `claude -p /bqaa-status` names the
    policy's table, and `claude -p --debug-file /tmp/bqaa.log /bqaa-status`
-   logs `hooks module bigquery-agent-analytics-mod@bqaa-tracing loaded (...
-   tier prepend)`. The mod under its earlier id does not load beside it, but
+   logs `hooks module bigquery-agent-analytics-mod@org-tools loaded (...
+   tier prepend)`. The mod under its earlier ids does not load beside it, but
    the settings-hook tracer keeps running: on a machine that has it, every
    event is written twice until step 3, so keep the pilot short.
 3. Then turn the earlier ways in off, which also stops them from being
@@ -115,7 +118,8 @@ first session, ahead of anything a person installed, under
 
    ```json
    "enabledPlugins": {
-     "bigquery-agent-analytics-mod@bqaa-tracing": true,
+     "bigquery-agent-analytics-mod@org-tools": true,
+     "bigquery-agent-analytics-mod@bqaa-tracing": false,
      "bigquery-agent-analytics-mod@bigquery-agent-analytics-plugin": false,
      "bigquery-agent-analytics-tracing@bigquery-agent-analytics-plugin": false,
      "bigquery-agent-analytics-tracing@bqaa-tracing": false
