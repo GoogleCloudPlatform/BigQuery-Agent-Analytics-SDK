@@ -179,10 +179,12 @@ entries, for the pilot group first. Each machine fetches the marketplace
 again at the new tag, but keeps running the copy it installed. On each, run
 `claude plugin update bigquery-agent-analytics-mod@bqaa-tracing` as the
 person (or a script run as them), and check that `claude plugin list` shows
-the new `Version`. Checked in a container, with a test repository and
-`autoUpdate` off: three sessions after the ref moved, the earlier version
-still ran, with the new one fetched beside it. `plugin update` moved it
-("updated from ... for scope managed"), and the next session ran it.
+the new `Version` (not `~/.claude/plugins/cache/`, which held both
+versions in one check). Checked in a container, with a test repository and
+`autoUpdate` off: the next session fetched the marketplace at the new tag,
+and three sessions after the ref moved the earlier version still ran.
+`plugin update` moved it ("updated from ... for scope managed"), and the
+next session ran it.
 
 ## The earlier location
 
