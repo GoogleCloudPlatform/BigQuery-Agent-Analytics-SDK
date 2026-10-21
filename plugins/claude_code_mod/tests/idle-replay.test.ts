@@ -342,7 +342,7 @@ test('a request BigQuery refuses whole on an idle replay parks its rows for /bqa
   expect(parkedIn(world, 'retry')).toEqual([])
   expect(parkedIn(world, 'rejected').sort()).toEqual([...parked].sort())
   const shown = await band($)
-  expect(shown.line).toBe('rows are not being written: BigQuery denied the identity access to the dataset. To fix, ask for roles/bigquery.dataEditor on my-gcp-project.agent_analytics, then run /bqaa-backfill.')
+  expect(shown.line).toBe('rows are not being written: BigQuery denied the identity access to the dataset. To fix, ask for bigquery.tables.get and bigquery.tables.updateData on the table my-gcp-project.agent_analytics.agent_events (no role that reads rows), then run /bqaa-backfill.')
   expect(shown.waiting).toBe(' 3 row(s) waiting.')
   const requests = world.insertCalls().length
   const files = world.files.size

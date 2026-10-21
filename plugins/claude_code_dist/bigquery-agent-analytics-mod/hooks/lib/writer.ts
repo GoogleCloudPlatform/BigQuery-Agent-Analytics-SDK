@@ -944,7 +944,7 @@ export class Writer {
   problemText(): { headline: string; fix: string } {
     const c = this.config()
     const kind = this.problem?.kind ?? 'credentials'
-    if (kind === 'permission') return { headline: HEADLINE.permission, fix: `ask for roles/bigquery.dataEditor on ${c.project}.${c.dataset}, then run /bqaa-backfill` }
+    if (kind === 'permission') return { headline: HEADLINE.permission, fix: `ask for bigquery.tables.get and bigquery.tables.updateData on the table ${c.project}.${c.dataset}.${c.table} (no role that reads rows), then run /bqaa-backfill` }
     if (kind === 'destination') {
       const what = this.problem?.missing === 'table' ? `the table ${c.project}.${c.dataset}.${c.table}` : `the dataset ${c.project}.${c.dataset}`
       const make = this.setupCommand() === null ? 'create it, or correct the project and dataset options' : "create it with the mod's setup.sh"

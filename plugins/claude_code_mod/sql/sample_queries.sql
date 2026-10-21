@@ -22,9 +22,11 @@
 --   python bigquery-agent-analytics-skill/scripts/run_bq.py --dry-run \
 --     --start 2026-10-01 --end 2026-10-13 "<one query below>"
 --
--- Every query keeps one row per event_id: a row resent after an ambiguous
--- timeout or by a backfill carries the same event_id (the ADK docs use the
--- same QUALIFY for its dedup).
+-- Every query reads only this mod's rows (attributes.writer.plugin: a table
+-- can also hold the settings-hook tracer's or ADK agents' rows) and keeps
+-- one row per event_id: a row resent after an ambiguous timeout or by a
+-- backfill carries the same event_id (the ADK docs use the same QUALIFY for
+-- its dedup). tests/queries.live.py runs each one on a synthetic fixture.
 
 -- 1. Rows this mod wrote, deduplicated.
 SELECT *
@@ -39,6 +41,7 @@ WITH responses AS (
   FROM `{PROJECT}.{DATASET}.{TABLE}`
   WHERE event_type = 'LLM_RESPONSE'
     AND timestamp BETWEEN @start AND @end
+    AND JSON_VALUE(attributes, '$.writer.plugin') = 'bigquery-agent-analytics-mod'
   QUALIFY event_id IS NULL OR ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY timestamp) = 1
 )
 SELECT
@@ -62,6 +65,7 @@ WITH responses AS (
   FROM `{PROJECT}.{DATASET}.{TABLE}`
   WHERE event_type = 'LLM_RESPONSE'
     AND timestamp BETWEEN @start AND @end
+    AND JSON_VALUE(attributes, '$.writer.plugin') = 'bigquery-agent-analytics-mod'
   QUALIFY event_id IS NULL OR ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY timestamp) = 1
 )
 SELECT
@@ -76,11 +80,27 @@ ORDER BY requests DESC;
 
 -- 4. Tool failure rate and latency. A permission prompt's wait is inside
 --    total_ms, so the share of calls that prompted is listed beside it.
+--    Each refused call is counted once, by where the refusal came from: the
+--    person at the prompt, a hook, a permission rule
+--    (permission_decision_source), or another source (refused_other: one
+--    the host did not give, which the mod records as unknown, or one not
+--    named here); the four add up to refused. A call that a rule blocks
+--    before the host records it leaves no row.
 WITH tools AS (
-  SELECT *
+  SELECT
+    *,
+    CASE
+      WHEN JSON_VALUE(attributes, '$.permission_decision') = 'reject'
+        AND JSON_VALUE(attributes, '$.permission_decision_source') IN ('user_reject', 'user_abort') THEN 'prompt'
+      WHEN JSON_VALUE(attributes, '$.denied') = 'true'
+        OR (JSON_VALUE(attributes, '$.permission_decision') = 'reject' AND JSON_VALUE(attributes, '$.permission_decision_source') = 'hook') THEN 'hook'
+      WHEN JSON_VALUE(attributes, '$.permission_decision') = 'reject' AND JSON_VALUE(attributes, '$.permission_decision_source') = 'config' THEN 'rule'
+      WHEN JSON_VALUE(attributes, '$.permission_decision') = 'reject' THEN 'other'
+    END AS refusal
   FROM `{PROJECT}.{DATASET}.{TABLE}`
   WHERE event_type = 'TOOL_COMPLETED'
     AND timestamp BETWEEN @start AND @end
+    AND JSON_VALUE(attributes, '$.writer.plugin') = 'bigquery-agent-analytics-mod'
   QUALIFY event_id IS NULL OR ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY timestamp) = 1
 )
 SELECT
@@ -89,7 +109,11 @@ SELECT
   COUNT(*) AS calls,
   COUNTIF(status = 'ERROR') AS failures,
   ROUND(COUNTIF(status = 'ERROR') / COUNT(*) * 100, 2) AS fail_rate_pct,
-  COUNTIF(JSON_VALUE(attributes, '$.denied') = 'true') AS denied_by_hook,
+  COUNTIF(refusal IS NOT NULL) AS refused,
+  COUNTIF(refusal = 'prompt') AS rejected_at_prompt,
+  COUNTIF(refusal = 'hook') AS denied_by_hook,
+  COUNTIF(refusal = 'rule') AS denied_by_rule,
+  COUNTIF(refusal = 'other') AS refused_other,
   COUNTIF(JSON_VALUE(attributes, '$.permission_requested') = 'true') AS asked_permission,
   APPROX_QUANTILES(CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64), 100)[OFFSET(50)] AS p50_ms,
   APPROX_QUANTILES(CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64), 100)[OFFSET(95)] AS p95_ms
@@ -143,11 +167,13 @@ LEFT JOIN (
   WHERE timestamp BETWEEN @start AND @end
     AND trace_id = @trace_id
     AND event_type IN ('INVOCATION_STARTING', 'LLM_REQUEST', 'AGENT_STARTING')
+    AND JSON_VALUE(attributes, '$.writer.plugin') = 'bigquery-agent-analytics-mod'
   GROUP BY span_id, trace_id
 ) AS parent
   ON child.parent_span_id = parent.span_id AND child.trace_id = parent.trace_id
 WHERE child.timestamp BETWEEN @start AND @end
   AND child.trace_id = @trace_id
+  AND JSON_VALUE(child.attributes, '$.writer.plugin') = 'bigquery-agent-analytics-mod'
 QUALIFY child.event_id IS NULL OR ROW_NUMBER() OVER (PARTITION BY child.event_id ORDER BY child.timestamp) = 1
 ORDER BY child.timestamp;
 
@@ -157,6 +183,7 @@ WITH agents AS (
   FROM `{PROJECT}.{DATASET}.{TABLE}`
   WHERE event_type IN ('AGENT_COMPLETED', 'AGENT_ERROR')
     AND timestamp BETWEEN @start AND @end
+    AND JSON_VALUE(attributes, '$.writer.plugin') = 'bigquery-agent-analytics-mod'
   QUALIFY event_id IS NULL OR ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY timestamp) = 1
 )
 SELECT
@@ -170,6 +197,13 @@ GROUP BY subagent_type
 ORDER BY runs DESC;
 
 -- 8. Is the mod healthy? Rows per day and version, truncation and errors.
+WITH events AS (
+  SELECT *
+  FROM `{PROJECT}.{DATASET}.{TABLE}`
+  WHERE timestamp BETWEEN @start AND @end
+    AND JSON_VALUE(attributes, '$.writer.plugin') = 'bigquery-agent-analytics-mod'
+  QUALIFY event_id IS NULL OR ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY timestamp) = 1
+)
 SELECT
   DATE(timestamp) AS day,
   JSON_VALUE(attributes, '$.writer.label') AS writer,
@@ -177,8 +211,6 @@ SELECT
   COUNT(*) AS rows_written,
   COUNTIF(is_truncated) AS truncated_rows,
   COUNTIF(status = 'ERROR') AS error_rows
-FROM `{PROJECT}.{DATASET}.{TABLE}`
-WHERE timestamp BETWEEN @start AND @end
-  AND JSON_VALUE(attributes, '$.writer.plugin') = 'bigquery-agent-analytics-mod'
+FROM events
 GROUP BY day, writer
 ORDER BY day DESC;

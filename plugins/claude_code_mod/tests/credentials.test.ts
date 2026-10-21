@@ -172,7 +172,7 @@ test('a missing permission is a notice with the role to ask for; /bqaa-backfill 
   await $.tool.call({ tool: 'Read', file_path: 'a.ts' })
   await world.clock.advance(5000)
   const shown = await band($)
-  expect(shown.line).toBe('rows are not being written: BigQuery denied the identity access to the dataset. To fix, ask for roles/bigquery.dataEditor on my-gcp-project.agent_analytics, then run /bqaa-backfill.')
+  expect(shown.line).toBe('rows are not being written: BigQuery denied the identity access to the dataset. To fix, ask for bigquery.tables.get and bigquery.tables.updateData on the table my-gcp-project.agent_analytics.agent_events (no role that reads rows), then run /bqaa-backfill.')
   expect(shown.waiting).toBe(' 3 row(s) waiting.')
   expect(world.toasts.length).toBe(1)
   // Access granted: new rows land, the band clears, and the transcript says

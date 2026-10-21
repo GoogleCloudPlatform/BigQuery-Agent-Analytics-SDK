@@ -69,6 +69,7 @@ check "the views keep to this mod's rows" test "$(grep -cF "AND JSON_VALUE(attri
 check 'no placeholder is left' lacks '{' "$log"
 check 'queries are standard SQL in the location' has 'query --use_legacy_sql=false --location=US' "$log"
 check 'three queries in all: the table, then the two views' test "$(grep -c -- '--- sql' "$log")" -eq 3
+check 'the next step names the project and dataset, and no table, views dataset or location (the defaults)' bash -c "grep -qF -- '--project my-gcp-project --dataset agent_analytics --no-create-dataset' '$log.out'"
 
 # 2. Run again with both datasets there: nothing is made but the views.
 log="$work/again.log"
@@ -83,6 +84,7 @@ check 'the table comes from BQ_TABLE' has '`other-project.events.coding_events`'
 check 'the views go to BQAA_VIEWS_DATASET' has '`other-project.reports.daily_usage_by_model`' "$log"
 check 'the location is EU' has '--location=EU mk --dataset' "$log"
 check 'the table option is printed when not the default' has '  table: coding_events' "$log.out"
+check 'the next step carries the table, the views dataset and the location' has '--project other-project --dataset events --table coding_events --views-dataset reports --location EU --no-create-dataset' "$log.out"
 
 # 4. A dry run calls bq for nothing and prints the SQL.
 log="$work/dry.log"

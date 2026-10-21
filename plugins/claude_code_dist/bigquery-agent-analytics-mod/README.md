@@ -10,13 +10,12 @@ model requests, tool calls and subagents as rows in the
 background.
 
 It produces the same table shape as ADK's BQAA plugin and this repo's
-settings-hook plugin, [`bigquery-agent-analytics-tracing`](../bigquery-agent-analytics-tracing),
-so the [analysis skill](../../bigquery-agent-analytics-skill) and its queries
-work on what it writes.
+settings-hook plugin, [`bigquery-agent-analytics-tracing`](../claude_code),
+so the [analysis skill](https://github.com/haiyuan-eng-google/bigquery_agent_analytics_skill/tree/main/bigquery-agent-analytics-skill) and its queries work on what it writes.
 
 Status: early. Mods are an early-access feature of the host CLI (v2.1.287 or
 later); this mod was built against **v2.1.296** and is tested with 2.1.296,
-2.1.299 and 2.1.302. Its writer is tested against a scripted BigQuery API (see
+2.1.299, 2.1.302 and 2.1.304. Its writer is tested against a scripted BigQuery API (see
 [Testing](#testing)). It has also run live: a real session (host 2.1.299)
 wrote its 14 rows to a test dataset, the last of them through a spill file
 that the next session replayed, and the rows were read back with `bq`. On
@@ -24,6 +23,9 @@ that the next session replayed, and the rows were read back with `bq`. On
 permission prompt were read back the same way, as was a session started
 before its dataset existed: its rows waited, then landed on their own once
 `setup.sh` had made the dataset.
+
+**New here?** [QUICKSTART.md](QUICKSTART.md) has three short paths: your own
+sandbox, joining what your team set up, and the administrator's steps.
 
 ## Why a mod, and not settings hooks
 
@@ -159,6 +161,11 @@ claude --plugin-dir ./plugins/claude_code_mod
 Use this mod **or** the settings-hook tracing plugin against a table, not both:
 with both enabled every event is written twice.
 
+**For a whole team**, an administrator can turn the mod on for everyone with
+the host's managed settings, pinning the destination, the token command and
+every option, and turning off the settings-hook tracer; each person still
+signs in to gcloud once. See [Managed settings](docs/managed-settings.md).
+
 ### The dataset
 
 [`setup.sh`](setup.sh) creates the rest with the `bq` CLI, and is safe to run
@@ -174,6 +181,11 @@ BQAA_PROJECT_ID=my-gcp-project BQAA_DATASET=agent_analytics ./plugins/claude_cod
 ```
 
 `--dry-run` prints the commands and the SQL. Without it, they run.
+`setup.sh` grants nothing: who may write and who may read is the
+bootstrap, [`setup_gcp_prereqs.py`](https://github.com/haiyuan-eng-google/bigquery_agent_analytics_skill/blob/main/plugins/bigquery-agent-analytics-tracing/scripts/setup_gcp_prereqs.py), which is still in the mod's
+source repository, and which `setup.sh` names when it is done (for a team, a writer service account
+that may only insert rows, and readers of the views alone; see
+[Service-account auth](docs/service-account-auth.md)).
 
 `setup.sh` ships with the mod. Installed from a marketplace, it is in the
 mod's own directory, not a checkout: start a session, and while BigQuery
@@ -384,8 +396,17 @@ service-account key file cannot be used directly: the mods environment has
 token. The type declarations mark `$.process.run` as CLI only; where it is
 not available, set `BQAA_ACCESS_TOKEN`.
 
-The identity needs `roles/bigquery.dataEditor` on the dataset (insert rows,
-create the table). The repo's `setup_gcp_prereqs.py` grants it.
+The identity needs to insert rows into the table. `roles/bigquery.dataEditor`
+on the dataset does (it can also create the table), and fits one person's
+sandbox; it can also read, change and delete every row, so never grant it to
+an identity a team shares. For a shared table, grant `bigquery.tables.get` and
+`bigquery.tables.updateData` on the table alone: the `bqaaRowWriter` role that
+the bootstrap's `setup_gcp_prereqs.py --writer-role row-writer` makes.
+[Service-account auth](docs/service-account-auth.md) says which identity to
+use where (a writer service account that people impersonate, with no
+long-lived key; group access; Workload Identity Federation for CI; an attached
+service account; a key file only as an approved exception), who reads the
+views, and offboarding.
 
 ### If rows cannot be written
 
@@ -682,7 +703,7 @@ The details below were checked on BigQuery itself:
   `event_id` alone would read the whole table.
 * Over a fixture shared by several writers, both views count only this
   mod's requests, sessions and tokens. That run read literal rows, with no
-  table, and so does [`tests/views.test.py`](tests/views.test.py) offline.
+  table, and so does [`tests/views.test.py`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/plugins/claude_code_mod/tests/views.test.py) offline.
 
 The rows carry token counts, not prices, so the views report tokens. Keep
 the views in a dataset of their own, as `setup.sh` does, so the identities
@@ -703,9 +724,11 @@ the analysis skill's `{PROJECT}.{DATASET}.{TABLE}` placeholders and `@start` /
 deduplicated, tokens and cache share per session and model, model latency
 (p50/p95 total, time to first token), tool failure rate and latency, one line
 per turn, the span tree of a trace, subagents by type, and the mod's own
-health. `QUALIFY` is evaluated after `GROUP BY`, so a query that aggregates
-dedups on `event_id` in a CTE first and aggregates what it returns. For
-example, tokens per model:
+health. Each reads only this mod's rows (`attributes.writer.plugin`: a table
+can also hold the settings-hook tracer's or ADK agents' rows). `QUALIFY` is
+evaluated after `GROUP BY`, so a query that aggregates dedups on `event_id`
+in a CTE first and aggregates what it returns. For example, tokens per
+model:
 
 ```sql
 WITH responses AS (
@@ -713,6 +736,7 @@ WITH responses AS (
   FROM `{PROJECT}.{DATASET}.{TABLE}`
   WHERE event_type = 'LLM_RESPONSE'
     AND timestamp BETWEEN @start AND @end
+    AND JSON_VALUE(attributes, '$.writer.plugin') = 'bigquery-agent-analytics-mod'
   QUALIFY event_id IS NULL OR ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY timestamp) = 1
 )
 SELECT
@@ -724,6 +748,13 @@ SELECT
 FROM responses
 GROUP BY model
 ```
+
+[`docs/value.md`](docs/value.md) says what a developer, a team lead and a
+platform team can learn from the rows, with the questions' queries in
+[`sql/value_queries.sql`](sql/value_queries.sql): sessions and turns, adoption
+against a roster, an estimated cost, tools, errors over time, and the mod
+beside ADK agents. It also covers who can run each query, the denominators,
+and the limits.
 
 ## Reliability
 
@@ -1094,7 +1125,9 @@ bash tests/setup.test.sh
 bash tests/version.test.sh    # plugin.json and PLUGIN_VERSION agree
 node tests/reload.test.mjs    # node 24: the welcome card across a fresh load
 bash tests/state-contract.test.sh   # the host's $.state, as the reload test models it
+HOST_CLI_LINUX=... bash tests/managed-settings.live.sh   # docker: a managed policy in a Linux container (below)
 python3 tests/views.test.py   # needs DuckDB: python3 -m pip install duckdb
+PROJECT=my-gcp-project RUNNER=path/to/run_bq.py python3 tests/queries.live.py   # live: every query on a synthetic fixture (below)
 npx -p typescript tsc -p .    # once the host CLI has loaded the mod (below)
 ```
 
@@ -1427,6 +1460,14 @@ calls. It checks:
   `<dataset>_reporting` even when the shell already sets `BQAA_VIEWS_DATASET`
   (valid or not), or another project, dataset or table.
 
+`tests/access.live.sh` checks, against a real project, the access that
+[Service-account auth](docs/service-account-auth.md) sets up: the writer
+service account holds only `bigquery.tables.get` and
+`bigquery.tables.updateData` on the table, and is refused a read of its rows
+and any query; a reader queries a view, and is refused the table, directly
+and in a query; and neither dataset gives the project's Viewers or Editors
+access. It changes nothing (`INSERT_PROBE=1` adds one insert).
+
 `tests/state-contract.test.sh` checks, with the host CLI's own test runtime,
 what `tests/reload.test.mjs` models of the host's `$.state`, so its stand-in
 never sets its own rules: a small mod of its own (`tests/state-contract`,
@@ -1437,6 +1478,38 @@ landed or missed, brings the whole moment up to date.
 
 `tests/version.test.sh` checks that `plugin.json` and `PLUGIN_VERSION` name
 the same version: the welcome card greets an update by the latter.
+
+`tests/managed-settings.live.sh` runs the
+[managed-settings](docs/managed-settings.md) guide in a Linux container, as
+an ordinary user under a root-owned policy. Offline, with the folder
+marketplace, it checks:
+
+* that the policy's options and environment pins hold against the person's
+  own settings, a `--settings` file, a repository's settings and the shell:
+  destination, capture, live writes, token command, the folder rows wait
+  in, agent name and identity;
+* that options a policy leaves out are the person's;
+* the move from the settings-hook tracer: it keeps writing until the policy
+  turns it off (and `allowManagedModsOnly` does not stop it);
+* what a person can try: `enabledPlugins`, `plugin disable` and
+  `plugin uninstall` change nothing, while safe and bare mode load no
+  plugin;
+* that the policy works as a drop-in beside an existing
+  `managed-settings.json`;
+* that a repository's `USER` becomes `user_id`;
+* that a repository's settings `env` reaches the token command, and that an
+  admin-owned wrapper with a clean environment keeps it out;
+* the emergency switches;
+* rollback: removing the policy straight after a migration brings the
+  tracer back, while a disable policy, kept until the earlier installs are
+  gone, does not;
+* the rows left on disk.
+
+With `BQAA_CHECK_NETWORK=1` it also checks the GitHub variant pinned to a
+tag: the tag's copy, `autoUpdate` off, when a fresh machine starts
+recording, the user tier, and a rollback that leaves no copy installed. It
+needs docker and the host CLI's Linux
+build (`HOST_CLI_LINUX`).
 
 `tests/reload.test.mjs` loads `hooks/register.ts` afresh, as a hot reload
 does, which the test kit cannot, under node 24 with a small stand-in for
@@ -1527,6 +1600,16 @@ the versions before and after an update, landing in either order, the
 later version's card shows, with its own greeting; and that draws of the
 card while its read of the close waits start no other read of it.
 
+`tests/queries.live.py` runs every query in `sql/value_queries.sql` and
+`sql/sample_queries.sql` through the analysis skill's runner (named by
+`RUNNER`: it is in the mod's source repository) against a synthetic fixture
+in a dataset of its own, which it makes and deletes. The
+fixture holds a replayed row, a session with no `user_id`, the settings-hook
+tracer's and an ADK agent's rows, a subagent run, both answers to a
+permission prompt, and a hook's denial. The test checks the answers, and
+prints each query's dry-run bytes. It needs Application Default Credentials
+that may create a dataset.
+
 `tests/views.test.py` runs both views in DuckDB. It uses five dialect
 substitutions, and each must match. The fixture is a table shared by this
 mod, an ADK-style writer, the settings-hook plugin, a duplicate row, another
@@ -1592,6 +1675,7 @@ the same views count other producers' requests but not their tokens.
 ## Files
 
 ```
+QUICKSTART.md                a sandbox, joining a team's setup, and the administrator's steps
 .claude-plugin/plugin.json   manifest and userConfig
 hooks/hooks.json             names the hooks module
 hooks/register.ts            hooks and $ wiring
@@ -1607,10 +1691,13 @@ hooks/lib/config.ts          options and environment
 hooks/lib/status.ts          /bqaa-status text
 hooks/lib/welcome.ts         the welcome card's text, and its records in the store: the version greeted, the card's landing, its close
 setup.sh                     creates the dataset, table, views dataset and views (bq CLI)
-sql/                         DDL and sample queries
+docs/service-account-auth.md which identity writes where, who reads the views, offboarding
+docs/managed-settings.md     turning the mod on for a team with the host's managed settings
+docs/value.md                what each persona learns, with its query, denominators and limits
+sql/                         DDL, sample queries and the value queries
 sql/views/                   the usage views setup.sh makes
 examples/sample-rows.jsonl   fixture output
-tests/                       plugin-test suites, setup.test.sh for setup.sh, version.test.sh, and reload.test.mjs
+tests/                       plugin-test suites, setup.test.sh for setup.sh, version.test.sh, reload.test.mjs, access.live.sh and queries.live.py (both live)
 types/index.d.ts             the values the mod keeps in the session's $.state
 ```
 

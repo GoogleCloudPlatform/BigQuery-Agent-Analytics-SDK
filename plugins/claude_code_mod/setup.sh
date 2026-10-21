@@ -131,6 +131,17 @@ echo "Done. The mod writes to $project.$dataset.$table with these options:"
 echo "  project: $project"
 echo "  dataset: $dataset"
 if [[ "$table" != agent_events ]]; then echo "  table: $table"; fi
-echo "Writers need roles/bigquery.dataEditor on $project:$dataset; readers of the views"
-echo "need roles/bigquery.dataViewer on $project:$views_dataset (authorize the views"
-echo "on $project:$dataset to keep them off the table) and roles/bigquery.jobUser."
+# The bootstrap's names for what is not its default: the table, the views
+# dataset and the location.
+names=""
+if [[ "$table" != agent_events ]]; then names+=" --table $table"; fi
+if [[ "$views_dataset" != "${dataset}_reporting" ]]; then names+=" --views-dataset $views_dataset"; fi
+if [[ "$location" != US ]]; then names+=" --location $location"; fi
+echo "Next, who writes and who reads (docs/service-account-auth.md). For a team, from a"
+echo "checkout of haiyuan-eng-google/bigquery_agent_analytics_skill, which holds the bootstrap:"
+echo "  python3 plugins/bigquery-agent-analytics-tracing/scripts/setup_gcp_prereqs.py \\"
+echo "    --project $project --dataset $dataset$names --no-create-dataset --no-create-table \\"
+echo "    --service-account bqaa-row-writer --writer-role row-writer \\"
+echo "    --token-creator group:WRITERS --reader group:READERS"
+echo "sets up a writer service account that may only insert rows into the table, and"
+echo "readers of the views in $project:$views_dataset who need no access to the table."
