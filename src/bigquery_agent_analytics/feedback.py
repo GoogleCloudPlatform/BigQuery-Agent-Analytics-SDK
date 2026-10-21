@@ -408,14 +408,14 @@ _TABLE_NAME_EXTRA_CATEGORIES = frozenset({"Pc", "Pd", "Zs"})
 def _validate_table_name(table: Any, label: str) -> None:
   """Raises ``ValueError`` unless *table* is one BigQuery table name.
 
-  Drift formats its golden and events tables into
-  ``FROM `{project}.{dataset}.{table}```. The BigQuery Remote Function's
-  ``drift`` operation passes the golden table straight from the caller's
-  params, and an application may forward a caller's events table
-  override. Any character outside BigQuery's table-name set (a backtick
-  that closes the quoted path, a dot that names another dataset, a
-  backslash, a line break) is refused before a query is built. *label*
-  names the value in the error.
+  Drift formats its golden and events tables, and question distribution
+  its events table, into ``FROM `{project}.{dataset}.{table}```. The
+  BigQuery Remote Function's ``drift`` operation passes the golden table
+  straight from the caller's params, and an application may forward a
+  caller's events table override. Any character outside BigQuery's
+  table-name set (a backtick that closes the quoted path, a dot that
+  names another dataset, a backslash, a line break) is refused before a
+  query is built. *label* names the value in the error.
   """
   if (
       not isinstance(table, str)
@@ -449,7 +449,8 @@ def _validate_project_id(project_id: Any) -> None:
   """Raises ``ValueError`` unless *project_id* is one project ID.
 
   Feedback formats the project into ``FROM `{project}.{dataset}.{table}```,
-  and the BigQuery Remote Function takes it from the request's
+  ``Client`` into its constructor's ``INFORMATION_SCHEMA`` queries, and
+  the BigQuery Remote Function takes it from the request's
   ``userDefinedContext``. A backtick that closes the quoted path, a quote,
   whitespace, a semicolon, ``#``, ``/*``, or a dot outside a domain-scoped
   project's domain is refused before a query is built. ``fullmatch`` (not
@@ -470,7 +471,8 @@ def _validate_dataset_id(dataset_id: Any) -> None:
   """Raises ``ValueError`` unless *dataset_id* is one BigQuery dataset ID.
 
   Feedback formats the dataset into ``FROM `{project}.{dataset}.{table}```,
-  and the BigQuery Remote Function takes it from the request's
+  ``Client`` into its constructor's ``INFORMATION_SCHEMA`` queries, and
+  the BigQuery Remote Function takes it from the request's
   ``userDefinedContext``. A dataset ID is ASCII letters, digits and
   underscores, so a backtick that closes the quoted path, a dot that adds
   a path segment, a quote, whitespace, a semicolon or a comment marker is
@@ -776,7 +778,7 @@ async def compute_question_distribution(
       project_id: GCP project ID, optionally domain-scoped
           (``example.com:my-project``).
       dataset_id: BigQuery dataset ID.
-      table_id: Events table.
+      table_id: Events table: one table name in *dataset_id*.
       where_clause: SQL WHERE clause.
       query_params: BigQuery query parameters.
       config: Analysis configuration.
@@ -786,9 +788,10 @@ async def compute_question_distribution(
       QuestionDistribution with categorized results.
 
   Raises:
-      ValueError: If *project_id* or *dataset_id* is not one project or
-          dataset ID.
+      ValueError: If *table_id* is not one BigQuery table name, or
+          *project_id* or *dataset_id* is not one project or dataset ID.
   """
+  _validate_table_name(table_id, "events table (dataset or table_id)")
   _validate_project_id(project_id)
   _validate_dataset_id(dataset_id)
 

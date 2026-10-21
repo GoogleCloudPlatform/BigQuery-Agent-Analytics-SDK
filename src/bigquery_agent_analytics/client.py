@@ -91,6 +91,8 @@ from .evaluators import _render_ai_generate_judge_query as render_ai_generate_ju
 from .evaluators import _split_judge_prompt_template as split_judge_prompt_template
 from .evaluators import DEFAULT_ENDPOINT
 from .evaluators import LLMAsJudge
+from .feedback import _validate_dataset_id
+from .feedback import _validate_project_id
 from .feedback import AnalysisConfig
 from .feedback import compute_drift
 from .feedback import compute_question_distribution
@@ -519,7 +521,8 @@ class Client:
   operations, and BQML mechanics.
 
   Args:
-      project_id: Google Cloud project ID.
+      project_id: Google Cloud project ID, optionally domain-scoped
+          (``example.com:my-project``).
       dataset_id: BigQuery dataset containing agent events.
       table_id: Table name for agent events. Pass ``"auto"``
           to auto-detect (tries ``agent_events`` first, then
@@ -541,6 +544,11 @@ class Client:
           remote-function runtime sets ``"remote-function"``. Lets
           operators attribute spend and usage back to the entry-point
           surface in ``INFORMATION_SCHEMA.JOBS_BY_PROJECT``.
+
+  Raises:
+      ValueError: If *project_id* or *dataset_id* is not one project or
+          dataset ID. Checked before any query, including table
+          auto-detection and schema verification.
   """
 
   def __init__(
@@ -556,6 +564,11 @@ class Client:
       connection_id: Optional[str] = None,
       sdk_surface: str = "python",
   ) -> None:
+    # Table auto-detection and schema verification below format both
+    # values into SQL, and the BigQuery Remote Function takes them from
+    # the request's userDefinedContext, so refuse them before any query.
+    _validate_project_id(project_id)
+    _validate_dataset_id(dataset_id)
     self.project_id = project_id
     self.dataset_id = dataset_id
     self.location = location
@@ -3996,15 +4009,19 @@ class Client:
         filters: Optional filters for production traces.
         configuration: Analysis configuration. Defaults to
             ``auto_group_using_semantics``.
-        dataset: Optional events table override.
+        dataset: Optional events table override: one table name in this
+            client's dataset. Defaults to the client's ``table_id``.
         text_model: Optional BQML text model for classification.
 
     Returns:
         QuestionDistribution with categorized results.
 
     Raises:
-        ValueError: If the client's ``project_id`` or ``dataset_id`` is
-            not one project or dataset ID.
+        ValueError: If the events table (*dataset*, else the client's
+            ``table_id``) is not one BigQuery table name, for example a
+            dotted path or a name containing a backtick, or if the
+            client's ``project_id`` or ``dataset_id`` is not one project
+            or dataset ID.
     """
     table = dataset or self.table_id
     filt = filters or TraceFilter()

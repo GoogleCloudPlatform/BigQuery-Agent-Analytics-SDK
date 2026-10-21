@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Feedback queries must keep the project and dataset inside their quoted path.
+"""Client and feedback queries keep project and dataset in their quoted path.
 
 ``compute_drift`` and ``compute_question_distribution`` format the
 project and dataset into ``FROM `{project}.{dataset}.{table}```.
@@ -21,6 +21,12 @@ and the BigQuery Remote Function builds that client from the request's
 ``userDefinedContext`` (``_deploy_runtime.resolve_client_options``). A
 backtick in either value used to close the quoted path, so the rest of the
 value became SQL that ran with the client's BigQuery credentials.
+
+The constructor formats both values into SQL of its own before it returns:
+``table_id="auto"`` reads ``INFORMATION_SCHEMA.TABLES`` even with
+``verify_schema=False``, and ``verify_schema=True`` reads
+``INFORMATION_SCHEMA.COLUMNS``. So ``Client`` refuses them before either
+query, and the feedback functions keep their own check.
 """
 
 import asyncio
@@ -53,6 +59,12 @@ _DATASET_PAYLOAD = (
 )
 # The same attack through the project.
 _PROJECT_PAYLOAD = "p." + _DATASET_PAYLOAD
+# The review's payload for table auto-detection: it closes the
+# INFORMATION_SCHEMA.TABLES path and lists the tables of another dataset.
+_AUTO_DETECT_PAYLOAD = (
+    "d.INFORMATION_SCHEMA.TABLES` WHERE FALSE UNION ALL SELECT table_name"
+    " FROM `p.private.INFORMATION_SCHEMA.TABLES` --"
+)
 
 # Values that are not one BigQuery dataset ID.
 _NOT_A_DATASET_ID = {
@@ -132,8 +144,22 @@ def _bq_client():
   return client
 
 
+def _detecting_bq_client():
+  """Fake BigQuery client whose every query finds ``agent_events``."""
+  client = MagicMock()
+  job = MagicMock()
+  job.result.return_value = [{"table_name": "agent_events"}]
+  client.query.return_value = job
+  return client
+
+
 def _sent_sql(bq_client):
   return [call.args[0] for call in bq_client.query.call_args_list]
+
+
+def _information_schema_from(project_id, dataset_id, view):
+  """The constructor's FROM line for one ``INFORMATION_SCHEMA`` view."""
+  return f"\nFROM `{project_id}.{dataset_id}.INFORMATION_SCHEMA.{view}`\n"
 
 
 def _events_from(project_id, dataset_id):
@@ -294,28 +320,118 @@ def call_client(request):
   return call
 
 
+# Constructor options that each send a query before ``Client()`` returns.
+_CONSTRUCTOR_QUERIES = {
+    # The defaults: verify_schema=True reads INFORMATION_SCHEMA.COLUMNS.
+    "verify_schema": {},
+    # table_id="auto" reads INFORMATION_SCHEMA.TABLES even without the
+    # schema check, which is how the BigQuery Remote Function builds it.
+    "auto_detect": {"table_id": "auto", "verify_schema": False},
+}
+
+
+class TestClientConstructor:
+  """``Client()`` checks both values before its own first query."""
+
+  @pytest.mark.parametrize(
+      "options",
+      list(_CONSTRUCTOR_QUERIES.values()),
+      ids=list(_CONSTRUCTOR_QUERIES),
+  )
+  @pytest.mark.parametrize(
+      "dataset_id",
+      list(_NOT_A_DATASET_ID.values()),
+      ids=list(_NOT_A_DATASET_ID),
+  )
+  def test_rejects_value_that_is_not_one_dataset_id(self, options, dataset_id):
+    bq = _bq_client()
+    with pytest.raises(
+        ValueError, match="dataset_id must be one BigQuery dataset ID"
+    ):
+      Client(project_id="p", dataset_id=dataset_id, bq_client=bq, **options)
+    assert _sent_sql(bq) == []
+
+  @pytest.mark.parametrize(
+      "options",
+      list(_CONSTRUCTOR_QUERIES.values()),
+      ids=list(_CONSTRUCTOR_QUERIES),
+  )
+  @pytest.mark.parametrize(
+      "project_id",
+      list(_NOT_A_PROJECT_ID.values()),
+      ids=list(_NOT_A_PROJECT_ID),
+  )
+  def test_rejects_value_that_is_not_one_project_id(self, options, project_id):
+    bq = _bq_client()
+    with pytest.raises(
+        ValueError, match="project_id must be one Google Cloud project ID"
+    ):
+      Client(project_id=project_id, dataset_id="d", bq_client=bq, **options)
+    assert _sent_sql(bq) == []
+
+  @pytest.mark.parametrize("project_id", _PROJECT_IDS)
+  def test_accepts_project_ids(self, project_id):
+    bq = _detecting_bq_client()
+    client = Client(
+        project_id=project_id,
+        dataset_id="analytics",
+        table_id="auto",
+        bq_client=bq,
+    )
+    assert client.table_id == "agent_events"
+    [tables_sql, columns_sql] = _sent_sql(bq)
+    assert (
+        _information_schema_from(project_id, "analytics", "TABLES")
+        in tables_sql
+    )
+    assert (
+        _information_schema_from(project_id, "analytics", "COLUMNS")
+        in columns_sql
+    )
+
+  @pytest.mark.parametrize("dataset_id", _DATASET_IDS)
+  def test_accepts_dataset_ids(self, dataset_id):
+    bq = _detecting_bq_client()
+    client = Client(
+        project_id="my-project",
+        dataset_id=dataset_id,
+        table_id="auto",
+        bq_client=bq,
+    )
+    assert client.table_id == "agent_events"
+    [tables_sql, columns_sql] = _sent_sql(bq)
+    assert (
+        _information_schema_from("my-project", dataset_id, "TABLES")
+        in tables_sql
+    )
+    assert (
+        _information_schema_from("my-project", dataset_id, "COLUMNS")
+        in columns_sql
+    )
+
+
 class TestClient:
-  """The public sync and async entry points, with the constructor's values."""
+  """The public sync and async entry points still check what they send."""
 
   @pytest.mark.parametrize("method", list(_CLIENT_CALLS))
   @pytest.mark.parametrize(
-      ("project_id", "dataset_id", "name"),
+      ("name", "value"),
       [
-          ("p", _DATASET_PAYLOAD, "dataset_id"),
-          (_PROJECT_PAYLOAD, "d", "project_id"),
+          ("dataset_id", _DATASET_PAYLOAD),
+          ("project_id", _PROJECT_PAYLOAD),
       ],
       ids=["dataset_id", "project_id"],
   )
-  def test_rejects_injected_value(
-      self, call_client, method, project_id, dataset_id, name
+  def test_rejects_value_set_after_construction(
+      self, call_client, method, name, value
   ):
     bq = _bq_client()
     client = Client(
-        project_id=project_id,
-        dataset_id=dataset_id,
-        verify_schema=False,
-        bq_client=bq,
+        project_id="p", dataset_id="d", verify_schema=False, bq_client=bq
     )
+    # Client() refuses these values itself (TestClientConstructor); the
+    # feedback functions check what the client hands them again.
+    setattr(client, name, value)
     with pytest.raises(ValueError, match=f"{name} must be one"):
       call_client(client, method)
     assert _sent_sql(bq) == []
@@ -337,11 +453,12 @@ class TestRemoteFunctionContext:
   """``userDefinedContext`` through ``resolve_client_options`` to drift.
 
   The client is built and the calls processed the way
-  ``main.handle_request`` does it.
+  ``main.handle_request`` does it; that handler answers a ``ValueError``
+  from building the client with HTTP 400 for the whole request.
   """
 
   @staticmethod
-  def _drift_reply(monkeypatch, bq, user_defined_context):
+  def _dispatch(monkeypatch, bq):
     spec = importlib.util.spec_from_file_location("rf_dispatch", _DISPATCH_PATH)
     dispatch = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(dispatch)
@@ -350,6 +467,11 @@ class TestRemoteFunctionContext:
         dispatch, "Client", functools.partial(Client, bq_client=bq)
     )
     monkeypatch.delenv("BQ_AGENT_TABLE", raising=False)
+    return dispatch
+
+  @classmethod
+  def _drift_reply(cls, monkeypatch, bq, user_defined_context):
+    dispatch = cls._dispatch(monkeypatch, bq)
     client = dispatch.build_client_from_context(user_defined_context)
     [reply] = dispatch.process_calls(
         client, [["drift", json.dumps({"golden_dataset": "golden_questions"})]]
@@ -361,17 +483,57 @@ class TestRemoteFunctionContext:
       [
           ({"project_id": "p", "dataset_id": _DATASET_PAYLOAD}, "dataset_id"),
           ({"project_id": _PROJECT_PAYLOAD, "dataset_id": "d"}, "project_id"),
+          (
+              {
+                  "project_id": "p",
+                  "dataset_id": _AUTO_DETECT_PAYLOAD,
+                  "table_id": "auto",
+              },
+              "dataset_id",
+          ),
+          (
+              {
+                  "project_id": "p." + _AUTO_DETECT_PAYLOAD,
+                  "dataset_id": "d",
+                  "table_id": "auto",
+              },
+              "project_id",
+          ),
       ],
-      ids=["dataset_id", "project_id"],
+      ids=[
+          "dataset_id",
+          "project_id",
+          "auto_detect_dataset_id",
+          "auto_detect_project_id",
+      ],
   )
-  def test_injected_context_is_a_row_error_and_sends_no_sql(
+  def test_injected_context_is_refused_before_any_query(
       self, monkeypatch, user_defined_context, name
   ):
     bq = _bq_client()
-    reply = self._drift_reply(monkeypatch, bq, user_defined_context)
-    assert reply.get("_error", {}).get("code") == "ValueError", reply
-    assert reply["_error"]["message"].startswith(f"{name} must be one"), reply
+    dispatch = self._dispatch(monkeypatch, bq)
+    with pytest.raises(ValueError, match=f"{name} must be one"):
+      dispatch.build_client_from_context(user_defined_context)
     assert _sent_sql(bq) == []
+
+  def test_auto_detect_context_still_reaches_bigquery(self, monkeypatch):
+    bq = _detecting_bq_client()
+    dispatch = self._dispatch(monkeypatch, bq)
+    client = dispatch.build_client_from_context(
+        {
+            "project_id": "example.com:my-project",
+            "dataset_id": "analytics",
+            "table_id": "auto",
+        }
+    )
+    assert client.table_id == "agent_events"
+    [tables_sql] = _sent_sql(bq)
+    assert (
+        _information_schema_from(
+            "example.com:my-project", "analytics", "TABLES"
+        )
+        in tables_sql
+    )
 
   def test_hyphenated_project_context_still_reaches_bigquery(self, monkeypatch):
     bq = _bq_client()
