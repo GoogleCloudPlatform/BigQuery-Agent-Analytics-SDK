@@ -191,9 +191,24 @@ matches the policy, and `plugin update` alone fails ("not found"). Without
 `--sparse`, the add itself is refused: its source would not match the
 policy's entry. Each release's tag carries its own version, which is what
 `plugin update` compares and `plugin list` shows. Check by commit instead
-of by version: `~/.claude/plugins/installed_plugins.json` records the
-copy's `gitCommitSha`, which is the tag's
-(`git ls-remote https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK mod-dist-vX.Y.Z`).
+of by version. Look up the tag's commit once:
+
+```bash
+git ls-remote https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK "refs/tags/mod-dist-vX.Y.Z" "refs/tags/mod-dist-vX.Y.Z^{}" | awk '{ c = $1 } /\^\{\}$/ { p = $1 } END { if (!c) { print "no commit found" > "/dev/stderr"; exit 1 } print (p ? p : c) }'
+```
+
+Release tags are annotated (`git tag -a`), so the `refs/tags/mod-dist-vX.Y.Z`
+line, the only one `git ls-remote … mod-dist-vX.Y.Z` prints, is the tag
+object's id, not a commit. The commit, which the host records, is on the
+`^{}` line, and the command prints it. If it prints "no commit found"
+instead, the tag is missing or the lookup failed: stop. On each machine,
+every `gitCommitSha` the host recorded for the copy in
+`~/.claude/plugins/installed_plugins.json` must be that commit:
+
+```bash
+python3 -c 'import json, os; d = json.load(open(os.path.expanduser("~/.claude/plugins/installed_plugins.json"))); print([e.get("gitCommitSha") for e in d["plugins"]["bigquery-agent-analytics-mod@bqaa-tracing"]])'
+```
+
 The same two commands, at the policy's tag, are needed on a machine where
 the person added this marketplace themselves (the README's sparse add)
 before the policy arrived: until then its copy does not load. If that copy
