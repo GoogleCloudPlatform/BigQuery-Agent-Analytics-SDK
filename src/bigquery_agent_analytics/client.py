@@ -3582,15 +3582,18 @@ class Client:
             holds the golden questions (must have a ``question``
             column).
         filters: Optional filters for production traces.
-        dataset: Optional events table override.
+        dataset: Optional events table override: one table name in this
+            client's dataset. Defaults to the client's ``table_id``.
         embedding_model: Optional model for semantic matching.
 
     Returns:
         DriftReport with coverage metrics.
 
     Raises:
-        ValueError: If *golden_dataset* is not one BigQuery table name,
-            for example a dotted path or a name containing a backtick.
+        ValueError: If *golden_dataset* or the events table (*dataset*,
+            else the client's ``table_id``) is not one BigQuery table
+            name, for example a dotted path or a name containing a
+            backtick.
     """
     table = dataset or self.table_id
     filt = filters or TraceFilter()

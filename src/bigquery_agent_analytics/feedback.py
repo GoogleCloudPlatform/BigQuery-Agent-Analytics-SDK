@@ -404,28 +404,31 @@ def _sanitize_categories(categories_str: str) -> str:
 _TABLE_NAME_EXTRA_CATEGORIES = frozenset({"Pc", "Pd", "Zs"})
 
 
-def _validate_golden_table(golden_table: Any) -> None:
-  """Raises ``ValueError`` unless *golden_table* is one BigQuery table name.
+def _validate_table_name(table: Any, label: str) -> None:
+  """Raises ``ValueError`` unless *table* is one BigQuery table name.
 
-  The name is formatted into ``FROM `{project}.{dataset}.{golden_table}```,
-  and the BigQuery Remote Function's ``drift`` operation passes it straight
-  from the caller's params. Any character outside BigQuery's table-name set
-  (a backtick that closes the quoted path, a dot that names another
-  dataset, a backslash, a line break) is refused before a query is built.
+  Drift formats its golden and events tables into
+  ``FROM `{project}.{dataset}.{table}```. The BigQuery Remote Function's
+  ``drift`` operation passes the golden table straight from the caller's
+  params, and an application may forward a caller's events table
+  override. Any character outside BigQuery's table-name set (a backtick
+  that closes the quoted path, a dot that names another dataset, a
+  backslash, a line break) is refused before a query is built. *label*
+  names the value in the error.
   """
   if (
-      not isinstance(golden_table, str)
-      or not golden_table
+      not isinstance(table, str)
+      or not table
       or any(
           unicodedata.category(char)[0] not in "LMN"
           and unicodedata.category(char) not in _TABLE_NAME_EXTRA_CATEGORIES
-          for char in golden_table
+          for char in table
       )
   ):
     raise ValueError(
-        "golden_dataset must be one table name in the client's dataset,"
+        f"{label} must be one table name in the client's dataset,"
         " using only letters, marks, numbers, '_', '-' or spaces; got"
-        f" {golden_table!r}"
+        f" {table!r}"
     )
 
 
@@ -445,7 +448,7 @@ async def compute_drift(
       bq_client: BigQuery client instance.
       project_id: GCP project ID.
       dataset_id: BigQuery dataset.
-      table_id: Events table.
+      table_id: Events table: one table name in *dataset_id*.
       golden_table: Golden questions table: one table name in
           *dataset_id*.
       where_clause: SQL WHERE clause for filtering.
@@ -456,9 +459,11 @@ async def compute_drift(
       DriftReport with coverage metrics.
 
   Raises:
-      ValueError: If *golden_table* is not one BigQuery table name.
+      ValueError: If *golden_table* or *table_id* is not one BigQuery
+          table name.
   """
-  _validate_golden_table(golden_table)
+  _validate_table_name(golden_table, "golden_dataset")
+  _validate_table_name(table_id, "events table (dataset or table_id)")
 
   from google.cloud import bigquery
 
