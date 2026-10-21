@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Optional
 import unicodedata
 
@@ -404,28 +405,83 @@ def _sanitize_categories(categories_str: str) -> str:
 _TABLE_NAME_EXTRA_CATEGORIES = frozenset({"Pc", "Pd", "Zs"})
 
 
-def _validate_golden_table(golden_table: Any) -> None:
-  """Raises ``ValueError`` unless *golden_table* is one BigQuery table name.
+def _validate_table_name(table: Any, label: str) -> None:
+  """Raises ``ValueError`` unless *table* is one BigQuery table name.
 
-  The name is formatted into ``FROM `{project}.{dataset}.{golden_table}```,
-  and the BigQuery Remote Function's ``drift`` operation passes it straight
-  from the caller's params. Any character outside BigQuery's table-name set
-  (a backtick that closes the quoted path, a dot that names another
-  dataset, a backslash, a line break) is refused before a query is built.
+  Drift formats its golden and events tables, and question distribution
+  its events table, into ``FROM `{project}.{dataset}.{table}```. The
+  BigQuery Remote Function's ``drift`` operation passes the golden table
+  straight from the caller's params, and an application may forward a
+  caller's events table override. Any character outside BigQuery's
+  table-name set (a backtick that closes the quoted path, a dot that
+  names another dataset, a backslash, a line break) is refused before a
+  query is built. *label* names the value in the error.
   """
   if (
-      not isinstance(golden_table, str)
-      or not golden_table
+      not isinstance(table, str)
+      or not table
       or any(
           unicodedata.category(char)[0] not in "LMN"
           and unicodedata.category(char) not in _TABLE_NAME_EXTRA_CATEGORIES
-          for char in golden_table
+          for char in table
       )
   ):
     raise ValueError(
-        "golden_dataset must be one table name in the client's dataset,"
+        f"{label} must be one table name in the client's dataset,"
         " using only letters, marks, numbers, '_', '-' or spaces; got"
-        f" {golden_table!r}"
+        f" {table!r}"
+    )
+
+
+# One DNS label of a domain-scoped project's domain.
+_DOMAIN_LABEL = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
+# A Google Cloud project ID: a lowercase letter, then lowercase letters,
+# digits or dashes, not ending with a dash. A domain-scoped project puts its
+# domain and a colon first, as in ``example.com:my-project``.
+_PROJECT_ID_PATTERN = re.compile(
+    rf"(?:{_DOMAIN_LABEL}(?:\.{_DOMAIN_LABEL})*:)?[a-z](?:[a-z0-9-]*[a-z0-9])?"
+)
+# A BigQuery dataset ID: ASCII letters, digits and underscores.
+_DATASET_ID_PATTERN = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _validate_project_id(project_id: Any) -> None:
+  """Raises ``ValueError`` unless *project_id* is one project ID.
+
+  Feedback formats the project into ``FROM `{project}.{dataset}.{table}```,
+  and the BigQuery Remote Function takes it from the request's
+  ``userDefinedContext``. A backtick that closes the quoted path, a quote,
+  whitespace, a semicolon, ``#``, ``/*``, or a dot outside a domain-scoped
+  project's domain is refused before a query is built. ``fullmatch`` (not
+  ``match``) so a trailing newline can't sneak past.
+  """
+  if not isinstance(project_id, str) or not _PROJECT_ID_PATTERN.fullmatch(
+      project_id
+  ):
+    raise ValueError(
+        "project_id must be one Google Cloud project ID, such as"
+        " 'my-project' or 'example.com:my-project': lowercase letters,"
+        " digits and '-', starting with a letter and not ending with '-';"
+        f" got {project_id!r}"
+    )
+
+
+def _validate_dataset_id(dataset_id: Any) -> None:
+  """Raises ``ValueError`` unless *dataset_id* is one BigQuery dataset ID.
+
+  Feedback formats the dataset into ``FROM `{project}.{dataset}.{table}```,
+  and the BigQuery Remote Function takes it from the request's
+  ``userDefinedContext``. A dataset ID is ASCII letters, digits and
+  underscores, so a backtick that closes the quoted path, a dot that adds
+  a path segment, a quote, whitespace, a semicolon or a comment marker is
+  refused before a query is built.
+  """
+  if not isinstance(dataset_id, str) or not _DATASET_ID_PATTERN.fullmatch(
+      dataset_id
+  ):
+    raise ValueError(
+        "dataset_id must be one BigQuery dataset ID, using only ASCII"
+        f" letters, digits or '_'; got {dataset_id!r}"
     )
 
 
@@ -443,9 +499,10 @@ async def compute_drift(
 
   Args:
       bq_client: BigQuery client instance.
-      project_id: GCP project ID.
-      dataset_id: BigQuery dataset.
-      table_id: Events table.
+      project_id: GCP project ID, optionally domain-scoped
+          (``example.com:my-project``).
+      dataset_id: BigQuery dataset ID.
+      table_id: Events table: one table name in *dataset_id*.
       golden_table: Golden questions table: one table name in
           *dataset_id*.
       where_clause: SQL WHERE clause for filtering.
@@ -456,9 +513,14 @@ async def compute_drift(
       DriftReport with coverage metrics.
 
   Raises:
-      ValueError: If *golden_table* is not one BigQuery table name.
+      ValueError: If *golden_table* or *table_id* is not one BigQuery
+          table name, or *project_id* or *dataset_id* is not one
+          project or dataset ID.
   """
-  _validate_golden_table(golden_table)
+  _validate_table_name(golden_table, "golden_dataset")
+  _validate_table_name(table_id, "events table (dataset or table_id)")
+  _validate_project_id(project_id)
+  _validate_dataset_id(dataset_id)
 
   from google.cloud import bigquery
 
@@ -711,9 +773,10 @@ async def compute_question_distribution(
 
   Args:
       bq_client: BigQuery client instance.
-      project_id: GCP project ID.
-      dataset_id: BigQuery dataset.
-      table_id: Events table.
+      project_id: GCP project ID, optionally domain-scoped
+          (``example.com:my-project``).
+      dataset_id: BigQuery dataset ID.
+      table_id: Events table: one table name in *dataset_id*.
       where_clause: SQL WHERE clause.
       query_params: BigQuery query parameters.
       config: Analysis configuration.
@@ -721,7 +784,15 @@ async def compute_question_distribution(
 
   Returns:
       QuestionDistribution with categorized results.
+
+  Raises:
+      ValueError: If *table_id* is not one BigQuery table name, or
+          *project_id* or *dataset_id* is not one project or dataset ID.
   """
+  _validate_table_name(table_id, "events table (dataset or table_id)")
+  _validate_project_id(project_id)
+  _validate_dataset_id(dataset_id)
+
   loop = asyncio.get_event_loop()
 
   if config.mode == "frequently_asked":

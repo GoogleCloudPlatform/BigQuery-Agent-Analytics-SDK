@@ -3686,15 +3686,19 @@ class Client:
             holds the golden questions (must have a ``question``
             column).
         filters: Optional filters for production traces.
-        dataset: Optional events table override.
+        dataset: Optional events table override: one table name in this
+            client's dataset. Defaults to the client's ``table_id``.
         embedding_model: Optional model for semantic matching.
 
     Returns:
         DriftReport with coverage metrics.
 
     Raises:
-        ValueError: If *golden_dataset* is not one BigQuery table name,
-            for example a dotted path or a name containing a backtick.
+        ValueError: If *golden_dataset* or the events table (*dataset*,
+            else the client's ``table_id``) is not one BigQuery table
+            name, for example a dotted path or a name containing a
+            backtick, or if the client's ``project_id`` or ``dataset_id``
+            is not one project or dataset ID.
     """
     table = dataset or self.table_id
     filt = filters or TraceFilter()
@@ -4096,11 +4100,19 @@ class Client:
         filters: Optional filters for production traces.
         configuration: Analysis configuration. Defaults to
             ``auto_group_using_semantics``.
-        dataset: Optional events table override.
+        dataset: Optional events table override: one table name in this
+            client's dataset. Defaults to the client's ``table_id``.
         text_model: Optional BQML text model for classification.
 
     Returns:
         QuestionDistribution with categorized results.
+
+    Raises:
+        ValueError: If the events table (*dataset*, else the client's
+            ``table_id``) is not one BigQuery table name, for example a
+            dotted path or a name containing a backtick, or if the
+            client's ``project_id`` or ``dataset_id`` is not one project
+            or dataset ID.
     """
     table = dataset or self.table_id
     filt = filters or TraceFilter()
