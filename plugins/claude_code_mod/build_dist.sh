@@ -25,10 +25,13 @@
 #   - the source's version is not lower than the copy's;
 #   - the copy is exactly what the source built at the copy's release tag,
 #     mod-v<copy version>, whatever the source holds now: the same files,
-#     contents and executable bits. Before that tag exists (the first
-#     release), it is checked against what the source builds now, which
-#     must be at the same version.
-# The tag needs a checkout with tags (fetch-depth: 0).
+#     contents and executable bits. Only while no mod-v tag exists at all
+#     (before the first release) is it checked against what the source
+#     builds now, which must be at the same version; once any release is
+#     tagged, a copy whose own tag is missing fails;
+#   - every mod-dist-v<version> tag, the ref an organization registers this
+#     repository at, holds the copy and the catalog entry at <version>.
+# The tags need a full checkout (fetch-depth: 0): a shallow one fails.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
@@ -109,9 +112,15 @@ if git -C "$repo" rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null; th
   git -C "$repo" archive "$tag" plugins/claude_code_mod | tar -x -C "$work/tagged"
   build "$work/tagged/plugins/claude_code_mod" "$work/built"
   against="the source at $tag"
+elif [[ -n "$(git -C "$repo" tag -l 'mod-v*')" ]]; then
+  echo "not ok - there is no tag $tag to check the copy against, though other mod-v releases are tagged: a copy is checked against its own release"
+  status=1
+elif [[ "$(git -C "$repo" rev-parse --is-shallow-repository)" == true ]]; then
+  echo "not ok - this checkout is shallow, so the mod-v tags cannot be seen: fetch them (fetch-depth: 0)"
+  status=1
 elif [[ "$source_version" == "$dist_version" ]]; then
   build "$here" "$work/built"
-  against="the source now ($tag is not tagged yet)"
+  against="the source now (no mod-v release is tagged yet)"
 else
   echo "not ok - there is no tag $tag to check the copy against (the source is at $source_version; fetch the tags)"
   status=1
@@ -124,4 +133,17 @@ if [[ -d "$work/built" ]]; then
     status=1
   fi
 fi
+for dist_tag in $(git -C "$repo" tag -l 'mod-dist-v*'); do
+  want="${dist_tag#mod-dist-v}"
+  at_copy="$(git -C "$repo" show "$dist_tag:plugins/claude_code_dist/bigquery-agent-analytics-mod/.claude-plugin/plugin.json" 2>/dev/null \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])' 2>/dev/null || echo none)"
+  at_catalog="$(git -C "$repo" show "$dist_tag:.claude-plugin/marketplace.json" 2>/dev/null \
+    | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["plugins"] if p["name"] == "bigquery-agent-analytics-mod"))' 2>/dev/null || echo none)"
+  if [[ "$at_copy" == "$want" && "$at_catalog" == "$want" ]]; then
+    echo "ok - $dist_tag holds the copy and the catalog entry at $want"
+  else
+    echo "not ok - $dist_tag holds the copy at $at_copy and the catalog entry at $at_catalog, not $want: an organization pinned to it installs that"
+    status=1
+  fi
+done
 exit "$status"

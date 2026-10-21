@@ -15,13 +15,17 @@
 
 # Offline test of build_dist.sh --check and sync_dist.sh, in a throwaway git
 # repository shaped like this one (the source, the committed copy and the
-# catalog), with mod-v release tags:
-#   - a first release passes, before and after its tag;
+# catalog), built from a baseline of its own at 0.1.0 whatever this
+# checkout's versions are, with mod-v release tags:
+#   - a first release passes, before and after its tag; a shallow checkout
+#     fails; once a release is tagged, a copy at the source's version with
+#     no tag of its own fails;
 #   - with the source ahead of the copy, a deleted, edited or no longer
 #     executable file in the copy fails, and the untouched copy passes;
 #   - a source lower than the copy, or not X.Y.Z, fails;
 #   - the release cycle (a tag, a fix after it, the copy synced from the
-#     tag's archive) passes;
+#     tag's archive) passes, and so does its mod-dist-v tag; a mod-dist-v
+#     tag on a commit whose copy is another version fails;
 #   - with no tag to check the copy against, the check fails;
 #   - a catalog version that is not the copy's fails;
 #   - sync_dist.sh refuses a wrong checksum and an archive of another version,
@@ -46,14 +50,6 @@ fails() { ! "$@"; }
 repo="$work/repo"
 src="$repo/plugins/claude_code_mod"
 dist="$repo/plugins/claude_code_dist/bigquery-agent-analytics-mod"
-mkdir -p "$repo/plugins/claude_code_dist" "$repo/.claude-plugin"
-cp -Rp "$mod" "$src"
-rm -rf "$src/.claude-plugin/types"
-cp -Rp "$real/plugins/claude_code_dist/bigquery-agent-analytics-mod" "$dist"
-cp "$real/.claude-plugin/marketplace.json" "$repo/.claude-plugin/marketplace.json"
-git -C "$repo" init -q
-git -C "$repo" -c user.name=test -c user.email=test@example.com add -A
-git -C "$repo" -c user.name=test -c user.email=test@example.com commit -qm "first release"
 commit() { git -C "$repo" -c user.name=test -c user.email=test@example.com commit -qam "$1"; }
 version() { # folder, version
   python3 - "$1/.claude-plugin/plugin.json" "$2" <<'PY'
@@ -76,6 +72,20 @@ open(path, "w").write(json.dumps(data, indent=2) + "\n")
 PY
 }
 checked() { bash "$src/build_dist.sh" --check; }
+
+# A baseline of its own, whatever the enclosing checkout holds (its source
+# may be ahead of its copy between releases): this source at 0.1.0, the
+# copy built from it, and the catalog entry at 0.1.0.
+mkdir -p "$repo/plugins/claude_code_dist" "$repo/.claude-plugin"
+cp -Rp "$mod" "$src"
+rm -rf "$src/.claude-plugin/types"
+version "$src" 0.1.0
+bash "$src/build_dist.sh" "$dist"
+cp "$real/.claude-plugin/marketplace.json" "$repo/.claude-plugin/marketplace.json"
+catalog 0.1.0
+git -C "$repo" init -q
+git -C "$repo" -c user.name=test -c user.email=test@example.com add -A
+git -C "$repo" -c user.name=test -c user.email=test@example.com commit -qm "first release"
 # A release's archive and SHA256SUMS, built from a tag as the release
 # workflow builds them.
 release() { # tag, version, folder
@@ -89,8 +99,13 @@ release() { # tag, version, folder
 tree() { (cd "$dist" && find . -type f -exec shasum {} + | sort | shasum); }
 
 check 'the first release, before its tag: the copy is what the source builds now' checked
+git clone -q --depth 1 "file://$repo" "$work/shallow"
+check 'a shallow checkout fails: it cannot see the tags' fails bash "$work/shallow/plugins/claude_code_mod/build_dist.sh" --check
 git -C "$repo" tag mod-v0.1.0
 check 'the first release, tagged: the copy is what the source built at mod-v0.1.0' checked
+version "$src" 0.1.1 && bash "$src/build_dist.sh" "$dist" && catalog 0.1.1 && commit "an unreleased 0.1.1 copy"
+check 'with mod-v0.1.0 tagged, a 0.1.1 copy with no mod-v0.1.1 tag fails, though the source is at 0.1.1 too' fails checked
+git -C "$repo" reset -q --hard mod-v0.1.0
 
 version "$src" 0.1.1 && commit "source ahead"
 check 'the source ahead: the untouched copy still checks against mod-v0.1.0' checked
@@ -127,6 +142,12 @@ check 'sync: ... and left the copy as it was' test "$(tree)" = "$before"
 check 'sync: the right archive replaces the copy' env BQAA_MOD_RELEASE_BASE="file://$work/release" bash "$src/sync_dist.sh" 0.1.1
 catalog 0.1.1
 check 'the release cycle: the synced copy checks against mod-v0.1.1, though the source changed after it' checked
+git -C "$repo" add -A && commit "the copy synced to 0.1.1"
+git -C "$repo" tag mod-dist-v0.1.1
+check 'the sync merged and tagged mod-dist-v0.1.1: the tag holds the 0.1.1 copy and catalog entry' checked
+git -C "$repo" tag mod-dist-v0.1.2
+check 'a mod-dist-v0.1.2 tag on a commit whose copy is 0.1.1 fails' fails checked
+git -C "$repo" tag -d mod-dist-v0.1.2 >/dev/null
 catalog 0.1.0
 check 'a catalog version that is not the copy'"'"'s fails' fails checked
 catalog 0.1.1

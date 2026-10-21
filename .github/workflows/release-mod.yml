@@ -27,7 +27,9 @@
 #              (bigquery-agent-analytics-mod-X.Y.Z.tar.gz) and SHA256SUMS.
 #   release  - a DRAFT pre-release with both files. A maintainer publishes
 #              it, then syncs plugins/claude_code_dist/bigquery-agent-analytics-mod
-#              from the archive and bumps the catalog entry
+#              from the archive and bumps the catalog entry, and tags the
+#              merged sync mod-dist-vX.Y.Z, the ref for organizations that
+#              register this repository as their marketplace
 #              (plugins/claude_code_dist/README.md has the routine). An
 #              organization that deploys the mod from a folder copies the
 #              archive and checks it against SHA256SUMS.

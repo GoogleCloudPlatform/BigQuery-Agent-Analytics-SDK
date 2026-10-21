@@ -65,7 +65,8 @@ first session, ahead of anything a person installed, under
 
 1. Build the folder as root from a published `mod-vX.Y.Z` release, checked
    against its `SHA256SUMS`. For a later release, run it again: it swaps
-   the whole folder.
+   the whole folder, and the next session runs the new version (checked:
+   `claude plugin list` shows it).
 
    ```bash
    set -euo pipefail
@@ -124,8 +125,12 @@ first session, ahead of anything a person installed, under
 ### This repository as the marketplace
 
 Where only settings can be delivered. The first policy registers the
-repository at a release tag, with the same two folders the sparse add
-fetches, and turns the mod on, with the earlier ids as they are:
+repository at a `mod-dist-vX.Y.Z` tag, with the same two folders the sparse
+add fetches, and turns the mod on, with the earlier ids as they are. That
+tag marks the commit whose served copy and catalog entry are at X.Y.Z. The
+`mod-vX.Y.Z` release tag is cut before the copy is synced, so it still holds
+the previous release's copy. And `ref` takes a branch or a tag, not a commit
+(checked: a commit is "not found in upstream origin").
 
 ```json
 {
@@ -134,7 +139,7 @@ fetches, and turns the mod on, with the earlier ids as they are:
       "source": {
         "source": "github",
         "repo": "GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK",
-        "ref": "mod-vX.Y.Z",
+        "ref": "mod-dist-vX.Y.Z",
         "sparsePaths": [".claude-plugin", "plugins/claude_code_dist"]
       },
       "autoUpdate": false
@@ -146,7 +151,7 @@ fetches, and turns the mod on, with the earlier ids as they are:
 ```
 
 If your policy sets `strictKnownMarketplaces`, add an entry with the same
-`ref`: `{ "source": "github", "repo": "GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK", "ref": "mod-vX.Y.Z" }`.
+`ref`: `{ "source": "github", "repo": "GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK", "ref": "mod-dist-vX.Y.Z" }`.
 An entry without the `ref` does not allow a source that names one.
 
 A mod installed this way is a mod the person installed. It runs in the user
@@ -158,8 +163,8 @@ The cutover takes the same two steps. While the mod under its earlier id is
 enabled on a machine, it keeps recording, and the new one, once installed,
 does not load: the host loads one plugin of a name, and the earlier install
 comes first. The new mod is installed on a pilot machine when
-`claude plugin list` lists `bigquery-agent-analytics-mod@bqaa-tracing`, and
-its debug log, from `claude -p --debug-file /tmp/bqaa.log /bqaa-status`,
+`claude plugin list` lists `bigquery-agent-analytics-mod@bqaa-tracing` with
+`Version: X.Y.Z`, and its debug log, from `claude -p --debug-file /tmp/bqaa.log /bqaa-status`,
 says
 `hooks module bigquery-agent-analytics-mod@bqaa-tracing not loaded: another plugin of that name loads first`.
 On a machine that had only the
@@ -168,6 +173,16 @@ and both write until the next step. Then set the earlier ids to `false`, as
 in step 3 above: the new mod loads from the next session. A machine that
 started no session between the two steps records from its second or third
 session after it.
+
+To move to a later release, change `ref` to its `mod-dist-v` tag in both
+entries, for the pilot group first. Each machine fetches the marketplace
+again at the new tag, but keeps running the copy it installed. On each, run
+`claude plugin update bigquery-agent-analytics-mod@bqaa-tracing` as the
+person (or a script run as them), and check that `claude plugin list` shows
+the new `Version`. Checked in a container, with a test repository and
+`autoUpdate` off: three sessions after the ref moved, the earlier version
+still ran, with the new one fetched beside it. `plugin update` moved it
+("updated from ... for scope managed"), and the next session ran it.
 
 ## The earlier location
 
