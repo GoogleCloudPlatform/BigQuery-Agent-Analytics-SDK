@@ -1,0 +1,103 @@
+{
+  "name": "bigquery-agent-analytics-mod",
+  "version": "0.1.0",
+  "description": "Coding-agent mod that records sessions, turns, model requests and tool calls as BigQuery Agent Analytics agent_events rows, written from the background so no hook waits on BigQuery.",
+  "author": {
+    "name": "Google LLC"
+  },
+  "homepage": "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/plugins/claude_code_mod",
+  "repository": "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK",
+  "license": "Apache-2.0",
+  "types": "./types/index.d.ts",
+  "keywords": [
+    "bigquery",
+    "agent-analytics",
+    "observability",
+    "tracing",
+    "mod"
+  ],
+  "userConfig": {
+    "project": {
+      "type": "string",
+      "title": "GCP project",
+      "description": "Project that holds the BigQuery dataset. Empty: BQAA_PROJECT_ID, GCP_PROJECT_ID or GOOGLE_CLOUD_PROJECT.",
+      "default": ""
+    },
+    "dataset": {
+      "type": "string",
+      "title": "BigQuery dataset",
+      "description": "Dataset for the events table. Empty: BQAA_DATASET or BQ_DATASET.",
+      "default": ""
+    },
+    "table": {
+      "type": "string",
+      "title": "BigQuery table",
+      "description": "Events table. Empty: BQAA_TABLE, BQ_TABLE, then agent_events.",
+      "default": ""
+    },
+    "location": {
+      "type": "string",
+      "title": "BigQuery location",
+      "description": "Dataset location, shown by /bqaa-status and passed to setup.sh by the setup command the mod offers, which makes the dataset there. Empty: BQAA_LOCATION, then US.",
+      "default": ""
+    },
+    "enabled": {
+      "type": "boolean",
+      "title": "Capture events",
+      "description": "Turn capture off without uninstalling. BQAA_TRACE_ENABLED=false also turns it off.",
+      "default": true
+    },
+    "dryRun": {
+      "type": "boolean",
+      "title": "Dry run",
+      "description": "Write rows as JSONL beside the dead-letter directory (dry-run/) instead of sending them. BQAA_DRY_RUN=true also turns it on.",
+      "default": false
+    },
+    "maxPayloadChars": {
+      "type": "number",
+      "title": "Max payload size (characters)",
+      "description": "Cap for each JSON payload column (content, attributes); longer payloads are cut and the row marked is_truncated.",
+      "default": 16384,
+      "min": 1024,
+      "max": 500000
+    },
+    "flushIntervalMs": {
+      "type": "number",
+      "title": "Flush interval (ms)",
+      "description": "How often the background writer sends queued rows.",
+      "default": 5000,
+      "min": 1000,
+      "max": 300000
+    },
+    "deadLetterDir": {
+      "type": "string",
+      "title": "Dead-letter directory",
+      "description": "Where rows that could not be sent are kept as JSONL. Empty: BQAA_DEAD_LETTER_DIR, then ~/.bqaa-mod/dead-letter.",
+      "default": ""
+    },
+    "agentName": {
+      "type": "string",
+      "title": "Agent name",
+      "description": "Value of the agent column for main-loop rows. Empty: BQAA_AGENT_NAME, then coding-agent.",
+      "default": ""
+    },
+    "accessTokenCommand": {
+      "type": "string",
+      "title": "Access token command",
+      "description": "Command (no shell) that prints a Google OAuth access token. Empty: BQAA_ACCESS_TOKEN_COMMAND, then gcloud auth application-default print-access-token.",
+      "default": ""
+    },
+    "userIdFromCredentials": {
+      "type": "boolean",
+      "title": "User id from the token's account",
+      "description": "Personal data, so off by default. On: user_id is the verified email of the account the access token was issued to (from Google's token information endpoint), instead of BQAA_USER_ID or the login name.",
+      "default": false
+    },
+    "recordHostname": {
+      "type": "boolean",
+      "title": "Record the host name",
+      "description": "Personal data, so off by default. On: session_metadata.host_name carries this machine's host name (from the hostname command).",
+      "default": false
+    }
+  }
+}
