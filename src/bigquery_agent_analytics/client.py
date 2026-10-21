@@ -476,6 +476,67 @@ def _run_sync(coro):
 
 
 # ------------------------------------------------------------------ #
+# Project and Dataset IDs                                              #
+# ------------------------------------------------------------------ #
+
+# One DNS label of a domain-scoped project's domain.
+_DOMAIN_LABEL = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
+# A Google Cloud project ID: a lowercase letter, then lowercase letters,
+# digits or dashes, not ending with a dash. A domain-scoped project puts its
+# domain and a colon first, as in ``example.com:my-project``.
+_PROJECT_ID_PATTERN = re.compile(
+    rf"(?:{_DOMAIN_LABEL}(?:\.{_DOMAIN_LABEL})*:)?[a-z](?:[a-z0-9-]*[a-z0-9])?"
+)
+# ASCII letters, digits, underscores and dashes. BigQuery accepts a dash in
+# the dataset position of a query, and callers pass names such as ``my-ds``.
+_DATASET_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _validate_client_project_id(project_id: Any) -> None:
+  """Raises ``ValueError`` unless *project_id* is one project ID.
+
+  ``Client`` formats the project into ``FROM `{project}.{dataset}.{table}```
+  in every query, and the BigQuery Remote Function takes it from the
+  request's ``userDefinedContext``. A backtick that closes the quoted path,
+  a quote, a backslash, whitespace, a semicolon, ``#``, ``/*``, or a dot
+  outside a domain-scoped project's domain is refused before any query.
+  ``fullmatch`` (not ``match``) so a trailing newline can't sneak past.
+  """
+  if not isinstance(project_id, str) or not _PROJECT_ID_PATTERN.fullmatch(
+      project_id
+  ):
+    raise ValueError(
+        "project_id must be one Google Cloud project ID, such as"
+        " 'my-project' or 'example.com:my-project': lowercase letters,"
+        " digits and '-', starting with a letter and not ending with '-';"
+        f" got {project_id!r}"
+    )
+
+
+def _validate_client_dataset_id(dataset_id: Any) -> None:
+  """Raises ``ValueError`` unless *dataset_id* is one dataset ID.
+
+  ``Client`` formats the dataset into ``FROM `{project}.{dataset}.{table}```
+  in every query, and the BigQuery Remote Function takes it from the
+  request's ``userDefinedContext``. Only ASCII letters, digits, ``_`` and
+  ``-`` pass, and ``--`` (a comment marker) is refused, so a backtick that
+  closes the quoted path, a dot that adds a path segment, a quote, a
+  backslash, whitespace, a semicolon or a comment marker is refused before
+  any query.
+  """
+  if (
+      not isinstance(dataset_id, str)
+      or not _DATASET_ID_PATTERN.fullmatch(dataset_id)
+      or "--" in dataset_id
+  ):
+    raise ValueError(
+        "dataset_id must be one BigQuery dataset ID, such as"
+        " 'agent_analytics': ASCII letters, digits, '_' and '-', without"
+        f" '--'; got {dataset_id!r}"
+    )
+
+
+# ------------------------------------------------------------------ #
 # Client                                                               #
 # ------------------------------------------------------------------ #
 
@@ -519,7 +580,8 @@ class Client:
   operations, and BQML mechanics.
 
   Args:
-      project_id: Google Cloud project ID.
+      project_id: Google Cloud project ID, optionally domain-scoped
+          (``example.com:my-project``).
       dataset_id: BigQuery dataset containing agent events.
       table_id: Table name for agent events. Pass ``"auto"``
           to auto-detect (tries ``agent_events`` first, then
@@ -541,6 +603,11 @@ class Client:
           remote-function runtime sets ``"remote-function"``. Lets
           operators attribute spend and usage back to the entry-point
           surface in ``INFORMATION_SCHEMA.JOBS_BY_PROJECT``.
+
+  Raises:
+      ValueError: If *project_id* or *dataset_id* is not one project or
+          dataset ID. Checked before any query, including table
+          auto-detection and schema verification.
   """
 
   def __init__(
@@ -556,6 +623,11 @@ class Client:
       connection_id: Optional[str] = None,
       sdk_surface: str = "python",
   ) -> None:
+    # Table auto-detection and schema verification below format both
+    # values into SQL, and the BigQuery Remote Function takes them from
+    # the request's userDefinedContext, so refuse them before any query.
+    _validate_client_project_id(project_id)
+    _validate_client_dataset_id(dataset_id)
     self.project_id = project_id
     self.dataset_id = dataset_id
     self.location = location
