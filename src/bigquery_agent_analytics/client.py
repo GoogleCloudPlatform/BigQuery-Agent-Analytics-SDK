@@ -3593,7 +3593,8 @@ class Client:
         ValueError: If *golden_dataset* or the events table (*dataset*,
             else the client's ``table_id``) is not one BigQuery table
             name, for example a dotted path or a name containing a
-            backtick.
+            backtick, or if the client's ``project_id`` or ``dataset_id``
+            is not one project or dataset ID.
     """
     table = dataset or self.table_id
     filt = filters or TraceFilter()
@@ -4000,6 +4001,10 @@ class Client:
 
     Returns:
         QuestionDistribution with categorized results.
+
+    Raises:
+        ValueError: If the client's ``project_id`` or ``dataset_id`` is
+            not one project or dataset ID.
     """
     table = dataset or self.table_id
     filt = filters or TraceFilter()
