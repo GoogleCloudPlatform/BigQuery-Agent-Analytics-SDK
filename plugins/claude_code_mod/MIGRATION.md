@@ -196,7 +196,14 @@ copy's `gitCommitSha`, which is the tag's
 (`git ls-remote https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK mod-dist-vX.Y.Z`).
 The same two commands, at the policy's tag, are needed on a machine where
 the person added this marketplace themselves (the README's sparse add)
-before the policy arrived: until then its copy does not load.
+before the policy arrived: until then its copy does not load. If that copy
+already had the tag's version, `plugin update` says "already at the latest
+version" and the copy keeps its own commit. Its files are still the
+release's, since Mod CI holds the served copy to its release tag. To have
+the tag's commit as well, deliver a policy that sets the id to `false`, run
+`claude plugin uninstall bigquery-agent-analytics-mod@bqaa-tracing`, then
+deliver the policy at the tag again and run
+`claude plugin install bigquery-agent-analytics-mod@bqaa-tracing`.
 
 Checked in a container, with a test repository whose policy pins sparse
 paths, and `autoUpdate` off:
