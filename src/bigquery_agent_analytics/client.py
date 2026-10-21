@@ -627,8 +627,7 @@ class Client:
     # Table auto-detection and schema verification below format both
     # values into SQL, and the BigQuery Remote Function takes them from
     # the request's userDefinedContext, so refuse them before any query.
-    _validate_client_project_id(project_id)
-    _validate_client_dataset_id(dataset_id)
+    # The project_id and dataset_id setters run the check.
     self.project_id = project_id
     self.dataset_id = dataset_id
     self.location = location
@@ -648,6 +647,36 @@ class Client:
 
     if verify_schema:
       self._verify_schema()
+
+  @property
+  def project_id(self) -> str:
+    """Project formatted into every query's ``{project}.{dataset}`` path.
+
+    Assigning a new value runs the constructor's check first, so a value
+    that would leave the quoted path raises ``ValueError`` and the client
+    keeps its current project.
+    """
+    return self._project_id
+
+  @project_id.setter
+  def project_id(self, project_id: str) -> None:
+    _validate_client_project_id(project_id)
+    self._project_id = project_id
+
+  @property
+  def dataset_id(self) -> str:
+    """Dataset formatted into every query's ``{project}.{dataset}`` path.
+
+    Assigning a new value runs the constructor's check first, so a value
+    that would leave the quoted path raises ``ValueError`` and the client
+    keeps its current dataset.
+    """
+    return self._dataset_id
+
+  @dataset_id.setter
+  def dataset_id(self, dataset_id: str) -> None:
+    _validate_client_dataset_id(dataset_id)
+    self._dataset_id = dataset_id
 
   @property
   def bq_client(self) -> bigquery.Client:

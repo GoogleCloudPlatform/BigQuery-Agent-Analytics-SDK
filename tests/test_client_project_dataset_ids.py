@@ -22,8 +22,9 @@ runs two of them itself: ``table_id="auto"`` reads
 Remote Function builds its client from the request's
 ``userDefinedContext`` (``_deploy_runtime.resolve_client_options``), so a
 backtick in either value closed the quoted path and the rest of the value
-became SQL. ``Client.__init__`` now checks both values first, so no sync
-or async method and no remote-function operation can send them.
+became SQL. ``Client.__init__`` now checks both values first, and so does
+every later assignment to ``client.project_id`` or ``client.dataset_id``,
+so no sync or async method and no remote-function operation can send them.
 """
 
 import asyncio
@@ -277,6 +278,96 @@ class TestSyncAndAsyncMethods:
     with pytest.raises(ValueError, match=f"^{field} must be one"):
       method(Client(verify_schema=False, bq_client=bq, **ids))
     assert _sent_sql(bq) == []
+
+
+# The review's payload for a value set after construction: it closes the
+# events table path and joins a table from another dataset.
+_ASSIGNED_DATASET_PAYLOAD = (
+    "d.agent_events` CROSS JOIN `p.private.secrets` AS injected --"
+)
+# The same attack through the project.
+_ASSIGNED_PROJECT_PAYLOAD = "p." + _ASSIGNED_DATASET_PAYLOAD
+
+
+def _built_client(bq=None):
+  return Client(
+      project_id="p",
+      dataset_id="d",
+      verify_schema=False,
+      bq_client=bq or _bq_client(),
+  )
+
+
+class TestAssignmentAfterConstruction:
+  """Setting ``project_id`` or ``dataset_id`` later runs the same check."""
+
+  @pytest.mark.parametrize(
+      "dataset_id",
+      list(_NOT_A_DATASET_ID.values()),
+      ids=list(_NOT_A_DATASET_ID),
+  )
+  def test_rejects_value_that_is_not_one_dataset_id(self, dataset_id):
+    client = _built_client()
+    with pytest.raises(
+        ValueError, match="^dataset_id must be one BigQuery dataset ID"
+    ):
+      client.dataset_id = dataset_id
+    assert client.dataset_id == "d"
+
+  @pytest.mark.parametrize(
+      "project_id",
+      list(_NOT_A_PROJECT_ID.values()),
+      ids=list(_NOT_A_PROJECT_ID),
+  )
+  def test_rejects_value_that_is_not_one_project_id(self, project_id):
+    client = _built_client()
+    with pytest.raises(
+        ValueError, match="^project_id must be one Google Cloud project ID"
+    ):
+      client.project_id = project_id
+    assert client.project_id == "p"
+
+  @pytest.mark.parametrize(
+      "method", list(_METHODS.values()), ids=list(_METHODS)
+  )
+  @pytest.mark.parametrize(
+      "field,value",
+      [
+          ("dataset_id", _ASSIGNED_DATASET_PAYLOAD),
+          ("project_id", _ASSIGNED_PROJECT_PAYLOAD),
+      ],
+      ids=["dataset", "project"],
+  )
+  def test_injected_assignment_never_reaches_a_query(
+      self, field, value, method
+  ):
+    bq = _bq_client()
+    client = _built_client(bq)
+    with pytest.raises(ValueError, match=f"^{field} must be one"):
+      setattr(client, field, value)
+      method(client)
+    assert _sent_sql(bq) == []
+
+  @pytest.mark.parametrize(
+      "field,value,path",
+      [
+          ("dataset_id", "my-ds", "`p.my-ds.agent_events`"),
+          (
+              "project_id",
+              "example.com:my-project",
+              "`example.com:my-project.d.agent_events`",
+          ),
+      ],
+      ids=["dataset", "project"],
+  )
+  def test_valid_assignment_reaches_the_query(self, field, value, path):
+    bq = _bq_client()
+    client = _built_client(bq)
+    setattr(client, field, value)
+    assert getattr(client, field) == value
+    _evaluate(client)
+    [sql] = _sent_sql(bq)
+    assert path in sql
 
 
 # A userDefinedContext per bad field. table_id="auto" makes the constructor
