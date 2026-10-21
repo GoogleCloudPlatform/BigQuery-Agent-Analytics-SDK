@@ -70,26 +70,30 @@ release sync. Send patches to:
 `bigquery-agent-analytics-mod/` is what
 [`plugins/claude_code_mod/build_dist.sh`](../claude_code_mod/build_dist.sh)
 builds from [`plugins/claude_code_mod/`](../claude_code_mod/): the mod's
-released files, without its tests. Mod CI checks that it is exactly what
-the source builds at its version (`build_dist.sh --check`), so a change to
-the source either bumps the version or is synced here.
+released files, without its tests. Mod CI (`build_dist.sh --check`)
+verifies that:
 
-After each `mod-vX.Y.Z` release is published:
+- the catalog entry's version is this copy's;
+- the source's version is not lower than this copy's;
+- this copy is exactly what the source built at this copy's release tag,
+  `mod-v<version>`, whatever the source holds now: the same files, contents
+  and executable bits. Before the first tag, it is checked against what the
+  source builds now, at the same version.
+
+So while the source moves ahead between releases, the copy users install
+is still checked against its own release.
+
+After each `mod-vX.Y.Z` release is published, sync this copy from its
+archive, then bump the mod's `version` in `.claude-plugin/marketplace.json`
+and PR:
 
 ```bash
-VERSION=X.Y.Z
-BASE="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/releases/download/mod-v${VERSION}"
-WORK=$(mktemp -d)
-curl -sSL "$BASE/bigquery-agent-analytics-mod-${VERSION}.tar.gz" -o "$WORK/bigquery-agent-analytics-mod-${VERSION}.tar.gz"
-curl -sSL "$BASE/SHA256SUMS" -o "$WORK/SHA256SUMS"
-(cd "$WORK" && sha256sum -c SHA256SUMS)
-tar -xzf "$WORK/bigquery-agent-analytics-mod-${VERSION}.tar.gz" -C "$WORK"
-
-rm -rf plugins/claude_code_dist/bigquery-agent-analytics-mod
-cp -R "$WORK/bigquery-agent-analytics-mod-${VERSION}" \
-      plugins/claude_code_dist/bigquery-agent-analytics-mod
+bash plugins/claude_code_mod/sync_dist.sh X.Y.Z
 ```
 
-Then bump the mod's `version` in `.claude-plugin/marketplace.json` and PR.
+The script replaces this copy only after the download, the `SHA256SUMS`
+check, the extraction and a check of the version inside all succeed; any
+failure leaves the copy as it was
+(`plugins/claude_code_mod/tests/build_dist.test.sh` checks both).
 As with the tracing plugin, send patches to
 [`plugins/claude_code_mod/`](../claude_code_mod/), not to this copy.

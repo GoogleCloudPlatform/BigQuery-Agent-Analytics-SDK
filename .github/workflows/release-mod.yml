@@ -90,6 +90,8 @@ jobs:
       - name: The checks Mod CI runs
         working-directory: plugins/claude_code_mod
         run: |
+          bash build_dist.sh --check
+          bash tests/build_dist.test.sh
           bash tests/setup.test.sh
           bash tests/version.test.sh
           node tests/reload.test.mjs

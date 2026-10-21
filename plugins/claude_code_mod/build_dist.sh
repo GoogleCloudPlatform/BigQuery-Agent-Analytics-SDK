@@ -19,29 +19,71 @@
 # TypeScript config stay here; so does .claude-plugin/types, which the host
 # CLI writes for the editor.
 #   bash plugins/claude_code_mod/build_dist.sh OUT_DIR
-# With --check, builds into a temporary folder and compares it with the
-# committed copy: identical when this folder's version is the copy's, and
-# the catalog entry's version is the copy's.
+#
+# With --check, verifies the committed copy:
+#   - the catalog entry's version is the copy's;
+#   - the source's version is not lower than the copy's;
+#   - the copy is exactly what the source built at the copy's release tag,
+#     mod-v<copy version>, whatever the source holds now: the same files,
+#     contents and executable bits. Before that tag exists (the first
+#     release), it is checked against what the source builds now, which
+#     must be at the same version.
+# The tag needs a checkout with tags (fetch-depth: 0).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 dist="$repo/plugins/claude_code_dist/bigquery-agent-analytics-mod"
 FILES=(.claude-plugin/plugin.json hooks types sql setup.sh README.md MIGRATION.md)
 
-build() { # out dir
-  rm -rf "$1"
-  mkdir -p "$1/.claude-plugin"
-  for item in "${FILES[@]}"; do cp -R "$here/$item" "$1/$item"; done
+build() { # source folder, out folder
+  rm -rf "$2"
+  mkdir -p "$2/.claude-plugin"
+  for item in "${FILES[@]}"; do cp -Rp "$1/$item" "$2/$item"; done
 }
 version_of() { python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' "$1/.claude-plugin/plugin.json"; }
+# Whether the first version is lower than the second (X.Y.Z, numerically):
+# 0 when it is, 1 when it is not, 2 when either is not X.Y.Z.
+lower() {
+  python3 - "$1" "$2" <<'PY'
+import re, sys
+def parse(v):
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)", v)
+    if not m:
+        print(f"not a version: {v!r}", file=sys.stderr)
+        sys.exit(2)
+    return tuple(int(x) for x in m.groups())
+sys.exit(0 if parse(sys.argv[1]) < parse(sys.argv[2]) else 1)
+PY
+}
+# Whether two folders hold the same files, contents and executable bits
+# (the host CLI's .claude-plugin/types left out).
+same_tree() {
+  python3 - "$1" "$2" <<'PY'
+import os, stat, sys
+def walk(root):
+    found = {}
+    for folder, dirs, files in os.walk(root):
+        if os.path.relpath(folder, root) == ".claude-plugin":
+            dirs[:] = [d for d in dirs if d != "types"]
+        for name in files:
+            path = os.path.join(folder, name)
+            with open(path, "rb") as handle:
+                found[os.path.relpath(path, root)] = (handle.read(), bool(os.lstat(path).st_mode & stat.S_IXUSR))
+    return found
+built, copy = walk(sys.argv[1]), walk(sys.argv[2])
+differ = sorted(set(built) ^ set(copy)) + sorted(k for k in set(built) & set(copy) if built[k] != copy[k])
+for name in differ[:20]:
+    print(f"  differs: {name}")
+sys.exit(1 if differ else 0)
+PY
+}
 
 if [[ "${1:-}" != --check ]]; then
-  build "${1:?usage: build_dist.sh OUT_DIR | --check}"
+  build "$here" "${1:?usage: build_dist.sh OUT_DIR | --check}"
   exit 0
 fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-build "$work/built"
 source_version="$(version_of "$here")"
 dist_version="$(version_of "$dist")"
 catalog_version="$(python3 -c 'import json, sys; print(next(p["version"] for p in json.load(open(sys.argv[1]))["plugins"] if p["name"] == "bigquery-agent-analytics-mod"))' "$repo/.claude-plugin/marketplace.json")"
@@ -52,13 +94,34 @@ if [[ "$catalog_version" != "$dist_version" ]]; then
 else
   echo "ok - the catalog entry and the committed copy are both $dist_version"
 fi
-if [[ "$source_version" != "$dist_version" ]]; then
-  echo "ok - the source is at $source_version, past the released $dist_version: the copy is synced at the next release"
-elif diff -r "$work/built" "$dist" >"$work/diff" 2>&1; then
-  echo "ok - the committed copy is exactly what the source builds at $dist_version"
-else
-  echo "not ok - the source changed at $dist_version without a version bump or a sync of the copy:"
-  head -20 "$work/diff"
+compared=0
+lower "$source_version" "$dist_version" || compared=$?
+if [[ "$compared" == 0 ]]; then
+  echo "not ok - the source is at $source_version, lower than the released copy's $dist_version"
   status=1
+elif [[ "$compared" != 1 ]]; then
+  echo "not ok - the source's version $source_version and the copy's $dist_version are not both X.Y.Z"
+  status=1
+fi
+tag="mod-v$dist_version"
+if git -C "$repo" rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null; then
+  mkdir -p "$work/tagged"
+  git -C "$repo" archive "$tag" plugins/claude_code_mod | tar -x -C "$work/tagged"
+  build "$work/tagged/plugins/claude_code_mod" "$work/built"
+  against="the source at $tag"
+elif [[ "$source_version" == "$dist_version" ]]; then
+  build "$here" "$work/built"
+  against="the source now ($tag is not tagged yet)"
+else
+  echo "not ok - there is no tag $tag to check the copy against (the source is at $source_version; fetch the tags)"
+  status=1
+fi
+if [[ -d "$work/built" ]]; then
+  if same_tree "$work/built" "$dist"; then
+    echo "ok - the committed copy is exactly what $against builds: files, contents and executable bits"
+  else
+    echo "not ok - the committed copy is not what $against builds"
+    status=1
+  fi
 fi
 exit "$status"

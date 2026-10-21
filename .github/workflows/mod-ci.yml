@@ -16,7 +16,10 @@
 # marketplace serves from plugins/claude_code_dist/bigquery-agent-analytics-mod.
 #
 # Run here:
-#   - the copy is exactly what the source builds (build_dist.sh --check);
+#   - the copy is exactly what the source built at the copy's release tag, or,
+#     before the first tag, what it builds now (build_dist.sh --check), and
+#     the check's own regression test, with the release sync
+#     (tests/build_dist.test.sh);
 #   - setup.sh against a stand-in bq (tests/setup.test.sh);
 #   - plugin.json and PLUGIN_VERSION agree (tests/version.test.sh);
 #   - the welcome card across a fresh load (tests/reload.test.mjs, Node 24);
@@ -61,6 +64,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
+          # The copy check reads the mod-v release tags.
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
@@ -71,8 +76,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: The marketplace copy is what the source builds
+      - name: The marketplace copy is what its release tag builds
         run: bash build_dist.sh --check
+
+      - name: The copy check and the release sync
+        run: bash tests/build_dist.test.sh
 
       - name: setup.sh
         run: bash tests/setup.test.sh
