@@ -63,6 +63,8 @@ from datetime import timezone
 from enum import Enum
 import json
 import logging
+import math
+import numbers
 from typing import Any, Optional
 
 from google.cloud import bigquery
@@ -147,6 +149,38 @@ class BatchEvaluationResult(BaseModel):
       default=None,
       description="Error message if evaluation failed.",
   )
+
+
+def _finite_float(value: Any, name: str) -> float:
+  """Returns *value* as a plain finite ``float`` to format into SQL.
+
+  Raises ``ValueError`` naming *name* unless *value* is a real number:
+  a string, ``None``, ``bool`` (although it subclasses ``int``), NaN or
+  an infinity is refused.
+  """
+  if isinstance(value, bool) or not isinstance(value, numbers.Real):
+    raise ValueError(f"{name} must be a number; got {value!r}")
+  try:
+    number = float(value)
+  except OverflowError:
+    number = math.inf
+  if not math.isfinite(number):
+    raise ValueError(f"{name} must be finite; got {value!r}")
+  return number
+
+
+def _whole_int(value: Any, name: str) -> int:
+  """Returns *value* as a plain ``int`` to format into SQL.
+
+  Raises ``ValueError`` naming *name* unless *value* is an integer or a
+  finite float without a fractional part; ``bool`` is refused.
+  """
+  if isinstance(value, numbers.Integral) and not isinstance(value, bool):
+    return int(value)
+  number = _finite_float(value, name)
+  if not number.is_integer():
+    raise ValueError(f"{name} must be a whole number; got {value!r}")
+  return int(number)
 
 
 class BigQueryAIClient:
@@ -281,7 +315,17 @@ class BigQueryAIClient:
 
     Returns:
         Generated text.
+
+    Raises:
+        ValueError: If *temperature* is not a finite number or
+            *max_tokens* is not a whole number. Checked before any
+            query.
     """
+    # Both are formatted into the model_params JSON literal, so only a
+    # plain float and int may reach it: a string or a subclass's
+    # format() text could close the literal.
+    temperature = _finite_float(temperature, "temperature")
+    max_tokens = _whole_int(max_tokens, "max_tokens")
     ep = endpoint or self.endpoint
     query = self._AI_GENERATE_QUERY.format(
         endpoint=_escape_sql_quoted(ep),
