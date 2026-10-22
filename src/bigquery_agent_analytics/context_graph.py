@@ -1144,15 +1144,16 @@ class ContextGraphManager:
     self._ensure_biz_nodes_table()
 
     entity_types_str = ", ".join(self.config.entity_types)
-    # The endpoint is configuration (Client.context_graph passes the
-    # client's), so keep it inside its quotes.
+    # The endpoint and the entity types are configuration
+    # (Client.context_graph passes the client's endpoint), so keep both
+    # inside their quotes.
     query = _EXTRACT_BIZ_NODES_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
         table=self.table_id,
         biz_table=self.config.biz_nodes_table,
         endpoint=_escape_sql_quoted(self._resolve_endpoint()),
-        entity_types=entity_types_str,
+        entity_types=_escape_sql_quoted(entity_types_str),
     )
 
     job_config = bigquery.QueryJobConfig(
