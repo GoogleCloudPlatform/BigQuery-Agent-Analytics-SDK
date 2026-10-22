@@ -92,6 +92,8 @@ from .evaluators import _render_ai_generate_judge_query as render_ai_generate_ju
 from .evaluators import _split_judge_prompt_template as split_judge_prompt_template
 from .evaluators import DEFAULT_ENDPOINT
 from .evaluators import LLMAsJudge
+from .feedback import _validate_source_table
+from .feedback import _validate_table_name
 from .feedback import AnalysisConfig
 from .feedback import compute_drift
 from .feedback import compute_question_distribution
@@ -537,6 +539,61 @@ def _validate_client_dataset_id(dataset_id: Any) -> None:
     )
 
 
+class _CheckedProjectAndDataset:
+  """``project_id`` and ``dataset_id``, checked on every assignment.
+
+  For classes other than ``Client`` that format both values into the
+  backtick-quoted ``{project}.{dataset}`` paths of the queries they
+  send, such as the AI/ML integration classes. Every assignment, the
+  constructor's included, runs the checks ``Client`` runs, so a value
+  that would leave the quoted path raises ``ValueError`` and the object
+  keeps its current value.
+  """
+
+  @property
+  def project_id(self) -> str:
+    """Project formatted into this object's ``{project}.{dataset}`` paths."""
+    return self._project_id
+
+  @project_id.setter
+  def project_id(self, project_id: str) -> None:
+    _validate_client_project_id(project_id)
+    self._project_id = project_id
+
+  @property
+  def dataset_id(self) -> str:
+    """Dataset formatted into this object's ``{project}.{dataset}`` paths."""
+    return self._dataset_id
+
+  @dataset_id.setter
+  def dataset_id(self, dataset_id: str) -> None:
+    _validate_client_dataset_id(dataset_id)
+    self._dataset_id = dataset_id
+
+
+class _CheckedTableId:
+  """``table_id``, checked on every assignment.
+
+  For classes that format it into the backtick-quoted
+  ``{project}.{dataset}.{table}`` path of queries that only read it, such
+  as ``AnomalyDetector`` and ``BatchEvaluator``. Every assignment, the
+  constructor's included, checks that it is one table name or one
+  wildcard read (one table name and a single trailing ``*``), so any
+  other value raises ``ValueError`` and the object keeps its current
+  table.
+  """
+
+  @property
+  def table_id(self) -> str:
+    """Events table formatted into this object's queries."""
+    return self._table_id
+
+  @table_id.setter
+  def table_id(self, table_id: str) -> None:
+    _validate_source_table(table_id, "table_id")
+    self._table_id = table_id
+
+
 # ------------------------------------------------------------------ #
 # Client                                                               #
 # ------------------------------------------------------------------ #
@@ -584,9 +641,10 @@ class Client:
       project_id: Google Cloud project ID, optionally domain-scoped
           (``example.com:my-project``).
       dataset_id: BigQuery dataset containing agent events.
-      table_id: Table name for agent events. Pass ``"auto"``
-          to auto-detect (tries ``agent_events`` first, then
-          ``agent_events_v2``).
+      table_id: Table name for agent events: one table name in
+          *dataset_id*, or a wildcard read over sharded tables such as
+          ``agent_events_*``. Pass ``"auto"`` to auto-detect (tries
+          ``agent_events`` first, then ``agent_events_v2``).
       location: BigQuery dataset location. When *None* (default),
           the BigQuery client uses its own default (typically ``US``).
       gcs_bucket_name: Optional GCS bucket name (reserved for future
@@ -607,8 +665,9 @@ class Client:
 
   Raises:
       ValueError: If *project_id* or *dataset_id* is not one project or
-          dataset ID. Checked before any query, including table
-          auto-detection and schema verification.
+          dataset ID, or *table_id* is neither ``"auto"``, one table
+          name nor one wildcard read. Checked before any query, including
+          table auto-detection and schema verification.
   """
 
   def __init__(
@@ -638,6 +697,8 @@ class Client:
     self.endpoint = endpoint or DEFAULT_ENDPOINT
     self.connection_id = connection_id
 
+    # The table_id setter checks the table; schema verification sends it
+    # only as a query parameter.
     if table_id == "auto":
       self.table_id = self._detect_table()
     else:
@@ -677,6 +738,26 @@ class Client:
   def dataset_id(self, dataset_id: str) -> None:
     _validate_client_dataset_id(dataset_id)
     self._dataset_id = dataset_id
+
+  @property
+  def table_id(self) -> str:
+    """Events table formatted into queries' ``{project}.{dataset}.{table}``.
+
+    The BigQuery Remote Function takes it from the request's
+    ``userDefinedContext``. Queries only read it, so it may be one table
+    name or a wildcard read (one table name and a single trailing ``*``).
+    Every assignment, the constructor's included, checks that first, so a
+    value such as a backtick that closes the quoted path, a dot that names
+    another dataset, a quote, a backslash or a line break raises
+    ``ValueError`` and the client keeps its current table. Drift and deep
+    analysis still refuse a wildcard events table.
+    """
+    return self._table_id
+
+  @table_id.setter
+  def table_id(self, table_id: str) -> None:
+    _validate_source_table(table_id, "table_id")
+    self._table_id = table_id
 
   @property
   def bq_client(self) -> bigquery.Client:
@@ -783,6 +864,17 @@ class Client:
           type(e).__name__,
           e,
       )
+
+  def _events_table(self, dataset: Optional[str]) -> str:
+    """The events table a method reads: *dataset*, else ``table_id``.
+
+    Callers format it into ``FROM `{project}.{dataset}.{table}```, so an
+    override is checked like ``table_id`` and raises ``ValueError`` before
+    any query unless it is one table name or one wildcard read.
+    """
+    table = dataset or self.table_id
+    _validate_source_table(table, "events table (dataset or table_id)")
+    return table
 
   def _read_rows(
       self,
@@ -2295,7 +2387,9 @@ class Client:
     Args:
         evaluator: A SystemEvaluator, PerformanceEvaluator, or LLMAsJudge.
         filters: Optional trace filters.
-        dataset: Optional table name override.
+        dataset: Optional events table override: one table name in this
+            client's dataset, or a wildcard read such as
+            ``agent_events_*``. Defaults to the client's ``table_id``.
         strict: When ``True``, sessions with unparseable or
             empty judge output are marked as failed instead of
             silently passing.  Affected sessions get
@@ -2315,6 +2409,11 @@ class Client:
         ``scope_signature`` attribution. These keys are SDK-reserved
         and strict mode preserves them while adding
         ``parse_error=True``.
+
+    Raises:
+        ValueError: If *dataset* is neither one BigQuery table name nor
+            one wildcard read, for example a dotted path or a name
+            containing a backtick.
     """
     if (
         isinstance(max_concurrency, bool)
@@ -2322,7 +2421,7 @@ class Client:
         or max_concurrency < 1
     ):
       raise ValueError("max_concurrency must be a positive integer")
-    table = dataset or self.table_id
+    table = self._events_table(dataset)
     # One detached snapshot for the whole evaluation: candidate
     # predicates, the fallback row predicate, and the limit all come
     # from the same immutable state (PR #371 review round 4, P1-6).
@@ -2885,7 +2984,9 @@ class Client:
         config: Categorical evaluation configuration with metric
             definitions and allowed categories.
         filters: Optional trace filters.
-        dataset: Optional table name override.
+        dataset: Optional events table override: one table name in this
+            client's dataset, or a wildcard read such as
+            ``agent_events_*``. Defaults to the client's ``table_id``.
         per_session_context: Optional trusted judge context keyed by an exact
             :class:`ResolvedTraceSelector` or, for an unambiguous evaluated
             population, by legacy session-id string. A non-empty mapping
@@ -2910,8 +3011,18 @@ class Client:
     Returns:
         CategoricalEvaluationReport with per-session results and
         category distributions.
+
+    Raises:
+        ValueError: If *dataset* is neither one BigQuery table name nor
+            one wildcard read, for example a dotted path or a name
+            containing a backtick, or if ``config.persist_results`` is
+            set and ``config.results_table`` is not one table name.
     """
-    table = dataset or self.table_id
+    table = self._events_table(dataset)
+    if config.persist_results:
+      # Persisting formats the results table into DDL after the
+      # evaluation queries, so refuse a bad one before any of them.
+      self._categorical_results_table(config)
     filt = filters or TraceFilter()
     where, params = filt.to_sql_conditions()
 
@@ -3549,6 +3660,20 @@ class Client:
 
     return _run_sync(classify_sessions_via_api(transcripts, config, endpoint))
 
+  @staticmethod
+  def _categorical_results_table(config: CategoricalEvaluationConfig) -> str:
+    """The table persisted categorical results go to, checked.
+
+    ``config.results_table``, else ``categorical_results``. Its CREATE
+    TABLE and ALTER TABLE statements and the streaming insert format it
+    into ``{project}.{dataset}.{table}``, and the categorical views read
+    it, so anything but one table name raises ``ValueError`` before a
+    query or DDL is sent.
+    """
+    results_table = config.results_table or DEFAULT_RESULTS_TABLE
+    _validate_table_name(results_table, "results_table")
+    return results_table
+
   def _persist_categorical_if_configured(
       self,
       report: CategoricalEvaluationReport,
@@ -3571,9 +3696,10 @@ class Client:
       report.details["persist_note"] = "no sessions to persist"
       return
 
-    results_table = config.results_table or DEFAULT_RESULTS_TABLE
-
     try:
+      # Checked again where the DDL is built; a refusal is reported as
+      # a persistence error, with no DDL sent.
+      results_table = self._categorical_results_table(config)
       ddl = CATEGORICAL_RESULTS_DDL.format(
           project=self.project_id,
           dataset=self.dataset_id,
@@ -3652,6 +3778,10 @@ class Client:
 
     Returns:
         A dict mapping view name to prefixed view name.
+
+    Raises:
+        ValueError: If *results_table*, or any view name *view_prefix*
+            forms, is not one table name. Checked before any DDL.
     """
     from .categorical_views import CategoricalViewManager
 
@@ -3741,11 +3871,18 @@ class Client:
         filters: Optional trace filters.
         config: Insights configuration. Defaults to
             analyzing up to 50 recent sessions.
-        dataset: Optional events table override.
+        dataset: Optional events table override: one table name in this
+            client's dataset, or a wildcard read such as
+            ``agent_events_*``. Defaults to the client's ``table_id``.
         text_model: Optional BQML text model.
 
     Returns:
         InsightsReport with facets, analysis, and summary.
+
+    Raises:
+        ValueError: If *dataset* is neither one BigQuery table name nor
+            one wildcard read, for example a dotted path or a name
+            containing a backtick.
     """
     return _run_sync(
         self._run_insights(
@@ -3764,7 +3901,7 @@ class Client:
       text_model: Optional[str] = None,
   ) -> InsightsReport:
     """Async implementation of the insights pipeline."""
-    table = dataset or self.table_id
+    table = self._events_table(dataset)
     filt = filters or TraceFilter()
     cfg = config or InsightsConfig()
     model = text_model or self.endpoint

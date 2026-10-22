@@ -149,15 +149,16 @@ class TestClientDriftProductionTable:
       ids=list(_NOT_A_TABLE_NAME),
   )
   def test_rejects_constructor_table_id(self, run_drift, table_id):
+    # Client() itself refuses the table now, before drift can.
     bq = _bq_client()
-    client = Client(
-        project_id="p",
-        dataset_id="d",
-        table_id=table_id,
-        verify_schema=False,
-        bq_client=bq,
-    )
-    with pytest.raises(ValueError, match="events table"):
+    with pytest.raises(ValueError, match="must be one table name"):
+      client = Client(
+          project_id="p",
+          dataset_id="d",
+          table_id=table_id,
+          verify_schema=False,
+          bq_client=bq,
+      )
       run_drift(client)
     assert _sent_sql(bq) == []
 

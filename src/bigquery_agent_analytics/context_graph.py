@@ -72,11 +72,19 @@ from typing import Any, Optional
 
 from google.cloud import bigquery
 from pydantic import BaseModel
+from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import field_validator
+from pydantic import ValidationInfo
 
 from ._telemetry import LabeledBigQueryClient
 from ._telemetry import make_bq_client
 from ._telemetry import with_sdk_labels
+from .client import _CheckedProjectAndDataset
+from .client import _CheckedTableId
+from .evaluators import _escape_sql_quoted
+from .evaluators import _whole_int
+from .feedback import _validate_table_name
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -248,7 +256,13 @@ class ContextGraphConfig(BaseModel):
       endpoint: AI.GENERATE endpoint for entity extraction.
       entity_types: Domain-specific entity types to extract.
       max_hops: Maximum causal hops for GQL traversal.
+
+  Every table name and the graph name are formatted into backtick-quoted
+  ``{project}.{dataset}.{name}`` paths, so each must be one table name,
+  checked when the config is built and on every later assignment.
   """
+
+  model_config = ConfigDict(validate_assignment=True)
 
   biz_nodes_table: str = Field(default="extracted_biz_nodes")
   cross_links_table: str = Field(default="context_cross_links")
@@ -270,6 +284,20 @@ class ContextGraphConfig(BaseModel):
       ]
   )
   max_hops: int = Field(default=20)
+
+  @field_validator(
+      "biz_nodes_table",
+      "cross_links_table",
+      "decision_points_table",
+      "candidates_table",
+      "made_decision_edges_table",
+      "candidate_edges_table",
+      "graph_name",
+  )
+  @classmethod
+  def _check_name(cls, value: str, info: ValidationInfo) -> str:
+    _validate_table_name(value, info.field_name)
+    return value
 
 
 # ------------------------------------------------------------------ #
@@ -948,7 +976,7 @@ def _dedupe_rows_by_key(
 # ------------------------------------------------------------------ #
 
 
-class ContextGraphManager:
+class ContextGraphManager(_CheckedProjectAndDataset, _CheckedTableId):
   """Manages the Context Graph linking technical traces to business entities.
 
   This is the main entry point for building and querying the
@@ -957,9 +985,18 @@ class ContextGraphManager:
   Args:
       project_id: Google Cloud project ID.
       dataset_id: BigQuery dataset ID.
-      table_id: Agent events table name.
+      table_id: Agent events table name: one table name, or a wildcard
+          read such as ``agent_events_*`` (the property-graph DDL
+          takes one table name only).
       config: Optional context graph configuration.
       client: Optional BigQuery client instance.
+
+  Raises:
+      ValueError: If *project_id* or *dataset_id* fails the check
+          ``Client`` runs, or *table_id* is neither one table name nor
+          one wildcard read. Every later assignment is checked the same
+          way, and a method's ``graph_name`` override and ``max_hops``
+          are checked before its query.
   """
 
   def __init__(
@@ -1143,13 +1180,16 @@ class ContextGraphManager:
     self._ensure_biz_nodes_table()
 
     entity_types_str = ", ".join(self.config.entity_types)
+    # The endpoint and the entity types are configuration
+    # (Client.context_graph passes the client's endpoint), so keep both
+    # inside their quotes.
     query = _EXTRACT_BIZ_NODES_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
         table=self.table_id,
         biz_table=self.config.biz_nodes_table,
-        endpoint=self._resolve_endpoint(),
-        entity_types=entity_types_str,
+        endpoint=_escape_sql_quoted(self._resolve_endpoint()),
+        entity_types=_escape_sql_quoted(entity_types_str),
     )
 
     job_config = bigquery.QueryJobConfig(
@@ -1384,6 +1424,17 @@ class ContextGraphManager:
   # Property Graph DDL                                               #
   # -------------------------------------------------------------- #
 
+  def _graph_name(self, graph_name: Optional[str]) -> str:
+    """The graph a method uses: *graph_name*, else the config's.
+
+    It is formatted into ``GRAPH `{project}.{dataset}.{graph_name}``` and
+    ``CREATE OR REPLACE PROPERTY GRAPH``, so a method's override gets the
+    table-name check the config's own name gets, before any query.
+    """
+    name = graph_name or self.config.graph_name
+    _validate_table_name(name, "graph_name")
+    return name
+
   def get_property_graph_ddl(
       self,
       graph_name: Optional[str] = None,
@@ -1396,7 +1447,10 @@ class ContextGraphManager:
     Returns:
         The DDL SQL string.
     """
-    name = graph_name or self.config.graph_name
+    name = self._graph_name(graph_name)
+    # The events table is a node and edge table of the graph, which a
+    # wildcard can't name.
+    _validate_table_name(self.table_id, "table_id")
     return _PROPERTY_GRAPH_DDL.format(
         project=self.project_id,
         dataset=self.dataset_id,
@@ -1468,8 +1522,8 @@ class ContextGraphManager:
     Returns:
         The GQL query string.
     """
-    name = graph_name or self.config.graph_name
-    hops = max_hops or self.config.max_hops
+    name = self._graph_name(graph_name)
+    hops = _whole_int(max_hops or self.config.max_hops, "max_hops")
 
     biz_filter_clause = ""
     if biz_entity:
@@ -1652,8 +1706,8 @@ class ContextGraphManager:
     Returns:
         The GQL query string.
     """
-    name = graph_name or self.config.graph_name
-    hops = max_hops or self.config.max_hops
+    name = self._graph_name(graph_name)
+    hops = _whole_int(max_hops or self.config.max_hops, "max_hops")
     return _GQL_FULL_CAUSAL_CHAIN_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
@@ -1758,7 +1812,7 @@ class ContextGraphManager:
     if not resolved_span_ids:
       return []
 
-    gname = graph_name or self.config.graph_name
+    gname = self._graph_name(graph_name)
     query = _GQL_TRACE_RECONSTRUCTION_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
@@ -2041,7 +2095,7 @@ class ContextGraphManager:
         project=self.project_id,
         dataset=self.dataset_id,
         table=self.table_id,
-        endpoint=self._resolve_endpoint(),
+        endpoint=_escape_sql_quoted(self._resolve_endpoint()),
     )
 
     job_config = bigquery.QueryJobConfig(
@@ -2371,7 +2425,8 @@ class ContextGraphManager:
     Returns:
         The DDL SQL string.
     """
-    name = graph_name or self.config.graph_name
+    name = self._graph_name(graph_name)
+    _validate_table_name(self.table_id, "table_id")
     return _DECISION_PROPERTY_GRAPH_DDL.format(
         project=self.project_id,
         dataset=self.dataset_id,
@@ -2408,7 +2463,7 @@ class ContextGraphManager:
     Returns:
         The GQL query string.
     """
-    name = graph_name or self.config.graph_name
+    name = self._graph_name(graph_name)
     hops = max_hops or self.config.max_hops
 
     decision_type_clause = ""
@@ -2437,7 +2492,7 @@ class ContextGraphManager:
     Returns:
         The GQL query string.
     """
-    name = graph_name or self.config.graph_name
+    name = self._graph_name(graph_name)
     return _GQL_DROPPED_CANDIDATES_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,

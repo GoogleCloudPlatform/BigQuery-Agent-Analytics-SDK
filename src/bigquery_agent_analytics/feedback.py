@@ -40,6 +40,7 @@ from pydantic import BaseModel
 from pydantic import Field
 
 from ._telemetry import with_sdk_labels
+from .evaluators import _escape_sql_quoted
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -391,13 +392,15 @@ def _is_legacy_model_ref(ref: str) -> bool:
 
 
 def _sanitize_categories(categories_str: str) -> str:
-  """Escapes category text for safe embedding in SQL string literals.
+  """Escapes category text to sit inside the grouping prompt's literal.
 
-  Doubles single quotes and strips backslashes to prevent SQL
-  injection or query breakage when custom category labels are
-  formatted into ``CONCAT(...)`` prompt text.
+  Custom category labels are formatted into the ``'Categories: ...'``
+  literal of both semantic-grouping queries. GoogleSQL reads a doubled
+  quote as two adjacent literals, a syntax error, so this delegates to
+  ``evaluators._escape_sql_quoted``: backslashes, then single quotes,
+  then control characters, all C-style.
   """
-  return categories_str.replace("\\", "\\\\").replace("'", "''")
+  return _escape_sql_quoted(categories_str)
 
 
 # Unicode categories a BigQuery table name may use besides letters (L),
@@ -417,18 +420,45 @@ def _validate_table_name(table: Any, label: str) -> None:
   names another dataset, a backslash, a line break) is refused before a
   query is built. *label* names the value in the error.
   """
-  if (
-      not isinstance(table, str)
-      or not table
-      or any(
-          unicodedata.category(char)[0] not in "LMN"
-          and unicodedata.category(char) not in _TABLE_NAME_EXTRA_CATEGORIES
-          for char in table
-      )
-  ):
+  if not _is_table_name(table):
     raise ValueError(
         f"{label} must be one table name in the client's dataset,"
         " using only letters, marks, numbers, '_', '-' or spaces; got"
+        f" {table!r}"
+    )
+
+
+def _is_table_name(table: Any) -> bool:
+  """Whether *table* is one table name, as ``_validate_table_name`` checks."""
+  return (
+      isinstance(table, str)
+      and bool(table)
+      and all(
+          unicodedata.category(char)[0] in "LMN"
+          or unicodedata.category(char) in _TABLE_NAME_EXTRA_CATEGORIES
+          for char in table
+      )
+  )
+
+
+def _validate_source_table(table: Any, label: str) -> None:
+  """Raises ``ValueError`` unless *table* is one table a query may read.
+
+  That is one table name, or a wildcard read: one table name followed by
+  a single trailing ``*``, such as ``agent_events_*``, which BigQuery reads
+  as every table in the dataset whose name starts with ``agent_events_``.
+  The name before the ``*`` gets the table-name check, so a backtick, dot,
+  quote or line break is still refused, and so is a ``*`` anywhere else.
+  Tables a query writes keep ``_validate_table_name``, and so do drift's
+  and question distribution's events tables. *label* names the value in
+  the error.
+  """
+  name = table[:-1] if isinstance(table, str) and table.endswith("*") else table
+  if not _is_table_name(name):
+    raise ValueError(
+        f"{label} must be one table name in the client's dataset, or one"
+        " followed by a single trailing '*' to read a wildcard table, using"
+        " only letters, marks, numbers, '_', '-' or spaces; got"
         f" {table!r}"
     )
 
@@ -668,13 +698,15 @@ async def _semantic_drift(
 
   loop = asyncio.get_event_loop()
 
+  # The caller's embedding model stays inside its quotes: backticks
+  # for a legacy model reference, single quotes for an endpoint.
   if _is_legacy_model_ref(embedding_model):
     query = _LEGACY_SEMANTIC_DRIFT_QUERY.format(
         project=project_id,
         dataset=dataset_id,
         table=table_id,
         golden_table=golden_table,
-        model=embedding_model,
+        model=_escape_sql_quoted(embedding_model, quote="`"),
         where=where_clause,
     )
     ai_function = "ml-generate-embedding"
@@ -684,7 +716,7 @@ async def _semantic_drift(
         dataset=dataset_id,
         table=table_id,
         golden_table=golden_table,
-        endpoint=embedding_model,
+        endpoint=_escape_sql_quoted(embedding_model),
         where=where_clause,
     )
     ai_function = "ai-embed"
@@ -985,7 +1017,9 @@ async def _semantic_grouping(
     )
     categories_str = _sanitize_categories(raw_categories)
 
-    # Try AI.GENERATE first when the endpoint is not a legacy ref
+    # Try AI.GENERATE first when the endpoint is not a legacy ref. The
+    # model is the caller's text_model or the client's endpoint, so it
+    # stays inside its quotes on both paths.
     if not _is_legacy_model_ref(text_model):
       try:
         query = _AI_GENERATE_SEMANTIC_GROUPING_QUERY.format(
@@ -993,7 +1027,7 @@ async def _semantic_grouping(
             dataset=dataset_id,
             table=table_id,
             where=where_clause,
-            endpoint=text_model,
+            endpoint=_escape_sql_quoted(text_model),
             categories=categories_str,
         )
         job_config = bigquery.QueryJobConfig(
@@ -1029,7 +1063,7 @@ async def _semantic_grouping(
           dataset=dataset_id,
           table=table_id,
           where=where_clause,
-          model=legacy_model,
+          model=_escape_sql_quoted(legacy_model, quote="`"),
           categories=categories_str,
       )
       job_config = bigquery.QueryJobConfig(
