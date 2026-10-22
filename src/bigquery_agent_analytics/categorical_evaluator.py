@@ -74,6 +74,8 @@ from pydantic import Field
 from pydantic import model_validator
 
 from bigquery_agent_analytics.evaluators import _escape_sql_quoted
+from bigquery_agent_analytics.evaluators import _finite_float
+from bigquery_agent_analytics.evaluators import _whole_int
 from bigquery_agent_analytics.trace import AmbiguousSessionError
 from bigquery_agent_analytics.trace import ResolvedTraceSelector
 from bigquery_agent_analytics.trace import Span
@@ -755,7 +757,15 @@ def build_ai_generate_query(
 
   Returns:
       Complete SQL query string.
+
+  Raises:
+      ValueError: If *temperature* is not a finite number or
+          *max_output_tokens* is not a whole number.
   """
+  # Both go into the model_params JSON literal, so only a plain float
+  # and int may reach it, as in BigQueryAIClient.generate_text.
+  temperature = _finite_float(temperature, "temperature")
+  max_output_tokens = _whole_int(max_output_tokens, "max_output_tokens")
   connection_clause = ""
   if connection_id:
     escaped = _escape_sql_string_literal(connection_id)
