@@ -736,3 +736,40 @@ test('flag credentials stay out of rows and diagnostics', () => {
     expect(redactDiagnostic(`command failed: ${command}`, 1000)).not.toContain('SecretSuffix')
   }
 })
+
+test("a credential option's value is found across line continuations and inside shell expansions", () => {
+  const stats = newStats()
+  const cases: [string, string][] = [
+    ['docker login --username me --password \\\n    SecretSuffix registry.example.com', 'docker login --username me --password \\\n    [REDACTED] registry.example.com'],
+    ['cli --password\\\nSecretSuffix --next', 'cli --password\\\n[REDACTED] --next'],
+    ['cli --password \\\r\n  SecretSuffix tail', 'cli --password \\\r\n  [REDACTED] tail'],
+    ['cli --password Secret\\\nSuffix tail', 'cli --password [REDACTED] tail'],
+    ["docker login --password $'prefix\\' SecretSuffix' registry.example.com", 'docker login --password [REDACTED] registry.example.com'],
+    ['docker login --password $(printf %s SecretSuffix) registry.example.com', 'docker login --password [REDACTED] registry.example.com'],
+    ['docker login --password $(printf "%s )" SecretSuffix) registry.example.com', 'docker login --password [REDACTED] registry.example.com'],
+    ['docker login --password `printf %s SecretSuffix` registry.example.com', 'docker login --password [REDACTED] registry.example.com'],
+    ['docker login --password ${LOGIN:-my SecretSuffix} registry.example.com', 'docker login --password [REDACTED] registry.example.com'],
+    ['docker login --password "$(cat "my file") SecretSuffix" registry.example.com', 'docker login --password [REDACTED] registry.example.com'],
+    ['tool --password $(echo SecretSuffix', 'tool --password [REDACTED]'],
+  ]
+  for (const [input, want] of cases) expect(redactText(input, stats)).toBe(want)
+  // No value before the next option, across a continuation too.
+  expect(redactText('cli --password \\\n--verbose', stats)).toBe('cli --password \\\n--verbose')
+})
+
+test('continued and expanded flag credentials stay out of rows and diagnostics', () => {
+  const commands = [
+    'docker login --username me --password \\\n    SecretSuffix registry.example.com',
+    "docker login --password $'prefix\\' SecretSuffix' registry.example.com",
+    'docker login --password $(printf %s SecretSuffix) registry.example.com',
+    'docker login --password `printf %s SecretSuffix` registry.example.com',
+  ]
+  for (const command of commands) {
+    const row = buildRow({ eventType: 'TOOL_STARTING', timestampMs: 0, eventId: 'e1', agent: 'coding-agent', sessionId: 's1',
+      invocationId: 'i1', userId: 'dev', traceId: null, spanId: null, parentSpanId: null,
+      content: { tool: 'Bash', args: { command } }, attributes: {}, maxPayloadChars: 16384 }).row
+    expect(JSON.stringify(row)).not.toContain('SecretSuffix')
+    expect(redactDiagnostic(`command failed: ${command}`, 1000)).not.toContain('SecretSuffix')
+    expect(JSON.stringify(row)).toContain('registry.example.com')
+  }
+})

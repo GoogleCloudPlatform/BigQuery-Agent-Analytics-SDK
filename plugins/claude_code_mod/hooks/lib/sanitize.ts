@@ -253,35 +253,56 @@ function redactNamedValues(text: string, stats: SanitizeStats): string {
 }
 
 // A long command-line option and its value after a space (`--password VALUE`,
-// `--api-key "VALUE"`, `--pass -VALUE`): the whole shell argument. The
-// option's name is a credential's and its last part a credential word, so
-// `--password-stdin host`, `--token-file path` and `--max-tokens 1024` keep
-// theirs. A value that starts with `--` is the next option, not a value.
-const FLAG_VALUE = /(^|[^A-Za-z0-9_.-])--([A-Za-z][A-Za-z0-9_.-]{0,99})[ \t]+(?!--)(?=\S)/g
+// `--api-key "VALUE"`, `--pass -VALUE`), or after line continuations
+// (`--password \` and the value on the next line): the whole shell argument.
+// The option's name is a credential's and its last part a credential word,
+// so `--password-stdin host`, `--token-file path` and `--max-tokens 1024`
+// keep theirs. A value that starts with `--` is the next option, not a value.
+const FLAG_VALUE = /(^|[^A-Za-z0-9_.-])--([A-Za-z][A-Za-z0-9_.-]{0,99})(?:[ \t]|\\\r?\n)+(?![ \t]|\\\r?\n)(?!--)(?=\S)/g
 // A value that is one redaction marker and nothing else.
 const WHOLE_MARKER = /^\[REDACTED(?::[a-z-]+)?\]$/
 
-// Where the shell argument that starts at `start` ends: through quoted parts
-// (single quotes literal, double quotes with backslash escapes), backslash
-// escapes and the parts joined to them, up to the first unquoted, unescaped
-// space. An unclosed quote runs to the end of the text.
+// Where the shell argument that starts at `start` ends: up to the first space
+// outside every quote and expansion, and not escaped. It goes through single
+// quotes (literal), double quotes and ANSI-C `$'…'` (backslash escapes),
+// `$(…)`, `(…)`, backticks and `${…}` (nested, with quotes inside them),
+// backslash escapes and line continuations, and the parts joined to them.
+// Anything left open runs to the end of the text.
 function shellArgumentEnd(text: string, start: number): number {
-  let quote = ''
+  // What is open, innermost last: ' " a(nsi) ( ` {
+  const open: string[] = []
   let i = start
   while (i < text.length) {
     const c = text[i] as string
-    if (quote === "'") {
-      if (c === "'") quote = ''
+    const top = open[open.length - 1] ?? ''
+    if (top === "'") {
+      if (c === "'") open.pop()
       i += 1
     } else if (c === '\\') {
+      i += text.startsWith('\r\n', i + 1) ? 3 : 2
+    } else if (top === 'a') {
+      if (c === "'") open.pop()
+      i += 1
+    } else if (top === '`') {
+      if (c === '`') open.pop()
+      i += 1
+    } else if (c === '$' && text[i + 1] === "'" && top !== '"') {
+      open.push('a')
       i += 2
-    } else if (quote === '"') {
-      if (c === '"') quote = ''
+    } else if (c === '$' && (text[i + 1] === '(' || text[i + 1] === '{')) {
+      open.push(text[i + 1] as string)
+      i += 2
+    } else if (top === '"') {
+      if (c === '"') open.pop()
+      else if (c === '`') open.push('`')
       i += 1
-    } else if (c === '"' || c === "'") {
-      quote = c
+    } else if (c === '"' || c === "'" || c === '`' || c === '(') {
+      open.push(c)
       i += 1
-    } else if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f' || c === '\v') {
+    } else if ((c === ')' && top === '(') || (c === '}' && top === '{')) {
+      open.pop()
+      i += 1
+    } else if (top === '' && (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f' || c === '\v')) {
       break
     } else {
       i += 1
