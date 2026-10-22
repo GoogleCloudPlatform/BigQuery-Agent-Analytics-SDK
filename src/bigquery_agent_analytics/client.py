@@ -538,6 +538,61 @@ def _validate_client_dataset_id(dataset_id: Any) -> None:
     )
 
 
+class _CheckedProjectAndDataset:
+  """``project_id`` and ``dataset_id``, checked on every assignment.
+
+  For classes other than ``Client`` that format both values into the
+  backtick-quoted ``{project}.{dataset}`` paths of the queries they
+  send, such as the AI/ML integration classes. Every assignment, the
+  constructor's included, runs the checks ``Client`` runs, so a value
+  that would leave the quoted path raises ``ValueError`` and the object
+  keeps its current value.
+  """
+
+  @property
+  def project_id(self) -> str:
+    """Project formatted into this object's ``{project}.{dataset}`` paths."""
+    return self._project_id
+
+  @project_id.setter
+  def project_id(self, project_id: str) -> None:
+    _validate_client_project_id(project_id)
+    self._project_id = project_id
+
+  @property
+  def dataset_id(self) -> str:
+    """Dataset formatted into this object's ``{project}.{dataset}`` paths."""
+    return self._dataset_id
+
+  @dataset_id.setter
+  def dataset_id(self, dataset_id: str) -> None:
+    _validate_client_dataset_id(dataset_id)
+    self._dataset_id = dataset_id
+
+
+class _CheckedTableId:
+  """``table_id``, checked on every assignment.
+
+  For classes that format it into the backtick-quoted
+  ``{project}.{dataset}.{table}`` path of queries that only read it, such
+  as ``AnomalyDetector`` and ``BatchEvaluator``. Every assignment, the
+  constructor's included, checks that it is one table name or one
+  wildcard read (one table name and a single trailing ``*``), so any
+  other value raises ``ValueError`` and the object keeps its current
+  table.
+  """
+
+  @property
+  def table_id(self) -> str:
+    """Events table formatted into this object's queries."""
+    return self._table_id
+
+  @table_id.setter
+  def table_id(self, table_id: str) -> None:
+    _validate_source_table(table_id, "table_id")
+    self._table_id = table_id
+
+
 # ------------------------------------------------------------------ #
 # Client                                                               #
 # ------------------------------------------------------------------ #

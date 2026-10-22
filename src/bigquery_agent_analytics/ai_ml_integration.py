@@ -60,12 +60,9 @@ from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
 from datetime import timezone
-import decimal
 from enum import Enum
 import json
 import logging
-import math
-import numbers
 from typing import Any, Optional
 
 from google.cloud import bigquery
@@ -75,9 +72,11 @@ from pydantic import Field
 from ._telemetry import LabeledBigQueryClient
 from ._telemetry import make_bq_client
 from ._telemetry import with_sdk_labels
-from .client import _validate_client_dataset_id
-from .client import _validate_client_project_id
+from .client import _CheckedProjectAndDataset
+from .client import _CheckedTableId
 from .evaluators import _escape_sql_quoted
+from .evaluators import _finite_float
+from .evaluators import _whole_int
 from .feedback import _validate_source_table
 from .feedback import _validate_table_name
 
@@ -151,43 +150,6 @@ class BatchEvaluationResult(BaseModel):
       default=None,
       description="Error message if evaluation failed.",
   )
-
-
-def _finite_float(value: Any, name: str) -> float:
-  """Returns *value* as a plain finite ``float`` to format into SQL.
-
-  Raises ``ValueError`` naming *name* unless *value* is a real number or
-  a ``Decimal``, and finite: a string, ``None``, ``bool`` (although it
-  subclasses ``int``), NaN or an infinity is refused.
-  """
-  if isinstance(value, bool) or not isinstance(
-      value, (numbers.Real, decimal.Decimal)
-  ):
-    raise ValueError(f"{name} must be a number; got {value!r}")
-  try:
-    number = float(value)
-  except (OverflowError, ValueError):
-    # An int too large for a float, or a signaling-NaN Decimal.
-    number = math.nan
-  if not math.isfinite(number):
-    raise ValueError(f"{name} must be finite; got {value!r}")
-  return number
-
-
-def _whole_int(value: Any, name: str) -> int:
-  """Returns *value* as a plain ``int`` to format into SQL.
-
-  Raises ``ValueError`` naming *name* unless *value* is an integer, or a
-  finite real number or ``Decimal`` without a fractional part; ``bool``
-  is refused. The fraction check is exact, not after rounding to float.
-  """
-  if isinstance(value, numbers.Integral) and not isinstance(value, bool):
-    return int(value)
-  _finite_float(value, name)
-  whole = int(value)
-  if whole != value:
-    raise ValueError(f"{name} must be a whole number; got {value!r}")
-  return whole
 
 
 class BigQueryAIClient:
@@ -474,60 +436,6 @@ Provide your analysis as JSON.
       pass
 
     return {"raw_analysis": result}
-
-
-class _CheckedProjectAndDataset:
-  """``project_id`` and ``dataset_id``, checked on every assignment.
-
-  ``EmbeddingSearchClient``, ``AnomalyDetector`` and ``BatchEvaluator``
-  format both values into backtick-quoted ``{project}.{dataset}`` table
-  and model paths in every query they send. Every assignment, the
-  constructor's included, runs the checks ``Client`` runs, so a value
-  that would leave the quoted path raises ``ValueError`` and the object
-  keeps its current value.
-  """
-
-  @property
-  def project_id(self) -> str:
-    """Project formatted into this object's ``{project}.{dataset}`` paths."""
-    return self._project_id
-
-  @project_id.setter
-  def project_id(self, project_id: str) -> None:
-    _validate_client_project_id(project_id)
-    self._project_id = project_id
-
-  @property
-  def dataset_id(self) -> str:
-    """Dataset formatted into this object's ``{project}.{dataset}`` paths."""
-    return self._dataset_id
-
-  @dataset_id.setter
-  def dataset_id(self, dataset_id: str) -> None:
-    _validate_client_dataset_id(dataset_id)
-    self._dataset_id = dataset_id
-
-
-class _CheckedTableId:
-  """``table_id``, checked on every assignment.
-
-  ``AnomalyDetector`` and ``BatchEvaluator`` format it into the
-  backtick-quoted ``{project}.{dataset}.{table}`` path of the queries
-  they send, which only read it. Every assignment, the constructor's
-  included, checks that it is one table name or one wildcard read (one
-  table name and a single trailing ``*``), so any other value raises
-  ``ValueError`` and the object keeps its current table.
-  """
-
-  @property
-  def table_id(self) -> str:
-    """Events table formatted into this object's queries."""
-    return self._table_id
-
-  @table_id.setter
-  def table_id(self, table_id: str) -> None:
-    _validate_source_table(table_id, "table_id")
-    self._table_id = table_id
 
 
 class EmbeddingSearchClient(_CheckedProjectAndDataset):
