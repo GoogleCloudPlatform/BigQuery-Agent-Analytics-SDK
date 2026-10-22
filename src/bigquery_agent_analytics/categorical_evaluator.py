@@ -73,6 +73,7 @@ from pydantic import BaseModel
 from pydantic import Field
 from pydantic import model_validator
 
+from bigquery_agent_analytics.evaluators import _escape_sql_quoted
 from bigquery_agent_analytics.trace import AmbiguousSessionError
 from bigquery_agent_analytics.trace import ResolvedTraceSelector
 from bigquery_agent_analytics.trace import Span
@@ -602,8 +603,16 @@ FROM session_transcripts
 
 
 def _escape_sql_string_literal(value: str) -> str:
-  """Doubles single quotes for safe embedding in SQL string literals."""
-  return value.replace("'", "''")
+  """Escapes *value* to sit between single quotes in GoogleSQL.
+
+  GoogleSQL string literals use C-style backslash escapes, so doubling
+  single quotes left a backslash free to escape the closing quote.
+  ``evaluators._escape_sql_quoted`` escapes backslashes first, then
+  single quotes, then control characters; the result can't end the
+  literal early and decodes back to *value*. A value without any of
+  those characters renders unchanged.
+  """
+  return _escape_sql_quoted(value)
 
 
 # ------------------------------------------------------------------ #

@@ -1465,8 +1465,8 @@ class TestBuildClassifyCategoriesLiteral:
         ],
     )
     result = build_classify_categories_literal(metric)
-    assert "it''s good" in result
-    assert "User''s satisfied." in result
+    assert "it\\'s good" in result
+    assert "User\\'s satisfied." in result
 
   def test_empty_categories(self):
     metric = CategoricalMetricDefinition(
@@ -1609,7 +1609,7 @@ class TestBuildAiGenerateQuery:
         "it's-a-model",
         0.0,
     )
-    assert "it''s-a-model" in sql
+    assert "it\\'s-a-model" in sql
 
 
 class TestIdentityBoundEvaluationInputs:
