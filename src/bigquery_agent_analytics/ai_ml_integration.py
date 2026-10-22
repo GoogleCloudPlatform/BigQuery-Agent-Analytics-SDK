@@ -60,6 +60,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
 from datetime import timezone
+import decimal
 from enum import Enum
 import json
 import logging
@@ -155,16 +156,19 @@ class BatchEvaluationResult(BaseModel):
 def _finite_float(value: Any, name: str) -> float:
   """Returns *value* as a plain finite ``float`` to format into SQL.
 
-  Raises ``ValueError`` naming *name* unless *value* is a real number:
-  a string, ``None``, ``bool`` (although it subclasses ``int``), NaN or
-  an infinity is refused.
+  Raises ``ValueError`` naming *name* unless *value* is a real number or
+  a ``Decimal``, and finite: a string, ``None``, ``bool`` (although it
+  subclasses ``int``), NaN or an infinity is refused.
   """
-  if isinstance(value, bool) or not isinstance(value, numbers.Real):
+  if isinstance(value, bool) or not isinstance(
+      value, (numbers.Real, decimal.Decimal)
+  ):
     raise ValueError(f"{name} must be a number; got {value!r}")
   try:
     number = float(value)
-  except OverflowError:
-    number = math.inf
+  except (OverflowError, ValueError):
+    # An int too large for a float, or a signaling-NaN Decimal.
+    number = math.nan
   if not math.isfinite(number):
     raise ValueError(f"{name} must be finite; got {value!r}")
   return number
@@ -173,15 +177,17 @@ def _finite_float(value: Any, name: str) -> float:
 def _whole_int(value: Any, name: str) -> int:
   """Returns *value* as a plain ``int`` to format into SQL.
 
-  Raises ``ValueError`` naming *name* unless *value* is an integer or a
-  finite float without a fractional part; ``bool`` is refused.
+  Raises ``ValueError`` naming *name* unless *value* is an integer, or a
+  finite real number or ``Decimal`` without a fractional part; ``bool``
+  is refused. The fraction check is exact, not after rounding to float.
   """
   if isinstance(value, numbers.Integral) and not isinstance(value, bool):
     return int(value)
-  number = _finite_float(value, name)
-  if not number.is_integer():
+  _finite_float(value, name)
+  whole = int(value)
+  if whole != value:
     raise ValueError(f"{name} must be a whole number; got {value!r}")
-  return int(number)
+  return whole
 
 
 class BigQueryAIClient:
