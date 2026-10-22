@@ -25,6 +25,7 @@ escaped it and the rest of the value became SQL, and line breaks and
 other control characters were left raw.
 """
 
+from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
@@ -254,3 +255,103 @@ def test_audit_payload_renders_escaped():
       "\n    endpoint => 'gemini-2.5-flash\\', request_type => \\'SHARED',"
       "\n    model_params => JSON '"
   ) in sql
+
+
+# What a string generation option appended to the model_params literal.
+_INJECTED = "}}', request_type => 'SHARED', model_params => JSON '{{"
+
+_NOT_A_TEMPERATURE = {
+    "sql_string": "0.0" + _INJECTED,
+    "numeric_string": "0.0",
+    "none": None,
+    "true": True,
+    "nan": float("nan"),
+    "infinite_decimal": Decimal("Infinity"),
+    "list": [0.0],
+}
+
+_NOT_A_MAX_OUTPUT_TOKENS = {
+    "sql_string": "8192" + _INJECTED,
+    "numeric_string": "8192",
+    "none": None,
+    "true": True,
+    "nan": float("nan"),
+    "fractional": 8192.5,
+    "fractional_decimal": Decimal("8192.5"),
+    "list": [8192],
+}
+
+
+def _model_params(sql):
+  """The ``model_params`` argument's line."""
+  start = sql.index("model_params => ")
+  return sql[start : sql.index("\n", start)]
+
+
+@pytest.mark.parametrize(
+    "identity_bound", [False, True], ids=["by_session", "identity_bound"]
+)
+class TestGenerationOptions:
+  """Both AI.GENERATE queries format only plain numbers into model_params."""
+
+  @pytest.mark.parametrize(
+      "temperature",
+      list(_NOT_A_TEMPERATURE.values()),
+      ids=list(_NOT_A_TEMPERATURE),
+  )
+  def test_refuses_temperature(self, identity_bound, temperature):
+    with pytest.raises(ValueError, match="^temperature must be"):
+      build_ai_generate_query(
+          "p",
+          "d",
+          "t",
+          "1=1",
+          "gemini-2.5-flash",
+          temperature,
+          identity_bound=identity_bound,
+      )
+
+  @pytest.mark.parametrize(
+      "max_output_tokens",
+      list(_NOT_A_MAX_OUTPUT_TOKENS.values()),
+      ids=list(_NOT_A_MAX_OUTPUT_TOKENS),
+  )
+  def test_refuses_max_output_tokens(self, identity_bound, max_output_tokens):
+    with pytest.raises(ValueError, match="^max_output_tokens must be"):
+      build_ai_generate_query(
+          "p",
+          "d",
+          "t",
+          "1=1",
+          "gemini-2.5-flash",
+          0.0,
+          max_output_tokens=max_output_tokens,
+          identity_bound=identity_bound,
+      )
+
+  @pytest.mark.parametrize(
+      "temperature,max_output_tokens,rendered",
+      [
+          (0.0, 8192, ("0.0", "8192")),
+          (0, 2048.0, ("0.0", "2048")),
+          (Decimal("0.2"), Decimal("4096"), ("0.2", "4096")),
+      ],
+      ids=["defaults", "int_and_whole_float", "decimals"],
+  )
+  def test_renders_plain_numbers(
+      self, identity_bound, temperature, max_output_tokens, rendered
+  ):
+    sql = build_ai_generate_query(
+        "p",
+        "d",
+        "t",
+        "1=1",
+        "gemini-2.5-flash",
+        temperature,
+        max_output_tokens=max_output_tokens,
+        identity_bound=identity_bound,
+    )
+    assert _model_params(sql) == (
+        'model_params => JSON \'{"generationConfig": {"temperature":'
+        f' {rendered[0]}, "maxOutputTokens": {rendered[1]}}}}}\','
+    )

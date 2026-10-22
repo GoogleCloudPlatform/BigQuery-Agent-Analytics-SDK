@@ -295,3 +295,95 @@ def test_grouping_fallback_model_renders_unchanged():
   _compute_question_distribution(bq, "gemini-2.5-flash")
   sql = _query_calling(bq, "ML.GENERATE_TEXT(")
   assert f"MODEL `p.d.gemini_text_model`{_THEN_PROMPT_STRUCT}" in sql
+
+
+# Custom categories that left the prompt's categories literal, or changed
+# it, when their quotes were doubled.
+_CUSTOM_CATEGORIES = {
+    "apostrophe": ["User's satisfied", "Billing"],
+    "quote_adds_sql": ["Other', (SELECT secret FROM `p.private.secrets`), '"],
+    "trailing_backslash": ["Billing\\"],
+    "line_break": ["Billing',\n'Refunds"],
+    "carriage_return": ["Billing" + chr(13)],
+    "nul": ["Billing" + chr(0)],
+}
+
+_DEFAULT_CATEGORIES = (
+    "General Inquiry, Technical Support, Account Management, Feature"
+    " Request, Bug Report, Other"
+)
+
+
+def _grouping_sql(categories, function, model, via_client=False):
+  """The grouping query that calls *function*, with these categories."""
+  bq = _bq_client()
+  config = AnalysisConfig(mode="custom", custom_categories=categories)
+  if via_client:
+    _client(bq).deep_analysis(configuration=config, text_model=model)
+  else:
+    asyncio.run(
+        compute_question_distribution(
+            bq_client=bq,
+            project_id="p",
+            dataset_id="d",
+            table_id="agent_events",
+            where_clause="1=1",
+            query_params=[],
+            config=config,
+            text_model=model,
+        )
+    )
+  return _query_calling(bq, function)
+
+
+def _categories_literal(sql):
+  """The prompt's categories literal, decoded, and what follows it."""
+  value, end = _read_quoted(sql, sql.index("'Categories: "))
+  return value, sql[end:]
+
+
+# Both grouping queries: the function each calls and a model that picks it.
+_GROUPING_PATHS = {
+    "AI.GENERATE": ("AI.GENERATE(", "gemini-2.5-flash"),
+    "ML.GENERATE_TEXT": ("ML.GENERATE_TEXT(", "proj.ds.my_model"),
+}
+
+
+@pytest.mark.parametrize(
+    "function,model", list(_GROUPING_PATHS.values()), ids=list(_GROUPING_PATHS)
+)
+class TestCustomCategories:
+  """The categories literal of both grouping prompts stays one literal."""
+
+  @pytest.mark.parametrize(
+      "via_client", [False, True], ids=["direct", "client"]
+  )
+  @pytest.mark.parametrize(
+      "categories",
+      list(_CUSTOM_CATEGORIES.values()),
+      ids=list(_CUSTOM_CATEGORIES),
+  )
+  def test_categories_stay_one_string_literal(
+      self, function, model, categories, via_client
+  ):
+    sql = _grouping_sql(categories, function, model, via_client)
+    value, rest = _categories_literal(sql)
+    assert value == f"Categories: {', '.join(categories)}\n"
+    assert rest.lstrip(", \n").startswith("'Question: '")
+
+  def test_default_categories_render_unchanged(self, function, model):
+    bq = _bq_client()
+    asyncio.run(
+        compute_question_distribution(
+            bq_client=bq,
+            project_id="p",
+            dataset_id="d",
+            table_id="agent_events",
+            where_clause="1=1",
+            query_params=[],
+            config=AnalysisConfig(),
+            text_model=model,
+        )
+    )
+    sql = _query_calling(bq, function)
+    assert f"'Categories: {_DEFAULT_CATEGORIES}\\n'" in sql
