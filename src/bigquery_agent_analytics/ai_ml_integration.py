@@ -74,6 +74,7 @@ from ._telemetry import make_bq_client
 from ._telemetry import with_sdk_labels
 from .client import _validate_client_dataset_id
 from .client import _validate_client_project_id
+from .evaluators import _escape_sql_quoted
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -282,7 +283,7 @@ class BigQueryAIClient:
     """
     ep = endpoint or self.endpoint
     query = self._AI_GENERATE_QUERY.format(
-        endpoint=ep,
+        endpoint=_escape_sql_quoted(ep),
         temperature=temperature,
         max_tokens=max_tokens,
     )
@@ -336,12 +337,12 @@ class BigQueryAIClient:
     # Route: legacy ML.GENERATE_EMBEDDING when a BQ ML model ref is set
     if self.embedding_model and self.embedding_model.count(".") >= 2:
       query = self._LEGACY_GENERATE_EMBEDDING_QUERY.format(
-          model=self.embedding_model,
+          model=_escape_sql_quoted(self.embedding_model, quote="`"),
       )
       ai_function = "ml-generate-embedding"
     else:
       query = self._AI_EMBED_QUERY.format(
-          endpoint=self.embedding_endpoint,
+          endpoint=_escape_sql_quoted(self.embedding_endpoint),
       )
       ai_function = "ai-embed"
 
@@ -693,7 +694,7 @@ class EmbeddingSearchClient(_CheckedProjectAndDataset):
           dataset=self.dataset_id,
           table=self.embeddings_table,
           source_table=self.source_table,
-          model=self.embedding_model,
+          model=_escape_sql_quoted(self.embedding_model, quote="`"),
       )
       ai_function = "ml-generate-embedding"
     else:
@@ -702,7 +703,7 @@ class EmbeddingSearchClient(_CheckedProjectAndDataset):
           dataset=self.dataset_id,
           table=self.embeddings_table,
           source_table=self.source_table,
-          endpoint=self.embedding_endpoint,
+          endpoint=_escape_sql_quoted(self.embedding_endpoint),
       )
       ai_function = "ai-embed"
 
@@ -1471,7 +1472,7 @@ class BatchEvaluator(_CheckedProjectAndDataset):
         project=self.project_id,
         dataset=self.dataset_id,
         table=self.table_id,
-        endpoint=self.endpoint,
+        endpoint=_escape_sql_quoted(self.endpoint),
     )
 
     job_config = bigquery.QueryJobConfig(
