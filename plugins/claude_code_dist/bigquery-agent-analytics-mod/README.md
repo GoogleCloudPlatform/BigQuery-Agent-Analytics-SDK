@@ -1085,9 +1085,8 @@ column. Treat the dataset like the transcripts it mirrors.
   backtick opens the value), and on to the next lines after a line continuation,
   or as far as the value runs on: after `=` with no space around it (a flag or
   an assignment), through the whole shell word it starts, wherever in it a
-  quote, `$(…)`, backtick or `${…}` opens (inside a quote still open where the
-  value starts, through that quote's end), to the end of the line that word
-  ends on; otherwise through a quote that opens the value, to the end of the
+  quote, `$(…)`, backtick or `${…}` opens (read in every quote it may start
+  in, as for an option below), to the end of the line that word ends on; otherwise through a quote that opens the value, to the end of the
   line it closes on (anything left open, to the end of the text); and after a
   long command-line option whose name's last part is a credential word
   (`--password VALUE`, `--api-key "VALUE"`, `--pass -VALUE`, `"--password"
@@ -1096,11 +1095,16 @@ column. Treat the dataset like the transcripts it mirrors.
   escapes in its name, and an `=` inside a quote) its whole shell argument:
   quoted and escaped parts, `$'…'`, `${…}`, `$((…))`, backticks, `$(…)` and
   `<(…)` included, line continuations read through, to the first space, `;`,
-  `|`, `&`, `<`, `>` or `)` outside them (inside a quote still open where the
-  value starts, read from the text's start, through that quote's end), with
-  the comments, here-documents,
+  `|`, `&`, `<`, `>` or `)` outside them, with the comments, here-documents,
   array elements and `case` statements in a `$(…)` read as bash, dash and zsh
-  read them (a file a redirection names is never `esac`);
+  read them (a file a redirection names is never `esac`). It is read in every
+  quote it may start in, and runs to the farthest of those ends: the quote a
+  scan of the whole text from its start, by the same rules, finds open there
+  (in a command string another shell runs, `sh -c "… --password \"a b\" …"`,
+  to that string's end); the quote just before the option as its word alone
+  reads it, where text the scan reads as shell may not be (prose, an odd
+  quote, a quote in a comment); and every quote where the scan cannot tell. A
+  quote it closes is put back after the marker;
   to the end of the text where shells read the code differently or its end
   cannot be told (a `#` right after an operator or an array's `(`, or
   starting a word in arithmetic, a comment ending in a backslash, an empty or expanded
