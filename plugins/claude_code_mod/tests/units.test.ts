@@ -774,17 +774,45 @@ test('continued and expanded flag credentials stay out of rows and diagnostics',
   }
 })
 
-test('inside a substitution, comments, case patterns and here-documents do not end the value', () => {
+test('inside a substitution, a comment, a case or a here-document runs the value to the end of the text', () => {
+  const stats = newStats()
+  const toEnd = [
+    'cli --password $(printf %s prefix # )\nprintf %s SecretSuffix) --verbose',
+    'cli --password $(printf %s SecretSuffix # (\n) --verbose',
+    'cli --password $(printf %s prefix \\\n# )\nprintf %s SecretSuffix) --verbose',
+    'cli --password $(printf %s x >#)\nprintf %s SecretSuffix) --verbose',
+    'cli --password $(case x in x) printf %s SecretSuffix;; esac) --verbose',
+    'cli --password $(case y in x) printf %s esac;; y) printf %s SecretSuffix;; esac) --verbose',
+    'cli --password "$(cat <<EOF\n) " SecretSuffix\nEOF\n)" --verbose',
+    'cli --password "$(cat <<EOF\ntext\\\nEOF\n) " SecretSuffix\nEOF\n)" --verbose',
+    "cli --password $(cat <<-'END'\n\t) SecretSuffix\n\tEND\n) --verbose",
+    'cli --password <(printf %s x # )\nprintf %s SecretSuffix) --verbose',
+    'cli --password $(cat <<EOF\nSecretSuffix with no end',
+  ]
+  for (const input of toEnd) expect(redactText(input, stats)).toBe('cli --password [REDACTED]')
+  // Substitutions without them are still delimited: what follows is kept.
+  const kept = [
+    'cli --password $(printf %s ${#SecretSuffix}) --verbose',
+    'cli --password $(echo $((1 + 2)) SecretSuffix) --verbose',
+    'cli --password $(printf "%s # )" SecretSuffix) --verbose',
+    'cli --password $(printf %s \\\n  SecretSuffix) --verbose',
+    'cli --password $(cat <<< SecretSuffix) --verbose',
+    'cli --password $(printf %s showcase SecretSuffix) --verbose',
+  ]
+  for (const input of kept) expect(redactText(input, stats)).toBe('cli --password [REDACTED] --verbose')
+})
+
+test('line continuations are read through: a split $\', ${, $(, << or case still counts', () => {
   const stats = newStats()
   const cases: [string, string][] = [
-    ['cli --password $(printf %s prefix # )\nprintf %s SecretSuffix) --verbose', 'cli --password [REDACTED] --verbose'],
-    ['cli --password $(printf %s SecretSuffix # (\n) --verbose', 'cli --password [REDACTED] --verbose'],
-    ['cli --password $(case x in x) printf %s SecretSuffix;; esac) --verbose', 'cli --password [REDACTED] --verbose'],
-    ['cli --password "$(cat <<EOF\n) " SecretSuffix\nEOF\n)" --verbose', 'cli --password [REDACTED] --verbose'],
-    ["cli --password $(cat <<-'END'\n\t) SecretSuffix\n\tEND\n) --verbose", 'cli --password [REDACTED] --verbose'],
-    ['cli --password $(printf %s ${#SecretSuffix}) --verbose', 'cli --password [REDACTED] --verbose'],
-    ['cli --password $(echo $((1 + 2)) SecretSuffix) --verbose', 'cli --password [REDACTED] --verbose'],
-    ['cli --password $(cat <<EOF\nSecretSuffix with no end', 'cli --password [REDACTED]'],
+    ["cli --password $\\\n'prefix\\' SecretSuffix' --verbose", 'cli --password [REDACTED] --verbose'],
+    ['cli --password $\\\n{LOGIN:-my SecretSuffix} --verbose', 'cli --password [REDACTED] --verbose'],
+    ['cli --password $\\\r\n{LOGIN:-my SecretSuffix} --verbose', 'cli --password [REDACTED] --verbose'],
+    ['cli --password $\\\n(printf %s SecretSuffix) --verbose', 'cli --password [REDACTED] --verbose'],
+    ['cli --password <\\\n(printf %s SecretSuffix) --verbose', 'cli --password [REDACTED] --verbose'],
+    ['cli --password $(ca\\\nse y in y) printf %s SecretSuffix;; esac) --verbose', 'cli --password [REDACTED]'],
+    ['cli --password $(cat <\\\n<EOF\n) SecretSuffix\nEOF\n) --verbose', 'cli --password [REDACTED]'],
+    ['cli --password $(cat <<\\\n< SecretSuffix) --verbose', 'cli --password [REDACTED] --verbose'],
   ]
   for (const [input, want] of cases) expect(redactText(input, stats)).toBe(want)
 })
@@ -812,6 +840,44 @@ test('a name=value credential runs on across line continuations and an unclosed 
   expect(redactText('{"password": "abc", "user": "bob"}\nnext', stats)).toBe('{"password": [REDACTED]\nnext')
 })
 
+test('a shell-style name=value runs through its whole shell word, to the end of the line it ends on', () => {
+  const stats = newStats()
+  const cases: [string, string][] = [
+    ['cli --password=prefix"Secret\nSuffix" --verbose\nnext line', 'cli --password=[REDACTED]\nnext line'],
+    ["cli --password=prefix'Secret\nSuffix' --verbose\nnext line", 'cli --password=[REDACTED]\nnext line'],
+    ['cli --password=$(printf %s prefix\nprintf %s SecretSuffix) --verbose\nnext line', 'cli --password=[REDACTED]\nnext line'],
+    ['PASSWORD=$(cat <<EOF\nSecretSuffix\nEOF\n) cli --verbose', 'PASSWORD=[REDACTED]'],
+    ['cli --from-literal=password=`printf %s prefix\nprintf %s SecretSuffix` --verbose\nnext line', 'cli --from-literal=password=[REDACTED]\nnext line'],
+    ['cli "--password=prefix\nSecretSuffix" --verbose\nnext line', 'cli "--password=[REDACTED]"\nnext line'],
+    ['cli `--password=prefix\nSecretSuffix` --verbose\nnext line', 'cli `--password=[REDACTED]`\nnext line'],
+    ['log {\\"cmd\\": \\"PASSWORD=abc\\"}\nnext line', 'log {\\"cmd\\": \\"PASSWORD=[REDACTED]\nnext line'],
+  ]
+  for (const [input, want] of cases) {
+    expect(redactText(input, stats)).toBe(want)
+    expect(redactText(want, stats)).toBe(want)
+  }
+  // A name: value, or name = value with spaces (code, INI), keeps to its line
+  // unless the value opens with a quote.
+  expect(redactText("password: it's here\nnext line", stats)).toBe('password: [REDACTED]\nnext line')
+  expect(redactText('key = (hi << 8) | lo\nnext line', stats)).toBe('key = [REDACTED]\nnext line')
+  expect(redactText('token=abc def\nnext line', stats)).toBe('token=[REDACTED]\nnext line')
+})
+
+test('a credential option inside a quote that opens just before it loses everything to that quote\'s end', () => {
+  const stats = newStats()
+  const cases: [string, string][] = [
+    ['cli "--password Secret\nSuffix" --verbose', 'cli "--password [REDACTED]" --verbose'],
+    ["cli '--password Secret Suffix' --verbose", "cli '--password [REDACTED]' --verbose"],
+    ['cli "--password Secret" --verbose', 'cli "--password [REDACTED]" --verbose'],
+    ['cli "--password Secret"Suffix --verbose', 'cli "--password [REDACTED]" --verbose'],
+    ['cli \\"--password Secret\\" --verbose', 'cli \\"--password [REDACTED] --verbose'],
+  ]
+  for (const [input, want] of cases) {
+    expect(redactText(input, stats)).toBe(want)
+    expect(redactText(want, stats)).toBe(want)
+  }
+})
+
 test('option shapes by credential names: no value is kept (198 inputs)', () => {
   const names = ['password', 'DB_PASSWORD', 'API_KEY', 'apiKey', 'token', 'NPM_TOKEN', 'client_secret', 'secret', 'passphrase', 'auth_token', 'private_key']
   const shapes = ['--opt=@N=@V', '--opt=@N:@V', '--opt= @N=@V', '--opt:@N=@V', '-o=@N=@V', '-Dfoo=@N=@V', '@N=@V', 'export @N=@V', '--@N=@V',
@@ -828,19 +894,45 @@ test('option shapes by credential names: no value is kept (198 inputs)', () => {
   expect(kept).toEqual([])
 })
 
-test('substitution-held credentials stay out of rows and diagnostics', () => {
-  const commands = [
+test('substitution-held credentials stay out of rows, errors, requests, dead letters and diagnostics', () => {
+  const leaks = [
     'cli --password $(printf %s prefix # )\nprintf %s SecretSuffix) --verbose',
+    'cli --password $(printf %s prefix \\\n# )\nprintf %s SecretSuffix) --verbose',
     'cli --password $(case x in x) printf %s SecretSuffix;; esac) --verbose',
+    'cli --password $(case y in x) printf %s esac;; y) printf %s SecretSuffix;; esac) --verbose',
     'cli --password "$(cat <<EOF\n) " SecretSuffix\nEOF\n)" --verbose',
+    'cli --password "$(cat <<EOF\ntext\\\nEOF\n) " SecretSuffix\nEOF\n)" --verbose',
+    'cli --password $(ca\\\nse y in y) printf %s SecretSuffix;; esac) --verbose',
+    'cli --password $(cat <\\\n<EOF\n) SecretSuffix\nEOF\n) --verbose',
     'cli --password=\\\nSecretSuffix --verbose',
+    'cli --password=prefix"Secret\nSuffix" --verbose',
+    'cli --password=$(printf %s prefix\nprintf %s SecretSuffix) --verbose',
+    'cli "--password=prefix\nSecretSuffix" --verbose',
+    'PASSWORD=$(cat <<EOF\nSecretSuffix\nEOF\n) cli --verbose',
   ]
-  for (const command of commands) {
-    const row = buildRow({ eventType: 'TOOL_STARTING', timestampMs: 0, eventId: 'e1', agent: 'coding-agent', sessionId: 's1',
+  // Delimited values: the argument after the closing boundary is kept.
+  const delimited = [
+    "cli --password $\\\n'prefix\\' SecretSuffix' --verbose",
+    'cli --password $\\\n{LOGIN:-my SecretSuffix} --verbose',
+    'cli --password $(printf %s \\\n  SecretSuffix) --verbose',
+    'cli --password $(cat <<< SecretSuffix) --verbose',
+    'cli "--password Secret\nSuffix" --verbose',
+  ]
+  for (const command of [...leaks, ...delimited]) {
+    const { row } = buildRow({ eventType: 'TOOL_COMPLETED', timestampMs: 0, eventId: 'e1', agent: 'coding-agent', sessionId: 's1',
       invocationId: 'i1', userId: 'dev', traceId: null, spanId: null, parentSpanId: null,
-      content: { tool: 'Bash', args: { command } }, attributes: {}, maxPayloadChars: 16384 }).row
-    expect(JSON.stringify(row)).not.toContain('SecretSuffix')
-    expect(redactDiagnostic(`command failed: ${command}`, 1000)).not.toContain('SecretSuffix')
-    expect(redactText(redactText(command, newStats()), newStats())).not.toContain('SecretSuffix')
+      content: { tool: 'Bash', args: { command } }, attributes: {}, status: 'ERROR', errorMessage: `command failed: ${command}`,
+      maxPayloadChars: 16384 })
+    const [file] = encodeLines([{ v: 1, kind: 'retry', reason: 'r', attempts: 1, failed_at: 'f', table: 't', row }])
+    const paths = [
+      JSON.stringify(row.content),
+      row.error_message ?? '',
+      insertAllBody([row]),
+      JSON.stringify(parseFile(file ?? '').lines),
+      redactDiagnostic(`command failed: ${command}`, 1000),
+      redactText(redactText(command, newStats()), newStats()),
+    ]
+    for (const text of paths) expect(text).not.toContain('Suffix')
+    if (delimited.includes(command)) for (const text of paths) expect(text).toContain('--verbose')
   }
 })
