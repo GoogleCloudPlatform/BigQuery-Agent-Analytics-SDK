@@ -392,13 +392,15 @@ def _is_legacy_model_ref(ref: str) -> bool:
 
 
 def _sanitize_categories(categories_str: str) -> str:
-  """Escapes category text for safe embedding in SQL string literals.
+  """Escapes category text to sit inside the grouping prompt's literal.
 
-  Doubles single quotes and strips backslashes to prevent SQL
-  injection or query breakage when custom category labels are
-  formatted into ``CONCAT(...)`` prompt text.
+  Custom category labels are formatted into the ``'Categories: ...'``
+  literal of both semantic-grouping queries. GoogleSQL reads a doubled
+  quote as two adjacent literals, a syntax error, so this delegates to
+  ``evaluators._escape_sql_quoted``: backslashes, then single quotes,
+  then control characters, all C-style.
   """
-  return categories_str.replace("\\", "\\\\").replace("'", "''")
+  return _escape_sql_quoted(categories_str)
 
 
 # Unicode categories a BigQuery table name may use besides letters (L),
