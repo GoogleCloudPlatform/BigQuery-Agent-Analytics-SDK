@@ -72,6 +72,8 @@ from pydantic import Field
 from ._telemetry import LabeledBigQueryClient
 from ._telemetry import make_bq_client
 from ._telemetry import with_sdk_labels
+from .client import _validate_client_dataset_id
+from .client import _validate_client_project_id
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -421,7 +423,39 @@ Provide your analysis as JSON.
     return {"raw_analysis": result}
 
 
-class EmbeddingSearchClient:
+class _CheckedProjectAndDataset:
+  """``project_id`` and ``dataset_id``, checked on every assignment.
+
+  ``EmbeddingSearchClient``, ``AnomalyDetector`` and ``BatchEvaluator``
+  format both values into backtick-quoted ``{project}.{dataset}`` table
+  and model paths in every query they send. Every assignment, the
+  constructor's included, runs the checks ``Client`` runs, so a value
+  that would leave the quoted path raises ``ValueError`` and the object
+  keeps its current value.
+  """
+
+  @property
+  def project_id(self) -> str:
+    """Project formatted into this object's ``{project}.{dataset}`` paths."""
+    return self._project_id
+
+  @project_id.setter
+  def project_id(self, project_id: str) -> None:
+    _validate_client_project_id(project_id)
+    self._project_id = project_id
+
+  @property
+  def dataset_id(self) -> str:
+    """Dataset formatted into this object's ``{project}.{dataset}`` paths."""
+    return self._dataset_id
+
+  @dataset_id.setter
+  def dataset_id(self, dataset_id: str) -> None:
+    _validate_client_dataset_id(dataset_id)
+    self._dataset_id = dataset_id
+
+
+class EmbeddingSearchClient(_CheckedProjectAndDataset):
   """Client for semantic search using BigQuery embeddings.
 
   Provides vector similarity search over pre-computed embeddings
@@ -528,6 +562,10 @@ class EmbeddingSearchClient:
             is used.  Pass ``None`` (default) to use ``AI.EMBED``.
         embedding_endpoint: Vertex AI endpoint for ``AI.EMBED``
             (default ``text-embedding-005``).
+
+    Raises:
+        ValueError: If *project_id* or *dataset_id* fails the project or
+            dataset ID check that ``Client`` runs.
     """
     self.project_id = project_id
     self.dataset_id = dataset_id
@@ -692,7 +730,7 @@ class EmbeddingSearchClient:
       return False
 
 
-class AnomalyDetector:
+class AnomalyDetector(_CheckedProjectAndDataset):
   """Detects anomalies in agent behavior using BigQuery AI/ML.
 
   Supports two detection modes:
@@ -885,6 +923,10 @@ class AnomalyDetector:
             ``ML.DETECT_ANOMALIES`` path with a pre-trained ARIMA_PLUS
             model for latency detection.  Defaults to False (uses
             ``AI.DETECT_ANOMALIES`` with built-in TimesFM).
+
+    Raises:
+        ValueError: If *project_id* or *dataset_id* fails the project or
+            dataset ID check that ``Client`` runs.
     """
     self.project_id = project_id
     self.dataset_id = dataset_id
@@ -1301,7 +1343,7 @@ class AnomalyDetector:
       return []
 
 
-class BatchEvaluator:
+class BatchEvaluator(_CheckedProjectAndDataset):
   """Batch evaluation of sessions using BigQuery AI.GENERATE.
 
   Leverages BigQuery's high-throughput AI.GENERATE for
@@ -1378,6 +1420,10 @@ class BatchEvaluator:
             backward compatibility.
         endpoint: AI.GENERATE endpoint (default
             ``gemini-2.5-flash``).
+
+    Raises:
+        ValueError: If *project_id* or *dataset_id* fails the project or
+            dataset ID check that ``Client`` runs.
     """
     self.project_id = project_id
     self.dataset_id = dataset_id
