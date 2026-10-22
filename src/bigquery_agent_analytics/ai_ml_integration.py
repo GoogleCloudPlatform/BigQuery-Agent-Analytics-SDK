@@ -77,6 +77,7 @@ from ._telemetry import with_sdk_labels
 from .client import _validate_client_dataset_id
 from .client import _validate_client_project_id
 from .evaluators import _escape_sql_quoted
+from .feedback import _validate_source_table
 from .feedback import _validate_table_name
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
@@ -506,8 +507,9 @@ class _CheckedTableId:
 
   ``AnomalyDetector`` and ``BatchEvaluator`` format it into the
   backtick-quoted ``{project}.{dataset}.{table}`` path of the queries
-  they send. Every assignment, the constructor's included, runs drift's
-  table-name check, so a value that is not one table name raises
+  they send, which only read it. Every assignment, the constructor's
+  included, checks that it is one table name or one wildcard read (one
+  table name and a single trailing ``*``), so any other value raises
   ``ValueError`` and the object keeps its current table.
   """
 
@@ -518,7 +520,7 @@ class _CheckedTableId:
 
   @table_id.setter
   def table_id(self, table_id: str) -> None:
-    _validate_table_name(table_id, "table_id")
+    _validate_source_table(table_id, "table_id")
     self._table_id = table_id
 
 
@@ -633,7 +635,8 @@ class EmbeddingSearchClient(_CheckedProjectAndDataset):
     Raises:
         ValueError: If *project_id* or *dataset_id* fails the project or
             dataset ID check that ``Client`` runs, or *embeddings_table*
-            or *source_table* is not one table name.
+            or *source_table* is neither one table name nor one wildcard
+            read.
     """
     self.project_id = project_id
     self.dataset_id = dataset_id
@@ -648,16 +651,17 @@ class EmbeddingSearchClient(_CheckedProjectAndDataset):
   def embeddings_table(self) -> str:
     """Table that ``search`` reads.
 
-    ``build_embeddings_index`` writes ``{table}_indexed``. Every
-    assignment, the constructor's included, runs drift's table-name check,
-    so a value that is not one table name raises ``ValueError`` and the
-    client keeps its current table.
+    Every assignment, the constructor's included, checks that it is one
+    table name or one wildcard read, so any other value raises
+    ``ValueError`` and the client keeps its current table.
+    ``build_embeddings_index`` writes ``{table}_indexed``, so it refuses a
+    wildcard.
     """
     return self._embeddings_table
 
   @embeddings_table.setter
   def embeddings_table(self, embeddings_table: str) -> None:
-    _validate_table_name(embeddings_table, "embeddings_table")
+    _validate_source_table(embeddings_table, "embeddings_table")
     self._embeddings_table = embeddings_table
 
   @property
@@ -667,7 +671,7 @@ class EmbeddingSearchClient(_CheckedProjectAndDataset):
 
   @source_table.setter
   def source_table(self, source_table: str) -> None:
-    _validate_table_name(source_table, "source_table")
+    _validate_source_table(source_table, "source_table")
     self._source_table = source_table
 
   @property
@@ -780,7 +784,13 @@ class EmbeddingSearchClient(_CheckedProjectAndDataset):
 
     Returns:
         True if successful, False otherwise.
+
+    Raises:
+        ValueError: If ``embeddings_table`` is a wildcard: the index is
+            written to ``{embeddings_table}_indexed``, which must be one
+            table name. Checked before any query.
     """
+    _validate_table_name(self.embeddings_table, "embeddings_table")
     if self.embedding_model and self.embedding_model.count(".") >= 2:
       query = self._LEGACY_INDEX_EMBEDDINGS_QUERY.format(
           project=self.project_id,
@@ -1020,8 +1030,8 @@ class AnomalyDetector(_CheckedProjectAndDataset, _CheckedTableId):
 
     Raises:
         ValueError: If *project_id* or *dataset_id* fails the project or
-            dataset ID check that ``Client`` runs, or *table_id* is not
-            one table name.
+            dataset ID check that ``Client`` runs, or *table_id* is neither
+            one table name nor one wildcard read.
     """
     self.project_id = project_id
     self.dataset_id = dataset_id
@@ -1518,8 +1528,8 @@ class BatchEvaluator(_CheckedProjectAndDataset, _CheckedTableId):
 
     Raises:
         ValueError: If *project_id* or *dataset_id* fails the project or
-            dataset ID check that ``Client`` runs, or *table_id* is not
-            one table name.
+            dataset ID check that ``Client`` runs, or *table_id* is neither
+            one table name nor one wildcard read.
     """
     self.project_id = project_id
     self.dataset_id = dataset_id

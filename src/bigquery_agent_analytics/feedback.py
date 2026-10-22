@@ -418,18 +418,45 @@ def _validate_table_name(table: Any, label: str) -> None:
   names another dataset, a backslash, a line break) is refused before a
   query is built. *label* names the value in the error.
   """
-  if (
-      not isinstance(table, str)
-      or not table
-      or any(
-          unicodedata.category(char)[0] not in "LMN"
-          and unicodedata.category(char) not in _TABLE_NAME_EXTRA_CATEGORIES
-          for char in table
-      )
-  ):
+  if not _is_table_name(table):
     raise ValueError(
         f"{label} must be one table name in the client's dataset,"
         " using only letters, marks, numbers, '_', '-' or spaces; got"
+        f" {table!r}"
+    )
+
+
+def _is_table_name(table: Any) -> bool:
+  """Whether *table* is one table name, as ``_validate_table_name`` checks."""
+  return (
+      isinstance(table, str)
+      and bool(table)
+      and all(
+          unicodedata.category(char)[0] in "LMN"
+          or unicodedata.category(char) in _TABLE_NAME_EXTRA_CATEGORIES
+          for char in table
+      )
+  )
+
+
+def _validate_source_table(table: Any, label: str) -> None:
+  """Raises ``ValueError`` unless *table* is one table a query may read.
+
+  That is one table name, or a wildcard read: one table name followed by
+  a single trailing ``*``, such as ``agent_events_*``, which BigQuery reads
+  as every table in the dataset whose name starts with ``agent_events_``.
+  The name before the ``*`` gets the table-name check, so a backtick, dot,
+  quote or line break is still refused, and so is a ``*`` anywhere else.
+  Tables a query writes keep ``_validate_table_name``, and so do drift's
+  and question distribution's events tables. *label* names the value in
+  the error.
+  """
+  name = table[:-1] if isinstance(table, str) and table.endswith("*") else table
+  if not _is_table_name(name):
+    raise ValueError(
+        f"{label} must be one table name in the client's dataset, or one"
+        " followed by a single trailing '*' to read a wildcard table, using"
+        " only letters, marks, numbers, '_', '-' or spaces; got"
         f" {table!r}"
     )
 

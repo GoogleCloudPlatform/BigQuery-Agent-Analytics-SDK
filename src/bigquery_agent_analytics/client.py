@@ -92,7 +92,7 @@ from .evaluators import _render_ai_generate_judge_query as render_ai_generate_ju
 from .evaluators import _split_judge_prompt_template as split_judge_prompt_template
 from .evaluators import DEFAULT_ENDPOINT
 from .evaluators import LLMAsJudge
-from .feedback import _validate_table_name
+from .feedback import _validate_source_table
 from .feedback import AnalysisConfig
 from .feedback import compute_drift
 from .feedback import compute_question_distribution
@@ -586,7 +586,8 @@ class Client:
           (``example.com:my-project``).
       dataset_id: BigQuery dataset containing agent events.
       table_id: Table name for agent events: one table name in
-          *dataset_id*. Pass ``"auto"`` to auto-detect (tries
+          *dataset_id*, or a wildcard read over sharded tables such as
+          ``agent_events_*``. Pass ``"auto"`` to auto-detect (tries
           ``agent_events`` first, then ``agent_events_v2``).
       location: BigQuery dataset location. When *None* (default),
           the BigQuery client uses its own default (typically ``US``).
@@ -608,9 +609,9 @@ class Client:
 
   Raises:
       ValueError: If *project_id* or *dataset_id* is not one project or
-          dataset ID, or *table_id* is neither ``"auto"`` nor one table
-          name. Checked before any query, including table auto-detection
-          and schema verification.
+          dataset ID, or *table_id* is neither ``"auto"``, one table
+          name nor one wildcard read. Checked before any query, including
+          table auto-detection and schema verification.
   """
 
   def __init__(
@@ -640,8 +641,8 @@ class Client:
     self.endpoint = endpoint or DEFAULT_ENDPOINT
     self.connection_id = connection_id
 
-    # The table_id setter runs drift's table-name check; schema
-    # verification sends the table only as a query parameter.
+    # The table_id setter checks the table; schema verification sends it
+    # only as a query parameter.
     if table_id == "auto":
       self.table_id = self._detect_table()
     else:
@@ -687,17 +688,19 @@ class Client:
     """Events table formatted into queries' ``{project}.{dataset}.{table}``.
 
     The BigQuery Remote Function takes it from the request's
-    ``userDefinedContext``. Every assignment, the constructor's included,
-    runs drift's table-name check first, so a value that is not one table
-    name (a backtick that closes the quoted path, a dot that names another
-    dataset, a quote, a backslash, a line break) raises ``ValueError`` and
-    the client keeps its current table.
+    ``userDefinedContext``. Queries only read it, so it may be one table
+    name or a wildcard read (one table name and a single trailing ``*``).
+    Every assignment, the constructor's included, checks that first, so a
+    value such as a backtick that closes the quoted path, a dot that names
+    another dataset, a quote, a backslash or a line break raises
+    ``ValueError`` and the client keeps its current table. Drift and deep
+    analysis still refuse a wildcard events table.
     """
     return self._table_id
 
   @table_id.setter
   def table_id(self, table_id: str) -> None:
-    _validate_table_name(table_id, "table_id")
+    _validate_source_table(table_id, "table_id")
     self._table_id = table_id
 
   @property
@@ -810,11 +813,11 @@ class Client:
     """The events table a method reads: *dataset*, else ``table_id``.
 
     Callers format it into ``FROM `{project}.{dataset}.{table}```, so an
-    override gets drift's table-name check and raises ``ValueError``
-    before any query unless it is one table name.
+    override is checked like ``table_id`` and raises ``ValueError`` before
+    any query unless it is one table name or one wildcard read.
     """
     table = dataset or self.table_id
-    _validate_table_name(table, "events table (dataset or table_id)")
+    _validate_source_table(table, "events table (dataset or table_id)")
     return table
 
   def _read_rows(
@@ -2329,7 +2332,8 @@ class Client:
         evaluator: A SystemEvaluator, PerformanceEvaluator, or LLMAsJudge.
         filters: Optional trace filters.
         dataset: Optional events table override: one table name in this
-            client's dataset. Defaults to the client's ``table_id``.
+            client's dataset, or a wildcard read such as
+            ``agent_events_*``. Defaults to the client's ``table_id``.
         strict: When ``True``, sessions with unparseable or
             empty judge output are marked as failed instead of
             silently passing.  Affected sessions get
@@ -2351,8 +2355,9 @@ class Client:
         ``parse_error=True``.
 
     Raises:
-        ValueError: If *dataset* is not one BigQuery table name, for
-            example a dotted path or a name containing a backtick.
+        ValueError: If *dataset* is neither one BigQuery table name nor
+            one wildcard read, for example a dotted path or a name
+            containing a backtick.
     """
     if (
         isinstance(max_concurrency, bool)
@@ -2924,7 +2929,8 @@ class Client:
             definitions and allowed categories.
         filters: Optional trace filters.
         dataset: Optional events table override: one table name in this
-            client's dataset. Defaults to the client's ``table_id``.
+            client's dataset, or a wildcard read such as
+            ``agent_events_*``. Defaults to the client's ``table_id``.
         per_session_context: Optional trusted judge context keyed by an exact
             :class:`ResolvedTraceSelector` or, for an unambiguous evaluated
             population, by legacy session-id string. A non-empty mapping
@@ -2951,8 +2957,9 @@ class Client:
         category distributions.
 
     Raises:
-        ValueError: If *dataset* is not one BigQuery table name, for
-            example a dotted path or a name containing a backtick.
+        ValueError: If *dataset* is neither one BigQuery table name nor
+            one wildcard read, for example a dotted path or a name
+            containing a backtick.
     """
     table = self._events_table(dataset)
     filt = filters or TraceFilter()
@@ -3785,15 +3792,17 @@ class Client:
         config: Insights configuration. Defaults to
             analyzing up to 50 recent sessions.
         dataset: Optional events table override: one table name in this
-            client's dataset. Defaults to the client's ``table_id``.
+            client's dataset, or a wildcard read such as
+            ``agent_events_*``. Defaults to the client's ``table_id``.
         text_model: Optional BQML text model.
 
     Returns:
         InsightsReport with facets, analysis, and summary.
 
     Raises:
-        ValueError: If *dataset* is not one BigQuery table name, for
-            example a dotted path or a name containing a backtick.
+        ValueError: If *dataset* is neither one BigQuery table name nor
+            one wildcard read, for example a dotted path or a name
+            containing a backtick.
     """
     return _run_sync(
         self._run_insights(
