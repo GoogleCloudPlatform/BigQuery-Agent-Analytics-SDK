@@ -1091,15 +1091,17 @@ column. Treat the dataset like the transcripts it mirrors.
   line it closes on (anything left open, to the end of the text); and after a
   long command-line option whose name's last part is a credential word
   (`--password VALUE`, `--api-key "VALUE"`, `--pass -VALUE`, `"--password"
-  VALUE`, the value after a line continuation too) its whole shell argument:
+  VALUE`, the value after a line continuation too, and line continuations,
+  quotes and backslashes in the name read through) its whole shell argument:
   quoted and escaped parts, `$'…'`, `${…}`, `$((…))`, backticks, `$(…)` and
   `<(…)` included, line continuations read through, to the first space, `;`,
   `|`, `&`, `<`, `>` or `)` outside them (inside a quote still open where the
-  value starts, through that quote's end), with the comments, here-documents
-  and `case` statements in a `$(…)` read as bash, dash and zsh read them;
+  value starts, through that quote's end), with the comments, here-documents,
+  array elements and `case` statements in a `$(…)` read as bash, dash and zsh
+  read them (a file a redirection names is never `esac`);
   to the end of the text where shells read the code differently or its end
-  cannot be told (a `#` right after an operator or starting a word in
-  arithmetic, a comment ending in a backslash, an empty or expanded
+  cannot be told (a `#` right after an operator or an array's `(`, or
+  starting a word in arithmetic, a comment ending in a backslash, an empty or expanded
   here-document delimiter, a body with no exact delimiter line, a continued
   line in an unquoted body, a body still due when its code ends, a `case`
   with an expansion in its subject, zsh's `{` form or a parenthesis in a

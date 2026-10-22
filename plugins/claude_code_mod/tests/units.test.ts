@@ -808,6 +808,20 @@ test('inside a substitution, comments, here-documents and case statements are re
     'cli --password $(case a in a) cat <<EOF;;\nSecretSuffix)\nEOF\nesac) --verbose',
     'cli --password $(ca\\\nse a i\\\nn a) printf %s SecretSuffix;; esac) --verbose',
     'cli --password $(cat <<EOF\nEOF) SecretSuffix\nEOF\n) --verbose',
+    // An array's elements, with their comments.
+    'cli --password $(a=( # )\nx\n); printf %s SecretSuffix) --verbose\necho ordinary',
+    'cli --password $(a=(x # )\n); printf %s SecretSuffix) --verbose',
+    'cli --password $(a=(y); a+=( # )\nx\n); printf %s SecretSuffix) --verbose',
+    'cli --password $(declare -a a=( # )\nx\n); printf %s SecretSuffix) --verbose',
+    'cli --password $(a=( [1]=x # )\n); printf %s SecretSuffix) --verbose',
+    'cli --password $(a=\\\n( # )\nx\n); printf %s SecretSuffix) --verbose',
+    'cli --password $(a=( (x) "#)" ); printf %s SecretSuffix) --verbose',
+    // A redirection names a file, never `esac`.
+    'cli --password $(case y in (x) <esac;; y) printf %s SecretSuffix;; esac) --verbose\necho ordinary',
+    'cli --password $(case y in (x) cat <esac;; y) printf %s SecretSuffix;; esac) --verbose',
+    'cli --password $(case y in (x) >/dev/null esac;; y) printf %s SecretSuffix;; esac) --verbose',
+    'cli --password $(case y in (x) >|esac;; y) printf %s SecretSuffix;; esac) --verbose',
+    'cli --password $(case y in x) 2>&esac;; y) printf %s SecretSuffix;; esac) --verbose',
   ]
   for (const input of kept) {
     const tail = input.endsWith('\necho ordinary') ? '\necho ordinary' : ''
@@ -830,6 +844,8 @@ test('inside a substitution, comments, here-documents and case statements are re
     'cli --password $(cat <<EOF\nSecretSuffix with no end',
     'cli --password $(cat <<EOF\nSecretSuffix\nEOF) --verbose',
     'cli --password $(printf %s $((1 # ))\n)) SecretSuffix) --verbose',
+    'cli --password $(a=(# )\nx\n); printf %s SecretSuffix) --verbose',
+    'cli --password $(a=( x;# )\n); printf %s SecretSuffix) --verbose',
   ]
   for (const input of toEnd) expect(redactText(input, stats)).toBe('cli --password [REDACTED]')
 })
@@ -931,6 +947,39 @@ test('a quote that closes around a credential name leaves the value outside it',
   }
 })
 
+test('line continuations, quotes and backslashes inside an option name are read through', () => {
+  const stats = newStats()
+  const cases: [string, string][] = [
+    ['cli --pass\\\nword SecretSuffix --verbose', 'cli --pass\\\nword [REDACTED] --verbose'],
+    ['cli --pa\\\nss\\\nword SecretSuffix --verbose', 'cli --pa\\\nss\\\nword [REDACTED] --verbose'],
+    ['cli -\\\n-password SecretSuffix --verbose', 'cli -\\\n-password [REDACTED] --verbose'],
+    ['cli --\\\npassword SecretSuffix --verbose', 'cli --\\\npassword [REDACTED] --verbose'],
+    ['cli --pass\\\r\nword SecretSuffix --verbose', 'cli --pass\\\r\nword [REDACTED] --verbose'],
+    // A continuation also separates an option from its value (as the shells
+    // do not), so `word=…` goes as the value of `--pass`, and `=…` of `--password`.
+    ['cli --pass\\\nword=SecretSuffix --verbose\nnext', 'cli --pass\\\n[REDACTED]\nnext'],
+    ['cli --password\\\n=SecretSuffix --verbose\nnext', 'cli --password\\\n[REDACTED]\nnext'],
+    ['PASS\\\nWORD=SecretSuffix cli\nnext', 'PASS\\\nWORD=[REDACTED]\nnext'],
+    // Quotes and backslashes the shell removes from a name.
+    ['cli "--pass"word SecretSuffix --verbose', 'cli "--pass"word [REDACTED] --verbose'],
+    ['cli --pass""word SecretSuffix --verbose', 'cli --pass""word [REDACTED] --verbose'],
+    ['cli --pa\\ssword SecretSuffix --verbose', 'cli --pa\\ssword [REDACTED] --verbose'],
+    ['cli -\\-password SecretSuffix --verbose', 'cli -\\-password [REDACTED] --verbose'],
+    ['cli "-"-password SecretSuffix --verbose', 'cli "-"-password [REDACTED] --verbose'],
+    ["cli $'--pass'word SecretSuffix --verbose", "cli $'--pass'word [REDACTED] --verbose"],
+    ["cli --'pass'word=SecretSuffix --verbose\nnext", "cli --'pass'word=[REDACTED]\nnext"],
+    ['cli "--api"-key=SecretSuffix --verbose\nnext', 'cli "--api"-key=[REDACTED]\nnext'],
+    ['cli "--api"-key SecretSuffix --verbose\nnext', 'cli "--api"-key [REDACTED] --verbose\nnext'],
+    // Not an option: kept.
+    ['cli "--pass"word-stdin host', 'cli "--pass"word-stdin host'],
+    ['cli "--max"-tokens 1024', 'cli "--max"-tokens 1024'],
+  ]
+  for (const [input, want] of cases) {
+    expect(redactText(input, stats)).toBe(want)
+    expect(redactText(want, stats)).toBe(want)
+  }
+})
+
 test('a credential option inside a quote that opens just before it loses everything to that quote\'s end', () => {
   const stats = newStats()
   const cases: [string, string][] = [
@@ -985,6 +1034,14 @@ test('substitution-held credentials stay out of rows, errors, requests, dead let
     ['cli --password=prefix"Secret\nSuffix" --verbose\necho ordinary', ['echo ordinary']],
     ['cli --password=$(printf %s prefix\nprintf %s SecretSuffix) --verbose\necho ordinary', ['echo ordinary']],
     ['PASSWORD=$(cat <<EOF\nSecretSuffix\nEOF\n) cli --verbose\necho ordinary', ['echo ordinary']],
+    ['cli --password $(a=( # )\nx\n); printf %s SecretSuffix) --verbose\necho ordinary', ['--verbose', 'echo ordinary']],
+    ['cli --password=$(a=( # )\nx\n)\nprintf %s SecretSuffix) --verbose\necho ordinary', ['echo ordinary']],
+    ['cli --password prefix$(a=( # )\nx\n); printf %s SecretSuffix)suffix --verbose\necho ordinary', ['--verbose', 'echo ordinary']],
+    ['cli --password $(case y in (x) <esac;; y) printf %s SecretSuffix;; esac) --verbose\necho ordinary', ['--verbose', 'echo ordinary']],
+    ['cli --pass\\\nword SecretSuffix --verbose\necho ordinary', ['--verbose', 'echo ordinary']],
+    ['cli --pass\\\nword=SecretSuffix --verbose\necho ordinary', ['echo ordinary']],
+    ['cli "--pass"word SecretSuffix --verbose\necho ordinary', ['--verbose', 'echo ordinary']],
+    ["cli --'pass'word=SecretSuffix --verbose\necho ordinary", ['echo ordinary']],
     ['cli --password=\\\nSecretSuffix --verbose', []],
     ['cli --password "$(cat <<EOF\ntext\\\nEOF\n) " SecretSuffix\nEOF\n)" --verbose', []],
     ['cli --password $(printf %s A;#x )\nprintf %s SecretSuffix) --verbose', []],

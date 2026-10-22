@@ -214,8 +214,8 @@ function redactUrls(text: string, stats: SanitizeStats): string {
 // A name and a separator: `name: value` and `name=value` (a header, a YAML or
 // .env line, a JSON key, an assignment, a command-line flag such as
 // `--password=value` or `-Dssl.password=value`), the name quoted or not, its
-// quote escaped or not.
-const NAMED_VALUE = /(^|[^A-Za-z0-9_.-])-{0,2}([A-Za-z_][A-Za-z0-9_.-]{0,99})(?:\\*["'])?[ \t]*([:=])[ \t]*/g
+// quote escaped or not, line continuations in and after it read through.
+const NAMED_VALUE = /(^|[^A-Za-z0-9_.-])(?:-(?:\\\r?\n)*){0,2}([A-Za-z_](?:(?:\\\r?\n)*[A-Za-z0-9_.-]){0,99})(?:\\*["'])?(?:[ \t]|\\\r?\n)*([:=])[ \t]*/g
 
 // After a credential name, the value goes: to the end of its line, whatever is
 // in it (quotes, brackets and redaction markers are not trusted to end it),
@@ -250,11 +250,12 @@ function namedValueEnd(text: string, start: number): number {
 }
 
 // The quote open where a match's value starts: one just before the match
-// (`"--password=…`, `'--password …`) unless it is escaped, then as the quotes
-// in `between`, the text between the name and the value, leave it: they can
-// close it (`"--password"=…`) or open one (`--password"=…`).
+// (`"--password=…`, `'--password …`) unless it is escaped or follows a word's
+// piece, which it closes (`"--api"-key=…`), then as the quotes in `between`,
+// the text between the name and the value, leave it: they can close it
+// (`"--password"=…`) or open one (`--password"=…`).
 function quoteAtValue(text: string, m: RegExpExecArray, between: string): string {
-  let quote = /^["'`]$/.test(m[1] as string) && text[m.index - 1] !== '\\' ? (m[1] as string) : ''
+  let quote = /^["'`]$/.test(m[1] as string) && !/[\\A-Za-z0-9_."'`]/.test(text[m.index - 1] ?? '') ? (m[1] as string) : ''
   for (let k = 0; k < between.length; k += 1) {
     const q = between[k] as string
     if (q === '\\' && quote !== "'") k += 1
@@ -263,6 +264,9 @@ function quoteAtValue(text: string, m: RegExpExecArray, between: string): string
   return quote
 }
 
+// A name as the shell reads it, its line continuations removed.
+const joined = (name: string): string => name.replace(/\\\r?\n/g, '')
+
 function redactNamedValues(text: string, stats: SanitizeStats): string {
   NAMED_VALUE.lastIndex = 0
   let out = ''
@@ -270,7 +274,7 @@ function redactNamedValues(text: string, stats: SanitizeStats): string {
   for (let m = NAMED_VALUE.exec(text); m !== null; m = NAMED_VALUE.exec(text)) {
     const name = m[2] as string
     const separator = m[0].lastIndexOf(m[3] as string)
-    if (!isSensitiveKey(name)) {
+    if (!isSensitiveKey(joined(name))) {
       // Resume at the separator: it can be the boundary before the next name
       // (`--from-literal=password=…`, `env: NAME=…`).
       NAMED_VALUE.lastIndex = m.index + separator
@@ -306,12 +310,12 @@ function redactNamedValues(text: string, stats: SanitizeStats): string {
 
 // A long command-line option and its value after a space (`--password VALUE`,
 // `--api-key "VALUE"`, `--pass -VALUE`, `"--password" VALUE`), or after line
-// continuations (`--password \` and the value on the next line): the whole
-// shell argument. The option's name is a credential's and its last part a
-// credential word, so `--password-stdin host`, `--token-file path` and
-// `--max-tokens 1024` keep theirs. A value that starts with `--` is the next
-// option, not a value.
-const FLAG_VALUE = /(^|[^A-Za-z0-9_.-])--([A-Za-z][A-Za-z0-9_.-]{0,99})(["']?)(?:[ \t]|\\\r?\n)+(?![ \t]|\\\r?\n)(?!--)(?=\S)/g
+// continuations (`--password \` and the value on the next line; in the
+// option's name too, `--pass\` and `word VALUE`): the whole shell argument.
+// The option's name is a credential's and its last part a credential word,
+// so `--password-stdin host`, `--token-file path` and `--max-tokens 1024`
+// keep theirs. A value that starts with `--` is the next option, not a value.
+const FLAG_VALUE = /(^|[^A-Za-z0-9_.-])-(?:\\\r?\n)*-(?:\\\r?\n)*([A-Za-z](?:(?:\\\r?\n)*[A-Za-z0-9_.-]){0,99})(["']?)(?:[ \t]|\\\r?\n)+(?![ \t]|\\\r?\n)(?!--)(?=\S)/g
 // A value that is one redaction marker and nothing else.
 const WHOLE_MARKER = /^\[REDACTED(?::[a-z-]+)?\]$/
 
@@ -322,6 +326,17 @@ function afterContinuations(text: string, i: number): number {
     if (text[i] === '\\' && text[i + 1] === '\n') i += 2
     else if (text[i] === '\\' && text[i + 1] === '\r' && text[i + 2] === '\n') i += 3
     else return i
+  }
+}
+
+// The character before `i` once line continuations are removed (called where
+// the text before `i` is a word, so a line break there is a continuation's).
+function charBefore(text: string, i: number): string {
+  let p = i - 1
+  for (;;) {
+    if (text[p] === '\n' && text[p - 1] === '\\') p -= 2
+    else if (text[p] === '\n' && text[p - 1] === '\r' && text[p - 2] === '\\') p -= 3
+    else return text[p] ?? ''
   }
 }
 
@@ -454,10 +469,11 @@ function hereDocumentsEnd(text: string, from: number, due: readonly [string, boo
 // quotes (literal), double quotes and ANSI-C `$'…'` (backslash escapes),
 // backticks, `${…}` (with the braces nested in it), `$((…))`, and `$(…)`,
 // `(…)`, `<(…)` and `>(…)`, which hold shell code: in them a comment, a
-// here-document's body and a `case` statement's patterns are read as the
-// shells read them (bash 5, dash and zsh agree on these), so a `)` there does
-// not end the argument, while a `#` inside a word, an arithmetic `<<` and a
-// `case` that is an argument are ordinary text. Line continuations are read
+// here-document's body, an array's elements (`name=(…)`) and a `case`
+// statement's patterns are read as the shells read them, so a `)` there does
+// not end the argument, while a `#` inside a word, an arithmetic `<<`, a
+// `case` that is an argument and an `esac` that a redirection names are
+// ordinary text. Line continuations are read
 // through (`$`, a continuation and `{` is `${`). Where shells read a construct
 // differently, or it cannot be delimited, the argument runs to the end of the
 // text: a `#` right after an operator or starting a word in arithmetic, a
@@ -471,9 +487,9 @@ function hereDocumentsEnd(text: string, from: number, due: readonly [string, boo
 // does not).
 function shellArgument(text: string, start: number, inside: string): { end: number; closed: number } {
   // What is open, innermost last: ' " a(nsi) ` {, $((…)) as A, ((…)) as B, a
-  // parenthesis inside them as P, a glob group as G, $( <( >( as S, a
-  // subshell as (, and a case statement: c between its arms, p in a pattern,
-  // l in an arm's commands.
+  // parenthesis inside them as P, a glob group as G, an array's elements
+  // (`name=(…)`) as R, $( <( >( as S, a subshell as (, and a case
+  // statement: c between its arms, p in a pattern, l in an arm's commands.
   const open: string[] = inside === '' ? [] : [inside]
   // Here-documents whose bodies start on the next line: delimiter, tabs
   // stripped, quoted, and the depth of the code that holds them.
@@ -639,6 +655,34 @@ function shellArgument(text: string, start: number, inside: string): { end: numb
       i += 1
       continue
     }
+    if (top === 'R') {
+      // An array's elements, up to its `)`: words, quotes, expansions and
+      // comments. A `#` right after its `(` (bash 3.2 reads no comment there)
+      // or an operator, an operator itself, or a line break while a
+      // here-document's body is due is not read.
+      if (c === ')') {
+        open.pop()
+        last = 'word'
+        command = false
+      } else if (c === ' ' || c === '\t' || c === '\n') {
+        if (c === '\n' && due.length > 0) return toEnd()
+        last = 'space'
+      } else if (c === '#' && last !== 'word') {
+        if (last !== 'space') return toEnd()
+        i = commentEnd(text, i)
+        if (i === -1) return toEnd()
+        continue
+      } else if (';&|<>'.includes(c)) {
+        return toEnd()
+      } else {
+        // In zsh, a parenthesis here opens a glob group.
+        if (c === '(') open.push('G')
+        else if (c === '"' || c === "'" || c === '`') open.push(c)
+        last = 'word'
+      }
+      i += 1
+      continue
+    }
     if (top === 'p') {
       // A case pattern, up to its `)`.
       if (c === ')') {
@@ -674,6 +718,8 @@ function shellArgument(text: string, start: number, inside: string): { end: numb
       }
       if (c === '<' && d === '<') {
         const e = afterContinuations(text, n + 1)
+        // A redirection's operand is not where a command starts.
+        command = false
         if (text[e] === '<') {
           // A here-string.
           i = e + 1
@@ -700,11 +746,13 @@ function shellArgument(text: string, start: number, inside: string): { end: numb
           i = n + 1
           continue
         }
-        // After a word, a glob group (or a function's `()`); else a subshell.
-        open.push(last === 'word' ? 'G' : '(')
-        if (last !== 'word') {
+        // After `name=`, an array's elements; after another word, a glob
+        // group (or a function's `()`); else a subshell.
+        const kind = last !== 'word' ? '(' : charBefore(text, i) === '=' ? 'R' : 'G'
+        open.push(kind)
+        if (kind !== 'G') {
           last = 'start'
-          command = true
+          command = kind === '('
         }
         i += 1
         continue
@@ -727,8 +775,10 @@ function shellArgument(text: string, start: number, inside: string): { end: numb
       }
       if (c === ';' || c === '&' || c === '|' || c === '<' || c === '>') {
         last = 'op'
-        if (c !== '<' && c !== '>') command = true
-        i += 1
+        // A redirection's operand (`<`, `>`, `>|`, `>&`, `<&`) is not where a
+        // command starts.
+        command = c !== '<' && c !== '>'
+        i = !command && (d === '|' || d === '&') ? n + 1 : i + 1
         continue
       }
       if (last !== 'word' && top === 'l' && command && esacAt(text, i)) {
@@ -779,7 +829,7 @@ function redactFlagValues(text: string, stats: SanitizeStats): string {
   let out = ''
   let copied = 0
   for (let m = FLAG_VALUE.exec(text); m !== null; m = FLAG_VALUE.exec(text)) {
-    const name = m[2] as string
+    const name = joined(m[2] as string)
     const last = nameParts(name).pop() ?? ''
     if (!isSensitiveKey(name) || !forms(last).some(isCredentialWord)) continue
     const start = m.index + m[0].length
@@ -797,8 +847,53 @@ function redactFlagValues(text: string, stats: SanitizeStats): string {
   return copied === 0 ? text : out + text.slice(copied)
 }
 
+// A word the shell reads as a long option once its quotes and backslashes are
+// removed (`"--pass"word`, `--pass''word`, `--pa\ssword`, `-\-password`,
+// `$'--pass'word`), which the rules above see only in pieces: with `=`, its
+// value as a flag's or an assignment's; else, if its name's last part is a
+// credential word, the next shell argument.
+const QUOTED_OPTION = /(^|[\s;&|(])((?=["'\\$-])(?:[-A-Za-z0-9_.]|\\[-A-Za-z0-9_.]|\$?'[-A-Za-z0-9_.]*'|"[-A-Za-z0-9_.]*"|\\\r?\n){2,300})(?=[\s=]|$)/g
+
+function redactQuotedOptions(text: string, stats: SanitizeStats): string {
+  QUOTED_OPTION.lastIndex = 0
+  let out = ''
+  let copied = 0
+  for (let m = QUOTED_OPTION.exec(text); m !== null; m = QUOTED_OPTION.exec(text)) {
+    const word = joined(m[2] as string)
+    if (!/["'\\]/.test(word)) continue
+    const name = /^--([A-Za-z][A-Za-z0-9_.-]*)$/.exec(word.replace(/\$'|["']|\\(?=.)/g, ''))?.[1]
+    if (name === undefined || !isSensitiveKey(name)) continue
+    const after = m.index + m[0].length
+    let start = after + 1
+    let end: number
+    if (text[after] === '=') {
+      end = lineEnd(text, start, shellArgument(text, start, '').end)
+    } else {
+      if (!forms(nameParts(name).pop() ?? '').some(isCredentialWord)) continue
+      start = after
+      for (;;) {
+        if (text[start] === ' ' || text[start] === '\t') start += 1
+        else if (afterContinuations(text, start) > start) start = afterContinuations(text, start)
+        else break
+      }
+      if (start === after || start >= text.length || /\s/.test(text[start] as string) || text.startsWith('--', start)) continue
+      end = shellArgument(text, start, '').end
+      if (WHOLE_MARKER.test(text.slice(start, end))) continue
+    }
+    const value = text.slice(start, end)
+    if (value.trim() === '') continue
+    out += text.slice(copied, start) + MARKER
+    copied = end
+    QUOTED_OPTION.lastIndex = end
+    if (value !== MARKER) stats.redactions += 1
+  }
+  return copied === 0 ? text : out + text.slice(copied)
+}
+
+
 // The free-text rules: credential shapes, URLs, credential-named values, then
-// credential-named command-line options.
+// credential-named command-line options, then options whose names are quoted
+// in pieces.
 export function redactText(input: string, stats: SanitizeStats): string {
   let out = input
   for (const [pattern, replacement] of PATTERNS) {
@@ -812,7 +907,7 @@ export function redactText(input: string, stats: SanitizeStats): string {
     })
   }
   out = redactUrls(out, stats)
-  return redactFlagValues(redactNamedValues(out, stats), stats)
+  return redactQuotedOptions(redactFlagValues(redactNamedValues(out, stats), stats), stats)
 }
 
 // Error text, dead-letter reasons and status lines: redacted first, then held
