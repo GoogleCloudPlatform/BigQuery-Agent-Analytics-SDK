@@ -226,7 +226,12 @@ function redactNamedValues(text: string, stats: SanitizeStats): string {
   let out = ''
   let copied = 0
   for (let m = NAMED_VALUE.exec(text); m !== null; m = NAMED_VALUE.exec(text)) {
-    if (!isSensitiveKey(m[2] as string)) continue
+    if (!isSensitiveKey(m[2] as string)) {
+      // Resume at the separator: it can be the boundary before the next name
+      // (`--from-literal=password=…`, `env: NAME=…`).
+      NAMED_VALUE.lastIndex = m.index + m[0].lastIndexOf(m[3] as string)
+      continue
+    }
     const start = m.index + m[0].length
     let end: number
     if (m[3] === '=' && /^[?&#;]$/.test(m[1] as string)) {
@@ -248,12 +253,42 @@ function redactNamedValues(text: string, stats: SanitizeStats): string {
 }
 
 // A long command-line option and its value after a space (`--password VALUE`,
-// `--api-key "VALUE"`): the value, to the next space, or a quoted value to
-// its closing quote on the line. The option's name is a credential's and its
-// last part a credential word, so `--password-stdin host`, `--token-file path`
-// and `--max-tokens 1024` keep their arguments.
-const FLAG_VALUE = /(^|[^A-Za-z0-9_.-])--([A-Za-z][A-Za-z0-9_.-]{0,99})[ \t]+(?=[^\s-])/g
-const SPACE = /\s/g
+// `--api-key "VALUE"`, `--pass -VALUE`): the whole shell argument. The
+// option's name is a credential's and its last part a credential word, so
+// `--password-stdin host`, `--token-file path` and `--max-tokens 1024` keep
+// theirs. A value that starts with `--` is the next option, not a value.
+const FLAG_VALUE = /(^|[^A-Za-z0-9_.-])--([A-Za-z][A-Za-z0-9_.-]{0,99})[ \t]+(?!--)(?=\S)/g
+// A value that is one redaction marker and nothing else.
+const WHOLE_MARKER = /^\[REDACTED(?::[a-z-]+)?\]$/
+
+// Where the shell argument that starts at `start` ends: through quoted parts
+// (single quotes literal, double quotes with backslash escapes), backslash
+// escapes and the parts joined to them, up to the first unquoted, unescaped
+// space. An unclosed quote runs to the end of the text.
+function shellArgumentEnd(text: string, start: number): number {
+  let quote = ''
+  let i = start
+  while (i < text.length) {
+    const c = text[i] as string
+    if (quote === "'") {
+      if (c === "'") quote = ''
+      i += 1
+    } else if (c === '\\') {
+      i += 2
+    } else if (quote === '"') {
+      if (c === '"') quote = ''
+      i += 1
+    } else if (c === '"' || c === "'") {
+      quote = c
+      i += 1
+    } else if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f' || c === '\v') {
+      break
+    } else {
+      i += 1
+    }
+  }
+  return Math.min(i, text.length)
+}
 
 function redactFlagValues(text: string, stats: SanitizeStats): string {
   FLAG_VALUE.lastIndex = 0
@@ -264,18 +299,8 @@ function redactFlagValues(text: string, stats: SanitizeStats): string {
     const last = nameParts(name).pop() ?? ''
     if (!isSensitiveKey(name) || !forms(last).some(isCredentialWord)) continue
     const start = m.index + m[0].length
-    const quote = text[start]
-    let end: number
-    if (quote === '"' || quote === "'") {
-      const close = text.indexOf(quote, start + 1)
-      const line = text.indexOf('\n', start)
-      end = close !== -1 && (line === -1 || close < line) ? close + 1 : line === -1 ? text.length : line
-    } else {
-      SPACE.lastIndex = start
-      const stop = SPACE.exec(text)
-      end = stop === null ? text.length : stop.index
-    }
-    if (text.startsWith('[REDACTED', start)) continue
+    const end = shellArgumentEnd(text, start)
+    if (WHOLE_MARKER.test(text.slice(start, end))) continue
     out += text.slice(copied, start) + MARKER
     copied = end
     FLAG_VALUE.lastIndex = end

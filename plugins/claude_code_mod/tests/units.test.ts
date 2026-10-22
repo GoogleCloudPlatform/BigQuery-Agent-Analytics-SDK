@@ -686,3 +686,53 @@ test('a long string never passes on a credential its scan window cut short', () 
   }
   expect(diagnosticLeaks).toBe(0)
 })
+
+test('a credential name right after a non-credential option is still matched', () => {
+  const stats = newStats()
+  const cases: [string, string][] = [
+    ['kubectl create secret generic db --from-literal=password=S3cretValue1', 'kubectl create secret generic db --from-literal=password=[REDACTED]'],
+    ['gcloud run deploy svc --set-env-vars=DB_PASSWORD=hunter2value', 'gcloud run deploy svc --set-env-vars=DB_PASSWORD=[REDACTED]'],
+    ['gcloud run deploy svc --update-env-vars=API_KEY=abc123def --region us', 'gcloud run deploy svc --update-env-vars=API_KEY=[REDACTED]'],
+    ['docker run --env=PASSWORD=abc123def image', 'docker run --env=PASSWORD=[REDACTED]'],
+    ['docker build --build-arg=NPM_TOKEN=abc123def .', 'docker build --build-arg=NPM_TOKEN=[REDACTED]'],
+    ['terraform apply -var=db_password=abc123def', 'terraform apply -var=db_password=[REDACTED]'],
+    ['mvn deploy -Dserver=password=abc123def', 'mvn deploy -Dserver=password=[REDACTED]'],
+    ['curl --header=X-Api-Key:abc123def', 'curl --header=X-Api-Key:[REDACTED]'],
+    ['tool --opt= DB_PASSWORD=abc123def', 'tool --opt= DB_PASSWORD=[REDACTED]'],
+    ['env: DB_PASSWORD=abc123def', 'env: DB_PASSWORD=[REDACTED]'],
+  ]
+  for (const [input, want] of cases) expect(redactText(input, stats)).toBe(want)
+})
+
+test('a credential option loses its whole shell argument, whatever it holds', () => {
+  const stats = newStats()
+  const cases: [string, string][] = [
+    ['docker login --password "prefix\\"SecretSuffix" registry.example.com', 'docker login --password [REDACTED] registry.example.com'],
+    ['docker login --password \'prefix\'"SecretSuffix" registry.example.com', 'docker login --password [REDACTED] registry.example.com'],
+    ['docker login --password prefix\\ SecretSuffix registry.example.com', 'docker login --password [REDACTED] registry.example.com'],
+    ['docker login --password [REDACTED]SecretSuffix registry.example.com', 'docker login --password [REDACTED] registry.example.com'],
+    [`docker login --password ghp_${'A1b2'.repeat(9)}!SecretSuffix registry.example.com`, 'docker login --password [REDACTED] registry.example.com'],
+    ['curl --pass -SyntheticPassphrase file:///dev/null', 'curl --pass [REDACTED] file:///dev/null'],
+    ['tool --password "an unclosed quote\nSecretSuffix on the next line', 'tool --password [REDACTED]'],
+  ]
+  for (const [input, want] of cases) expect(redactText(input, stats)).toBe(want)
+  // Kept: an exact marker, and no value before the next long option.
+  expect(redactText('tool --token [REDACTED:github-token] --verbose', stats)).toBe('tool --token [REDACTED:github-token] --verbose')
+  expect(redactText('cli --password --verbose', stats)).toBe('cli --password --verbose')
+})
+
+test('flag credentials stay out of rows and diagnostics', () => {
+  const commands = [
+    'kubectl create secret generic db --from-literal=password=SecretSuffix1',
+    'docker login --password "prefix\\"SecretSuffix" registry.example.com',
+    'docker login --password [REDACTED]SecretSuffix registry.example.com',
+    'curl --pass -SecretSuffix file:///dev/null',
+  ]
+  for (const command of commands) {
+    const row = buildRow({ eventType: 'TOOL_STARTING', timestampMs: 0, eventId: 'e1', agent: 'coding-agent', sessionId: 's1',
+      invocationId: 'i1', userId: 'dev', traceId: null, spanId: null, parentSpanId: null,
+      content: { tool: 'Bash', args: { command } }, attributes: {}, maxPayloadChars: 16384 }).row
+    expect(JSON.stringify(row)).not.toContain('SecretSuffix')
+    expect(redactDiagnostic(`command failed: ${command}`, 1000)).not.toContain('SecretSuffix')
+  }
+})

@@ -1082,8 +1082,10 @@ column. Treat the dataset like the transcripts it mirrors.
   such as `--password=…` or `-Dssl.password=…`) everything to the end of the
   line, whatever it holds, including a redaction marker (`?name=` / `&name=`
   only to the next `&`); and after a long command-line option whose name's
-  last part is a credential word (`--password VALUE`, `--api-key "VALUE"`)
-  its value, to the next space or, quoted, to its closing quote
+  last part is a credential word (`--password VALUE`, `--api-key "VALUE"`,
+  `--pass -VALUE`) its whole shell argument, quoted and escaped parts
+  included, to the first unquoted space (an unclosed quote, to the end), unless it
+  is one redaction marker alone or starts with `--`
   (`--password-stdin` and `--token-file` keep theirs). A name is a credential's when
   one of its parts, split on punctuation and camelCase and compared without
   case, is `pass`, `passwd`, `password`, `passphrase`, `pwd`, `secret`,
