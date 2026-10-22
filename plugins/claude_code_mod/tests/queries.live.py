@@ -23,7 +23,7 @@ The fixture holds what the queries must count right:
   - a session with no user_id;
   - other producers in the same table: the settings-hook tracer's rows (a
     turn with three model requests among them, which it writes as one
-    response) and
+    response), this repository's settings-hook tracer's, and
     an ADK agent's, the latter with no event_id and its tokens under
     usage_metadata.total_token_count, with two streamed model calls (a row
     for each chunk and the last; one call's final row marked by cache_type
@@ -55,6 +55,10 @@ The fixture holds what the queries must count right:
     from one that covers it;
   - a window with a day of no rows, and a window with none at all.
 
+It also runs the managed-settings guide's rollout query, read from the guide,
+over the same rows: per enrolled person, the mod's sessions and the rows from
+every other writer.
+
 It makes a dataset of its own (bqaa_query_check_<random>, in US), with the
 events table and a team_roster table, prints each query's dry-run bytes,
 and deletes the dataset when it is done. It needs the Python BigQuery
@@ -71,6 +75,7 @@ import re
 import secrets
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -80,6 +85,9 @@ START, END = "2026-10-19", "2026-10-20"
 
 MOD_WRITER = {"plugin": "bigquery-agent-analytics-mod", "version": "0.1.0", "label": "bigquery-agent-analytics-mod/0.1.0"}
 TRACER_WRITER = {"plugin": "bqaa-coding-agent-plugin", "version": "0.1.0", "label": "bqaa-coding-agent-plugin/0.1.0"}
+# This repository's settings-hook tracer stamps another name.
+SDK_TRACER_WRITER = {"plugin": "bigquery-agent-analytics-tracing", "version": "0.1.0",
+                     "label": "bigquery-agent-analytics-tracing/0.1.0"}
 
 
 def usage(input_tokens, output_tokens, cache_read=0, cache_write=0):
@@ -364,6 +372,16 @@ FIXTURE += [
         latency={"total_ms": 90000000}),
     row("l06", "2026-10-24T11:00:04Z", "INVOCATION_COMPLETED", "SL", **IL, span="inv-l", latency={"total_ms": 90004000}),
 ]
+# bob, writing one turn twice: the mod's S2 rows, and this repository's
+# tracer beside them.
+SDK_TURN = dict(writer=SDK_TRACER_WRITER, user="bob", invocation="U1-1")
+FIXTURE += [
+    row("u01", "2026-10-20T11:00:00Z", "LLM_REQUEST", "U1", **SDK_TURN, attributes={"model": "model-a"}),
+    row("u02", "2026-10-20T11:00:02Z", "TOOL_STARTING", "U1", **SDK_TURN, content={"tool": "Bash"}),
+    row("u03", "2026-10-20T11:00:03Z", "TOOL_COMPLETED", "U1", **SDK_TURN, content={"tool": "Bash"}, latency={"total_ms": 300}),
+    row("u04", "2026-10-20T11:00:09Z", "LLM_RESPONSE", "U1", **SDK_TURN,
+        attributes={"model": "model-a", "usage_metadata": usage(50, 10)}, latency={"total_ms": 9000}),
+]
 # The replay: e05 sent twice.
 FIXTURE.append(dict(FIXTURE[4]))
 ROSTER = ["alice", "bob", "dave"]
@@ -371,6 +389,21 @@ RATES = """SELECT * FROM UNNEST([
     STRUCT('model-a' AS model, DATE '2026-10-01' AS rates_as_of, 'fixture' AS rates_source,
            2.0 AS input_usd, 0.5 AS cache_read_usd, 4.0 AS cache_write_usd, 10.0 AS output_usd)
   ])"""
+
+
+GUIDE = MOD / "docs" / "managed-settings.md"
+
+
+def guide_rollout_query():
+    # The guide's rollout query as it stands, on this check's table and
+    # roster, over the run's window instead of the last 7 days.
+    block = re.search(r"```sql\n([ \t]*-- Per enrolled person.*?)```", GUIDE.read_text(), re.S)
+    sql = textwrap.dedent(block.group(1))
+    sql = sql.replace("`my-gcp-project.agent_analytics.agent_events`", "`{PROJECT}.{DATASET}.{TABLE}`")
+    sql = sql.replace("`my-gcp-project.agent_analytics.team_roster`", "`{PROJECT}.{DATASET}.team_roster`")
+    window = "timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)"
+    assert sql.count(window) == 1, sql
+    return sql.replace(window, "timestamp BETWEEN @start AND @end")
 
 
 def by(rows, *keys):
@@ -476,6 +509,19 @@ def checks(name: str, rows: list[dict]):
         yield "sequential calls leave out their later finals (2) and keep 20.0% of 5 rows; unstreamed calls have none", (legacy["later_finals"], legacy["error_row_pct"], fan["later_finals"], adk["later_finals"]) == (2, 20.0, 0, 0)
         yield "a call whose own rows recorded no usage adds no tokens and is shown: the mod's main loop has 1", (mod["model_requests_without_usage"], adk["model_requests_without_usage"]) == (1, 0)
         yield "the mod's rows are never unmatched", all(r["model_requests_unmatched"] == 0 for r in rows if r["producer"] != "adk (no writer)")
+    elif name == "rollout":
+        r = by(rows, "user_id")
+
+        def writer(x):
+            return (x["attributes"].get("writer") or {}).get("plugin")
+
+        want = {}
+        for user in ROSTER:
+            mine = [x for x in FIXTURE if x["user_id"] == user and START <= x["timestamp"][:10] <= END and writer(x)]
+            want[user] = (len({x["session_id"] for x in mine if writer(x) == MOD_WRITER["plugin"]}),
+                          sum(1 for x in mine if writer(x) != MOD_WRITER["plugin"]))
+        yield f"per enrolled person, the mod's sessions and every other writer's rows: {want}", set(r) == set(ROSTER) and all((r[u]["sessions"], r[u]["tracer_rows"]) == want[u] for u in ROSTER)
+        yield "this repository's tracer counts: bob's 4 rows from it are tracer rows", r["bob"]["tracer_rows"] == 4
     elif name == "V7 later finals only":
         p = by(rows, "producer", "agent")
         only = p.get(("adk (no writer)", "adk-staggered"))
@@ -591,6 +637,8 @@ def main() -> int:
                     runs.append((f"{path.name} V7 (from just after a call's request)", "V7 clipped", sql, "2026-10-20T15:00:01Z", END))
                     runs.append((f"{path.name} V7 (a window of later finals)", "V7 later finals only", sql,
                                  "2026-10-20T19:00:05Z", "2026-10-20T19:00:08Z"))
+                if name == "V2" and path.name == "value_queries.sql":
+                    runs.append(("managed-settings.md rollout query", "rollout", guide_rollout_query(), START, END))
                 if name == "V2":
                     for case, start, end in (("V2 ends mid-turn", "2026-10-22T20:00:00Z", "2026-10-22T20:00:10Z"),
                                              ("V2 after the turn", "2026-10-22T20:00:00Z", "2026-10-22T20:00:30Z"),

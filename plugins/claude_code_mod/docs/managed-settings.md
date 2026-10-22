@@ -306,6 +306,13 @@ person's own `settings.json`) has no plugin id to turn off: ask people to
 remove it, or set `allowManagedHooksOnly`. To find people still writing
 twice, see the query in [Roll out in stages](#7-roll-out-in-stages).
 
+The policy's `env` pins (`BQAA_TRACE_ENABLED: "true"`, `BQAA_DRY_RUN:
+"false"`) also reach a copy of either settings-hook tracer that its `false`
+ids do not stop: one installed from the tracer's release archive, loaded with
+`--plugin-dir`, or listed by another catalog. Both tracers read those
+variables, so a copy someone had silenced with `BQAA_TRACE_ENABLED=false`
+writes again. Remove such copies, or set `allowManagedHooksOnly`.
+
 ## 6. Without a folder: this repository's marketplace, pinned
 
 Where you can deliver settings but not files, name this repository's
@@ -495,20 +502,30 @@ off):
    - enrolled people with no rows on days they used the agent;
    - people whose rows wait on disk: their `/bqaa-status` shows a notice,
      or rows waiting;
-   - rows from the settings-hook tracer (`writer.plugin` =
-     `bqaa-coding-agent-plugin`) from enrolled people: events written twice.
+   - rows from a settings-hook tracer from enrolled people: events written
+     twice. This repository's tracer stamps `writer.plugin` =
+     `bigquery-agent-analytics-tracing`, and the earlier repository's
+     `bqaa-coding-agent-plugin`; the query counts every writer but the mod
+     (ADK agents' rows name none).
 
    With a table of the enrolled login names (`team_roster`, one `user_id`
    column) that you keep:
 
    ```sql
-   -- Per enrolled person, the last 7 days: sessions, last row, tracer rows.
-   WITH seen AS (
-     SELECT user_id, COUNT(DISTINCT session_id) AS sessions, MAX(timestamp) AS last_row,
-       COUNTIF(JSON_VALUE(attributes, '$.writer.plugin') = 'bqaa-coding-agent-plugin') AS tracer_rows
+   -- Per enrolled person, the last 7 days: the mod's sessions and last row,
+   -- and the rows of every other writer (a settings-hook tracer: writing twice).
+   WITH written AS (
+     SELECT user_id, session_id, timestamp, JSON_VALUE(attributes, '$.writer.plugin') AS writer
      FROM `my-gcp-project.agent_analytics.agent_events`
      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-       AND JSON_VALUE(attributes, '$.writer.plugin') IN ('bigquery-agent-analytics-mod', 'bqaa-coding-agent-plugin')
+   ),
+   seen AS (
+     SELECT user_id,
+       COUNT(DISTINCT IF(writer = 'bigquery-agent-analytics-mod', session_id, NULL)) AS sessions,
+       MAX(IF(writer = 'bigquery-agent-analytics-mod', timestamp, NULL)) AS last_row,
+       COUNTIF(writer != 'bigquery-agent-analytics-mod') AS tracer_rows
+     FROM written
+     WHERE writer IS NOT NULL
      GROUP BY user_id
    )
    SELECT r.user_id, IFNULL(s.sessions, 0) AS sessions, s.last_row, IFNULL(s.tracer_rows, 0) AS tracer_rows
