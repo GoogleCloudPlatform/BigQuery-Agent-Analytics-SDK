@@ -212,9 +212,10 @@ function redactUrls(text: string, stats: SanitizeStats): string {
 }
 
 // A name and a separator: `name: value` and `name=value` (a header, a YAML or
-// .env line, a JSON key, an assignment), the name quoted or not, its quote
-// escaped or not.
-const NAMED_VALUE = /(^|[^A-Za-z0-9_.-])([A-Za-z_][A-Za-z0-9_.-]{0,99})(?:\\*["'])?[ \t]*([:=])[ \t]*/g
+// .env line, a JSON key, an assignment, a command-line flag such as
+// `--password=value` or `-Dssl.password=value`), the name quoted or not, its
+// quote escaped or not.
+const NAMED_VALUE = /(^|[^A-Za-z0-9_.-])-{0,2}([A-Za-z_][A-Za-z0-9_.-]{0,99})(?:\\*["'])?[ \t]*([:=])[ \t]*/g
 
 // After a credential name, the value goes: to the end of its line, whatever is
 // in it (quotes, brackets and redaction markers are not trusted to end it),
@@ -246,7 +247,45 @@ function redactNamedValues(text: string, stats: SanitizeStats): string {
   return copied === 0 ? text : out + text.slice(copied)
 }
 
-// The free-text rules: credential shapes, URLs, then credential-named values.
+// A long command-line option and its value after a space (`--password VALUE`,
+// `--api-key "VALUE"`): the value, to the next space, or a quoted value to
+// its closing quote on the line. The option's name is a credential's and its
+// last part a credential word, so `--password-stdin host`, `--token-file path`
+// and `--max-tokens 1024` keep their arguments.
+const FLAG_VALUE = /(^|[^A-Za-z0-9_.-])--([A-Za-z][A-Za-z0-9_.-]{0,99})[ \t]+(?=[^\s-])/g
+const SPACE = /\s/g
+
+function redactFlagValues(text: string, stats: SanitizeStats): string {
+  FLAG_VALUE.lastIndex = 0
+  let out = ''
+  let copied = 0
+  for (let m = FLAG_VALUE.exec(text); m !== null; m = FLAG_VALUE.exec(text)) {
+    const name = m[2] as string
+    const last = nameParts(name).pop() ?? ''
+    if (!isSensitiveKey(name) || !forms(last).some(isCredentialWord)) continue
+    const start = m.index + m[0].length
+    const quote = text[start]
+    let end: number
+    if (quote === '"' || quote === "'") {
+      const close = text.indexOf(quote, start + 1)
+      const line = text.indexOf('\n', start)
+      end = close !== -1 && (line === -1 || close < line) ? close + 1 : line === -1 ? text.length : line
+    } else {
+      SPACE.lastIndex = start
+      const stop = SPACE.exec(text)
+      end = stop === null ? text.length : stop.index
+    }
+    if (text.startsWith('[REDACTED', start)) continue
+    out += text.slice(copied, start) + MARKER
+    copied = end
+    FLAG_VALUE.lastIndex = end
+    stats.redactions += 1
+  }
+  return copied === 0 ? text : out + text.slice(copied)
+}
+
+// The free-text rules: credential shapes, URLs, credential-named values, then
+// credential-named command-line options.
 export function redactText(input: string, stats: SanitizeStats): string {
   let out = input
   for (const [pattern, replacement] of PATTERNS) {
@@ -260,15 +299,19 @@ export function redactText(input: string, stats: SanitizeStats): string {
     })
   }
   out = redactUrls(out, stats)
-  return redactNamedValues(out, stats)
+  return redactFlagValues(redactNamedValues(out, stats), stats)
 }
 
 // Error text, dead-letter reasons and status lines: redacted first, then held
 // to `maxChars`, so a cut can never leave the start of a credential that, cut
-// short, no longer matches its pattern.
+// short, no longer matches its pattern. Of a window cut from a longer text,
+// the last REDACT_MARGIN characters are never kept: they were scanned only
+// for what comes before them, and may end in a credential the window cut
+// short (redactions before it can shrink the window under `maxChars`).
 export function redactDiagnostic(text: string, maxChars: number): string {
-  const window = text.length > maxChars + REDACT_MARGIN ? text.slice(0, maxChars + REDACT_MARGIN) : text
-  return cutAt(redactText(window, newStats()), maxChars)
+  const clipped = text.length > maxChars + REDACT_MARGIN
+  const redacted = redactText(clipped ? text.slice(0, maxChars + REDACT_MARGIN) : text, newStats())
+  return cutAt(redacted, clipped ? Math.min(maxChars, Math.max(0, redacted.length - REDACT_MARGIN)) : maxChars)
 }
 
 // ---- bounded copies ------------------------------------------------------------
@@ -310,13 +353,17 @@ function cutToFit(text: string, originalLength: number, maxJson: number, stats: 
 // `input` redacted by the text rules and, past `maxJson` characters of
 // serialized JSON, cut and marked. Only a window reaching REDACT_MARGIN past
 // the cut is scanned; the rest of a longer input is dropped, not passed on.
+// Of that window, the last REDACT_MARGIN characters are never kept: they were
+// scanned only for what comes before them, and may end in a credential the
+// window cut short (redactions before it can shrink the window under the cut).
 function clipString(input: string, maxJson: number, stats: SanitizeStats): { text: string; cost: number } {
-  const window = input.length > maxJson + REDACT_MARGIN ? input.slice(0, maxJson + REDACT_MARGIN) : input
-  const redacted = redactText(window, stats)
-  if (window.length === input.length) {
-    const cost = jsonLength(redacted)
-    if (cost <= maxJson) return { text: redacted, cost }
+  if (input.length > maxJson + REDACT_MARGIN) {
+    const redacted = redactText(input.slice(0, maxJson + REDACT_MARGIN), stats)
+    return cutToFit(cutAt(redacted, Math.max(0, redacted.length - REDACT_MARGIN)), input.length, maxJson, stats)
   }
+  const redacted = redactText(input, stats)
+  const cost = jsonLength(redacted)
+  if (cost <= maxJson) return { text: redacted, cost }
   return cutToFit(redacted, input.length, maxJson, stats)
 }
 

@@ -645,3 +645,44 @@ test('a huge tool input is cut inside args; tool and tool_origin survive', () =>
   expect(content.args.file_path).toBe('big.txt')
   expect(built.row.is_truncated).toBe(true)
 })
+
+test('credentials in command-line flags are removed, with = or a space before the value', () => {
+  const stats = newStats()
+  const out = (text: string): string => redactText(text, stats)
+  expect(out('docker login -u ci --password=Pr0dRegistryPass! registry.example.com')).toBe('docker login -u ci --password=[REDACTED]')
+  expect(out('tool --api-key=abc123def --verbose')).toBe('tool --api-key=[REDACTED]')
+  expect(out('gcloud x --client-secret=s3cr3tValue')).toBe('gcloud x --client-secret=[REDACTED]')
+  expect(out('java -Djavax.net.ssl.trustStorePassword=changeit -jar app.jar')).toBe('java -Djavax.net.ssl.trustStorePassword=[REDACTED]')
+  expect(out('docker login --username ci --password Pr0dRegistryPass! registry.example.com')).toBe('docker login --username ci --password [REDACTED] registry.example.com')
+  expect(out('tool --api-key "two words" --verbose')).toBe('tool --api-key [REDACTED] --verbose')
+  expect(out("curl --cookie 'id=1; theme=dark' https://example.com/")).toBe('curl --cookie [REDACTED] https://example.com/')
+  // Not credentials, or no value after the space: kept as they are.
+  for (const kept of ['ls --color=auto -la', 'ls --color auto', 'docker login --password-stdin registry.example.com',
+    'tool --token-file /etc/token --verbose', 'cli --max-tokens 1024', 'cli --password --verbose', 'cli --password\nnext line']) {
+    expect(out(kept)).toBe(kept)
+  }
+  expect(out('tool --token [REDACTED:github-token] --verbose')).toBe('tool --token [REDACTED:github-token] --verbose')
+})
+
+test('a long string never passes on a credential its scan window cut short', () => {
+  // A long credential line shrinks the scanned window by more than the scan
+  // margin; a token at the window's end, cut there, no longer matches its
+  // pattern. The window's last part, scanned only for what comes before it,
+  // is never kept.
+  const token = 'ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'
+  const head = `PRIVATE_KEY=${'k'.repeat(11_988)}\n`
+  let leaked = 0
+  for (let at = 23_900; at <= 24_200; at += 1) {
+    const text = head + 'a'.repeat(at - head.length) + ' ' + token + ' tail'
+    const out = JSON.stringify(sanitize({ result: text }, limitsFor(16384), newStats()))
+    if (out.includes(token.slice(0, 8))) leaked += 1
+  }
+  expect(leaked).toBe(0)
+  const shortHead = `PRIVATE_KEY=${'k'.repeat(8_488)}\n`
+  let diagnosticLeaks = 0
+  for (let at = 9_150; at <= 9_200; at += 1) {
+    const text = shortHead + 'e'.repeat(at - shortHead.length) + ' ' + token + ' and more'
+    if (redactDiagnostic(text, 1000).includes(token.slice(0, 8))) diagnosticLeaks += 1
+  }
+  expect(diagnosticLeaks).toBe(0)
+})

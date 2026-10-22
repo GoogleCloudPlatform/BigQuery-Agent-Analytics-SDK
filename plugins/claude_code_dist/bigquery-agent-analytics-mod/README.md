@@ -1077,10 +1077,14 @@ column. Treat the dataset like the transcripts it mirrors.
   tokens, GitHub/GitLab/npm/Slack/Stripe tokens, JWTs and `Bearer`/`Basic`
   credentials; in URLs, the user-info part and credential-named query or
   fragment parameters, and incoming-webhook URLs (Slack, Discord, Office)
-  whole; and after a credential name followed by `:` or `=` (a header, a
-  YAML or `.env` line, a JSON key in text, an assignment) everything to the
-  end of the line, whatever it holds, including a redaction marker
-  (`?name=` / `&name=` only to the next `&`). A name is a credential's when
+  whole; after a credential name followed by `:` or `=` (a header, a
+  YAML or `.env` line, a JSON key in text, an assignment, a command-line flag
+  such as `--password=…` or `-Dssl.password=…`) everything to the end of the
+  line, whatever it holds, including a redaction marker (`?name=` / `&name=`
+  only to the next `&`); and after a long command-line option whose name's
+  last part is a credential word (`--password VALUE`, `--api-key "VALUE"`)
+  its value, to the next space or, quoted, to its closing quote
+  (`--password-stdin` and `--token-file` keep theirs). A name is a credential's when
   one of its parts, split on punctuation and camelCase and compared without
   case, is `pass`, `passwd`, `password`, `passphrase`, `pwd`, `secret`,
   `token`, `auth`, `authorization`, `cookie`, `session`, `key`, `apikey`,
@@ -1106,7 +1110,8 @@ column. Treat the dataset like the transcripts it mirrors.
   a multi-megabyte tool input costs the hot path milliseconds (a test checks
   under 100 ms for a 2,760,000-character Write). A long string is scanned up
   to 8,192 characters past where it is cut, so a credential across the cut is
-  still matched whole; anything further is dropped, never passed on unscanned.
+  still matched whole; those last 8,192 characters scanned are never kept,
+  and anything further is dropped, never passed on unscanned.
   Cut rows have `is_truncated = true`.
 * **Local files:** dead-letter and dry-run files hold the same redacted rows
   as the table; they are written with your user's default permissions.
