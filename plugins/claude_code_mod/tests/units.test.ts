@@ -1458,6 +1458,15 @@ test('text with no credential is left as it is, byte for byte, in every path', (
     // A JSON-encoded continuation that carries the name on.
     'log "cli --password\\\\\\n-stdin host"',
     'log "cli --password\\\\\\r\\n-stdin host"',
+    // Lists of names and values with no credential name in them, and an
+    // escaped `=` after a name that is no credential's.
+    'gcloud run deploy svc --set-env-vars=ORDINARY=x,MODE="a b" --region us',
+    'gcloud run deploy svc --set-env-vars ^:^A=1:B=2 --labels=team=x,env=prod',
+    'mount -o user=x,uid=1000 //host/share /mnt',
+    'helm install demo ./chart --set image.tag=v1,db.host=x',
+    "sed 's/password\\=.*/x/' config.ini",
+    'cli --opt=a\\=b --verbose',
+    `echo "x=1, y='2'" && echo ordinary`,
   ]
   const commandOf = (content: string | undefined): string => (JSON.parse(content ?? '{}') as { args?: { command?: string } }).args?.command ?? ''
   for (const command of commands) {
@@ -1563,4 +1572,134 @@ test('a generated sweep: after prose that the quote scan misreads, an option wor
     }
   }
   expect(inputs).toBe(1100)
+})
+
+// How long each path takes for a command, in milliseconds, at the default
+// payload cap: its redaction, the row's content and its error message, the
+// insertAll request, the dead-letter file and its lines read back, a
+// diagnostic, and a second redaction pass.
+function pathTimes(command: string): [string, number][] {
+  const times: [string, number][] = []
+  const time = <T>(path: string, run: () => T): T => {
+    const started = performance.now()
+    const out = run()
+    times.push([path, performance.now() - started])
+    return out
+  }
+  const row = (content: unknown, errorMessage: string | null) => buildRow({ eventType: 'TOOL_COMPLETED', timestampMs: 0, eventId: 'e1', agent: 'coding-agent', sessionId: 's1',
+    invocationId: 'i1', userId: 'dev', traceId: null, spanId: null, parentSpanId: null, content, attributes: {}, status: 'ERROR', errorMessage,
+    maxPayloadChars: 16384 }).row
+  const content = { tool: 'Bash', args: { command } }
+  const once = time('redaction', () => redactText(command, newStats()))
+  time('row content', () => row(content, null))
+  time('row error_message', () => row(null, `command failed: ${command}`))
+  time('insertAll request', () => insertAllBody([row(content, null)]))
+  const [file = ''] = time('dead-letter file', () => encodeLines([{ v: 1, kind: 'retry', reason: 'r', attempts: 1, failed_at: 'f', table: 't', row: row(content, `command failed: ${command}`) }]))
+  time('dead-letter lines read back', () => parseFile(file))
+  time('diagnostic', () => redactDiagnostic(`command failed: ${command}`, 1000))
+  time('second pass', () => redactText(once, newStats()))
+  return times
+}
+
+test('a long run of line continuations as a JSON string encodes them, and other 100,000-character runs, cost each path a few milliseconds', () => {
+  // The review's input: a log line that quotes, as a JSON string, line
+  // continuations as JSON encodes them (`\\\n`, then `\\\r\n`), 100,000
+  // characters with no credential; then the same with no log line around it.
+  const unit = '\\'.repeat(3) + 'n' + '\\'.repeat(3) + 'r\\n'
+  const logged = `log "${unit.repeat(9999)}"    `
+  expect(logged.length).toBe(100_000)
+  expect(typeof JSON.parse(logged.slice(4).trim())).toBe('string')
+  expect(redactText(logged, newStats())).toBe(logged)
+  const texts = [
+    logged,
+    unit.repeat(10_000),
+    // A name, then a long run of continuations, or of spaces and
+    // continuations, then an `=` or none; and a name after each raw one.
+    `a${'\\\\\\n'.repeat(24_999)}=x`,
+    `password${' \\\\\\n'.repeat(19_998)}x`,
+    `${'a\\\n'.repeat(33_332)}=x`,
+    // A list of 25,000 names and values, and 50,000 `(`, each of which
+    // starts a word.
+    `--set-env-vars=${'A=x,'.repeat(24_990)}DB_PASS"WORD"=SecretSuffix`,
+    '$('.repeat(50_000),
+  ]
+  for (const text of texts) {
+    expect(text.length > 99_000).toBe(true)
+    for (const [path, ms] of pathTimes(text)) expect([path, ms < 100]).toEqual([path, true])
+  }
+})
+
+test('an escaped `=` after a credential name, and a credential name spelled in pieces in a list of names and values, leave no part of the credential in any path', () => {
+  const json = (command: string): string => JSON.stringify(command).slice(1, -1)
+  const cases: [string, string][] = [
+    // An escaped `=` after an option's name, or after a name after another
+    // option's `=`: the shell passes `--password=…` and `PASSWORD=…`.
+    ['cli --password\\=SecretSuffix --verbose', 'cli --password\\=[REDACTED]'],
+    ['cli --from-literal=PASSWORD\\=SecretSuffix', 'cli --from-literal=PASSWORD\\=[REDACTED]'],
+    ['cli --password\\="Secret Suffix" --verbose\necho ordinary', 'cli --password\\=[REDACTED]\necho ordinary'],
+    ['kubectl create secret generic demo --from-literal=PASSWORD\\=SecretSuffix --dry-run=client\necho ordinary', 'kubectl create secret generic demo --from-literal=PASSWORD\\=[REDACTED]\necho ordinary'],
+    ['env DB_PASSWORD\\=SecretSuffix printenv DB_PASSWORD\necho ordinary', 'env DB_PASSWORD\\=[REDACTED]\necho ordinary'],
+    ['cli --set-env-vars=ORDINARY=x,DB_PASSWORD\\=SecretSuffix --region us\necho ordinary', 'cli --set-env-vars=ORDINARY=x,DB_PASSWORD\\=[REDACTED]\necho ordinary'],
+    // A name joined from quoted parts after a comma in a list of names and
+    // values: the shell passes `…,DB_PASSWORD=…`.
+    ['cli --set-env-vars=ORDINARY=x,DB_PASS"WORD"=SecretSuffix', 'cli --set-env-vars=ORDINARY=x,DB_PASS"WORD"=[REDACTED]'],
+    ['gcloud run deploy svc --set-env-vars=ORDINARY=x,DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=ORDINARY=x,DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    // The list after a space, in quotes with `;` between, with gcloud's own
+    // delimiter, after `-o` and `--set`, and past eight `=`.
+    ['gcloud run deploy svc --set-env-vars ORDINARY=x,DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars ORDINARY=x,DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars="ORDINARY=x;DB_PASS"WORD"=Secret Suffix" --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars="ORDINARY=x;DB_PASS"WORD"=[REDACTED]"\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars=^:^ORDINARY=x:DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^:^ORDINARY=x:DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    ['mount -o user=x,pass"word"=SecretSuffix //host/share /mnt\necho ordinary', 'mount -o user=x,pass"word"=[REDACTED]\necho ordinary'],
+    ['helm install demo ./chart --set image.tag=v1,db.pass"word"=SecretSuffix\necho ordinary', 'helm install demo ./chart --set image.tag=v1,db.pass"word"=[REDACTED]\necho ordinary'],
+    ['cli --opt=a=b=c=d=e=f=g=h=pass"word"=SecretSuffix\necho ordinary', 'cli --opt=a=b=c=d=e=f=g=h=pass"word"=[REDACTED]\necho ordinary'],
+    // In a command string, and in a log line that quotes it as a JSON string;
+    // where the inner shell's quotes hold `<` and a continuation joins the
+    // name.
+    [`sh -c "gcloud run deploy svc --set-env-vars=ORDINARY=x,DB_PASS\\"WORD\\"=SecretSuffix --region us"\necho ordinary`, 'sh -c "gcloud run deploy svc --set-env-vars=ORDINARY=x,DB_PASS\\"WORD\\"=[REDACTED]'],
+    [`log "${json('gcloud run deploy svc --set-env-vars=ORDINARY=x,DB_PASS"WORD"=SecretSuffix --region us')}"`, 'log "gcloud run deploy svc --set-env-vars=ORDINARY=x,DB_PASS\\"WORD\\"=[REDACTED]'],
+    [`sh -c "cli --set-env-vars=\\"ORDINARY=x<DB_PASS\\\\\nWORD=Secret Suffix\\" --verbose"\necho ordinary`, 'sh -c "cli --set-env-vars=\\"ORDINARY=x<DB_PASS\\\\\n[REDACTED]'],
+  ]
+  for (const [input, want] of cases) {
+    expect(redactText(input, newStats())).toBe(want)
+    for (const text of pathsOf(input)) expect(text).not.toMatch(/Secret|Suffix/)
+  }
+})
+
+test('a generated sweep: in a list of names and values, after each separator and each option that takes a list, a credential name spelled in pieces loses its value in every path', () => {
+  const inputs: string[] = []
+  // Unquoted, after each separator: each spelling the shell joins into a
+  // credential's name, the `=` escaped too.
+  const names = ['DB_PASS"WORD"', "DB_PASS'WORD'", '"DB_PASS"WORD', 'DB_PA\\SSWORD', 'DB_PASS""WORD', "DB_PASS''WORD", 'DB_PASS\\\nWORD', 'db.pass"word"',
+    'API"_KEY"', 'x-api"-key"', "$'DB_PASS\\x57ORD'", 'DB_PASSWORD\\']
+  for (const separator of [',', ':', '@', '#', '/', '+', '%', '!', '~', '^', '=']) {
+    for (const name of names) inputs.push(`cli --set-env-vars=ORDINARY=x${separator}${name}=SecretSuffix --verbose\necho ordinary`)
+  }
+  // In double and single quotes, where operators and blanks separate too.
+  for (const separator of [',', ';', '|', '&', ' ', '\t', '<', '>', '(', ')', '\n']) {
+    for (const name of ['DB_PASS"WORD"', 'DB_PASS""WORD', 'DB_PASS\\\nWORD', 'db.pass"word"', 'API"_KEY"']) inputs.push(`cli --set-env-vars="ORDINARY=x${separator}${name}=Secret Suffix" --verbose\necho ordinary`)
+    for (const name of ["DB_PASS'WORD'", "DB_PASS''WORD", "db.pass'word'"]) inputs.push(`cli --set-env-vars='ORDINARY=x${separator}${name}=Secret Suffix' --verbose\necho ordinary`)
+  }
+  // Each option that takes a list, after `=` or a space, with each value.
+  for (const option of ['--set-env-vars ', '--update-env-vars=', '--build-env-vars=', '--labels=', '-o ', '--set ', '-e ', 'env ']) {
+    for (const name of ['DB_PASS"WORD"', 'db.pass"word"', "DB_PASS''WORD", 'DB_PASSWORD\\']) {
+      for (const value of ['SecretSuffix', '"Secret Suffix"', "'Secret Suffix'", 'Secret\\ Suffix']) inputs.push(`cli ${option}ORDINARY=x,${name}=${value} --verbose\necho ordinary`)
+    }
+  }
+  // gcloud's own delimiter, and a list of twelve before the credential.
+  for (const name of names) {
+    inputs.push(`cli --set-env-vars=^:^A=1:B=x,y:${name}=SecretSuffix --verbose`, `cli --set-env-vars=${Array.from({ length: 12 }, (_, i) => `K${i}=v${i}`).join(',')},${name}=SecretSuffix`)
+  }
+  // An escaped `=` after an option, a name, or a name in a list.
+  for (const name of ['--password', 'PASSWORD', 'DB_PASSWORD', 'api_key', '--api-key', 'db.password']) {
+    for (const value of ['SecretSuffix', '"Secret Suffix"', "'Secret Suffix'", 'Secret\\ Suffix']) {
+      inputs.push(`cli ${name}\\=${value} --verbose`, `cli --from-literal=${name}\\=${value}`, `cli --set-env-vars=ORDINARY=x,${name}\\=${value}`)
+    }
+  }
+  // Each, also in a command string another shell runs and in a log line that
+  // quotes it as a JSON string.
+  for (const command of inputs.splice(0)) {
+    inputs.push(command, `sh -c "${command.replace(/[\\"$`]/g, c => `\\${c}`)}"`, `log "${JSON.stringify(command).slice(1, -1)}"`)
+  }
+  expect(inputs.length).toBe(1332)
+  for (const input of inputs) for (const text of pathsOf(input)) expect(text).not.toMatch(/Secret|Suffix/)
 })

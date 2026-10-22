@@ -135,9 +135,16 @@ const forms = (part: string): string[] => {
 const isCredentialWord = (word: string): boolean =>
   word !== '' && (SENSITIVE_WORDS.has(word) || SENSITIVE_ENDINGS.some(end => word.endsWith(end)) || SENSITIVE_STEMS.some(stem => word.includes(stem)))
 
+// Each word, ending and stem above holds one of these, and a name's parts
+// are pieces of its lower-case form: a name that holds none is no
+// credential's, which is quick to tell.
+const CREDENTIAL_PIECE = /pass|pwd|secret|token|auth|cookie|session|key|credential|private|bearer|jwt|sig/
+
 export const isSensitiveKey = (name: string): boolean => {
+  const lower = name.toLowerCase()
   // ADK's per-invocation state.
-  if (name.toLowerCase().startsWith('temp:')) return true
+  if (lower.startsWith('temp:')) return true
+  if (!CREDENTIAL_PIECE.test(lower)) return false
   // Listed names, such as the token counts, are not credentials.
   if (isListedKey(name)) return false
   return nameParts(name).some(part => forms(part).some(isCredentialWord))
@@ -216,13 +223,90 @@ function redactUrls(text: string, stats: SanitizeStats): string {
 // log line that quotes a command.
 const JOIN = String.raw`(?:\\(?:\r?\n|\\\\(?:r\\)?n))`
 
+// The length of the line continuation (JOIN) that starts at `i`; 0 where none
+// does.
+function joinLength(text: string, i: number): number {
+  if (text[i] !== '\\') return 0
+  if (text[i + 1] === '\n') return 2
+  if (text[i + 1] === '\r') return text[i + 2] === '\n' ? 3 : 0
+  if (text[i + 1] !== '\\' || text[i + 2] !== '\\') return 0
+  if (text[i + 3] === 'n') return 4
+  return text[i + 3] === 'r' && text[i + 4] === '\\' && text[i + 5] === 'n' ? 6 : 0
+}
+
+// A character's place in a name: 2 for one a name may start with (a letter
+// or `_`), 1 for one it may only hold (a digit, `.` or `-`), else 0.
+const NAME_PLACES = Uint8Array.from({ length: 128 }, (_, c) => (/[A-Za-z_]/.test(String.fromCharCode(c)) ? 2 : /[0-9.-]/.test(String.fromCharCode(c)) ? 1 : 0))
+const namePlace = (text: string, i: number): number => NAME_PLACES[text.charCodeAt(i)] ?? 0
+
 // A name and a separator: `name: value` and `name=value` (a header, a YAML or
 // .env line, a JSON key, an assignment, a command-line flag such as
 // `--password=value` or `-Dssl.password=value`), the name quoted or not, its
 // quote escaped or not, line continuations (JOIN) in and after it read
-// through. The name is taken whole (a lookahead and a backreference), so a
-// long continued name that no separator follows is not tried again shorter.
-const NAMED_VALUE = new RegExp(String.raw`(^|[^A-Za-z0-9_.-])(?:-${JOIN}*){0,2}(?=([A-Za-z_](?:${JOIN}*[A-Za-z0-9_.-]){0,99}))\2(?:\\*["'])?(?:[ \t]|${JOIN})*([:=])[ \t]*`, 'g')
+// through. That is, after the text's start or a character no name has
+// (`boundary`), where this pattern matches, the name taken whole, so a long
+// continued name that no separator follows is not tried again shorter:
+//   (?:-JOIN*){0,2}([A-Za-z_](?:JOIN*[A-Za-z0-9_.-]){0,99})(?:\\*["'])?(?:[ \t]|JOIN)*([:=])[ \t]*
+// As a regular expression it reads a long run of continuations again from
+// each place in it where a name may start (the `n` of a JSON-encoded one),
+// which is quadratic. Here each run (continuations, a name, backslashes, the
+// blanks before a separator) is measured once, from the text's end back (see
+// nameRuns), and each place is tried in a few steps.
+type NamedValue = { index: number; boundary: string; name: string; separator: number; end: number }
+
+// For each position in a text: where the run of line continuations (JOIN)
+// that starts there ends (`joins`); the run of spaces, tabs and continuations
+// (`blanks`); the run of backslashes (`slashes`); and, at a name's character,
+// the name from there, continuations read through (`names`), and how many
+// characters it has, counted up to 101 (`lengths`).
+type NameRuns = { joins: Int32Array; blanks: Int32Array; slashes: Int32Array; names: Int32Array; lengths: Uint8Array }
+
+function nameRuns(text: string): NameRuns {
+  const n = text.length
+  const runs: NameRuns = { joins: new Int32Array(n + 1), blanks: new Int32Array(n + 1), slashes: new Int32Array(n + 1), names: new Int32Array(n + 1), lengths: new Uint8Array(n + 1) }
+  const { joins, blanks, slashes, names, lengths } = runs
+  joins[n] = blanks[n] = slashes[n] = names[n] = n
+  for (let i = n - 1; i >= 0; i -= 1) {
+    const c = text[i]
+    const join = joinLength(text, i)
+    joins[i] = join === 0 ? i : (joins[i + join] as number)
+    blanks[i] = c === ' ' || c === '\t' ? (blanks[i + 1] as number) : join === 0 ? i : (blanks[i + join] as number)
+    slashes[i] = c === '\\' ? (slashes[i + 1] as number) : i
+    if (namePlace(text, i) === 0) continue
+    const next = joins[i + 1] as number
+    const more = namePlace(text, next) !== 0
+    names[i] = more ? (names[next] as number) : i + 1
+    lengths[i] = more ? Math.min(101, (lengths[next] as number) + 1) : 1
+  }
+  return runs
+}
+
+// The first name and separator (see NamedValue) at or after `from`.
+function namedValue(text: string, from: number, runs: NameRuns): NamedValue | null {
+  for (let i = from; i < text.length; i += 1) {
+    const found = (i === 0 ? namedAt(text, 0, '', runs) : null) ?? (namePlace(text, i) === 0 ? namedAt(text, i + 1, text[i] as string, runs) : null)
+    if (found !== null) return found
+  }
+  return null
+}
+
+// A name and a separator (see NamedValue) right after `boundary`, which ends
+// at `p`.
+function namedAt(text: string, p: number, boundary: string, runs: NameRuns): NamedValue | null {
+  // Up to two dashes, each with the continuations after it.
+  let q = p
+  for (let k = 0; k < 2 && text[q] === '-'; k += 1) q = runs.joins[q + 1] as number
+  if (namePlace(text, q) !== 2 || (runs.lengths[q] as number) > 100) return null
+  const end = runs.names[q] as number
+  // A quote after the name, escaped or not, then spaces, tabs and
+  // continuations.
+  const slash = runs.slashes[end] as number
+  const separator = runs.blanks[text[slash] === '"' || text[slash] === "'" ? slash + 1 : end] as number
+  if (text[separator] !== ':' && text[separator] !== '=') return null
+  let after = separator + 1
+  while (text[after] === ' ' || text[after] === '\t') after += 1
+  return { index: p - boundary.length, boundary, name: text.slice(q, end), separator, end: after }
+}
 
 // After a credential name, the value goes: to the end of its line, whatever is
 // in it (quotes, brackets and redaction markers are not trusted to end it),
@@ -440,7 +524,7 @@ const JOINS = new RegExp(JOIN, 'g')
 const JOIN_AT = new RegExp(JOIN, 'y')
 
 // A name as the shell reads it, its line continuations (JOIN) removed.
-const joined = (name: string): string => name.replace(JOINS, '')
+const joined = (name: string): string => (name.includes('\\') ? name.replace(JOINS, '') : name)
 
 // The first index at or after `i` that no line continuation (JOIN) covers.
 function afterJoins(text: string, i: number): number {
@@ -449,32 +533,34 @@ function afterJoins(text: string, i: number): number {
 }
 
 function redactNamedValues(text: string, stats: SanitizeStats): string {
-  NAMED_VALUE.lastIndex = 0
+  if (!/[:=]/.test(text)) return text
+  const runs = nameRuns(text)
   let states: Uint8Array | undefined
   let out = ''
   let copied = 0
-  for (let m = NAMED_VALUE.exec(text); m !== null; m = NAMED_VALUE.exec(text)) {
-    const name = m[2] as string
-    const separator = m[0].lastIndexOf(m[3] as string)
-    if (!isSensitiveKey(joined(name))) {
+  let next = 0
+  for (let m = namedValue(text, 0, runs); m !== null; m = namedValue(text, next, runs)) {
+    next = m.end
+    if (!isSensitiveKey(joined(m.name))) {
       // Resume at the separator: it can be the boundary before the next name
       // (`--from-literal=password=…`, `env: NAME=…`).
-      NAMED_VALUE.lastIndex = m.index + separator
+      next = m.separator
       continue
     }
-    const start = m.index + m[0].length
-    const from = wordStart(text, m.index + (m[1] as string).length)
+    const start = m.end
+    const from = wordStart(text, m.index + m.boundary.length)
+    const equals = text[m.separator] === '='
     let end: number
     // A quote open where the value starts and closed in it is put back after
     // the marker.
     let close = ''
-    if (m[3] === '=' && /^[?&#;]$/.test(m[1] as string)) {
+    if (equals && /^[?&#;]$/.test(m.boundary)) {
       const stop = /[&#;\s]/.exec(text.slice(start))
       end = stop === null ? text.length : start + stop.index
       // After `;` or `&` it may be a shell assignment, and after `?` or `#` a
       // quote, `$` or a backtick may open it: through its shell word, if that
       // is longer (escaped spaces, quotes, expansions).
-      if (m[1] === ';' || m[1] === '&' || /^["'`$]/.test(text[start] ?? '')) {
+      if (m.boundary === ';' || m.boundary === '&' || /^["'`$]/.test(text[start] ?? '')) {
         const read = readValue(text, start, from, (states ??= quoteStates(text)))
         if (read === null) {
           end = text.length
@@ -483,7 +569,7 @@ function redactNamedValues(text: string, stats: SanitizeStats): string {
           close = read.close
         }
       }
-    } else if (m[3] === '=' && /[^ \t]=$/.test(m[0])) {
+    } else if (equals && start === m.separator + 1 && !/[ \t]/.test(text[m.separator - 1] as string)) {
       const read = readValue(text, start, from, (states ??= quoteStates(text)))
       end = read === null ? text.length : valueStop(text, start, read.end, /^\$?["']*-/.test(text.slice(from, start)))
       close = read?.close ?? ''
@@ -494,7 +580,7 @@ function redactNamedValues(text: string, stats: SanitizeStats): string {
     if (value.trim() === '') continue
     out += text.slice(copied, start) + MARKER + close
     copied = end
-    NAMED_VALUE.lastIndex = end
+    next = end
     if (value !== MARKER + close) stats.redactions += 1
   }
   return copied === 0 ? text : out + text.slice(copied)
@@ -621,19 +707,32 @@ function ansiEscape(text: string, i: number): { char: string; length: number } {
   return { char: /^[\\'"?]$/.test(e) ? e : '\0', length: 2 }
 }
 
-type OptionWord = { name: string; end: number; value: number }
+type OptionWord = { name: string; start: number; end: number; value: number }
 
 // A long option's word from `i` as the shell passes it: its quotes and
 // backslashes removed, ANSI-C escapes decoded and line continuations
-// dropped, up to its first `=` or its end. Returns that text, where it ends
-// and where the value after an `=` starts (-1: no `=`); null when, before
-// then, the word holds an expansion or a character no option name has.
-function optionWord(text: string, i: number): OptionWord | null {
+// dropped, up to its first `=` or its end. Returns that text, where it starts
+// and ends and where the value after an `=` starts (-1: no `=`); null when,
+// before then, the word holds an expansion or a character no option name
+// has. With `accept`, a name before an `=` that it does not take is passed
+// by, and the rest of the word is read as a list of names and values
+// (`--set-env-vars=ORDINARY=x,DB_PASS"WORD"=…`, `-o user=x:pass"word"=…`):
+// a name starts again after each `=` and each other character no name has
+// but a quote or a backslash the word leaves in (those are dropped), up to a
+// name before an `=` that `accept` takes. Null where an expansion comes
+// first, or the word ends, unless nothing but name characters came after its
+// last `=` (that name is returned, as without `accept`).
+function optionWord(text: string, i: number, accept?: (word: OptionWord) => boolean): OptionWord | null {
   let name = ''
+  let start = i
   let quote = ''
+  // Whether a name before an `=` was passed by, and since the last `=` a
+  // character no name has came.
+  let listed = false
+  let apart = false
   while (name.length <= 200) {
     const c = text[i]
-    if (c === undefined) return quote === '' ? { name, end: i, value: -1 } : null
+    if (c === undefined) return quote === '' && !apart ? { name, start, end: i, value: -1 } : null
     let ch = c
     let step = 1
     if (quote === "'" || quote === 'a') {
@@ -675,11 +774,27 @@ function optionWord(text: string, i: number): OptionWord | null {
       i += 2
       continue
     } else if (/[\s;&|<>()]/.test(c)) {
-      return { name, end: i, value: -1 }
+      return apart ? null : { name, start, end: i, value: -1 }
     }
-    if (ch === '=') return { name, end: i, value: i + step }
-    if (!/^[A-Za-z0-9_.-]$/.test(ch)) return null
-    name += ch
+    if (ch === '=') {
+      const word = { name, start, end: i, value: i + step }
+      if (accept === undefined || accept(word)) return word
+      listed = true
+      apart = false
+      name = ''
+      start = i + step
+    } else if (/^[A-Za-z0-9_.-]$/.test(ch)) {
+      name += ch
+    } else if (listed && /^["'\\]$/.test(ch)) {
+      // A quote or backslash the word leaves in is dropped, as the shell of a
+      // command string the word may be in reads it (`DB_PASS'"'"'WORD'"'"'=`).
+    } else if (listed && !(quote === '' && (c === '$' || c === '`'))) {
+      apart = true
+      name = ''
+      start = i + step
+    } else {
+      return null
+    }
     i += step
   }
   return null
@@ -696,45 +811,78 @@ const JSON_BREAK = /(?:r\\+)?n/y
 // `$'…'` decoded, up to its first `=` or its end (a space, tab, line break
 // or operator). A continuation right after a credential's name glues what
 // follows to it as its value (as after an `=`), unless that carries the name
-// on (`-`, `_`, `.`). Null where it holds a character no name has.
-function looseWord(text: string, i: number): OptionWord | null {
+// on (`-`, `_`, `.`). Null where it holds a character no name has. With
+// `accept`, read on as a list past a name before an `=` that it does not
+// take, as optionWord reads one.
+function looseWord(text: string, i: number, accept?: (word: OptionWord) => boolean): OptionWord | null {
   let name = ''
+  let start = i
   let ansi = false
+  // As in optionWord.
+  let listed = false
+  let apart = false
+  // After a character no name has: in a list a name starts again after it,
+  // else the word is no name's.
+  const other = (next: number): boolean => {
+    if (!listed) return false
+    apart = true
+    name = ''
+    start = next
+    return true
+  }
   while (name.length <= 200) {
     const c = text[i]
-    if (c === undefined || /[\s;&|<>()]/.test(c)) return { name, end: i, value: -1 }
+    // In a list, an operator, which the string's own quotes may hold, is one
+    // more character no name has.
+    if (c === undefined || /\s/.test(c) || (!listed && /[;&|<>()]/.test(c))) return apart ? null : { name, start, end: i, value: -1 }
     if (c === '\\') {
       let j = i
       while (text[j] === '\\') j += 1
       let after = text[j] === '\n' ? j + 1 : text[j] === '\r' && text[j + 1] === '\n' ? j + 2 : -1
       JSON_BREAK.lastIndex = j
       if (after === -1 && j - i >= 3 && (j - i) % 2 === 1 && JSON_BREAK.test(text)) after = JSON_BREAK.lastIndex
-      if (after !== -1 && !/[-_.]/.test(text[after] ?? '') && isSensitiveKey(name.replace(/^-+/, ''))) return { name, end: after, value: after }
+      if (after !== -1 && name !== '' && !/[-_.]/.test(text[after] ?? '') && isSensitiveKey(name.replace(/^-+/, ''))) {
+        const word = { name, start, end: after, value: after }
+        if (accept === undefined || accept(word)) return word
+      }
       if (after !== -1) {
         i = after
       } else if (ansi && /[0-7xuU]/.test(text[j] ?? '')) {
         const e = ansiEscape(text, j - 1)
-        if (!/^[A-Za-z0-9_.-]$/.test(e.char)) return null
-        name += e.char
         i = j - 1 + e.length
+        if (/^[A-Za-z0-9_.-]$/.test(e.char)) name += e.char
+        else if (!other(i)) return null
       } else {
         i = j
       }
       continue
     }
-    if (c === '$' && text[i + 1] === "'") ansi = true
-    else if (c === '=') return { name, end: i, value: i + 1 }
-    else if (/^[A-Za-z0-9_.-]$/.test(c)) name += c
-    else if (c !== '"' && c !== "'") return null
-    i += c === '$' ? 2 : 1
+    const ansiQuote = c === '$' && text[i + 1] === "'"
+    if (ansiQuote) {
+      ansi = true
+    } else if (c === '=') {
+      const word = { name, start, end: i, value: i + 1 }
+      if (accept === undefined || accept(word)) return word
+      listed = true
+      apart = false
+      name = ''
+      start = i + 1
+    } else if (/^[A-Za-z0-9_.-]$/.test(c)) {
+      name += c
+    } else if (c !== '"' && c !== "'" && (c === '$' || c === '`' || !other(i + 1))) {
+      // An expansion ends a list too.
+      return null
+    }
+    i += ansiQuote ? 2 : 1
   }
   return null
 }
 
 // The option or name a word is: `--name`, or before an `=` also `-name`,
-// `-Dname` or a shell variable's name.
-function nameOf(word: OptionWord): string | undefined {
-  const m = (word.value === -1 ? /^--([A-Za-z][A-Za-z0-9_.-]*)$/ : /^(?:--?([A-Za-z][A-Za-z0-9_.-]*)|([A-Za-z_][A-Za-z0-9_]*))$/).exec(word.name)
+// `-Dname` or a shell variable's name; in a list (`listed`), any name as the
+// rules above read one (`db.password`, `x-api-key`).
+function nameOf(word: OptionWord, listed = false): string | undefined {
+  const m = (word.value === -1 ? /^--([A-Za-z][A-Za-z0-9_.-]*)$/ : listed ? /^(?:--?([A-Za-z][A-Za-z0-9_.-]*)|([A-Za-z_][A-Za-z0-9_.-]*))$/ : /^(?:--?([A-Za-z][A-Za-z0-9_.-]*)|([A-Za-z_][A-Za-z0-9_]*))$/).exec(word.name)
   return m?.[1] ?? m?.[2]
 }
 
@@ -758,54 +906,108 @@ function joinedArguments(text: string): Uint8Array {
 }
 
 // The whole-text readings a word's rules use, made once per text: each
-// position's quote (see quoteStates) and whether a shell reads it again as a
-// joined argument (see joinedArguments).
-type Scan = { states: () => Uint8Array; rerun: () => Uint8Array }
+// position's quote (see quoteStates) and the first position after it in
+// another quote (see quoteChanges), whether a shell reads it again as a
+// joined argument (see joinedArguments), and where commandWord's marks are
+// (see commandMarks).
+type Scan = { states: () => Uint8Array; changes: () => Int32Array; rerun: () => Uint8Array; marks: () => CommandMarks }
+
+// For each position, the first position after it whose quote (`states`)
+// differs.
+function quoteChanges(states: Uint8Array): Int32Array {
+  const changes = new Int32Array(states.length)
+  changes[states.length - 1] = states.length
+  for (let i = states.length - 2; i >= 0; i -= 1) changes[i] = states[i + 1] !== states[i] ? i + 1 : (changes[i + 1] as number)
+  return changes
+}
+
+// For each position in a text: the first backslash or `"'"` at or after it
+// (`marks`) and the first space, tab, line break or other white space
+// (`spaces`), so that commandWord, run at each of a long word's dashes,
+// quotes or backslashes, does not read the word again each time.
+type CommandMarks = { marks: Int32Array; spaces: Int32Array }
+
+function commandMarks(text: string): CommandMarks {
+  const n = text.length
+  const marks = new Int32Array(n + 1)
+  const spaces = new Int32Array(n + 1)
+  marks[n] = spaces[n] = n
+  for (let i = n - 1; i >= 0; i -= 1) {
+    marks[i] = text[i] === '\\' || text.startsWith(`"'"`, i) ? i : (marks[i + 1] as number)
+    spaces[i] = /\s/.test(text[i] as string) ? i : (spaces[i + 1] as number)
+  }
+  return { marks, spaces }
+}
 
 // Whether the word at `at` may be a command string's, quoted for the shell
 // that runs it: where it holds a backslash that the whole-text scan does not
 // read inside a quote the word opens itself (in `cli '--pa\ssword' x` the
 // backslash is literal), or does but the word is a joined argument (`ssh
 // host cli '--pa\ssword' x`); or a single quote written `"'"`, as a
-// single-quoted command string writes its own (`'"'"'`).
+// single-quoted command string writes its own (`'"'"'`). Only the first 400
+// characters of the word are read.
 function commandWord(text: string, at: number, scan: Scan): boolean {
-  let states: Uint8Array | undefined
-  // The first position from `at` that is not in the quote open at `at`.
-  let other = at
-  for (let k = at; k < text.length && k - at < 400 && !/\s/.test(text[k] as string); k += 1) {
+  const { marks, spaces } = scan.marks()
+  const end = Math.min(spaces[at] as number, at + 400)
+  for (let k = marks[at] as number; k < end; k = marks[k + 1] as number) {
     if (text.startsWith(`"'"`, k)) return true
-    if (text[k] !== '\\') continue
-    states ??= scan.states()
+    const states = scan.states()
     if (states[k] !== SINGLE && states[k] !== DOUBLE) return true
-    while (other <= k && states[other] === states[at]) other += 1
-    if (other > k || scan.rerun()[at] === 1) return true
+    // In a quote: one the word opens itself, unless the quote open at `at`
+    // lasts to it.
+    if ((scan.changes()[at] as number) > k || scan.rerun()[at] === 1) return true
   }
   return false
 }
+
+// Whether a word's name, or its name and `=`, holds a quote or a backslash
+// that is not a line continuation's (`"DB_PASS"WORD`, `--password\=`): one
+// spelled plainly is the rules above's.
+const inPieces = (text: string, word: OptionWord): boolean =>
+  /["'\\]/.test(joined(text.slice(word.start, word.value === -1 ? word.end : word.value)))
 
 // The credential name the word at `at` holds, as the shell passes it (see
 // optionWord), else, where the word may be a command string's (see
 // commandWord), read loosely (see looseWord): the word's own, or, after the
 // `=` of a name that is not a credential's, the next one's
-// (`--from-literal=pass"word"=…`), and where that one starts. Undefined
-// where none is.
-function credentialWord(text: string, at: number, scan: Scan): { word: OptionWord; name: string; from: number; nested: boolean } | undefined {
+// (`--from-literal=pass"word"=…`, each part after an `=` read afresh); and
+// where it starts. Where neither reading finds one so, the word is read on
+// as a list of names and values (`--set-env-vars=ORDINARY=x,DB_PASS"WORD"=…`),
+// both ways, and of the names spelled in pieces (see inPieces) the one whose
+// value starts first is taken. Undefined where none is.
+function credentialWord(text: string, at: number, scan: Scan): { word: OptionWord; name: string; nested: boolean } | undefined {
+  // The readings that pass an `=`: only those can go on as a list.
+  const lists: boolean[] = []
   for (const nested of commandWord(text, at, scan) ? [false, true] : [false]) {
     for (let from = at, k = 0; k < 8; k += 1) {
       const word = nested ? looseWord(text, from) : optionWord(text, from)
       const name = word === null ? undefined : nameOf(word)
-      if (word !== null && name !== undefined && isSensitiveKey(name)) return { word, name, from, nested }
+      if (word !== null && name !== undefined && isSensitiveKey(name)) return { word, name, nested }
       if (word === null || word.value === -1) break
+      if (k === 0) lists.push(nested)
       from = word.value
     }
   }
-  return undefined
+  // A list's credential name, spelled in pieces.
+  const listed = (word: OptionWord): boolean => {
+    const name = nameOf(word, true)
+    return name !== undefined && isSensitiveKey(name) && inPieces(text, word)
+  }
+  let found: { word: OptionWord; name: string; nested: boolean } | undefined
+  const starts = (word: OptionWord): number => (word.value === -1 ? word.end : word.value)
+  for (const nested of lists) {
+    const word = nested ? looseWord(text, at, listed) : optionWord(text, at, listed)
+    if (word === null || !listed(word)) continue
+    if (found === undefined || starts(word) < starts(found.word)) found = { word, name: nameOf(word, true) as string, nested }
+  }
+  return found
 }
 
 // Where a word starts that the rules above may see only in pieces: at a
 // quote, a backslash, `$'` or a dash, or a name that a quote, a backslash or
-// `$'` comes in (`DB_PASS"WORD"`).
-const OPTION_WORD = /(?:^|[\s;&|(])(?=["'\\$-]|[A-Za-z_][A-Za-z0-9_.-]*["'\\$])/g
+// `$'` comes in (`DB_PASS"WORD"`), or an `=` follows (a list of names and
+// values, `ORDINARY=x,DB_PASS"WORD"=…`).
+const OPTION_WORD = /(?:^|[\s;&|(])(?=["'\\$-]|[A-Za-z_][A-Za-z0-9_.-]*["'\\$=])/g
 
 // A word the shell passes as a long option once its quotes, backslashes,
 // ANSI-C escapes and line continuations are read (`"--pass"word`,
@@ -820,8 +1022,15 @@ const OPTION_WORD = /(?:^|[\s;&|(])(?=["'\\$-]|[A-Za-z_][A-Za-z0-9_.-]*["'\\$])/
 function redactOptionWords(text: string, stats: SanitizeStats): string {
   OPTION_WORD.lastIndex = 0
   let states: Uint8Array | undefined
+  let changes: Int32Array | undefined
   let rerun: Uint8Array | undefined
-  const scan: Scan = { states: () => (states ??= quoteStates(text)), rerun: () => (rerun ??= joinedArguments(text)) }
+  let marks: CommandMarks | undefined
+  const scan: Scan = {
+    states: () => (states ??= quoteStates(text)),
+    changes: () => (changes ??= quoteChanges(scan.states())),
+    rerun: () => (rerun ??= joinedArguments(text)),
+    marks: () => (marks ??= commandMarks(text)),
+  }
   let out = ''
   let copied = 0
   for (let m = OPTION_WORD.exec(text); m !== null; m = OPTION_WORD.exec(text)) {
@@ -830,8 +1039,9 @@ function redactOptionWords(text: string, stats: SanitizeStats): string {
     // A line continuation's line break starts no word.
     if (m[0] === '\n' && (text[m.index - 1] === '\\' || (text[m.index - 1] === '\r' && text[m.index - 2] === '\\'))) continue
     const option = credentialWord(text, at, scan)
-    if (option === undefined || !/["'\\]/.test(joined(text.slice(option.from, option.word.end)))) continue
-    const { word, name, from, nested } = option
+    if (option === undefined || !inPieces(text, option.word)) continue
+    const { word, name, nested } = option
+    const from = word.start
     // A name the rules above see whole (a quote at most before and after
     // it) is theirs.
     if (!nested && word.value !== -1 && !word.name.startsWith('--') && /^\$?["']?-?[A-Za-z_][A-Za-z0-9_.-]*["']?$/.test(text.slice(from, word.value - 1))) continue
