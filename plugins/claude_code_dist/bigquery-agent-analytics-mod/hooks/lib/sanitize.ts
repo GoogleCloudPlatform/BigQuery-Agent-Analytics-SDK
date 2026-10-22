@@ -249,26 +249,102 @@ function namedValueEnd(text: string, start: number): number {
   return q >= text.length ? text.length : lineEnd(text, start, q)
 }
 
-// The quote open where a match's value starts: one just before the match
-// (`"--password=…`, `'--password …`) unless it is escaped or follows a word's
-// piece, which it closes (`"--api"-key=…`), then as the quotes in `between`,
-// the text between the name and the value, leave it: they can close it
-// (`"--password"=…`) or open one (`--password"=…`).
-function quoteAtValue(text: string, m: RegExpExecArray, between: string): string {
-  let quote = /^["'`]$/.test(m[1] as string) && !/[\\A-Za-z0-9_."'`]/.test(text[m.index - 1] ?? '') ? (m[1] as string) : ''
+// The quotes of a text read as shell code from its start, at positions asked
+// for in increasing order: the innermost quote open there (' " ` or a for an
+// ANSI-C `$'…'`), '' where none is, 'escaped' at a character a backslash
+// escapes (or a comment holds), and null once the text holds a here-document
+// or a `case`, which this does not follow.
+function quoteStates(text: string): (at: number) => string | null {
+  // What is open, innermost last: ' " a ` {, and ( for shell code.
+  const open: string[] = []
+  let i = 0
+  let wordStart = true
+  let lost = false
+  return (at: number): string | null => {
+    while (!lost && i < at) {
+      const c = text[i] as string
+      const top = open[open.length - 1] ?? ''
+      if (top === "'") {
+        if (c === "'") open.pop()
+        i += 1
+      } else if (c === '\\') {
+        i += 2
+        wordStart = false
+      } else if (top === 'a' || top === '`') {
+        if (c === (top === 'a' ? "'" : '`')) open.pop()
+        i += 1
+      } else if (c === '$' && text[i + 1] === "'" && top !== '"') {
+        open.push('a')
+        i += 2
+      } else if (c === '$' && (text[i + 1] === '(' || text[i + 1] === '{')) {
+        open.push(text[i + 1] as string)
+        i += 2
+        wordStart = true
+      } else if (top === '"') {
+        if (c === '"') open.pop()
+        else if (c === '`') open.push('`')
+        i += 1
+      } else if (top === '{') {
+        if (c === '}') open.pop()
+        else if (c === '"' || c === "'" || c === '`') open.push(c)
+        i += 1
+      } else if (c === '#' && wordStart) {
+        const nl = text.indexOf('\n', i)
+        i = nl === -1 ? text.length : nl
+      } else if ((c === '<' && text[i + 1] === '<' && text[i + 2] !== '<') || (wordStart && /^case[ \t]/.test(text.slice(i, i + 5)))) {
+        lost = true
+      } else {
+        if (c === '(') open.push('(')
+        else if (c === ')' && top === '(') open.pop()
+        else if (c === '"' || c === "'" || c === '`') open.push(c)
+        wordStart = /[\s;&|()<>]/.test(c)
+        i += 1
+      }
+    }
+    if (lost) return null
+    if (i > at) return 'escaped'
+    const top = open[open.length - 1] ?? ''
+    return top === '(' || top === '{' ? '' : top
+  }
+}
+
+// The quote open where a match's value starts. Read from the text's start,
+// the quote just before the match opens one (an ANSI-C one after `$`),
+// closes the one it is in (`"--api"-key=…`), or is text inside another
+// quote, which the value is then in; where that reading stops, it is taken
+// to open one. The quotes in `between`, the text between the name and the
+// value, then close it (`"--password"=…`) or open one (`--password"=…`).
+function quoteAtValue(text: string, m: RegExpExecArray, between: string, stateAt: (at: number) => string | null): string {
+  const q = m[1] as string
+  let quote = ''
+  if (q === '"' || q === "'" || q === '`') {
+    let ansi = q === "'" && text[m.index - 1] === '$'
+    let state = stateAt(ansi ? m.index - 1 : m.index)
+    if (ansi && state === 'escaped') {
+      ansi = false
+      state = stateAt(m.index)
+    }
+    if (state === null || state === '') quote = ansi ? 'a' : q
+    else if (state === 'escaped' || state === q || (state === 'a' && q === "'")) quote = ''
+    else quote = state
+  }
   for (let k = 0; k < between.length; k += 1) {
-    const q = between[k] as string
-    if (q === '\\' && quote !== "'") k += 1
-    else if (q === '"' || q === "'") quote = quote === '' ? q : quote === q ? '' : quote
+    const b = between[k] as string
+    if (b === '\\' && quote !== "'") k += 1
+    else if (b === '"' || b === "'") quote = quote === '' ? b : quote === b || (quote === 'a' && b === "'") ? '' : quote
   }
   return quote
 }
+
+// The character that closes a quote open where a value starts.
+const closer = (quote: string): string => (quote === 'a' ? "'" : quote)
 
 // A name as the shell reads it, its line continuations removed.
 const joined = (name: string): string => name.replace(/\\\r?\n/g, '')
 
 function redactNamedValues(text: string, stats: SanitizeStats): string {
   NAMED_VALUE.lastIndex = 0
+  const stateAt = quoteStates(text)
   let out = ''
   let copied = 0
   for (let m = NAMED_VALUE.exec(text); m !== null; m = NAMED_VALUE.exec(text)) {
@@ -291,10 +367,10 @@ function redactNamedValues(text: string, stats: SanitizeStats): string {
       if (/^["'`$]/.test(text[start] ?? '')) end = Math.max(end, shellArgument(text, start, '').end)
     } else if (m[3] === '=' && /[^ \t]=$/.test(m[0])) {
       const nameEnd = m[0].indexOf(name, (m[1] as string).length) + name.length
-      const inside = quoteAtValue(text, m, m[0].slice(nameEnd, separator))
+      const inside = quoteAtValue(text, m, m[0].slice(nameEnd, separator), stateAt)
       const word = shellArgument(text, start, inside)
       end = lineEnd(text, start, word.end)
-      if (word.closed !== -1) close = inside
+      if (word.closed !== -1) close = closer(inside)
     } else {
       end = namedValueEnd(text, start)
     }
@@ -310,12 +386,15 @@ function redactNamedValues(text: string, stats: SanitizeStats): string {
 
 // A long command-line option and its value after a space (`--password VALUE`,
 // `--api-key "VALUE"`, `--pass -VALUE`, `"--password" VALUE`), or after line
-// continuations (`--password \` and the value on the next line; in the
-// option's name too, `--pass\` and `word VALUE`): the whole shell argument.
-// The option's name is a credential's and its last part a credential word,
-// so `--password-stdin host`, `--token-file path` and `--max-tokens 1024`
-// keep theirs. A value that starts with `--` is the next option, not a value.
-const FLAG_VALUE = /(^|[^A-Za-z0-9_.-])-(?:\\\r?\n)*-(?:\\\r?\n)*([A-Za-z](?:(?:\\\r?\n)*[A-Za-z0-9_.-]){0,99})(["']?)(?:[ \t]|\\\r?\n)+(?![ \t]|\\\r?\n)(?!--)(?=\S)/g
+// continuations (`--password \` and the value on the next line): the whole
+// shell argument. The option's name is a credential's and its last part a
+// credential word, so `--password-stdin host`, `--token-file path` and
+// `--max-tokens 1024` keep theirs. A value that starts with `--` is the next
+// option, not a value. Line continuations in the name are read through
+// (`--pass\` and `word VALUE`); one with no space beside it is also taken for
+// the gap before a value (`--password\` and `VALUE`), unless what follows
+// carries the name on (`"--password"\` and `-stdin`).
+const FLAG_VALUE = /(^|[^A-Za-z0-9_.-])-(?:\\\r?\n)*-(?:\\\r?\n)*([A-Za-z](?:(?:\\\r?\n)*[A-Za-z0-9_.-]){0,99})(["']?)((?:[ \t]|\\\r?\n)+)(?![ \t]|\\\r?\n)(?!--)(?=\S)/g
 // A value that is one redaction marker and nothing else.
 const WHOLE_MARKER = /^\[REDACTED(?::[a-z-]+)?\]$/
 
@@ -824,22 +903,50 @@ function shellArgument(text: string, start: number, inside: string): { end: numb
   return { end: Math.min(i, text.length), closed }
 }
 
+// Whether a long option's name is a credential's: one with a credential word
+// for its last part.
+const credentialOption = (name: string): boolean =>
+  isSensitiveKey(name) && forms(nameParts(name).pop() ?? '').some(isCredentialWord)
+
 function redactFlagValues(text: string, stats: SanitizeStats): string {
   FLAG_VALUE.lastIndex = 0
+  const stateAt = quoteStates(text)
   let out = ''
   let copied = 0
   for (let m = FLAG_VALUE.exec(text); m !== null; m = FLAG_VALUE.exec(text)) {
-    const name = joined(m[2] as string)
-    const last = nameParts(name).pop() ?? ''
-    if (!isSensitiveKey(name) || !forms(last).some(isCredentialWord)) continue
-    const start = m.index + m[0].length
+    const raw = m[2] as string
+    let start = m.index + m[0].length
+    let between = m[3] as string
+    if (credentialOption(joined(raw))) {
+      // A gap of line continuations alone joins what follows to the name.
+      if (!/[ \t]/.test(m[4] as string) && /^[-_.]/.test(text[start] ?? '')) continue
+    } else {
+      // With a continuation in the name taken for the gap before a value
+      // (`--password\` and `VALUE`), the part before it may be a credential
+      // option's: the longest such part, before a letter or digit.
+      let cut = -1
+      let part = ''
+      for (let k = 0; k < raw.length; ) {
+        const after = afterContinuations(raw, k)
+        if (after === k) {
+          part += raw[k]
+          k += 1
+          continue
+        }
+        if (/[A-Za-z0-9]/.test(raw[after] ?? '') && credentialOption(part)) cut = after
+        k = after
+      }
+      if (cut === -1) continue
+      start = m.index + m[0].indexOf(raw, (m[1] as string).length) + cut
+      between = ''
+    }
     // An option inside a quote still open where its value starts: the value
     // runs through that quote's end, and the quote is put back after the
     // marker.
-    const inside = quoteAtValue(text, m, m[3] as string)
+    const inside = quoteAtValue(text, m, between, stateAt)
     const { end, closed } = shellArgument(text, start, inside)
     if (WHOLE_MARKER.test(text.slice(start, closed === end - 1 ? closed : end))) continue
-    out += text.slice(copied, start) + MARKER + (closed === -1 ? '' : inside)
+    out += text.slice(copied, start) + MARKER + (closed === -1 ? '' : closer(inside))
     copied = end
     FLAG_VALUE.lastIndex = end
     stats.redactions += 1
@@ -847,52 +954,145 @@ function redactFlagValues(text: string, stats: SanitizeStats): string {
   return copied === 0 ? text : out + text.slice(copied)
 }
 
-// A word the shell reads as a long option once its quotes and backslashes are
-// removed (`"--pass"word`, `--pass''word`, `--pa\ssword`, `-\-password`,
-// `$'--pass'word`), which the rules above see only in pieces: with `=`, its
-// value as a flag's or an assignment's; else, if its name's last part is a
-// credential word, the next shell argument.
-const QUOTED_OPTION = /(^|[\s;&|(])((?=["'\\$-])(?:[-A-Za-z0-9_.]|\\[-A-Za-z0-9_.]|\$?'[-A-Za-z0-9_.]*'|"[-A-Za-z0-9_.]*"|\\\r?\n){2,300})(?=[\s=]|$)/g
+// An ANSI-C escape at `i` (a backslash inside `$'…'`): the character it
+// stands for and its length. A control character or an escape it does not
+// decode gives a character no option name has.
+function ansiEscape(text: string, i: number): { char: string; length: number } {
+  const ahead = text.slice(i + 1, i + 10)
+  const hex = /^x([0-9A-Fa-f]{1,2})/.exec(ahead)
+  if (hex !== null) return { char: String.fromCharCode(parseInt(hex[1] as string, 16)), length: 1 + hex[0].length }
+  const octal = /^[0-7]{1,3}/.exec(ahead)
+  if (octal !== null) return { char: String.fromCharCode(parseInt(octal[0], 8) & 0xff), length: 1 + octal[0].length }
+  const unicode = /^(?:u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8})/.exec(ahead)
+  if (unicode !== null) {
+    const code = parseInt(unicode[0].slice(1), 16)
+    return { char: code <= 0x10ffff ? String.fromCodePoint(code) : '\0', length: 1 + unicode[0].length }
+  }
+  const e = ahead[0] ?? ''
+  return { char: /^[\\'"?]$/.test(e) ? e : '\0', length: 2 }
+}
 
-function redactQuotedOptions(text: string, stats: SanitizeStats): string {
-  QUOTED_OPTION.lastIndex = 0
+// A long option's word from `i` as the shell passes it: its quotes and
+// backslashes removed, ANSI-C escapes decoded and line continuations
+// dropped, up to its first `=` or its end. Returns that text, where it ends,
+// where the value after an `=` starts (-1: no `=`) and the quote open there;
+// null when, before then, the word holds an expansion or a character no
+// option name has.
+function optionWord(text: string, i: number): { name: string; end: number; value: number; inside: string } | null {
+  let name = ''
+  let quote = ''
+  while (name.length <= 200) {
+    const c = text[i]
+    if (c === undefined) return quote === '' ? { name, end: i, value: -1, inside: '' } : null
+    let ch = c
+    let step = 1
+    if (quote === "'" || quote === 'a') {
+      if (c === "'") {
+        quote = ''
+        i += 1
+        continue
+      }
+      if (quote === 'a' && c === '\\') {
+        const e = ansiEscape(text, i)
+        ch = e.char
+        step = e.length
+      }
+    } else if (c === '\\') {
+      const after = afterContinuations(text, i)
+      if (after > i) {
+        i = after
+        continue
+      }
+      if (quote === '"' && !/[\\"$`]/.test(text[i + 1] ?? '')) {
+        ch = '\\'
+      } else {
+        ch = text[i + 1] ?? ''
+        step = 2
+      }
+    } else if (quote === '"') {
+      if (c === '"') {
+        quote = ''
+        i += 1
+        continue
+      }
+      if (c === '$' || c === '`') return null
+    } else if (c === "'" || c === '"') {
+      quote = c
+      i += 1
+      continue
+    } else if (c === '$' && text[i + 1] === "'") {
+      quote = 'a'
+      i += 2
+      continue
+    } else if (/[\s;&|<>()]/.test(c)) {
+      return { name, end: i, value: -1, inside: '' }
+    }
+    if (ch === '=') return { name, end: i, value: i + step, inside: quote }
+    if (!/^[A-Za-z0-9_.-]$/.test(ch)) return null
+    name += ch
+    i += step
+  }
+  return null
+}
+
+// Where a word starts that the rules above may see only in pieces: at a
+// quote, a backslash, `$'` or a dash.
+const OPTION_WORD = /(?:^|[\s;&|(])(?=["'\\$-])/g
+
+// A word the shell passes as a long option once its quotes, backslashes,
+// ANSI-C escapes and line continuations are read (`"--pass"word`,
+// `--pass''word`, `--pa\ssword`, `-\-password`, `$'--pa\x73sword'`,
+// `"--pass"word"=…"`), which the rules above see only in pieces: with `=`,
+// its value as a flag's or an assignment's, from inside the quote the `=` is
+// in; else, if its name's last part is a credential word, the next shell
+// argument.
+function redactOptionWords(text: string, stats: SanitizeStats): string {
+  OPTION_WORD.lastIndex = 0
   let out = ''
   let copied = 0
-  for (let m = QUOTED_OPTION.exec(text); m !== null; m = QUOTED_OPTION.exec(text)) {
-    const word = joined(m[2] as string)
-    if (!/["'\\]/.test(word)) continue
-    const name = /^--([A-Za-z][A-Za-z0-9_.-]*)$/.exec(word.replace(/\$'|["']|\\(?=.)/g, ''))?.[1]
+  for (let m = OPTION_WORD.exec(text); m !== null; m = OPTION_WORD.exec(text)) {
+    const at = m.index + m[0].length
+    OPTION_WORD.lastIndex = at + 1
+    // A line continuation's line break starts no word.
+    if (m[0] === '\n' && (text[m.index - 1] === '\\' || (text[m.index - 1] === '\r' && text[m.index - 2] === '\\'))) continue
+    const word = optionWord(text, at)
+    if (word === null || !/["'\\]/.test(joined(text.slice(at, word.end)))) continue
+    const name = /^--([A-Za-z][A-Za-z0-9_.-]*)$/.exec(word.name)?.[1]
     if (name === undefined || !isSensitiveKey(name)) continue
-    const after = m.index + m[0].length
-    let start = after + 1
+    let start: number
     let end: number
-    if (text[after] === '=') {
-      end = lineEnd(text, start, shellArgument(text, start, '').end)
+    let close = ''
+    if (word.value !== -1) {
+      start = word.value
+      const scan = shellArgument(text, start, word.inside)
+      end = lineEnd(text, start, scan.end)
+      if (scan.closed !== -1) close = closer(word.inside)
     } else {
-      if (!forms(nameParts(name).pop() ?? '').some(isCredentialWord)) continue
-      start = after
+      if (!credentialOption(name)) continue
+      start = word.end
       for (;;) {
         if (text[start] === ' ' || text[start] === '\t') start += 1
         else if (afterContinuations(text, start) > start) start = afterContinuations(text, start)
         else break
       }
-      if (start === after || start >= text.length || /\s/.test(text[start] as string) || text.startsWith('--', start)) continue
+      if (start === word.end || start >= text.length || /\s/.test(text[start] as string) || text.startsWith('--', start)) continue
+      // A gap of line continuations alone joins what follows to the name.
+      if (!/[ \t]/.test(text.slice(word.end, start)) && /^[-_.]/.test(text[start] as string)) continue
       end = shellArgument(text, start, '').end
       if (WHOLE_MARKER.test(text.slice(start, end))) continue
     }
     const value = text.slice(start, end)
     if (value.trim() === '') continue
-    out += text.slice(copied, start) + MARKER
+    out += text.slice(copied, start) + MARKER + close
     copied = end
-    QUOTED_OPTION.lastIndex = end
-    if (value !== MARKER) stats.redactions += 1
+    OPTION_WORD.lastIndex = end
+    if (value !== MARKER + close) stats.redactions += 1
   }
   return copied === 0 ? text : out + text.slice(copied)
 }
 
-
 // The free-text rules: credential shapes, URLs, credential-named values, then
-// credential-named command-line options, then options whose names are quoted
+// credential-named command-line options, then option words the shell reads
 // in pieces.
 export function redactText(input: string, stats: SanitizeStats): string {
   let out = input
@@ -907,7 +1107,7 @@ export function redactText(input: string, stats: SanitizeStats): string {
     })
   }
   out = redactUrls(out, stats)
-  return redactQuotedOptions(redactFlagValues(redactNamedValues(out, stats), stats), stats)
+  return redactOptionWords(redactFlagValues(redactNamedValues(out, stats), stats), stats)
 }
 
 // Error text, dead-letter reasons and status lines: redacted first, then held

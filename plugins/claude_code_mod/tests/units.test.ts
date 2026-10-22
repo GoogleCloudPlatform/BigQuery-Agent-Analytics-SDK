@@ -940,6 +940,19 @@ test('a quote that closes around a credential name leaves the value outside it',
     // An option whose name is quoted alone, and its value.
     ['cli "--password" "Secret Suffix" --verbose', 'cli "--password" [REDACTED] --verbose'],
     ["cli '--password' Secret\\ Suffix --verbose", "cli '--password' [REDACTED] --verbose"],
+    // Empty and other complete quoted segments before the name: the quote
+    // just before it opens one.
+    [`cli ''"--password=prefix\nSecretSuffix" --verbose\necho ordinary`, `cli ''"--password=[REDACTED]"\necho ordinary`],
+    [`cli ""'--password=prefix\nSecretSuffix' --verbose\necho ordinary`, `cli ""'--password=[REDACTED]'\necho ordinary`],
+    [`cli ''''"--password=prefix\nSecretSuffix" --verbose\necho ordinary`, `cli ''''"--password=[REDACTED]"\necho ordinary`],
+    [`cli ''""'--password=prefix\nSecretSuffix' --verbose\necho ordinary`, `cli ''""'--password=[REDACTED]'\necho ordinary`],
+    [`cli 'a'"--password=prefix\nSecretSuffix" --verbose\necho ordinary`, `cli 'a'"--password=[REDACTED]"\necho ordinary`],
+    [`cli $'a'"--password=prefix\nSecretSuffix" --verbose\necho ordinary`, `cli $'a'"--password=[REDACTED]"\necho ordinary`],
+    [`cli \\'"--password=prefix\nSecretSuffix" --verbose\necho ordinary`, `cli \\'"--password=[REDACTED]"\necho ordinary`],
+    [`cli ''"--password Secret\nSuffix" --verbose\necho ordinary`, `cli ''"--password [REDACTED]" --verbose\necho ordinary`],
+    [`echo "a\nb" "--password=prefix\nSecretSuffix" --verbose\necho ordinary`, `echo "a\nb" "--password=[REDACTED]"\necho ordinary`],
+    // A quote that closes an earlier segment: the value is outside it.
+    [`cli "a b"--password=x"y z" --verbose\necho ordinary`, `cli "a b"--password=[REDACTED]\necho ordinary`],
   ]
   for (const [input, want] of cases) {
     expect(redactText(input, stats)).toBe(want)
@@ -970,6 +983,16 @@ test('line continuations, quotes and backslashes inside an option name are read 
     ["cli --'pass'word=SecretSuffix --verbose\nnext", "cli --'pass'word=[REDACTED]\nnext"],
     ['cli "--api"-key=SecretSuffix --verbose\nnext', 'cli "--api"-key=[REDACTED]\nnext'],
     ['cli "--api"-key SecretSuffix --verbose\nnext', 'cli "--api"-key [REDACTED] --verbose\nnext'],
+    // ANSI-C escapes in the name, and an `=` inside a quote.
+    ["cli $'--pa\\x73sword' SecretSuffix --verbose", "cli $'--pa\\x73sword' [REDACTED] --verbose"],
+    ["cli $'--pa\\163sword' SecretSuffix --verbose", "cli $'--pa\\163sword' [REDACTED] --verbose"],
+    ['cli "--pass"word"=prefix\nSecretSuffix" --verbose\nnext', 'cli "--pass"word"=[REDACTED]"\nnext'],
+    // A continuation with no space beside it also separates the value
+    // (`--password\` and `VALUE`), unless what follows carries the name on.
+    ['cli --password\\\nSecretSuffix host', 'cli --password\\\n[REDACTED] host'],
+    ['cli --pass\\\nword\\\nSecretSuffix host', 'cli --pass\\\nword\\\n[REDACTED] host'],
+    ['cli "--password"\\\n-stdin host', 'cli "--password"\\\n-stdin host'],
+    ['cli --password\\\n-stdin host', 'cli --password\\\n-stdin host'],
     // Not an option: kept.
     ['cli "--pass"word-stdin host', 'cli "--pass"word-stdin host'],
     ['cli "--max"-tokens 1024', 'cli "--max"-tokens 1024'],
@@ -1042,6 +1065,12 @@ test('substitution-held credentials stay out of rows, errors, requests, dead let
     ['cli --pass\\\nword=SecretSuffix --verbose\necho ordinary', ['echo ordinary']],
     ['cli "--pass"word SecretSuffix --verbose\necho ordinary', ['--verbose', 'echo ordinary']],
     ["cli --'pass'word=SecretSuffix --verbose\necho ordinary", ['echo ordinary']],
+    [`cli ''"--password=prefix\nSecretSuffix" --verbose\necho ordinary`, ['echo ordinary']],
+    [`cli ""'--password=prefix\nSecretSuffix' --verbose\necho ordinary`, ['echo ordinary']],
+    [`cli ''''"--password Secret\nSuffix" --verbose\necho ordinary`, ['--verbose', 'echo ordinary']],
+    ["cli $'--pa\\x73sword' SecretSuffix --verbose\necho ordinary", ['--verbose', 'echo ordinary']],
+    ['cli "--pass"word"=prefix\nSecretSuffix" --verbose\necho ordinary', ['echo ordinary']],
+    ['cli --password\\\nSecretSuffix host\necho ordinary', ['host', 'echo ordinary']],
     ['cli --password=\\\nSecretSuffix --verbose', []],
     ['cli --password "$(cat <<EOF\ntext\\\nEOF\n) " SecretSuffix\nEOF\n)" --verbose', []],
     ['cli --password $(printf %s A;#x )\nprintf %s SecretSuffix) --verbose', []],

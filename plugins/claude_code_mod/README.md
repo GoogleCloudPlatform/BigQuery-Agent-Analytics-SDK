@@ -1091,12 +1091,14 @@ column. Treat the dataset like the transcripts it mirrors.
   line it closes on (anything left open, to the end of the text); and after a
   long command-line option whose name's last part is a credential word
   (`--password VALUE`, `--api-key "VALUE"`, `--pass -VALUE`, `"--password"
-  VALUE`, the value after a line continuation too, and line continuations,
-  quotes and backslashes in the name read through) its whole shell argument:
+  VALUE`, the value after a line continuation too, the option's word read as
+  the shell passes it: line continuations, quotes, backslashes and ANSI-C
+  escapes in its name, and an `=` inside a quote) its whole shell argument:
   quoted and escaped parts, `$'…'`, `${…}`, `$((…))`, backticks, `$(…)` and
   `<(…)` included, line continuations read through, to the first space, `;`,
   `|`, `&`, `<`, `>` or `)` outside them (inside a quote still open where the
-  value starts, through that quote's end), with the comments, here-documents,
+  value starts, read from the text's start, through that quote's end), with
+  the comments, here-documents,
   array elements and `case` statements in a `$(…)` read as bash, dash and zsh
   read them (a file a redirection names is never `esac`);
   to the end of the text where shells read the code differently or its end
