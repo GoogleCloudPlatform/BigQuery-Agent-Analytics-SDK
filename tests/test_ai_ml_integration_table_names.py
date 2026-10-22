@@ -20,10 +20,12 @@
 paths in the queries they send. A backtick in any of them closed the path,
 so the rest of the value became SQL, such as a ``CROSS JOIN`` on a table
 in another dataset. The constructors, and every later assignment to those
-attributes, now run drift's table-name check
-(``feedback._validate_table_name``), so a bad value raises ``ValueError``
-before any query, and table names with dashes, spaces or non-ASCII letters
-keep working.
+attributes, now run drift's table-name check, so a bad value raises
+``ValueError`` before any query. The queries only read these tables, so a
+wildcard read (one table name and a single trailing ``*``) keeps working,
+and so do table names with dashes, spaces or non-ASCII letters.
+``build_embeddings_index`` also writes ``{embeddings_table}_indexed``, so it
+refuses a wildcard ``embeddings_table`` before its query.
 """
 
 import pytest
@@ -37,7 +39,8 @@ from tests.test_ai_ml_integration_ids import _METHODS
 from tests.test_ai_ml_integration_ids import _send
 from tests.test_ai_ml_integration_ids import _sent_sql
 from tests.test_client_table_id import _CROSS_JOIN_PAYLOAD
-from tests.test_client_table_id import _NOT_A_TABLE_NAME
+from tests.test_client_table_id import _NOT_A_TABLE_SOURCE
+from tests.test_client_table_id import _WILDCARDS
 from tests.test_drift_production_table import _TABLE_NAMES
 
 # Each table attribute: its class, its name and its default.
@@ -99,6 +102,11 @@ _SINKS = {
     },
 }
 
+# The sinks that read their table; the other two write {table}_indexed.
+_READ_SINKS = {
+    name: sink for name, sink in _SINKS.items() if "_indexed" not in sink[2]
+}
+
 
 @pytest.mark.parametrize(
     "cls,attribute,default",
@@ -110,8 +118,8 @@ class TestTableAttributes:
 
   @pytest.mark.parametrize(
       "table",
-      list(_NOT_A_TABLE_NAME.values()),
-      ids=list(_NOT_A_TABLE_NAME),
+      list(_NOT_A_TABLE_SOURCE.values()),
+      ids=list(_NOT_A_TABLE_SOURCE),
   )
   def test_constructor_rejects_value_that_is_not_one_table_name(
       self, cls, attribute, default, table
@@ -123,8 +131,8 @@ class TestTableAttributes:
 
   @pytest.mark.parametrize(
       "table",
-      list(_NOT_A_TABLE_NAME.values()),
-      ids=list(_NOT_A_TABLE_NAME),
+      list(_NOT_A_TABLE_SOURCE.values()),
+      ids=list(_NOT_A_TABLE_SOURCE),
   )
   def test_assignment_rejects_value_that_is_not_one_table_name(
       self, cls, attribute, default, table
@@ -134,7 +142,7 @@ class TestTableAttributes:
       setattr(instance, attribute, table)
     assert getattr(instance, attribute) == default
 
-  @pytest.mark.parametrize("table", _TABLE_NAMES)
+  @pytest.mark.parametrize("table", _TABLE_NAMES + _WILDCARDS)
   def test_accepts_table_name(self, cls, attribute, default, table):
     instance = _built(cls, **{attribute: table})
     assert getattr(instance, attribute) == table
@@ -168,3 +176,27 @@ class TestEveryQuery:
     bq = _bq_client()
     _send(send, _built(cls, bq, **{**options, attribute: table}))
     assert any(path.format(table) in sql for sql in _sent_sql(bq))
+
+
+@pytest.mark.parametrize(
+    "method,attribute,path", list(_READ_SINKS.values()), ids=list(_READ_SINKS)
+)
+@pytest.mark.parametrize("table", _WILDCARDS)
+def test_wildcard_read_reaches_the_query(method, attribute, path, table):
+  cls, options, send = _METHODS[method]
+  bq = _bq_client()
+  _send(send, _built(cls, bq, **{**options, attribute: table}))
+  assert any(path.format(table) in sql for sql in _sent_sql(bq))
+
+
+@pytest.mark.parametrize("method", _INDEX_METHODS)
+@pytest.mark.parametrize("table", _WILDCARDS)
+def test_index_refuses_wildcard_embeddings_table(method, table):
+  # The index is written to {embeddings_table}_indexed, which can't hold a
+  # '*'. search() still reads a wildcard embeddings table.
+  cls, options, send = _METHODS[method]
+  bq = _bq_client()
+  instance = _built(cls, bq, **{**options, "embeddings_table": table})
+  with pytest.raises(ValueError, match="^embeddings_table must be one table"):
+    _send(send, instance)
+  assert _sent_sql(bq) == []
