@@ -1079,10 +1079,13 @@ column. Treat the dataset like the transcripts it mirrors.
   fragment parameters, and incoming-webhook URLs (Slack, Discord, Office)
   whole; after a credential name followed by `:` or `=` (a header, a
   YAML or `.env` line, a JSON key in text, an assignment, a command-line flag
-  such as `--password=…` or `-Dssl.password=…`) everything to the end of the
+  such as `--password=…` or `-Dssl.password=…`, a name the shell joins from
+  quoted, escaped or continued parts, such as `"DB_PASS"WORD=…`) everything
+  to the end of the
   line, whatever it holds, including a redaction marker (`?name=` / `&name=`
-  only to the next `&`, or through the shell word when a quote, `$` or a
-  backtick opens the value), and on to the next lines after a line continuation,
+  only to the next `&`, or through its shell word if that is longer when a
+  quote, `$` or a backtick opens the value or `;` or `&` comes before the
+  name), and on to the next lines after a line continuation,
   or as far as the value runs on: after `=` with no space around it (a flag or
   an assignment), through the whole shell word it starts, wherever in it a
   quote, `$(…)`, backtick or `${…}` opens (read in every quote it may start
@@ -1090,9 +1093,14 @@ column. Treat the dataset like the transcripts it mirrors.
   line it closes on (anything left open, to the end of the text); and after a
   long command-line option whose name's last part is a credential word
   (`--password VALUE`, `--api-key "VALUE"`, `--pass -VALUE`, `"--password"
-  VALUE`, the value after a line continuation too, the option's word read as
+  VALUE` and `\"--password\" VALUE` in a command string, the value after a
+  line continuation too, the option's word read as
   the shell passes it: line continuations, quotes, backslashes and ANSI-C
-  escapes in its name, and an `=` inside a quote) its whole shell argument:
+  escapes in its name, and an `=` inside a quote, so a quoted part a line
+  continuation joins to it is part of the name (`"--pass\` and `"word" VALUE`;
+  that part goes too where the name before it is a credential's), and as a
+  command string's word wherever it is (`\"--pass\"word VALUE`)) its whole
+  shell argument:
   quoted and escaped parts, `$'…'`, `${…}`, `$((…))`, backticks, `$(…)` and
   `<(…)` included, line continuations read through, to the first space, `;`,
   `|`, `&`, `<`, `>` or `)` outside them, with the comments, here-documents,
@@ -1101,10 +1109,16 @@ column. Treat the dataset like the transcripts it mirrors.
   quote it may start in, and runs to the farthest of those ends: the quote a
   scan of the whole text from its start, by the same rules, finds open there
   (in a command string another shell runs, `sh -c "… --password \"a b\" …"`,
-  to that string's end); the quote just before the option as its word alone
-  reads it, where text the scan reads as shell may not be (prose, an odd
-  quote, a quote in a comment); and every quote where the scan cannot tell. A
-  quote it closes is put back after the marker;
+  to that string's end; in a comment or a here-document's body, as that text
+  read as shell on its own finds); the word alone, in no quote or in the quote
+  just before the option, where text the scan reads as shell may not be
+  (prose, an odd quote); as the shell a command string runs reads it, where
+  the value or the text before it in that string escapes a quote or a
+  backslash (`\"a b\"`, `a\\ b`), to that string's end at most; and every
+  quote where the scan cannot tell (from the line after a comment ending in a
+  backslash or a continued line of an unquoted here-document body, and in a
+  body no line ends). A quote it closes is put back after the marker
+  (escaped, for a command string's reading);
   to the end of the text where shells read the code differently or its end
   cannot be told (a `#` right after an operator or an array's `(`, or
   starting a word in arithmetic, a comment ending in a backslash, an empty or expanded
@@ -1113,7 +1127,8 @@ column. Treat the dataset like the transcripts it mirrors.
   with an expansion in its subject, zsh's `{` form or a parenthesis in a
   pattern), or when anything is left open; unless it is one redaction marker
   alone or starts with `--`
-  (`--password-stdin` and `--token-file` keep theirs). A name is a credential's when
+  (`--password-stdin`, also as `--password\` and `"-stdin"`, and
+  `--token-file` keep theirs). A name is a credential's when
   one of its parts, split on punctuation and camelCase and compared without
   case, is `pass`, `passwd`, `password`, `passphrase`, `pwd`, `secret`,
   `token`, `auth`, `authorization`, `cookie`, `session`, `key`, `apikey`,
