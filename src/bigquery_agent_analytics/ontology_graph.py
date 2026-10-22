@@ -51,6 +51,7 @@ from google.cloud import bigquery
 from ._telemetry import LabeledBigQueryClient
 from ._telemetry import make_bq_client
 from ._telemetry import with_sdk_labels
+from .evaluators import _escape_sql_quoted
 from .extracted_models import ExtractedEdge
 from .extracted_models import ExtractedGraph
 from .extracted_models import ExtractedNode
@@ -625,7 +626,7 @@ class OntologyGraphManager:
     full_prompt = prompt + "\n\nReturn a single JSON object:\n" + schema_hint
     return _EXTRACT_ONTOLOGY_AI_QUERY.format(
         prompt=_escape_sql_literal(full_prompt),
-        endpoint=self._resolve_endpoint(),
+        endpoint=_escape_sql_quoted(self._resolve_endpoint()),
         project=self.project_id,
         dataset=self.dataset_id,
         table=self.table_id,
@@ -944,7 +945,7 @@ class OntologyGraphManager:
 
     query = _EXTRACT_ONTOLOGY_AI_QUERY.format(
         prompt=_escape_sql_literal(full_prompt),
-        endpoint=self._resolve_endpoint(),
+        endpoint=_escape_sql_quoted(self._resolve_endpoint()),
         project=self.project_id,
         dataset=self.dataset_id,
         table=self.table_id,

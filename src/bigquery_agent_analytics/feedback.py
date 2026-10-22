@@ -40,6 +40,7 @@ from pydantic import BaseModel
 from pydantic import Field
 
 from ._telemetry import with_sdk_labels
+from .evaluators import _escape_sql_quoted
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -668,13 +669,15 @@ async def _semantic_drift(
 
   loop = asyncio.get_event_loop()
 
+  # The caller's embedding model stays inside its quotes: backticks
+  # for a legacy model reference, single quotes for an endpoint.
   if _is_legacy_model_ref(embedding_model):
     query = _LEGACY_SEMANTIC_DRIFT_QUERY.format(
         project=project_id,
         dataset=dataset_id,
         table=table_id,
         golden_table=golden_table,
-        model=embedding_model,
+        model=_escape_sql_quoted(embedding_model, quote="`"),
         where=where_clause,
     )
     ai_function = "ml-generate-embedding"
@@ -684,7 +687,7 @@ async def _semantic_drift(
         dataset=dataset_id,
         table=table_id,
         golden_table=golden_table,
-        endpoint=embedding_model,
+        endpoint=_escape_sql_quoted(embedding_model),
         where=where_clause,
     )
     ai_function = "ai-embed"
@@ -985,7 +988,9 @@ async def _semantic_grouping(
     )
     categories_str = _sanitize_categories(raw_categories)
 
-    # Try AI.GENERATE first when the endpoint is not a legacy ref
+    # Try AI.GENERATE first when the endpoint is not a legacy ref. The
+    # model is the caller's text_model or the client's endpoint, so it
+    # stays inside its quotes on both paths.
     if not _is_legacy_model_ref(text_model):
       try:
         query = _AI_GENERATE_SEMANTIC_GROUPING_QUERY.format(
@@ -993,7 +998,7 @@ async def _semantic_grouping(
             dataset=dataset_id,
             table=table_id,
             where=where_clause,
-            endpoint=text_model,
+            endpoint=_escape_sql_quoted(text_model),
             categories=categories_str,
         )
         job_config = bigquery.QueryJobConfig(
@@ -1029,7 +1034,7 @@ async def _semantic_grouping(
           dataset=dataset_id,
           table=table_id,
           where=where_clause,
-          model=legacy_model,
+          model=_escape_sql_quoted(legacy_model, quote="`"),
           categories=categories_str,
       )
       job_config = bigquery.QueryJobConfig(

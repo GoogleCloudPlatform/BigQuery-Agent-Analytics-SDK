@@ -77,6 +77,7 @@ from pydantic import Field
 from ._telemetry import LabeledBigQueryClient
 from ._telemetry import make_bq_client
 from ._telemetry import with_sdk_labels
+from .evaluators import _escape_sql_quoted
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -1143,12 +1144,14 @@ class ContextGraphManager:
     self._ensure_biz_nodes_table()
 
     entity_types_str = ", ".join(self.config.entity_types)
+    # The endpoint is configuration (Client.context_graph passes the
+    # client's), so keep it inside its quotes.
     query = _EXTRACT_BIZ_NODES_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
         table=self.table_id,
         biz_table=self.config.biz_nodes_table,
-        endpoint=self._resolve_endpoint(),
+        endpoint=_escape_sql_quoted(self._resolve_endpoint()),
         entity_types=entity_types_str,
     )
 
@@ -2041,7 +2044,7 @@ class ContextGraphManager:
         project=self.project_id,
         dataset=self.dataset_id,
         table=self.table_id,
-        endpoint=self._resolve_endpoint(),
+        endpoint=_escape_sql_quoted(self._resolve_endpoint()),
     )
 
     job_config = bigquery.QueryJobConfig(
