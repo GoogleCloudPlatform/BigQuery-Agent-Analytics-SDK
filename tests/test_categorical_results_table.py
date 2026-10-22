@@ -77,6 +77,14 @@ _NOT_A_VIEW_PREFIX = {
     "decorator": "adk$",
 }
 
+# The config's results_table is typed str, so pydantic turns bytes into a
+# str itself; only strings reach the check through a config.
+_NOT_A_CONFIG_RESULTS_TABLE = {
+    name: value
+    for name, value in _NOT_A_RESULTS_TABLE.items()
+    if isinstance(value, str)
+}
+
 _RESULTS_TABLE_ERROR = "^results_table must be one table name"
 _VIEW_NAME_ERROR = "^view name must be one table name"
 
@@ -160,8 +168,8 @@ class TestPersistedResultsTable:
 
   @pytest.mark.parametrize(
       "results_table",
-      list(_NOT_A_RESULTS_TABLE.values()),
-      ids=list(_NOT_A_RESULTS_TABLE),
+      list(_NOT_A_CONFIG_RESULTS_TABLE.values()),
+      ids=list(_NOT_A_CONFIG_RESULTS_TABLE),
   )
   def test_refuses_results_table_before_any_query(self, results_table):
     bq = _bq_client()
@@ -172,17 +180,21 @@ class TestPersistedResultsTable:
     bq.insert_rows_json.assert_not_called()
 
   def test_results_table_changed_during_evaluation_is_refused_at_ddl(self):
-    # The table is checked again where the DDL is built.
+    # Checked again where the DDL is built. The refusal is reported like
+    # any persistence error, so the evaluation keeps its results.
     config = _config(persist_results=True, results_table="my_results")
 
     def change():
       config.results_table = _TWO_STATEMENTS
 
     bq = _bq_client(on_evaluate=change)
-    with pytest.raises(ValueError, match=_RESULTS_TABLE_ERROR):
-      _client(bq).evaluate_categorical(config=config)
+    report = _client(bq).evaluate_categorical(config=config)
     assert [sql for sql in _sent_sql(bq) if "AI.GENERATE(" not in sql] == []
     bq.insert_rows_json.assert_not_called()
+    assert report.details["persisted"] is False
+    assert report.details["persist_error"].startswith(
+        "results_table must be one table name"
+    )
 
   def test_results_table_is_unused_without_persistence(self):
     bq = _bq_client()

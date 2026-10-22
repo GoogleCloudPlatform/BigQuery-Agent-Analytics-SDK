@@ -93,6 +93,7 @@ from .evaluators import _split_judge_prompt_template as split_judge_prompt_templ
 from .evaluators import DEFAULT_ENDPOINT
 from .evaluators import LLMAsJudge
 from .feedback import _validate_source_table
+from .feedback import _validate_table_name
 from .feedback import AnalysisConfig
 from .feedback import compute_drift
 from .feedback import compute_question_distribution
@@ -3014,9 +3015,14 @@ class Client:
     Raises:
         ValueError: If *dataset* is neither one BigQuery table name nor
             one wildcard read, for example a dotted path or a name
-            containing a backtick.
+            containing a backtick, or if ``config.persist_results`` is
+            set and ``config.results_table`` is not one table name.
     """
     table = self._events_table(dataset)
+    if config.persist_results:
+      # Persisting formats the results table into DDL after the
+      # evaluation queries, so refuse a bad one before any of them.
+      self._categorical_results_table(config)
     filt = filters or TraceFilter()
     where, params = filt.to_sql_conditions()
 
@@ -3654,6 +3660,20 @@ class Client:
 
     return _run_sync(classify_sessions_via_api(transcripts, config, endpoint))
 
+  @staticmethod
+  def _categorical_results_table(config: CategoricalEvaluationConfig) -> str:
+    """The table persisted categorical results go to, checked.
+
+    ``config.results_table``, else ``categorical_results``. Its CREATE
+    TABLE and ALTER TABLE statements and the streaming insert format it
+    into ``{project}.{dataset}.{table}``, and the categorical views read
+    it, so anything but one table name raises ``ValueError`` before a
+    query or DDL is sent.
+    """
+    results_table = config.results_table or DEFAULT_RESULTS_TABLE
+    _validate_table_name(results_table, "results_table")
+    return results_table
+
   def _persist_categorical_if_configured(
       self,
       report: CategoricalEvaluationReport,
@@ -3676,9 +3696,10 @@ class Client:
       report.details["persist_note"] = "no sessions to persist"
       return
 
-    results_table = config.results_table or DEFAULT_RESULTS_TABLE
-
     try:
+      # Checked again where the DDL is built; a refusal is reported as
+      # a persistence error, with no DDL sent.
+      results_table = self._categorical_results_table(config)
       ddl = CATEGORICAL_RESULTS_DDL.format(
           project=self.project_id,
           dataset=self.dataset_id,
@@ -3757,6 +3778,10 @@ class Client:
 
     Returns:
         A dict mapping view name to prefixed view name.
+
+    Raises:
+        ValueError: If *results_table*, or any view name *view_prefix*
+            forms, is not one table name. Checked before any DDL.
     """
     from .categorical_views import CategoricalViewManager
 
