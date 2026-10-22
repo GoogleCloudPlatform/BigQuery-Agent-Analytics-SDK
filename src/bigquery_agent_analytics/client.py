@@ -3950,11 +3950,14 @@ class Client:
     loop = asyncio.get_event_loop()
 
     facet_prompt = build_facet_prompt()
+    # The endpoint is client configuration, which the BigQuery Remote
+    # Function takes from the request's userDefinedContext, so keep it
+    # inside its quotes the way the judge's AI.GENERATE query does.
     query = _AI_GENERATE_FACET_EXTRACTION_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
         table=table,
-        endpoint=self.endpoint,
+        endpoint=_escape_sql_quoted(self.endpoint),
     )
     job_config = bq.QueryJobConfig(
         query_parameters=[
@@ -4002,11 +4005,13 @@ class Client:
     loop = asyncio.get_event_loop()
 
     facet_prompt = build_facet_prompt()
+    # text_model defaults to the client's endpoint, which also lands here
+    # when AI.GENERATE fails, so keep it inside its backticks.
     query = _FACET_EXTRACTION_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
         table=table,
-        model=text_model,
+        model=_escape_sql_quoted(text_model, quote="`"),
     )
     job_config = bq.QueryJobConfig(
         query_parameters=[
