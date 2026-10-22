@@ -75,6 +75,7 @@ from ._telemetry import with_sdk_labels
 from .client import _validate_client_dataset_id
 from .client import _validate_client_project_id
 from .evaluators import _escape_sql_quoted
+from .feedback import _validate_table_name
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -456,6 +457,27 @@ class _CheckedProjectAndDataset:
     self._dataset_id = dataset_id
 
 
+class _CheckedTableId:
+  """``table_id``, checked on every assignment.
+
+  ``AnomalyDetector`` and ``BatchEvaluator`` format it into the
+  backtick-quoted ``{project}.{dataset}.{table}`` path of the queries
+  they send. Every assignment, the constructor's included, runs drift's
+  table-name check, so a value that is not one table name raises
+  ``ValueError`` and the object keeps its current table.
+  """
+
+  @property
+  def table_id(self) -> str:
+    """Events table formatted into this object's queries."""
+    return self._table_id
+
+  @table_id.setter
+  def table_id(self, table_id: str) -> None:
+    _validate_table_name(table_id, "table_id")
+    self._table_id = table_id
+
+
 class EmbeddingSearchClient(_CheckedProjectAndDataset):
   """Client for semantic search using BigQuery embeddings.
 
@@ -566,7 +588,8 @@ class EmbeddingSearchClient(_CheckedProjectAndDataset):
 
     Raises:
         ValueError: If *project_id* or *dataset_id* fails the project or
-            dataset ID check that ``Client`` runs.
+            dataset ID check that ``Client`` runs, or *embeddings_table*
+            or *source_table* is not one table name.
     """
     self.project_id = project_id
     self.dataset_id = dataset_id
@@ -576,6 +599,32 @@ class EmbeddingSearchClient(_CheckedProjectAndDataset):
     self._warned_unlabeled_client = False
     self.embedding_model = embedding_model
     self.embedding_endpoint = embedding_endpoint
+
+  @property
+  def embeddings_table(self) -> str:
+    """Table that ``search`` reads.
+
+    ``build_embeddings_index`` writes ``{table}_indexed``. Every
+    assignment, the constructor's included, runs drift's table-name check,
+    so a value that is not one table name raises ``ValueError`` and the
+    client keeps its current table.
+    """
+    return self._embeddings_table
+
+  @embeddings_table.setter
+  def embeddings_table(self, embeddings_table: str) -> None:
+    _validate_table_name(embeddings_table, "embeddings_table")
+    self._embeddings_table = embeddings_table
+
+  @property
+  def source_table(self) -> str:
+    """Events table ``build_embeddings_index`` reads, checked the same way."""
+    return self._source_table
+
+  @source_table.setter
+  def source_table(self, source_table: str) -> None:
+    _validate_table_name(source_table, "source_table")
+    self._source_table = source_table
 
   @property
   def client(self) -> bigquery.Client:
@@ -731,7 +780,7 @@ class EmbeddingSearchClient(_CheckedProjectAndDataset):
       return False
 
 
-class AnomalyDetector(_CheckedProjectAndDataset):
+class AnomalyDetector(_CheckedProjectAndDataset, _CheckedTableId):
   """Detects anomalies in agent behavior using BigQuery AI/ML.
 
   Supports two detection modes:
@@ -927,7 +976,8 @@ class AnomalyDetector(_CheckedProjectAndDataset):
 
     Raises:
         ValueError: If *project_id* or *dataset_id* fails the project or
-            dataset ID check that ``Client`` runs.
+            dataset ID check that ``Client`` runs, or *table_id* is not
+            one table name.
     """
     self.project_id = project_id
     self.dataset_id = dataset_id
@@ -1344,7 +1394,7 @@ class AnomalyDetector(_CheckedProjectAndDataset):
       return []
 
 
-class BatchEvaluator(_CheckedProjectAndDataset):
+class BatchEvaluator(_CheckedProjectAndDataset, _CheckedTableId):
   """Batch evaluation of sessions using BigQuery AI.GENERATE.
 
   Leverages BigQuery's high-throughput AI.GENERATE for
@@ -1424,7 +1474,8 @@ class BatchEvaluator(_CheckedProjectAndDataset):
 
     Raises:
         ValueError: If *project_id* or *dataset_id* fails the project or
-            dataset ID check that ``Client`` runs.
+            dataset ID check that ``Client`` runs, or *table_id* is not
+            one table name.
     """
     self.project_id = project_id
     self.dataset_id = dataset_id
