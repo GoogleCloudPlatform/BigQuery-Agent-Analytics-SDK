@@ -774,32 +774,64 @@ test('continued and expanded flag credentials stay out of rows and diagnostics',
   }
 })
 
-test('inside a substitution, a comment, a case or a here-document runs the value to the end of the text', () => {
+test('inside a substitution, comments, here-documents and case statements are read as the shells read them', () => {
   const stats = newStats()
-  const toEnd = [
-    'cli --password $(printf %s prefix # )\nprintf %s SecretSuffix) --verbose',
+  // Ordinary shell code: the value ends where its substitution does, and what
+  // follows is kept.
+  const kept = [
+    'cli --password $(printf %s SecretSuffix # comment\n) --verbose\necho ordinary',
+    'cli --password $(printf %s prefix # )\nprintf %s SecretSuffix) --verbose\necho ordinary',
     'cli --password $(printf %s SecretSuffix # (\n) --verbose',
     'cli --password $(printf %s prefix \\\n# )\nprintf %s SecretSuffix) --verbose',
-    'cli --password $(printf %s x >#)\nprintf %s SecretSuffix) --verbose',
-    'cli --password $(case x in x) printf %s SecretSuffix;; esac) --verbose',
-    'cli --password $(case y in x) printf %s esac;; y) printf %s SecretSuffix;; esac) --verbose',
-    'cli --password "$(cat <<EOF\n) " SecretSuffix\nEOF\n)" --verbose',
-    'cli --password "$(cat <<EOF\ntext\\\nEOF\n) " SecretSuffix\nEOF\n)" --verbose',
-    "cli --password $(cat <<-'END'\n\t) SecretSuffix\n\tEND\n) --verbose",
+    'cli --password $(# a comment first\nprintf %s SecretSuffix) --verbose',
     'cli --password <(printf %s x # )\nprintf %s SecretSuffix) --verbose',
-    'cli --password $(cat <<EOF\nSecretSuffix with no end',
-  ]
-  for (const input of toEnd) expect(redactText(input, stats)).toBe('cli --password [REDACTED]')
-  // Substitutions without them are still delimited: what follows is kept.
-  const kept = [
+    'cli --password $(printf %s abc#SecretSuffix) --verbose',
+    'cli --password $(printf %s $((1 << 2)) SecretSuffix) --verbose',
+    'cli --password $( (( x = 1 << 2 )); printf %s SecretSuffix) --verbose',
     'cli --password $(printf %s ${#SecretSuffix}) --verbose',
-    'cli --password $(echo $((1 + 2)) SecretSuffix) --verbose',
     'cli --password $(printf "%s # )" SecretSuffix) --verbose',
     'cli --password $(printf %s \\\n  SecretSuffix) --verbose',
     'cli --password $(cat <<< SecretSuffix) --verbose',
-    'cli --password $(printf %s showcase SecretSuffix) --verbose',
+    'cli --password $(printf %s showcase case SecretSuffix) --verbose',
+    'cli --password ${LOGIN:-{a b} SecretSuffix} --verbose',
+    'cli --password $(cat <<EOF\nSecretSuffix\nEOF\n) --verbose\necho ordinary',
+    'cli --password "$(cat <<EOF\n) " SecretSuffix\nEOF\n)" --verbose',
+    "cli --password $(cat <<-'END'\n\t) SecretSuffix\n\tEND\n) --verbose",
+    'cli --password $(cat <<A <<B\nx\nA\nSecretSuffix)\nB\n) --verbose',
+    'cli --password $(cat <<EOF\nA\nEOF\r\nSecretSuffix)\nEOF \n)\nEOF\n) --verbose',
+    'cli --password $(case x in x) printf %s SecretSuffix;; esac) --verbose',
+    'cli --password $(case y in x) printf %s esac;; y) printf %s SecretSuffix;; esac) --verbose',
+    'cli --password $(case a in (a) printf %s SecretSuffix;; esac) --verbose',
+    'cli --password $(case "a b" in c | "a b") printf %s SecretSuffix;& d) printf %s x;; esac) --verbose',
+    'cli --password $(case a\nin\n  # a comment\n  a) printf %s SecretSuffix\n  ;;\nesac) --verbose',
+    'cli --password $(case a in a) printf %s SecretSuffix esac\nesac) --verbose',
+    'cli --password $(case a in a) cat <<EOF;;\nSecretSuffix)\nEOF\nesac) --verbose',
+    'cli --password $(ca\\\nse a i\\\nn a) printf %s SecretSuffix;; esac) --verbose',
+    'cli --password $(cat <<EOF\nEOF) SecretSuffix\nEOF\n) --verbose',
   ]
-  for (const input of kept) expect(redactText(input, stats)).toBe('cli --password [REDACTED] --verbose')
+  for (const input of kept) {
+    const tail = input.endsWith('\necho ordinary') ? '\necho ordinary' : ''
+    expect(redactText(input, stats)).toBe(`cli --password [REDACTED] --verbose${tail}`)
+  }
+  // Where shells read the code differently, or its end cannot be told: to the
+  // end of the text.
+  const toEnd = [
+    'cli --password "$(cat <<EOF\ntext\\\nEOF\n) " SecretSuffix\nEOF\n)" --verbose',
+    'cli --password $(printf %s A;#x )\nprintf %s SecretSuffix) --verbose',
+    'cli --password $(printf %s x >#)\nprintf %s SecretSuffix) --verbose',
+    'cli --password $(printf %s A # x \\\nprintf %s SecretSuffix) --verbose',
+    'cli --password $(cat <<EOF) --verbose\nSecretSuffix\nEOF',
+    "cli --password $(cat <<''\nSecretSuffix)\n\n) --verbose",
+    'cli --password $(cat <<EOF $(printf %s x\n)\nSecretSuffix\nEOF\n) --verbose',
+    'cli --password $(case $(uname) in *) printf %s SecretSuffix;; esac) --verbose',
+    'cli --password $(case a { a) printf %s SecretSuffix;; }) --verbose',
+    'cli --password $(case a in @(a|b)) printf %s SecretSuffix;; esac) --verbose',
+    'cli --password $((printf %s a) SecretSuffix) --verbose',
+    'cli --password $(cat <<EOF\nSecretSuffix with no end',
+    'cli --password $(cat <<EOF\nSecretSuffix\nEOF) --verbose',
+    'cli --password $(printf %s $((1 # ))\n)) SecretSuffix) --verbose',
+  ]
+  for (const input of toEnd) expect(redactText(input, stats)).toBe('cli --password [REDACTED]')
 })
 
 test('line continuations are read through: a split $\', ${, $(, << or case still counts', () => {
@@ -810,8 +842,8 @@ test('line continuations are read through: a split $\', ${, $(, << or case still
     ['cli --password $\\\r\n{LOGIN:-my SecretSuffix} --verbose', 'cli --password [REDACTED] --verbose'],
     ['cli --password $\\\n(printf %s SecretSuffix) --verbose', 'cli --password [REDACTED] --verbose'],
     ['cli --password <\\\n(printf %s SecretSuffix) --verbose', 'cli --password [REDACTED] --verbose'],
-    ['cli --password $(ca\\\nse y in y) printf %s SecretSuffix;; esac) --verbose', 'cli --password [REDACTED]'],
-    ['cli --password $(cat <\\\n<EOF\n) SecretSuffix\nEOF\n) --verbose', 'cli --password [REDACTED]'],
+    ['cli --password $(ca\\\nse y in y) printf %s SecretSuffix;; esac) --verbose', 'cli --password [REDACTED] --verbose'],
+    ['cli --password $(cat <\\\n<EOF\n) SecretSuffix\nEOF\n) --verbose', 'cli --password [REDACTED] --verbose'],
     ['cli --password $(cat <<\\\n< SecretSuffix) --verbose', 'cli --password [REDACTED] --verbose'],
   ]
   for (const [input, want] of cases) expect(redactText(input, stats)).toBe(want)
@@ -880,6 +912,25 @@ test('a query-style name= value that a quote or an expansion opens runs through 
   }
 })
 
+test('a quote that closes around a credential name leaves the value outside it', () => {
+  const stats = newStats()
+  const cases: [string, string][] = [
+    ['cli "--password"="prefix\nSecretSuffix" --verbose\necho ordinary', 'cli "--password"=[REDACTED]\necho ordinary'],
+    ['cli --"password"="prefix\nSecretSuffix" --verbose\necho ordinary', 'cli --"password"=[REDACTED]\necho ordinary'],
+    ["cli --'password'='prefix\nSecretSuffix' --verbose\necho ordinary", "cli --'password'=[REDACTED]\necho ordinary"],
+    ['message "password"="prefix\nSecretSuffix" more\nnext line', 'message "password"=[REDACTED]\nnext line'],
+    // A quote opened between the name and `=` holds the value.
+    ['cli --password"=prefix\nSecretSuffix" --verbose\nnext line', 'cli --password"=[REDACTED]"\nnext line'],
+    // An option whose name is quoted alone, and its value.
+    ['cli "--password" "Secret Suffix" --verbose', 'cli "--password" [REDACTED] --verbose'],
+    ["cli '--password' Secret\\ Suffix --verbose", "cli '--password' [REDACTED] --verbose"],
+  ]
+  for (const [input, want] of cases) {
+    expect(redactText(input, stats)).toBe(want)
+    expect(redactText(want, stats)).toBe(want)
+  }
+})
+
 test('a credential option inside a quote that opens just before it loses everything to that quote\'s end', () => {
   const stats = newStats()
   const cases: [string, string][] = [
@@ -912,30 +963,33 @@ test('option shapes by credential names: no value is kept (198 inputs)', () => {
 })
 
 test('substitution-held credentials stay out of rows, errors, requests, dead letters and diagnostics', () => {
-  const leaks = [
-    'cli --password $(printf %s prefix # )\nprintf %s SecretSuffix) --verbose',
-    'cli --password $(printf %s prefix \\\n# )\nprintf %s SecretSuffix) --verbose',
-    'cli --password $(case x in x) printf %s SecretSuffix;; esac) --verbose',
-    'cli --password $(case y in x) printf %s esac;; y) printf %s SecretSuffix;; esac) --verbose',
-    'cli --password "$(cat <<EOF\n) " SecretSuffix\nEOF\n)" --verbose',
-    'cli --password "$(cat <<EOF\ntext\\\nEOF\n) " SecretSuffix\nEOF\n)" --verbose',
-    'cli --password $(ca\\\nse y in y) printf %s SecretSuffix;; esac) --verbose',
-    'cli --password $(cat <\\\n<EOF\n) SecretSuffix\nEOF\n) --verbose',
-    'cli --password=\\\nSecretSuffix --verbose',
-    'cli --password=prefix"Secret\nSuffix" --verbose',
-    'cli --password=$(printf %s prefix\nprintf %s SecretSuffix) --verbose',
-    'cli "--password=prefix\nSecretSuffix" --verbose',
-    'PASSWORD=$(cat <<EOF\nSecretSuffix\nEOF\n) cli --verbose',
+  // Each command, and the text after its value that is kept.
+  const commands: [string, string[]][] = [
+    ['cli --password $(printf %s SecretSuffix # comment\n) --verbose\necho ordinary', ['--verbose', 'echo ordinary']],
+    ['cli --password $(printf %s prefix \\\n# )\nprintf %s SecretSuffix) --verbose', ['--verbose']],
+    ['cli --password $(case y in x) printf %s esac;; y) printf %s SecretSuffix;; esac) --verbose', ['--verbose']],
+    ['cli --password $(cat <<EOF\nSecretSuffix\nEOF\n) --verbose\necho ordinary', ['--verbose', 'echo ordinary']],
+    ['cli --password "$(cat <<EOF\n) " SecretSuffix\nEOF\n)" --verbose', ['--verbose']],
+    ['cli --password $(printf %s abc#SecretSuffix) --verbose', ['--verbose']],
+    ['cli --password $(printf %s $((1 << 2)) SecretSuffix) --verbose', ['--verbose']],
+    ['cli --password $(ca\\\nse a in a) printf %s SecretSuffix;; esac) --verbose', ['--verbose']],
+    ["cli --password $\\\n'prefix\\' SecretSuffix' --verbose", ['--verbose']],
+    ['cli --password $\\\n{LOGIN:-my SecretSuffix} --verbose', ['--verbose']],
+    ['cli --password $(cat <<< SecretSuffix) --verbose', ['--verbose']],
+    ['cli "--password Secret\nSuffix" --verbose', ['--verbose']],
+    ['cli "--password" "Secret Suffix" --verbose', ['--verbose']],
+    ['cli "--password"="prefix\nSecretSuffix" --verbose\necho ordinary', ['echo ordinary']],
+    ['cli --"password"="prefix\nSecretSuffix" --verbose\necho ordinary', ['echo ordinary']],
+    ["cli --'password'='prefix\nSecretSuffix' --verbose\necho ordinary", ['echo ordinary']],
+    ['message "password"="prefix\nSecretSuffix" more\necho ordinary', ['echo ordinary']],
+    ['cli --password=prefix"Secret\nSuffix" --verbose\necho ordinary', ['echo ordinary']],
+    ['cli --password=$(printf %s prefix\nprintf %s SecretSuffix) --verbose\necho ordinary', ['echo ordinary']],
+    ['PASSWORD=$(cat <<EOF\nSecretSuffix\nEOF\n) cli --verbose\necho ordinary', ['echo ordinary']],
+    ['cli --password=\\\nSecretSuffix --verbose', []],
+    ['cli --password "$(cat <<EOF\ntext\\\nEOF\n) " SecretSuffix\nEOF\n)" --verbose', []],
+    ['cli --password $(printf %s A;#x )\nprintf %s SecretSuffix) --verbose', []],
   ]
-  // Delimited values: the argument after the closing boundary is kept.
-  const delimited = [
-    "cli --password $\\\n'prefix\\' SecretSuffix' --verbose",
-    'cli --password $\\\n{LOGIN:-my SecretSuffix} --verbose',
-    'cli --password $(printf %s \\\n  SecretSuffix) --verbose',
-    'cli --password $(cat <<< SecretSuffix) --verbose',
-    'cli "--password Secret\nSuffix" --verbose',
-  ]
-  for (const command of [...leaks, ...delimited]) {
+  for (const [command, kept] of commands) {
     const { row } = buildRow({ eventType: 'TOOL_COMPLETED', timestampMs: 0, eventId: 'e1', agent: 'coding-agent', sessionId: 's1',
       invocationId: 'i1', userId: 'dev', traceId: null, spanId: null, parentSpanId: null,
       content: { tool: 'Bash', args: { command } }, attributes: {}, status: 'ERROR', errorMessage: `command failed: ${command}`,
@@ -949,7 +1003,9 @@ test('substitution-held credentials stay out of rows, errors, requests, dead let
       redactDiagnostic(`command failed: ${command}`, 1000),
       redactText(redactText(command, newStats()), newStats()),
     ]
-    for (const text of paths) expect(text).not.toContain('Suffix')
-    if (delimited.includes(command)) for (const text of paths) expect(text).toContain('--verbose')
+    for (const text of paths) {
+      expect(text).not.toContain('Suffix')
+      for (const k of kept) expect(text).toContain(k)
+    }
   }
 })

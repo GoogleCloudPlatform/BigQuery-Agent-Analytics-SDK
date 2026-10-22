@@ -1085,20 +1085,26 @@ column. Treat the dataset like the transcripts it mirrors.
   backtick opens the value), and on to the next lines after a line continuation,
   or as far as the value runs on: after `=` with no space around it (a flag or
   an assignment), through the whole shell word it starts, wherever in it a
-  quote, `$(…)`, backtick or `${…}` opens (inside a quote that opens just
-  before the name, through that quote's end), to the end of the line that
-  word ends on; otherwise through a quote that opens the value, to the end of
-  the line it closes on (anything left open, to the end of the text); and
-  after a long command-line option
-  whose name's last part is a credential word (`--password VALUE`, `--api-key
-  "VALUE"`, `--pass -VALUE`, the value after a line continuation too) its
-  whole shell argument: quoted and escaped parts, `$'…'`, `$(…)`, `<(…)`,
-  backticks and `${…}` included, line continuations read through, to the
-  first space, `;`, `|`, `&`, `<`, `>` or `)` outside them (inside a quote
-  that opens just before the option, through that quote's end); to the end of
-  the text when a `$(…)`, `(…)` or `<(…)` in it holds a comment, a `case` or a
-  here-document, or when anything is left open; unless it is one redaction
-  marker alone or starts with `--`
+  quote, `$(…)`, backtick or `${…}` opens (inside a quote still open where the
+  value starts, through that quote's end), to the end of the line that word
+  ends on; otherwise through a quote that opens the value, to the end of the
+  line it closes on (anything left open, to the end of the text); and after a
+  long command-line option whose name's last part is a credential word
+  (`--password VALUE`, `--api-key "VALUE"`, `--pass -VALUE`, `"--password"
+  VALUE`, the value after a line continuation too) its whole shell argument:
+  quoted and escaped parts, `$'…'`, `${…}`, `$((…))`, backticks, `$(…)` and
+  `<(…)` included, line continuations read through, to the first space, `;`,
+  `|`, `&`, `<`, `>` or `)` outside them (inside a quote still open where the
+  value starts, through that quote's end), with the comments, here-documents
+  and `case` statements in a `$(…)` read as bash, dash and zsh read them;
+  to the end of the text where shells read the code differently or its end
+  cannot be told (a `#` right after an operator or starting a word in
+  arithmetic, a comment ending in a backslash, an empty or expanded
+  here-document delimiter, a body with no exact delimiter line, a continued
+  line in an unquoted body, a body still due when its code ends, a `case`
+  with an expansion in its subject, zsh's `{` form or a parenthesis in a
+  pattern), or when anything is left open; unless it is one redaction marker
+  alone or starts with `--`
   (`--password-stdin` and `--token-file` keep theirs). A name is a credential's when
   one of its parts, split on punctuation and camelCase and compared without
   case, is `pass`, `passwd`, `password`, `passphrase`, `pwd`, `secret`,

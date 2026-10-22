@@ -222,11 +222,11 @@ const NAMED_VALUE = /(^|[^A-Za-z0-9_.-])-{0,2}([A-Za-z_][A-Za-z0-9_.-]{0,99})(?:
 // or, for a query-style `?name=` / `&name=`, to the next `&`, `#`, `;` or
 // space (when a quote, `$` or a backtick opens it, as in a shell assignment
 // after `;` or `&`, through its shell word if that is longer). A line that
-// ends in a continuation (`\`) runs on to the next. After
-// `=` with no space around it (a flag or an assignment) the value runs on
-// through the whole shell word it starts, to the end of the line that word
-// ends on; otherwise through a quote that opens the value, to the end of the
-// line that quote closes on. Anything left open runs to the end of the text.
+// ends in a continuation (`\`) runs on to the next. After `=` with no space
+// around it (a flag or an assignment) the value runs on through the whole
+// shell word it starts, to the end of the line that word ends on; otherwise
+// through a quote that opens the value, to the end of the line that quote
+// closes on. Anything left open runs to the end of the text.
 
 // The end of the line at or after `from`, run on through each line that ends
 // in a continuation; `start` is where the value starts.
@@ -249,33 +249,45 @@ function namedValueEnd(text: string, start: number): number {
   return q >= text.length ? text.length : lineEnd(text, start, q)
 }
 
-// The quote just before a match (`"--password=…`, `'--password …`), unless
-// it is escaped: the match is inside it.
-const quoteBefore = (text: string, m: RegExpExecArray): string =>
-  /^["'`]$/.test(m[1] as string) && text[m.index - 1] !== '\\' ? (m[1] as string) : ''
+// The quote open where a match's value starts: one just before the match
+// (`"--password=…`, `'--password …`) unless it is escaped, then as the quotes
+// in `between`, the text between the name and the value, leave it: they can
+// close it (`"--password"=…`) or open one (`--password"=…`).
+function quoteAtValue(text: string, m: RegExpExecArray, between: string): string {
+  let quote = /^["'`]$/.test(m[1] as string) && text[m.index - 1] !== '\\' ? (m[1] as string) : ''
+  for (let k = 0; k < between.length; k += 1) {
+    const q = between[k] as string
+    if (q === '\\' && quote !== "'") k += 1
+    else if (q === '"' || q === "'") quote = quote === '' ? q : quote === q ? '' : quote
+  }
+  return quote
+}
 
 function redactNamedValues(text: string, stats: SanitizeStats): string {
   NAMED_VALUE.lastIndex = 0
   let out = ''
   let copied = 0
   for (let m = NAMED_VALUE.exec(text); m !== null; m = NAMED_VALUE.exec(text)) {
-    if (!isSensitiveKey(m[2] as string)) {
+    const name = m[2] as string
+    const separator = m[0].lastIndexOf(m[3] as string)
+    if (!isSensitiveKey(name)) {
       // Resume at the separator: it can be the boundary before the next name
       // (`--from-literal=password=…`, `env: NAME=…`).
-      NAMED_VALUE.lastIndex = m.index + m[0].lastIndexOf(m[3] as string)
+      NAMED_VALUE.lastIndex = m.index + separator
       continue
     }
     const start = m.index + m[0].length
     let end: number
-    // A quote that opened before the name and closes in the value is put
-    // back after the marker.
+    // A quote open where the value starts and closed in it is put back after
+    // the marker.
     let close = ''
     if (m[3] === '=' && /^[?&#;]$/.test(m[1] as string)) {
       const stop = /[&#;\s]/.exec(text.slice(start))
       end = stop === null ? text.length : start + stop.index
       if (/^["'`$]/.test(text[start] ?? '')) end = Math.max(end, shellArgument(text, start, '').end)
-    } else if (m[3] === '=' && /[^ 	]=$/.test(m[0])) {
-      const inside = quoteBefore(text, m)
+    } else if (m[3] === '=' && /[^ \t]=$/.test(m[0])) {
+      const nameEnd = m[0].indexOf(name, (m[1] as string).length) + name.length
+      const inside = quoteAtValue(text, m, m[0].slice(nameEnd, separator))
       const word = shellArgument(text, start, inside)
       end = lineEnd(text, start, word.end)
       if (word.closed !== -1) close = inside
@@ -293,12 +305,13 @@ function redactNamedValues(text: string, stats: SanitizeStats): string {
 }
 
 // A long command-line option and its value after a space (`--password VALUE`,
-// `--api-key "VALUE"`, `--pass -VALUE`), or after line continuations
-// (`--password \` and the value on the next line): the whole shell argument.
-// The option's name is a credential's and its last part a credential word,
-// so `--password-stdin host`, `--token-file path` and `--max-tokens 1024`
-// keep theirs. A value that starts with `--` is the next option, not a value.
-const FLAG_VALUE = /(^|[^A-Za-z0-9_.-])--([A-Za-z][A-Za-z0-9_.-]{0,99})(?:[ \t]|\\\r?\n)+(?![ \t]|\\\r?\n)(?!--)(?=\S)/g
+// `--api-key "VALUE"`, `--pass -VALUE`, `"--password" VALUE`), or after line
+// continuations (`--password \` and the value on the next line): the whole
+// shell argument. The option's name is a credential's and its last part a
+// credential word, so `--password-stdin host`, `--token-file path` and
+// `--max-tokens 1024` keep theirs. A value that starts with `--` is the next
+// option, not a value.
+const FLAG_VALUE = /(^|[^A-Za-z0-9_.-])--([A-Za-z][A-Za-z0-9_.-]{0,99})(["']?)(?:[ \t]|\\\r?\n)+(?![ \t]|\\\r?\n)(?!--)(?=\S)/g
 // A value that is one redaction marker and nothing else.
 const WHOLE_MARKER = /^\[REDACTED(?::[a-z-]+)?\]$/
 
@@ -312,50 +325,232 @@ function afterContinuations(text: string, i: number): number {
   }
 }
 
-// Whether the shell reads the word `case` at `i`, line continuations removed.
-function caseAt(text: string, i: number): boolean {
-  if (/[A-Za-z0-9_]/.test(text[i - 1] ?? '')) return false
+// Where the word `word` that starts at `i` ends, line continuations in and
+// after it read through; -1 when the text there is not that word alone.
+function wordEnd(text: string, i: number, word: string): number {
   let j = i
-  for (const letter of 'case') {
+  for (const letter of word) {
     j = afterContinuations(text, j)
-    if (text[j] !== letter) return false
+    if (text[j] !== letter) return -1
     j += 1
   }
-  return !/[A-Za-z0-9_]/.test(text[afterContinuations(text, j)] ?? '')
+  j = afterContinuations(text, j)
+  return /[A-Za-z0-9_]/.test(text[j] ?? '') ? -1 : j
+}
+
+// Whether `esac` at `i` is the word alone. A split `esac` is taken for
+// another word, which leaves its case open, so the argument runs to the end.
+const esacAt = (text: string, i: number): boolean =>
+  text.startsWith('esac', i) && /^(?:[ \t\n;&|)<>]|$)/.test(text[i + 4] ?? '')
+
+// After a `case` at `i`: the index just past its `in`; -1 when no subject and
+// `in` follow, so `case` is a word; text.length for a form this does not
+// read: a subject with a backslash (other than a line continuation), a
+// backtick, `$(`, `${` or `$'`, a comment before `in`, or zsh's `{` form.
+function caseStatementAt(text: string, i: number): number {
+  let j = wordEnd(text, i, 'case')
+  if (j === -1 || (text[j] !== ' ' && text[j] !== '\t')) return -1
+  while (text[j] === ' ' || text[j] === '\t') j = afterContinuations(text, j + 1)
+  const subject = j
+  while (j < text.length && !/[ \t\n;&|<>()]/.test(text[j] as string)) {
+    const c = text[j] as string
+    if (c === '\\' && afterContinuations(text, j) > j) {
+      j = afterContinuations(text, j)
+      continue
+    }
+    if (c === '\\' || c === '`' || (c === '$' && /[('"{]/.test(text[j + 1] ?? ''))) return text.length
+    if (c === '"' || c === "'") {
+      const e = text.indexOf(c, j + 1)
+      if (e === -1 || (c === '"' && /[\\`]|\$[('"{]/.test(text.slice(j + 1, e)))) return text.length
+      j = e + 1
+    } else {
+      j += 1
+    }
+  }
+  if (j === subject) return -1
+  for (;;) {
+    if (text[j] === ' ' || text[j] === '\t' || text[j] === '\n') j += 1
+    else if (afterContinuations(text, j) > j) j = afterContinuations(text, j)
+    else break
+  }
+  if (text[j] === '#' || text[j] === '{') return text.length
+  const k = wordEnd(text, j, 'in')
+  if (k === -1) return -1
+  if (k >= text.length || text[k] === ' ' || text[k] === '\t' || text[k] === '\n') return k
+  return text[k] === '\r' ? text.length : -1
+}
+
+// Where a comment that starts at `i` ends: at its line break; -1 when it runs
+// to the end of the text or ends in a backslash, which bash 3.2 takes to
+// continue it on the next line and other shells do not.
+function commentEnd(text: string, i: number): number {
+  const nl = text.indexOf('\n', i)
+  return nl === -1 || text[nl - 1] === '\\' ? -1 : nl
+}
+
+// The delimiter of a here-document whose `<<` ends just before `j`: the word
+// with its quotes removed, whether any of it was quoted, whether `<<-` strips
+// tabs, and where the word ends. Null for an empty delimiter (bash 5 and
+// other shells end its body differently) or one with an expansion, a
+// backtick or a backslash in double quotes.
+function hereDelimiter(text: string, j: number): { delimiter: string; quoted: boolean; tabs: boolean; end: number } | null {
+  const tabs = text[j] === '-'
+  if (tabs) j = afterContinuations(text, j + 1)
+  while (text[j] === ' ' || text[j] === '\t') j = afterContinuations(text, j + 1)
+  let delimiter = ''
+  let quoted = false
+  while (j < text.length && !/[ \t\n;&|<>()]/.test(text[j] as string)) {
+    const c = text[j] as string
+    if (c === '\\') {
+      const after = afterContinuations(text, j)
+      if (after > j) {
+        j = after
+        continue
+      }
+      delimiter += text[j + 1] ?? ''
+      quoted = true
+      j += 2
+    } else if (c === '"' || c === "'") {
+      const e = text.indexOf(c, j + 1)
+      if (e === -1 || (c === '"' && /[\\$`]/.test(text.slice(j + 1, e)))) return null
+      delimiter += text.slice(j + 1, e)
+      quoted = true
+      j = e + 1
+    } else if (c === '`' || (c === '$' && /[({'"]/.test(text[j + 1] ?? ''))) {
+      return null
+    } else {
+      delimiter += c
+      j += 1
+    }
+  }
+  return delimiter === '' ? null : { delimiter, quoted, tabs, end: j }
+}
+
+// Where the bodies of the here-documents in `due` end, read from `from`, the
+// start of the line after theirs: just past each one's delimiter line, taken
+// as it is (a carriage return, a trailing space or a `)` after it makes
+// another line: bash alone ends a body at `EOF)`). -1 when one has none, or a
+// line of an unquoted body ends in a backslash: a continuation, which joins
+// the next line before it is compared.
+function hereDocumentsEnd(text: string, from: number, due: readonly [string, boolean, boolean, number][]): number {
+  let at = from
+  for (const [delimiter, tabs, quoted] of due) {
+    for (;;) {
+      if (at >= text.length) return -1
+      const nl = text.indexOf('\n', at)
+      const line = text.slice(at, nl === -1 ? text.length : nl)
+      if (!quoted && line.endsWith('\\')) return -1
+      at = nl === -1 ? text.length : nl + 1
+      if ((tabs ? line.replace(/^\t+/, '') : line) === delimiter) break
+      if (nl === -1) return -1
+    }
+  }
+  return at
 }
 
 // The shell argument that starts at `start`: it ends at the first space, tab,
 // newline, control operator (`;`, `|`, `&`), redirection (`<`, `>`) or `)`
 // outside every quote and expansion, and not escaped. It goes through single
 // quotes (literal), double quotes and ANSI-C `$'…'` (backslash escapes),
-// `$(…)`, `(…)`, `<(…)`, backticks and `${…}` (nested, with quotes inside
-// them), backslash escapes and line continuations (read through: `$`, a
-// continuation and `{` is `${`), and the parts joined to them. Shell code in
-// `$(…)`, `(…)` or `<(…)` that holds a comment (`#`), a `case` or a
-// here-document (`<<`, not `<<<`) can hold a `)` that does not end it: the
-// argument runs to the end of the text, as does anything left open.
-// `inside` is a quote the argument starts in; `closed` is where that quote
-// closes (-1: it does not).
+// backticks, `${…}` (with the braces nested in it), `$((…))`, and `$(…)`,
+// `(…)`, `<(…)` and `>(…)`, which hold shell code: in them a comment, a
+// here-document's body and a `case` statement's patterns are read as the
+// shells read them (bash 5, dash and zsh agree on these), so a `)` there does
+// not end the argument, while a `#` inside a word, an arithmetic `<<` and a
+// `case` that is an argument are ordinary text. Line continuations are read
+// through (`$`, a continuation and `{` is `${`). Where shells read a construct
+// differently, or it cannot be delimited, the argument runs to the end of the
+// text: a `#` right after an operator or starting a word in arithmetic, a
+// comment that ends in a backslash, a here-document delimiter that is empty
+// or holds an expansion, a body with no exact delimiter line, a continued
+// line in an unquoted body, a body still due when its code ends or at a line
+// break inside a nested part, `$((…)` that is not arithmetic, and a `case`
+// that the function caseStatementAt does not read, or whose patterns hold a
+// parenthesis or a line break. So does anything left open. `inside` is a
+// quote the argument starts in; `closed` is where that quote closes (-1: it
+// does not).
 function shellArgument(text: string, start: number, inside: string): { end: number; closed: number } {
-  // What is open, innermost last: ' " a(nsi) ( ` {
+  // What is open, innermost last: ' " a(nsi) ` {, $((…)) as A, ((…)) as B, a
+  // parenthesis inside them as P, a glob group as G, $( <( >( as S, a
+  // subshell as (, and a case statement: c between its arms, p in a pattern,
+  // l in an arm's commands.
   const open: string[] = inside === '' ? [] : [inside]
+  // Here-documents whose bodies start on the next line: delimiter, tabs
+  // stripped, quoted, and the depth of the code that holds them.
+  const due: [string, boolean, boolean, number][] = []
   let closed = -1
+  // In shell code: what came last (the code's start, a space or line break,
+  // an operator or a word), and whether a command can start here.
+  let last: 'start' | 'space' | 'op' | 'word' = 'word'
+  let command = false
   let i = start
+  const toEnd = (): { end: number; closed: number } => ({ end: text.length, closed })
   while (i < text.length) {
     if (closed === -1 && inside !== '' && open.length === 0) closed = i - 1
     const c = text[i] as string
     const top = open[open.length - 1] ?? ''
     if (top === "'") {
-      if (c === "'") open.pop()
+      if (c === "'") {
+        open.pop()
+        last = 'word'
+        command = false
+      }
       i += 1
       continue
     }
+    if (c === '\n' && due.length > 0 && (top === 'S' || top === '(' || top === 'l' || top === 'c')) {
+      if (due.some(h => h[3] !== open.length)) return toEnd()
+      i = hereDocumentsEnd(text, i + 1, due)
+      if (i === -1) return toEnd()
+      due.length = 0
+      last = 'space'
+      command = true
+      continue
+    }
+    if (top === 'c') {
+      // Between a case statement's arms: `esac`, a comment or a pattern.
+      if (c === ' ' || c === '\t' || c === '\n') {
+        last = 'space'
+        i += 1
+      } else if (afterContinuations(text, i) > i) {
+        i = afterContinuations(text, i)
+      } else if (c === '#') {
+        if (last !== 'space') return toEnd()
+        i = commentEnd(text, i)
+        if (i === -1) return toEnd()
+      } else if (esacAt(text, i)) {
+        if (due.length > 0) return toEnd()
+        open.pop()
+        last = 'word'
+        command = false
+        i += 4
+      } else if (c === ')') {
+        return toEnd()
+      } else {
+        open[open.length - 1] = 'p'
+        last = 'op'
+        if (c === '(') i += 1
+      }
+      continue
+    }
     if (c === '\\') {
-      i += text.startsWith('\r\n', i + 1) ? 3 : 2
+      const after = afterContinuations(text, i)
+      if (after > i) {
+        // A line continuation leaves no trace.
+        i = after
+        continue
+      }
+      i += 2
+      last = 'word'
+      command = false
       continue
     }
     if (top === 'a' || top === '`') {
-      if (c === (top === 'a' ? "'" : '`')) open.pop()
+      if (c === (top === 'a' ? "'" : '`')) {
+        open.pop()
+        last = 'word'
+        command = false
+      }
       i += 1
       continue
     }
@@ -367,45 +562,212 @@ function shellArgument(text: string, start: number, inside: string): { end: numb
       i = n + 1
       continue
     }
-    if (c === '$' && (d === '(' || d === '{')) {
-      open.push(d)
+    if (c === '$' && d === '(') {
+      const e = afterContinuations(text, n + 1)
+      if (text[e] === '(') {
+        open.push('A')
+        i = e + 1
+      } else {
+        open.push('S')
+        i = n + 1
+        last = 'start'
+        command = true
+      }
+      continue
+    }
+    if (c === '$' && d === '{') {
+      open.push('{')
       i = n + 1
+      // zsh's flags: `${(s:}:)name}`.
+      if (text[i] === '(') {
+        open.push('G')
+        i += 1
+      }
       continue
     }
     if (top === '"') {
-      if (c === '"') open.pop()
-      else if (c === '`') open.push('`')
+      if (c === '"') {
+        open.pop()
+        last = 'word'
+        command = false
+      } else if (c === '`') {
+        open.push('`')
+      }
       i += 1
       continue
     }
-    if (top === '(') {
-      if (c === '#' || caseAt(text, i)) return { end: text.length, closed }
-      if (c === '<' && d === '<') {
-        const e = afterContinuations(text, n + 1)
-        if (text[e] !== '<') return { end: text.length, closed }
-        i = e + 1
-        continue
-      }
-      if (c === ')') {
+    if (top === '{') {
+      if (c === '}') {
         open.pop()
-        i += 1
-        continue
+        last = 'word'
+        command = false
+      } else if (c === '{' || c === '"' || c === "'" || c === '`') {
+        // zsh counts the braces inside `${…}`.
+        open.push(c)
       }
-    } else if (top === '') {
-      if (c === ' ' || c === '\t' || c === '\n' || (c === '\r' && text[i + 1] === '\n')) break
-      if ((c === '<' || c === '>') && d === '(') {
-        open.push('(')
+      i += 1
+      continue
+    }
+    if (top === 'A' || top === 'B' || top === 'P') {
+      // bash 5 reads a `#` that starts a word here as a comment; other shells
+      // as text (`16#ff` is a number to all).
+      if (c === '#' && !/[A-Za-z0-9_]/.test(text[i - 1] ?? '')) return toEnd()
+      if (c === ')' && top !== 'P') {
+        if (d !== ')') return toEnd()
+        open.pop()
+        last = top === 'A' ? 'word' : 'op'
+        command = false
         i = n + 1
         continue
       }
-      if (c === ';' || c === '|' || c === '&' || c === '<' || c === '>' || c === ')') break
-    }
-    if (c === '"' || c === "'" || c === '`' || c === '(') {
-      open.push(c)
+      if (c === '(') open.push('P')
+      else if (c === ')') open.pop()
+      else if (c === '"' || c === "'" || c === '`') open.push(c)
       i += 1
       continue
     }
-    if (c === '}' && top === '{') open.pop()
+    if (top === 'G') {
+      if (c === ')') {
+        open.pop()
+        last = 'word'
+        command = false
+      } else if (c === '(') {
+        open.push('G')
+      } else if (c === '"' || c === "'" || c === '`') {
+        open.push(c)
+      }
+      i += 1
+      continue
+    }
+    if (top === 'p') {
+      // A case pattern, up to its `)`.
+      if (c === ')') {
+        open[open.length - 1] = 'l'
+        last = 'op'
+        command = true
+      } else if (c === '|') {
+        last = 'op'
+      } else if (c === ' ' || c === '\t') {
+        last = 'space'
+      } else if ('(\n;&<>'.includes(c) || (c === '#' && last !== 'word')) {
+        return toEnd()
+      } else {
+        if (c === '"' || c === "'" || c === '`') open.push(c)
+        last = 'word'
+      }
+      i += 1
+      continue
+    }
+    if (top === 'S' || top === '(' || top === 'l') {
+      if (c === ' ' || c === '\t' || c === '\n') {
+        last = 'space'
+        if (c === '\n') command = true
+        i += 1
+        continue
+      }
+      if (c === '#' && last !== 'word') {
+        // After an operator, bash 3.2 reads no comment; other shells do.
+        if (last === 'op') return toEnd()
+        i = commentEnd(text, i)
+        if (i === -1) return toEnd()
+        continue
+      }
+      if (c === '<' && d === '<') {
+        const e = afterContinuations(text, n + 1)
+        if (text[e] === '<') {
+          // A here-string.
+          i = e + 1
+          last = 'op'
+          continue
+        }
+        const h = hereDelimiter(text, e)
+        if (h === null) return toEnd()
+        due.push([h.delimiter, h.tabs, h.quoted, open.length])
+        i = h.end
+        last = 'word'
+        continue
+      }
+      if ((c === '<' || c === '>') && d === '(') {
+        open.push('S')
+        i = n + 1
+        last = 'start'
+        command = true
+        continue
+      }
+      if (c === '(') {
+        if (last !== 'word' && d === '(') {
+          open.push('B')
+          i = n + 1
+          continue
+        }
+        // After a word, a glob group (or a function's `()`); else a subshell.
+        open.push(last === 'word' ? 'G' : '(')
+        if (last !== 'word') {
+          last = 'start'
+          command = true
+        }
+        i += 1
+        continue
+      }
+      if (c === ')') {
+        if (top === 'l' || due.length > 0) return toEnd()
+        open.pop()
+        last = top === '(' ? 'op' : 'word'
+        command = false
+        i += 1
+        continue
+      }
+      if (c === ';' && top === 'l' && (d === ';' || d === '&' || d === '|')) {
+        // An arm ends: `;;`, `;;&`, `;&` or zsh's `;|`.
+        i = n + 1
+        if (d === ';' && text[afterContinuations(text, i)] === '&') i = afterContinuations(text, i) + 1
+        open[open.length - 1] = 'c'
+        last = 'op'
+        continue
+      }
+      if (c === ';' || c === '&' || c === '|' || c === '<' || c === '>') {
+        last = 'op'
+        if (c !== '<' && c !== '>') command = true
+        i += 1
+        continue
+      }
+      if (last !== 'word' && top === 'l' && command && esacAt(text, i)) {
+        if (due.length > 0) return toEnd()
+        open.pop()
+        last = 'word'
+        command = false
+        i += 4
+        continue
+      }
+      if (last !== 'word' && c === 'c') {
+        const k = caseStatementAt(text, i)
+        if (k === text.length) return toEnd()
+        if (k !== -1) {
+          open.push('c')
+          i = k
+          last = 'word'
+          command = false
+          continue
+        }
+      }
+      if (c === '"' || c === "'" || c === '`') open.push(c)
+      last = 'word'
+      command = false
+      i += 1
+      continue
+    }
+    // The argument itself, outside every quote and expansion.
+    if (c === ' ' || c === '\t' || c === '\n' || (c === '\r' && text[i + 1] === '\n')) break
+    if ((c === '<' || c === '>') && d === '(') {
+      open.push('S')
+      i = n + 1
+      last = 'start'
+      command = true
+      continue
+    }
+    if (c === ';' || c === '|' || c === '&' || c === '<' || c === '>' || c === ')') break
+    if (c === '(') open.push('G')
+    else if (c === '"' || c === "'" || c === '`') open.push(c)
     i += 1
   }
   if (closed === -1 && inside !== '' && open.length === 0) closed = i - 1
@@ -421,9 +783,10 @@ function redactFlagValues(text: string, stats: SanitizeStats): string {
     const last = nameParts(name).pop() ?? ''
     if (!isSensitiveKey(name) || !forms(last).some(isCredentialWord)) continue
     const start = m.index + m[0].length
-    // An option inside a quote that opens just before it: the value runs
-    // through that quote's end, and the quote is put back after the marker.
-    const inside = quoteBefore(text, m)
+    // An option inside a quote still open where its value starts: the value
+    // runs through that quote's end, and the quote is put back after the
+    // marker.
+    const inside = quoteAtValue(text, m, m[3] as string)
     const { end, closed } = shellArgument(text, start, inside)
     if (WHOLE_MARKER.test(text.slice(start, closed === end - 1 ? closed : end))) continue
     out += text.slice(copied, start) + MARKER + (closed === -1 ? '' : inside)
