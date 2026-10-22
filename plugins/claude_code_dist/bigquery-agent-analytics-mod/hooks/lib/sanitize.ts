@@ -220,7 +220,27 @@ const NAMED_VALUE = /(^|[^A-Za-z0-9_.-])-{0,2}([A-Za-z_][A-Za-z0-9_.-]{0,99})(?:
 // After a credential name, the value goes: to the end of its line, whatever is
 // in it (quotes, brackets and redaction markers are not trusted to end it),
 // or, for a query-style `?name=` / `&name=`, to the next `&`, `#`, `;` or
-// space.
+// space. A line that ends in a continuation (`\`) runs on to the next, and
+// so does a value that opens a quote it does not close on its line, to the
+// end of the line the quote closes on (or of the text).
+function namedValueEnd(text: string, start: number): number {
+  let from = start
+  const quote = text[start]
+  if (quote === '"' || quote === "'") {
+    let q = start + 1
+    while (q < text.length && text[q] !== quote) q += quote === '"' && text[q] === '\\' ? 2 : 1
+    if (q >= text.length) return text.length
+    from = q
+  }
+  for (;;) {
+    const nl = text.indexOf('\n', from)
+    if (nl === -1) return text.length
+    const stop = text[nl - 1] === '\r' ? nl - 1 : nl
+    if (stop <= start || text[stop - 1] !== '\\') return stop
+    from = nl + 1
+  }
+}
+
 function redactNamedValues(text: string, stats: SanitizeStats): string {
   NAMED_VALUE.lastIndex = 0
   let out = ''
@@ -238,9 +258,7 @@ function redactNamedValues(text: string, stats: SanitizeStats): string {
       const stop = /[&#;\s]/.exec(text.slice(start))
       end = stop === null ? text.length : start + stop.index
     } else {
-      end = text.indexOf('\n', start)
-      if (end === -1) end = text.length
-      if (end > start && text[end - 1] === '\r') end -= 1
+      end = namedValueEnd(text, start)
     }
     const value = text.slice(start, end)
     if (value.trim() === '') continue
@@ -262,15 +280,41 @@ const FLAG_VALUE = /(^|[^A-Za-z0-9_.-])--([A-Za-z][A-Za-z0-9_.-]{0,99})(?:[ \t]|
 // A value that is one redaction marker and nothing else.
 const WHOLE_MARKER = /^\[REDACTED(?::[a-z-]+)?\]$/
 
-// Where the shell argument that starts at `start` ends: up to the first space
-// outside every quote and expansion, and not escaped. It goes through single
-// quotes (literal), double quotes and ANSI-C `$'…'` (backslash escapes),
-// `$(…)`, `(…)`, backticks and `${…}` (nested, with quotes inside them),
-// backslash escapes and line continuations, and the parts joined to them.
-// Anything left open runs to the end of the text.
+// Characters after which a word starts, in shell code.
+const WORD_START = new Set([' ', '\t', '\n', '\r', '(', ';', '|', '&'])
+const wordAt = (text: string, i: number, word: string): boolean =>
+  text.startsWith(word, i) && !/[A-Za-z0-9_]/.test(text[i + word.length] ?? '')
+
+// Where a here-document's body ends: just past the line after `from` that is
+// its delimiter (tabs before it allowed with `<<-`); -1 when no line is.
+function hereDocumentEnd(text: string, from: number, delimiter: string, tabs: boolean): number {
+  let line = from
+  while (line < text.length) {
+    let next = text.indexOf('\n', line)
+    if (next === -1) next = text.length
+    let body = text.slice(line, next)
+    if (body.endsWith('\r')) body = body.slice(0, -1)
+    if ((tabs ? body.replace(/^\t+/, '') : body) === delimiter) return Math.min(next + 1, text.length)
+    line = next + 1
+  }
+  return -1
+}
+
+// Where the shell argument that starts at `start` ends: at the first space,
+// tab, newline, control operator (`;`, `|`, `&`), redirection (`<`, `>`) or
+// `)` outside every quote and expansion, and not escaped. It goes through
+// single quotes (literal), double quotes and ANSI-C `$'…'` (backslash
+// escapes), `$(…)`, `(…)`, `<(…)`, backticks and `${…}` (nested, with quotes
+// inside them), backslash escapes and line continuations, and the parts
+// joined to them. Inside `$(…)` and `(…)`, which hold shell code, a comment
+// runs to its line's end, a `case`'s patterns may end in `)`, and a
+// here-document's body runs to its delimiter line. Anything left open runs to
+// the end of the text.
 function shellArgumentEnd(text: string, start: number): number {
-  // What is open, innermost last: ' " a(nsi) ( ` {
+  // What is open, innermost last: ' " a(nsi) ( c(ase) ` {
   const open: string[] = []
+  const hereDocuments: [string, boolean][] = []
+  let wordStart = true
   let i = start
   while (i < text.length) {
     const c = text[i] as string
@@ -278,35 +322,111 @@ function shellArgumentEnd(text: string, start: number): number {
     if (top === "'") {
       if (c === "'") open.pop()
       i += 1
-    } else if (c === '\\') {
+      continue
+    }
+    if (c === '\\') {
       i += text.startsWith('\r\n', i + 1) ? 3 : 2
-    } else if (top === 'a') {
-      if (c === "'") open.pop()
+      wordStart = false
+      continue
+    }
+    if (top === 'a' || top === '`') {
+      if (c === (top === 'a' ? "'" : '`')) open.pop()
       i += 1
-    } else if (top === '`') {
-      if (c === '`') open.pop()
-      i += 1
-    } else if (c === '$' && text[i + 1] === "'" && top !== '"') {
+      continue
+    }
+    if (c === '$' && text[i + 1] === "'" && top !== '"') {
       open.push('a')
       i += 2
-    } else if (c === '$' && (text[i + 1] === '(' || text[i + 1] === '{')) {
+      continue
+    }
+    if (c === '$' && (text[i + 1] === '(' || text[i + 1] === '{')) {
       open.push(text[i + 1] as string)
       i += 2
-    } else if (top === '"') {
+      wordStart = true
+      continue
+    }
+    if (top === '"') {
       if (c === '"') open.pop()
       else if (c === '`') open.push('`')
       i += 1
-    } else if (c === '"' || c === "'" || c === '`' || c === '(') {
+      continue
+    }
+    if (top === '(' || top === 'c') {
+      if (wordStart && c === '#') {
+        const end = text.indexOf('\n', i)
+        if (end === -1) return text.length
+        i = end
+        continue
+      }
+      if (c === '\n' && hereDocuments.length > 0) {
+        let at = i + 1
+        for (const [delimiter, tabs] of hereDocuments.splice(0)) {
+          at = hereDocumentEnd(text, at, delimiter, tabs)
+          if (at === -1) return text.length
+        }
+        i = at
+        wordStart = true
+        continue
+      }
+      if (c === '<' && text[i + 1] === '<' && text[i + 2] !== '<') {
+        let j = i + 2
+        const tabs = text[j] === '-'
+        if (tabs) j += 1
+        while (text[j] === ' ' || text[j] === '\t') j += 1
+        let delimiter = ''
+        while (j < text.length && !/[\s;|&<>()]/.test(text[j] as string)) {
+          const d = text[j] as string
+          if (d === '\\') {
+            delimiter += text[j + 1] ?? ''
+            j += 2
+          } else {
+            if (d !== '"' && d !== "'") delimiter += d
+            j += 1
+          }
+        }
+        if (delimiter === '') return text.length
+        hereDocuments.push([delimiter, tabs])
+        i = j
+        wordStart = false
+        continue
+      }
+      if (wordStart && wordAt(text, i, 'case')) {
+        open.push('c')
+        i += 4
+        wordStart = false
+        continue
+      }
+      if (wordStart && top === 'c' && wordAt(text, i, 'esac')) {
+        open.pop()
+        i += 4
+        wordStart = false
+        continue
+      }
+      if (c === ')') {
+        if (top === '(') open.pop()
+        i += 1
+        wordStart = true
+        continue
+      }
+    } else if (top === '') {
+      if (c === ' ' || c === '\t' || c === '\n' || (c === '\r' && text[i + 1] === '\n')) break
+      if ((c === '<' || c === '>') && text[i + 1] === '(') {
+        open.push('(')
+        i += 2
+        wordStart = true
+        continue
+      }
+      if (c === ';' || c === '|' || c === '&' || c === '<' || c === '>' || c === ')') break
+    }
+    if (c === '"' || c === "'" || c === '`' || c === '(') {
       open.push(c)
       i += 1
-    } else if ((c === ')' && top === '(') || (c === '}' && top === '{')) {
-      open.pop()
-      i += 1
-    } else if (top === '' && (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f' || c === '\v')) {
-      break
-    } else {
-      i += 1
+      wordStart = c === '('
+      continue
     }
+    if (c === '}' && top === '{') open.pop()
+    wordStart = WORD_START.has(c)
+    i += 1
   }
   return Math.min(i, text.length)
 }

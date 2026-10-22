@@ -1081,12 +1081,15 @@ column. Treat the dataset like the transcripts it mirrors.
   YAML or `.env` line, a JSON key in text, an assignment, a command-line flag
   such as `--password=…` or `-Dssl.password=…`) everything to the end of the
   line, whatever it holds, including a redaction marker (`?name=` / `&name=`
-  only to the next `&`); and after a long command-line option whose name's
+  only to the next `&`), and on to the next lines after a line continuation or
+  a quote the value opens and the line does not close; and after a long command-line option whose name's
   last part is a credential word (`--password VALUE`, `--api-key "VALUE"`,
   `--pass -VALUE`, the value after a line continuation too) its whole shell
-  argument: quoted and escaped parts, `$'…'`, `$(…)`, backticks and `${…}`
-  included, to the first space outside them (anything left open, to the
-  end), unless it is one redaction marker alone or starts with `--`
+  argument: quoted and escaped parts, `$'…'`, `$(…)` (with the comments,
+  `case` patterns and here-documents in it), `<(…)`, backticks and `${…}`
+  included, to the first space, `;`, `|`, `&`, `<`, `>` or `)` outside them
+  (anything left open, to the end), unless it is one redaction marker alone
+  or starts with `--`
   (`--password-stdin` and `--token-file` keep theirs). A name is a credential's when
   one of its parts, split on punctuation and camelCase and compared without
   case, is `pass`, `passwd`, `password`, `passphrase`, `pwd`, `secret`,
