@@ -1081,7 +1081,8 @@ column. Treat the dataset like the transcripts it mirrors.
   YAML or `.env` line, a JSON key in text, an assignment, a command-line flag
   such as `--password=…` or `-Dssl.password=…`) everything to the end of the
   line, whatever it holds, including a redaction marker (`?name=` / `&name=`
-  only to the next `&`), and on to the next lines after a line continuation,
+  only to the next `&`, or through the shell word when a quote, `$` or a
+  backtick opens the value), and on to the next lines after a line continuation,
   or as far as the value runs on: after `=` with no space around it (a flag or
   an assignment), through the whole shell word it starts, wherever in it a
   quote, `$(…)`, backtick or `${…}` opens (inside a quote that opens just

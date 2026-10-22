@@ -220,7 +220,9 @@ const NAMED_VALUE = /(^|[^A-Za-z0-9_.-])-{0,2}([A-Za-z_][A-Za-z0-9_.-]{0,99})(?:
 // After a credential name, the value goes: to the end of its line, whatever is
 // in it (quotes, brackets and redaction markers are not trusted to end it),
 // or, for a query-style `?name=` / `&name=`, to the next `&`, `#`, `;` or
-// space. A line that ends in a continuation (`\`) runs on to the next. After
+// space (when a quote, `$` or a backtick opens it, as in a shell assignment
+// after `;` or `&`, through its shell word if that is longer). A line that
+// ends in a continuation (`\`) runs on to the next. After
 // `=` with no space around it (a flag or an assignment) the value runs on
 // through the whole shell word it starts, to the end of the line that word
 // ends on; otherwise through a quote that opens the value, to the end of the
@@ -271,6 +273,7 @@ function redactNamedValues(text: string, stats: SanitizeStats): string {
     if (m[3] === '=' && /^[?&#;]$/.test(m[1] as string)) {
       const stop = /[&#;\s]/.exec(text.slice(start))
       end = stop === null ? text.length : start + stop.index
+      if (/^["'`$]/.test(text[start] ?? '')) end = Math.max(end, shellArgument(text, start, '').end)
     } else if (m[3] === '=' && /[^ 	]=$/.test(m[0])) {
       const inside = quoteBefore(text, m)
       const word = shellArgument(text, start, inside)

@@ -863,6 +863,23 @@ test('a shell-style name=value runs through its whole shell word, to the end of 
   expect(redactText('token=abc def\nnext line', stats)).toBe('token=[REDACTED]\nnext line')
 })
 
+test('a query-style name= value that a quote or an expansion opens runs through its shell word', () => {
+  const stats = newStats()
+  const cases: [string, string][] = [
+    ['cmd;PASSWORD="a Secret" cli --verbose', 'cmd;PASSWORD=[REDACTED] cli --verbose'],
+    ["true&TOKEN='x Secret' cli", 'true&TOKEN=[REDACTED] cli'],
+    ['cmd;API_KEY=$(printf %s a Secret) cli', 'cmd;API_KEY=[REDACTED] cli'],
+    ['cmd;TOKEN=`printf %s a Secret` cli', 'cmd;TOKEN=[REDACTED] cli'],
+    // Query strings keep their rule.
+    ['/path?token=abc&x=1 next', '/path?token=[REDACTED]&x=1 next'],
+    ['a=1&password=abc;b=2', 'a=1&password=[REDACTED];b=2'],
+  ]
+  for (const [input, want] of cases) {
+    expect(redactText(input, stats)).toBe(want)
+    expect(redactText(want, stats)).toBe(want)
+  }
+})
+
 test('a credential option inside a quote that opens just before it loses everything to that quote\'s end', () => {
   const stats = newStats()
   const cases: [string, string][] = [
