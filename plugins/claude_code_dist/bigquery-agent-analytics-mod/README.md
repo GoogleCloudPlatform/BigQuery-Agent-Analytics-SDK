@@ -10,7 +10,7 @@ model requests, tool calls and subagents as rows in the
 background.
 
 It produces the same table shape as ADK's BQAA plugin and this repo's
-settings-hook plugin, [`bigquery-agent-analytics-tracing`](../claude_code),
+settings-hook plugin, [`bigquery-agent-analytics-tracing`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/plugins/claude_code),
 so the [analysis skill](https://github.com/haiyuan-eng-google/bigquery_agent_analytics_skill/tree/main/bigquery-agent-analytics-skill) and its queries work on what it writes.
 
 Status: early. Mods are an early-access feature of the host CLI (v2.1.287 or
@@ -351,8 +351,8 @@ the environment variable the tracing plugin already uses, then to a default.
 | `dataset` | `BQAA_DATASET`, `BQ_DATASET` | (required) | Dataset of the events table |
 | `table` | `BQAA_TABLE`, `BQ_TABLE` | `agent_events` | Events table |
 | `location` | `BQAA_LOCATION` | `US` | Dataset location; shown by `/bqaa-status`, and passed to `setup.sh` by the setup command the mod offers (insertAll itself is addressed by table) |
-| `enabled` | `BQAA_TRACE_ENABLED=false` turns it off | `true` | Capture on or off |
-| `dryRun` | `BQAA_DRY_RUN=true` turns it on | `false` | Write rows as JSONL to `<deadLetterDir>/../dry-run/` instead of sending |
+| `enabled` | `BQAA_TRACE_ENABLED` set to `false`, `0`, `no` or `off` turns it off | `true` | Capture on or off |
+| `dryRun` | `BQAA_DRY_RUN` set to `true`, `1`, `yes` or `on` turns it on | `false` | Write rows as JSONL to `<deadLetterDir>/../dry-run/` instead of sending |
 | `maxPayloadChars` | | `16384` (1024 to 500000) | Cap per JSON payload column (`content`, `attributes`); past it the value is cut and `is_truncated` set |
 | `flushIntervalMs` | | `5000` (1000 to 300000) | How often the background writer sends |
 | `deadLetterDir` | `BQAA_DEAD_LETTER_DIR` | `~/.bqaa-mod/dead-letter` | Where unsent rows are kept, in one subdirectory per table (`project.dataset.table`) |
@@ -372,6 +372,12 @@ Advanced, environment only:
 | `BQAA_EXIT_FLUSH_MS` | `800` (0 to 1200) | How long session end may wait for its spill file, and any dead-letter file still being written, to be written; `0` starts the write without waiting |
 | `BQAA_AUTO_CREATE_TABLE` | `true` | Create the table (BQAA schema v2, partitioned and clustered) when insertAll answers 404 for it |
 | `BQAA_AUTO_BACKFILL` | `true` | Replay the table's `spill` and `retry` files at session start and after BigQuery recovers |
+
+Switch values ignore case and surrounding spaces, and
+`BQAA_AUTO_CREATE_TABLE` and `BQAA_AUTO_BACKFILL` are turned off by the same
+`false`, `0`, `no` or `off`. An empty or unset variable, or any other value,
+changes nothing; nor can the environment turn capture on when `enabled` is
+off, or a dry run off when `dryRun` is on.
 
 For a `--plugin-dir` session, options live in the host's user settings file under
 `pluginConfigs["bigquery-agent-analytics-mod@inline"].options`, or use the
@@ -625,7 +631,7 @@ JSON-typed values on `tabledata.insertAll` (its `_json_to_json` converter is
 
 ### Sample rows
 
-[`examples/sample-rows.jsonl`](examples/sample-rows.jsonl) is the insertAll
+[`examples/sample-rows.jsonl`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/plugins/claude_code_mod/examples/sample-rows.jsonl) is the insertAll
 payload of a fixture session (`tests/sample-rows.test.ts`): a prompt, four
 model requests, Read, Agent (an Explore subagent), Edit and Bash (with a
 permission prompt), and session end. It holds the rows the stubbed insertAll
@@ -1086,8 +1092,10 @@ column. Treat the dataset like the transcripts it mirrors.
   in `--set-env-vars=ORDINARY=x,DB_PASS"WORD"=…` (`:`, `;` in quotes,
   gcloud's `^:^` and others alike; after an expansion such as `$VALUE` or
   `${VALUE}`, whose value after `${` runs to the end of the text, after a
-  value of any length, and after a command substitution, such as
-  `VERSION=$(git rev-parse HEAD),DB_PASS"WORD"=…`), before an escaped `=`, as in
+  value of any length, and after a command substitution that ends the
+  value, such as `VERSION=$(git rev-parse HEAD),DB_PASS"WORD"=…`, but not
+  after one in quotes or with more of the value after it: see
+  [Limitations](#limitations)), before an escaped `=`, as in
   `--password\=…` and `--from-literal=PASSWORD\=…`, and with
   the continuation as a JSON string in a log line encodes it, `\\\n` or
   `\\\r\n`) everything to the end of the line, whatever it holds,
@@ -1748,6 +1756,12 @@ the same views count other producers' requests but not their tokens.
   arguments, structured results and JSON output, and anything else under a
   key that is not on the list, are recorded as `[REDACTED]`. Free text is
   scanned for credentials on a best-effort basis.
+* In a list of names and values, a credential name the shell joins from
+  parts (`DB_PASS"WORD"=…`, `DB_PASS\WORD=…`) is missed after a value whose
+  command substitution is in quotes or has more of the value after it
+  (`VERSION="$(git rev-parse HEAD)",…`, `VERSION=$(git rev-parse HEAD)-dev,…`,
+  and the same with backticks), so its value is kept. A name written
+  whole (`DB_PASSWORD=…`) still has its value redacted there.
 * Timestamps have millisecond precision.
 * An organization's web-fetch policy or `allowManagedModsOnly` can stop the
   mod; `/bqaa-status` and the debug log (start the CLI with `--debug`) say why.

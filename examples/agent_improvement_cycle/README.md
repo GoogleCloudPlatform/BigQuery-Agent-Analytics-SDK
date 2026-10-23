@@ -104,7 +104,7 @@ This demo shows how to close that gap using four components:
    logged sessions back from BigQuery, evaluates quality using an LLM
    judge, and produces structured reports that drive automated
    improvement.
-3. **[`SDK SystemEvaluator`](../../bigquery_agent_analytics/evaluators.py)** (the SDK's deterministic evaluator) checks
+3. **[`SDK SystemEvaluator`](../../src/bigquery_agent_analytics/evaluators.py)** (the SDK's deterministic evaluator) checks
    operational metrics — latency, token efficiency, and turn count —
    on the same sessions. No LLM calls needed, just math on the data
    already in BigQuery. This ensures the improved prompt doesn't trade
