@@ -43,9 +43,11 @@ before agent events can land in BigQuery.
   only; does not affect the exit code.
 - `BQAA_DRY_RUN` — reported as `on` / `off` (case-insensitive, defaults
   to `false`). When `BQAA_DRY_RUN=true`, events write to `BQAA_LOG_FILE`
-  instead of BigQuery, and the report prints that log path; unset it (or
-  set it to `false`) before a live BigQuery smoke test. Informational
-  only; does not affect the exit code.
+  instead of BigQuery, and the report prints that log path. If
+  `BQAA_LOG_FILE` is set but empty, dry-run events are discarded and the
+  report says so. Unset `BQAA_DRY_RUN` (or set it to `false`) before a
+  live BigQuery smoke test. Informational only; does not affect the exit
+  code.
 - `google-cloud-bigquery` — always required (both writer paths use it).
 - `google-cloud-bigquery-storage` + `pyarrow` — required only for the
   lower-latency Storage Write path; absence is reported as advisory

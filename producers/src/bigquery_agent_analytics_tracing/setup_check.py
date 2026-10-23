@@ -27,7 +27,8 @@ Surfaces:
     vendored layout works on BQAA_PYTHON.
   * BQAA_TRACE_ENABLED / BQAA_DRY_RUN — reported mode flags that never
     change the exit code; dry-run also names the BQAA_LOG_FILE that
-    receives events instead of BigQuery.
+    receives events instead of BigQuery, or warns that an empty
+    BQAA_LOG_FILE discards them.
 
 This script is **advisory-only**. It never mutates the environment,
 shell rc files, GCP resources, or IAM. It only reports what is
@@ -89,7 +90,8 @@ class _SetupReport:
   dataset: str | None
   trace_enabled: bool
   # Operational mode, like trace_enabled: reported but not part of
-  # all_ok. When dry_run is on, rows go to log_file, not BigQuery.
+  # all_ok. When dry_run is on, rows go to log_file, not BigQuery; an
+  # empty log_file (BQAA_LOG_FILE="") means they are discarded.
   dry_run: bool = False
   log_file: str = DEFAULT_LOG_FILE
   # Non-None when the configured interpreter cannot be executed
@@ -264,7 +266,9 @@ def collect_report(python_bin: str | None = None) -> _SetupReport:
           os.environ.get("BQAA_TRACE_ENABLED", "true").lower() == "true"
       ),
       dry_run=(os.environ.get("BQAA_DRY_RUN", "false").lower() == "true"),
-      log_file=os.environ.get("BQAA_LOG_FILE") or DEFAULT_LOG_FILE,
+      # Resolve like BQAAConfig.from_env: an empty BQAA_LOG_FILE stays
+      # empty, and log_to_file() then drops every dry-run row.
+      log_file=os.environ.get("BQAA_LOG_FILE", DEFAULT_LOG_FILE),
       package_imports=package_imports,
       required_imports=required_imports,
       storage_write_imports=storage_write_imports,
@@ -294,11 +298,20 @@ def _format_report(report: _SetupReport) -> str:
     )
   lines.append(f"BQAA_DRY_RUN: {'on' if report.dry_run else 'off'}")
   if report.dry_run:
-    lines.append(
-        f"  Note: dry-run mode is active (events write to {report.log_file},"
-        " not BigQuery). Set BQAA_DRY_RUN=false (or unset it) for live"
-        " BigQuery writes."
-    )
+    if report.log_file:
+      lines.append(
+          f"  Note: dry-run mode is active (events write to {report.log_file},"
+          " not BigQuery). Set BQAA_DRY_RUN=false (or unset it) for live"
+          " BigQuery writes."
+      )
+    else:
+      lines.append(
+          "  Note: dry-run mode is active, but BQAA_LOG_FILE is empty so"
+          " dry-run events are discarded (not written to a file or"
+          " BigQuery). Unset BQAA_LOG_FILE (or set a file path) to record"
+          " dry-run events, or set BQAA_DRY_RUN=false (or unset it) for"
+          " live BigQuery writes."
+      )
   lines.append("")
 
   if report.interpreter_error:

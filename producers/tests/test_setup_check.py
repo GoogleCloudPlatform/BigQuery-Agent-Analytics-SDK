@@ -279,16 +279,29 @@ def test_report_dry_run_enabled_case_insensitively(
   assert report.all_ok
 
 
-def test_report_log_file_honors_bqaa_log_file(
-    monkeypatch, fake_probes, tmp_path
+@pytest.mark.parametrize(
+    "env_value, expected",
+    [
+        (None, DEFAULT_LOG_FILE),
+        ("/var/tmp/bqaa-dry-run.log", "/var/tmp/bqaa-dry-run.log"),
+        ("", ""),
+    ],
+    ids=["unset", "custom-path", "empty"],
+)
+def test_report_log_file_matches_runtime_config(
+    monkeypatch, fake_probes, env_value, expected
 ):
-  custom = str(tmp_path / "dry-run.log")
+  """The dry-run destination must resolve exactly like the runtime
+  (``BQAAConfig.from_env``). An empty BQAA_LOG_FILE stays empty there and
+  log_to_file() then drops every dry-run row, so the report must not
+  swap in the default path."""
   monkeypatch.setenv("BQAA_DRY_RUN", "true")
-  monkeypatch.setenv("BQAA_LOG_FILE", custom)
+  if env_value is not None:
+    monkeypatch.setenv("BQAA_LOG_FILE", env_value)
 
   report = collect_report()
 
-  assert report.log_file == custom
+  assert report.log_file == expected
   # Same destination the runtime logger writes dry-run rows to.
   assert report.log_file == BQAAConfig.from_env().log_file
 
@@ -427,6 +440,27 @@ def test_format_report_dry_run_note_uses_default_log_file(
   assert f"events write to {DEFAULT_LOG_FILE}, not BigQuery" in text
 
 
+def test_format_report_warns_dry_run_discards_when_log_file_empty(
+    monkeypatch, fake_probes
+):
+  """BQAA_LOG_FILE set but empty: the runtime drops every dry-run row,
+  so the note must say the events are discarded instead of naming a log
+  file that never receives them."""
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  monkeypatch.setenv("BQAA_LOG_FILE", "")
+
+  text = _format_report(collect_report())
+
+  assert "BQAA_DRY_RUN: on" in text
+  assert "BQAA_LOG_FILE is empty so dry-run events are discarded" in text
+  assert "events write to" not in text
+  assert DEFAULT_LOG_FILE not in text
+  # Still a mode, not a missing prerequisite: the note carries the warning.
+  assert "Status: READY" in text
+
+
 def test_format_report_shows_dry_run_when_interpreter_broken(
     monkeypatch, fake_probes
 ):
@@ -538,6 +572,24 @@ def test_main_json_mode_reports_dry_run_and_log_file(
   assert parsed["dry_run"] is True
   assert parsed["log_file"] == custom
   assert parsed["all_ok"] is True
+
+
+def test_main_json_mode_reports_empty_log_file(
+    monkeypatch, fake_probes, capsys
+):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  monkeypatch.setenv("BQAA_LOG_FILE", "")
+
+  rc = main(argv=["--json"])
+
+  assert rc == 0
+  parsed = json.loads(capsys.readouterr().out)
+  assert parsed["dry_run"] is True
+  # Empty like the runtime config, not the default path, so a consumer
+  # can tell dry-run rows are being dropped.
+  assert parsed["log_file"] == ""
 
 
 def test_main_json_mode_exit_one_with_actionable_payload(

@@ -724,3 +724,96 @@ def test_shell_hooks_short_circuit_when_trace_disabled_in_any_case(
   assert (
       not marker.exists()
   ), f"common.sh exec'd BQAA_PYTHON despite BQAA_TRACE_ENABLED={trace_enabled}"
+
+
+def test_vendored_plugin_empty_log_file_dry_run_reported_and_discarded(
+    tmp_path, restore_manifest, cleanup_vendor
+):
+  """Regression: with ``BQAA_DRY_RUN=true`` and ``BQAA_LOG_FILE=""``,
+  /bqaa-setup named the default log file and said READY, but the
+  runtime keeps the empty path and log_to_file() drops every dry-run
+  row. Run the real setup helper and hooks: the report must say the
+  events are discarded, and the hooks must not write a log file. A
+  control run with BQAA_LOG_FILE unset shows the same hooks do write
+  one, so these checks can fail."""
+  build_claude_plugin.build(dist_dir=tmp_path / "dist", skip_tar=True)
+
+  # DEFAULT_LOG_FILE comes from tempfile.gettempdir(), so TMPDIR keeps
+  # the default log under the test dir instead of the real /tmp.
+  scratch = tmp_path / "scratch"
+  scratch.mkdir()
+  home = tmp_path / "home"
+  home.mkdir()
+  state_dir = tmp_path / "state"
+  spool_dir = tmp_path / "spool"
+  base_env = {
+      "PATH": "/usr/bin:/bin",
+      "HOME": str(home),
+      "TMPDIR": str(scratch),
+      "BQAA_PYTHON": sys.executable,
+      "BQAA_PROJECT_ID": "synthetic-project",
+      "BQAA_DATASET": "synthetic_dataset",
+      "BQAA_DRY_RUN": "true",
+      "BQAA_SPOOL_DIR": str(spool_dir),
+      "BQAA_STATE_DIR": str(state_dir),
+  }
+  empty_env = {**base_env, "BQAA_LOG_FILE": ""}
+  payload = json.dumps({"session_id": "emptylog", "cwd": str(tmp_path)})
+
+  def _setup_check(env, *args):
+    return subprocess.run(
+        ["bash", str(PLUGIN_DIR / "scripts" / "run_setup_check.sh"), *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+  def _fire(hook_script, env):
+    return subprocess.run(
+        ["bash", str(PLUGIN_DIR / "hooks" / hook_script)],
+        env=env,
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+  text = _setup_check(empty_env)
+  assert text.returncode == 0, f"stderr={text.stderr!r}"
+  assert "BQAA_DRY_RUN: on" in text.stdout
+  assert (
+      "BQAA_LOG_FILE is empty so dry-run events are discarded" in text.stdout
+  ), text.stdout
+  assert "events write to" not in text.stdout
+  # The default log file lives under TMPDIR; it must not be named.
+  assert str(scratch) not in text.stdout
+
+  as_json = _setup_check(empty_env, "--json")
+  assert as_json.returncode == 0, f"stderr={as_json.stderr!r}"
+  report = json.loads(as_json.stdout)
+  assert report["dry_run"] is True
+  assert report["log_file"] == ""
+
+  start = _fire("session_start.sh", empty_env)
+  assert start.returncode == 0, f"stderr={start.stderr!r}"
+  # The state file proves the hook reached python.
+  assert (state_dir / "state_emptylog.json").is_file()
+  end = _fire("session_end.sh", empty_env)
+  assert end.returncode == 0, f"stderr={end.stderr!r}"
+  assert sorted(tmp_path.rglob("*.log")) == []
+  # Nothing was queued for BigQuery either.
+  assert not any(p.is_file() for p in spool_dir.rglob("*"))
+
+  # Control: with BQAA_LOG_FILE unset, the report names the default log
+  # file and the same hooks write the SessionEnd row there.
+  control = _setup_check(base_env)
+  assert control.returncode == 0, f"stderr={control.stderr!r}"
+  assert f"events write to {scratch}" in control.stdout, control.stdout
+  start = _fire("session_start.sh", base_env)
+  assert start.returncode == 0, f"stderr={start.stderr!r}"
+  end = _fire("session_end.sh", base_env)
+  assert end.returncode == 0, f"stderr={end.stderr!r}"
+  logs = sorted(tmp_path.rglob("*.log"))
+  assert len(logs) == 1 and logs[0].is_relative_to(scratch), logs
+  assert "DRY_RUN " in logs[0].read_text()
