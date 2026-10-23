@@ -23,6 +23,8 @@ import sys
 import pytest
 
 from bigquery_agent_analytics_tracing import setup_check
+from bigquery_agent_analytics_tracing.config import BQAAConfig
+from bigquery_agent_analytics_tracing.config import DEFAULT_LOG_FILE
 from bigquery_agent_analytics_tracing.setup_check import _format_report
 from bigquery_agent_analytics_tracing.setup_check import _ImportProbe
 from bigquery_agent_analytics_tracing.setup_check import _resolve_python_bin
@@ -35,6 +37,8 @@ _ALL_BQAA_ENV = [
     "BQAA_DATASET",
     "BQAA_PYTHON",
     "BQAA_TRACE_ENABLED",
+    "BQAA_DRY_RUN",
+    "BQAA_LOG_FILE",
     "GCP_PROJECT_ID",
     "GOOGLE_CLOUD_PROJECT",
     "BQ_DATASET",
@@ -246,6 +250,68 @@ def test_report_trace_disabled_via_env(monkeypatch, fake_probes):
   assert report.all_ok
 
 
+def test_report_dry_run_defaults_off_with_default_log_file(
+    monkeypatch, fake_probes
+):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+
+  report = collect_report()
+
+  assert report.dry_run is False
+  assert report.log_file == DEFAULT_LOG_FILE
+  assert report.all_ok
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", "True"])
+def test_report_dry_run_enabled_case_insensitively(
+    monkeypatch, fake_probes, value
+):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", value)
+
+  report = collect_report()
+
+  assert report.dry_run is True
+  # Like trace_enabled, dry-run is runtime intent rather than a missing
+  # prerequisite, so it must not flip all_ok.
+  assert report.all_ok
+
+
+def test_report_log_file_honors_bqaa_log_file(
+    monkeypatch, fake_probes, tmp_path
+):
+  custom = str(tmp_path / "dry-run.log")
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  monkeypatch.setenv("BQAA_LOG_FILE", custom)
+
+  report = collect_report()
+
+  assert report.log_file == custom
+  # Same destination the runtime logger writes dry-run rows to.
+  assert report.log_file == BQAAConfig.from_env().log_file
+
+
+@pytest.mark.parametrize(
+    "value", ["true", "TRUE", "True", "false", "FALSE", "0", "1", "yes", ""]
+)
+def test_report_mode_flags_match_runtime_config(
+    monkeypatch, fake_probes, value
+):
+  """/bqaa-setup must parse the mode flags exactly like the runtime
+  (``BQAAConfig.from_env``); otherwise it reports a mode the hooks do
+  not actually run in."""
+  monkeypatch.setenv("BQAA_TRACE_ENABLED", value)
+  monkeypatch.setenv("BQAA_DRY_RUN", value)
+
+  report = collect_report()
+  config = BQAAConfig.from_env()
+
+  assert report.trace_enabled is config.enabled
+  assert report.dry_run is config.dry_run
+
+
 def test_report_interpreter_error_breaks_all_ok(monkeypatch, fake_probes):
   monkeypatch.setenv("BQAA_PROJECT_ID", "p")
   monkeypatch.setenv("BQAA_DATASET", "d")
@@ -315,6 +381,67 @@ def test_format_report_warns_when_trace_disabled(monkeypatch, fake_probes):
   assert "off" in text.lower()
 
 
+def test_format_report_shows_dry_run_off_by_default(monkeypatch, fake_probes):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+
+  text = _format_report(collect_report())
+
+  assert "BQAA_DRY_RUN: off" in text
+  assert "dry-run mode is active" not in text
+  assert "Status: READY" in text
+
+
+def test_format_report_warns_when_dry_run_on(
+    monkeypatch, fake_probes, tmp_path
+):
+  """Moving from the dry-run walkthrough to a live BigQuery smoke test
+  with BQAA_DRY_RUN=true still exported must not look like a plain
+  READY: the note says events go to the local log, names that log, and
+  says how to switch back to live writes."""
+  custom = str(tmp_path / "dry-run.log")
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  monkeypatch.setenv("BQAA_LOG_FILE", custom)
+
+  text = _format_report(collect_report())
+
+  assert "BQAA_DRY_RUN: on" in text
+  assert f"events write to {custom}, not BigQuery" in text
+  assert "BQAA_DRY_RUN=false" in text
+  # Dry-run is a mode, not a missing prerequisite.
+  assert "Status: READY" in text
+
+
+def test_format_report_dry_run_note_uses_default_log_file(
+    monkeypatch, fake_probes
+):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", "TRUE")
+
+  text = _format_report(collect_report())
+
+  assert "BQAA_DRY_RUN: on" in text
+  assert f"events write to {DEFAULT_LOG_FILE}, not BigQuery" in text
+
+
+def test_format_report_shows_dry_run_when_interpreter_broken(
+    monkeypatch, fake_probes
+):
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  fake_probes["interpreter_error"] = "interpreter not found: /bad/path"
+
+  text = _format_report(collect_report())
+
+  # Mode flags print before the skipped-checks early return, same as
+  # BQAA_TRACE_ENABLED.
+  assert "BQAA_DRY_RUN: on" in text
+  assert "skipped" in text.lower()
+  assert "ACTION NEEDED" in text
+
+
 def test_format_report_surfaces_interpreter_error_actionably(
     monkeypatch, fake_probes
 ):
@@ -378,6 +505,39 @@ def test_main_json_mode_emits_structured_report(
       p["module"] == "google.cloud.bigquery" and p["ok"]
       for p in parsed["required_imports"]
   )
+
+
+def test_main_json_mode_reports_dry_run_defaults(
+    monkeypatch, fake_probes, capsys
+):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+
+  rc = main(argv=["--json"])
+
+  assert rc == 0
+  parsed = json.loads(capsys.readouterr().out)
+  assert parsed["dry_run"] is False
+  assert parsed["log_file"] == DEFAULT_LOG_FILE
+
+
+def test_main_json_mode_reports_dry_run_and_log_file(
+    monkeypatch, fake_probes, capsys, tmp_path
+):
+  custom = str(tmp_path / "dry-run.log")
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", "True")
+  monkeypatch.setenv("BQAA_LOG_FILE", custom)
+
+  rc = main(argv=["--json"])
+
+  # Dry-run is reported but does not turn READY into ACTION NEEDED.
+  assert rc == 0
+  parsed = json.loads(capsys.readouterr().out)
+  assert parsed["dry_run"] is True
+  assert parsed["log_file"] == custom
+  assert parsed["all_ok"] is True
 
 
 def test_main_json_mode_exit_one_with_actionable_payload(

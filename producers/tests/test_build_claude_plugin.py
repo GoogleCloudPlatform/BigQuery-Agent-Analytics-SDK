@@ -630,3 +630,97 @@ def test_vendored_plugin_respects_trace_enabled_kill_switch_via_shell(
   )
   # No log file written because we never reached python.
   assert not (tmp_path / "bqaa.log").exists()
+
+
+@pytest.mark.parametrize("trace_enabled", ["true", "TRUE", "True"])
+def test_vendored_plugin_shell_hooks_accept_trace_enabled_in_any_case(
+    tmp_path, restore_manifest, cleanup_vendor, trace_enabled
+):
+  """Regression: common.sh compared ``BQAA_TRACE_ENABLED`` to ``true``
+  case-sensitively, while config.py and /bqaa-setup lower-case it. With
+  ``TRUE`` / ``True`` the setup check reported tracing on, yet every
+  hook exited before python and no event was written. Fire the real
+  shell hooks and prove the event lands in the dry-run log."""
+  build_claude_plugin.build(dist_dir=tmp_path / "dist", skip_tar=True)
+
+  log_file = tmp_path / "bqaa.log"
+  state_dir = tmp_path / "state"
+  env = {
+      "PATH": "/usr/bin:/bin",
+      "BQAA_PYTHON": sys.executable,
+      "BQAA_TRACE_ENABLED": trace_enabled,
+      "BQAA_DRY_RUN": "true",
+      "BQAA_LOG_FILE": str(log_file),
+      "BQAA_SPOOL_DIR": str(tmp_path / "spool"),
+      "BQAA_STATE_DIR": str(state_dir),
+  }
+  payload = json.dumps({"session_id": "shellgate", "cwd": str(tmp_path)})
+
+  def _fire(hook_script):
+    return subprocess.run(
+        ["bash", str(PLUGIN_DIR / "hooks" / hook_script)],
+        env=env,
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+  start = _fire("session_start.sh")
+  assert start.returncode == 0, f"stderr={start.stderr!r}"
+  # SessionStart only records state; the state file proves the shell
+  # gate handed off to python.
+  assert (
+      state_dir / "state_shellgate.json"
+  ).is_file(), f"BQAA_TRACE_ENABLED={trace_enabled} never reached python"
+
+  end = _fire("session_end.sh")
+  assert end.returncode == 0, f"stderr={end.stderr!r}"
+  text = log_file.read_text() if log_file.exists() else ""
+  rows = [
+      json.loads(line.split("DRY_RUN ", 1)[1])
+      for line in text.splitlines()
+      if "DRY_RUN " in line
+  ]
+  assert any(
+      r["event_type"] == "STATE_DELTA"
+      and "claude_code_session_end" in r["attributes"]
+      for r in rows
+  ), f"no SessionEnd row in dry-run log: {text!r}"
+
+
+@pytest.mark.parametrize("trace_enabled", ["false", "FALSE", "False"])
+def test_shell_hooks_short_circuit_when_trace_disabled_in_any_case(
+    tmp_path, trace_enabled
+):
+  """The other half of the parity contract: a value config.py does not
+  parse as ``true`` must stop common.sh before it execs BQAA_PYTHON. A
+  recorder stands in for python so the test asserts directly that it
+  was never invoked."""
+  marker = tmp_path / "bqaa-python-invoked"
+  recorder = tmp_path / "fake_python.sh"
+  recorder.write_text(f'#!/bin/bash\ntouch "{marker}"\nexit 0\n')
+  recorder.chmod(0o755)
+  env = {
+      "PATH": "/usr/bin:/bin",
+      "BQAA_PYTHON": str(recorder),
+      "BQAA_TRACE_ENABLED": trace_enabled,
+  }
+
+  for hook_script in ("session_start.sh", "session_end.sh"):
+    result = subprocess.run(
+        ["bash", str(PLUGIN_DIR / "hooks" / hook_script)],
+        env=env,
+        input="{}",
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, (
+        f"{hook_script} with BQAA_TRACE_ENABLED={trace_enabled} should"
+        f" short-circuit cleanly; stderr={result.stderr!r}"
+    )
+
+  assert (
+      not marker.exists()
+  ), f"common.sh exec'd BQAA_PYTHON despite BQAA_TRACE_ENABLED={trace_enabled}"

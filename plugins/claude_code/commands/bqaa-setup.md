@@ -38,6 +38,14 @@ before agent events can land in BigQuery.
 - `BQAA_PYTHON` — the interpreter the hooks will exec; defaults to the
   current `python3`. The check verifies it can import the tracing
   package and required runtime deps.
+- `BQAA_TRACE_ENABLED` — reported as `on` / `off` (case-insensitive,
+  defaults to `true`). When off, the hooks emit nothing. Informational
+  only; does not affect the exit code.
+- `BQAA_DRY_RUN` — reported as `on` / `off` (case-insensitive, defaults
+  to `false`). When `BQAA_DRY_RUN=true`, events write to `BQAA_LOG_FILE`
+  instead of BigQuery, and the report prints that log path; unset it (or
+  set it to `false`) before a live BigQuery smoke test. Informational
+  only; does not affect the exit code.
 - `google-cloud-bigquery` — always required (both writer paths use it).
 - `google-cloud-bigquery-storage` + `pyarrow` — required only for the
   lower-latency Storage Write path; absence is reported as advisory

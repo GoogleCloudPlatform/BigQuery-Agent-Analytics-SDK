@@ -25,6 +25,9 @@ Surfaces:
     insert_rows_json).
   * bigquery_agent_analytics_tracing itself — sanity check the
     vendored layout works on BQAA_PYTHON.
+  * BQAA_TRACE_ENABLED / BQAA_DRY_RUN — reported mode flags that never
+    change the exit code; dry-run also names the BQAA_LOG_FILE that
+    receives events instead of BigQuery.
 
 This script is **advisory-only**. It never mutates the environment,
 shell rc files, GCP resources, or IAM. It only reports what is
@@ -48,6 +51,8 @@ import os
 import subprocess
 import sys
 from typing import Iterable
+
+from .config import DEFAULT_LOG_FILE
 
 # Modules whose absence blocks the writer entirely.
 _REQUIRED_IMPORTS: tuple[tuple[str, str], ...] = (
@@ -83,6 +88,10 @@ class _SetupReport:
   project_id: str | None
   dataset: str | None
   trace_enabled: bool
+  # Operational mode, like trace_enabled: reported but not part of
+  # all_ok. When dry_run is on, rows go to log_file, not BigQuery.
+  dry_run: bool = False
+  log_file: str = DEFAULT_LOG_FILE
   # Non-None when the configured interpreter cannot be executed
   # (FileNotFoundError, permission denied, timeout, non-zero exit on a
   # trivial command). Surfacing this separately tells the user "fix
@@ -254,6 +263,8 @@ def collect_report(python_bin: str | None = None) -> _SetupReport:
       trace_enabled=(
           os.environ.get("BQAA_TRACE_ENABLED", "true").lower() == "true"
       ),
+      dry_run=(os.environ.get("BQAA_DRY_RUN", "false").lower() == "true"),
+      log_file=os.environ.get("BQAA_LOG_FILE") or DEFAULT_LOG_FILE,
       package_imports=package_imports,
       required_imports=required_imports,
       storage_write_imports=storage_write_imports,
@@ -280,6 +291,13 @@ def _format_report(report: _SetupReport) -> str:
     lines.append(
         "  Note: emission is disabled. Set BQAA_TRACE_ENABLED=true"
         " (or unset it) to enable."
+    )
+  lines.append(f"BQAA_DRY_RUN: {'on' if report.dry_run else 'off'}")
+  if report.dry_run:
+    lines.append(
+        f"  Note: dry-run mode is active (events write to {report.log_file},"
+        " not BigQuery). Set BQAA_DRY_RUN=false (or unset it) for live"
+        " BigQuery writes."
     )
   lines.append("")
 
