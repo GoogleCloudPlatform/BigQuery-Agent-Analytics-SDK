@@ -1,0 +1,4 @@
+{
+  "description": "BigQuery Agent Analytics mod: event capture and background writer",
+  "modules": ["./register.ts"]
+}
