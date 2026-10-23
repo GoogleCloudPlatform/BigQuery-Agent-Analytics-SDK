@@ -83,12 +83,12 @@ structured, versioned `SKILL.md`. No managed optimizer, no hand-written patches
   Only the skill is wrong — the model, tools, and questions stay fixed across
   versions, so any delta is attributable to the skill.
 - **The engine, imported not copied.** `analyze_and_evolve.py` imports the SDK's
-  reusable [`scripts/skill_evolution.py`](../../scripts/skill_evolution.py) (the
+  reusable [`scripts/skill_evolution.py`](../scripts/skill_evolution.py) (the
   same `evolve_skill()` the quality lab uses): it partitions scored
   conversations, runs a fleet of parallel analysts, and consolidates recurring
   rules into a new skill version.
 - **Ground-truth scoring.** Quality is graded against a golden Q&A answer key
-  (`eval/eval_spec.json`) via [`scripts/quality_report.py`](../../scripts/quality_report.py)
+  (`eval/eval_spec.json`) via [`scripts/quality_report.py`](../scripts/quality_report.py)
   (`--eval-spec`), not a no-ground-truth "usefulness" guess.
 - **The anti-parroting rule.** Multi-turn cases where the user asserts a *wrong*
   correction; V0's agreeableness defect makes the agent genuinely cave and repeat
