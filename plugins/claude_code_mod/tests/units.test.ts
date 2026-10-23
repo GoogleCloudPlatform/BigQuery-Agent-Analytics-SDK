@@ -1467,6 +1467,14 @@ test('text with no credential is left as it is, byte for byte, in every path', (
     "sed 's/password\\=.*/x/' config.ini",
     'cli --opt=a\\=b --verbose',
     `echo "x=1, y='2'" && echo ordinary`,
+    // Lists with expansions, command substitutions and long values, and
+    // substitutions joined by commas.
+    'gcloud run deploy svc --set-env-vars=VERSION=$(git rev-parse HEAD),MODE=prod --region us',
+    'gcloud run deploy svc --set-env-vars=ORDINARY=${VALUE},MODE="a b" --region us\necho ordinary',
+    'cli --labels=v=`date +%s`,team=x --set-env-vars=A=$X,B=${Y:-z},C=$1',
+    `cli --set-env-vars=A=${'a'.repeat(300)},B=c,${'b'.repeat(250)}=d --verbose`,
+    'echo "$(date),$(whoami)" && printf \'%s\\n\' "$(ls),x=1"',
+    'x=`date`,y=1; echo "$x"',
   ]
   const commandOf = (content: string | undefined): string => (JSON.parse(content ?? '{}') as { args?: { command?: string } }).args?.command ?? ''
   for (const command of commands) {
@@ -1575,10 +1583,10 @@ test('a generated sweep: after prose that the quote scan misreads, an option wor
 })
 
 // How long each path takes for a command, in milliseconds, at the default
-// payload cap: its redaction, the row's content and its error message, the
-// insertAll request, the dead-letter file and its lines read back, a
-// diagnostic, and a second redaction pass.
-function pathTimes(command: string): [string, number][] {
+// payload cap or another: its redaction, the row's content and its error
+// message, the insertAll request, the dead-letter file and its lines read
+// back, a diagnostic, and a second redaction pass.
+function pathTimes(command: string, maxPayloadChars = 16384, diagnosticChars = 1000): [string, number][] {
   const times: [string, number][] = []
   const time = <T>(path: string, run: () => T): T => {
     const started = performance.now()
@@ -1588,7 +1596,7 @@ function pathTimes(command: string): [string, number][] {
   }
   const row = (content: unknown, errorMessage: string | null) => buildRow({ eventType: 'TOOL_COMPLETED', timestampMs: 0, eventId: 'e1', agent: 'coding-agent', sessionId: 's1',
     invocationId: 'i1', userId: 'dev', traceId: null, spanId: null, parentSpanId: null, content, attributes: {}, status: 'ERROR', errorMessage,
-    maxPayloadChars: 16384 }).row
+    maxPayloadChars }).row
   const content = { tool: 'Bash', args: { command } }
   const once = time('redaction', () => redactText(command, newStats()))
   time('row content', () => row(content, null))
@@ -1596,7 +1604,7 @@ function pathTimes(command: string): [string, number][] {
   time('insertAll request', () => insertAllBody([row(content, null)]))
   const [file = ''] = time('dead-letter file', () => encodeLines([{ v: 1, kind: 'retry', reason: 'r', attempts: 1, failed_at: 'f', table: 't', row: row(content, `command failed: ${command}`) }]))
   time('dead-letter lines read back', () => parseFile(file))
-  time('diagnostic', () => redactDiagnostic(`command failed: ${command}`, 1000))
+  time('diagnostic', () => redactDiagnostic(`command failed: ${command}`, diagnosticChars))
   time('second pass', () => redactText(once, newStats()))
   return times
 }
@@ -1701,5 +1709,90 @@ test('a generated sweep: in a list of names and values, after each separator and
     inputs.push(command, `sh -c "${command.replace(/[\\"$`]/g, c => `\\${c}`)}"`, `log "${JSON.stringify(command).slice(1, -1)}"`)
   }
   expect(inputs.length).toBe(1332)
+  for (const input of inputs) for (const text of pathsOf(input)) expect(text).not.toMatch(/Secret|Suffix/)
+})
+
+test('a list of names and values that each `;` starts again, a backslash in it, is read once: 100,000 characters cost each path a few milliseconds, at the payload cap and whole', () => {
+  // The review's inputs: `A=x;\A=x;` repeated (one literal backslash), cut
+  // to 100,000 characters, and 1,111 of them then spaces to 100,000, with no
+  // credential; and a printf of 10,002 characters of it in double quotes.
+  // Each `;` starts another word that may be a list of names and values.
+  const unit = 'A=x;\\A=x;'
+  const texts = [unit.repeat(Math.ceil(100_000 / unit.length)).slice(0, 100_000), unit.repeat(1111).padEnd(100_000), `printf %s "${unit.repeat(1112).slice(0, 10_002)}"`]
+  expect(texts.map(text => text.length)).toEqual([100_000, 100_000, 10_014])
+  for (const text of texts) {
+    expect(redactText(text, newStats())).toBe(text)
+    for (const [cap, diagnostic] of [[16384, 1000], [220_000, 110_000]] as const) {
+      for (const [path, ms] of pathTimes(text, cap, diagnostic)) expect([cap, path, ms < 100]).toEqual([cap, path, true])
+    }
+  }
+})
+
+test('in a list of names and values, a credential name spelled in pieces after an expansion, a command substitution or a long value loses its value in every path', () => {
+  const json = (command: string): string => JSON.stringify(command).slice(1, -1)
+  const long = 'a'.repeat(210)
+  const cases: [string, string][] = [
+    // The review's inputs: the shell passes `…,DB_PASSWORD=SecretSuffix`
+    // whatever the expansion holds, and after a value of 210 characters. A
+    // value after `${` runs to the end of the text: where the word goes on
+    // past `${…}` cannot be told.
+    ['cli --set-env-vars=ORDINARY=${VALUE},DB_PASS"WORD"=SecretSuffix', 'cli --set-env-vars=ORDINARY=${VALUE},DB_PASS"WORD"=[REDACTED]'],
+    ['cli --set-env-vars=ORDINARY=$VALUE,DB_PASS"WORD"=SecretSuffix', 'cli --set-env-vars=ORDINARY=$VALUE,DB_PASS"WORD"=[REDACTED]'],
+    [`cli --set-env-vars=ORDINARY=${long},DB_PASS"WORD"=SecretSuffix`, `cli --set-env-vars=ORDINARY=${long},DB_PASS"WORD"=[REDACTED]`],
+    // With more of the command after it.
+    ['gcloud run deploy svc --set-env-vars=ORDINARY=${VALUE},DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=ORDINARY=${VALUE},DB_PASS"WORD"=[REDACTED]'],
+    ['gcloud run deploy svc --set-env-vars=ORDINARY=$VALUE,DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=ORDINARY=$VALUE,DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    [`gcloud run deploy svc --set-env-vars=ORDINARY=${long},DB_PASS"WORD"=SecretSuffix --region us\necho ordinary`, `gcloud run deploy svc --set-env-vars=ORDINARY=${long},DB_PASS"WORD"=[REDACTED]\necho ordinary`],
+    // Other expansions, in quotes too, and other separators and options.
+    ['cli --set-env-vars=ORDINARY=$1,DB_PASS"WORD"=SecretSuffix --verbose\necho ordinary', 'cli --set-env-vars=ORDINARY=$1,DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    ['cli --set-env-vars=ORDINARY=$@,DB_PASS"WORD"=SecretSuffix --verbose\necho ordinary', 'cli --set-env-vars=ORDINARY=$@,DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    ['cli --set-env-vars=ORDINARY=${VALUE:-x},DB_PASS"WORD"=SecretSuffix --verbose\necho ordinary', 'cli --set-env-vars=ORDINARY=${VALUE:-x},DB_PASS"WORD"=[REDACTED]'],
+    ['cli --set-env-vars=ORDINARY="$VALUE",DB_PASS"WORD"=SecretSuffix --verbose\necho ordinary', 'cli --set-env-vars=ORDINARY="$VALUE",DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    ['cli --set-env-vars="ORDINARY=$VALUE;DB_PASS"WORD"=Secret Suffix" --verbose\necho ordinary', 'cli --set-env-vars="ORDINARY=$VALUE;DB_PASS"WORD"=[REDACTED]"\necho ordinary'],
+    ['cli --set-env-vars=ORDINARY=$A$B,MODE=${C}x,DB_PASS"WORD"=SecretSuffix --verbose\necho ordinary', 'cli --set-env-vars=ORDINARY=$A$B,MODE=${C}x,DB_PASS"WORD"=[REDACTED]'],
+    ['cli --set-env-vars=^:^ORDINARY=$VALUE:DB_PASS"WORD"=SecretSuffix --verbose\necho ordinary', 'cli --set-env-vars=^:^ORDINARY=$VALUE:DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    ['mount -o user=$USER,pass"word"=SecretSuffix //host/share /mnt\necho ordinary', 'mount -o user=$USER,pass"word"=[REDACTED]\necho ordinary'],
+    // After a command substitution, whose end the list reading does not
+    // read: the entry after it starts a word of its own.
+    ['gcloud run deploy svc --set-env-vars=VERSION=$(git rev-parse HEAD),DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=VERSION=$(git rev-parse HEAD),DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars=VERSION=`git rev-parse HEAD`,DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=VERSION=`git rev-parse HEAD`,DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    ['cli --set-env-vars=VERSION=$(date),MODE=x,DB_PASS"WORD"=SecretSuffix --verbose\necho ordinary', 'cli --set-env-vars=VERSION=$(date),MODE=x,DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    ['cli --set-env-vars=^:^VERSION=$((1 + 2)):DB_PASS"WORD"=SecretSuffix --verbose\necho ordinary', 'cli --set-env-vars=^:^VERSION=$((1 + 2)):DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    // Long values: quoted, with dots and dashes, and a long name that is no
+    // credential's before the credential's.
+    [`cli --set-env-vars=ORDINARY="${long}",DB_PASS"WORD"=SecretSuffix --verbose\necho ordinary`, `cli --set-env-vars=ORDINARY="${long}",DB_PASS"WORD"=[REDACTED]\necho ordinary`],
+    [`cli --set-env-vars=ORDINARY=${'a.b-c'.repeat(200)},DB_PASS"WORD"=SecretSuffix --verbose\necho ordinary`, `cli --set-env-vars=ORDINARY=${'a.b-c'.repeat(200)},DB_PASS"WORD"=[REDACTED]\necho ordinary`],
+    [`cli --set-env-vars=ORDINARY=x,${long}=y,DB_PASS"WORD"=SecretSuffix --verbose\necho ordinary`, `cli --set-env-vars=ORDINARY=x,${long}=y,DB_PASS"WORD"=[REDACTED]\necho ordinary`],
+    // In a command string, and in a log line that quotes it as a JSON string.
+    ['sh -c "cli --set-env-vars=ORDINARY=\\${VALUE},DB_PASS\\"WORD\\"=SecretSuffix --verbose"\necho ordinary', 'sh -c "cli --set-env-vars=ORDINARY=\\${VALUE},DB_PASS\\"WORD\\"=[REDACTED]'],
+    [`sh -c "cli --set-env-vars=ORDINARY=${long},DB_PASS\\"WORD\\"=SecretSuffix --verbose"\necho ordinary`, `sh -c "cli --set-env-vars=ORDINARY=${long},DB_PASS\\"WORD\\"=[REDACTED]`],
+    [`log "${json('cli --set-env-vars=ORDINARY=$VALUE,DB_PASS"WORD"=SecretSuffix --verbose')}"`, 'log "cli --set-env-vars=ORDINARY=$VALUE,DB_PASS\\"WORD\\"=[REDACTED]'],
+  ]
+  for (const [input, want] of cases) {
+    expect(redactText(input, newStats())).toBe(want)
+    for (const text of pathsOf(input)) expect(text).not.toMatch(/Secret|Suffix/)
+  }
+})
+
+test('a generated sweep: in a list of names and values, after each expansion, command substitution and long value, a credential name spelled in pieces loses its value in every path', () => {
+  const inputs: string[] = []
+  // What comes before the credential's entry: expansions, alone or among
+  // other text, in quotes or not, command substitutions, and values and
+  // names of 201 or more characters.
+  const before = ['$VALUE', '${VALUE}', '${VALUE:-x}', '${#VALUE}', '$1', '$@', '$?', '"$VALUE"', '"${VALUE}"', 'pre$VALUE', '${VALUE}post', '$A$B', 'x${A}y$B',
+    '$(date)', '`date`', '$(git rev-parse HEAD)', 'a'.repeat(201), 'a'.repeat(1000), `"${'a'.repeat(300)}"`, `'${'a'.repeat(300)}'`, 'a-b.c_'.repeat(50)]
+  const names = ['DB_PASS"WORD"', "DB_PASS'WORD'", 'DB_PA\\SSWORD', 'db.pass"word"', 'API"_KEY"', 'DB_PASSWORD\\']
+  for (const value of before) {
+    for (const name of names) {
+      for (const separator of [',', ':', '@']) inputs.push(`cli --set-env-vars=ORDINARY=${value}${separator}${name}=SecretSuffix --verbose\necho ordinary`)
+      inputs.push(`cli --set-env-vars ORDINARY=${value},${name}="Secret Suffix" --verbose`, `cli -o user=${value},${name}=Secret\\ Suffix`)
+    }
+  }
+  // Each, also in a command string another shell runs and in a log line that
+  // quotes it as a JSON string.
+  for (const command of inputs.splice(0)) {
+    inputs.push(command, `sh -c "${command.replace(/[\\"$`]/g, c => `\\${c}`)}"`, `log "${JSON.stringify(command).slice(1, -1)}"`)
+  }
+  expect(inputs.length).toBe(1890)
   for (const input of inputs) for (const text of pathsOf(input)) expect(text).not.toMatch(/Secret|Suffix/)
 })

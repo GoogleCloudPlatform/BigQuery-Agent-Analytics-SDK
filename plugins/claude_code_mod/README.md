@@ -1084,7 +1084,10 @@ column. Treat the dataset like the transcripts it mirrors.
   after another option's `=`, as in `--from-literal=pass"word"=…`, or in the
   list of names and values after one, after any character no name has, as
   in `--set-env-vars=ORDINARY=x,DB_PASS"WORD"=…` (`:`, `;` in quotes,
-  gcloud's `^:^` and others alike), before an escaped `=`, as in
+  gcloud's `^:^` and others alike; after an expansion such as `$VALUE` or
+  `${VALUE}`, whose value after `${` runs to the end of the text, after a
+  value of any length, and after a command substitution, such as
+  `VERSION=$(git rev-parse HEAD),DB_PASS"WORD"=…`), before an escaped `=`, as in
   `--password\=…` and `--from-literal=PASSWORD\=…`, and with
   the continuation as a JSON string in a log line encodes it, `\\\n` or
   `\\\r\n`) everything to the end of the line, whatever it holds,
@@ -1174,9 +1177,11 @@ column. Treat the dataset like the transcripts it mirrors.
   under 100 ms for a 2,760,000-character Write). The free-text rules measure
   each run of line continuations, of a name's characters and of the blanks
   before a separator once, never again from each place in it where a name
-  may start, so 100,000 characters of continuations as JSON encodes them,
-  of names and values or of `$(` cost each path under 100 ms too (tested,
-  the payload cap and the full text). A long string is scanned up
+  may start, and read a list of names and values once, whichever word
+  starts in it (each `;` in `A=x;\A=x;…` starts one), so 100,000
+  characters of continuations as JSON encodes them, of names and values,
+  of such a list or of `$(` cost each path under 100 ms too (tested, the
+  payload cap and the full text). A long string is scanned up
   to 8,192 characters past where it is cut, so a credential across the cut is
   still matched whole; those last 8,192 characters scanned are never kept,
   and anything further is dropped, never passed on unscanned.
@@ -1217,7 +1222,7 @@ test kit, with no session, sign-in, GCP or network: `$.http.fetch`,
 `$.process.run`, `$.fs` and `$.store` are stubbed, and `mock.clock` drives the
 timers; the `$.fs` stubs measure files in UTF-8 bytes and refuse a file over
 4 MiB, and the `$.store` stub a store over 4 MiB of JSON in all, as the host
-does. 420 tests cover the captured rows and their spans,
+does. 423 tests cover the captured rows and their spans,
 subagent runs in the order the host raises them (one invocation and one
 trace for the turn, a span per run, a SubagentStart that comes late or never),
 the session-start row raised before or during `session.start`'s setup,
@@ -1240,9 +1245,11 @@ webhook URLs,
 credential-named lines whatever they hold, credential options and
 assignments whose value ends cleanly (the rest kept) or cannot be told
 (redacted to the end of the text, with a generated sweep of value openers),
-credential names in lists of names and values (a generated sweep of
-separators, spellings and options) and before an escaped `=`, 100,000
-characters of continuations, lists or `$(` under 100 ms in every path,
+credential names in lists of names and values (generated sweeps of
+separators, spellings and options, and of expansions, command
+substitutions and long values before them) and before an escaped `=`,
+100,000 characters of continuations, lists (one that each `;` starts
+again too) or `$(` under 100 ms in every path,
 text with no credential left as it is, values past 5,000 characters and
 past the scanned window, credentials across a length cap, every diagnostic
 sink, and each review probe through capture, delivery and the dead-letter
