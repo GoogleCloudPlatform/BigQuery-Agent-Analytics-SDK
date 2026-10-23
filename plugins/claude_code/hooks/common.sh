@@ -29,9 +29,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_DIR="$(dirname "$SCRIPT_DIR")"
 PYTHON_BIN="${BQAA_PYTHON:-python3}"
 
-if [[ "${BQAA_TRACE_ENABLED:-true}" != "true" ]]; then
-  exit 0
-fi
+# Match config.py, which lower-cases the value, so TRUE / True enable
+# tracing here too. A case glob (not ${var,,}) keeps this working on
+# the Bash 3.2 that macOS ships as /bin/bash.
+case "${BQAA_TRACE_ENABLED:-true}" in
+  [Tt][Rr][Uu][Ee]) ;;
+  *) exit 0 ;;
+esac
 
 export PYTHONPATH="${PLUGIN_DIR}/vendor:${PYTHONPATH:-}"
 
