@@ -574,9 +574,9 @@ class TestSanitizeCategories:
     """Normal text passes through unchanged."""
     assert _sanitize_categories("Billing, Technical") == "Billing, Technical"
 
-  def test_single_quote_doubled(self):
-    """Single quotes are doubled for safe SQL embedding."""
-    assert _sanitize_categories("It's broken") == "It''s broken"
+  def test_single_quote_escaped(self):
+    """Single quotes get a backslash; GoogleSQL can't parse ''."""
+    assert _sanitize_categories("It's broken") == "It\\'s broken"
 
   def test_backslash_escaped(self):
     """Backslashes are escaped."""
@@ -585,7 +585,7 @@ class TestSanitizeCategories:
   def test_combined_escaping(self):
     """Both quotes and backslashes are handled together."""
     result = _sanitize_categories("O'Brien's \\data")
-    assert result == "O''Brien''s \\\\data"
+    assert result == "O\\'Brien\\'s \\\\data"
 
   def test_empty_string(self):
     assert _sanitize_categories("") == ""
