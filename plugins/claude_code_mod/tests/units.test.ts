@@ -1875,36 +1875,37 @@ test('a query-style value after `#` or `?` runs through its shell word in a list
   }
 })
 
-test('a generated sweep: in a list of names and values, after each delimiter, after each value before the entry, in each spelling, with each value and in each wrapper, a credential name loses its value in every path', () => {
-  // How each delimiter is written so that the shell passes it, gcloud's
-  // `^…^` before the list where it is not the comma, and the quote around
-  // the list.
+// Every list of names and values that a delimiter, a value before the
+// credential's entry, a spelling of its name and a value make: the full cross
+// product, as gcloud would take it. How each delimiter is written so that the
+// shell passes it, gcloud's `^…^` before the list (as the shell passes it,
+// a quote or a space in it too) where it is not the comma, and the quote
+// around the list; what comes before the entry (a delimiter-looking value
+// too); each spelling the shell joins into a credential's name by that quote,
+// an escaped `=` too where nothing quotes it; and each value.
+function listSweep(): string[] {
   const delimiters: [string, string, string][] = [
     [',', '', ''], [':', '^:^', ''], ['::', '^::^', ''], [']', '^]^', ''], ['#', '^#^', ''], ['?', '^?^', ''], ['.', '^.^', ''], [',.', '^,.^', ''],
-    ['\\\\', '^\\\\^', ''], ['\\,', '', ''], ['1', '^1^', ''], ['q', '^q^', ''], ['ab', '^ab^', ''], ['--', '^--^', ''],
-    ["'", "^'^", '"'], [';', '^;^', '"'], [' ', '^ ^', '"'], ['#', '^#^', '"'], ['"', '^"^', "'"], [',', '', "'"],
+    ['\\\\', '^\\\\^', ''], ['\\,', '', ''], ['1', '^1^', ''], ['q', '^q^', ''], ['ab', '^ab^', ''], ['--', '^--^', ''], ['q', '^"q"^', ''],
+    ["'", "^'^", '"'], [';', '^;^', '"'], [' ', '^ ^', '"'], ['#', '^#^', '"'], [' q', '^ q^', '"'], ['"', '^"^', "'"], [',', '', "'"],
   ]
-  // What comes before the credential's entry.
-  const befores = ['v', '$VALUE', '${VALUE}', '$(printf v)', '`printf v`', '$(printf v)-dev', '$((1 + 2))', 'a'.repeat(201)]
-  // Each spelling the shell joins into a credential's name, by the quote
-  // the list is in.
+  const befores = ['v', '$VALUE', '${VALUE}', '$(printf v)', '`printf v`', '$(printf v)-dev', '$((1 + 2))', 'a'.repeat(201), '^x^']
   const spellings: Record<string, string[]> = {
-    '': ['DB_PASSWORD', 'DB_PASS"WORD"', "DB_PASS'WORD'", 'DB_PA\\SSWORD', '"DB_PASS"WORD', 'DB_PASS\\\nWORD', 'db.pass"word"', 'API"_KEY"', 'pass', "$'DB_PASS'WORD"],
+    '': ['DB_PASSWORD', 'DB_PASS"WORD"', "DB_PASS'WORD'", 'DB_PA\\SSWORD', '"DB_PASS"WORD', 'DB_PASS\\\nWORD', 'db.pass"word"', 'API"_KEY"', 'pass', "$'DB_PASS'WORD",
+      'DB_PASSWORD\\', 'DB_PASS"WORD"\\'],
     '"': ['DB_PASSWORD', 'DB_PASS"WORD"', 'DB_PASS""WORD', 'DB_PASS\\\nWORD', 'db.pass"word"', 'API"_KEY"', 'pass'],
     "'": ['DB_PASSWORD', "DB_PASS''WORD", "db.pass''word", 'pass'],
   }
   // An unquoted `&` ends the command: escaped, it is the value's.
   const values: Record<string, string[]> = { '': ['SecretSuffix', '"Secret Suffix"', "'Secret Suffix'", 'Secret\\ Suffix', '\\&SecretSuffix'], '"': ['Secret Suffix', '&Secret Suffix', 'x&Secret;Suffix'], "'": ['Secret Suffix', '&Secret Suffix'] }
   const inputs: string[] = []
-  let k = 0
   for (const [delimiter, prefix, quote] of delimiters) {
     // The delimiter as gcloud gets it: a value that holds it is split.
     const passed = delimiter.replace(/^\\(.)/, '$1')
-    const choices = (values[quote] as string[]).filter(value => !value.includes(passed))
-    expect([delimiter, choices.length > 0]).toEqual([delimiter, true])
     for (const before of befores) {
       // A variable takes the name characters after it, and a delimiter
-      // splits a name that holds it: neither gives a credential's entry.
+      // splits a name or a value that holds it: none gives a credential's
+      // entry.
       if (before === '$VALUE' && /^[A-Za-z0-9_]/.test(delimiter)) continue
       for (const name of spellings[quote] as string[]) {
         // A short credential word is a name of its own only after a
@@ -1912,19 +1913,36 @@ test('a generated sweep: in a list of names and values, after each delimiter, af
         // or digits).
         if (name === 'pass' && !/[A-Za-z0-9]$/.test(delimiter) && delimiter !== ',') continue
         if (name.includes('.') && passed.includes('.')) continue
-        const value = choices[k++ % choices.length] as string
-        inputs.push(`gcloud run deploy svc --set-env-vars=${quote}${prefix}VERSION=${before}${delimiter}${name}=${value}${quote} --region us\necho ordinary`)
+        for (const value of values[quote] as string[]) {
+          if (value.includes(passed)) continue
+          inputs.push(`gcloud run deploy svc --set-env-vars=${quote}${prefix}VERSION=${before}${delimiter}${name}=${value}${quote} --region us\necho ordinary`)
+        }
       }
     }
   }
-  // Each, also in a command string another shell runs and in a log line that
-  // quotes it as a JSON string.
-  for (const command of inputs.splice(0)) {
-    inputs.push(command, `sh -c "${command.replace(/[\\"$`]/g, c => `\\${c}`)}"`, `log "${JSON.stringify(command).slice(1, -1)}"`)
+  return inputs
+}
+
+const LIST_SWEEP = listSweep()
+
+for (const [label, wrap] of [
+  ['as a command line', (c: string): string => c],
+  ["in a single-quoted command string another shell runs (sh -c '…')", (c: string): string => `sh -c '${c.replace(/'/g, `'\\''`)}'`],
+  ['in a double-quoted command string another shell runs (sh -c "…")', (c: string): string => `sh -c "${c.replace(/[\\"$`]/g, ch => `\\${ch}`)}"`],
+  ['in a log line that quotes it as a JSON string', (c: string): string => `log "${JSON.stringify(c).slice(1, -1)}"`],
+] as const) {
+  // In four parts, each well within a test's time.
+  for (const part of [0, 1, 2, 3]) {
+    test(`a generated sweep, ${label}, part ${part + 1} of 4: every delimiter × value before the entry × spelling × value in a list of names and values loses the credential in every path`, () => {
+      expect(LIST_SWEEP.length).toBe(7923)
+      const size = Math.ceil(LIST_SWEEP.length / 4)
+      for (const command of LIST_SWEEP.slice(part * size, (part + 1) * size)) {
+        const input = wrap(command)
+        for (const text of pathsOf(input)) expect([input, /Secret|Suffix/.test(text)]).toEqual([input, false])
+      }
+    })
   }
-  expect(inputs.length > 3000).toBe(true)
-  for (const input of inputs) for (const text of pathsOf(input)) expect(text).not.toMatch(/Secret|Suffix/)
-})
+}
 
 test('lists of names and values with these delimiters and no credential name in them are left as they are, byte for byte, in every path', () => {
   const commands = [
@@ -1941,9 +1959,14 @@ test('lists of names and values with these delimiters and no credential name in 
     'make TARGET=x86_64 OS=linux KEYBOARD=us',
     'printf "%s\\n" "a=1" "b=2"',
   ]
+  const commandOf = (content: string | undefined): string => (JSON.parse(content ?? '{}') as { args?: { command?: string } }).args?.command ?? ''
   for (const command of commands) {
-    const [once, , error, , , , diagnostic, twice] = pathsOf(command)
+    const [once, content = 'null', error, request = '{}', file = '', lines = '[]', diagnostic, twice] = pathsOf(command)
     expect([once, twice, error, diagnostic]).toEqual([command, command, `command failed: ${command}`, `command failed: ${command}`])
+    expect(commandOf(JSON.parse(content) as string)).toBe(command)
+    expect(commandOf((JSON.parse(request) as { rows: { json: { content: string } }[] }).rows[0]?.json.content)).toBe(command)
+    expect(commandOf((parseFile(file).lines[0] as { row: { content: string } } | undefined)?.row.content)).toBe(command)
+    expect(commandOf((JSON.parse(lines) as { row: { content: string } }[])[0]?.row.content)).toBe(command)
   }
 })
 
@@ -1963,11 +1986,73 @@ test('names in lists after any delimiter are read once per text: 100,000-charact
     `--set-env-vars="^'^A=1'DB_PASS"WORD"=y"\n`.repeat(2_500),
     `^ ${'#token=x '.repeat(11_000)}`,
     `^ ${'a=1 '.repeat(25_000)}`,
+    // gcloud's delimiter read as the shell passes it: quoted, with spaces,
+    // and a `^…^` in each value; and escaped `=` in a command string.
+    `--o='^"q"^A=1qpass=x' `.repeat(4_546),
+    `--o="^ a b^xa b" `.repeat(5_883),
+    'a=^x^'.repeat(20_000),
+    `sh -c '${'DB_PASSWORD\\=x '.repeat(6_667)}'`,
   ]
   for (const text of texts) {
     expect(text.length > 99_000).toBe(true)
     for (const [cap, diagnostic] of [[16384, 1000], [220_000, 110_000]] as const) {
       for (const [path, ms] of pathTimes(text, cap, diagnostic)) expect([cap, path, ms < 100]).toEqual([cap, path, true])
     }
+  }
+})
+
+// A command as a command line, in a single- and a double-quoted command
+// string another shell runs, and in a log line that quotes it as a JSON
+// string.
+const wrappersOf = (command: string): string[] => [
+  command,
+  `sh -c '${command.replace(/'/g, `'\\''`)}'`,
+  `sh -c "${command.replace(/[\\"$`]/g, c => `\\${c}`)}"`,
+  `log "${JSON.stringify(command).slice(1, -1)}"`,
+]
+
+test('round 3 review inputs: a value a marker or a provider token starts, an escaped `=` in a command string, gcloud\'s delimiter as the shell passes it, a delimiter-looking value and a long quoted name lose all of the credential in every path and wrapper', () => {
+  const token = `ghp_${'a1B2'.repeat(9)}`
+  const cases: [string, string][] = [
+    // P1-1: a value that a marker or a provider token's redaction starts.
+    ['gcloud run deploy svc --set-env-vars="^q^VERSION=vqpass=[REDACTED]SecretSuffix"', 'gcloud run deploy svc --set-env-vars="^q^VERSION=vqpass=[REDACTED]"'],
+    [`gcloud run deploy svc --set-env-vars=^q^VERSION=vqpass=${token}:SecretSuffix`, 'gcloud run deploy svc --set-env-vars=^q^VERSION=vqpass=[REDACTED]'],
+    [`gcloud run deploy svc --set-env-vars="^q^VERSION=vqpass=${token}:SecretSuffix" --region us\necho ordinary`, 'gcloud run deploy svc --set-env-vars="^q^VERSION=vqpass=[REDACTED]"\necho ordinary'],
+    // P1-2: an `=` escaped outside quotes, then in command strings below.
+    ['gcloud run deploy svc --set-env-vars=^::^VERSION=$(printf v)::DB_PASSWORD\\=SecretSuffix', 'gcloud run deploy svc --set-env-vars=^::^VERSION=$(printf v)::DB_PASSWORD\\=[REDACTED]'],
+    ['gcloud run deploy svc --set-env-vars=^::^VERSION=$(printf v)::DB_PASS"WORD"\\=SecretSuffix', 'gcloud run deploy svc --set-env-vars=^::^VERSION=$(printf v)::DB_PASS"WORD"\\=[REDACTED]'],
+    // P1-3: gcloud's delimiter as the shell passes it: with a space in it,
+    // in quotes.
+    // (A space in quotes hides where the word starts: to the end of the text.)
+    ['gcloud run deploy svc --set-env-vars="^ q^VERSION=v qpass=SecretSuffix"', 'gcloud run deploy svc --set-env-vars="^ q^VERSION=v qpass=[REDACTED]'],
+    ['gcloud run deploy svc --set-env-vars=^"q"^VERSION=vqpass=SecretSuffix', 'gcloud run deploy svc --set-env-vars=^"q"^VERSION=vqpass=[REDACTED]'],
+    ['gcloud run deploy svc --set-env-vars="^ #^VERSION=v #DB_PASSWORD=first&SecretSuffix"', 'gcloud run deploy svc --set-env-vars="^ #^VERSION=v #DB_PASSWORD=[REDACTED]'],
+    // P1-4: a value that looks like gcloud's delimiter does not set the
+    // list's apart.
+    ['gcloud run deploy svc --set-env-vars="^#^VERSION=^x^#DB_PASSWORD=first&SecretSuffix"', 'gcloud run deploy svc --set-env-vars="^#^VERSION=^x^#DB_PASSWORD=[REDACTED]"'],
+    // P2-1: a name's pieces past any length.
+    [`gcloud run deploy svc --set-env-vars=^::^VERSION=$(printf v)::pa${'""'.repeat(520)}ss=SecretSuffix`, `gcloud run deploy svc --set-env-vars=^::^VERSION=$(printf v)::pa${'""'.repeat(520)}ss=[REDACTED]`],
+  ]
+  for (const [input, want] of cases) {
+    expect(redactText(input, newStats())).toBe(want)
+    for (const wrapped of wrappersOf(input)) for (const text of pathsOf(wrapped)) expect([wrapped, /Secret|Suffix/.test(text)]).toEqual([wrapped, false])
+  }
+})
+
+test('an allowlisted name the shell joins from quoted parts, and a backslash its own quote keeps, leave the text as it is in every path', () => {
+  const commandOf = (content: string | undefined): string => (JSON.parse(content ?? '{}') as { args?: { command?: string } }).args?.command ?? ''
+  const commands = [
+    ...['cli --max_"to"kens=1024', 'cli --set input_"to"kens=512 --verbose', 'cli --total_"to"kens=5', 'cli --cache_creation_input_"to"kens=3',
+      'cli --set prompt_"tok"ens=9', "cli --output_'to'kens=7"].flatMap(wrappersOf),
+    // The literal backslash of a word's own quote, in each wrapper.
+    ...wrappersOf("sed 's/password\\=.*/x/' config.ini"),
+  ]
+  for (const command of commands) {
+    const [once, content = 'null', error, request = '{}', file = '', lines = '[]', diagnostic, twice] = pathsOf(command)
+    expect([once, twice, error, diagnostic]).toEqual([command, command, `command failed: ${command}`, `command failed: ${command}`])
+    expect(commandOf(JSON.parse(content) as string)).toBe(command)
+    expect(commandOf((JSON.parse(request) as { rows: { json: { content: string } }[] }).rows[0]?.json.content)).toBe(command)
+    expect(commandOf((parseFile(file).lines[0] as { row: { content: string } } | undefined)?.row.content)).toBe(command)
+    expect(commandOf((JSON.parse(lines) as { row: { content: string } }[])[0]?.row.content)).toBe(command)
   }
 })

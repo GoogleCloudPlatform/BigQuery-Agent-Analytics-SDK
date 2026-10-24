@@ -1093,21 +1093,27 @@ column. Treat the dataset like the transcripts it mirrors.
   apart (any character no name has, such as `:`, `::`, `]`, `#`, `\,` or
   `;` in quotes; a quote or a backslash, as with gcloud's `^'^` and `^\^`;
   a dot, a dash or digits before the name, as with `^.^` and `^,.^`; and,
-  to the end of its line, gcloud's own `^DELIM^` of any characters, letters
-  and digits too, as `^x^` and `^1^`: see [Limitations](#limitations)) and
-  whatever comes before the entry (an expansion such as `$VALUE` or
-  `${VALUE}`, whose value after `${` runs to the end of the text, a value of
-  any length, a command substitution or backticks, in quotes or with more of
-  the value after them, as in
+  to the end of its line, gcloud's own `^DELIM^` at the start of an
+  option's value or of a word, read as the shell passes it, of any
+  characters, letters, digits and spaces too, as `^x^`, `^1^`, `^"q"^` and
+  `"^ q^…"`: see [Limitations](#limitations)) and whatever comes before the
+  entry (an expansion such as `$VALUE` or `${VALUE}`, whose value after
+  `${` runs to the end of the text, a value of any length or one that looks
+  like gcloud's delimiter, `VERSION=^x^…`, a command substitution or
+  backticks, in quotes or with more of the value after them, as in
   `VERSION=$(git rev-parse HEAD)::DB_PASS"WORD"=…`), before an escaped `=`, as in
-  `--password\=…` and `--from-literal=PASSWORD\=…`, and with
+  `--password\=…` and `--from-literal=PASSWORD\=…`, also in a command
+  string or a log line's JSON string (outside a command string, not after
+  a backslash that a quote the word opens itself keeps, as in
+  `sed 's/password\=.*/x/'`), and with
   the continuation as a JSON string in a log line encodes it, `\\\n` or
   `\\\r\n`) everything to the end of the line, whatever it holds,
   including a redaction marker (`?name=` / `&name=`
-  only to the next `&`, or through its shell word if that is longer when a
-  quote, `$` or a backtick opens the value, `;` or `&` comes before the
-  name, or `#` or `?` does in a list that gcloud's delimiter holding it sets
-  apart, such as `^#^`), and on to the next lines after a line continuation,
+  only to the next `&` that no backslash escapes, or through its shell word
+  if that is longer when a quote, escaped or not, `$` or a backtick opens
+  the value, `;` or `&` comes before the name, or `#` or `?` does in a list
+  that gcloud's delimiter holding it sets apart, such as `^#^`), and on to
+  the next lines after a line continuation,
   or as far as the value runs on: after `=` with no space around it (a flag or
   an assignment), through the whole shell word it starts, to the end of the
   line that word ends on (a flag's value, to a `;`, `|`, `&`, `<`, `>` or `)`
@@ -1161,7 +1167,10 @@ column. Treat the dataset like the transcripts it mirrors.
   '--pa\ssword' x` is left as it is, unless a command before it in its
   command runs its arguments, joined, as shell code (`ssh host`, `eval`,
   `watch`), where that shell reads it again. A value that is one
-  redaction marker alone is kept, and a word that starts with `--` is no
+  redaction marker alone, as its whole shell word, is kept (in a command
+  string, where a value may run to the end of the text, the marker can take
+  the rest); one with more of its word after a marker, `[REDACTED]x` or
+  `[REDACTED:github-token]:x`, is not. A word that starts with `--` is no
   value (`--password-stdin`, also as `--password\` and `"-stdin"`, and
   `--token-file` keep theirs). A name is a credential's when
   one of its parts, split on punctuation and camelCase and compared without
@@ -1237,7 +1246,7 @@ test kit, with no session, sign-in, GCP or network: `$.http.fetch`,
 `$.process.run`, `$.fs` and `$.store` are stubbed, and `mock.clock` drives the
 timers; the `$.fs` stubs measure files in UTF-8 bytes and refuse a file over
 4 MiB, and the `$.store` stub a store over 4 MiB of JSON in all, as the host
-does. 428 tests cover the captured rows and their spans,
+does. 445 tests cover the captured rows and their spans,
 subagent runs in the order the host raises them (one invocation and one
 trace for the turn, a span per run, a SubagentStart that comes late or never),
 the session-start row raised before or during `session.start`'s setup,
@@ -1261,12 +1270,14 @@ credential-named lines whatever they hold, credential options and
 assignments whose value ends cleanly (the rest kept) or cannot be told
 (redacted to the end of the text, with a generated sweep of value openers),
 credential names in lists of names and values (generated sweeps of
-separators, delimiters of any characters (gcloud's own, quotes and
-backslashes too), spellings, values and options, and of expansions,
-command substitutions and long values before them) and before an escaped
-`=`, 100,000 characters of continuations, lists (one that each `;` starts
-again, or another delimiter sets apart, too) or `$(` under 100 ms in every
-path,
+separators, spellings and options, and of expansions, command
+substitutions and long values before them, and the full cross product of
+delimiters of any characters (gcloud's own as the shell passes it, quotes
+and backslashes too), values before the entry, spellings and values, as a
+command line, in single- and double-quoted command strings and in a JSON
+log line) and before an escaped `=`, 100,000 characters of continuations,
+lists (one that each `;` starts again, or another delimiter sets apart,
+too) or `$(` under 100 ms in every path,
 text with no credential left as it is, values past 5,000 characters and
 past the scanned window, credentials across a length cap, every diagnostic
 sink, and each review probe through capture, delivery and the dead-letter
@@ -1766,8 +1777,8 @@ the same views count other producers' requests but not their tokens.
   key that is not on the list, are recorded as `[REDACTED]`. Free text is
   scanned for credentials on a best-effort basis.
 * In a list of names and values, letters and digits are taken to set the
-  entries apart only after gcloud's own `^DELIM^` before the list, and to
-  the end of that line. Elsewhere a credential word glued to the value
+  entries apart only after gcloud's own `^DELIM^` at the start of the list,
+  and to the end of that line. Elsewhere a credential word glued to the value
   before it is part of one longer name, a credential's only where that
   name's own parts say so: `VERSION=v1DB_PASSWORD=…` has its value
   redacted, `VERSION=vxpass=…` with no `^x^` before it keeps it.
