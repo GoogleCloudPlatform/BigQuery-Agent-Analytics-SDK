@@ -52,11 +52,7 @@ from __future__ import annotations
 
 import dataclasses
 import enum
-import logging
 from typing import Any, Optional
-
-logger = logging.getLogger("bigquery_agent_analytics." + __name__)
-
 
 # ------------------------------------------------------------------ #
 # Failure codes                                                        #

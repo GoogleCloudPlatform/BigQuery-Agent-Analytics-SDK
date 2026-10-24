@@ -33,12 +33,9 @@ Example usage::
 from __future__ import annotations
 
 from dataclasses import dataclass
-import logging
 
 from .eval_suite import EvalSuite
 from .eval_suite import EvalTaskDef
-
-logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 
 @dataclass
