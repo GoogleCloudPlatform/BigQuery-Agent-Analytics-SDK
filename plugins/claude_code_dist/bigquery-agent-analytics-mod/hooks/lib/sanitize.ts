@@ -233,6 +233,29 @@ function redactUrls(text: string, stats: SanitizeStats): string {
   })
 }
 
+const URL_SPANS = new RegExp(URL_IN_TEXT.source, 'gi')
+
+// Where the URLs in a text are (see URL_IN_TEXT): each one's start and end,
+// in order. Their query and fragment parameters are redactUrl's.
+function urlSpans(text: string): number[] {
+  const spans: number[] = []
+  URL_SPANS.lastIndex = 0
+  for (let m = URL_SPANS.exec(text); m !== null; m = URL_SPANS.exec(text)) spans.push(m.index, m.index + m[0].length)
+  return spans
+}
+
+// Whether `i` is in one of the URLs at `spans` (see urlSpans).
+function inUrl(spans: number[], i: number): boolean {
+  let lo = 0
+  let hi = spans.length / 2
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if ((spans[mid * 2 + 1] as number) <= i) lo = mid + 1
+    else hi = mid
+  }
+  return lo < spans.length / 2 && (spans[lo * 2] as number) <= i
+}
+
 // A line continuation in a name, as text holds it: a backslash and a line
 // break, or that pair as a JSON string encodes it (`\\\n`, `\\\r\n`), as in a
 // log line that quotes a command.
@@ -326,8 +349,10 @@ function namedAt(text: string, p: number, boundary: string, runs: NameRuns): Nam
 // After a credential name, the value goes: to the end of its line, whatever is
 // in it (quotes, brackets and redaction markers are not trusted to end it),
 // or, for a query-style `?name=` / `&name=`, to the next `&`, `#`, `;` or
-// space (when a quote, `$` or a backtick opens it, as in a shell assignment
-// after `;` or `&`, through its shell word if that is longer). A line that
+// space (through its shell word if that is longer: after `;` or `&`, as a
+// shell assignment; after `?` or `#` where gcloud's delimiter holding it sets
+// a list's entries apart (`^#^`); and where a quote, `$` or a backtick opens
+// it). A line that
 // ends in a continuation (`\`) runs on to the next. After `=` with no space
 // around it (a flag or an assignment) the value runs on through the whole
 // shell word it starts (see readValue), to the end of the line that word
@@ -552,6 +577,8 @@ function redactNamedValues(text: string, stats: SanitizeStats): string {
   if (!/[:=]/.test(text)) return text
   const runs = nameRuns(text)
   let states: Uint8Array | undefined
+  // gcloud's lists (see delimitedLists), found once: null where none is.
+  let lists: DelimitedLists | null | undefined
   let out = ''
   let copied = 0
   let next = 0
@@ -573,14 +600,19 @@ function redactNamedValues(text: string, stats: SanitizeStats): string {
     if (equals && /^[?&#;]$/.test(m.boundary)) {
       const stop = /[&#;\s]/.exec(text.slice(start))
       end = stop === null ? text.length : start + stop.index
-      // After `;` or `&` it may be a shell assignment, and after `?` or `#` a
-      // quote, `$` or a backtick may open it: through its shell word, if that
-      // is longer (escaped spaces, quotes, expansions).
-      if (m.boundary === ';' || m.boundary === '&' || /^["'`$]/.test(text[start] ?? '')) {
+      // After `;` or `&` it may be a shell assignment, after `?` or `#` in a
+      // list gcloud's delimiter holding it sets apart (`^#^`), a list's entry,
+      // whose value a quoted or escaped `&` does not end, and a quote, `$` or
+      // a backtick may open it: through its shell word, if that is longer
+      // (escaped spaces, quotes, expansions).
+      if (lists === undefined) lists = delimitedLists(text)
+      if (m.boundary === ';' || m.boundary === '&' || /^["'`$]/.test(text[start] ?? '') || delimiterAt(lists, m.index).includes(m.boundary)) {
         const read = readValue(text, start, from, (states ??= quoteStates(text)))
         if (read === null) {
           end = text.length
-        } else if (read.end > end) {
+        } else if (read.end >= end) {
+          // Also where both end at once: the quote the value starts in is
+          // put back.
           end = read.end
           close = read.close
         }
@@ -1191,9 +1223,195 @@ function redactOptionWords(text: string, stats: SanitizeStats): string {
   return copied === 0 ? text : out + text.slice(copied)
 }
 
+// ---- names in lists, after any delimiter -------------------------------------
+//
+// A list of names and values may set its entries apart with any characters:
+// gcloud takes `^DELIM^` before a list for its delimiter, whatever DELIM holds
+// (`^::^`, `^#^`, `^'^`, `^\^`, `^.^`, `^1^`, `^ab^`). The rules above find a
+// name in a list after a character no name has, and lose the list at code
+// whose end they do not read (`$(`, a backtick). This rule, last, reads back
+// from each `=` whose value is not redacted yet through the name characters,
+// quotes, backslashes, line continuations and `$'` before it, and takes a
+// name to start at their first letter or `_` (past digits, dots and dashes,
+// as after `^.^` or `^1^`), at each letter or `_` after a quote or a
+// backslash (which may set the entries apart, or be dropped as a shell drops
+// it), and, in a list gcloud's delimiter of letters or digits sets apart,
+// after each of its letters and digits. Where any such name is a
+// credential's, its value goes, read as a flag's or an assignment's (see
+// readValue): what came before the entry does not matter.
+
+// How far back from an `=` the pieces of its name are read: a name has at
+// most 200 characters, and a quote or a backslash may come before each.
+const LIST_NAME_REACH = 1024
+
+// gcloud's own delimiter before a list (`--set-env-vars=^DELIM^…`,
+// `--labels "^DELIM^…"`).
+const GCLOUD_DELIMITER = /(?:^|[=\s"'])\^([^\s^]{1,256})\^/g
+
+// The lists that gcloud's own delimiter sets apart: where each starts (just
+// past the delimiter) and ends, and the delimiter as written. As a
+// substitution in the list may hold spaces, whose end is not read, a list
+// runs to the end of its line (on through continued lines).
+type DelimitedLists = { starts: number[]; ends: number[]; delimiters: string[] }
+
+function delimitedLists(text: string): DelimitedLists | null {
+  if (!text.includes('^')) return null
+  const lists: DelimitedLists = { starts: [], ends: [], delimiters: [] }
+  // The end of the line the last list started on, found once for each line.
+  let line = -1
+  GCLOUD_DELIMITER.lastIndex = 0
+  for (let m = GCLOUD_DELIMITER.exec(text); m !== null; m = GCLOUD_DELIMITER.exec(text)) {
+    const start = m.index + m[0].length
+    if (start >= line) line = lineEnd(text, start, start)
+    lists.starts.push(start)
+    lists.ends.push(line)
+    lists.delimiters.push(m[1] as string)
+  }
+  return lists.starts.length === 0 ? null : lists
+}
+
+// gcloud's delimiter in force at `i` (see delimitedLists): the latest list's
+// that started before it and has not ended; '' where none is.
+function delimiterAt(lists: DelimitedLists | null, i: number): string {
+  if (lists === null) return ''
+  let lo = 0
+  let hi = lists.starts.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if ((lists.starts[mid] as number) <= i) lo = mid + 1
+    else hi = mid
+  }
+  return lo > 0 && (lists.ends[lo - 1] as number) > i ? (lists.delimiters[lo - 1] as string) : ''
+}
+
+// Where the pieces of the name before the `=` at `e` start (see above), and
+// whether a name they hold is a credential's; `suffix`, gcloud's delimiter's
+// last letters and digits in force there.
+function listName(text: string, e: number, suffix: string): { from: number; credential: boolean } {
+  let r = e
+  while (r > 0 && e - r < LIST_NAME_REACH) {
+    const c = text[r - 1] as string
+    if (isNameChar(c) || c === '"' || c === "'" || c === '\\' || (c === '$' && text[r] === "'")) r -= 1
+    else if (c === '\n' && text[r - 2] === '\\') r -= 2
+    else if (c === '\n' && text[r - 2] === '\r' && text[r - 3] === '\\') r -= 3
+    else break
+  }
+  // The name's characters as a shell may pass them, where in them a name may
+  // start (`starts`), and where a part of one does, after a dot, a dash or an
+  // underscore (`parts`). A name may start past digits where it could before
+  // them, and never right after a letter.
+  let chars = ''
+  const starts: number[] = []
+  const parts: number[] = []
+  let open = true
+  let part = false
+  let ansi = false
+  const add = (ch: string, at: number): void => {
+    const place = namePlace(ch, 0)
+    if (place === 2) {
+      if (open || (suffix !== '' && at - suffix.length >= r && text.startsWith(suffix, at - suffix.length))) starts.push(chars.length)
+      else if (part) parts.push(chars.length)
+      open = false
+    }
+    chars += ch
+    part = ch === '.' || ch === '-' || ch === '_' ? true : place === 2 ? false : part
+  }
+  for (let i = r; i < e; ) {
+    const join = joinLength(text, i)
+    const c = text[i] as string
+    if (join > 0) {
+      i += join
+    } else if (c === '$' && text[i + 1] === "'") {
+      ansi = true
+      i += 2
+    } else if (c === "'" || c === '"') {
+      if (c === "'") ansi = false
+      i += 1
+    } else if (c === '\\' && ansi) {
+      const escape = ansiEscape(text, i)
+      i += escape.length
+      if (isNameChar(escape.char)) {
+        add(escape.char, i - escape.length)
+        continue
+      }
+      // A character no name has sets entries apart.
+      if (!/["'\\]/.test(escape.char)) {
+        chars = ''
+        starts.length = 0
+        parts.length = 0
+        part = false
+      }
+    } else if (c === '\\') {
+      i += 1
+    } else {
+      add(c, i)
+      i += 1
+      continue
+    }
+    open = true
+  }
+  // The name from each start; past 200 characters (a long value glued to
+  // it), from the first part's start before the next start that leaves at
+  // most 200. A part of a name that is whole within 200 is no name of its
+  // own (`max_tokens` holds no credential's name `tokens`).
+  let credential = false
+  for (let i = 0, j = 0; i < starts.length && !credential; i += 1) {
+    let at = starts[i] as number
+    if (chars.length - at > 200) {
+      const next = starts[i + 1] ?? chars.length
+      while (j < parts.length && ((parts[j] as number) < at || chars.length - (parts[j] as number) > 200)) j += 1
+      if (j >= parts.length || (parts[j] as number) >= next) continue
+      at = parts[j] as number
+    }
+    const name = chars.slice(at)
+    // A later name, a part of this one, holds no credential's piece that this
+    // one does not.
+    if (!PIECE_IN_NAME.test(name)) break
+    credential = isSensitiveKey(name)
+  }
+  return { from: r, credential }
+}
+
+function redactListNames(text: string, stats: SanitizeStats): string {
+  if (!text.includes('=')) return text
+  let states: Uint8Array | undefined
+  let urls: number[] | undefined
+  // As in redactNamedValues.
+  let lists: DelimitedLists | null | undefined
+  const scanned = (): Uint8Array => (states ??= quoteStates(text))
+  let out = ''
+  let copied = 0
+  for (let e = text.indexOf('='); e !== -1; e = text.indexOf('=', e + 1)) {
+    const start = e + 1
+    // A value already redacted is the rules above's, and so is an `=` that a
+    // backslash in quotes comes before (`sed 's/password\=.*/x/'`); one
+    // escaped outside them is the shell's `=` (`…::DB_PASSWORD\=…`).
+    if (start >= text.length || text.startsWith('[REDACTED', start)) continue
+    if (text[e - 1] === '\\' && (scanned()[e - 1] === SINGLE || scanned()[e - 1] === DOUBLE)) continue
+    if (lists === undefined) lists = delimitedLists(text)
+    const delimiter = delimiterAt(lists, e)
+    const name = listName(text, e, /[A-Za-z0-9]+$/.exec(delimiter)?.[0] ?? '')
+    if (!name.credential) continue
+    // A URL's query or fragment parameter is redactUrl's.
+    if (/[?&#;]/.test(text[name.from - 1] ?? '') && inUrl((urls ??= urlSpans(text)), e)) continue
+    const from = wordStart(text, name.from)
+    const read = readValue(text, start, from, scanned())
+    const end = read === null ? text.length : valueStop(text, start, read.end, /^\$?["']*-/.test(text.slice(from, start)))
+    const close = read?.close ?? ''
+    const value = text.slice(start, end)
+    if (value.trim() === '' || wholeMarker(value, close)) continue
+    out += text.slice(copied, start) + MARKER + close
+    copied = end
+    stats.redactions += 1
+    if (end >= text.length) break
+    e = end - 1
+  }
+  return copied === 0 ? text : out + text.slice(copied)
+}
+
 // The free-text rules: credential shapes, URLs, credential-named values, then
 // credential-named command-line options, then option words the shell reads
-// in pieces.
+// in pieces, then names in lists after any delimiter.
 export function redactText(input: string, stats: SanitizeStats): string {
   let out = input
   for (const [pattern, replacement] of PATTERNS) {
@@ -1207,7 +1425,7 @@ export function redactText(input: string, stats: SanitizeStats): string {
     })
   }
   out = redactUrls(out, stats)
-  return redactOptionWords(redactFlagValues(redactNamedValues(out, stats), stats), stats)
+  return redactListNames(redactOptionWords(redactFlagValues(redactNamedValues(out, stats), stats), stats), stats)
 }
 
 // Error text, dead-letter reasons and status lines: redacted first, then held

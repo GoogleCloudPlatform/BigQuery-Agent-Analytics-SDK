@@ -1796,3 +1796,178 @@ test('a generated sweep: in a list of names and values, after each expansion, co
   expect(inputs.length).toBe(1890)
   for (const input of inputs) for (const text of pathsOf(input)) expect(text).not.toMatch(/Secret|Suffix/)
 })
+
+test('in a list of names and values, after any delimiter (`#` or `?`, a quote, a backslash, a dot or digits, gcloud\'s own of any characters) and after a command substitution or an expansion, a credential name loses its value in every path', () => {
+  const long = 'a'.repeat(201)
+  const cases: [string, string][] = [
+    // After `#` or `?` (gcloud's `^#^`, `^?^`), a value that `&` or `;`
+    // leads or holds, in quotes or escaped: its whole shell word (to the end
+    // of the text where a space in a substitution hides the word's start).
+    ['gcloud run deploy svc --set-env-vars="^#^VERSION=$(printf v)#DB_PASSWORD=&SecretSuffix" --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars="^#^VERSION=$(printf v)#DB_PASSWORD=[REDACTED]'],
+    ['gcloud run deploy svc --set-env-vars="^#^VERSION=$(printf v)#DB_PASSWORD=first&SecretSuffix" --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars="^#^VERSION=$(printf v)#DB_PASSWORD=[REDACTED]'],
+    ['gcloud run deploy svc --set-env-vars=^#^VERSION=v#DB_PASSWORD=first\\&SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^#^VERSION=v#DB_PASSWORD=[REDACTED] --region us\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars=^#^VERSION=v#DB_PASS\\\nWORD=first\\&SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^#^VERSION=v#DB_PASS\\\nWORD=[REDACTED] --region us\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars="^?^VERSION=v?DB_PASSWORD=&SecretSuffix" --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars="^?^VERSION=v?DB_PASSWORD=[REDACTED]" --region us\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars="^#^VERSION=v#DB_PASSWORD=;SecretSuffix" --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars="^#^VERSION=v#DB_PASSWORD=[REDACTED]" --region us\necho ordinary'],
+    // A backslash or a quote for the delimiter, also after a value of 201
+    // characters: the shell passes `…123\DB_PASSWORD=…`, `…123'DB_PASSWORD=…`.
+    ['gcloud run deploy svc --set-env-vars=^\\\\^VERSION=123\\\\DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^\\\\^VERSION=123\\\\DB_PASS"WORD"=[REDACTED]'],
+    [`gcloud run deploy svc --set-env-vars=^\\\\^VERSION=${long}\\\\DB_PASS"WORD"=SecretSuffix --region us\necho ordinary`, `gcloud run deploy svc --set-env-vars=^\\\\^VERSION=${long}\\\\DB_PASS"WORD"=[REDACTED]`],
+    [`gcloud run deploy svc --set-env-vars="^'^VERSION=123'DB_PASS"WORD"=Secret Suffix" --region us\necho ordinary`, `gcloud run deploy svc --set-env-vars="^'^VERSION=123'DB_PASS"WORD"=[REDACTED]"\necho ordinary`],
+    [`gcloud run deploy svc --set-env-vars="^'^VERSION=${long}'DB_PASS"WORD"=Secret Suffix" --region us\necho ordinary`, `gcloud run deploy svc --set-env-vars="^'^VERSION=${long}'DB_PASS"WORD"=[REDACTED]"\necho ordinary`],
+    [`gcloud run deploy svc --set-env-vars='^"^VERSION=123"DB_PASS'WORD=SecretSuffix --region us\necho ordinary`, `gcloud run deploy svc --set-env-vars='^"^VERSION=123"DB_PASS'WORD=[REDACTED]\necho ordinary`],
+    // After a command substitution or backticks, whatever comes between it
+    // and the name: two characters, an escaped one, another one, a quote
+    // that closes on it, more of the value, a later entry. The space in the
+    // substitution hides where the word starts: its value runs to the end of
+    // the line, or of the text where the quotes read from the space and from
+    // the text's start disagree.
+    ['gcloud run deploy svc --set-env-vars=^::^VERSION=$(printf v)::DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^::^VERSION=$(printf v)::DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars=VERSION=$(printf v)\\,DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=VERSION=$(printf v)\\,DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars=^]^VERSION=$(printf v)]DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^]^VERSION=$(printf v)]DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars=^::^VERSION=`printf v`::DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^::^VERSION=`printf v`::DB_PASS"WORD"=[REDACTED]'],
+    ['gcloud run deploy svc --set-env-vars=VERSION="$(printf v)",DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=VERSION="$(printf v)",DB_PASS"WORD"=[REDACTED]'],
+    ['gcloud run deploy svc --set-env-vars=VERSION=$(printf v)-dev,DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=VERSION=$(printf v)-dev,DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars=VERSION=`printf v`-dev,DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=VERSION=`printf v`-dev,DB_PASS"WORD"=[REDACTED]'],
+    ['gcloud run deploy svc --set-env-vars=^::^VERSION=$(printf v)::MODE=x::DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^::^VERSION=$(printf v)::MODE=x::DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    ["gcloud run deploy svc --set-env-vars=VERSION=$(printf v)','DB_PASS'WORD'=SecretSuffix --region us\necho ordinary", "gcloud run deploy svc --set-env-vars=VERSION=$(printf v)','DB_PASS'WORD'=[REDACTED]\necho ordinary"],
+    ['gcloud run deploy svc --set-env-vars="^)^VERSION=$(printf v))DB_PASS"WORD"=Secret Suffix" --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars="^)^VERSION=$(printf v))DB_PASS"WORD"=[REDACTED]'],
+    // A name after a dot or digits that end the delimiter, written whole
+    // or in pieces, after a value, an expansion or a substitution.
+    ['gcloud run deploy svc --set-env-vars=^.^VERSION=$(printf v).DB_PASSWORD=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^.^VERSION=$(printf v).DB_PASSWORD=[REDACTED]\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars=^.^VERSION=${VALUE}.DB_PASSWORD=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^.^VERSION=${VALUE}.DB_PASSWORD=[REDACTED]'],
+    ['gcloud run deploy svc --set-env-vars=^,.^ORDINARY=x,.DB_PASSWORD=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^,.^ORDINARY=x,.DB_PASSWORD=[REDACTED]\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars=^:.^ORDINARY=x:.DB_PASSWORD=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^:.^ORDINARY=x:.DB_PASSWORD=[REDACTED]\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars=^.^VERSION=$(printf v).DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^.^VERSION=$(printf v).DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars=^1^VERSION=$(printf v)1DB_PASSWORD=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^1^VERSION=$(printf v)1DB_PASSWORD=[REDACTED]\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars=^1^VERSION=$(printf v)1DB_PASS"WORD"=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^1^VERSION=$(printf v)1DB_PASS"WORD"=[REDACTED]\necho ordinary'],
+    // gcloud's own delimiter of letters or digits: a name after it, even a
+    // short credential word glued to the value before it.
+    ['gcloud run deploy svc --set-env-vars=^1^VERSION=v1pass=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^1^VERSION=v1pass=[REDACTED]\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars=^x^VERSION=vxpass=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^x^VERSION=vxpass=[REDACTED]\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars=^ab^VERSION=vabpass=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^ab^VERSION=vabpass=[REDACTED]\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars "^xy^A=1xyB=2xyapi_key=Secret Suffix" --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars "^xy^A=1xyB=2xyapi_key=[REDACTED]"\necho ordinary'],
+    [`gcloud run deploy svc --set-env-vars=^${'x'.repeat(40)}q^VERSION=1${'x'.repeat(40)}qpass=SecretSuffix --region us\necho ordinary`, `gcloud run deploy svc --set-env-vars=^${'x'.repeat(40)}q^VERSION=1${'x'.repeat(40)}qpass=[REDACTED]\necho ordinary`],
+    // An `=` escaped outside quotes, after a substitution and such a delimiter.
+    ['gcloud run deploy svc --set-env-vars=^::^VERSION=$(printf v)::DB_PASS"WORD"\\=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^::^VERSION=$(printf v)::DB_PASS"WORD"\\=[REDACTED]\necho ordinary'],
+    ['gcloud run deploy svc --set-env-vars=^::^VERSION=$(printf v)::DB_PASSWORD\\=SecretSuffix --region us\necho ordinary', 'gcloud run deploy svc --set-env-vars=^::^VERSION=$(printf v)::DB_PASSWORD\\=[REDACTED]\necho ordinary'],
+  ]
+  for (const [input, want] of cases) {
+    expect(redactText(input, newStats())).toBe(want)
+    for (const text of pathsOf(input)) expect(text).not.toMatch(/Secret|Suffix/)
+  }
+})
+
+test('a query-style value after `#` or `?` runs through its shell word in a list that gcloud\'s `^#^` or `^?^` sets apart; elsewhere, and in a URL, the parameter rule stays', () => {
+  const cases: [string, string][] = [
+    ['gcloud run deploy svc --set-env-vars="^#^A=1#token=Secret&x=1" && echo ordinary', 'gcloud run deploy svc --set-env-vars="^#^A=1#token=[REDACTED]" && echo ordinary'],
+    ['gcloud run deploy svc --set-env-vars=^?^A=1?token=Secret\\&x=1 && echo ordinary', 'gcloud run deploy svc --set-env-vars=^?^A=1?token=[REDACTED] && echo ordinary'],
+    ['gcloud run deploy svc --set-env-vars="^?^A=1?token=&Secret" && echo ordinary', 'gcloud run deploy svc --set-env-vars="^?^A=1?token=[REDACTED]" && echo ordinary'],
+    // Query strings and URLs keep their rule, in quotes too.
+    ['/path?token=abc&x=1 next', '/path?token=[REDACTED]&x=1 next'],
+    ['cli "/path?token=Secret&x=1" && echo ordinary', 'cli "/path?token=[REDACTED]&x=1" && echo ordinary'],
+    ['curl "https://h.example.test/cb?access_token=Secret&page=2" && echo ordinary', 'curl "https://h.example.test/cb?access_token=[REDACTED]&page=2" && echo ordinary'],
+    ['curl https://h.example.test/cb#access_token=Secret&state=x && echo ordinary', 'curl https://h.example.test/cb#access_token=[REDACTED]&state=x && echo ordinary'],
+  ]
+  for (const [input, want] of cases) {
+    expect(redactText(input, newStats())).toBe(want)
+    expect(redactText(want, newStats())).toBe(want)
+  }
+})
+
+test('a generated sweep: in a list of names and values, after each delimiter, after each value before the entry, in each spelling, with each value and in each wrapper, a credential name loses its value in every path', () => {
+  // How each delimiter is written so that the shell passes it, gcloud's
+  // `^…^` before the list where it is not the comma, and the quote around
+  // the list.
+  const delimiters: [string, string, string][] = [
+    [',', '', ''], [':', '^:^', ''], ['::', '^::^', ''], [']', '^]^', ''], ['#', '^#^', ''], ['?', '^?^', ''], ['.', '^.^', ''], [',.', '^,.^', ''],
+    ['\\\\', '^\\\\^', ''], ['\\,', '', ''], ['1', '^1^', ''], ['q', '^q^', ''], ['ab', '^ab^', ''], ['--', '^--^', ''],
+    ["'", "^'^", '"'], [';', '^;^', '"'], [' ', '^ ^', '"'], ['#', '^#^', '"'], ['"', '^"^', "'"], [',', '', "'"],
+  ]
+  // What comes before the credential's entry.
+  const befores = ['v', '$VALUE', '${VALUE}', '$(printf v)', '`printf v`', '$(printf v)-dev', '$((1 + 2))', 'a'.repeat(201)]
+  // Each spelling the shell joins into a credential's name, by the quote
+  // the list is in.
+  const spellings: Record<string, string[]> = {
+    '': ['DB_PASSWORD', 'DB_PASS"WORD"', "DB_PASS'WORD'", 'DB_PA\\SSWORD', '"DB_PASS"WORD', 'DB_PASS\\\nWORD', 'db.pass"word"', 'API"_KEY"', 'pass', "$'DB_PASS'WORD"],
+    '"': ['DB_PASSWORD', 'DB_PASS"WORD"', 'DB_PASS""WORD', 'DB_PASS\\\nWORD', 'db.pass"word"', 'API"_KEY"', 'pass'],
+    "'": ['DB_PASSWORD', "DB_PASS''WORD", "db.pass''word", 'pass'],
+  }
+  // An unquoted `&` ends the command: escaped, it is the value's.
+  const values: Record<string, string[]> = { '': ['SecretSuffix', '"Secret Suffix"', "'Secret Suffix'", 'Secret\\ Suffix', '\\&SecretSuffix'], '"': ['Secret Suffix', '&Secret Suffix', 'x&Secret;Suffix'], "'": ['Secret Suffix', '&Secret Suffix'] }
+  const inputs: string[] = []
+  let k = 0
+  for (const [delimiter, prefix, quote] of delimiters) {
+    // The delimiter as gcloud gets it: a value that holds it is split.
+    const passed = delimiter.replace(/^\\(.)/, '$1')
+    const choices = (values[quote] as string[]).filter(value => !value.includes(passed))
+    expect([delimiter, choices.length > 0]).toEqual([delimiter, true])
+    for (const before of befores) {
+      // A variable takes the name characters after it, and a delimiter
+      // splits a name that holds it: neither gives a credential's entry.
+      if (before === '$VALUE' && /^[A-Za-z0-9_]/.test(delimiter)) continue
+      for (const name of spellings[quote] as string[]) {
+        // A short credential word is a name of its own only after a
+        // delimiter (or, glued to the value before it, gcloud's of letters
+        // or digits).
+        if (name === 'pass' && !/[A-Za-z0-9]$/.test(delimiter) && delimiter !== ',') continue
+        if (name.includes('.') && passed.includes('.')) continue
+        const value = choices[k++ % choices.length] as string
+        inputs.push(`gcloud run deploy svc --set-env-vars=${quote}${prefix}VERSION=${before}${delimiter}${name}=${value}${quote} --region us\necho ordinary`)
+      }
+    }
+  }
+  // Each, also in a command string another shell runs and in a log line that
+  // quotes it as a JSON string.
+  for (const command of inputs.splice(0)) {
+    inputs.push(command, `sh -c "${command.replace(/[\\"$`]/g, c => `\\${c}`)}"`, `log "${JSON.stringify(command).slice(1, -1)}"`)
+  }
+  expect(inputs.length > 3000).toBe(true)
+  for (const input of inputs) for (const text of pathsOf(input)) expect(text).not.toMatch(/Secret|Suffix/)
+})
+
+test('lists of names and values with these delimiters and no credential name in them are left as they are, byte for byte, in every path', () => {
+  const commands = [
+    'gcloud run deploy svc --set-env-vars=^::^VERSION=$(printf v)::MODE=prod --region us',
+    'gcloud run deploy svc --set-env-vars=^.^VERSION=v.MODE=prod --region us',
+    'gcloud run deploy svc --set-env-vars=^1^VERSION=v1MODE=prod --region us',
+    'gcloud run deploy svc --set-env-vars=^x^VERSION=vxMODE=prod --region us',
+    'gcloud run deploy svc --set-env-vars=^ab^VERSION=vabMODE=prod --region us',
+    `gcloud run deploy svc --set-env-vars="^'^VERSION=1'MODE=prod" --region us`,
+    'gcloud run deploy svc --set-env-vars=^\\\\^VERSION=1\\\\MODE=prod --region us',
+    'gcloud run deploy svc --set-env-vars="^#^VERSION=v#MODE=&prod" --region us',
+    'curl "https://h.example.test/x?q=tokens&page=2#frag" && echo ordinary',
+    'echo aGVsbG8gd29ybGQ= dGhpcyBpcyBhIHRlc3Q= && x509=1 v1=2',
+    'make TARGET=x86_64 OS=linux KEYBOARD=us',
+    'printf "%s\\n" "a=1" "b=2"',
+  ]
+  for (const command of commands) {
+    const [once, , error, , , , diagnostic, twice] = pathsOf(command)
+    expect([once, twice, error, diagnostic]).toEqual([command, command, `command failed: ${command}`, `command failed: ${command}`])
+  }
+})
+
+test('names in lists after any delimiter are read once per text: 100,000-character lists cost each path a few milliseconds, at the payload cap and whole', () => {
+  const texts = [
+    // Long runs of quoted pieces with a credential piece in them before each
+    // `=`, a gcloud list with a letter for its delimiter, a run of digits
+    // and letters, and quotes and backslashes before an `=`.
+    `${'"key'.repeat(100)}=x,`.repeat(248),
+    `--set-env-vars=^x^${'AxB=1x'.repeat(16_600)}`,
+    `${'1a'.repeat(49_998)}=x`,
+    `${'\\"'.repeat(49_998)}=x`,
+    `"^'^${"A=1'".repeat(24_999)}"`,
+    // 2,500 lines, each with a credential that only this rule finds; and
+    // after a `^` that opens no list, 11,000 `#name=` and 25,000 `name=`
+    // (gcloud's lists are looked for once).
+    `--set-env-vars="^'^A=1'DB_PASS"WORD"=y"\n`.repeat(2_500),
+    `^ ${'#token=x '.repeat(11_000)}`,
+    `^ ${'a=1 '.repeat(25_000)}`,
+  ]
+  for (const text of texts) {
+    expect(text.length > 99_000).toBe(true)
+    for (const [cap, diagnostic] of [[16384, 1000], [220_000, 110_000]] as const) {
+      for (const [path, ms] of pathTimes(text, cap, diagnostic)) expect([cap, path, ms < 100]).toEqual([cap, path, true])
+    }
+  }
+})
