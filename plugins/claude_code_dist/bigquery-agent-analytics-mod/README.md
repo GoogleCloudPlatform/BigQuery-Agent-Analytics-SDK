@@ -1093,8 +1093,10 @@ column. Treat the dataset like the transcripts it mirrors.
   gcloud's `^:^` and others alike; after an expansion such as `$VALUE` or
   `${VALUE}`, whose value after `${` runs to the end of the text, after a
   value of any length, and after a command substitution that ends the
-  value, such as `VERSION=$(git rev-parse HEAD),DB_PASS"WORD"=…`, but not
-  after one in quotes or with more of the value after it: see
+  value when a single `,`, `:`, `@`, `#`, `/`, `+`, `%`, `!`, `~` or `^`
+  comes between it and the name, such as
+  `VERSION=$(git rev-parse HEAD),DB_PASS"WORD"=…`, but not always with
+  anything else between them: see
   [Limitations](#limitations)), before an escaped `=`, as in
   `--password\=…` and `--from-literal=PASSWORD\=…`, and with
   the continuation as a JSON string in a log line encodes it, `\\\n` or
@@ -1756,12 +1758,23 @@ the same views count other producers' requests but not their tokens.
   arguments, structured results and JSON output, and anything else under a
   key that is not on the list, are recorded as `[REDACTED]`. Free text is
   scanned for credentials on a best-effort basis.
-* In a list of names and values, a credential name the shell joins from
-  parts (`DB_PASS"WORD"=…`, `DB_PASS\WORD=…`) is missed after a value whose
-  command substitution is in quotes or has more of the value after it
-  (`VERSION="$(git rev-parse HEAD)",…`, `VERSION=$(git rev-parse HEAD)-dev,…`,
-  and the same with backticks), so its value is kept. A name written
-  whole (`DB_PASSWORD=…`) still has its value redacted there.
+* In a list of names and values, the entries after a command substitution
+  are read again from one that starts right after it and a single `,`,
+  `:`, `@`, `#`, `/`, `+`, `%`, `!`, `~` or `^`, or after a space, `;`,
+  `&`, `|` or `(`. Before such an entry, a credential name the shell joins
+  from parts (`DB_PASS"WORD"=…`, `DB_PASS\WORD=…`) can be missed, and its
+  value kept: after a substitution in quotes or with more of the value
+  after it (`VERSION="$(git rev-parse HEAD)",…`,
+  `VERSION=$(git rev-parse HEAD)-dev,…`), or one followed by two of those
+  characters (gcloud's `^::^`, as in
+  `--set-env-vars=^::^VERSION=$(git rev-parse HEAD)::DB_PASS"WORD"=…`), an
+  escaped one (`VERSION=$(git rev-parse HEAD)\,DB_PASS"WORD"=…`) or another
+  character (gcloud's `^]^`, as in
+  `--set-env-vars=^]^VERSION=$(git rev-parse HEAD)]DB_PASS"WORD"=…`), and
+  the same with backticks. A name written whole (`DB_PASSWORD=…`) still
+  has its value redacted there when a character no name has comes right
+  before it, but not after a `.` right after the substitution (gcloud's
+  `^.^`, as in `VERSION=$(git rev-parse HEAD).DB_PASSWORD=…`).
 * Timestamps have millisecond precision.
 * An organization's web-fetch policy or `allowManagedModsOnly` can stop the
   mod; `/bqaa-status` and the debug log (start the CLI with `--debug`) say why.
