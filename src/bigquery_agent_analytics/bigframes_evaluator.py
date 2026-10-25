@@ -41,10 +41,7 @@ Requires the optional ``bigframes`` dependency::
 
 from __future__ import annotations
 
-import logging
 from typing import Optional
-
-logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 _DEFAULT_ENDPOINT = "gemini-2.5-flash"
 
