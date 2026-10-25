@@ -1093,12 +1093,13 @@ column. Treat the dataset like the transcripts it mirrors.
   `!` or `~` (gcloud's own `^:^` and the like for the non-comma ones) in a
   list that is a single shell word, with no quotes, backslashes,
   expansions, substitutions, backticks or blanks, as in
-  `--set-env-vars=ORDINARY=x,DB_PASSWORD=…` (that plain entry is the only
-  one relied on; a name the shell joins from quoted, escaped or continued
-  parts such as `"DB_PASS"WORD=…`, and any list with a quote, a backslash,
-  an expansion, a substitution, a backtick or a blank in it, are best
-  effort, and the shapes known to be missed are under
-  [Limitations](#limitations)), before an escaped `=`, as in
+  `--set-env-vars=ORDINARY=x,DB_PASSWORD=…` (this build goes further: a
+  generated sweep of 7,923 lists — many single-character and gcloud
+  `^DELIM^` separators, substitutions, expansions, backticks and long
+  values before the entry, and names joined from quoted or escaped parts
+  such as `"DB_PASS"WORD=…` — is redacted in four wrappers and all eight
+  paths; the shapes still missed are under [Limitations](#limitations)),
+  before an escaped `=`, as in
   `--password\=…` and `--from-literal=PASSWORD\=…`, and with
   the continuation as a JSON string in a log line encodes it, `\\\n` or
   `\\\r\n`) everything to the end of the line, whatever it holds,
@@ -1237,7 +1238,7 @@ test kit, with no session, sign-in, GCP or network: `$.http.fetch`,
 `$.process.run`, `$.fs` and `$.store` are stubbed, and `mock.clock` drives the
 timers; the `$.fs` stubs measure files in UTF-8 bytes and refuse a file over
 4 MiB, and the `$.store` stub a store over 4 MiB of JSON in all, as the host
-does. 423 tests cover the captured rows and their spans,
+does. 446 tests cover the captured rows and their spans,
 subagent runs in the order the host raises them (one invocation and one
 trace for the turn, a span per run, a SubagentStart that comes late or never),
 the session-start row raised before or during `session.start`'s setup,
@@ -1262,9 +1263,13 @@ assignments whose value ends cleanly (the rest kept) or cannot be told
 (redacted to the end of the text, with a generated sweep of value openers),
 credential names in lists of names and values (generated sweeps of
 separators, spellings and options, and of expansions, command
-substitutions and long values before them) and before an escaped `=`,
-100,000 characters of continuations, lists (one that each `;` starts
-again too) or `$(` under 100 ms in every path,
+substitutions and long values before them, and the full cross product of
+delimiters of any characters (gcloud's own as the shell passes it, quotes
+and backslashes too), values before the entry, spellings and values, as a
+command line, in single- and double-quoted command strings and in a JSON
+log line) and before an escaped `=`, 100,000 characters of continuations,
+lists (one that each `;` starts again, or another delimiter sets apart,
+too) or `$(` under 100 ms in every path,
 text with no credential left as it is, values past 5,000 characters and
 past the scanned window, credentials across a length cap, every diagnostic
 sink, and each review probe through capture, delivery and the dead-letter
@@ -1763,11 +1768,6 @@ the same views count other producers' requests but not their tokens.
   arguments, structured results and JSON output, and anything else under a
   key that is not on the list, are recorded as `[REDACTED]`. Free text is
   scanned for credentials on a best-effort basis.
-* After `?` or `#`, a value that a quote, `$` or a backtick opens stops at
-  the next `&`, `#`, `;` or blank where a backslash escapes that character,
-  as `sh -c "…"` escapes all three and a log line's JSON string a `"`:
-  `sh -c "see q?token=\"abc def\""` and `log "see q?token=\"abc def\""`
-  keep `def`.
 * In a URL, a credential-named parameter's value is redacted only to where
   the URL ends (a blank, a quote, a backslash or a backtick), and the rest
   of its shell word can be kept: a `$` that opens the value, or a `;` or `&`
@@ -1776,79 +1776,31 @@ the same views count other producers' requests but not their tokens.
   `?token=$'a x'` keeps `x'` and `?token=a\ x` keeps `x`.
   [#546](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/546)
   lists this as open.
-* In a list of names and values, such as `--set-env-vars`, only a plain
-  entry (letters, digits, `_`, `.`, `-`; see above) is relied on. The rules
-  still catch many other shapes, best effort, but can miss a credential's
-  entry and keep its value when a quote, a backslash, an expansion, a
-  substitution, a backtick or a blank is in the list.
+* In a list of names and values, such as `--set-env-vars`, this build
+  redacts far more than main (the sweep above), but a few shapes are still
+  missed and keep the credential's value.
   [#546](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/546)
-  proposes reading these lists more fully. Known shapes that are missed:
-  * After a command substitution or backticks, a separator that is quoted
-    or carried across a line continuation (`VERSION=$(printf v)","DB_PASS"WORD"=…`,
-    `^:^VERSION=$(printf v)":"DB_PASS"WORD"=…`, backticks then `','`, or a
-    `\` line break between `)` and the separator): the entry after it is
-    missed, because the readers resume only on a separator written plainly
-    right after the `)` or backtick.
-  * An expansion that holds a blank (`${VALUE:-a b}`, `${VALUE// /b}`) or
-    an arithmetic expansion with blanks (`$[1 + 2]`): the readers stop at
-    the blank inside it, so a name after it is missed.
-  * An escaped literal backtick in the list, in a command string or a log
-    line (`VERSION=a\`b,DB_PASS"WORD"=…` as a JSON string): the readers
-    treat the backtick as unreadable, so a name after it is missed.
-  * After a command substitution or backticks (`$(…)`, `` `…` ``, also
-    `$((…))`), a name the shell joins from parts (`DB_PASS"WORD"=…`,
-    `DB_PASS\WORD=…`) can be missed:
-    * the substitution is in quotes or has more of the value after it
-      (`VERSION="$(git rev-parse HEAD)",…`,
-      `VERSION=$(git rev-parse HEAD)-dev,…`);
-    * two characters set the entries apart (gcloud's `^::^`, as in
-      `--set-env-vars=^::^VERSION=$(git rev-parse HEAD)::DB_PASS"WORD"=…`,
-      also with an escaped `=`, as a command line, in `sh -c '…'` or in a
-      log line);
-    * an escaped `,` sets them apart
-      (`VERSION=$(git rev-parse HEAD)\,DB_PASS"WORD"=…`);
-    * a single character other than those above sets them apart, such as
-      gcloud's `^]^`, `^*^` or `^-^`
-      (`--set-env-vars=^]^VERSION=$(git rev-parse HEAD)]DB_PASS"WORD"=…`).
-  * With a quote or a backslash setting the entries apart (gcloud's `^'^`
-    and `^\^`), such a name can be missed after digits, a substitution or a
-    long value: `"^'^VERSION=123'DB_PASS"WORD"=…"` and
-    `^\\^VERSION=123\\DB_PASS"WORD"=…`.
-  * With `#` or `?` setting the entries apart (gcloud's `^#^` and `^?^`), a
-    value is read as a query-style one: to the next `&`, `#`, `;` or blank,
-    unless a quote, `$` or a backtick opens it. So
-    `"^#^VERSION=v#DB_PASSWORD=first&…"`,
-    `"^#^VERSION=$(git rev-parse HEAD)#DB_PASSWORD=&…"` and
-    `"^#^VERSION=^x^#DB_PASSWORD=first&…"` keep what follows the `&`.
-  * gcloud's `^DELIM^` is not read, so a dot, a digit or a letter in the
-    delimiter is taken for part of a name:
-    * `^1^VERSION=v1pass=…`, `^x^VERSION=vxpass=…` and `^ab^` lists keep
-      their value;
-    * so do `^.^` and `^,.^` lists after a substitution
-      (`^.^VERSION=$(git rev-parse HEAD).DB_PASSWORD=…`);
-    * so does a list whose `^DELIM^` is written with a space or quotes
-      (`"^ q^…"`, `^"q"^…`), is spelled by the shell (`^$'\x71'^…`) or
-      follows an option name in quotes (`--set-env-"vars"=^q^…`);
-    * so does a value after such a delimiter that starts with a redaction
-      marker (`"^q^VERSION=vqpass=[REDACTED]…"`), or one after a `^x^` in
-      the value before (`"^q^VERSION=hello ^x^qpass=…"`).
-  * A delimiter that names can hold can join two entries into one listed
-    name: `^_^VERSION=max_tokens=…`, `^.^VERSION=max.tokens=…` and
-    `^-^VERSION=output-tokens=…` keep the value of `tokens`.
-  * With a space and another character setting the entries apart (gcloud's
-    `"^ :^…"`), a name that holds quotes inside the list's double quotes
-    (`"^ :^VERSION=v :DB_PASS'WORD'=…"`) is missed in `sh -c "…"` and in a
-    log line.
-  * In `sh -c "…"` or a log line, a space in an earlier value of the list,
-    in double quotes or after a backslash (`VERSION="a b",…`,
-    `VERSION=a\ b,…`), and in `sh -c '…'` one in `$'…'`
-    (`VERSION=$'a b',…`), ends the list for these rules, so a name the
-    shell joins from parts after it is missed:
-    `sh -c "gcloud run deploy svc --set-env-vars=VERSION=\"a b\",DB_PASS\"WORD\"=…"`.
-  * In a command string or a log line, a name written with `$'…'`, with an
-    escape in it or part way through it (`$'DB_PASS\x57ORD'=…`,
-    `DB_P$'ASS'WORD=…`), or continued across lines (`DB_PASS\` and
-    `WORD=…`), can be missed once it is past about the first 400
+  tracks them. Known shapes that are missed:
+  * A value that ends with a redaction marker and more text
+    (`…qpass=[REDACTED]&…`, `…qpass=[REDACTED] …`), or a provider-shaped
+    token the earlier pass turned into a marker then more text
+    (`…qpass=[REDACTED:github-token]&…`): the text after the marker is
+    kept, because the marker is trusted as the whole value when the shell
+    word's end is not certain.
+  * A value that looks like gcloud's delimiter after a quoted space or
+    inside a substitution (`"^#^VERSION=hello ^x^#DB_PASSWORD=first&…"`,
+    `"^q^VERSION=$(printf ^x^)qpass=…"`): the `^x^` is taken for the list's
+    delimiter.
+  * A punctuation delimiter that a name can hold, where the real entry is a
+    listed name's suffix: `^.^VERSION=max.tokens=…` and
+    `^-^VERSION=output-tokens=…` keep the value of `tokens`, because the
+    allowlist is applied before the declared delimiter splits the entry.
+  * A `^DELIM^` the shell spells rather than passing literally: an ANSI-C
+    `^$'\x71'^` or `$'^\x71^…'`, or one after an option name in quotes
+    (`--set-env-"vars"=^q^…`); and a delimiter of 256 characters or more,
+    which is past the length the reader scans.
+  * A name written with `$'…'`, with an escape in it or part way through
+    it (`$'DB_PASS\x57ORD'=…`), once it is past about the first 400
     characters of its shell word: after `--set-env-vars=VERSION=` and 380
     more characters, or after 70 short entries.
 * A credential name with a locale-quoted `$"…"` part (`DB_PASS$"WORD"=…`,

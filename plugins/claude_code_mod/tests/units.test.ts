@@ -2056,3 +2056,57 @@ test('an allowlisted name the shell joins from quoted parts, and a backslash its
     expect(commandOf((JSON.parse(lines) as { row: { content: string } }[])[0]?.row.content)).toBe(command)
   }
 })
+
+// Review rounds r5, r6 and r7: every reported list/URL shape, in the four
+// wrappers and eight output paths. The cases this build redacts must keep
+// no part of the canary anywhere; the cases still open (tracked in the
+// README's Limitations and in #546) are pinned here so a later fix trips
+// this test and both places get updated together.
+test('r5/r6/r7 review shapes: fixed cases redact in every path and wrapper; open cases are pinned', () => {
+  const G = 'gcloud run deploy svc --set-env-vars='
+  const token = 'gh' + 'p_' + 'Z'.repeat(36)
+  const long = 'a'.repeat(400)
+  const fixed = [
+    // r7 P1-1: a quoted or continued separator after a substitution.
+    `${G}VERSION=$(printf v)","DB_PASS"WORD"=CanaryValue`,
+    `${G}^:^VERSION=$(printf v)":"DB_PASS"WORD"=CanaryValue`,
+    // r7 P1-3: an expansion that holds a blank, and $[1 + 2].
+    `${G}VERSION=\${VALUE:-a b},DB_PASS"WORD"=CanaryValue`,
+    `${G}VERSION=$[1 + 2],DB_PASS"WORD"=CanaryValue`,
+    // r7 P1-4: an escaped literal backtick in the list.
+    `${G}VERSION=a\\\`b,DB_PASS"WORD"=CanaryValue`,
+    // r6: a space in an earlier value; the broad delimiter/substitution set.
+    `${G}VERSION="a b",DB_PASS"WORD"=CanaryValue`,
+    `${G}VERSION=$(git rev-parse HEAD),DB_PASS"WORD"=CanaryValue`,
+    `${G}^::^VERSION=v::DB_PASS"WORD"=CanaryValue`,
+    // the query escaped-opener, now read through its shell word.
+    'sh -c "see q?token=\\"abc def\\""',
+  ]
+  for (const command of fixed) for (const wrapped of wrappersOf(command)) for (const text of pathsOf(wrapped)) expect([wrapped, /CanaryValue|abc|def/.test(text)]).toEqual([wrapped, false])
+
+  const open = [
+    // r5 P1-1: a marker, or a provider token the earlier pass marked, then more text.
+    `${G}"^q^VERSION=$(printf v)qpass=[REDACTED]&CanaryValue"`,
+    `${G}"^q^VERSION=$(printf v)qpass=${token}&CanaryValue"`,
+    // r5 P1-2: a delimiter-looking value after a quoted space or in a substitution.
+    `${G}"^#^VERSION=hello ^x^#DB_PASSWORD=first&CanaryValue"`,
+    // r5 P1-3: the allowlist before a punctuation delimiter splits the entry.
+    `${G}^.^VERSION=max.tokens=CanaryValue`,
+    `${G}^-^VERSION=output-tokens=CanaryValue`,
+    // r5 P1-4: a shell-spelled delimiter, a quoted option name, a 256-char delimiter.
+    `${G}^$'\\x71'^VERSION=vqpass=CanaryValue`,
+    `gcloud run deploy svc --set-env-"vars"=^q^VERSION=vqpass=CanaryValue`,
+    `${G}^${'q'.repeat(256)}^VERSION=v${'q'.repeat(256)}pass=CanaryValue`,
+    // r6 P1-2: a $'…' name past about the first 400 characters of its word.
+    `${G}VERSION=${long},$'DB_PASS\\x57ORD'=CanaryValue`,
+    // r6 P1-3: a $ opener in a URL query value.
+    'curl https://example.test/?token=$(printf %s CanaryValue)',
+    // r7 P1-2: a locale-quoted $"…" name fragment.
+    `${G}VERSION=v,DB_PASS$"WORD"=CanaryValue`,
+    'cli --pass$"word" CanaryValue',
+  ]
+  // Pins current behavior: each still keeps the canary in some output
+  // path of some wrapper. When one is fixed, flip it to the `fixed` list
+  // above and drop its Limitations bullet.
+  for (const command of open) expect([command, wrappersOf(command).some(w => pathsOf(w).some(t => t.includes('CanaryValue')))]).toEqual([command, true])
+})
