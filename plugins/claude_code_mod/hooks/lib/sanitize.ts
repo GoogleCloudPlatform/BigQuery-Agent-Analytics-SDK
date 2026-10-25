@@ -1226,7 +1226,7 @@ function redactOptionWords(text: string, stats: SanitizeStats): string {
     if (nested && quoted && scan.rerun()[word.start] !== 1 && !text.slice(word.start, word.end).includes("$'")) {
       let literal = false
       for (let k = word.start; k < word.end && !literal; k += 1) {
-        if (text[k] === '\\' && isNameChar(text[k + 1] ?? '')) literal = (backslashes ??= backslashReader(text, scan.states(), scan.rerun)).literal(k)
+        if (text[k] === '\\' && isNameChar(text[k + 1] ?? '')) literal = (backslashes ??= backslashReader(text, scan.states, scan.rerun)).literal(k)
       }
       if (literal) continue
     }
@@ -1531,7 +1531,7 @@ function sensitiveListSuffix(chars: string, starts: number[]): boolean {
 // JSON string), in a quote the word's own text opens once that outer quoting
 // is undone, as the shell that runs it reads it. `word` is where the word
 // starts (-1: not known).
-function backslashReader(text: string, states: Uint8Array, rerun: () => Uint8Array): { word: (at: number) => number; literal: (at: number) => boolean; quote: (at: number) => number } {
+function backslashReader(text: string, getStates: () => Uint8Array, rerun: () => Uint8Array): { word: (at: number) => number; literal: (at: number) => boolean; ownLiteral: (at: number) => boolean; quote: (at: number) => number } {
   const words = new Int32Array(text.length + 1)
   let word = 0
   for (let i = 0; i <= text.length; i += 1) {
@@ -1549,6 +1549,7 @@ function backslashReader(text: string, states: Uint8Array, rerun: () => Uint8Arr
   const quote = (k: number): number => {
     const from = start(k)
     if (from === -1 || rerun()[k] === 1) return NONE
+    const states = getStates()
     const q = states[from]
     if (q !== SINGLE && q !== DOUBLE) return states[k] as number
     if (cache[k] !== 0) return (cache[k] as number) - 1
@@ -1581,7 +1582,12 @@ function backslashReader(text: string, states: Uint8Array, rerun: () => Uint8Arr
     cache[pos] = inner + 1
     return (cache[k] as number) - 1
   }
-  return { word: start, quote, literal: k => {
+  return { word: start, quote, ownLiteral: k => {
+    const from = start(k)
+    if (from === -1 || (text[from] !== "'" && text[from] !== '"')) return false
+    const states = getStates()
+    return states[from] === NONE && (states[k] === SINGLE || states[k] === DOUBLE) && rerun()[k] !== 1
+  }, literal: k => {
     const q = quote(k)
     return q === SINGLE || q === DOUBLE
   } }
@@ -1601,7 +1607,7 @@ function redactListNames(text: string, stats: SanitizeStats): string {
   const scanned = (): Uint8Array => (states ??= quoteStates(text))
   const joinedAt = (): Uint8Array => (rerun ??= joinedArguments(text))
   let backslashes: ReturnType<typeof backslashReader> | undefined
-  const reader = (): ReturnType<typeof backslashReader> => (backslashes ??= backslashReader(text, scanned(), joinedAt))
+  const reader = (): ReturnType<typeof backslashReader> => (backslashes ??= backslashReader(text, scanned, joinedAt))
   let out = ''
   let copied = 0
   for (let e = text.indexOf('='); e !== -1; e = text.indexOf('=', e + 1)) {
@@ -1610,6 +1616,9 @@ function redactListNames(text: string, stats: SanitizeStats): string {
     // A marker at the very end leaves no unscanned suffix. Avoid decoding
     // a long name again after an earlier pass already removed its value.
     if (text[start] === '[' && /^\[REDACTED(?::[a-z-]+)?\][\"']?$/.test(text.slice(start))) continue
+    // A word's own quote can make every escaped equals literal. Reject it
+    // before repeatedly decoding the names in a substitution pattern.
+    if (text[e - 1] === '\\' && reader().ownLiteral(e - 1)) continue
     if (lists === undefined) lists = delimitedLists(text)
     const delimiter = delimiterAt(lists, e)
     const name = listName(text, e, delimiter, reader)
