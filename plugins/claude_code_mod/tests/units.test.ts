@@ -2223,6 +2223,7 @@ test('overlapping delimiter suffixes and long uppercase names stay within the ti
     'gcloud run deploy svc --set-env-vars=^q^VERSION=' + 'q'.repeat(23_000) + 'monkey=x',
     `--set-env-vars=^x^${'monkeyx'.repeat(14_280)}=x`,
     '--set-env-vars=VERSION=v,' + 'A'.repeat(23_000) + 'PASSWORD=CanaryValue',
+    '--set-env-vars=^1^' + '1'.repeat(23_000) + 'monkey=x',
     // Many underscore candidates normalize to the same remaining part.
     `--set-env-vars="^'^${"_'".repeat(40_000)}monkey=x"`,
   ]

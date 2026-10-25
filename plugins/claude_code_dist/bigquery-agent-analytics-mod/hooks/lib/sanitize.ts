@@ -128,7 +128,9 @@ const SENSITIVE_STEMS = ['password', 'passwd', 'apikey', 'accesskey', 'privateke
 // A part also counts without trailing digits and a plural `s`: `token2`,
 // `api_keys`, `access_tokens` and `sessions` are credential names too.
 const forms = (part: string): string[] => {
-  const bare = part.replace(/\d+$/, '')
+  let end = part.length
+  while (end > 0 && part.charCodeAt(end - 1) >= 48 && part.charCodeAt(end - 1) <= 57) end -= 1
+  const bare = part.slice(0, end)
   return bare.endsWith('s') ? [part, bare, bare.slice(0, -1)] : [part, bare]
 }
 
