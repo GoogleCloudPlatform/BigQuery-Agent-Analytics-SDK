@@ -419,13 +419,24 @@ const UNKNOWN = 4
 // which open code, an escaped quote, backslash, `$` or backtick outside
 // quotes (which a command string's quoting can leave in), or where an escape
 // runs past `to`.
+const QUOTE_TEXT = /[^"'\\$`<#\n]+/y
 function readQuotes(text: string, from: number, to: number, states?: Uint8Array): number {
+  // These are the only characters that can alter the initial quote state.
+  // A supplied state table is newly zeroed, so plain spans need no writes.
+  if (!/["'\\$`<#]/.test(text.slice(from, to))) return NONE
   let q = NONE
   let comment = false
   // Where a backtick outside quotes opened what has not closed.
   let tick = -1
   let i = from
   while (i < to) {
+    QUOTE_TEXT.lastIndex = i
+    if (QUOTE_TEXT.test(text)) {
+      const end = Math.min(to, QUOTE_TEXT.lastIndex)
+      states?.fill(q, i, end)
+      i = end
+      continue
+    }
     const c = text[i] as string
     let next = i + 1
     let after = q
@@ -1381,7 +1392,7 @@ function delimiterAt(lists: DelimitedLists | null, i: number): string {
 // whether a name they hold is a credential's, using the declared delimiter
 // to distinguish entry boundaries from pieces of the same name. The pieces before two `=` never
 // overlap, so each is read once, however long.
-function listName(text: string, e: number, firstEquals: number, delimiter: string, reader: () => ReturnType<typeof backslashReader>): { from: number; credential: boolean } {
+function listName(text: string, e: number, firstEquals: number, delimiter: string, names: Map<string, boolean>, reader: () => ReturnType<typeof backslashReader>): { from: number; credential: boolean } {
   let r = e
   while (r > 0) {
     const c = text[r - 1] as string
@@ -1431,6 +1442,11 @@ function listName(text: string, e: number, firstEquals: number, delimiter: strin
   // A preceding assignment can introduce a list whose separator resembles
   // a quote. Keep its conservative reading even without a known delimiter.
   const standalone = firstEquals >= r
+  // With no escapes and no context-dependent literal quotes, repeated name
+  // spellings have the same classification throughout this text.
+  const cacheKey = raw.length <= 200 && !raw.includes('\\') && (delimiter !== '' || !standalone) ? `${delimiter.length}:${delimiter}${raw}` : undefined
+  const cached = cacheKey === undefined ? undefined : names.get(cacheKey)
+  if (cached !== undefined) return { from: r, credential: cached }
   // An outer single-quoted command string represents its apostrophes with
   // joined quote/escape sequences. Undo those before reading ANSI-C parts.
   const hasAnsi = raw.includes("$'")
@@ -1520,7 +1536,9 @@ function listName(text: string, e: number, firstEquals: number, delimiter: strin
   }
   // There is no name-length cap here. Each segment before an `=` is read
   // once, including long names that the bounded forward readers skip.
-  if (!sensitiveListSuffix(chars, starts)) return { from: r, credential: false }
+  const credential = sensitiveListSuffix(chars, starts)
+  if (cacheKey !== undefined && names.size < 4096) names.set(cacheKey, credential)
+  if (!credential) return { from: r, credential: false }
   // Quote analysis is needed only for a possible credential. Ordinary list
   // entries avoid building and traversing the whole-text quote cache.
   for (const at of quotes) {
@@ -1680,6 +1698,7 @@ function redactListNames(text: string, stats: SanitizeStats): string {
   if (!text.includes('\\') && !text.includes("$'") && !PIECE_IN_NAME.test(text.replace(/["']/g, ''))) return text
   let states: Uint8Array | undefined
   let urls: number[] | undefined
+  const names = new Map<string, boolean>()
   let rerun: Uint8Array | undefined
   // As in redactNamedValues.
   let lists: DelimitedLists | null | undefined
@@ -1700,7 +1719,7 @@ function redactListNames(text: string, stats: SanitizeStats): string {
     if (text[e - 1] === '\\' && reader().ownLiteral(e - 1)) continue
     if (lists === undefined) lists = delimitedLists(text)
     const delimiter = delimiterAt(lists, e)
-    const name = listName(text, e, firstEquals, delimiter, reader)
+    const name = listName(text, e, firstEquals, delimiter, names, reader)
     if (!name.credential) continue
     // A literal backslash before `=` cannot introduce an assignment.
     if (text[e - 1] === '\\' && reader().literal(e - 1)) continue
@@ -1709,7 +1728,9 @@ function redactListNames(text: string, stats: SanitizeStats): string {
     // (a query string's value ends at its `&` there), and a URL's query or
     // fragment parameter redactUrl's.
     if (/[?&#;]/.test(before) && (/^-{0,2}[A-Za-z_][A-Za-z0-9_.-]{0,99}$/.test(text.slice(name.from, e)) || inUrl((urls ??= urlSpans(text)), e))) continue
-    const from = reader().word(name.from)
+    // Build the whole-text word cache only when escape analysis needs it.
+    // A single word-start lookup is bounded and does not allocate that cache.
+    const from = backslashes === undefined ? wordStart(text, name.from) : backslashes.word(name.from)
     // An escaped `=` is the shell's `=` (`…::DB_PASSWORD\=…`); literal
     // backslashes were excluded before reading the name.
     const read = readValue(text, start, from, scanned())
