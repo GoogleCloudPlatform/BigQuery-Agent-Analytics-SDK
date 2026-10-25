@@ -2329,7 +2329,7 @@ test('ANSI-C names and closed quotes redact through combined shell and JSON wrap
 })
 
 test('opposite quotes inside a substitution pattern are literal characters in the name', () => {
-  for (const prefix of ['', 'echo x=1\n', 'x=1; ', 'x=1 | ', 'x=1 && ']) {
+  for (const prefix of ['', 'echo x=1\n', 'x=1; ', 'x=1 | ', 'x=1 && ', 'x=1 ', 'echo x=1 ']) {
     for (const pattern of [`sed 's/pass"word"=.*/x/' config.ini`, `sed "s/pass'word'=.*/x/" config.ini`]) {
       for (const input of prefix === '' ? wrappersOf(pattern) : [prefix + pattern]) expect(redactText(input, newStats())).toBe(input)
     }

@@ -1460,7 +1460,9 @@ function listName(text: string, e: number, commandEquals: (end: number) => numbe
   }
   // Only an assignment in this command can introduce an undeclared list.
   // Earlier commands cannot change whether a quote is literal.
-  const standalone = commandEquals(e) >= r
+  // A slash can also introduce a substitution pattern's literal name,
+  // independently of any assignment earlier in the same command.
+  const standalone = text[r - 1] === '/' || commandEquals(e) >= r
   // Without escapes, repeated spellings in the same quote context share
   // their final classification, including rejected literal quotes.
   const cacheable = raw.length <= 200 && !raw.includes('\\')
