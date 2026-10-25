@@ -1085,8 +1085,11 @@ column. Treat the dataset like the transcripts it mirrors.
   `--set-env-vars=VERSION=v,DB_PASSWORD=VALUE`, a plain credential name of
   at most 100 characters is covered when the entire list is one shell word
   containing only letters, digits, `_`, `.`, `-`, `,` and `=`. Names start
-  with a letter or `_`; values are nonempty literals. Listed names such as
-  `max_tokens` keep their values. Quoting, escapes, expansions, other list
+  with a letter or `_`; values are nonempty literals. Names matching a
+  provider-token pattern are excluded: that earlier pass can rewrite the
+  name before its value is checked. Listed names such as `max_tokens` do
+  not trigger redaction themselves; an earlier credential in the same list
+  can consume their values too. Quoting, escapes, expansions, other list
   separators and more complex URLs are best effort; see
   [Limitations](#limitations) for concrete misses and
   [#546](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/546)
@@ -1684,6 +1687,13 @@ the same views count other producers' requests but not their tokens.
   main; [#546](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/546)
   hardens several of them. A miss in any wrapper can leave the value in a
   row, log or dead-letter file.
+  * A provider-token-shaped name can be rewritten before the named-value
+    pass sees it. For example,
+    `--set-env-vars=VERSION=v,github_pat_PRODUCTION_ACCESS_TOKEN=CanaryValue`
+    keeps `CanaryValue` after the name becomes a redaction marker.
+  * Listed entries after a credential can be swallowed with its value:
+    `--set-env-vars=DB_PASSWORD=x,max_tokens=1024` becomes
+    `--set-env-vars=DB_PASSWORD=[REDACTED]`.
   * A plain name longer than 100 characters can be missed. For example,
     `--set-env-vars=VERSION=v,` followed by 92 `A` characters and
     `_PASSWORD=CanaryValue` has a 101-character name; its value is kept.
@@ -1705,7 +1715,7 @@ the same views count other producers' requests but not their tokens.
   * A quoted separator after a substitution
     (`VERSION=$(printf v)","DB_PASS"WORD"=CanaryValue`), an expansion with a
     blank (`VERSION=${VALUE:-a b},DB_PASS"WORD"=CanaryValue`), or escaped
-    backticks (`VERSION=a\`b,DB_PASS"WORD"=CanaryValue` in a JSON log)
+    backticks (``VERSION=a\`b,DB_PASS"WORD"=CanaryValue`` in a JSON log)
     can hide the following list name.
   * A substitution followed by more value text
     (`VERSION=$(printf v)-dev,DB_PASS"WORD"=CanaryValue`), or a space in an
