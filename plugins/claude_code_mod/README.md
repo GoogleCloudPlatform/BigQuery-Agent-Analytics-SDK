@@ -1192,7 +1192,7 @@ and before an escaped `=`,
 selected long continuations, lists (one that each `;` starts again too),
 overlapping suffixes, uppercase names, repeated literal `\=` and `$(`
 with per-path timing assertions at both payload caps,
-text with no credential left as it is, values past 5,000 characters and
+text with no credential left as it is (including locale-quoted ordinary names), values past 5,000 characters and
 past the scanned window, credentials across a length cap, every diagnostic
 sink, and each review probe through capture, delivery and the dead-letter
 file),
@@ -1740,8 +1740,10 @@ the same views count other producers' requests but not their tokens.
     names (`--set-env-"vars"=^q^VERSION=vqpass=CanaryValue`), and delimiters
     of 256 characters or more can be missed. The delimiter reader inspects
     at most 255 characters between the opening and closing `^`.
-  * Locale-quoted names (`DB_PASS$"WORD"=CanaryValue` and
-    `cli --pass$"word" CanaryValue`) remain best effort. ANSI-C names are
+  * Locale-quoted option names with separate values
+    (`cli --pass$"word" CanaryValue`) remain best effort. Locale-quoted list
+    names such as `DB_PASS$"WORD"=CanaryValue` have explicit regression cases.
+    ANSI-C names are
     checked by explicit regression cases, including names after earlier
     substitutions or escapes and beyond the forward heuristic's window;
     this is not a guarantee for every `$'…'` spelling or nesting depth.

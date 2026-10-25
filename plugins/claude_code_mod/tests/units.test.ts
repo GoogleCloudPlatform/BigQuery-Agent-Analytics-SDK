@@ -2083,6 +2083,7 @@ test('r5/r6/r7 review shapes: fixed cases redact in every path and wrapper; open
     `${G}^::^VERSION=v::DB_PASS"WORD"=CanaryValue`,
     // ANSI-C names beyond the forward heuristic use the list fallback.
     `${G}VERSION=${long},$'DB_PASS\\x57ORD'=CanaryValue`,
+    `${G}VERSION=v,DB_PASS$"WORD"=CanaryValue`,
     // the query escaped-opener, now read through its shell word.
     'sh -c "see q?token=\\"CanaryValue Suffix\\""',
   ]
@@ -2113,8 +2114,7 @@ test('r5/r6/r7 review shapes: fixed cases redact in every path and wrapper; open
     `${G}^${'q'.repeat(256)}^VERSION=v${'q'.repeat(256)}pass=CanaryValue`,
     // r6 P1-3: a $ opener in a URL query value.
     'curl https://example.test/?token=$(printf %s CanaryValue)',
-    // r7 P1-2: a locale-quoted $"…" name fragment.
-    `${G}VERSION=v,DB_PASS$"WORD"=CanaryValue`,
+    // A locale-quoted option name with a separate value remains best effort.
     'cli --pass$"word" CanaryValue',
   ]
   // Pins current behavior: each still keeps the canary in some output
@@ -2275,6 +2275,45 @@ const combinedWrappers = (command: string): string[] => {
   return [command, ...shells.map(f => f(command)), ...shells.flatMap(f => shells.map(g => f(g(command))))]
     .flatMap(c => [c, JSON.stringify(c), `log ${JSON.stringify(c)}`, `INFO ${JSON.stringify({ command: c })}`, JSON.stringify(JSON.stringify(c))])
 }
+
+test('locale-quoted ordinary names keep their values through combined shell and log wrappers', () => {
+  for (const name of ['mon$"k"ey', 'by$"p"ass', '$"monkey"']) {
+    const command = `make ${name}=banana`
+    for (const input of combinedWrappers(command)) {
+      expect(redactText(input, newStats())).toBe(input)
+      const [once, content, error, request, file, lines, diagnostic, twice] = pathsOf(input)
+      const commandOf = (json: string | undefined): string | undefined => (JSON.parse(json ?? '{}') as { args?: { command?: string } }).args?.command
+      expect([once, twice, error, diagnostic]).toEqual([input, input, `command failed: ${input}`, `command failed: ${input}`])
+      expect(commandOf(JSON.parse(content ?? 'null') as string)).toBe(input)
+      expect(commandOf((JSON.parse(request ?? '{}') as { rows: { json: { content: string } }[] }).rows[0]?.json.content)).toBe(input)
+      expect(commandOf((parseFile(file ?? '').lines[0] as { row: { content: string } } | undefined)?.row.content)).toBe(input)
+      expect(commandOf((JSON.parse(lines ?? '[]') as { row: { content: string } }[])[0]?.row.content)).toBe(input)
+    }
+  }
+})
+
+test('locale-quoted ordinary names stay within the timing bound at both payload caps', () => {
+  for (const name of ['mon$"k"ey', 'by$"p"ass']) {
+    for (const command of [`make ${name}=banana`, `make ${name}=banana\n`.repeat(5000)]) {
+      expect(redactText(command, newStats())).toBe(command)
+      for (const [cap, diagnostic] of [[16_384, 1_000], [220_000, 110_000]] as const) {
+        const started = performance.now()
+        sanitize({ command }, limitsFor(cap), newStats())
+        expect([cap, 'sanitize', performance.now() - started < 100]).toEqual([cap, 'sanitize', true])
+        for (const [path, ms] of pathTimes(command, cap, diagnostic)) expect([cap, path, ms < 100]).toEqual([cap, path, true])
+      }
+    }
+  }
+})
+
+test('locale-quoted credential list names redact through combined shell and log wrappers', () => {
+  for (const name of ['DB_PASS$"WORD"', '$"password"', 'api_$"key"']) {
+    for (const before of ['v', '$(printf v)', 'a'.repeat(400)]) {
+      const command = `cli --set-env-vars=VERSION=${before},${name}=CanaryValue`
+      for (const input of combinedWrappers(command)) for (const text of pathsOf(input)) expect([input, text.includes('CanaryValue')]).toEqual([input, false])
+    }
+  }
+})
 
 test('ANSI-C names and closed quotes redact through combined shell and JSON wrappers in every output path', () => {
   for (const name of [String.raw`pass$'\x77ord'`, String.raw`'pass'\word`, String.raw`"pass"\word`]) {

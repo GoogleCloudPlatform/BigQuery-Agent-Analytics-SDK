@@ -1388,6 +1388,12 @@ function delimiterAt(lists: DelimitedLists | null, i: number): string {
   return lo > 0 && (lists.ends[lo - 1] as number) > i ? (lists.delimiters[lo - 1] as string) : ''
 }
 
+// A double quote can carry escape layers from command strings and logs.
+function localeQuoteAt(text: string, i: number): boolean {
+  while (text[i] === '\\') i += 1
+  return text[i] === '"'
+}
+
 // Where the pieces of the name before the `=` at `e` start (see above), and
 // whether a name they hold is a credential's, using the declared delimiter
 // to distinguish entry boundaries from pieces of the same name. The pieces before two `=` never
@@ -1396,7 +1402,7 @@ function listName(text: string, e: number, firstEquals: number, delimiter: strin
   let r = e
   while (r > 0) {
     const c = text[r - 1] as string
-    if (isNameChar(c) || c === '"' || c === "'" || c === '\\' || (c === '$' && text[r] === "'")) r -= 1
+    if (isNameChar(c) || c === '"' || c === "'" || c === '\\' || (c === '$' && (text[r] === "'" || localeQuoteAt(text, r)))) r -= 1
     else if (c === '\n' && text[r - 2] === '\\') r -= 2
     else if (c === '\n' && text[r - 2] === '\r' && text[r - 3] === '\\') r -= 3
     else break
@@ -1501,6 +1507,9 @@ function listName(text: string, e: number, firstEquals: number, delimiter: strin
     } else if (c === '$' && source[i + 1] === "'") {
       ansi = true
       i += 2
+    } else if (c === '$' && localeQuoteAt(source, i + 1)) {
+      // Locale quoting joins the same name pieces as ordinary double quotes.
+      i += 1
     } else if (c === "'" || c === '"') {
       // A quote inside the opposite kind of quote is part of the name,
       // rather than a shell fragment that can be joined to its neighbors.
