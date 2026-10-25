@@ -1111,7 +1111,9 @@ column. Treat the dataset like the transcripts it mirrors.
   under 100 ms for a 2,760,000-character Write). Timing regression tests
   also cover selected 23,000- and 100,000-character inputs: continuations,
   lists, overlapping letter-delimiter suffixes, long uppercase names,
-  literal backslashes and `$(`. They assert under 100 ms per output path
+  literal backslashes and `$(`. Additional cases cover repeated equals and
+  255-character delimiter suffixes through 500,000 characters. They assert
+  under 100 ms per output path
   at both the default payload cap and a cap that scans the full input.
   These are finite workloads measured on the test machine, not a latency
   guarantee for arbitrary text or hardware. A long string is scanned up
@@ -1695,10 +1697,11 @@ the same views count other producers' requests but not their tokens.
   including 201-character and longer names. The scan margin extends 8,192
   characters beyond the internal budget, after reserving 512 characters
   from the configured cap for markers: at most 24,064 characters at the
-  default 16,384-character cap. Text beyond the window is dropped. A word's
-  quote analysis looks back at most 4,096 characters; beyond that, a detected
-  credential takes the remaining text. The command-string heuristic reads
-  only the first 400 characters of a word. These bounds do not constitute
+  default 16,384-character cap. Text beyond the window is dropped. The
+  word-start lookup looks back at most 4,096 characters. This bounds that
+  lookup only: value and name readers can scan farther, and a detected
+  credential can preserve later lines when its value ends unambiguously.
+  The command-string heuristic reads only the first 400 characters of a word. These bounds do not constitute
   general shell parsing. Known misses are tracked in
   [#546](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/546):
   * A provider-token-shaped name can be rewritten before the named-value

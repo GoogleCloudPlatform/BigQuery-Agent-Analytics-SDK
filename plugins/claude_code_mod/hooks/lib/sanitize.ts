@@ -601,8 +601,19 @@ function redactNamedValues(text: string, stats: SanitizeStats): string {
     let close = ''
     if (equals && /^[?&#;]$/.test(m.boundary)) {
       // An escaped `&`, `#`, `;` or blank does not end it.
-      const stop = /(?<!\\)[&#;\s]/.exec(text.slice(start))
-      end = stop === null ? text.length : start + stop.index
+      end = text.length
+      const stops = /[&#;\s]/g
+      stops.lastIndex = start
+      for (let stop = stops.exec(text); stop !== null; stop = stops.exec(text)) {
+        let slash = stop.index
+        while (slash > start && text[slash - 1] === '\\') slash -= 1
+        // Outer quotes may encode another shell's backslashes. Unless the
+        // value is unquoted, keep that uncertain suffix with the credential.
+        if ((stop.index - slash) % 2 === 0 && (slash === stop.index || (states ??= quoteStates(text))[start] === NONE)) {
+          end = stop.index
+          break
+        }
+      }
       // After `;` or `&` it may be a shell assignment, after `?` or `#` in a
       // list gcloud's delimiter holding it sets apart (`^#^`), a list's entry,
       // whose value a quoted or escaped `&` does not end, and a quote
@@ -913,13 +924,14 @@ const wordState = (state: number): number => ((state & 1) === 1 ? state >> 1 : U
 const JSON_BREAK = /(?:r\\+)?n/y
 
 // Apostrophes in an outer command string, with extra backslashes from
-// JSON or another shell. The loose reading treats adjacent encoding
-// fragments as one apostrophe; uncertain nesting is redacted conservatively.
+// JSON or another shell. Quote analysis keeps each transition separate.
+// The loose name reader can skip the entire run of encoding fragments.
 const OUTER_APOSTROPHE = /'(?:\\+''|\\*"'\\*"')/y
-function outerApostrophe(text: string, at: number): number {
+function outerApostrophe(text: string, at: number, fragments = false): number {
   OUTER_APOSTROPHE.lastIndex = at
   if (!OUTER_APOSTROPHE.test(text)) return 0
   let end = OUTER_APOSTROPHE.lastIndex
+  if (!fragments) return end - at
   while (end < text.length && /["'\\]/.test(text[end] as string)) end += 1
   while (text[end - 1] === '\\') end -= 1
   return end - at
@@ -991,7 +1003,7 @@ function looseWord(text: string, i: number, accept?: (word: OptionWord) => boole
     if (ansiQuote) {
       ansi = true
       // A single-quoted command string spells its own apostrophe this way.
-      const apostrophe = outerApostrophe(text, i + 1)
+      const apostrophe = outerApostrophe(text, i + 1, true)
       if (apostrophe > 0) {
         i += 1 + apostrophe
         continue
@@ -1008,7 +1020,7 @@ function looseWord(text: string, i: number, accept?: (word: OptionWord) => boole
     } else if (c === '"' || c === "'") {
       if (c === "'") {
         if (!stickyAnsi) ansi = false
-        const apostrophe = outerApostrophe(text, i)
+        const apostrophe = outerApostrophe(text, i, true)
         if (apostrophe > 0) {
           i += apostrophe
           continue
@@ -1369,7 +1381,7 @@ function delimiterAt(lists: DelimitedLists | null, i: number): string {
 // whether a name they hold is a credential's, using the declared delimiter
 // to distinguish entry boundaries from pieces of the same name. The pieces before two `=` never
 // overlap, so each is read once, however long.
-function listName(text: string, e: number, delimiter: string, reader: () => ReturnType<typeof backslashReader>): { from: number; credential: boolean } {
+function listName(text: string, e: number, firstEquals: number, delimiter: string, reader: () => ReturnType<typeof backslashReader>): { from: number; credential: boolean } {
   let r = e
   while (r > 0) {
     const c = text[r - 1] as string
@@ -1379,18 +1391,46 @@ function listName(text: string, e: number, delimiter: string, reader: () => Retu
     else break
   }
   const raw = text.slice(r, e)
+  if (!/[A-Za-z]/.test(raw) && !raw.includes("$'")) return { from: r, credential: false }
+  const plain = !/["'\\$]/.test(raw)
   // Plain names with no letter/digit delimiter suffix have one candidate.
   // Reuse the normal classifier and its cache instead of rebuilding parts.
-  if (!/["'\\$]/.test(raw) && !/[A-Za-z0-9]$/.test(delimiter)) {
+  if (plain && !/[A-Za-z0-9]$/.test(delimiter)) {
     const name = raw.replace(/^[0-9.-]+/, '')
     // A long alphanumeric name cannot be listed. A credential stem then
     // settles it without constructing thousands of camel-case parts.
     const stem = name.length > MAX_LISTED_NAME_CHARS && /^[A-Za-z0-9]+$/.test(name) && SENSITIVE_STEMS.some(part => name.toLowerCase().includes(part))
     return { from: r, credential: stem || isSensitiveKey(name) }
   }
+  if (plain) {
+    const name = raw.replace(/^[0-9.-]+/, '')
+    if (isSensitiveKey(name)) return { from: r, credential: true }
+    if (!isListedKey(name)) {
+      // Removing a delimiter prefix cannot create a stem or an ending that
+      // the whole name lacks. Only a whole credential word at the end of a
+      // part can become sensitive when its prefix is removed.
+      const suffix = /[A-Za-z0-9]+$/.exec(delimiter)?.[0] ?? ''
+      const lower = raw.toLowerCase()
+      let from = 0
+      for (const part of nameParts(raw)) {
+        const start = lower.indexOf(part, from)
+        for (const form of forms(part)) for (const word of SENSITIVE_WORDS) {
+          if (!form.endsWith(word)) continue
+          const at = start + form.length - word.length
+          // Leading underscores do not change the remaining name's parts.
+          for (let candidate = at; candidate >= 0; candidate -= 1) {
+            if (candidate >= suffix.length && raw.startsWith(suffix, candidate - suffix.length) && isSensitiveKey(raw.slice(candidate))) return { from: r, credential: true }
+            if (raw[candidate - 1] !== '_') break
+          }
+        }
+        from = start + part.length
+      }
+      return { from: r, credential: false }
+    }
+  }
   // A preceding assignment can introduce a list whose separator resembles
   // a quote. Keep its conservative reading even without a known delimiter.
-  const standalone = text.indexOf('=') >= r
+  const standalone = firstEquals >= r
   // An outer single-quoted command string represents its apostrophes with
   // joined quote/escape sequences. Undo those before reading ANSI-C parts.
   const hasAnsi = raw.includes("$'")
@@ -1402,9 +1442,37 @@ function listName(text: string, e: number, delimiter: string, reader: () => Retu
   let open = true
   let ansi = false
   const suffix = /[A-Za-z0-9]+$/.exec(delimiter)?.[0] ?? ''
+  // Prefix lengths let overlapping delimiter matches advance once through
+  // the source, instead of re-comparing the whole suffix at every letter.
+  const prefixes = new Uint16Array(suffix.length)
+  for (let i = 1, matched = 0; i < suffix.length; i += 1) {
+    while (matched > 0 && suffix[i] !== suffix[matched]) matched = prefixes[matched - 1] as number
+    if (suffix[i] === suffix[matched]) matched += 1
+    prefixes[i] = matched
+  }
+  let scanned = 0
+  let matched = 0
+  const followsSuffix = (at: number): boolean => {
+    if (suffix === '') return false
+    while (scanned < at) {
+      const c = source[scanned] as string
+      while (matched > 0 && (matched === suffix.length || c !== suffix[matched])) matched = prefixes[matched - 1] as number
+      if (c === suffix[matched]) matched += 1
+      scanned += 1
+    }
+    return matched === suffix.length
+  }
+  if (plain) {
+    for (let i = 0; i < source.length; i += 1) {
+      if (namePlace(source, i) !== 2) continue
+      if (open || followsSuffix(i)) starts.push(i)
+      open = false
+    }
+    return { from: r, credential: sensitiveListSuffix(source, starts) }
+  }
   const add = (ch: string, at: number): void => {
     if (namePlace(ch, 0) === 2) {
-      if (open || (suffix !== '' && source.startsWith(suffix, at - suffix.length))) starts.push(chars.length)
+      if (open || followsSuffix(at)) starts.push(chars.length)
       open = false
     }
     chars += ch
@@ -1566,13 +1634,20 @@ function backslashReader(text: string, getStates: () => Uint8Array, rerun: () =>
       if (apostrophe > 0) {
         c = "'"
         pos += apostrophe
+      } else if (q === SINGLE && c === '\\' && /["'\\]/.test(text[pos + 1] ?? '')) {
+        // Escapes between encoded apostrophes require another shell layer.
+        // One-layer quote analysis cannot prove a backslash is literal there.
+        inner = UNKNOWN
+        pos += 1
       } else if (q === DOUBLE && c === '\\' && pos + 1 < text.length && /["\\$`]/.test(text[pos + 1] as string)) {
         c = text[pos + 1] as string
         pos += 2
+        if (c === '\\' && /["'\\]/.test(text[pos] ?? '')) inner = UNKNOWN
       } else {
         pos += 1
       }
       cache.fill(inner + 1, before, pos)
+      if (inner === UNKNOWN) continue
       if (escaped) escaped = false
       else if (inner === SINGLE) inner = c === "'" ? NONE : SINGLE
       else if (c === '\\') escaped = true
@@ -1598,7 +1673,11 @@ function backslashReader(text: string, getStates: () => Uint8Array, rerun: () =>
 const MARKER_WORD = /\[REDACTED(?::[a-z-]+)?\]["']?(?![^\s;&|<>)])/y
 
 function redactListNames(text: string, stats: SanitizeStats): string {
-  if (!text.includes('=')) return text
+  const firstEquals = text.indexOf('=')
+  if (firstEquals === -1) return text
+  // Without escapes or ANSI-C decoding, removing quotes exposes every
+  // possible credential piece. Text with none needs no list-name fallback.
+  if (!text.includes('\\') && !text.includes("$'") && !PIECE_IN_NAME.test(text.replace(/["']/g, ''))) return text
   let states: Uint8Array | undefined
   let urls: number[] | undefined
   let rerun: Uint8Array | undefined
@@ -1610,7 +1689,7 @@ function redactListNames(text: string, stats: SanitizeStats): string {
   const reader = (): ReturnType<typeof backslashReader> => (backslashes ??= backslashReader(text, scanned, joinedAt))
   let out = ''
   let copied = 0
-  for (let e = text.indexOf('='); e !== -1; e = text.indexOf('=', e + 1)) {
+  for (let e = firstEquals; e !== -1; e = text.indexOf('=', e + 1)) {
     const start = e + 1
     if (start >= text.length) continue
     // A marker at the very end leaves no unscanned suffix. Avoid decoding
@@ -1621,7 +1700,7 @@ function redactListNames(text: string, stats: SanitizeStats): string {
     if (text[e - 1] === '\\' && reader().ownLiteral(e - 1)) continue
     if (lists === undefined) lists = delimitedLists(text)
     const delimiter = delimiterAt(lists, e)
-    const name = listName(text, e, delimiter, reader)
+    const name = listName(text, e, firstEquals, delimiter, reader)
     if (!name.credential) continue
     // A literal backslash before `=` cannot introduce an assignment.
     if (text[e - 1] === '\\' && reader().literal(e - 1)) continue

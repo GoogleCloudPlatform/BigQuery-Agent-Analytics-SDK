@@ -2298,3 +2298,66 @@ test('the documented list after a credential is swallowed with its value', () =>
   const command = '--set-env-vars=DB_PASSWORD=x,max_tokens=1024'
   expect(redactText(command, newStats())).toBe('--set-env-vars=DB_PASSWORD=[REDACTED]')
 })
+
+
+test('adjacent empty quote fragments keep active escapes through combined shell and log wrappers in every output path', () => {
+  const options = [String.raw`''--pa\ssword`, String.raw`""--pa\ssword`, String.raw`''""--pa\ssword`,
+    String.raw`--pa''\ssword`, String.raw`--pa""\ssword`, String.raw`--pa''''\ssword`,
+    String.raw`'--pa'\ssword`, String.raw`"--pa"\ssword`]
+  const names = [String.raw`''DB_PA\SSWORD`, String.raw`""DB_PA\SSWORD`, String.raw`DB_PA''\SSWORD`,
+    String.raw`DB_PA""\SSWORD`, String.raw`DB_PA''''\SSWORD`]
+  const commands = [...options.flatMap(name => [`cli ${name} CanaryValue`, `cli ${name}=CanaryValue`]),
+    ...names.flatMap(name => [`cli --set-env-vars=VERSION=v,${name}=CanaryValue`,
+      `cli --set-env-vars=VERSION=$(printf v),${name}=CanaryValue`])]
+  for (const command of commands) for (const input of combinedWrappers(command)) for (const text of pathsOf(input)) {
+    expect([input, text.includes('CanaryValue')]).toEqual([input, false])
+  }
+})
+
+test('only odd unquoted backslash runs escape URL parameter delimiters', () => {
+  for (const delimiter of ['&page=2', '#section', ';page=2', ' ordinary', '\tordinary', '\nordinary']) {
+    for (const count of [0, 1, 2, 3, 4, 6]) {
+      const input = '/path?token=CanaryValue' + '\\'.repeat(count) + delimiter
+      const want = '/path?token=[REDACTED]' + (count % 2 === 0 ? delimiter : '')
+      const once = redactText(input, newStats())
+      expect([input, once]).toEqual([input, want])
+      expect(redactText(once, newStats())).toBe(want)
+      for (const text of pathsOf(input)) expect(text.includes('CanaryValue')).toBe(false)
+    }
+  }
+})
+
+test('the quote lookup bound does not prevent a long list name from preserving the next line', () => {
+  for (const length of [4095, 4096, 4097, 5000]) {
+    const prefix = 'cli --set-env-vars=VERSION=v,' + 'a'.repeat(length) + 'password='
+    const input = prefix + 'CanaryValue\nprintf ordinary'
+    expect(redactText(input, newStats())).toBe(prefix + '[REDACTED]\nprintf ordinary')
+    for (const wrapped of combinedWrappers(input)) for (const text of pathsOf(wrapped)) expect(text.includes('CanaryValue')).toBe(false)
+  }
+})
+
+test('repeated equals and long overlapping delimiter suffixes stay within the timing bound at both payload caps', () => {
+  const commands = [
+    ...[100_000, 250_000, 500_000].map(size => 'a'.repeat(size / 2) + '""=x,'.repeat(size / 10)),
+    ...[100_000, 500_000].map(size => '--set-env-vars=^' + 'q'.repeat(255) + '^' + 'q'.repeat(size) + 'monkey=x'),
+  ]
+  for (const command of commands) {
+    expect(redactText(command, newStats())).toBe(command)
+    for (const [cap, diagnostic] of [[16_384, 1_000], [1_100_000, 550_000]] as const) {
+      const started = performance.now()
+      sanitize({ command }, limitsFor(cap), newStats())
+      expect([command.length, cap, 'sanitize', performance.now() - started < 100]).toEqual([command.length, cap, 'sanitize', true])
+      for (const [path, ms] of pathTimes(command, cap, diagnostic)) expect([command.length, cap, path, ms < 100]).toEqual([command.length, cap, path, true])
+    }
+  }
+})
+
+
+test('long overlapping delimiter matches preserve ordinary names and find quoted credential parts', () => {
+  for (const delimiter of ['q'.repeat(255), 'q'.repeat(254) + 'r', 'ab'.repeat(127) + 'a', 'q1'.repeat(127) + 'q']) {
+    for (const [name, secret] of [['mon"k"ey', false], ['build_"number"', false], ['DB_PASS"WORD"', true], ['__"key"', true]] as const) {
+      const input = `cli --set-env-vars=^${delimiter}^VERSION=$(printf v)${delimiter}${name}=CanaryValue`
+      for (const wrapped of quoteWrappers(input)) for (const text of pathsOf(wrapped)) expect([wrapped, text.includes('CanaryValue')]).toEqual([wrapped, !secret])
+    }
+  }
+})
