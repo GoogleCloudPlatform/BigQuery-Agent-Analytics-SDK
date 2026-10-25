@@ -27,7 +27,7 @@
 // the same as one of 20 KB). Text past a budget is dropped and marked, never
 // passed on unscanned.
 
-import { isListedKey, nameParts } from './allowlist.ts'
+import { isListedKey, nameParts, MAX_LISTED_NAME_CHARS } from './allowlist.ts'
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 
@@ -910,6 +910,10 @@ const wordState = (state: number): number => ((state & 1) === 1 ? state >> 1 : U
 // before it: `n`, or `r`, backslashes and `n`.
 const JSON_BREAK = /(?:r\\+)?n/y
 
+// The two apostrophe encodings in a single-quoted outer command string.
+const outerApostrophe = (text: string, at: number): number =>
+  text.startsWith("'\\''", at) ? 4 : text.startsWith(`'"'"'`, at) ? 5 : 0
+
 // The word at `i` read loosely, as a command string's word that another
 // shell runs, however deeply quoted, may pass it: every quote, backslash and
 // line continuation (a run of backslashes and a line break, or one as a JSON
@@ -976,8 +980,9 @@ function looseWord(text: string, i: number, accept?: (word: OptionWord) => boole
     if (ansiQuote) {
       ansi = true
       // A single-quoted command string spells its own apostrophe this way.
-      if (text.startsWith("$'\\''", i)) {
-        i += 5
+      const apostrophe = outerApostrophe(text, i + 1)
+      if (apostrophe > 0) {
+        i += 1 + apostrophe
         continue
       }
     } else if (c === '=') {
@@ -992,8 +997,9 @@ function looseWord(text: string, i: number, accept?: (word: OptionWord) => boole
     } else if (c === '"' || c === "'") {
       if (c === "'") {
         ansi = false
-        if (text.startsWith("'\\''", i)) {
-          i += 4
+        const apostrophe = outerApostrophe(text, i)
+        if (apostrophe > 0) {
+          i += apostrophe
           continue
         }
       }
@@ -1199,7 +1205,8 @@ function redactOptionWords(text: string, stats: SanitizeStats): string {
     const { word, name, nested } = option
     // Undoing an outer command string must still respect a word's own
     // literal backslashes. ANSI-C names have a separate escape reader.
-    if (nested && text[word.start] === "'" && scan.rerun()[word.start] !== 1 && !text.slice(word.start, word.end).includes("$'")) {
+    const quoted = /["']/.test(text[word.start] ?? '') || (text[word.start] === '\\' && /["']/.test(text[word.start + 1] ?? ''))
+    if (nested && quoted && scan.rerun()[word.start] !== 1 && !text.slice(word.start, word.end).includes("$'")) {
       let literal = false
       for (let k = word.start; k < word.end && !literal; k += 1) {
         if (text[k] === '\\' && isNameChar(text[k + 1] ?? '')) literal = (backslashes ??= backslashReader(text, scan.states(), scan.rerun)).literal(k)
@@ -1409,16 +1416,66 @@ function listName(text: string, e: number, delimiter: string, literal: (at: numb
   }
   // There is no name-length cap here. Each segment before an `=` is read
   // once, including long names that the bounded forward readers skip.
-  let credential = false
-  for (const at of starts) {
-    const name = chars.slice(at)
-    if (!PIECE_IN_NAME.test(name) || isListedKey(name)) break
-    if (isSensitiveKey(name)) {
-      credential = true
-      break
+  return { from: r, credential: sensitiveListSuffix(chars, starts) }
+}
+
+// Classify all possible suffixes without slicing and normalizing overlapping
+// names. Camel-case parts stay the same when a prefix is removed; only the
+// first remaining part can change. Each part's credential stems and endings
+// are scanned once, then each candidate uses those summaries.
+function sensitiveListSuffix(chars: string, starts: number[]): boolean {
+  if (starts.length === 0 || !PIECE_IN_NAME.test(chars)) return false
+  const lower = chars.toLowerCase()
+  const parts = nameParts(chars)
+  const ranges: { start: number; end: number; until: number; whole: Set<number>; tail: boolean }[] = []
+  let from = 0
+  for (const part of parts) {
+    const start = lower.indexOf(part, from)
+    const end = start + part.length
+    let until = -1
+    for (const stem of SENSITIVE_STEMS) {
+      const at = part.lastIndexOf(stem)
+      if (at !== -1) until = Math.max(until, start + at)
     }
+    const whole = new Set<number>()
+    for (const form of forms(part)) {
+      const stop = start + form.length
+      for (const ending of SENSITIVE_ENDINGS) if (form.endsWith(ending)) until = Math.max(until, stop - ending.length)
+      for (const word of SENSITIVE_WORDS) if (form.endsWith(word)) whole.add(stop - word.length)
+    }
+    ranges.push({ start, end, until, whole, tail: false })
+    from = end
   }
-  return { from: r, credential }
+  let tail = false
+  for (let i = ranges.length - 1; i >= 0; i -= 1) {
+    const part = ranges[i]!
+    part.tail = tail
+    tail ||= part.start <= part.until || part.whole.has(part.start)
+  }
+  // Only a bounded number of suffixes can be listed: each distinct normalized candidate starts
+  // at a letter, and listed names contain at most this many name
+  // characters. Punctuation does not count toward that bound.
+  let listedFrom = chars.length
+  let count = 0
+  while (listedFrom > 0 && count <= MAX_LISTED_NAME_CHARS) {
+    listedFrom -= 1
+    if (/[A-Za-z0-9]/.test(chars[listedFrom] as string)) count += 1
+  }
+  if (count > MAX_LISTED_NAME_CHARS) listedFrom += 1
+  let partAt = 0
+  let checkedAt = -1
+  for (const at of starts) {
+    while (partAt < ranges.length && ranges[partAt]!.end <= at) partAt += 1
+    const part = ranges[partAt]
+    if (part === undefined) break
+    const candidate = Math.max(at, part.start)
+    // Leading underscores all normalize to the same remaining parts.
+    if (candidate === checkedAt) continue
+    checkedAt = candidate
+    if (candidate >= listedFrom && isListedKey(chars.slice(candidate))) break
+    if (part.tail || candidate <= part.until || part.whole.has(candidate)) return true
+  }
+  return false
 }
 
 // Whether the backslash run that ends at `k`, before an `=`, is one the shell
@@ -1431,14 +1488,10 @@ function listName(text: string, e: number, delimiter: string, literal: (at: numb
 // starts (-1: not known).
 function backslashReader(text: string, states: Uint8Array, rerun: () => Uint8Array): { word: (at: number) => number; literal: (at: number) => boolean } {
   const words = new Int32Array(text.length + 1)
-  const openings = new Int32Array(text.length + 1)
   let word = 0
-  let opening = 0
   for (let i = 0; i <= text.length; i += 1) {
     if (i > 0 && (isSpace(text[i - 1] as string) || isOperator(text[i - 1] as string))) word = i
-    if (i > 0 && states[i] !== states[i - 1]) opening = i
     words[i] = word
-    openings[i] = opening
   }
   let lastWord = -1
   let lastQuote = NONE
@@ -1449,10 +1502,10 @@ function backslashReader(text: string, states: Uint8Array, rerun: () => Uint8Arr
   return {
     word: start,
     literal: (k: number): boolean => {
-      const q = states[k]
       const from = start(k)
-      if ((q !== SINGLE && q !== DOUBLE) || from === -1) return false
-      if ((openings[k] as number) > from) return rerun()[k] !== 1
+      if (from === -1) return false
+      const q = states[from]
+      if (q !== SINGLE && q !== DOUBLE) return (states[k] === SINGLE || states[k] === DOUBLE) && rerun()[k] !== 1
       if (lastWord !== from || lastQuote !== q || pos > k) {
         lastWord = from
         lastQuote = q
@@ -1462,7 +1515,11 @@ function backslashReader(text: string, states: Uint8Array, rerun: () => Uint8Arr
       }
       for (; pos < k; ) {
         let c = text[pos] as string
-        if (q === DOUBLE && c === '\\' && pos + 1 < k && /["\\$`]/.test(text[pos + 1] as string)) {
+        const apostrophe = q === SINGLE ? outerApostrophe(text, pos) : 0
+        if (apostrophe > 0) {
+          c = "'"
+          pos += apostrophe
+        } else if (q === DOUBLE && c === '\\' && pos + 1 < k && /["\\$`]/.test(text[pos + 1] as string)) {
           c = text[pos + 1] as string
           pos += 2
         } else {

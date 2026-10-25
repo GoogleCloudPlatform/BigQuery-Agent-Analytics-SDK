@@ -1104,18 +1104,20 @@ column. Treat the dataset like the transcripts it mirrors.
   only, never its arguments.
 * **Truncation:** each payload column is held to `maxPayloadChars`,
   error messages to 4,096 characters; the copy is built within that budget, so
-  a multi-megabyte tool input costs the hot path milliseconds (a test checks
-  under 100 ms for a 2,760,000-character Write). The free-text rules measure
-  each run of line continuations, of a name's characters and of the blanks
-  before a separator once, never again from each place in it where a name
-  may start, and read a list of names and values once, whichever word
-  starts in it (each `;` in `A=x;\A=x;…` starts one), so 100,000
-  characters of continuations as JSON encodes them, of names and values,
-  of such a list or of `$(` cost each path under 100 ms too (tested, the
-  payload cap and the full text). A long string is scanned up
-  to 8,192 characters past where it is cut, so a credential across the cut is
-  still matched whole; those last 8,192 characters scanned are never kept,
-  and anything further is dropped, never passed on unscanned.
+  a multi-megabyte tool input is bounded before scanning (a test checks
+  under 100 ms for a 2,760,000-character Write). Timing regression tests
+  also cover selected 23,000- and 100,000-character inputs: continuations,
+  lists, overlapping letter-delimiter suffixes, long uppercase names,
+  literal backslashes and `$(`. They assert under 100 ms per output path
+  at both the default payload cap and a cap that scans the full input.
+  These are finite workloads measured on the test machine, not a latency
+  guarantee for arbitrary text or hardware. A long string is scanned up
+  to 8,192 characters beyond the internal string budget, which reserves
+  512 characters below the configured cap for markers. At the default
+  cap of 16,384, the scan window is at most 24,064 characters
+  (16,384 - 512 + 8,192); it can be smaller when the remaining column
+  budget is lower. The margin is scanned only to complete matches near
+  the cut and is never kept; anything further is dropped unscanned.
   Cut rows have `is_truncated = true`.
 * **Local files:** dead-letter and dry-run files hold the same redacted rows
   as the table; they are written with your user's default permissions.
@@ -1182,8 +1184,9 @@ substitutions and long values before them; the 8,454-command matrix filters
 out combinations split inside a name or value and variable names that
 consume the delimiter, and includes short `pass` names after punctuation)
 and before an escaped `=`,
-100,000 characters of continuations, lists (one that each `;` starts
-again too), repeated literal `\=` or `$(` under 100 ms in every path,
+selected long continuations, lists (one that each `;` starts again too),
+overlapping suffixes, uppercase names, repeated literal `\=` and `$(`
+with per-path timing assertions at both payload caps,
 text with no credential left as it is, values past 5,000 characters and
 past the scanned window, credentials across a length cap, every diagnostic
 sink, and each review probe through capture, delivery and the dead-letter
@@ -1686,8 +1689,10 @@ the same views count other producers' requests but not their tokens.
   100-character name bound and the forward shell-name readers a
   200-character bound. The final list-name fallback has no name-length
   bound: it scans each candidate segment before `=` regardless of length,
-  including 201-character and longer names. Payload scanning still stops 8,192 characters beyond
-  the configured payload cap; text beyond it is dropped. A word's quote
+  including 201-character and longer names. The scan margin extends 8,192
+  characters beyond the internal budget, after reserving 512 characters
+  from the configured cap for markers: at most 24,064 characters at the
+  default 16,384-character cap. Text beyond the window is dropped. A word's quote
   analysis looks back at most 4,096 characters; beyond that, a detected
   credential takes the remaining text. The command-string heuristic reads
   only the first 400 characters of a word. These bounds do not constitute

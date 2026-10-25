@@ -164,7 +164,7 @@ export const TEXT_KEYS: readonly string[] = [
 export const nameParts = (name: string): string[] =>
   name
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replace(/([A-Z])([A-Z][a-z])/g, '$1 $2')
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter(part => part !== '')
@@ -172,3 +172,6 @@ export const nameParts = (name: string): string[] =>
 const LISTED = new Set([...TELEMETRY_KEYS, ...TEXT_KEYS].map(key => nameParts(key).join('_')))
 
 export const isListedKey = (name: string): boolean => LISTED.has(nameParts(name).join('_'))
+
+// An upper bound on the letters and digits in a listed spelling.
+export const MAX_LISTED_NAME_CHARS = Math.max(...[...LISTED].map(name => name.replace(/_/g, '').length))

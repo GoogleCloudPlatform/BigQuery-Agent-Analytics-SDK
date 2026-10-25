@@ -2161,3 +2161,90 @@ test('short names after punctuation delimiters are included in the filtered matr
   expect(LIST_SWEEP.some(input => input.includes('^:^VERSION=v:pass=SecretSuffix'))).toBe(true)
   for (const wrapped of wrappersOf(command)) for (const text of pathsOf(wrapped)) expect([wrapped, text.includes('CanaryValue')]).toEqual([wrapped, false])
 })
+
+
+// Equivalent credential spellings exercise the inner name independently of
+// the shell command string or log that quotes it.
+function quoteSweep(): string[] {
+  const spellings = new Set<string>()
+  for (const name of ['password', 'authorization', 'access_token', 'api-key', 'DB_PASSWORD', 'x-api-key', 'secret', 'session', 'credential', 'cookie', 'token']) {
+    spellings.add(name)
+    for (let at = 0; at < name.length; at += 1) {
+      const a = name.slice(0, at)
+      const b = name.slice(at)
+      const c = name[at] as string
+      const d = name.slice(at + 1)
+      for (const word of [a+"'"+b+"'", a+'"'+b+'"', "'"+a+"'\\"+b, '"'+a+'"\\'+b,
+        a+'\\'+b, a+"$'\\x"+c.charCodeAt(0).toString(16)+"'"+d,
+        a+"$'\\"+c.charCodeAt(0).toString(8)+"'"+d, a+"$'\\u"+c.charCodeAt(0).toString(16).padStart(4,'0')+"'"+d,
+        a+"$'"+c+"'"+(d ? '\\'+d : ''), a+"''"+b, a+'""'+b]) spellings.add(word)
+    }
+  }
+  const commands: string[] = []
+  for (const word of spellings) commands.push(`cli --${word} CanaryValue`, `cli --${word}=CanaryValue`,
+    `cli --set-env-vars=VERSION=v,${word}=CanaryValue`,
+    `cli --set-env-vars=^q^VERSION=vq${word}=CanaryValue`)
+  return commands
+}
+
+const QUOTE_SWEEP = quoteSweep()
+const quoteWrappers = (command: string): string[] => [
+  ...wrappersOf(command),
+  `sh -c '${command.replace(/'/g, `'"'"'`)}'`,
+]
+
+for (const part of [0, 1, 2, 3]) {
+  test(`quoted option and list spellings through both apostrophe encodings, part ${part + 1} of 4`, () => {
+    const size = Math.ceil(QUOTE_SWEEP.length / 4)
+    for (const command of QUOTE_SWEEP.slice(part * size, (part + 1) * size)) {
+      for (const input of quoteWrappers(command)) for (const text of pathsOf(input)) {
+        expect([input, text.includes('CanaryValue')]).toEqual([input, false])
+      }
+    }
+  })
+}
+
+test('outer apostrophes preserve ANSI-C mode and a closed inner quote leaves the following backslash active', () => {
+  for (const command of [String.raw`cli --pass$'\x77ord' CanaryValue`,
+    String.raw`cli '--pass'\word CanaryValue`, String.raw`cli "--pass"\word CanaryValue`,
+    String.raw`cli --set-env-vars=VERSION=v,'DB_PASS'\WORD=CanaryValue`]) {
+    for (const input of quoteWrappers(command)) for (const text of pathsOf(input)) {
+      expect([input, text.includes('CanaryValue')]).toEqual([input, false])
+    }
+  }
+  for (const command of [String.raw`cli '--pa\ssword=x' tail`, String.raw`cli "--pa\ssword=x" tail`,
+    String.raw`sed 's/pa\ssword=.*/x/' config.ini`]) {
+    for (const input of quoteWrappers(command)) expect(redactText(input, newStats())).toBe(input)
+  }
+})
+
+test('overlapping delimiter suffixes and long uppercase names stay within the timing bound at both payload caps', () => {
+  const commands = [
+    'gcloud run deploy svc --set-env-vars=^q^VERSION=' + 'q'.repeat(23_000) + 'monkey=x',
+    `--set-env-vars=^x^${'monkeyx'.repeat(14_280)}=x`,
+    '--set-env-vars=VERSION=v,' + 'A'.repeat(23_000) + 'PASSWORD=CanaryValue',
+    // Many underscore candidates normalize to the same remaining part.
+    `--set-env-vars="^'^${"_'".repeat(40_000)}monkey=x"`,
+  ]
+  for (const command of commands) {
+    for (const [cap, diagnostic] of [[16_384, 1_000], [220_000, 110_000]] as const) {
+      const started = performance.now()
+      sanitize({ command }, limitsFor(cap), newStats())
+      expect([cap, 'sanitize', performance.now() - started < 100]).toEqual([cap, 'sanitize', true])
+      for (const [path, ms] of pathTimes(command, cap, diagnostic)) expect([cap, path, ms < 100]).toEqual([cap, path, true])
+    }
+  }
+})
+
+test('suffix classification keeps whole credential parts and listed spellings after punctuation and acronym boundaries', () => {
+  for (const name of ['___key', '__keys123', 'monkeyKey', 'XXPassword', 'monkeypassword', 'ACCESS_TOKEN2', 'APICredential', 'monKEY']) {
+    expect(isSensitiveKey(name)).toBe(true)
+    const command = `cli --set-env-vars=VERSION=$(printf v),${name}=CanaryValue`
+    expect(redactText(command, newStats()).includes('CanaryValue')).toBe(false)
+  }
+  for (const name of ['monkey', 'monkeys123', 'max_tokens', '__max_tokens', 'inputTokens', 'monKEYboard']) {
+    expect(isSensitiveKey(name)).toBe(false)
+    const command = `cli --set-env-vars=VERSION=$(printf v),${name}=banana`
+    expect(redactText(command, newStats())).toBe(command)
+  }
+})
