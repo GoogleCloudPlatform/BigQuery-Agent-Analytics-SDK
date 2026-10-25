@@ -6,7 +6,7 @@ Standalone scripts for the BigQuery Agent Analytics SDK.
 |--------|-------------|
 | [quality_report](#quality-report) | LLM-as-a-judge evaluation over agent sessions |
 | [skill_evolution](#skill-evolution) | Turn a scored quality report into an improved, versioned `SKILL.md` |
-| [latency_report](#latency-report-1) | Timing tree and waterfall for agent traces with A2A stitching |
+| [latency_report](#latency-report) | Timing tree and waterfall for agent traces with A2A stitching |
 | [mutation_testing](../docs/mutation_testing.md) | Report-only mutation testing (mutmut) of the core scoring modules; never gates a merge |
 
 ## Quality Report

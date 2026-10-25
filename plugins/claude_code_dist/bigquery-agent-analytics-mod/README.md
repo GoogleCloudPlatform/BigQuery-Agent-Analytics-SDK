@@ -10,7 +10,7 @@ model requests, tool calls and subagents as rows in the
 background.
 
 It produces the same table shape as ADK's BQAA plugin and this repo's
-settings-hook plugin, [`bigquery-agent-analytics-tracing`](../claude_code),
+settings-hook plugin, [`bigquery-agent-analytics-tracing`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/plugins/claude_code),
 so the [analysis skill](https://github.com/haiyuan-eng-google/bigquery_agent_analytics_skill/tree/main/bigquery-agent-analytics-skill) and its queries work on what it writes.
 
 Status: early. Mods are an early-access feature of the host CLI (v2.1.287 or
@@ -351,8 +351,8 @@ the environment variable the tracing plugin already uses, then to a default.
 | `dataset` | `BQAA_DATASET`, `BQ_DATASET` | (required) | Dataset of the events table |
 | `table` | `BQAA_TABLE`, `BQ_TABLE` | `agent_events` | Events table |
 | `location` | `BQAA_LOCATION` | `US` | Dataset location; shown by `/bqaa-status`, and passed to `setup.sh` by the setup command the mod offers (insertAll itself is addressed by table) |
-| `enabled` | `BQAA_TRACE_ENABLED=false` turns it off | `true` | Capture on or off |
-| `dryRun` | `BQAA_DRY_RUN=true` turns it on | `false` | Write rows as JSONL to `<deadLetterDir>/../dry-run/` instead of sending |
+| `enabled` | `BQAA_TRACE_ENABLED` set to `false`, `0`, `no` or `off` turns it off | `true` | Capture on or off |
+| `dryRun` | `BQAA_DRY_RUN` set to `true`, `1`, `yes` or `on` turns it on | `false` | Write rows as JSONL to `<deadLetterDir>/../dry-run/` instead of sending |
 | `maxPayloadChars` | | `16384` (1024 to 500000) | Cap per JSON payload column (`content`, `attributes`); past it the value is cut and `is_truncated` set |
 | `flushIntervalMs` | | `5000` (1000 to 300000) | How often the background writer sends |
 | `deadLetterDir` | `BQAA_DEAD_LETTER_DIR` | `~/.bqaa-mod/dead-letter` | Where unsent rows are kept, in one subdirectory per table (`project.dataset.table`) |
@@ -372,6 +372,12 @@ Advanced, environment only:
 | `BQAA_EXIT_FLUSH_MS` | `800` (0 to 1200) | How long session end may wait for its spill file, and any dead-letter file still being written, to be written; `0` starts the write without waiting |
 | `BQAA_AUTO_CREATE_TABLE` | `true` | Create the table (BQAA schema v2, partitioned and clustered) when insertAll answers 404 for it |
 | `BQAA_AUTO_BACKFILL` | `true` | Replay the table's `spill` and `retry` files at session start and after BigQuery recovers |
+
+Switch values ignore case and surrounding spaces, and
+`BQAA_AUTO_CREATE_TABLE` and `BQAA_AUTO_BACKFILL` are turned off by the same
+`false`, `0`, `no` or `off`. An empty or unset variable, or any other value,
+changes nothing; nor can the environment turn capture on when `enabled` is
+off, or a dry run off when `dryRun` is on.
 
 For a `--plugin-dir` session, options live in the host's user settings file under
 `pluginConfigs["bigquery-agent-analytics-mod@inline"].options`, or use the
@@ -625,7 +631,7 @@ JSON-typed values on `tabledata.insertAll` (its `_json_to_json` converter is
 
 ### Sample rows
 
-[`examples/sample-rows.jsonl`](examples/sample-rows.jsonl) is the insertAll
+[`examples/sample-rows.jsonl`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/plugins/claude_code_mod/examples/sample-rows.jsonl) is the insertAll
 payload of a fixture session (`tests/sample-rows.test.ts`): a prompt, four
 model requests, Read, Agent (an Explore subagent), Edit and Bash (with a
 permission prompt), and session end. It holds the rows the stubbed insertAll
@@ -1071,99 +1077,23 @@ column. Treat the dataset like the transcripts it mirrors.
   Text that only starts with a bracket or a quote (`[1/3] Building`,
   `[INFO] ready`, `"Hi," she said.`) does not look like JSON; `[1] first`
   does, and is dropped.
-* **Free text (best effort):** text has no structure to go by; every string
-  that is not JSON is scanned, all of what is kept (see Truncation). Removed: private-key blocks,
-  provider-style `sk-` keys, AWS access key ids, Google API keys and OAuth
-  tokens, GitHub/GitLab/npm/Slack/Stripe tokens, JWTs and `Bearer`/`Basic`
-  credentials; in URLs, the user-info part and credential-named query or
-  fragment parameters, and incoming-webhook URLs (Slack, Discord, Office)
-  whole; after a credential name followed by `:` or `=` (a header, a
-  YAML or `.env` line, a JSON key in text, an assignment, a command-line flag
-  such as `--password=…` or `-Dssl.password=…`, a name the shell joins from
-  quoted, escaped or continued parts, such as `"DB_PASS"WORD=…`, also right
-  after another option's `=`, as in `--from-literal=pass"word"=…`, or in the
-  list of names and values after one, after any character no name has, as
-  in `--set-env-vars=ORDINARY=x,DB_PASS"WORD"=…` (`:`, `;` in quotes,
-  gcloud's `^:^` and others alike; after an expansion such as `$VALUE` or
-  `${VALUE}`, whose value after `${` runs to the end of the text, after a
-  value of any length, and after a command substitution, such as
-  `VERSION=$(git rev-parse HEAD),DB_PASS"WORD"=…`), before an escaped `=`, as in
-  `--password\=…` and `--from-literal=PASSWORD\=…`, and with
-  the continuation as a JSON string in a log line encodes it, `\\\n` or
-  `\\\r\n`) everything to the end of the line, whatever it holds,
-  including a redaction marker (`?name=` / `&name=`
-  only to the next `&`, or through its shell word if that is longer when a
-  quote, `$` or a backtick opens the value or `;` or `&` comes before the
-  name), and on to the next lines after a line continuation,
-  or as far as the value runs on: after `=` with no space around it (a flag or
-  an assignment), through the whole shell word it starts, to the end of the
-  line that word ends on (a flag's value, to a `;`, `|`, `&`, `<`, `>` or `)`
-  that ends its word: `--password=x;echo ok` keeps `;echo ok`); otherwise
-  through a quote that opens the value, to the end of the
-  line it closes on (anything left open, to the end of the text); and after a
-  long command-line option whose name's last part is a credential word
-  (`--password VALUE`, `--api-key "VALUE"`, `--pass -VALUE`, `"--password"
-  VALUE`, the value after a line continuation too, the option's word read as
-  the shell passes it: line continuations (JSON-encoded ones too), quotes,
-  backslashes and ANSI-C escapes in its name, and an `=` inside a quote) its
-  whole shell argument.
-  A credential's shell word is read by a few simple rules only: plain and
-  backslash-escaped characters, single-quoted parts and double-quoted parts
-  with no expansion, joined, up to the first space, tab, line break, `;`,
-  `|`, `&`, `<`, `>` or `)` outside them; a quote it starts in (an option in
-  a quote, `"--password a b"`) is put back after the marker. Where its end
-  cannot be told with certainty, the value runs to the end of the text, and
-  everything after it goes with it: when it holds or starts with `$(…)`,
-  `${…}`, `$[…]`, a backtick, `$'…'`, `$"…"`, `(`, `<(` or `>(`, a line
-  continuation, a quote that does not close, a single quote written `"'"`
-  (as a single-quoted command string writes its own, `'"'"'`, whose quotes a
-  scan after an apostrophe reads the other way round), an escaped quote,
-  backslash, `$` or backtick outside quotes (which a command string's quoting
-  can leave in), or a redirection before it (`--password 2>&1 VALUE`); when
-  the quote it starts in closes with more of its word joined after it
-  (`"PASSWORD="a b"`, where that quote may be an outer string's, such as
-  JSON's); and when that
-  quote is not known: a scan of the whole text from its start (quotes,
-  backslashes, `$'…'` and comments only) and the value's word read alone
-  from its start disagree on it, as after an apostrophe or an odd quote in
-  prose, in a command string another shell runs (`sh -c "… --password
-  \"a b\" …"`, `ssh host '… --password a b'`) or after an escaped quote in
-  the option's word; or the scan cannot read the text before it (past any
-  `<<` other than `<<<`, such as a here-document's, a comment that ends in a
-  backslash, a `#` right after an operator, or a backtick that does not
-  close). So `It's here: cli --password 'a b' --verbose` keeps only
-  `It's here: cli --password [REDACTED]`, and `cli --password $(cat f)
-  --verbose` only `cli --password [REDACTED]`: that over-redaction is the
-  price of never keeping part of a credential. A line continuation with no
-  space beside it right after a credential option's name glues what follows
-  to it, which goes to the end of the text too (`--password\` and `VALUE`,
-  `--pass\` and `"word" VALUE`), unless it carries the name on into another
-  option (`--password\` and `-stdin`, `"--password"\` and `"-stdin"`). A word
-  of a command string another shell runs (one that holds a backslash, or a
-  single quote written `"'"`) is also read with every quote, backslash and
-  line continuation dropped, to find an option or a name the shell would
-  pass (`\"--pass\"word`, `--pa\\ssword`, `'\''--password'\''=`,
-  `'"'"'--password'"'"'`), whose value then runs to the end of the text. A
-  backslash inside a quote the word opens itself is literal, so `cli
-  '--pa\ssword' x` is left as it is, unless a command before it in its
-  command runs its arguments, joined, as shell code (`ssh host`, `eval`,
-  `watch`), where that shell reads it again. A value that is one
-  redaction marker alone is kept, and a word that starts with `--` is no
-  value (`--password-stdin`, also as `--password\` and `"-stdin"`, and
-  `--token-file` keep theirs). A name is a credential's when
-  one of its parts, split on punctuation and camelCase and compared without
-  case, is `pass`, `passwd`, `password`, `passphrase`, `pwd`, `secret`,
-  `token`, `auth`, `authorization`, `cookie`, `session`, `key`, `apikey`,
-  `credential(s)`, `private`, `bearer`, `jwt`, `sig` or `signature`, also
-  with trailing digits or a plural `s` (`api_keys`, `access_tokens`,
-  `sessions`, `token2`, `passphrase2`); when a part ends with one of the
-  longer words (`rootpwd`, `accesstoken`); or when it has ADK's `temp:`
-  prefix. Names on the allowlist, such as the token counts (`max_tokens`,
-  `input_tokens`), are not credential names. JSON that follows other text in
-  a string (a file view with line numbers, a log line) is free text, where a
-  value nested on a later line than its credential name is missed. Code can
-  lose a little more than the credential (`token: string` loses its type
-  name). Patterns cannot catch every secret; do not rely on them alone.
+* **Free text (best effort):** non-JSON strings are scanned for credential
+  patterns. Simple literal forms such as `--password=VALUE`,
+  `--password VALUE`, and `https://user:VALUE@example.test/path` are
+  redacted. The URL example has exactly one `@` and no shell syntax.
+  In a comma-separated list such as
+  `--set-env-vars=VERSION=v,DB_PASSWORD=VALUE`, a plain credential name of
+  at most 100 characters is covered when the entire list is one shell word
+  containing only letters, digits, `_`, `.`, `-`, `,` and `=`. Names start
+  with a letter or `_`; values are nonempty literals. Names matching a
+  provider-token pattern are excluded: that earlier pass can rewrite the
+  name before its value is checked. Listed names such as `max_tokens` do
+  not trigger redaction themselves; an earlier credential in the same list
+  can consume their values too. Quoting, escapes, expansions, other list
+  separators and more complex URLs are best effort; see
+  [Limitations](#limitations) for concrete misses and
+  [#546](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/546)
+  for sanitizer hardening. These rules do not identify every secret.
 * **Diagnostics:** error text from BigQuery, the token command or the file
   system goes through the same free-text rules before it is cut (including
   where BigQuery's error messages and per-row insert errors are first held to
@@ -1748,6 +1678,62 @@ the same views count other producers' requests but not their tokens.
   arguments, structured results and JSON output, and anything else under a
   key that is not on the list, are recorded as `[REDACTED]`. Free text is
   scanned for credentials on a best-effort basis.
+* Free-text parsing is best effort. Detailed shell cases — names joined
+  from quoted, escaped or continued parts, ANSI-C `$'…'` names, command
+  strings another shell runs, substitutions, expansions, and non-comma list
+  separators — are outside the plain-list coverage above. The readers have
+  different bounds; the command-string heuristic inspects only the first
+  400 characters of a word. The following examples document misses on
+  main; [#546](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/546)
+  hardens several of them. A miss in any wrapper can leave the value in a
+  row, log or dead-letter file.
+  * A provider-token-shaped name can be rewritten before the named-value
+    pass sees it. For example,
+    `--set-env-vars=VERSION=v,github_pat_PRODUCTION_ACCESS_TOKEN=CanaryValue`
+    keeps `CanaryValue` after the name becomes a redaction marker.
+  * Listed entries after a credential can be swallowed with its value:
+    `--set-env-vars=DB_PASSWORD=x,max_tokens=1024` becomes
+    `--set-env-vars=DB_PASSWORD=[REDACTED]`.
+  * A plain name longer than 100 characters can be missed. For example,
+    `--set-env-vars=VERSION=v,` followed by 92 `A` characters and
+    `_PASSWORD=CanaryValue` has a 101-character name; its value is kept.
+  * ANSI-C option names containing a decoded NUL are not truncated as the
+    shell truncates them: `cli $'--password\0' CanaryValue`,
+    `cli $'--password\x00ignored' CanaryValue`,
+    `cli --pass$'\0'word CanaryValue` and
+    `cli $'--oauth2-bearer\0ignored' CanaryValue` keep the value.
+  * URL user-info stops at the first `@`, so
+    `curl https://u:prefix@CanaryValue@example.test/path` keeps the password
+    suffix `CanaryValue`.
+  * Query-style values whose opening quote is escaped can keep a suffix:
+    `sh -c "see q?token=\"abc CanaryValue\""` keeps `CanaryValue`.
+    In URLs, shell syntax can outlast the URL scan:
+    `curl https://example.test/?token=$(printf %s CanaryValue)`,
+    `curl https://example.test/?token=$'a CanaryValue'`,
+    `curl https://example.test/?token=a\ CanaryValue` and
+    `curl https://example.test/?token=${VALUE:-a CanaryValue}` keep a suffix.
+  * A quoted separator after a substitution
+    (`VERSION=$(printf v)","DB_PASS"WORD"=CanaryValue`), an expansion with a
+    blank (`VERSION=${VALUE:-a b},DB_PASS"WORD"=CanaryValue`), or escaped
+    backticks (``VERSION=a\`b,DB_PASS"WORD"=CanaryValue`` in a JSON log)
+    can hide the following list name.
+  * A substitution followed by more value text
+    (`VERSION=$(printf v)-dev,DB_PASS"WORD"=CanaryValue`), or a space in an
+    earlier value (`VERSION="a b",DB_PASS"WORD"=CanaryValue` in a command
+    string), can hide the following list name.
+  * Declared delimiters and allowlisted suffixes need care:
+    `^1^VERSION=v1pass=CanaryValue`, `^::^VERSION=$(printf v)::DB_PASS"WORD"=CanaryValue`,
+    `^.^VERSION=max.tokens=CanaryValue`, and
+    `"^#^VERSION=v#DB_PASSWORD=first&CanaryValue"` can keep a value or suffix.
+    Shell-spelled delimiters (`^$'\x71'^VERSION=vqpass=CanaryValue`),
+    quoted option names (`--set-env-"vars"=^q^VERSION=vqpass=CanaryValue`),
+    and values resembling delimiters
+    (`"^q^VERSION=hello ^x^qpass=CanaryValue"`) can also be missed.
+  * An ANSI-C list name after an earlier substitution
+    (`VERSION=$(printf v)-dev,$'DB_PASS\x57ORD'=CanaryValue` in a JSON log),
+    or after 400 literal characters in an earlier value, can be missed.
+    Locale-quoted names (`DB_PASS$"WORD"=CanaryValue` and
+    `cli --pass$"word" CanaryValue`) are also best effort.
 * Timestamps have millisecond precision.
 * An organization's web-fetch policy or `allowManagedModsOnly` can stop the
   mod; `/bqaa-status` and the debug log (start the CLI with `--debug`) say why.
