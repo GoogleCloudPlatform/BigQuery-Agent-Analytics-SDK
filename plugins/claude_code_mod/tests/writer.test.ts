@@ -544,7 +544,7 @@ test('a dead-letter file over the 4 MiB read limit is reported, not skipped sile
   expect(await statusText($)).toMatch(new RegExp(`1 file\\(s\\) over the 4 MiB read limit, not replayed: ${name.replace(/\./g, '\\.')}`))
 })
 
-test('a failing token command never puts credential text in a file, the status line, a log or a command', { options: { ...OPTIONS, accessTokenCommand: 'fake-token-tool --profile argcanaryprofile' } }, async ($, on) => {
+test('the failing token-command fixture keeps its canaries out of the exercised files and diagnostics', { options: { ...OPTIONS, accessTokenCommand: 'fake-token-tool --profile argcanaryprofile' } }, async ($, on) => {
   const world = setUp(on)
   world.processReply = { exitCode: 1, stdout: '', stderr: `ERROR: refresh failed for ${LEAKY}\n` }
   await startSession($)
@@ -571,7 +571,7 @@ test('a failing token command never puts credential text in a file, the status l
   expect(world.logs.some(l => l.startsWith('bqaa backfill:') && l.includes('[REDACTED'))).toBe(true)
 })
 
-test('BigQuery error text never puts credential text in a file, the status line, a log or a command', { options: OPTIONS }, async ($, on) => {
+test('the scripted API error fixture keeps its canaries out of the exercised files and diagnostics', { options: OPTIONS }, async ($, on) => {
   const world = setUp(on)
   const refusal = { status: 403, text: JSON.stringify({ error: { code: 403, message: `Access Denied: ${LEAKY}`, errors: [{ reason: 'accessDenied' }] } }) }
   const invalid = { status: 200, text: JSON.stringify({ insertErrors: [{ index: 0, errors: [{ reason: 'invalid', message: `bad value ${LEAKY}` }] }] }) }
@@ -721,7 +721,7 @@ const CUT_TOKEN = ['gh', 'p_', 'x'.repeat(36)].join('')
 // Its first characters, which must not survive a cut either.
 const FRAGMENT = CUT_TOKEN.slice(0, 4)
 
-test('a credential across the length cap of BigQuery error text is removed whole, everywhere', { options: OPTIONS }, async ($, on) => {
+test('the API-error credential fixture crossing the length cap is removed in the exercised sinks', { options: OPTIONS }, async ($, on) => {
   const world = setUp(on)
   // The token ends just past the 1,000-character cap on error messages.
   world.replies = [{ status: 403, text: JSON.stringify({ error: { message: `${'e'.repeat(950)} ${CUT_TOKEN}`, errors: [{ reason: 'accessDenied' }] } }) }]

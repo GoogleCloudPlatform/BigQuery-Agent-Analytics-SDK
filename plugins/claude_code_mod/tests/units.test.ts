@@ -15,6 +15,9 @@
 // Unit tests of the mod's plain functions: redaction, truncation, row
 // building, configuration, the BigQuery answer classifier and the
 // dead-letter file format.
+// Redaction checks cover the fixtures and generated combinations below.
+// A passing fixture does not establish other shell spellings or nesting depths;
+// tests labelled "known gap" deliberately assert current missed/extra redaction.
 
 import { expect, test } from 'claude-code/testing'
 
@@ -39,7 +42,7 @@ const redact = (text: string) => {
 // has its provider's prefix and length, so every pattern has to fire.
 const fake = (prefix: readonly string[], filler: string, length: number): string => prefix.join('') + filler.repeat(length).slice(0, length)
 
-test('well-known credential shapes are redacted', () => {
+test('selected credential-shape fixtures are redacted', () => {
   const pemLabel = ['RSA', 'PRIVATE', 'KEY'].join(' ')
   const cases: [string, RegExp][] = [
     [`key ${fake(['sk-', 'ant-api03-'], 'x', 40)}`, /\[REDACTED:api-key\]/],
@@ -68,7 +71,7 @@ test('well-known credential shapes are redacted', () => {
   }
 })
 
-test('ordinary text, token counts and hashes are left alone', () => {
+test('selected ordinary text, token counts and hashes are left alone', () => {
   const keep = [
     'max_tokens: 1024',
     '"input_tokens": 512, "output_tokens": 77',
@@ -134,7 +137,7 @@ test('credential names in text: words, endings, stems, plural and numbered forms
   for (const name of ['pass', 'PASS', 'MY_PWD', 'db_pwd', 'rootpwd', 'password', 'dbPassword', 'passwordHash', 'passwd', 'passphrase', 'secret', 'clientSecret', 'token', 'accessToken', 'X-Amz-Security-Token', 'accesstoken', 'auth', 'Authorization', 'Proxy-Authorization', 'cookie', 'Set-Cookie', 'cookies', 'sessionCookie', 'session', 'session_id', 'key', 'api_key', 'X-Api-Key', 'APIKey', 'apikey', 'privatekey', 'credential', 'credentials', 'private', 'private_key', 'bearer', 'jwt', 'sig', 'signature', 'temp:scratch', 'api_keys', 'API_KEYS', 'access_tokens', 'signing_keys', 'decryption_keys', 'sessions', 'token2', 'secret1', 'passphrase2', 'PASSWORDS2', 'apiKeys']) {
     expect([name, isSensitiveKey(name)]).toEqual([name, true])
   }
-  // Listed token counts are not credentials, however they are written.
+  // The listed token-count spellings below are not credential names.
   for (const name of ['max_tokens', 'MAX_TOKENS', 'maxTokens', 'inputTokens', 'prompt_tokens', 'cache_read_input_tokens', 'total_tokens', 'tokenizer', 'author', 'authors', 'oauth_client_id', 'monkey', 'monkeys', 'keyboard', 'signal', 'file_path', 'command', 'description', 'content', 'role', 'url', 'page']) {
     expect([name, isSensitiveKey(name)]).toEqual([name, false])
   }
@@ -155,7 +158,7 @@ test('credential names in text match by stem: prefixed names, signatures and sig
   expect(redact(named)).toEqual({ out: ['signature', 'my_api_key', 'openaiApiKey', 'x_amz_security_token', 'sessionCookie', 'db_passphrase'].map(name => `${name}: [REDACTED]`).join('\n'), count: 6 })
 })
 
-test('diagnostics are redacted before they are cut, so a cut never leaves part of a credential', () => {
+test('diagnostic token and password fixtures redact before the tested cuts', () => {
   // The token starts four characters before the cut: cut first and redacted
   // second, its first characters would be too short to match, and would show.
   const token = ['ya29', 'x'.repeat(40)].join('.')
@@ -235,7 +238,7 @@ test('deep, wide and circular values stay bounded', () => {
   expect(sanitize(loop, limitsFor(16384), newStats())).toEqual({ text: 'a', result: '[CIRCULAR]' })
 })
 
-test('a multi-megabyte payload costs the hot path a few milliseconds', () => {
+test('the 2,760,000-character payload fixture stays below 100 ms', () => {
   const big = { file_path: 'dump.sql', content: 'INSERT INTO t VALUES (1, \'password=hunter2\');\n'.repeat(60_000) }
   const started = performance.now()
   const built = buildRow({
@@ -428,7 +431,7 @@ test('URLs: user-info, credential-named parameters and webhook URLs', () => {
   }
 })
 
-test('JSON in text is parsed and held to the same list, however deeply it is encoded', () => {
+test('selected nested JSON encodings obey the allowlist or are dropped at the budget', () => {
   const secret = 'z'.repeat(20)
   const once = JSON.stringify({ command: 'ls', password: secret })
   const twice = JSON.stringify({ text: once })
@@ -450,7 +453,7 @@ test('JSON in text is parsed and held to the same list, however deeply it is enc
   expect(deepStats.truncated).toBe(true)
 })
 
-test('JSON-looking text that cannot be parsed whole is dropped and marked, however it opens', () => {
+test('selected invalid and oversized JSON-looking openers are dropped and marked', () => {
   const secret = 'z'.repeat(20)
   const pad = 'p'.repeat(30_000)
   const nested = `{"password": [\n  "${secret}"\n], "pad": "${pad}"}`
@@ -664,7 +667,7 @@ test('credentials in command-line flags are removed, with = or a space before th
   expect(out('tool --token [REDACTED:github-token] --verbose')).toBe('tool --token [REDACTED:github-token] --verbose')
 })
 
-test('a long string never passes on a credential its scan window cut short', () => {
+test('the long-string fixtures drop the credential crossing the scan-window boundary', () => {
   // A long credential line shrinks the scanned window by more than the scan
   // margin; a token at the window's end, cut there, no longer matches its
   // pattern. The window's last part, scanned only for what comes before it,
@@ -704,7 +707,7 @@ test('a credential name right after a non-credential option is still matched', (
   for (const [input, want] of cases) expect(redactText(input, stats)).toBe(want)
 })
 
-test('a credential option loses its whole shell argument, whatever it holds', () => {
+test('selected credential option values lose their tested shell arguments', () => {
   const stats = newStats()
   const cases: [string, string][] = [
     ['docker login --password "prefix\\"SecretSuffix" registry.example.com', 'docker login --password [REDACTED] registry.example.com'],
@@ -777,7 +780,7 @@ test('continued and expanded flag credentials stay out of rows and diagnostics',
   }
 })
 
-test('a value a substitution holds runs to the end of the text, whatever shell code is in it', () => {
+test('selected substitution-held values redact to the end of the text', () => {
   const stats = newStats()
   // The substitution's end is not read (its comments, here-documents, arrays
   // and case statements included), so whatever follows the value goes too.
@@ -963,7 +966,7 @@ test('a quote that closes around a credential name leaves the value outside it',
   expect(redactText(`cli "a b"--password=x"y z" --verbose\necho ordinary`, stats)).toBe(`cli "a b"--password=[REDACTED]`)
 })
 
-test('line continuations, quotes and backslashes inside an option name are read through', () => {
+test('selected continued, quoted and backslash-spelled option names redact', () => {
   const stats = newStats()
   const cases: [string, string][] = [
     ['cli --pass\\\nword SecretSuffix --verbose', 'cli --pass\\\nword [REDACTED] --verbose'],
@@ -1148,7 +1151,7 @@ test('a value in a command string another shell runs, or after an escape its quo
   }
 })
 
-test('a word is read whole across quotes, backslashes and line continuations', () => {
+test('selected quoted, backslash-spelled and continued words redact', () => {
   const stats = newStats()
   const cases: [string, string][] = [
     // A continuation with no space beside it right after a credential's name
@@ -1293,7 +1296,7 @@ test('substitution-held credentials stay out of rows, errors, requests, dead let
   }
 })
 
-test('round 8 and 9 review inputs leave no part of a credential in any path; a value whose end is not certain takes all that follows it', () => {
+test('round 8 and 9 fixtures remove the canary in the eight tested paths', () => {
   const token = `ghp_${'0'.repeat(36)}`
   const cases: [string, string][] = [
     // Round 8, A: prose, an odd quote or a lone backtick before a quoted value.
@@ -1366,7 +1369,7 @@ test('round 8 and 9 review inputs leave no part of a credential in any path; a v
   }
 })
 
-test('a generated sweep: in each credential form, a value an expansion, a quote or a continuation opens runs to the end of the text in every path', () => {
+test('generated value-opener fixtures redact to the end in the eight tested paths', () => {
   // Values whose end the simple rules cannot tell.
   const values = [
     '$(printf %s pre SecretSuffix)',
@@ -1398,7 +1401,7 @@ test('a generated sweep: in each credential form, a value an expansion, a quote 
   }
 })
 
-test('a credential whose end the simple rules tell keeps what follows it, in every path', () => {
+test('selected credential-value endings preserve the tested suffixes in eight paths', () => {
   // Each command, what is left of it, and text after its value that is kept.
   const cases: [string, string, string[]][] = [
     ['cli --password plain --verbose', 'cli --password [REDACTED] --verbose', ['--verbose']],
@@ -1432,7 +1435,7 @@ test('a credential whose end the simple rules tell keeps what follows it, in eve
   }
 })
 
-test('text with no credential is left as it is, byte for byte, in every path', () => {
+test('ordinary-text fixtures remain byte-identical in the eight tested paths', () => {
   const commands = [
     'printf %s case',
     'cat <<EOF\nhi\nEOF\necho ordinary',
@@ -1486,7 +1489,7 @@ test('text with no credential is left as it is, byte for byte, in every path', (
   }
 })
 
-test('round 19 review inputs leave no part of a credential in any path; a value whose end is not certain takes all that follows it', () => {
+test('round 19 fixtures remove the canary in the eight tested paths', () => {
   const token = `ghp_${'0'.repeat(36)}`
   // A log line that quotes a command as a JSON string.
   const json = (command: string): string => JSON.stringify(command).slice(1, -1)
@@ -1562,7 +1565,7 @@ test('round 19 review inputs leave no part of a credential in any path; a value 
   }
 })
 
-test('a generated sweep: after prose that the quote scan misreads, an option word in each spelling loses each value in every path', () => {
+test('generated prose-prefix and option-spelling fixtures remove canaries in eight paths', () => {
   const prefixes = ['', `It's set up. Run: `, `Use a 27" screen; `, `He measured 13" and wrote:\n`, `error: can't connect; `, "Here's the command:\n```\n",
     'Use the ` key; ', "fn f(x: &'static str) {}\n", `He said "use\n`, `x=\nprintf '<%s>' "\${x:-it's}"; `]
   const words = ['--password', '"--pass"word', '--pass"word"', "--pass''word", '-\\-password', "$'--pa\\x73sword'", '--pa\\ssword', '"--password"', "'--password'",
@@ -1609,7 +1612,7 @@ function pathTimes(command: string, maxPayloadChars = 16384, diagnosticChars = 1
   return times
 }
 
-test('a long run of line continuations as a JSON string encodes them, and other 100,000-character runs, cost each path a few milliseconds', () => {
+test('selected encoded continuations and 100,000-character runs stay below 100 ms per tested path', () => {
   // The review's input: a log line that quotes, as a JSON string, line
   // continuations as JSON encodes them (`\\\n`, then `\\\r\n`), 100,000
   // characters with no credential; then the same with no log line around it.
@@ -1639,7 +1642,7 @@ test('a long run of line continuations as a JSON string encodes them, and other 
   }
 })
 
-test('an escaped `=` after a credential name, and a credential name spelled in pieces in a list of names and values, leave no part of the credential in any path', () => {
+test('selected escaped-equals and split list-name fixtures remove canaries in eight paths', () => {
   const json = (command: string): string => JSON.stringify(command).slice(1, -1)
   const cases: [string, string][] = [
     // An escaped `=` after an option's name, or after a name after another
@@ -1675,7 +1678,7 @@ test('an escaped `=` after a credential name, and a credential name spelled in p
   }
 })
 
-test('a generated sweep: in a list of names and values, after each separator and each option that takes a list, a credential name spelled in pieces loses its value in every path', () => {
+test('the 1,332 generated separator, option and name fixtures remove canaries in eight paths', () => {
   const inputs: string[] = []
   // Unquoted, after each separator: each spelling the shell joins into a
   // credential's name, the `=` escaped too.
@@ -1714,7 +1717,7 @@ test('a generated sweep: in a list of names and values, after each separator and
   for (const input of inputs) for (const text of pathsOf(input)) expect(text).not.toMatch(/Secret|Suffix/)
 })
 
-test('a list of names and values that each `;` starts again, a backslash in it, is read once: 100,000 characters cost each path a few milliseconds, at the payload cap and whole', () => {
+test('the three repeated-semicolon fixtures stay below 100 ms per path at both payload caps', () => {
   // The review's inputs: `A=x;\A=x;` repeated (one literal backslash), cut
   // to 100,000 characters, and 1,111 of them then spaces to 100,000, with no
   // credential; and a printf of 10,002 characters of it in double quotes.
@@ -1730,12 +1733,12 @@ test('a list of names and values that each `;` starts again, a backslash in it, 
   }
 })
 
-test('in a list of names and values, a credential name spelled in pieces after an expansion, a command substitution or a long value loses its value in every path', () => {
+test('selected list-name fixtures after expansions, substitutions and long values remove canaries in eight paths', () => {
   const json = (command: string): string => JSON.stringify(command).slice(1, -1)
   const long = 'a'.repeat(210)
   const cases: [string, string][] = [
     // The review's inputs: the shell passes `…,DB_PASSWORD=SecretSuffix`
-    // whatever the expansion holds, and after a value of 210 characters. A
+    // for the expansion spellings below, and after a value of 210 characters. A
     // value after `${` runs to the end of the text: where the word goes on
     // past `${…}` cannot be told.
     ['cli --set-env-vars=ORDINARY=${VALUE},DB_PASS"WORD"=SecretSuffix', 'cli --set-env-vars=ORDINARY=${VALUE},DB_PASS"WORD"=[REDACTED]'],
@@ -1776,7 +1779,7 @@ test('in a list of names and values, a credential name spelled in pieces after a
   }
 })
 
-test('a generated sweep: in a list of names and values, after each expansion, command substitution and long value, a credential name spelled in pieces loses its value in every path', () => {
+test('generated earlier-value and list-name fixtures remove canaries in eight paths', () => {
   const inputs: string[] = []
   // What comes before the credential's entry: expansions, alone or among
   // other text, in quotes or not, command substitutions, and values and
@@ -1799,7 +1802,7 @@ test('a generated sweep: in a list of names and values, after each expansion, co
   for (const input of inputs) for (const text of pathsOf(input)) expect(text).not.toMatch(/Secret|Suffix/)
 })
 
-test('in a list of names and values, after any delimiter (`#` or `?`, a quote, a backslash, a dot or digits, gcloud\'s own of any characters) and after a command substitution or an expansion, a credential name loses its value in every path', () => {
+test('selected delimiter, substitution and expansion fixtures remove canaries in eight paths', () => {
   const long = 'a'.repeat(201)
   const cases: [string, string][] = [
     // After `#` or `?` (gcloud's `^#^`, `^?^`), a value that `&` or `;`
@@ -1969,7 +1972,7 @@ test('lists of names and values with these delimiters and no credential name in 
   }
 })
 
-test('names in lists after any delimiter are read once per text: 100,000-character lists cost each path a few milliseconds, at the payload cap and whole', () => {
+test('selected long-list fixtures stay below 100 ms per path at both payload caps', () => {
   const texts = [
     // Long runs of quoted pieces with a credential piece in them before each
     // `=`, a gcloud list with a letter for its delimiter, a run of digits
@@ -2015,7 +2018,7 @@ const wrappersOf = (command: string): string[] => [
   `INFO ${JSON.stringify({ command })}`,
 ]
 
-test('round 3 review inputs: a value a marker or a provider token starts, an escaped `=` in a command string, gcloud\'s delimiter as the shell passes it, a delimiter-looking value and a long quoted name lose all of the credential in every path and wrapper', () => {
+test('round 3 fixtures remove canaries in the listed wrappers and eight paths', () => {
   const token = `ghp_${'a1B2'.repeat(9)}`
   const cases: [string, string][] = [
     // P1-1: a value that a marker or a provider token's redaction starts.
@@ -2034,7 +2037,7 @@ test('round 3 review inputs: a value a marker or a provider token starts, an esc
     // P1-4: a value that looks like gcloud's delimiter does not set the
     // list's apart.
     ['gcloud run deploy svc --set-env-vars="^#^VERSION=^x^#DB_PASSWORD=first&SecretSuffix"', 'gcloud run deploy svc --set-env-vars="^#^VERSION=^x^#DB_PASSWORD=[REDACTED]"'],
-    // P2-1: a name's pieces past any length.
+    // P2-1: the 1,044-character name with 520 empty quote fragments.
     [`gcloud run deploy svc --set-env-vars=^::^VERSION=$(printf v)::pa${'""'.repeat(520)}ss=SecretSuffix`, `gcloud run deploy svc --set-env-vars=^::^VERSION=$(printf v)::pa${'""'.repeat(520)}ss=[REDACTED]`],
   ]
   for (const [input, want] of cases) {
@@ -2061,12 +2064,12 @@ test('an allowlisted name the shell joins from quoted parts, and a backslash its
   }
 })
 
-// Review rounds r5, r6 and r7: every reported list/URL shape, in the four
-// wrappers and eight output paths. The cases this build redacts must keep
+// Selected list/URL fixtures from review rounds r5, r6 and r7, in the
+// wrappersOf wrappers and eight output paths. The cases this build redacts must keep
 // no part of the canary anywhere; the cases still open (tracked in the
 // README's Limitations and in #546) are pinned here so a later fix trips
 // this test and both places get updated together.
-test('r5/r6/r7 review shapes: fixed cases redact in every path and wrapper; open cases are pinned', () => {
+test('r5/r6/r7 fixtures redact in the listed wrappers and paths; known gaps are pinned', () => {
   const G = 'gcloud run deploy svc --set-env-vars='
   const token = 'gh' + 'p_' + 'Z'.repeat(36)
   const long = 'a'.repeat(400)
@@ -2079,7 +2082,8 @@ test('r5/r6/r7 review shapes: fixed cases redact in every path and wrapper; open
     `${G}VERSION=$[1 + 2],DB_PASS"WORD"=CanaryValue`,
     // r7 P1-4: an escaped literal backtick in the list.
     `${G}VERSION=a\\\`b,DB_PASS"WORD"=CanaryValue`,
-    // r6: a space in an earlier value; the broad delimiter/substitution set.
+    // r6: the quoted-name sibling after a space; selected delimiters/substitutions.
+    // The backslash-name sibling is pinned separately as a known gap.
     `${G}VERSION="a b",DB_PASS"WORD"=CanaryValue`,
     `${G}VERSION=$(git rev-parse HEAD),DB_PASS"WORD"=CanaryValue`,
     `${G}^::^VERSION=v::DB_PASS"WORD"=CanaryValue`,
@@ -2126,7 +2130,7 @@ test('r5/r6/r7 review shapes: fixed cases redact in every path and wrapper; open
 })
 
 
-test('plain credential names at and beyond both forward-reader bounds lose their values in every path and wrapper', () => {
+test('plain credential names at the nine tested lengths redact in listed wrappers and paths', () => {
   for (const length of [100, 101, 199, 200, 201, 202, 1024, 4097, 16000]) {
     const name = 'a'.repeat(length - 8) + 'password'
     expect(isSensitiveKey(name)).toBe(true)
@@ -2135,7 +2139,7 @@ test('plain credential names at and beyond both forward-reader bounds lose their
   }
 })
 
-test('short ANSI-C list names after substitutions and escapes decode once through each wrapper, in every path', () => {
+test('the two short ANSI-C list spellings after three earlier values redact in listed wrappers and paths', () => {
   for (const before of ['$(printf v)-dev', 'a\\ b', '"$(printf v)"']) {
     for (const name of [String.raw`$'DB_PASS\x57ORD'`, String.raw`$'\x61'\uthorization`]) {
       const command = `gcloud run deploy svc --set-env-vars=VERSION=${before},${name}=CanaryValue`
@@ -2164,7 +2168,7 @@ test('a quote inside an ordinary name and literal backslashes inside the word\'s
   }
 })
 
-test('escaped spaces in URL parameter values no longer leave a suffix, including variable-prefixed values', () => {
+test('the two escaped-space URL fixtures remove the canary suffix', () => {
   for (const command of [String.raw`curl https://example.test/?token=a\ CanaryValue`, String.raw`curl https://example.test/?token=$TOKEN\ CanaryValue`]) {
     for (const wrapped of wrappersOf(command)) for (const text of pathsOf(wrapped)) expect([wrapped, text.includes('CanaryValue')]).toEqual([wrapped, false])
   }
@@ -2328,7 +2332,39 @@ test('ANSI-C names and closed quotes redact through combined shell and JSON wrap
   }
 })
 
-test('opposite quotes inside a substitution pattern are literal characters in the name', () => {
+test('known gap: a backslash-spelled list name after a quoted space survives double-quoted commands and INFO JSON logs', () => {
+  const command = String.raw`gcloud run deploy svc --set-env-vars=VERSION="a b",DB_PA\SSWORD=CanaryValue`
+  const inputs = [
+    `sh -c "${command.replace(/[\\"$`]/g, c => `\\${c}`)}"`,
+    `INFO ${JSON.stringify({ command })}`,
+  ]
+  const commandOf = (content: string | undefined): string => (JSON.parse(content ?? '{}') as { args?: { command?: string } }).args?.command ?? ''
+  for (const input of inputs) {
+    expect(redact(input)).toEqual({ out: input, count: 0 })
+    const [once, content = 'null', error, request = '{}', file = '', lines = '[]', diagnostic, twice] = pathsOf(input)
+    // Known gap, also missed on main: assert the unchanged commands and canary.
+    expect([once, twice, error, diagnostic]).toEqual([input, input, `command failed: ${input}`, `command failed: ${input}`])
+    expect(commandOf(JSON.parse(content) as string)).toBe(input)
+    expect(commandOf((JSON.parse(request) as { rows: { json: { content: string } }[] }).rows[0]?.json.content)).toBe(input)
+    expect(commandOf((parseFile(file).lines[0] as { row: { content: string } } | undefined)?.row.content)).toBe(input)
+    expect(commandOf((JSON.parse(lines) as { row: { content: string } }[])[0]?.row.content)).toBe(input)
+    for (const text of pathsOf(input)) expect(text.includes('CanaryValue')).toBe(true)
+  }
+})
+
+test('known gap: hash, colon and percent substitution delimiters after an assignment over-redact the pattern and filename', () => {
+  for (const prefix of ['x=1 ', 'FOO=bar ']) {
+    for (const delimiter of ['#', ':', '%']) {
+      const pattern = `sed 's${delimiter}pass"word"=.*${delimiter}x${delimiter}' config.ini`
+      expect(redact(pattern)).toEqual({ out: pattern, count: 0 })
+      const input = prefix + pattern
+      expect(redact(input)).toEqual({ out: `${prefix}sed 's${delimiter}pass"word"=[REDACTED]'`, count: 1 })
+      for (const text of pathsOf(input)) expect(text.includes('config.ini')).toBe(false)
+    }
+  }
+})
+
+test('the two slash-delimited substitution patterns preserve literal opposite quotes with listed prefixes', () => {
   for (const prefix of ['', 'echo x=1\n', 'x=1; ', 'x=1 | ', 'x=1 && ', 'x=1 ', 'echo x=1 ']) {
     for (const pattern of [`sed 's/pass"word"=.*/x/' config.ini`, `sed "s/pass'word'=.*/x/" config.ini`]) {
       for (const input of prefix === '' ? wrappersOf(pattern) : [prefix + pattern]) expect(redactText(input, newStats())).toBe(input)
@@ -2337,7 +2373,7 @@ test('opposite quotes inside a substitution pattern are literal characters in th
 })
 
 
-test('the documented list after a credential is swallowed with its value', () => {
+test('known gap: the documented max_tokens entry is swallowed with the earlier credential value', () => {
   const command = '--set-env-vars=DB_PASSWORD=x,max_tokens=1024'
   expect(redactText(command, newStats())).toBe('--set-env-vars=DB_PASSWORD=[REDACTED]')
 })
@@ -2357,7 +2393,7 @@ test('adjacent empty quote fragments keep active escapes through combined shell 
   }
 })
 
-test('only odd unquoted backslash runs escape URL parameter delimiters', () => {
+test('the six tested backslash counts follow parity for the six URL parameter suffixes', () => {
   for (const delimiter of ['&page=2', '#section', ';page=2', ' ordinary', '\tordinary', '\nordinary']) {
     for (const count of [0, 1, 2, 3, 4, 6]) {
       const input = '/path?token=CanaryValue' + '\\'.repeat(count) + delimiter
@@ -2405,7 +2441,7 @@ test('long overlapping delimiter matches preserve ordinary names and find quoted
   }
 })
 
-test('encoded whitespace before an escaped credential name stays conservative in every shell and log layer', () => {
+test('six whitespace fixtures before three escaped-name spellings redact through 65 listed wrappers', () => {
   for (const blank of ['\t', '\n', '\r', '\f', ' \t', '\t ']) {
     for (const name of [String.raw`--pa\ssword`, String.raw`''--pa\ssword`, String.raw`'--pa'\ssword`]) {
       const command = `cli${blank}${name}=CanaryValue`
@@ -2416,7 +2452,7 @@ test('encoded whitespace before an escaped credential name stays conservative in
   }
 })
 
-test('a complete declared delimiter is required before a short credential suffix', () => {
+test('five declared delimiters preserve the listed ordinary suffixes and redact three credential spellings', () => {
   for (const delimiter of [',x', ':x', '#x', '::ab', ',xy']) {
     for (const name of ['ordinaryxpass', 'ordinaryabpass', 'ordinaryxypass']) {
       const command = `cli --set-env-vars=^${delimiter}^VERSION=v${delimiter}${name}=banana`

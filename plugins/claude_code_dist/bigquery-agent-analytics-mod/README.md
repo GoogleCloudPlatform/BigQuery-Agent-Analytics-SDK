@@ -1023,8 +1023,8 @@ The table receives your prompts, the model's visible answers, tool arguments
 and tool results (the text the model read), cut to `maxPayloadChars` per
 column. Treat the dataset like the transcripts it mirrors.
 
-* **Allowlist:** in `content` and `attributes`, at any depth, and in JSON
-  found in their text, a value is kept only under a key on the list in
+* **Allowlist:** in `content`, `attributes` and parsed JSON text, within the
+  depth and character budgets, a value is kept only under a key on the list in
   [`hooks/lib/allowlist.ts`](hooks/lib/allowlist.ts); under any other key it
   becomes `[REDACTED]`, whatever it is: a string, a number, a boolean, a list
   or an object (`null` stays). Keys are compared by their words, so
@@ -1067,8 +1067,9 @@ column. Treat the dataset like the transcripts it mirrors.
 * **JSON in text:** text that looks like JSON (an object; a list that opens
   with a value, whether an object, a list, a string, a number, `true`,
   `false` or `null`, or is empty; or a JSON-encoded string whose text opens
-  an object or a list) is parsed and held to the same list, at any encoding
-  depth, then encoded again (compactly). Text that looks like JSON but
+  an object or a list) is parsed and held to the same list within the
+  character and depth budgets, then encoded again (compactly). Deeper
+  content is dropped and marked. Text that looks like JSON but
   cannot be parsed whole (longer than the 24,064 characters parsed at the
   default `maxPayloadChars`, or not valid JSON, such as a document cut short
   or JSON lines) is dropped: it becomes `[TRUNCATED: N chars of JSON text
@@ -1081,11 +1082,13 @@ column. Treat the dataset like the transcripts it mirrors.
   patterns. Simple literal forms such as `--password=VALUE`,
   `--password VALUE`, and `https://user:VALUE@example.test/path` are
   redacted. The URL example has exactly one `@` and no shell syntax.
-  In a comma-separated list such as
-  `--set-env-vars=VERSION=v,DB_PASSWORD=VALUE`, a plain credential name of
-  at most 100 characters is covered when the entire list is one shell word
-  containing only letters, digits, `_`, `.`, `-`, `,` and `=`. Names start
-  with a letter or `_`; values are nonempty literals. Names matching a
+  Plain-list probes include
+  `--set-env-vars=VERSION=v,DB_PASSWORD=VALUE`, selected credential names
+  and lengths, and nonempty literal values in single shell words made of
+  letters, digits, `_`, `.`, `-`, `,` and `=`. The direct name reader has a
+  100-character bound; separate tests exercise longer names through the
+  list fallback. These examples do not establish coverage of every word
+  made from those characters. Names matching a
   provider-token pattern are excluded: that earlier pass can rewrite the
   name before its value is checked. Listed names such as `max_tokens` do
   not trigger redaction themselves; an earlier credential in the same list
@@ -1097,8 +1100,11 @@ column. Treat the dataset like the transcripts it mirrors.
   of 8,454 list commands across five wrappers (direct, both `sh -c` quote
   forms, JSON-string logs and INFO JSON logs) and eight output paths. This
   is a finite regression set, not coverage of arbitrary shell syntax.
-  Additional regressions combine encoded whitespace and selected name spellings
-  with nested command strings and JSON logs. These rules do not identify every secret.
+  Additional regressions combine selected encoded whitespace and name
+  spellings with nested command strings and JSON logs. A backslash-spelled
+  name after an earlier quoted space remains a known gap in double-quoted
+  command strings and INFO JSON logs. These rules can miss credentials or
+  redact ordinary text; see the pinned examples in Limitations.
 * **Diagnostics:** error text from BigQuery, the token command or the file
   system goes through the same free-text rules before it is cut (including
   where BigQuery's error messages and per-row insert errors are first held to
@@ -1175,15 +1181,15 @@ written, cut short or changed is not complete; a writer and a replayer
 interleaved lose no row; a file without its record is kept and reported),
 backfill, the exit spill and its time bound, multibyte rows held to the
 file limit in bytes, dry run,
-redaction (the allowlist at any depth and in JSON inside text, whole values
-of any type, JSON nested in strings to any encoding depth, JSON-looking text
-too long or broken to parse however it opens, key names that hold a
-credential (in nested objects, JSON text and tool arguments), credential
-names in text with their parts, endings, plural and numbered forms, URLs and
-webhook URLs,
-credential-named lines whatever they hold, credential options and
-assignments whose value ends cleanly (the rest kept) or cannot be told
-(redacted to the end of the text, with a generated sweep of value openers),
+redaction (allowlist fixtures within the depth budget and dropped deeper
+values, scalar/list/object values, selected nested JSON encodings and
+JSON-looking openers that are too long or broken to parse, selected
+credential-bearing key names in nested objects, JSON text and tool
+arguments, and fixtures for credential-name parts, endings, plural and
+numbered forms, URLs and webhook URLs),
+selected credential-named lines, options and assignments with literal,
+quoted, expanded or uncertain value endings (including a generated sweep
+of value openers),
 credential names in lists of names and values (generated sweeps of
 separators, spellings and options, and of expansions, command
 substitutions and long values before them; the 8,454-command matrix filters
@@ -1193,11 +1199,14 @@ and before an escaped `=`,
 selected long continuations, lists (one that each `;` starts again too),
 overlapping suffixes, uppercase names, repeated literal `\=` and `$(`
 with per-path timing assertions at both payload caps,
-text with no credential left as it is (including locale-quoted ordinary names), values past 5,000 characters and
-past the scanned window, credentials across a length cap, every diagnostic
-sink, and each review probe through capture, delivery and the dead-letter
-file),
-truncation (identifying fields survive a cut), refused environment reads
+selected ordinary text left unchanged (including locale-quoted names),
+values past 5,000 characters and past the scanned window, credential
+fixtures across a length cap, the exercised diagnostic sinks, and selected
+review probes through capture, delivery and the dead-letter file.
+Known-gap tests pin missed redaction after a quoted space and over-redaction
+of non-`/` substitution patterns after an assignment; passing those tests
+records the current gaps rather than successful redaction.
+The tests also cover truncation (identifying fields survive a cut), refused environment reads
 (`BQAA_ACCESS_TOKEN` included), a re-fired `session.start`, and
 configuration.
 
@@ -1703,8 +1712,22 @@ the same views count other producers' requests but not their tokens.
   lookup only: value and name readers can scan farther, and a detected
   credential can preserve later lines when its value ends unambiguously.
   The command-string heuristic reads only the first 400 characters of a word. These bounds do not constitute
-  general shell parsing. Known misses are tracked in
+  general shell parsing. Known gaps are tracked in
   [#546](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/546):
+  * **Known gap — backslash-spelled name after a quoted space:**
+    `sh -c "gcloud run deploy svc --set-env-vars=VERSION=\"a b\",DB_PA\\SSWORD=CanaryValue"`
+    and `INFO {"command":"gcloud run deploy svc --set-env-vars=VERSION=\"a b\",DB_PA\\SSWORD=CanaryValue"}`
+    are returned unchanged by the free-text redactor, retaining
+    `CanaryValue` in the eight tested output paths. The backslash/quote
+    heuristic restarts at the earlier raw space. Main also misses these
+    two inputs; the quoted-name sibling `DB_PASS"WORD"` is a separate
+    positive fixture.
+  * **Known gap — non-`/` substitution delimiters after an assignment:**
+    `x=1 sed 's#pass"word"=.*#x#' config.ini` becomes
+    `x=1 sed 's#pass"word"=[REDACTED]'`, losing the pattern suffix and
+    filename. The pinned `#`, `:` and `%` examples after `x=1` or `FOO=bar`
+    have this over-redaction. The literal-quote guard special-cases `/`;
+    tests preserving `/` patterns do not establish other-delimiter coverage.
   * A provider-token-shaped name can be rewritten before the named-value
     pass sees it. For example,
     `--set-env-vars=VERSION=v,github_pat_PRODUCTION_ACCESS_TOKEN=CanaryValue`
