@@ -1,5 +1,19 @@
 > **Note:** This web application was previously located at `dashboard_v2/` at the repository root.
 
+## Migrating Existing Deployments (Vercel)
+
+If you have an existing Vercel deployment originally connected to `dashboard_v2/`:
+
+1. Open your project in the **Vercel Dashboard**.
+2. Navigate to **Settings** → **General** → **Root Directory**.
+3. Update the Root Directory from `dashboard_v2` to `dashboards/web` and click **Save**.
+4. If you use local `.env` or `service-account.json` credential files, ensure they are placed inside `dashboards/web/` (or configured under **Settings** → **Environment Variables** in Vercel).
+5. Trigger a redeploy (from **Deployments** → **Redeploy**, or by pushing a new commit).
+
+For new Vercel deployments, specify **Root Directory** as `dashboards/web` during repository import.
+
+---
+
 # BigQuery Dashboard
 
 This dashboard is designed to be deployed once per customer. Each customer
@@ -141,7 +155,7 @@ Rename it:
 service-account.json
 ```
 
-Place it in the project root directory.
+Place it in the `dashboards/web/` directory (`./service-account.json`).
 
 ---
 

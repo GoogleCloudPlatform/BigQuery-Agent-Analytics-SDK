@@ -22,8 +22,8 @@
 ### Task 1: Pure BigQuery Console URL parsing
 
 **Files:**
-- Modify: `dashboard/looker_studio/tools/test_web_configurator.mjs`
-- Modify: `dashboard/looker_studio/docs/configurator.mjs`
+- Modify: `dashboards/looker_studio/tools/test_web_configurator.mjs`
+- Modify: `dashboards/looker_studio/docs/configurator.mjs`
 
 **Interfaces:**
 - Consumes: `PROJECT_RE`, `DATASET_RE`, `TABLE_RE`, and `splitQualifiedTableId(value)`.
@@ -41,7 +41,7 @@ duplicate marker sequences, and invalid components.
 Run:
 
 ```bash
-node dashboard/looker_studio/tools/test_web_configurator.mjs
+node dashboards/looker_studio/tools/test_web_configurator.mjs
 ```
 
 Expected: failure because `parseBigQueryConsoleTableUrl` and the unified
@@ -60,7 +60,7 @@ only through this parser; route non-URL input through
 Run:
 
 ```bash
-node dashboard/looker_studio/tools/test_web_configurator.mjs
+node dashboards/looker_studio/tools/test_web_configurator.mjs
 ```
 
 Expected: all existing and new parser assertions pass.
@@ -68,8 +68,8 @@ Expected: all existing and new parser assertions pass.
 ### Task 2: Browser paste and committed-input integration
 
 **Files:**
-- Modify: `dashboard/looker_studio/tools/test_web_configurator.mjs`
-- Modify: `dashboard/looker_studio/docs/app.mjs`
+- Modify: `dashboards/looker_studio/tools/test_web_configurator.mjs`
+- Modify: `dashboards/looker_studio/docs/app.mjs`
 
 **Interfaces:**
 - Consumes: `parseTableReference(value)` and `parseTableReferenceForInput(value)` from Task 1.
@@ -87,7 +87,7 @@ changed and the paste is not intercepted.
 Run:
 
 ```bash
-node dashboard/looker_studio/tools/test_web_configurator.mjs
+node dashboards/looker_studio/tools/test_web_configurator.mjs
 ```
 
 Expected: URL paste is not intercepted and the fields are not distributed.
@@ -105,7 +105,7 @@ single mutation and refresh path.
 Run:
 
 ```bash
-node dashboard/looker_studio/tools/test_web_configurator.mjs
+node dashboards/looker_studio/tools/test_web_configurator.mjs
 ```
 
 Expected: URL and existing qualified-ID UI cases pass.
@@ -113,7 +113,7 @@ Expected: URL and existing qualified-ID UI cases pass.
 ### Task 3: User guidance and final verification
 
 **Files:**
-- Modify: `dashboard/looker_studio/docs/index.html`
+- Modify: `dashboards/looker_studio/docs/index.html`
 - Modify: `tests/test_looker_studio_dashboard.py`
 
 **Interfaces:**
@@ -147,7 +147,7 @@ fields as the source of truth.
 Run:
 
 ```bash
-node dashboard/looker_studio/tools/test_web_configurator.mjs
+node dashboards/looker_studio/tools/test_web_configurator.mjs
 pytest -q tests/test_looker_studio_dashboard.py
 bash autoformat.sh
 git diff --check
