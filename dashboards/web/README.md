@@ -1,3 +1,5 @@
+> **Note:** This web application was previously located at `dashboard_v2/` at the repository root.
+
 # BigQuery Dashboard
 
 This dashboard is designed to be deployed once per customer. Each customer
@@ -51,8 +53,8 @@ Before running the project, ensure you have:
 Clone the repository:
 
 ```bash
-git clone https://github.com/Saherpathan/BigQuery-Agent-Analytics-SDK.git
-cd BigQuery-Agent-Analytics-SDK/dashboard_v2
+git clone https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK.git
+cd BigQuery-Agent-Analytics-SDK/dashboards/web
 ```
 
 Install dependencies:
@@ -72,7 +74,7 @@ GCP_PROJECT_ID=your-project-id
 GOOGLE_APPLICATION_CREDENTIALS=./service-account.json
 ```
 
-For a ready-to-edit template, see `dashboard_v2/.env.example`. For step-by-step
+For a ready-to-edit template, see `dashboards/web/.env.example`. For step-by-step
 local setup and troubleshooting, see `LOCAL_SETUP.md` at the repository root.
 
 ## Production / hosted deployments
