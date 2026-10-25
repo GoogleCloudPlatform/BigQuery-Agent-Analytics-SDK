@@ -2446,3 +2446,13 @@ test('encoded whitespace and local quote and delimiter guards stay within the ti
     }
   }
 })
+
+test('cached list spellings keep their own quote context across commands', () => {
+  const credential = 'cli --set-env-vars=VERSION=v,pass"word"=CanaryValue'
+  const pattern = `sed 's/pass"word"=.*/x/' config.ini`
+  const redacted = 'cli --set-env-vars=VERSION=v,pass"word"=[REDACTED]'
+  for (const [input, want] of [[credential + '\n' + pattern, redacted + '\n' + pattern],
+    [pattern + '\n' + credential, pattern + '\n' + redacted]] as const) {
+    expect(redactText(input, newStats())).toBe(want)
+  }
+})

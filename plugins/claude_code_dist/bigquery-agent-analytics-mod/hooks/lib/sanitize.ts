@@ -321,8 +321,19 @@ function nameRuns(text: string): NameRuns {
   return runs
 }
 
+// Without backslashes, a bounded native search needs none of the continuation
+// tables. The boundary still prevents matching the tail of a longer name.
+const PLAIN_NAMED_VALUE = /(^|[^A-Za-z0-9_.-])-{0,2}([A-Za-z_][A-Za-z0-9_.-]{0,99})["']?[ \t]*([:=])[ \t]*/g
+
 // The first name and separator (see NamedValue) at or after `from`.
-function namedValue(text: string, from: number, runs: NameRuns): NamedValue | null {
+function namedValue(text: string, from: number, runs: NameRuns | undefined): NamedValue | null {
+  if (runs === undefined) {
+    PLAIN_NAMED_VALUE.lastIndex = from
+    const m = PLAIN_NAMED_VALUE.exec(text)
+    if (m === null) return null
+    return { index: m.index, boundary: m[1] as string, name: m[2] as string,
+      separator: m.index + m[0].lastIndexOf(m[3] as string), end: m.index + m[0].length }
+  }
   for (let i = from; i < text.length; i += 1) {
     const found = (i === 0 ? namedAt(text, 0, '', runs) : null) ?? (namePlace(text, i) === 0 ? namedAt(text, i + 1, text[i] as string, runs) : null)
     if (found !== null) return found
@@ -588,7 +599,7 @@ function afterJoins(text: string, i: number): number {
 
 function redactNamedValues(text: string, stats: SanitizeStats): string {
   if (!/[:=]/.test(text)) return text
-  const runs = nameRuns(text)
+  const runs = text.includes('\\') ? nameRuns(text) : undefined
   let states: Uint8Array | undefined
   // gcloud's lists (see delimitedLists), found once: null where none is.
   let lists: DelimitedLists | null | undefined
@@ -1070,12 +1081,15 @@ const JOINER = /(?:^|[\s(`/])(?:ssh|eval|watch)(?=[ \t])/g
 function joinedArguments(text: string): Uint8Array {
   const marks = new Uint8Array(text.length + 1)
   JOINER.lastIndex = 0
-  let m = JOINER.exec(text)
-  let on = 0
-  for (let i = 0; i <= text.length; i += 1) {
-    for (; m !== null && m.index + m[0].length <= i; m = JOINER.exec(text)) on = 1
-    marks[i] = on
-    if (/[\n;&|]/.test(text[i] ?? '')) on = 0
+  const ends = /[\n;&|]/g
+  let through = -1
+  for (let m = JOINER.exec(text); m !== null; m = JOINER.exec(text)) {
+    const start = m.index + m[0].length
+    if (start <= through) continue
+    ends.lastIndex = start
+    through = ends.exec(text)?.index ?? text.length
+    // The separator itself is still in the preceding command's interval.
+    marks.fill(1, start, through + 1)
   }
   return marks
 }
@@ -1398,7 +1412,7 @@ function localeQuoteAt(text: string, i: number): boolean {
 // whether a name they hold is a credential's, using the declared delimiter
 // to distinguish entry boundaries from pieces of the same name. The pieces before two `=` never
 // overlap, so each is read once, however long.
-function listName(text: string, e: number, localEquals: number, delimiter: string, names: Map<string, boolean>, reader: () => ReturnType<typeof backslashReader>): { from: number; credential: boolean } {
+function listName(text: string, e: number, commandEquals: (end: number) => number, delimiter: string, names: Map<string, boolean>, reader: () => ReturnType<typeof backslashReader>): { from: number; credential: boolean } {
   let r = e
   while (r > 0) {
     const c = text[r - 1] as string
@@ -1446,10 +1460,12 @@ function listName(text: string, e: number, localEquals: number, delimiter: strin
   }
   // Only an assignment in this command can introduce an undeclared list.
   // Earlier commands cannot change whether a quote is literal.
-  const standalone = localEquals >= r
-  // With no escapes and no context-dependent literal quotes, repeated name
-  // spellings have the same classification throughout this text.
-  const cacheKey = raw.length <= 200 && !raw.includes('\\') && (delimiter !== '' || !standalone) ? `${delimiter.length}:${delimiter}${raw}` : undefined
+  const standalone = commandEquals(e) >= r
+  // Without escapes, repeated spellings in the same quote context share
+  // their final classification, including rejected literal quotes.
+  const cacheable = raw.length <= 200 && !raw.includes('\\')
+  const context = cacheable && standalone && delimiter === '' ? reader().quote(r) : NONE
+  const cacheKey = cacheable ? `${standalone ? 1 : 0}:${context}:${delimiter.length}:${delimiter}${raw}` : undefined
   const cached = cacheKey === undefined ? undefined : names.get(cacheKey)
   if (cached !== undefined) return { from: r, credential: cached }
   // An outer single-quoted command string represents its apostrophes with
@@ -1547,16 +1563,19 @@ function listName(text: string, e: number, localEquals: number, delimiter: strin
   // There is no name-length cap here. Each segment before an `=` is read
   // once, including long names that the bounded forward readers skip.
   const credential = sensitiveListSuffix(chars, starts)
-  if (cacheKey !== undefined && names.size < 4096) names.set(cacheKey, credential)
-  if (!credential) return { from: r, credential: false }
-  // Quote analysis is needed only for a possible credential. Ordinary list
-  // entries avoid building and traversing the whole-text quote cache.
+  const finish = (credential: boolean): { from: number; credential: boolean } => {
+    if (cacheKey !== undefined && names.size < 4096) names.set(cacheKey, credential)
+    return { from: r, credential }
+  }
+  if (!credential) return finish(false)
+  // Check the remaining quote transitions only for a possible credential;
+  // repeated spellings already reused their final result above.
   for (const at of quotes) {
     const q = reader().quote(at)
-    if ((text[at] === '"' && q === SINGLE) || (text[at] === "'" && q === DOUBLE)) return { from: r, credential: false }
+    if ((text[at] === '"' && q === SINGLE) || (text[at] === "'" && q === DOUBLE)) return finish(false)
   }
-  for (const at of slashes) if (reader().literal(at)) return { from: r, credential: false }
-  return { from: r, credential: true }
+  for (const at of slashes) if (reader().literal(at)) return finish(false)
+  return finish(true)
 }
 
 // Classify all possible suffixes without slicing and normalizing overlapping
@@ -1725,8 +1744,22 @@ function redactListNames(text: string, stats: SanitizeStats): string {
   const reader = (): ReturnType<typeof backslashReader> => (backslashes ??= backslashReader(text, scanned, joinedAt))
   let out = ''
   let copied = 0
-  let scopeAt = 0
-  let localEquals = firstEquals
+  // Read command boundaries lazily, once. Plain list names need no quote
+  // context, and native searches skip long ordinary spans between matches.
+  const boundaries = /[=;\n|&]|\\[nr]/g
+  let boundary: RegExpExecArray | null | undefined
+  let localEquals = text.length
+  const commandEquals = (end: number): number => {
+    if (boundary === undefined) boundary = boundaries.exec(text)
+    while (boundary !== null && boundary.index < end) {
+      const at = boundary.index
+      const c = boundary[0]
+      if (c === '=') localEquals = Math.min(localEquals, at)
+      else if (!(c === '\n' && (text[at - 1] === '\\' || (text[at - 1] === '\r' && text[at - 2] === '\\')))) localEquals = text.length
+      boundary = boundaries.exec(text)
+    }
+    return localEquals
+  }
   for (let e = firstEquals; e !== -1; e = text.indexOf('=', e + 1)) {
     const start = e + 1
     if (start >= text.length) continue
@@ -1738,16 +1771,7 @@ function redactListNames(text: string, stats: SanitizeStats): string {
     if (text[e - 1] === '\\' && reader().ownLiteral(e - 1)) continue
     if (lists === undefined) lists = delimitedLists(text)
     const delimiter = delimiterAt(lists, e)
-    // Advance once across the input, including values consumed by a prior
-    // redaction. Scope undeclared lists to the current command. Parentheses
-    // and blanks can belong to substitutions in a preceding list value.
-    for (; scopeAt < e; scopeAt += 1) {
-      const c = text[scopeAt] as string
-      if ((c === '\n' && text[scopeAt - 1] !== '\\' && !(text[scopeAt - 1] === '\r' && text[scopeAt - 2] === '\\')) || c === ';' || c === '|' || c === '&' ||
-        (text[scopeAt - 1] === '\\' && (c === 'n' || c === 'r'))) localEquals = e
-      else if (c === '=' && localEquals > scopeAt) localEquals = scopeAt
-    }
-    const name = listName(text, e, localEquals, delimiter, names, reader)
+    const name = listName(text, e, commandEquals, delimiter, names, reader)
     if (!name.credential) continue
     // A literal backslash before `=` cannot introduce an assignment.
     if (text[e - 1] === '\\' && reader().literal(e - 1)) continue
