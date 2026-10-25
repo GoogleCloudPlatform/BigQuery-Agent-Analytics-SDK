@@ -1305,7 +1305,7 @@ function redactOptionWords(text: string, stats: SanitizeStats): string {
 // and `$'` before it, and takes a name to start at their first letter or `_`
 // (past digits, dots and dashes, as after `^.^` or `^1^`), after quotes or
 // backslashes only when the declared delimiter uses them, and after the
-// declared delimiter's trailing letters and digits. Where any such
+// complete declared delimiter. Where any such
 // name is a credential's (a listed name and its parts are not), its value
 // goes, read as a flag's or an assignment's (see readValue): what came before
 // the entry does not matter.
@@ -1398,7 +1398,7 @@ function localeQuoteAt(text: string, i: number): boolean {
 // whether a name they hold is a credential's, using the declared delimiter
 // to distinguish entry boundaries from pieces of the same name. The pieces before two `=` never
 // overlap, so each is read once, however long.
-function listName(text: string, e: number, firstEquals: number, delimiter: string, names: Map<string, boolean>, reader: () => ReturnType<typeof backslashReader>): { from: number; credential: boolean } {
+function listName(text: string, e: number, localEquals: number, delimiter: string, names: Map<string, boolean>, reader: () => ReturnType<typeof backslashReader>): { from: number; credential: boolean } {
   let r = e
   while (r > 0) {
     const c = text[r - 1] as string
@@ -1426,7 +1426,6 @@ function listName(text: string, e: number, firstEquals: number, delimiter: strin
       // Removing a delimiter prefix cannot create a stem or an ending that
       // the whole name lacks. Only a whole credential word at the end of a
       // part can become sensitive when its prefix is removed.
-      const suffix = /[A-Za-z0-9]+$/.exec(delimiter)?.[0] ?? ''
       const lower = raw.toLowerCase()
       let from = 0
       for (const part of nameParts(raw)) {
@@ -1436,7 +1435,7 @@ function listName(text: string, e: number, firstEquals: number, delimiter: strin
           const at = start + form.length - word.length
           // Leading underscores do not change the remaining name's parts.
           for (let candidate = at; candidate >= 0; candidate -= 1) {
-            if (candidate >= suffix.length && raw.startsWith(suffix, candidate - suffix.length) && isSensitiveKey(raw.slice(candidate))) return { from: r, credential: true }
+            if (r + candidate >= delimiter.length && text.startsWith(delimiter, r + candidate - delimiter.length) && isSensitiveKey(raw.slice(candidate))) return { from: r, credential: true }
             if (raw[candidate - 1] !== '_') break
           }
         }
@@ -1445,9 +1444,9 @@ function listName(text: string, e: number, firstEquals: number, delimiter: strin
       return { from: r, credential: false }
     }
   }
-  // A preceding assignment can introduce a list whose separator resembles
-  // a quote. Keep its conservative reading even without a known delimiter.
-  const standalone = firstEquals >= r
+  // Only an assignment in this command can introduce an undeclared list.
+  // Earlier commands cannot change whether a quote is literal.
+  const standalone = localEquals >= r
   // With no escapes and no context-dependent literal quotes, repeated name
   // spellings have the same classification throughout this text.
   const cacheKey = raw.length <= 200 && !raw.includes('\\') && (delimiter !== '' || !standalone) ? `${delimiter.length}:${delimiter}${raw}` : undefined
@@ -1463,7 +1462,8 @@ function listName(text: string, e: number, firstEquals: number, delimiter: strin
   const slashes: number[] = []
   let open = true
   let ansi = false
-  const suffix = /[A-Za-z0-9]+$/.exec(delimiter)?.[0] ?? ''
+  const suffix = delimiter
+  const prefix = text.slice(Math.max(0, r - suffix.length), r)
   // Prefix lengths let overlapping delimiter matches advance once through
   // the source, instead of re-comparing the whole suffix at every letter.
   const prefixes = new Uint16Array(suffix.length)
@@ -1472,15 +1472,16 @@ function listName(text: string, e: number, firstEquals: number, delimiter: strin
     if (suffix[i] === suffix[matched]) matched += 1
     prefixes[i] = matched
   }
-  let scanned = 0
+  let scanned = -prefix.length
   let matched = 0
   const followsSuffix = (at: number): boolean => {
     if (suffix === '') return false
     while (scanned < at) {
-      const c = source[scanned] as string
+      const c = (scanned < 0 ? prefix[scanned + prefix.length] : source[scanned]) as string
+      scanned += 1
+      if (c === '"' || c === "'" || c === '\\') continue
       while (matched > 0 && (matched === suffix.length || c !== suffix[matched])) matched = prefixes[matched - 1] as number
       if (c === suffix[matched]) matched += 1
-      scanned += 1
     }
     return matched === suffix.length
   }
@@ -1629,9 +1630,16 @@ function sensitiveListSuffix(chars: string, starts: number[]): boolean {
 function backslashReader(text: string, getStates: () => Uint8Array, rerun: () => Uint8Array): { word: (at: number) => number; literal: (at: number) => boolean; ownLiteral: (at: number) => boolean; quote: (at: number) => number } {
   const words = new Int32Array(text.length + 1)
   let word = 0
+  let uncertain = false
   for (let i = 0; i <= text.length; i += 1) {
-    if (i > 0 && (isSpace(text[i - 1] as string) || isOperator(text[i - 1] as string))) word = i
-    words[i] = word
+    if (i > 0 && (isSpace(text[i - 1] as string) || isOperator(text[i - 1] as string))) {
+      word = i
+      uncertain = false
+    }
+    // An apparent word can span encoded whitespace, or a continued name.
+    // Neither reading can prove that its quotes keep a backslash literal.
+    if (text[i] === '\\' && /[tnrf]/.test(text[i + 1] ?? '')) uncertain = true
+    words[i] = uncertain ? -1 : word
   }
   // Cache every traversed position, including those before the most recent
   // query: checking an escaped equals can precede checking its name.
@@ -1640,7 +1648,7 @@ function backslashReader(text: string, getStates: () => Uint8Array, rerun: () =>
   let pos = 0
   let inner = NONE
   let escaped = false
-  const start = (at: number): number => at - (words[at] as number) > 4096 ? -1 : (words[at] as number)
+  const start = (at: number): number => (words[at] as number) < 0 || at - (words[at] as number) > 4096 ? -1 : (words[at] as number)
   const quote = (k: number): number => {
     const from = start(k)
     if (from === -1 || rerun()[k] === 1) return NONE
@@ -1704,7 +1712,7 @@ function redactListNames(text: string, stats: SanitizeStats): string {
   if (firstEquals === -1) return text
   // Without escapes or ANSI-C decoding, removing quotes exposes every
   // possible credential piece. Text with none needs no list-name fallback.
-  if (!text.includes('\\') && !text.includes("$'") && !PIECE_IN_NAME.test(text.replace(/["']/g, ''))) return text
+  if (!text.includes('\\') && !text.includes("$'") && !PIECE_IN_NAME.test(text.replace(/\$?["']/g, ''))) return text
   let states: Uint8Array | undefined
   let urls: number[] | undefined
   const names = new Map<string, boolean>()
@@ -1717,6 +1725,8 @@ function redactListNames(text: string, stats: SanitizeStats): string {
   const reader = (): ReturnType<typeof backslashReader> => (backslashes ??= backslashReader(text, scanned, joinedAt))
   let out = ''
   let copied = 0
+  let scopeAt = 0
+  let localEquals = firstEquals
   for (let e = firstEquals; e !== -1; e = text.indexOf('=', e + 1)) {
     const start = e + 1
     if (start >= text.length) continue
@@ -1728,7 +1738,16 @@ function redactListNames(text: string, stats: SanitizeStats): string {
     if (text[e - 1] === '\\' && reader().ownLiteral(e - 1)) continue
     if (lists === undefined) lists = delimitedLists(text)
     const delimiter = delimiterAt(lists, e)
-    const name = listName(text, e, firstEquals, delimiter, names, reader)
+    // Advance once across the input, including values consumed by a prior
+    // redaction. Scope undeclared lists to the current command. Parentheses
+    // and blanks can belong to substitutions in a preceding list value.
+    for (; scopeAt < e; scopeAt += 1) {
+      const c = text[scopeAt] as string
+      if ((c === '\n' && text[scopeAt - 1] !== '\\' && !(text[scopeAt - 1] === '\r' && text[scopeAt - 2] === '\\')) || c === ';' || c === '|' || c === '&' ||
+        (text[scopeAt - 1] === '\\' && (c === 'n' || c === 'r'))) localEquals = e
+      else if (c === '=' && localEquals > scopeAt) localEquals = scopeAt
+    }
+    const name = listName(text, e, localEquals, delimiter, names, reader)
     if (!name.credential) continue
     // A literal backslash before `=` cannot introduce an assignment.
     if (text[e - 1] === '\\' && reader().literal(e - 1)) continue
@@ -1736,7 +1755,7 @@ function redactListNames(text: string, stats: SanitizeStats): string {
     // A name written whole after `?`, `&`, `#` or `;` is redactNamedValues'
     // (a query string's value ends at its `&` there), and a URL's query or
     // fragment parameter redactUrl's.
-    if (/[?&#;]/.test(before) && (/^-{0,2}[A-Za-z_][A-Za-z0-9_.-]{0,99}$/.test(text.slice(name.from, e)) || inUrl((urls ??= urlSpans(text)), e))) continue
+    if (/[?&#;]/.test(before) && ((delimiter === '' && /^-{0,2}[A-Za-z_][A-Za-z0-9_.-]{0,99}$/.test(text.slice(name.from, e))) || inUrl((urls ??= urlSpans(text)), e))) continue
     // Build the whole-text word cache only when escape analysis needs it.
     // A single word-start lookup is bounded and does not allocate that cache.
     const from = backslashes === undefined ? wordStart(text, name.from) : backslashes.word(name.from)

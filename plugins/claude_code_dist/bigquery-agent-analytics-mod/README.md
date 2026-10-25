@@ -1097,7 +1097,8 @@ column. Treat the dataset like the transcripts it mirrors.
   of 8,454 list commands across five wrappers (direct, both `sh -c` quote
   forms, JSON-string logs and INFO JSON logs) and eight output paths. This
   is a finite regression set, not coverage of arbitrary shell syntax.
-  These rules do not identify every secret.
+  Additional regressions combine encoded whitespace and selected name spellings
+  with nested command strings and JSON logs. These rules do not identify every secret.
 * **Diagnostics:** error text from BigQuery, the token command or the file
   system goes through the same free-text rules before it is cut (including
   where BigQuery's error messages and per-row insert errors are first held to
@@ -1742,7 +1743,9 @@ the same views count other producers' requests but not their tokens.
     at most 255 characters between the opening and closing `^`.
   * Locale-quoted option names with separate values
     (`cli --pass$"word" CanaryValue`) remain best effort. Locale-quoted list
-    names such as `DB_PASS$"WORD"=CanaryValue` have explicit regression cases.
+    names such as `DB_PASS$"WORD"=CanaryValue` and
+    `p$"a"ssword=CanaryValue` have explicit regression cases; these finite
+    examples do not establish coverage of every locale-quoted spelling.
     ANSI-C names are
     checked by explicit regression cases, including names after earlier
     substitutions or escapes and beyond the forward heuristic's window;

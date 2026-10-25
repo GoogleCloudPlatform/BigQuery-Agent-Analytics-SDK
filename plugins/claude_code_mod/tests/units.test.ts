@@ -1633,7 +1633,9 @@ test('a long run of line continuations as a JSON string encodes them, and other 
   ]
   for (const text of texts) {
     expect(text.length > 99_000).toBe(true)
-    for (const [path, ms] of pathTimes(text)) expect([path, ms < 100]).toEqual([path, true])
+    for (const [cap, diagnostic] of [[16_384, 1_000], [220_000, 110_000]] as const) {
+      for (const [path, ms] of pathTimes(text, cap, diagnostic)) expect([cap, path, ms < 100]).toEqual([cap, path, true])
+    }
   }
 })
 
@@ -2307,7 +2309,7 @@ test('locale-quoted ordinary names stay within the timing bound at both payload 
 })
 
 test('locale-quoted credential list names redact through combined shell and log wrappers', () => {
-  for (const name of ['DB_PASS$"WORD"', '$"password"', 'api_$"key"']) {
+  for (const name of ['DB_PASS$"WORD"', 'p$"a"ssword', '$"password"', 'api_$"key"']) {
     for (const before of ['v', '$(printf v)', 'a'.repeat(400)]) {
       const command = `cli --set-env-vars=VERSION=${before},${name}=CanaryValue`
       for (const input of combinedWrappers(command)) for (const text of pathsOf(input)) expect([input, text.includes('CanaryValue')]).toEqual([input, false])
@@ -2327,8 +2329,10 @@ test('ANSI-C names and closed quotes redact through combined shell and JSON wrap
 })
 
 test('opposite quotes inside a substitution pattern are literal characters in the name', () => {
-  for (const command of [`sed 's/pass"word"=.*/x/' config.ini`, `sed "s/pass'word'=.*/x/" config.ini`]) {
-    for (const input of wrappersOf(command)) expect(redactText(input, newStats())).toBe(input)
+  for (const prefix of ['', 'echo x=1\n', 'x=1; ', 'x=1 | ', 'x=1 && ']) {
+    for (const pattern of [`sed 's/pass"word"=.*/x/' config.ini`, `sed "s/pass'word'=.*/x/" config.ini`]) {
+      for (const input of prefix === '' ? wrappersOf(pattern) : [prefix + pattern]) expect(redactText(input, newStats())).toBe(input)
+    }
   }
 })
 
@@ -2397,6 +2401,48 @@ test('long overlapping delimiter matches preserve ordinary names and find quoted
     for (const [name, secret] of [['mon"k"ey', false], ['build_"number"', false], ['DB_PASS"WORD"', true], ['__"key"', true]] as const) {
       const input = `cli --set-env-vars=^${delimiter}^VERSION=$(printf v)${delimiter}${name}=CanaryValue`
       for (const wrapped of quoteWrappers(input)) for (const text of pathsOf(wrapped)) expect([wrapped, text.includes('CanaryValue')]).toEqual([wrapped, !secret])
+    }
+  }
+})
+
+test('encoded whitespace before an escaped credential name stays conservative in every shell and log layer', () => {
+  for (const blank of ['\t', '\n', '\r', '\f', ' \t', '\t ']) {
+    for (const name of [String.raw`--pa\ssword`, String.raw`''--pa\ssword`, String.raw`'--pa'\ssword`]) {
+      const command = `cli${blank}${name}=CanaryValue`
+      for (const input of combinedWrappers(command)) for (const text of pathsOf(input)) {
+        expect([input, text.includes('CanaryValue')]).toEqual([input, false])
+      }
+    }
+  }
+})
+
+test('a complete declared delimiter is required before a short credential suffix', () => {
+  for (const delimiter of [',x', ':x', '#x', '::ab', ',xy']) {
+    for (const name of ['ordinaryxpass', 'ordinaryabpass', 'ordinaryxypass']) {
+      const command = `cli --set-env-vars=^${delimiter}^VERSION=v${delimiter}${name}=banana`
+      for (const input of combinedWrappers(command)) expect(redactText(input, newStats())).toBe(input)
+    }
+    for (const name of ['pass', '"pass"', 'p$"a"ssword']) {
+      const command = `cli --set-env-vars=^${delimiter}^VERSION=v${delimiter}${name}=CanaryValue`
+      for (const input of combinedWrappers(command)) for (const text of pathsOf(input)) expect([input, text.includes('CanaryValue')]).toEqual([input, false])
+    }
+  }
+})
+
+test('encoded whitespace and local quote and delimiter guards stay within the timing bound at both payload caps', () => {
+  const commands = [
+    'INFO ' + JSON.stringify({ command: "sh -c 'cli\t--pa\\ssword=CanaryValue'" }),
+    'cli --set-env-vars=VERSION=v,p$"a"ssword=CanaryValue',
+    `echo x=1\nsed 's/pass"word"=.*/x/' config.ini`,
+    `x=1; sed 's/pass"word"=.*/x/' config.ini`,
+    'gcloud run deploy svc --set-env-vars=^,x^VERSION=v,xordinaryxpass=banana',
+  ]
+  for (const short of commands) for (const command of [short, (short + '\n').repeat(Math.ceil(100_000 / (short.length + 1)))]) {
+    for (const [cap, diagnostic] of [[16_384, 1_000], [220_000, 110_000]] as const) {
+      const started = performance.now()
+      sanitize({ command }, limitsFor(cap), newStats())
+      expect([cap, 'sanitize', performance.now() - started < 100]).toEqual([cap, 'sanitize', true])
+      for (const [path, ms] of pathTimes(command, cap, diagnostic)) expect([cap, path, ms < 100]).toEqual([cap, path, true])
     }
   }
 })
