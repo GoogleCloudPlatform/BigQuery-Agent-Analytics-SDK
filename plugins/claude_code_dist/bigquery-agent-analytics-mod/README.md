@@ -1087,20 +1087,17 @@ column. Treat the dataset like the transcripts it mirrors.
   and incoming-webhook URLs (Slack, Discord, Office) whole; after a
   credential name followed by `:` or `=` (a header, a
   YAML or `.env` line, a JSON key in text, an assignment, a command-line flag
-  such as `--password=…` or `-Dssl.password=…`, a name the shell joins from
-  quoted, escaped or continued parts, such as `"DB_PASS"WORD=…`, also right
-  after another option's `=`, as in `--from-literal=pass"word"=…`, or in the
-  list of names and values after one, where one `,`, `:`, `@`, `/`, `+`,
-  `%`, `!` or `~`, or one `;` or space in quotes, sets the entries apart, as
-  in `--set-env-vars=ORDINARY=x,DB_PASS"WORD"=…` (gcloud's `^:^` and the
-  others alike; after an expansion such as `$VALUE` or `${VALUE}`, whose
-  value after `${` runs to the end of the text, after a long value, and
-  after a command substitution or backticks that end the value, such as
-  `VERSION=$(git rev-parse HEAD),DB_PASS"WORD"=…`; in a command string or
-  a log line, not after an earlier value that holds a blank in quotes or
-  after a backslash, and a name written with `$'…'` or continued across
-  lines only within about the first 400 characters of its shell word;
-  other delimiters, and the entries these rules miss, are under
+  such as `--password=…` or `-Dssl.password=…`, or, in a list of names and
+  values, a plain `name=value` entry — its name and value only letters,
+  digits, `_`, `.` or `-` — set off by one `,`, `:`, `@`, `/`, `+`, `%`,
+  `!` or `~` (gcloud's own `^:^` and the like for the non-comma ones) in a
+  list that is a single shell word, with no quotes, backslashes,
+  expansions, substitutions, backticks or blanks, as in
+  `--set-env-vars=ORDINARY=x,DB_PASSWORD=…` (that plain entry is the only
+  one relied on; a name the shell joins from quoted, escaped or continued
+  parts such as `"DB_PASS"WORD=…`, and any list with a quote, a backslash,
+  an expansion, a substitution, a backtick or a blank in it, are best
+  effort, and the shapes known to be missed are under
   [Limitations](#limitations)), before an escaped `=`, as in
   `--password\=…` and `--from-literal=PASSWORD\=…`, and with
   the continuation as a JSON string in a log line encodes it, `\\\n` or
@@ -1120,9 +1117,10 @@ column. Treat the dataset like the transcripts it mirrors.
   long command-line option whose name's last part is a credential word
   (`--password VALUE`, `--api-key "VALUE"`, `--pass -VALUE`, `"--password"
   VALUE`, the value after a line continuation too, the option's word read as
-  the shell passes it: line continuations (JSON-encoded ones too), quotes,
-  backslashes and ANSI-C escapes in its name, and an `=` inside a quote) its
-  whole shell argument.
+  the shell passes it: line continuations (JSON-encoded ones too), quotes
+  (but not a locale `$"…"`, which is best effort), backslashes and ANSI-C
+  escapes (`$'…'`) in its name, and an `=` inside a quote) its whole shell
+  argument.
   A credential's shell word is read by a few simple rules only: plain and
   backslash-escaped characters, single-quoted parts and double-quoted parts
   with no expansion, joined, up to the first space, tab, line break, `;`,
@@ -1778,10 +1776,25 @@ the same views count other producers' requests but not their tokens.
   `?token=$'a x'` keeps `x'` and `?token=a\ x` keeps `x`.
   [#546](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/546)
   lists this as open.
-* In a list of names and values, such as `--set-env-vars`, the free-text
-  rules can miss a credential's entry and keep its value.
+* In a list of names and values, such as `--set-env-vars`, only a plain
+  entry (letters, digits, `_`, `.`, `-`; see above) is relied on. The rules
+  still catch many other shapes, best effort, but can miss a credential's
+  entry and keep its value when a quote, a backslash, an expansion, a
+  substitution, a backtick or a blank is in the list.
   [#546](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/546)
-  proposes reading these lists more fully. Until then, these can be missed:
+  proposes reading these lists more fully. Known shapes that are missed:
+  * After a command substitution or backticks, a separator that is quoted
+    or carried across a line continuation (`VERSION=$(printf v)","DB_PASS"WORD"=…`,
+    `^:^VERSION=$(printf v)":"DB_PASS"WORD"=…`, backticks then `','`, or a
+    `\` line break between `)` and the separator): the entry after it is
+    missed, because the readers resume only on a separator written plainly
+    right after the `)` or backtick.
+  * An expansion that holds a blank (`${VALUE:-a b}`, `${VALUE// /b}`) or
+    an arithmetic expansion with blanks (`$[1 + 2]`): the readers stop at
+    the blank inside it, so a name after it is missed.
+  * An escaped literal backtick in the list, in a command string or a log
+    line (`VERSION=a\`b,DB_PASS"WORD"=…` as a JSON string): the readers
+    treat the backtick as unreadable, so a name after it is missed.
   * After a command substitution or backticks (`$(…)`, `` `…` ``, also
     `$((…))`), a name the shell joins from parts (`DB_PASS"WORD"=…`,
     `DB_PASS\WORD=…`) can be missed:
@@ -1838,6 +1851,10 @@ the same views count other producers' requests but not their tokens.
     `WORD=…`), can be missed once it is past about the first 400
     characters of its shell word: after `--set-env-vars=VERSION=` and 380
     more characters, or after 70 short entries.
+* A credential name with a locale-quoted `$"…"` part (`DB_PASS$"WORD"=…`,
+  `--pass$"word" …`) is read as ending at the `$`, so its value is best
+  effort, whether it is a list entry, an assignment or a flag. A plain
+  `$'…'` part is read; `$"…"` is not.
 * Timestamps have millisecond precision.
 * An organization's web-fetch policy or `allowManagedModsOnly` can stop the
   mod; `/bqaa-status` and the debug log (start the CLI with `--debug`) say why.
