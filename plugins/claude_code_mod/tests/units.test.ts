@@ -1989,6 +1989,8 @@ test('names in lists after any delimiter are read once per text: 100,000-charact
     `--o="^ a b^xa b" `.repeat(5_883),
     'a=^x^'.repeat(20_000),
     `sh -c '${'DB_PASSWORD\\=x '.repeat(6_667)}'`,
+    // Escaped names and equals query quote positions in both directions.
+    `sh -c 'cli --set=${'mon\\key\\=x,'.repeat(300)}'\n`.repeat(30),
     // Repeated literal backslashes before `=` used to rescan each quote.
     `sed '${'key\\='.repeat(800)}' `.repeat(25),
   ]
@@ -2087,6 +2089,16 @@ test('r5/r6/r7 review shapes: fixed cases redact in every path and wrapper; open
   for (const command of fixed) for (const wrapped of wrappersOf(command)) for (const text of pathsOf(wrapped)) expect([wrapped, /CanaryValue|Suffix/.test(text)]).toEqual([wrapped, false])
 
   const open = [
+    `${G}VERSION=v,github_pat_PRODUCTION_ACCESS_TOKEN=CanaryValue`,
+    String.raw`cli $'--password\0' CanaryValue`,
+    String.raw`cli $'--password\x00ignored' CanaryValue`,
+    String.raw`cli --pass$'\0'word CanaryValue`,
+    String.raw`cli $'--oauth2-bearer\0ignored' CanaryValue`,
+    'curl https://u:prefix@CanaryValue@example.test/path',
+    "curl https://example.test/?token=$'a CanaryValue'",
+    'curl https://example.test/?token=${VALUE:-a CanaryValue}',
+    `${G}"^q^VERSION=$(printf ^x^)qpass=CanaryValue"`,
+    G + String.raw`$'^\x71^VERSION=vqpass=CanaryValue'`,
     // r5 P1-1: a marker, or a provider token the earlier pass marked, then more text.
     `${G}"^q^VERSION=$(printf v)qpass=[REDACTED]&CanaryValue"`,
     `${G}"^q^VERSION=$(printf v)qpass=${token}&CanaryValue"`,
@@ -2223,6 +2235,7 @@ test('overlapping delimiter suffixes and long uppercase names stay within the ti
     'gcloud run deploy svc --set-env-vars=^q^VERSION=' + 'q'.repeat(23_000) + 'monkey=x',
     `--set-env-vars=^x^${'monkeyx'.repeat(14_280)}=x`,
     '--set-env-vars=VERSION=v,' + 'A'.repeat(23_000) + 'PASSWORD=CanaryValue',
+    '--set-env-vars=VERSION=v,' + 'A1'.repeat(11_500) + 'PASSWORD=CanaryValue',
     '--set-env-vars=^1^' + '1'.repeat(23_000) + 'monkey=x',
     // Many underscore candidates normalize to the same remaining part.
     `--set-env-vars="^'^${"_'".repeat(40_000)}monkey=x"`,
@@ -2248,4 +2261,40 @@ test('suffix classification keeps whole credential parts and listed spellings af
     const command = `cli --set-env-vars=VERSION=$(printf v),${name}=banana`
     expect(redactText(command, newStats())).toBe(command)
   }
+})
+
+
+// Exercise shell quoting and log encoding together, including both ways a
+// single-quoted command string can represent an apostrophe.
+const combinedWrappers = (command: string): string[] => {
+  const shells = [
+    (c: string): string => `sh -c '${c.replace(/'/g, `'\\''`)}'`,
+    (c: string): string => `sh -c '${c.replace(/'/g, `'"'"'`)}'`,
+    (c: string): string => `sh -c "${c.replace(/[\\"$`]/g, x => `\\${x}`)}"`,
+  ]
+  return [command, ...shells.map(f => f(command)), ...shells.flatMap(f => shells.map(g => f(g(command))))]
+    .flatMap(c => [c, JSON.stringify(c), `log ${JSON.stringify(c)}`, `INFO ${JSON.stringify({ command: c })}`, JSON.stringify(JSON.stringify(c))])
+}
+
+test('ANSI-C names and closed quotes redact through combined shell and JSON wrappers in every output path', () => {
+  for (const name of [String.raw`pass$'\x77ord'`, String.raw`'pass'\word`, String.raw`"pass"\word`]) {
+    for (const command of [`cli --${name} CanaryValue`, `cli --${name}=CanaryValue`,
+      `cli --set-env-vars=VERSION=v,${name}=CanaryValue`, `cli --set-env-vars=^q^VERSION=vq${name}=CanaryValue`]) {
+      for (const input of combinedWrappers(command)) for (const text of pathsOf(input)) {
+        expect([input, text.includes('CanaryValue')]).toEqual([input, false])
+      }
+    }
+  }
+})
+
+test('opposite quotes inside a substitution pattern are literal characters in the name', () => {
+  for (const command of [`sed 's/pass"word"=.*/x/' config.ini`, `sed "s/pass'word'=.*/x/" config.ini`]) {
+    for (const input of wrappersOf(command)) expect(redactText(input, newStats())).toBe(input)
+  }
+})
+
+
+test('the documented list after a credential is swallowed with its value', () => {
+  const command = '--set-env-vars=DB_PASSWORD=x,max_tokens=1024'
+  expect(redactText(command, newStats())).toBe('--set-env-vars=DB_PASSWORD=[REDACTED]')
 })
