@@ -27,7 +27,7 @@ to a numbered step here:
 | 1 | Decide your **events** vs **graph** dataset names | [Datasets](#dataset-roles-events-vs-graph) |
 | 2 | Local dry-run against your project (no Cloud Run) | [Local dry-run](#local-dry-run) |
 | 3 | Pick a schedule | [Recommended schedules](#recommended-schedules) |
-| 4 | Deploy with `--smoke` (verifies in one shot) | [Deploy to Cloud Run + Cloud Scheduler](#deploy-to-cloud-run-cloud-scheduler) |
+| 4 | Deploy with `--smoke` (verifies in one shot) | [Deploy to Cloud Run + Cloud Scheduler](#deploy-to-cloud-run--cloud-scheduler) |
 | 5 | Read the JSON log shape per run | [Expected JSON log shape](#expected-json-log-shape) |
 | 6 | Wire the Cloud Monitoring alert on `ok=false` | [Cloud Monitoring alerts](#cloud-monitoring-alerts) |
 | 7 | Query the state-table audit log | [Inspecting results](#inspecting-results) |
