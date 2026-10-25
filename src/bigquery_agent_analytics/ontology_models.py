@@ -36,7 +36,6 @@ Example usage::
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 import re
 from typing import Optional
@@ -45,8 +44,6 @@ from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
 import yaml
-
-logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 # ------------------------------------------------------------------ #
 # Spec Models (YAML ontology definition)                               #
