@@ -51,10 +51,13 @@ before agent events can land in BigQuery.
   directory, which each process resolves from its own `TMPDIR`;
   sandboxed shell commands can see a different `TMPDIR` than the hooks.
   A relative `BQAA_LOG_FILE` resolves against each hook's working
-  directory, and `~` against each hook's `HOME`. Set `BQAA_LOG_FILE` to
-  an absolute path for dry-run walkthroughs. In `--json`,
-  `log_file_is_default: true` and `log_file_is_relative: true` mark
-  `log_file` as a path the hooks may resolve differently. If
+  directory, and `~` or `~/...` against each hook's `HOME`. A
+  `~user/...` path instead expands through the account database, the
+  same for every process; if that user does not exist, the runtime
+  cannot expand it and discards dry-run events, and the report says so.
+  Set `BQAA_LOG_FILE` to an absolute path for dry-run walkthroughs. In
+  `--json`, `log_file_is_default: true` and `log_file_is_relative: true`
+  mark `log_file` as a path the hooks may resolve differently. If
   `BQAA_LOG_FILE` is set but empty, dry-run events are discarded, and if
   `BQAA_TRACE_ENABLED` is off nothing is emitted; the report says so in
   both cases. Unset `BQAA_DRY_RUN` (or set it to `false`) before a live

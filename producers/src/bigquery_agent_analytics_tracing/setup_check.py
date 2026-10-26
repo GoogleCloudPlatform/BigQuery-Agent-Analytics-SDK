@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from dataclasses import field
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 from typing import Iterable
@@ -101,8 +102,9 @@ class _SetupReport:
   log_file_is_default: bool = True
   # True when BQAA_LOG_FILE is set to a path that is not absolute: the
   # runtime opens a relative path in each hook's working directory and
-  # expands "~" with each hook's HOME, so log_file as printed is then not
-  # necessarily the hooks' path either.
+  # expands "~" and "~/..." with each hook's HOME, so log_file as printed
+  # is then not necessarily the hooks' path either. "~user/..." is not
+  # flagged: it expands through the account database for every process.
   log_file_is_relative: bool = False
   # Non-None when the configured interpreter cannot be executed
   # (FileNotFoundError, permission denied, timeout, non-zero exit on a
@@ -244,10 +246,40 @@ def _probe_imports(
 def _is_relative_path(value: str | None) -> bool:
   """Whether an explicit BQAA_LOG_FILE resolves per hook process.
 
-  Unset and empty values are reported separately. ``~`` counts as
-  relative: the runtime expands it with the hook's own HOME.
+  Unset and empty values are reported separately. ``~`` and ``~/...``
+  count as relative: the runtime expands them with the hook's own HOME.
+  ``~user/...`` does not: it expands through the account database, the
+  same for every process (see ``_tilde_user_note``).
   """
-  return bool(value) and (value.startswith("~") or not os.path.isabs(value))
+  if not value:
+    return False
+  if value.startswith("~"):
+    return value == "~" or value.startswith("~/")
+  return not os.path.isabs(value)
+
+
+def _tilde_user_note(value: str) -> str | None:
+  """How the runtime expands a ``~user/...`` BQAA_LOG_FILE, or None.
+
+  Like ``_utils._open_log``, which calls ``Path.expanduser()``: the
+  account database gives the user's home directory, and an unknown user
+  raises RuntimeError, which ``log_to_file`` swallows, dropping every
+  dry-run row.
+  """
+  if not value.startswith("~") or _is_relative_path(value):
+    return None
+  try:
+    expanded = Path(value).expanduser()
+  except RuntimeError:
+    return (
+        f'{value} (the user named after "~" was not found in the account'
+        " database, so the runtime cannot expand the path and discards"
+        " dry-run events)"
+    )
+  return (
+      f"{value} (expanded through the account database to {expanded}, the"
+      " same for every hook)"
+  )
 
 
 def collect_report(python_bin: str | None = None) -> _SetupReport:
@@ -434,11 +466,11 @@ def _dry_run_note(report: _SetupReport) -> str:
   elif report.log_file_is_relative:
     target = (
         f"{report.log_file} (not an absolute path: each hook resolves it"
-        ' against its own working directory, and "~" against its own'
-        " HOME. Set BQAA_LOG_FILE to an absolute path to pin it)"
+        ' against its own working directory, and "~" or "~/" against its'
+        " own HOME. Set BQAA_LOG_FILE to an absolute path to pin it)"
     )
   else:
-    target = report.log_file
+    target = _tilde_user_note(report.log_file) or report.log_file
   return (
       "  Note: dry-run mode is active. The hooks try to write dry-run"
       f" events to {target} instead of BigQuery, and drop them silently"

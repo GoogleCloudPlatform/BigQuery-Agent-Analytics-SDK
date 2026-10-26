@@ -19,6 +19,7 @@ from __future__ import annotations
 import io
 import json
 import os
+from pathlib import Path
 import sys
 
 import pytest
@@ -295,8 +296,17 @@ def test_report_dry_run_enabled_case_insensitively(
         (" ", " ", True),
         ("dry.log", "dry.log", True),
         ("~/dry.log", "~/dry.log", True),
+        ("~root/dry.log", "~root/dry.log", False),
     ],
-    ids=["unset", "custom-path", "empty", "whitespace", "relative", "tilde"],
+    ids=[
+        "unset",
+        "custom-path",
+        "empty",
+        "whitespace",
+        "relative",
+        "tilde",
+        "tilde-user",
+    ],
 )
 def test_report_log_file_matches_runtime_config(
     monkeypatch, fake_probes, env_value, expected, relative
@@ -470,7 +480,7 @@ def test_format_report_warns_when_dry_run_on(
   assert "Status: READY" in text
 
 
-@pytest.mark.parametrize("log_file", ["dry.log", "~/dry.log", " "])
+@pytest.mark.parametrize("log_file", ["dry.log", "~", "~/dry.log", " "])
 def test_format_report_dry_run_note_flags_a_relative_log_file(
     monkeypatch, fake_probes, log_file
 ):
@@ -484,10 +494,65 @@ def test_format_report_dry_run_note_flags_a_relative_log_file(
   assert (
       f"try to write dry-run events to {log_file} (not an absolute path:"
       " each hook resolves it against its own working directory, and"
-      ' "~" against its own HOME. Set BQAA_LOG_FILE to an absolute path'
-      " to pin it) instead of BigQuery" in text
+      ' "~" or "~/" against its own HOME. Set BQAA_LOG_FILE to an absolute'
+      " path to pin it) instead of BigQuery" in text
   ), text
   assert "is empty" not in text
+
+
+@pytest.mark.parametrize("home", ["/home-a", "/home-b"])
+def test_format_report_dry_run_note_expands_a_tilde_user_log_file(
+    monkeypatch, fake_probes, home
+):
+  """``~user/...`` expands through the account database, as the
+  runtime's ``Path.expanduser()`` does, not through each hook's HOME: it
+  is not flagged as relative, and the note names the expansion, which
+  does not depend on HOME."""
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  monkeypatch.setenv("BQAA_LOG_FILE", "~root/dry.log")
+  monkeypatch.setenv("HOME", home)
+  expanded = Path("~root/dry.log").expanduser()
+  assert not str(expanded).startswith(home)
+
+  report = collect_report()
+  text = _format_report(report)
+
+  assert report.log_file_is_relative is False
+  assert (
+      "try to write dry-run events to ~root/dry.log (expanded through the"
+      f" account database to {expanded}, the same for every hook) instead"
+      " of BigQuery" in text
+  ), text
+  assert "pin it" not in text
+
+
+def test_format_report_dry_run_note_flags_an_unknown_tilde_user(
+    monkeypatch, fake_probes
+):
+  """The runtime cannot expand ``~user`` for a user that does not exist
+  (``Path.expanduser()`` raises RuntimeError and ``log_to_file`` drops
+  the row), so the note must say the events are discarded."""
+  missing = "~bqaa-no-such-user-0/dry.log"
+  with pytest.raises(RuntimeError):
+    Path(missing).expanduser()
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  monkeypatch.setenv("BQAA_LOG_FILE", missing)
+
+  report = collect_report()
+  text = _format_report(report)
+
+  assert report.log_file_is_relative is False
+  assert (
+      f"try to write dry-run events to {missing} (the user named after"
+      ' "~" was not found in the account database, so the runtime cannot'
+      " expand the path and discards dry-run events)" in text
+  ), text
+  # Exit status and READY are unchanged: the note carries the warning.
+  assert "Status: READY" in text
 
 
 @pytest.mark.parametrize("log_file", [None, "/var/tmp/dry.log", ""])
