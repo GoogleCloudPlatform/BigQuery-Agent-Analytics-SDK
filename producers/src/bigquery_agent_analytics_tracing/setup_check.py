@@ -26,9 +26,9 @@ Surfaces:
   * bigquery_agent_analytics_tracing itself — sanity check the
     vendored layout works on BQAA_PYTHON.
   * BQAA_TRACE_ENABLED / BQAA_DRY_RUN — reported mode flags that never
-    change the exit code; dry-run also names the BQAA_LOG_FILE that
-    receives events instead of BigQuery, or warns that an empty
-    BQAA_LOG_FILE discards them.
+    change the exit code; dry-run also names the BQAA_LOG_FILE the hooks
+    try to write events to instead of BigQuery, or warns that an empty
+    BQAA_LOG_FILE (or tracing being off) means nothing is recorded.
 
 This script is **advisory-only**. It never mutates the environment,
 shell rc files, GCP resources, or IAM. It only reports what is
@@ -298,20 +298,7 @@ def _format_report(report: _SetupReport) -> str:
     )
   lines.append(f"BQAA_DRY_RUN: {'on' if report.dry_run else 'off'}")
   if report.dry_run:
-    if report.log_file:
-      lines.append(
-          f"  Note: dry-run mode is active (events write to {report.log_file},"
-          " not BigQuery). Set BQAA_DRY_RUN=false (or unset it) for live"
-          " BigQuery writes."
-      )
-    else:
-      lines.append(
-          "  Note: dry-run mode is active, but BQAA_LOG_FILE is empty so"
-          " dry-run events are discarded (not written to a file or"
-          " BigQuery). Unset BQAA_LOG_FILE (or set a file path) to record"
-          " dry-run events, or set BQAA_DRY_RUN=false (or unset it) for"
-          " live BigQuery writes."
-      )
+    lines.append(_dry_run_note(report))
   lines.append("")
 
   if report.interpreter_error:
@@ -390,6 +377,48 @@ def _format_report(report: _SetupReport) -> str:
 
   lines.append("Status: " + ("READY" if report.all_ok else "ACTION NEEDED"))
   return "\n".join(lines) + "\n"
+
+
+def _dry_run_note(report: _SetupReport) -> str:
+  """The note under ``BQAA_DRY_RUN: on``.
+
+  It never promises delivery: the runtime drops dry-run rows silently
+  when it refuses the log path (``_utils._open_log``), and the hooks
+  resolve the default path from their own TMPDIR, which this shell may
+  not share.
+  """
+  live = " Set BQAA_DRY_RUN=false (or unset it) for live BigQuery writes."
+  if not report.trace_enabled:
+    # The hooks exit at the shell gate, so nothing reaches the log.
+    return (
+        "  Note: dry-run mode is active, but nothing is emitted while"
+        " BQAA_TRACE_ENABLED is off."
+    )
+  if not report.log_file:
+    return (
+        "  Note: dry-run mode is active, but BQAA_LOG_FILE is empty so"
+        " dry-run events are discarded (not written to a file or"
+        " BigQuery). Unset BQAA_LOG_FILE (or set a file path) to record"
+        " dry-run events, or set BQAA_DRY_RUN=false (or unset it) for"
+        " live BigQuery writes."
+    )
+  if "BQAA_LOG_FILE" not in os.environ:
+    # DEFAULT_LOG_FILE comes from tempfile.gettempdir() of this process.
+    target = (
+        f"the default log file ({report.log_file} for this shell's"
+        " TMPDIR; the hooks resolve it from their own TMPDIR, which"
+        " differs when shell commands run sandboxed. Set BQAA_LOG_FILE"
+        " to an absolute path to pin it)"
+    )
+  else:
+    target = report.log_file
+  return (
+      "  Note: dry-run mode is active. The hooks try to write dry-run"
+      f" events to {target} instead of BigQuery, and drop them silently"
+      " if the runtime refuses that path (for example a read-only file,"
+      " a symlink, or a file in a directory that your group or other"
+      f" users can write).{live}"
+  )
 
 
 def _report_to_json(report: _SetupReport) -> str:

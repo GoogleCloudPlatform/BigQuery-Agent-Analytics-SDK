@@ -421,7 +421,7 @@ def test_format_report_warns_when_dry_run_on(
   text = _format_report(collect_report())
 
   assert "BQAA_DRY_RUN: on" in text
-  assert f"events write to {custom}, not BigQuery" in text
+  assert f"try to write dry-run events to {custom} instead of BigQuery" in text
   assert "BQAA_DRY_RUN=false" in text
   # Dry-run is a mode, not a missing prerequisite.
   assert "Status: READY" in text
@@ -437,7 +437,7 @@ def test_format_report_dry_run_note_uses_default_log_file(
   text = _format_report(collect_report())
 
   assert "BQAA_DRY_RUN: on" in text
-  assert f"events write to {DEFAULT_LOG_FILE}, not BigQuery" in text
+  assert f"the default log file ({DEFAULT_LOG_FILE} for this shell's" in text
 
 
 def test_format_report_warns_dry_run_discards_when_log_file_empty(

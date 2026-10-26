@@ -809,7 +809,7 @@ def test_vendored_plugin_empty_log_file_dry_run_reported_and_discarded(
   # file and the same hooks write the SessionEnd row there.
   control = _setup_check(base_env)
   assert control.returncode == 0, f"stderr={control.stderr!r}"
-  assert f"events write to {scratch}" in control.stdout, control.stdout
+  assert f"the default log file ({scratch}" in control.stdout, control.stdout
   start = _fire("session_start.sh", base_env)
   assert start.returncode == 0, f"stderr={start.stderr!r}"
   end = _fire("session_end.sh", base_env)
