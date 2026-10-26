@@ -1606,7 +1606,7 @@ assert.match(
 );
 assert.match(
   pageSource,
-  /dashboard\/looker_studio\/sql\/bqca_events_v1\.sql\.tmpl/,
+  /dashboards\/looker_studio\/sql\/bqca_events_v1\.sql\.tmpl/,
   "the BQCA note links the BQCA custom query",
 );
 assert.match(

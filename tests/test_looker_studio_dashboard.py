@@ -27,7 +27,7 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-DASHBOARD = ROOT / "dashboard/looker_studio"
+DASHBOARD = ROOT / "dashboards/looker_studio"
 
 
 def _load_dashboard_module(name):
@@ -1119,7 +1119,7 @@ def test_googlecloudplatform_pages_configuration():
   assert "every template republish" in impl
 
   workflow = (ROOT / ".github/workflows/looker-studio-pages.yml").read_text()
-  assert "path: dashboard/looker_studio/docs" in workflow
+  assert "path: dashboards/looker_studio/docs" in workflow
   assert "pages: write" in workflow
   assert "id-token: write" in workflow
   assert (
@@ -2130,7 +2130,7 @@ def test_bqca_deep_link_page_is_published_with_the_site():
   assert "Dedicated 7-page tool-free BQCA Looker Studio template" in note
   assert '<details class="advanced-bqca-options">' in note
   assert BQCA_REPORT_ID in note
-  assert "dashboard/looker_studio/sql/bqca_events_v1.sql.tmpl" in note
+  assert "dashboards/looker_studio/sql/bqca_events_v1.sql.tmpl" in note
   assert "--profile bqca --custom-sql-out" in note
   assert "dashboards/streamlit" in note
   bqca_note_tag = bqca_page.split('id="bqca-template-note"', 1)[1]

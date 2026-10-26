@@ -89,7 +89,7 @@ extra Looker Studio data sources. To execute every tile contract against a
 real, preflight-compatible BQAA dataset without recording any result values:
 
 ```sh
-cd dashboard/looker_studio
+cd dashboards/looker_studio
 python3 tools/validate_live_bqaa.py \
   --project PROJECT_ID \
   --dataset DATASET_ID \
@@ -190,7 +190,7 @@ from a signed-in, non-owner, out-of-domain account (anonymous HTTP cannot
 observe either). While the template is unavailable, the
 `tools/hydrate_dashboard.py` preflight below still validates the table — but
 its creation URL copies the same template, so it is not an outage workaround;
-the [Grafana dashboard](../../dashboards/grafana/) and the Looker Agent Analytics block
+the [Grafana dashboard](../grafana/) and the Looker Agent Analytics block
 (below) remain available.
 
 Looker Studio report parameters are intentionally not used for these values:
@@ -209,7 +209,7 @@ Prerequisites:
 Run one validation command:
 
 ```sh
-cd dashboard/looker_studio
+cd dashboards/looker_studio
 python3 tools/hydrate_dashboard.py \
   --project YOUR_PROJECT_ID \
   --dataset YOUR_DATASET_ID \
@@ -283,7 +283,7 @@ three-parameter format.
 `bqca_prompt_response_logs`:
 
 ```sh
-cd dashboard/looker_studio
+cd dashboards/looker_studio
 python3 tools/hydrate_dashboard.py \
   --profile bqca \
   --project YOUR_PROJECT_ID \
@@ -315,7 +315,7 @@ PENDING_EXTERNAL_IDENTITY_CHECK`, tracked on
 [#515](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/515)),
 so external access is not yet verified. External non-owner Google accounts
 that see "This report isn't shared with you" should use the
-[Self-Hosted Streamlit BQCA Dashboard](../../dashboards/streamlit/)
+[Self-Hosted Streamlit BQCA Dashboard](../streamlit/)
 (`dashboards/streamlit/`) or `--custom-sql-out`.
 Because BQCA never logs tool events, all tool-usage pages, tool-latency series,
 and tool-error charts are omitted from the template:
@@ -354,7 +354,7 @@ and tool-error charts are omitted from the template:
   `error_message`, `total_latency_ms`, and `total_tokens`.
 
 You can also run the
-[Self-Hosted Streamlit BQCA Dashboard](../../dashboards/streamlit/)
+[Self-Hosted Streamlit BQCA Dashboard](../streamlit/)
 (`dashboards/streamlit/`) or export `sql/bqca_events_v1.sql.tmpl` bound to your
 table with `--custom-sql-out`. The query reads only the nine event types BQCA
 logs, in one date-pruned scan of your table, and adds:
@@ -373,7 +373,7 @@ logs, in one date-pruned scan of your table, and adds:
 | `similar_queries_count`, `is_embedding_hit`, `embedding_suggestion_reason` | Suggested-column / suggestion count (`$.suggested_columns` first in `COALESCE`, before `$.similar_queries_count` and `$.suggestions`), non-empty indicator, and `$.reason` on `EMBEDDING_SUGGESTION` rows |
 
 Every generated file is deterministic and CI-checked for drift. After
-editing a source, regenerate and validate from `dashboard/looker_studio`:
+editing a source, regenerate and validate from `dashboards/looker_studio`:
 
 ```sh
 python3 tools/gen_bqca_events_tmpl.py   # sql/bqca_events_v1.sql.tmpl
@@ -429,7 +429,7 @@ as a data-freshness guarantee.
 To run the browser configurator from this checkout:
 
 ```sh
-python3 -m http.server 8000 --directory dashboard/looker_studio/docs
+python3 -m http.server 8000 --directory dashboards/looker_studio/docs
 ```
 
 Then open `http://localhost:8000` (or `http://localhost:8000/bqca/` for the

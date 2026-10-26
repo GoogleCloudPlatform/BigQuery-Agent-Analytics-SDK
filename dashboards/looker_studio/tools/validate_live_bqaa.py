@@ -30,6 +30,8 @@ FILTER_PARAMS = (
     "filter_span_id",
     "filter_tool_name",
 )
+
+
 def require_identifier(label: str, value: str, pattern: re.Pattern) -> str:
   if not pattern.fullmatch(value):
     raise ValueError(f"invalid {label}: {value!r}")

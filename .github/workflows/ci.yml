@@ -99,10 +99,10 @@ jobs:
           persist-credentials: false
 
       - name: Run the smoke check's own negative fixtures
-        run: bash dashboard/looker_studio/tools/browser_smoke.sh --self-test
+        run: bash dashboards/looker_studio/tools/browser_smoke.sh --self-test
 
       - name: Load the configurator in headless Chrome
-        run: bash dashboard/looker_studio/tools/browser_smoke.sh
+        run: bash dashboards/looker_studio/tools/browser_smoke.sh
 
   build:
     name: Build package
