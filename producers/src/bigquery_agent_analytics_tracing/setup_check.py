@@ -94,6 +94,11 @@ class _SetupReport:
   # empty log_file (BQAA_LOG_FILE="") means they are discarded.
   dry_run: bool = False
   log_file: str = DEFAULT_LOG_FILE
+  # True when BQAA_LOG_FILE is unset, so log_file is DEFAULT_LOG_FILE as
+  # resolved from this process's TMPDIR. Each hook resolves the default
+  # from its own TMPDIR, which differs when shell commands run
+  # sandboxed, so log_file is then not necessarily the hooks' path.
+  log_file_is_default: bool = True
   # Non-None when the configured interpreter cannot be executed
   # (FileNotFoundError, permission denied, timeout, non-zero exit on a
   # trivial command). Surfacing this separately tells the user "fix
@@ -269,6 +274,7 @@ def collect_report(python_bin: str | None = None) -> _SetupReport:
       # Resolve like BQAAConfig.from_env: an empty BQAA_LOG_FILE stays
       # empty, and log_to_file() then drops every dry-run row.
       log_file=os.environ.get("BQAA_LOG_FILE", DEFAULT_LOG_FILE),
+      log_file_is_default="BQAA_LOG_FILE" not in os.environ,
       package_imports=package_imports,
       required_imports=required_imports,
       storage_write_imports=storage_write_imports,
@@ -402,7 +408,7 @@ def _dry_run_note(report: _SetupReport) -> str:
         " dry-run events, or set BQAA_DRY_RUN=false (or unset it) for"
         " live BigQuery writes."
     )
-  if "BQAA_LOG_FILE" not in os.environ:
+  if report.log_file_is_default:
     # DEFAULT_LOG_FILE comes from tempfile.gettempdir() of this process.
     target = (
         f"the default log file ({report.log_file} for this shell's"

@@ -817,3 +817,82 @@ def test_vendored_plugin_empty_log_file_dry_run_reported_and_discarded(
   logs = sorted(tmp_path.rglob("*.log"))
   assert len(logs) == 1 and logs[0].is_relative_to(scratch), logs
   assert "DRY_RUN " in logs[0].read_text()
+
+
+def test_vendored_plugin_default_log_file_is_flagged_when_tmpdirs_differ(
+    tmp_path, restore_manifest, cleanup_vendor
+):
+  """With BQAA_LOG_FILE unset, the check resolves the default log path
+  from its own TMPDIR while each hook resolves it from its own (they
+  differ when shell commands run sandboxed). Run the built setup helper
+  with TMPDIR=A and the real hooks with TMPDIR=B: the text report and
+  the JSON must both mark the reported path as this shell's default,
+  and the row lands under B, not A. Pinning BQAA_LOG_FILE clears the
+  flag and the path then matches where the hooks write."""
+  build_claude_plugin.build(dist_dir=tmp_path / "dist", skip_tar=True)
+
+  check_tmp = tmp_path / "check-tmp"
+  hooks_tmp = tmp_path / "hooks-tmp"
+  home = tmp_path / "home"
+  for d in (check_tmp, hooks_tmp, home):
+    d.mkdir()
+  base = {
+      "PATH": "/usr/bin:/bin",
+      "HOME": str(home),
+      "BQAA_PYTHON": sys.executable,
+      "BQAA_PROJECT_ID": "synthetic-project",
+      "BQAA_DATASET": "synthetic_dataset",
+      "BQAA_TRACE_ENABLED": "true",
+      "BQAA_DRY_RUN": "true",
+      "BQAA_SPOOL_DIR": str(tmp_path / "spool"),
+  }
+  payload = json.dumps({"session_id": "tmpdirs", "cwd": str(tmp_path)})
+
+  def _check(env, *args):
+    result = subprocess.run(
+        ["bash", str(PLUGIN_DIR / "scripts" / "run_setup_check.sh"), *args],
+        env={**env, "TMPDIR": str(check_tmp)},
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    return result.stdout
+
+  def _fire(env):
+    for hook_script in ("session_start.sh", "session_end.sh"):
+      result = subprocess.run(
+          ["bash", str(PLUGIN_DIR / "hooks" / hook_script)],
+          env={**env, "TMPDIR": str(hooks_tmp)},
+          input=payload,
+          capture_output=True,
+          text=True,
+          timeout=15,
+      )
+      assert result.returncode == 0, f"{hook_script}: {result.stderr!r}"
+
+  text = _check(base)
+  assert f"the default log file ({check_tmp}" in text, text
+  assert "the hooks resolve it from their own TMPDIR" in text
+  report = json.loads(_check(base, "--json"))
+  assert report["log_file_is_default"] is True
+  assert report["log_file"].startswith(str(check_tmp))
+
+  _fire(base)
+  assert list(check_tmp.rglob("*.log")) == []
+  hook_logs = list(hooks_tmp.rglob("*.log"))
+  assert len(hook_logs) == 1 and "DRY_RUN " in hook_logs[0].read_text()
+  # The JSON path is not where the hooks wrote, which is why it is
+  # flagged as this shell's default.
+  assert report["log_file"] != str(hook_logs[0])
+
+  private = tmp_path / "private"
+  private.mkdir(mode=0o700)
+  pinned = private / "dry.log"
+  pinned_env = {**base, "BQAA_LOG_FILE": str(pinned)}
+  assert "TMPDIR" not in _check(pinned_env)
+  report = json.loads(_check(pinned_env, "--json"))
+  assert report["log_file_is_default"] is False
+  assert report["log_file"] == str(pinned)
+  _fire(pinned_env)
+  assert "DRY_RUN " in pinned.read_text()

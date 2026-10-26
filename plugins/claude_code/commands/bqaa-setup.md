@@ -51,11 +51,13 @@ before agent events can land in BigQuery.
   lives under the temp directory, which each process resolves from its
   own `TMPDIR`; sandboxed shell commands can see a different `TMPDIR`
   than the hooks, so set `BQAA_LOG_FILE` to an absolute path for dry-run
-  walkthroughs. If `BQAA_LOG_FILE` is set but empty, dry-run events are
-  discarded, and if `BQAA_TRACE_ENABLED` is off nothing is emitted; the
-  report says so in both cases. Unset `BQAA_DRY_RUN` (or set it to
-  `false`) before a live BigQuery smoke test. Informational only; does
-  not affect the exit code.
+  walkthroughs. In `--json`, `log_file_is_default: true` marks
+  `log_file` as this shell's default path rather than a path the hooks
+  are guaranteed to use. If `BQAA_LOG_FILE` is set but empty, dry-run
+  events are discarded, and if `BQAA_TRACE_ENABLED` is off nothing is
+  emitted; the report says so in both cases. Unset `BQAA_DRY_RUN` (or
+  set it to `false`) before a live BigQuery smoke test. Informational
+  only; does not affect the exit code.
 - `google-cloud-bigquery` — always required (both writer paths use it).
 - `google-cloud-bigquery-storage` + `pyarrow` — required only for the
   lower-latency Storage Write path; absence is reported as advisory
