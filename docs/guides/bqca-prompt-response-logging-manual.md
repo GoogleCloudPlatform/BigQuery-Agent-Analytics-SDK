@@ -895,7 +895,7 @@ Because Cell `1.3` creates `v_bqca_customer_turns` as a standard BigQuery view w
 - End-to-end latency P50/P90 (`e2e_latency_ms`) and Verified Queries Fast-Path share (`is_fast_path = TRUE`).
 - Token consumption (`prompt_tokens`, `candidate_tokens`, `thinking_tokens`, `cached_tokens`, `total_tokens`) and estimated token cost (`cost_sdk_usd`, `cost_incl_thinking_usd`).
 
-For the full 37-chart observability template over `v_bqca_customer_sdk_events`, see the [Looker Studio Dashboard User Manual](../../dashboard/looker_studio/USER_MANUAL.md). To drill down turn by turn on the raw logging table (prompts, responses, generated SQL, latency, tokens, and errors per data agent) with the BQCA Looker Studio profile or the Streamlit dashboard, see [Section 7.4](#74-visualizing-logs-with-the-bqca-analytics-dashboards-looker-studio--streamlit).
+For the full 37-chart observability template over `v_bqca_customer_sdk_events`, see the [Looker Studio Dashboard User Manual](../../dashboards/looker_studio/USER_MANUAL.md). To drill down turn by turn on the raw logging table (prompts, responses, generated SQL, latency, tokens, and errors per data agent) with the BQCA Looker Studio profile or the Streamlit dashboard, see [Section 7.4](#74-visualizing-logs-with-the-bqca-analytics-dashboards-looker-studio--streamlit).
 
 ### 7.2 Recommended Evaluation Cadence & Cost Control
 - **Real-time / Hourly (Zero LLM Cost)**: Query `v_bqca_customer_turns`, `SystemEvaluator` SLO checks (Section 7), and `bqaa.ERROR_SQL_PREDICATE` + `finish_reason != 'STOP'` (Section 8). These are pure BigQuery SQL queries with zero Vertex AI model invocations.
@@ -920,7 +920,7 @@ Sections 7.1–7.3 chart the session-level `v_bqca_customer_turns` view. For tur
 | Runs as | A report you copy into your own Looker Studio account | A self-hosted Python app (laptop, VM, or Cloud Run) |
 | Setup | One CLI command or a configurator link; no servers | `pip install -e '.[streamlit]'`, then `streamlit run` |
 | Best for | Sharing charts with BI viewers | Reading prompts, responses, and generated SQL turn by turn, with a per-query cost cap |
-| Reference | [Looker Studio README](../../dashboard/looker_studio/README.md), [User Manual](../../dashboard/looker_studio/USER_MANUAL.md) | [Streamlit README](../../dashboards/streamlit/README.md) |
+| Reference | [Looker Studio README](../../dashboards/looker_studio/README.md), [User Manual](../../dashboards/looker_studio/USER_MANUAL.md) | [Streamlit README](../../dashboards/streamlit/README.md) |
 
 **Before you start.** Both dashboards read the raw logging table: `agent_events` in this manual's notebook (`RAW_TABLE_ID`), while the dashboards default to `bqca_prompt_response_logs`, so pass your own table name as shown below. Whoever runs a dashboard needs `roles/bigquery.jobUser` on the project and `roles/bigquery.dataViewer` on the dataset that holds the table. Neither dashboard needs the notebook's views.
 
@@ -929,7 +929,7 @@ Sections 7.1–7.3 chart the session-level `v_bqca_customer_turns` view. For tur
 ```bash
 # From the repository root. Validates your table, then prints a link that
 # copies the dashboard template into your Looker Studio account.
-cd dashboard/looker_studio
+cd dashboards/looker_studio
 python3 tools/hydrate_dashboard.py \
   --profile bqca \
   --project YOUR_PROJECT_ID \
@@ -945,10 +945,10 @@ Set `--location` to the location of your dataset. Prefer a browser? Open the web
 https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/bqca/
 ```
 
-The Linking API URL opens the **dedicated 7-page tool-free BQCA Looker Studio template** (`42e79a1f-a979-4de8-911f-80d5a99543d5`, alias `ds0`) backed by `sql/bqca_events_v1.template.sql` — covering Token Consumption, Data Agents & Turns, LLM Interactions & Embedding Suggestions, User & Persona Analytics, Latency & Fast-Path ROI, Errors (BQCA 3-Condition), and the Prompt, Response & SQL Inspector, with all tool-related pages and charts omitted. `--custom-sql-out` also writes the standalone BQCA reporting query bound to your table. The [Looker Studio README](../../dashboard/looker_studio/README.md) describes the BQCA profile and its derived columns.
+The Linking API URL opens the **dedicated 7-page tool-free BQCA Looker Studio template** (`42e79a1f-a979-4de8-911f-80d5a99543d5`, alias `ds0`) backed by `sql/bqca_events_v1.template.sql` — covering Token Consumption, Data Agents & Turns, LLM Interactions & Embedding Suggestions, User & Persona Analytics, Latency & Fast-Path ROI, Errors (BQCA 3-Condition), and the Prompt, Response & SQL Inspector, with all tool-related pages and charts omitted. `--custom-sql-out` also writes the standalone BQCA reporting query bound to your table. The [Looker Studio README](../../dashboards/looker_studio/README.md) describes the BQCA profile and its derived columns.
 
 > [!NOTE]
-> **External public-sharing status (`42e79a1f-a979-4de8-911f-80d5a99543d5`):** The report owner turned on public link sharing (anyone with the link) for the hosted 1-click Looker Studio template on 2026-10-09 (`link_access: PUBLIC` in `dashboard/looker_studio/bindings/bqca_report_template.yaml`), but the copy check from a signed-in outside Google account has not run yet (`external_access_verification.status: PENDING_EXTERNAL_IDENTITY_CHECK`), so external access is not yet verified. External accounts that see a Looker Studio permission prompt on the 1-click link should either use the self-hosted **Streamlit dashboard** below (`dashboards/streamlit/`) or generate the hydrated Custom SQL query with `hydrate_dashboard.py --profile bqca ... --custom-sql-out /tmp/bqca_events.sql` and connect it directly as a BigQuery Custom Query data source in Looker Studio.
+> **External public-sharing status (`42e79a1f-a979-4de8-911f-80d5a99543d5`):** The report owner turned on public link sharing (anyone with the link) for the hosted 1-click Looker Studio template on 2026-10-09 (`link_access: PUBLIC` in `dashboards/looker_studio/bindings/bqca_report_template.yaml`), but the copy check from a signed-in outside Google account has not run yet (`external_access_verification.status: PENDING_EXTERNAL_IDENTITY_CHECK`), so external access is not yet verified. External accounts that see a Looker Studio permission prompt on the 1-click link should either use the self-hosted **Streamlit dashboard** below (`dashboards/streamlit/`) or generate the hydrated Custom SQL query with `hydrate_dashboard.py --profile bqca ... --custom-sql-out /tmp/bqca_events.sql` and connect it directly as a BigQuery Custom Query data source in Looker Studio.
 
 #### Streamlit
 

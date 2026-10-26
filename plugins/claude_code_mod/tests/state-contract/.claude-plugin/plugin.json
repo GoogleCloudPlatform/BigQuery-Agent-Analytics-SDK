@@ -1,0 +1,1 @@
+{ "name": "state-contract", "version": "0.0.0", "description": "Checks the host's $.state as the reload test models it", "types": "./types/index.d.ts" }

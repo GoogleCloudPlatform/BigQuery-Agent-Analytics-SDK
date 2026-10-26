@@ -24,6 +24,26 @@
         "tracing",
         "claude-code"
       ]
+    },
+    {
+      "name": "bigquery-agent-analytics-mod",
+      "description": "Early access. Coding-agent mod that records sessions, turns, model requests and tool calls as BigQuery Agent Analytics agent_events rows, written from the background so no hook waits on BigQuery.",
+      "version": "0.1.0",
+      "source": "./plugins/claude_code_dist/bigquery-agent-analytics-mod",
+      "author": {
+        "name": "Google LLC"
+      },
+      "homepage": "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/plugins/claude_code_mod",
+      "repository": "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK",
+      "license": "Apache-2.0",
+      "keywords": [
+        "bigquery",
+        "agent-analytics",
+        "observability",
+        "tracing",
+        "mod",
+        "preview"
+      ]
     }
   ]
 }
