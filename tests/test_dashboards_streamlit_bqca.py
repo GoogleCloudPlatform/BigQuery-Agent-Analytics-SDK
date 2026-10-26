@@ -975,7 +975,7 @@ def test_persona_falls_back_from_label_to_user_handle_to_data_agent():
 # The Looker Studio BQCA profile (a sibling deliverable) extracts the same
 # fields. The parity checks below skip when its template is not in the tree.
 LOOKER_BQCA_TEMPLATE = (
-    ROOT / "dashboard" / "looker_studio" / "sql" / "bqca_events_v1.sql.tmpl"
+    ROOT / "dashboards" / "looker_studio" / "sql" / "bqca_events_v1.sql.tmpl"
 )
 
 

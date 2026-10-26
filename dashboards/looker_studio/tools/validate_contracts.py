@@ -722,14 +722,16 @@ def _validate_bqca_sql_behavioral_oracle(sql_text: str) -> list[str]:
       lambda ts, tz: f"{str(ts)[:13]}:00:00Z" if ts else None,
   )
 
-  conn.execute("""
+  conn.execute(
+      """
       CREATE TABLE source_events (
         timestamp TEXT, event_type TEXT, agent TEXT, session_id TEXT,
         invocation_id TEXT, user_id TEXT, trace_id TEXT, span_id TEXT,
         parent_span_id TEXT, content TEXT, attributes TEXT, latency_ms TEXT,
         status TEXT, error_message TEXT, is_truncated INTEGER
       )
-  """)
+  """
+  )
   fixtures = [
       (
           "2026-04-05T10:00:00Z",

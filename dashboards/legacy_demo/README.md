@@ -1,10 +1,12 @@
+> **Notice:** This is the legacy demo dashboard. For actively maintained, feature-complete monitoring and analytics, please use the [Streamlit Dashboard](../streamlit/README.md), [Grafana Dashboard](../grafana/README.md), or [Looker Studio Dashboard](../looker_studio/README.md).
+
 # 🤖 Agent Analytics & Orchestration Dashboard
 
 An interactive Streamlit dashboard for monitoring and diagnosing agent execution logs stored in **Google BigQuery**. This tool provides deep visibility into LLM performance, token consumption, and orchestration reliability, following the **ADK (Agent Development Kit)** standard.
 
 For the published, no-hosting-required Looker Studio template over
 BQAA-generated views, see
-[`dashboard/looker_studio`](looker_studio/README.md).
+[`dashboards/looker_studio`](../looker_studio/README.md).
 
 ---
 
