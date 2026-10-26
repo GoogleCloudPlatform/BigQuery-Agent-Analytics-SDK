@@ -99,6 +99,11 @@ class _SetupReport:
   # from its own TMPDIR, which differs when shell commands run
   # sandboxed, so log_file is then not necessarily the hooks' path.
   log_file_is_default: bool = True
+  # True when BQAA_LOG_FILE is set to a path that is not absolute: the
+  # runtime opens a relative path in each hook's working directory and
+  # expands "~" with each hook's HOME, so log_file as printed is then not
+  # necessarily the hooks' path either.
+  log_file_is_relative: bool = False
   # Non-None when the configured interpreter cannot be executed
   # (FileNotFoundError, permission denied, timeout, non-zero exit on a
   # trivial command). Surfacing this separately tells the user "fix
@@ -236,6 +241,15 @@ def _probe_imports(
   return results
 
 
+def _is_relative_path(value: str | None) -> bool:
+  """Whether an explicit BQAA_LOG_FILE resolves per hook process.
+
+  Unset and empty values are reported separately. ``~`` counts as
+  relative: the runtime expands it with the hook's own HOME.
+  """
+  return bool(value) and (value.startswith("~") or not os.path.isabs(value))
+
+
 def collect_report(python_bin: str | None = None) -> _SetupReport:
   """Run the full set of checks against ``python_bin`` (or BQAA_PYTHON
   fallback) and return a structured report.
@@ -275,6 +289,7 @@ def collect_report(python_bin: str | None = None) -> _SetupReport:
       # empty, and log_to_file() then drops every dry-run row.
       log_file=os.environ.get("BQAA_LOG_FILE", DEFAULT_LOG_FILE),
       log_file_is_default="BQAA_LOG_FILE" not in os.environ,
+      log_file_is_relative=_is_relative_path(os.environ.get("BQAA_LOG_FILE")),
       package_imports=package_imports,
       required_imports=required_imports,
       storage_write_imports=storage_write_imports,
@@ -416,6 +431,12 @@ def _dry_run_note(report: _SetupReport) -> str:
         " differs when shell commands run sandboxed. Set BQAA_LOG_FILE"
         " to an absolute path to pin it)"
     )
+  elif report.log_file_is_relative:
+    target = (
+        f"{report.log_file} (not an absolute path: each hook resolves it"
+        ' against its own working directory, and "~" against its own'
+        " HOME. Set BQAA_LOG_FILE to an absolute path to pin it)"
+    )
   else:
     target = report.log_file
   return (
@@ -458,6 +479,12 @@ def main(argv: list[str] | None = None) -> int:
       help="Emit a JSON report instead of human-readable text.",
   )
   args = parser.parse_args(argv)
+  # Environment values reach the text report as they are; one that is
+  # not valid in the output encoding (e.g. a BQAA_LOG_FILE with a 0xff
+  # byte, decoded as a surrogate escape) is escaped instead of crashing.
+  reconfigure = getattr(sys.stdout, "reconfigure", None)
+  if reconfigure is not None:
+    reconfigure(errors="backslashreplace")
   report = collect_report()
   if args.json:
     sys.stdout.write(_report_to_json(report) + "\n")

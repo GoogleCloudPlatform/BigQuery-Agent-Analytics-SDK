@@ -38,26 +38,40 @@ before agent events can land in BigQuery.
 - `BQAA_PYTHON` — the interpreter the hooks will exec; defaults to the
   current `python3`. The check verifies it can import the tracing
   package and required runtime deps.
-- `BQAA_TRACE_ENABLED` — reported as `on` / `off` (case-insensitive,
-  defaults to `true`). When off, the hooks emit nothing. Informational
-  only; does not affect the exit code.
-- `BQAA_DRY_RUN` — reported as `on` / `off` (case-insensitive, defaults
-  to `false`). When `BQAA_DRY_RUN=true`, the hooks try to write events
-  to `BQAA_LOG_FILE` instead of BigQuery, and the report prints that log
-  path. The runtime drops dry-run events silently if it refuses the path
-  (for example a read-only file, a symlink, or a file in a directory
-  that your group or other users can write), so the report does not
-  promise delivery. When `BQAA_LOG_FILE` is unset, the default log file
-  lives under the temp directory, which each process resolves from its
-  own `TMPDIR`; sandboxed shell commands can see a different `TMPDIR`
-  than the hooks, so set `BQAA_LOG_FILE` to an absolute path for dry-run
-  walkthroughs. In `--json`, `log_file_is_default: true` marks
-  `log_file` as this shell's default path rather than a path the hooks
-  are guaranteed to use. If `BQAA_LOG_FILE` is set but empty, dry-run
-  events are discarded, and if `BQAA_TRACE_ENABLED` is off nothing is
-  emitted; the report says so in both cases. Unset `BQAA_DRY_RUN` (or
-  set it to `false`) before a live BigQuery smoke test. Informational
-  only; does not affect the exit code.
+- `BQAA_TRACE_ENABLED` — reported as `on` / `off`; on when unset. When
+  off, the hooks emit nothing. Informational only; does not affect the
+  exit code.
+- `BQAA_DRY_RUN` — reported as `on` / `off`; off when unset. When
+  `BQAA_DRY_RUN=true`, the hooks try to write events to `BQAA_LOG_FILE`
+  instead of BigQuery, and the report prints that log path. The runtime
+  drops dry-run events silently if it refuses the path (for example a
+  read-only file, a symlink, or a file in a directory that your group or
+  other users can write), so the report does not promise delivery. When
+  `BQAA_LOG_FILE` is unset, the default log file lives under the temp
+  directory, which each process resolves from its own `TMPDIR`;
+  sandboxed shell commands can see a different `TMPDIR` than the hooks.
+  A relative `BQAA_LOG_FILE` resolves against each hook's working
+  directory, and `~` against each hook's `HOME`. Set `BQAA_LOG_FILE` to
+  an absolute path for dry-run walkthroughs. In `--json`,
+  `log_file_is_default: true` and `log_file_is_relative: true` mark
+  `log_file` as a path the hooks may resolve differently. If
+  `BQAA_LOG_FILE` is set but empty, dry-run events are discarded, and if
+  `BQAA_TRACE_ENABLED` is off nothing is emitted; the report says so in
+  both cases. Unset `BQAA_DRY_RUN` (or set it to `false`) before a live
+  BigQuery smoke test. Informational only; does not affect the exit
+  code.
+
+Accepted values for both flags: only the word `true`, in any letter
+case and with no surrounding whitespace, turns a flag on. Every other
+set value turns it off, including `1`, `yes`, `on`, padded values such
+as ` true`, and an empty value. The hooks, the runtime and this report
+all apply the same rule. Upgrade note: earlier versions of this
+plugin's hooks stopped at the shell gate for `BQAA_TRACE_ENABLED=TRUE`
+or `True` and emitted nothing, so an existing uppercase setting now
+starts emission. The sibling `claude_code_mod` plugin parses these
+variables differently: it trims and lower-cases the value, turns
+`BQAA_DRY_RUN` on for `true`, `1`, `yes` or `on`, and keeps tracing on
+unless `BQAA_TRACE_ENABLED` is `false`, `0`, `no` or `off`.
 - `google-cloud-bigquery` — always required (both writer paths use it).
 - `google-cloud-bigquery-storage` + `pyarrow` — required only for the
   lower-latency Storage Write path; absence is reported as advisory

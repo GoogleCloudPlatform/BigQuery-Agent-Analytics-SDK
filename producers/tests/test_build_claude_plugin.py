@@ -726,6 +726,74 @@ def test_shell_hooks_short_circuit_when_trace_disabled_in_any_case(
   ), f"common.sh exec'd BQAA_PYTHON despite BQAA_TRACE_ENABLED={trace_enabled}"
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "true",
+        "TRUE",
+        "tRuE",
+        "false",
+        "0",
+        "1",
+        "yes",
+        "on",
+        "t",
+        "trueX",
+        " true",
+        "true ",
+        "",
+        " ",
+    ],
+    ids=lambda v: "unset" if v is None else repr(v),
+)
+def test_shell_gate_matches_runtime_for_every_value(tmp_path, value):
+  """The shell gate in common.sh, the runtime parser and /bqaa-setup must
+  agree on every value: the hook execs BQAA_PYTHON exactly when
+  config.py (and the setup helper) read tracing as on. Covers unset,
+  empty, whitespace, numeric and near-match spellings."""
+  marker = tmp_path / "bqaa-python-invoked"
+  recorder = tmp_path / "fake_python.sh"
+  recorder.write_text(f'#!/bin/bash\ntouch "{marker}"\nexit 0\n')
+  recorder.chmod(0o755)
+  env = {"PATH": "/usr/bin:/bin", "BQAA_PYTHON": str(recorder)}
+  if value is not None:
+    env["BQAA_TRACE_ENABLED"] = value
+
+  result = subprocess.run(
+      ["bash", str(PLUGIN_DIR / "hooks" / "session_start.sh")],
+      env=env,
+      input="{}",
+      capture_output=True,
+      text=True,
+      timeout=10,
+  )
+  assert result.returncode == 0, f"stderr={result.stderr!r}"
+
+  probe = subprocess.run(
+      [
+          sys.executable,
+          "-c",
+          "from bigquery_agent_analytics_tracing.config import BQAAConfig;"
+          "from bigquery_agent_analytics_tracing.setup_check import"
+          " collect_report;"
+          "print(BQAAConfig.from_env().enabled,"
+          " collect_report(python_bin=__import__('sys').executable)"
+          ".trace_enabled)",
+      ],
+      env={**env, "PYTHONPATH": str(_PRODUCERS_DIR / "src")},
+      capture_output=True,
+      text=True,
+      timeout=30,
+  )
+  assert probe.returncode == 0, probe.stderr
+  runtime_on, helper_on = probe.stdout.split()
+  assert runtime_on == helper_on
+  assert marker.exists() is (
+      runtime_on == "True"
+  ), f"shell gate and runtime disagree for BQAA_TRACE_ENABLED={value!r}"
+
+
 def test_vendored_plugin_empty_log_file_dry_run_reported_and_discarded(
     tmp_path, restore_manifest, cleanup_vendor
 ):
@@ -896,3 +964,70 @@ def test_vendored_plugin_default_log_file_is_flagged_when_tmpdirs_differ(
   assert report["log_file"] == str(pinned)
   _fire(pinned_env)
   assert "DRY_RUN " in pinned.read_text()
+
+
+@pytest.mark.parametrize("form", ["relative", "tilde"])
+def test_vendored_plugin_relative_log_file_is_flagged_per_hook_context(
+    tmp_path, restore_manifest, cleanup_vendor, form
+):
+  """A relative BQAA_LOG_FILE resolves against each hook's working
+  directory and "~" against each hook's HOME. Run the built setup helper
+  in context A and the real hooks in context B: the text and the JSON
+  must flag the path, and the row lands in B, not A."""
+  build_claude_plugin.build(dist_dir=tmp_path / "dist", skip_tar=True)
+
+  ctx_a = tmp_path / "a"
+  ctx_b = tmp_path / "b"
+  for d in (ctx_a, ctx_b):
+    d.mkdir(mode=0o700)
+  log_value = "dry.log" if form == "relative" else "~/dry.log"
+  base = {
+      "PATH": "/usr/bin:/bin",
+      "TMPDIR": str(tmp_path),
+      "BQAA_PYTHON": sys.executable,
+      "BQAA_PROJECT_ID": "synthetic-project",
+      "BQAA_DATASET": "synthetic_dataset",
+      "BQAA_DRY_RUN": "true",
+      "BQAA_LOG_FILE": log_value,
+      "BQAA_SPOOL_DIR": str(tmp_path / "spool"),
+      "BQAA_STATE_DIR": str(tmp_path / "state"),
+  }
+  # The same cwd and HOME per context, so both forms differ between A
+  # and B.
+  env_a = {**base, "HOME": str(ctx_a)}
+  env_b = {**base, "HOME": str(ctx_b)}
+
+  def _check(*args):
+    result = subprocess.run(
+        ["bash", str(PLUGIN_DIR / "scripts" / "run_setup_check.sh"), *args],
+        env=env_a,
+        cwd=ctx_a,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    return result.stdout
+
+  text = _check()
+  assert f"try to write dry-run events to {log_value} (not an absolute" in text
+  report = json.loads(_check("--json"))
+  assert report["log_file"] == log_value
+  assert report["log_file_is_default"] is False
+  assert report["log_file_is_relative"] is True
+
+  payload = json.dumps({"session_id": "relative", "cwd": str(ctx_b)})
+  for hook_script in ("session_start.sh", "session_end.sh"):
+    result = subprocess.run(
+        ["bash", str(PLUGIN_DIR / "hooks" / hook_script)],
+        env=env_b,
+        cwd=ctx_b,
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, f"{hook_script}: {result.stderr!r}"
+
+  assert not (ctx_a / "dry.log").exists()
+  assert "DRY_RUN " in (ctx_b / "dry.log").read_text()
