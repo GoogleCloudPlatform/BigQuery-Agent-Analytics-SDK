@@ -52,6 +52,8 @@ check() { # description, then a command that must succeed
 }
 fails() { ! "$@"; }
 
+check 'the README describes coverage without a fixed suite count' fails grep -Eq '[0-9]+ tests cover' "$mod/README.md"
+
 repo="$work/repo"
 src="$repo/plugins/claude_code_mod"
 dist="$repo/plugins/claude_code_dist/bigquery-agent-analytics-mod"

@@ -1023,8 +1023,8 @@ The table receives your prompts, the model's visible answers, tool arguments
 and tool results (the text the model read), cut to `maxPayloadChars` per
 column. Treat the dataset like the transcripts it mirrors.
 
-* **Allowlist:** in `content` and `attributes`, at any depth, and in JSON
-  found in their text, a value is kept only under a key on the list in
+* **Allowlist:** in `content`, `attributes` and parsed JSON text, within the
+  depth and character budgets, a value is kept only under a key on the list in
   [`hooks/lib/allowlist.ts`](hooks/lib/allowlist.ts); under any other key it
   becomes `[REDACTED]`, whatever it is: a string, a number, a boolean, a list
   or an object (`null` stays). Keys are compared by their words, so
@@ -1067,8 +1067,9 @@ column. Treat the dataset like the transcripts it mirrors.
 * **JSON in text:** text that looks like JSON (an object; a list that opens
   with a value, whether an object, a list, a string, a number, `true`,
   `false` or `null`, or is empty; or a JSON-encoded string whose text opens
-  an object or a list) is parsed and held to the same list, at any encoding
-  depth, then encoded again (compactly). Text that looks like JSON but
+  an object or a list) is parsed and held to the same list within the
+  character and depth budgets, then encoded again (compactly). Deeper
+  content is dropped and marked. Text that looks like JSON but
   cannot be parsed whole (longer than the 24,064 characters parsed at the
   default `maxPayloadChars`, or not valid JSON, such as a document cut short
   or JSON lines) is dropped: it becomes `[TRUNCATED: N chars of JSON text
@@ -1081,11 +1082,13 @@ column. Treat the dataset like the transcripts it mirrors.
   patterns. Simple literal forms such as `--password=VALUE`,
   `--password VALUE`, and `https://user:VALUE@example.test/path` are
   redacted. The URL example has exactly one `@` and no shell syntax.
-  In a comma-separated list such as
-  `--set-env-vars=VERSION=v,DB_PASSWORD=VALUE`, a plain credential name of
-  at most 100 characters is covered when the entire list is one shell word
-  containing only letters, digits, `_`, `.`, `-`, `,` and `=`. Names start
-  with a letter or `_`; values are nonempty literals. Names matching a
+  Plain-list probes include
+  `--set-env-vars=VERSION=v,DB_PASSWORD=VALUE`, selected credential names
+  and lengths, and nonempty literal values in single shell words made of
+  letters, digits, `_`, `.`, `-`, `,` and `=`. The direct name reader has a
+  100-character bound; separate tests exercise longer names through the
+  list fallback. These examples do not establish coverage of every word
+  made from those characters. Names matching a
   provider-token pattern are excluded: that earlier pass can rewrite the
   name before its value is checked. Listed names such as `max_tokens` do
   not trigger redaction themselves; an earlier credential in the same list
@@ -1093,7 +1096,15 @@ column. Treat the dataset like the transcripts it mirrors.
   separators and more complex URLs are best effort; see
   [Limitations](#limitations) for concrete misses and
   [#546](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/546)
-  for sanitizer hardening. These rules do not identify every secret.
+  for sanitizer hardening. This build additionally checks a filtered matrix
+  of 8,454 list commands across five wrappers (direct, both `sh -c` quote
+  forms, JSON-string logs and INFO JSON logs) and eight output paths. This
+  is a finite regression set, not coverage of arbitrary shell syntax.
+  Additional regressions combine selected encoded whitespace and name
+  spellings with nested command strings and JSON logs. A backslash-spelled
+  name after an earlier quoted space remains a known gap in double-quoted
+  command strings and INFO JSON logs. These rules can miss credentials or
+  redact ordinary text; see the pinned examples in Limitations.
 * **Diagnostics:** error text from BigQuery, the token command or the file
   system goes through the same free-text rules before it is cut (including
   where BigQuery's error messages and per-row insert errors are first held to
@@ -1103,18 +1114,22 @@ column. Treat the dataset like the transcripts it mirrors.
   only, never its arguments.
 * **Truncation:** each payload column is held to `maxPayloadChars`,
   error messages to 4,096 characters; the copy is built within that budget, so
-  a multi-megabyte tool input costs the hot path milliseconds (a test checks
-  under 100 ms for a 2,760,000-character Write). The free-text rules measure
-  each run of line continuations, of a name's characters and of the blanks
-  before a separator once, never again from each place in it where a name
-  may start, and read a list of names and values once, whichever word
-  starts in it (each `;` in `A=x;\A=x;…` starts one), so 100,000
-  characters of continuations as JSON encodes them, of names and values,
-  of such a list or of `$(` cost each path under 100 ms too (tested, the
-  payload cap and the full text). A long string is scanned up
-  to 8,192 characters past where it is cut, so a credential across the cut is
-  still matched whole; those last 8,192 characters scanned are never kept,
-  and anything further is dropped, never passed on unscanned.
+  a multi-megabyte tool input is bounded before scanning (a test checks
+  under 100 ms for a 2,760,000-character Write). Timing regression tests
+  also cover selected 23,000- and 100,000-character inputs: continuations,
+  lists, overlapping letter-delimiter suffixes, long uppercase names,
+  literal backslashes and `$(`. Additional cases cover repeated equals and
+  255-character delimiter suffixes through 500,000 characters. They assert
+  under 100 ms per output path
+  at both the default payload cap and a cap that scans the full input.
+  These are finite workloads measured on the test machine, not a latency
+  guarantee for arbitrary text or hardware. A long string is scanned up
+  to 8,192 characters beyond the internal string budget, which reserves
+  512 characters below the configured cap for markers. At the default
+  cap of 16,384, the scan window is at most 24,064 characters
+  (16,384 - 512 + 8,192); it can be smaller when the remaining column
+  budget is lower. The margin is scanned only to complete matches near
+  the cut and is never kept; anything further is dropped unscanned.
   Cut rows have `is_truncated = true`.
 * **Local files:** dead-letter and dry-run files hold the same redacted rows
   as the table; they are written with your user's default permissions.
@@ -1152,7 +1167,7 @@ test kit, with no session, sign-in, GCP or network: `$.http.fetch`,
 `$.process.run`, `$.fs` and `$.store` are stubbed, and `mock.clock` drives the
 timers; the `$.fs` stubs measure files in UTF-8 bytes and refuse a file over
 4 MiB, and the `$.store` stub a store over 4 MiB of JSON in all, as the host
-does. 423 tests cover the captured rows and their spans,
+does. The tests cover the captured rows and their spans,
 subagent runs in the order the host raises them (one invocation and one
 trace for the turn, a span per run, a SubagentStart that comes late or never),
 the session-start row raised before or during `session.start`'s setup,
@@ -1166,25 +1181,32 @@ written, cut short or changed is not complete; a writer and a replayer
 interleaved lose no row; a file without its record is kept and reported),
 backfill, the exit spill and its time bound, multibyte rows held to the
 file limit in bytes, dry run,
-redaction (the allowlist at any depth and in JSON inside text, whole values
-of any type, JSON nested in strings to any encoding depth, JSON-looking text
-too long or broken to parse however it opens, key names that hold a
-credential (in nested objects, JSON text and tool arguments), credential
-names in text with their parts, endings, plural and numbered forms, URLs and
-webhook URLs,
-credential-named lines whatever they hold, credential options and
-assignments whose value ends cleanly (the rest kept) or cannot be told
-(redacted to the end of the text, with a generated sweep of value openers),
+redaction (allowlist fixtures within the depth budget and dropped deeper
+values, scalar/list/object values, selected nested JSON encodings and
+JSON-looking openers that are too long or broken to parse, selected
+credential-bearing key names in nested objects, JSON text and tool
+arguments, and fixtures for credential-name parts, endings, plural and
+numbered forms, URLs and webhook URLs),
+selected credential-named lines, options and assignments with literal,
+quoted, expanded or uncertain value endings (including a generated sweep
+of value openers),
 credential names in lists of names and values (generated sweeps of
 separators, spellings and options, and of expansions, command
-substitutions and long values before them) and before an escaped `=`,
-100,000 characters of continuations, lists (one that each `;` starts
-again too) or `$(` under 100 ms in every path,
-text with no credential left as it is, values past 5,000 characters and
-past the scanned window, credentials across a length cap, every diagnostic
-sink, and each review probe through capture, delivery and the dead-letter
-file),
-truncation (identifying fields survive a cut), refused environment reads
+substitutions and long values before them; the 8,454-command matrix filters
+out combinations split inside a name or value and variable names that
+consume the delimiter, and includes short `pass` names after punctuation)
+and before an escaped `=`,
+selected long continuations, lists (one that each `;` starts again too),
+overlapping suffixes, uppercase names, repeated literal `\=` and `$(`
+with per-path timing assertions at both payload caps,
+selected ordinary text left unchanged (including locale-quoted names),
+values past 5,000 characters and past the scanned window, credential
+fixtures across a length cap, the exercised diagnostic sinks, and selected
+review probes through capture, delivery and the dead-letter file.
+Known-gap tests pin missed redaction after a quoted space and over-redaction
+of non-`/` substitution patterns after an assignment; passing those tests
+records the current gaps rather than successful redaction.
+The tests also cover truncation (identifying fields survive a cut), refused environment reads
 (`BQAA_ACCESS_TOKEN` included), a re-fired `session.start`, and
 configuration.
 
@@ -1678,15 +1700,34 @@ the same views count other producers' requests but not their tokens.
   arguments, structured results and JSON output, and anything else under a
   key that is not on the list, are recorded as `[REDACTED]`. Free text is
   scanned for credentials on a best-effort basis.
-* Free-text parsing is best effort. Detailed shell cases — names joined
-  from quoted, escaped or continued parts, ANSI-C `$'…'` names, command
-  strings another shell runs, substitutions, expansions, and non-comma list
-  separators — are outside the plain-list coverage above. The readers have
-  different bounds; the command-string heuristic inspects only the first
-  400 characters of a word. The following examples document misses on
-  main; [#546](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/546)
-  hardens several of them. A miss in any wrapper can leave the value in a
-  row, log or dead-letter file.
+* Free-text parsing is best effort. The direct named-value reader has a
+  100-character name bound and the forward shell-name readers a
+  200-character bound. The final list-name fallback has no name-length
+  bound: it scans each candidate segment before `=` regardless of length,
+  including 201-character and longer names. The scan margin extends 8,192
+  characters beyond the internal budget, after reserving 512 characters
+  from the configured cap for markers: at most 24,064 characters at the
+  default 16,384-character cap. Text beyond the window is dropped. The
+  word-start lookup looks back at most 4,096 characters. This bounds that
+  lookup only: value and name readers can scan farther, and a detected
+  credential can preserve later lines when its value ends unambiguously.
+  The command-string heuristic reads only the first 400 characters of a word. These bounds do not constitute
+  general shell parsing. Known gaps are tracked in
+  [#546](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/546):
+  * **Known gap — backslash-spelled name after a quoted space:**
+    `sh -c "gcloud run deploy svc --set-env-vars=VERSION=\"a b\",DB_PA\\SSWORD=CanaryValue"`
+    and `INFO {"command":"gcloud run deploy svc --set-env-vars=VERSION=\"a b\",DB_PA\\SSWORD=CanaryValue"}`
+    are returned unchanged by the free-text redactor, retaining
+    `CanaryValue` in the eight tested output paths. The backslash/quote
+    heuristic restarts at the earlier raw space. Main also misses these
+    two inputs; the quoted-name sibling `DB_PASS"WORD"` is a separate
+    positive fixture.
+  * **Known gap — non-`/` substitution delimiters after an assignment:**
+    `x=1 sed 's#pass"word"=.*#x#' config.ini` becomes
+    `x=1 sed 's#pass"word"=[REDACTED]'`, losing the pattern suffix and
+    filename. The pinned `#`, `:` and `%` examples after `x=1` or `FOO=bar`
+    have this over-redaction. The literal-quote guard special-cases `/`;
+    tests preserving `/` patterns do not establish other-delimiter coverage.
   * A provider-token-shaped name can be rewritten before the named-value
     pass sees it. For example,
     `--set-env-vars=VERSION=v,github_pat_PRODUCTION_ACCESS_TOKEN=CanaryValue`
@@ -1694,9 +1735,6 @@ the same views count other producers' requests but not their tokens.
   * Listed entries after a credential can be swallowed with its value:
     `--set-env-vars=DB_PASSWORD=x,max_tokens=1024` becomes
     `--set-env-vars=DB_PASSWORD=[REDACTED]`.
-  * A plain name longer than 100 characters can be missed. For example,
-    `--set-env-vars=VERSION=v,` followed by 92 `A` characters and
-    `_PASSWORD=CanaryValue` has a 101-character name; its value is kept.
   * ANSI-C option names containing a decoded NUL are not truncated as the
     shell truncates them: `cli $'--password\0' CanaryValue`,
     `cli $'--password\x00ignored' CanaryValue`,
@@ -1705,35 +1743,36 @@ the same views count other producers' requests but not their tokens.
   * URL user-info stops at the first `@`, so
     `curl https://u:prefix@CanaryValue@example.test/path` keeps the password
     suffix `CanaryValue`.
-  * Query-style values whose opening quote is escaped can keep a suffix:
-    `sh -c "see q?token=\"abc CanaryValue\""` keeps `CanaryValue`.
-    In URLs, shell syntax can outlast the URL scan:
-    `curl https://example.test/?token=$(printf %s CanaryValue)`,
-    `curl https://example.test/?token=$'a CanaryValue'`,
-    `curl https://example.test/?token=a\ CanaryValue` and
-    `curl https://example.test/?token=${VALUE:-a CanaryValue}` keep a suffix.
-  * A quoted separator after a substitution
-    (`VERSION=$(printf v)","DB_PASS"WORD"=CanaryValue`), an expansion with a
-    blank (`VERSION=${VALUE:-a b},DB_PASS"WORD"=CanaryValue`), or escaped
-    backticks (``VERSION=a\`b,DB_PASS"WORD"=CanaryValue`` in a JSON log)
-    can hide the following list name.
-  * A substitution followed by more value text
-    (`VERSION=$(printf v)-dev,DB_PASS"WORD"=CanaryValue`), or a space in an
-    earlier value (`VERSION="a b",DB_PASS"WORD"=CanaryValue` in a command
-    string), can hide the following list name.
-  * Declared delimiters and allowlisted suffixes need care:
-    `^1^VERSION=v1pass=CanaryValue`, `^::^VERSION=$(printf v)::DB_PASS"WORD"=CanaryValue`,
-    `^.^VERSION=max.tokens=CanaryValue`, and
-    `"^#^VERSION=v#DB_PASSWORD=first&CanaryValue"` can keep a value or suffix.
-    Shell-spelled delimiters (`^$'\x71'^VERSION=vqpass=CanaryValue`),
-    quoted option names (`--set-env-"vars"=^q^VERSION=vqpass=CanaryValue`),
-    and values resembling delimiters
-    (`"^q^VERSION=hello ^x^qpass=CanaryValue"`) can also be missed.
-  * An ANSI-C list name after an earlier substitution
-    (`VERSION=$(printf v)-dev,$'DB_PASS\x57ORD'=CanaryValue` in a JSON log),
-    or after 400 literal characters in an earlier value, can be missed.
-    Locale-quoted names (`DB_PASS$"WORD"=CanaryValue` and
-    `cli --pass$"word" CanaryValue`) are also best effort.
+  * URL parameter values containing shell expansions can outlast the URL
+    scan: `curl https://example.test/?token=$(printf %s CanaryValue)`,
+    `curl https://example.test/?token=$'a CanaryValue'` and
+    `curl https://example.test/?token=${VALUE:-a CanaryValue}` can keep a
+    suffix. Escaped spaces (`?token=a\ CanaryValue` and
+    `?token=$TOKEN\ CanaryValue`) are covered by regression tests and are
+    no longer an open limitation.
+  * A value after a redaction marker can keep a suffix when its shell end
+    is uncertain: `"^q^VERSION=$(printf v)qpass=[REDACTED]&CanaryValue"`,
+    also with a provider-shaped token in place of `[REDACTED]`.
+  * A delimiter-looking earlier value can hide the declared delimiter:
+    `"^#^VERSION=hello ^x^#DB_PASSWORD=first&CanaryValue"` and
+    `"^q^VERSION=$(printf ^x^)qpass=CanaryValue"` can keep a suffix.
+  * A declared delimiter can split an allowlisted spelling:
+    `^.^VERSION=max.tokens=CanaryValue` and
+    `^-^VERSION=output-tokens=CanaryValue` can keep the value of `tokens`.
+  * Shell-spelled delimiters (`^$'\x71'^VERSION=vqpass=CanaryValue` and
+    `$'^\x71^VERSION=vqpass=CanaryValue'`), delimiters after quoted option
+    names (`--set-env-"vars"=^q^VERSION=vqpass=CanaryValue`), and delimiters
+    of 256 characters or more can be missed. The delimiter reader inspects
+    at most 255 characters between the opening and closing `^`.
+  * Locale-quoted option names with separate values
+    (`cli --pass$"word" CanaryValue`) remain best effort. Locale-quoted list
+    names such as `DB_PASS$"WORD"=CanaryValue` and
+    `p$"a"ssword=CanaryValue` have explicit regression cases; these finite
+    examples do not establish coverage of every locale-quoted spelling.
+    ANSI-C names are
+    checked by explicit regression cases, including names after earlier
+    substitutions or escapes and beyond the forward heuristic's window;
+    this is not a guarantee for every `$'…'` spelling or nesting depth.
 * Timestamps have millisecond precision.
 * An organization's web-fetch policy or `allowManagedModsOnly` can stop the
   mod; `/bqaa-status` and the debug log (start the CLI with `--debug`) say why.
