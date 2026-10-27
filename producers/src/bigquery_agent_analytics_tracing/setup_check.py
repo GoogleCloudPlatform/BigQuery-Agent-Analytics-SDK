@@ -286,6 +286,14 @@ def collect_report(python_bin: str | None = None) -> _SetupReport:
   )
 
 
+def _append_config_error(lines: list[str], config_error: str) -> None:
+  lines.append(f"  [INVALID] BQAA_* settings: {config_error}")
+  lines.append(
+      "  Fix: correct or unset that variable; the hooks cannot load"
+      " their configuration and emit no trace events until then."
+  )
+
+
 def _format_report(report: _SetupReport) -> str:
   """Human-readable, copy-pasteable advisory output."""
   lines: list[str] = []
@@ -312,6 +320,11 @@ def _format_report(report: _SetupReport) -> str:
   if report.interpreter_error:
     # Skip the per-import sections — they're all empty when the
     # interpreter is broken, and printing empty checklists is noise.
+    # A bad BQAA_* setting is found without the interpreter, so still
+    # report it; otherwise only --json would name the variable.
+    if report.config_error:
+      _append_config_error(lines, report.config_error)
+      lines.append("")
     lines.append("Import + env checks skipped: interpreter unavailable.")
     lines.append("")
     lines.append("Status: ACTION NEEDED")
@@ -335,11 +348,7 @@ def _format_report(report: _SetupReport) -> str:
       lines.append("  export BQAA_DATASET=agent_analytics")
   if report.config_error:
     lines.append("")
-    lines.append(f"  [INVALID] BQAA_* settings: {report.config_error}")
-    lines.append(
-        "  Fix: correct or unset that variable; the hooks cannot load"
-        " their configuration and emit nothing until then."
-    )
+    _append_config_error(lines, report.config_error)
   lines.append("")
 
   lines.append("Package import:")

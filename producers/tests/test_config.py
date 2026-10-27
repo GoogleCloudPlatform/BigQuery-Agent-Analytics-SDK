@@ -175,7 +175,8 @@ def test_from_env_names_a_malformed_numeric_var(monkeypatch, name, kind):
   monkeypatch.setenv(name, "abc")
   with pytest.raises(ValueError) as excinfo:
     BQAAConfig.from_env()
-  assert str(excinfo.value) == f"{name} must be {kind}, got 'abc'"
+  assert str(excinfo.value) == f"{name} must be {kind}"
+  assert "abc" not in str(excinfo.value)
 
 
 def test_from_env_numeric_parsing_is_unchanged(monkeypatch):

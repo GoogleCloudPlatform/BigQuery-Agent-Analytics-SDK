@@ -96,7 +96,9 @@ def _env_number(
   """``cast`` of the variable, or ``default`` when it is unset.
 
   Parses exactly as ``cast(value)`` would; only the error changes, so it
-  names the variable instead of a bare "invalid literal".
+  names the variable instead of a bare "invalid literal". The error does
+  not include the value: a mis-pasted secret would otherwise reach hook
+  stderr, the hook log and ``/bqaa-setup`` output, which users share.
   """
   raw = os.environ.get(name)
   if raw is None:
@@ -104,7 +106,7 @@ def _env_number(
   try:
     return cast(raw)
   except ValueError:
-    raise ValueError(f"{name} must be {kind}, got {raw!r}") from None
+    raise ValueError(f"{name} must be {kind}") from None
 
 
 @dataclass

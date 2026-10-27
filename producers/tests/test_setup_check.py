@@ -449,16 +449,14 @@ def test_report_flags_a_setting_the_runtime_cannot_parse(
   monkeypatch.setenv("BQAA_MAX_CONTENT_LENGTH", "bad")
 
   report = collect_report()
-  assert report.config_error == (
-      "BQAA_MAX_CONTENT_LENGTH must be an integer, got 'bad'"
-  )
+  assert report.config_error == "BQAA_MAX_CONTENT_LENGTH must be an integer"
   assert report.config_ok is False
   assert report.all_ok is False
 
   text = _format_report(report)
   assert (
       "[INVALID] BQAA_* settings: BQAA_MAX_CONTENT_LENGTH must be an"
-      " integer, got 'bad'" in text
+      " integer" in text
   )
   assert "Status: ACTION NEEDED" in text
 
@@ -480,3 +478,50 @@ def test_report_accepts_settings_the_runtime_parses(monkeypatch, fake_probes):
   assert report.config_error is None
   assert report.all_ok is True
   assert "[INVALID]" not in _format_report(report)
+
+
+def test_report_does_not_echo_the_malformed_value(
+    monkeypatch, fake_probes, capsys
+):
+  """A secret pasted into a numeric setting must not show up in the text
+  or JSON report, which users paste into issues."""
+  sentinel = "SYNTHETIC_SECRET_549"
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_MAX_CONTENT_LENGTH", "x" * 220 + sentinel)
+
+  assert main(argv=[]) == 1
+  text = capsys.readouterr().out
+  assert "BQAA_MAX_CONTENT_LENGTH must be an integer" in text
+  assert sentinel not in text
+
+  assert main(argv=["--json"]) == 1
+  out = capsys.readouterr().out
+  assert sentinel not in out
+  parsed = json.loads(out)
+  assert parsed["config_error"] == "BQAA_MAX_CONTENT_LENGTH must be an integer"
+
+
+def test_text_report_names_a_bad_setting_when_the_interpreter_is_broken(
+    monkeypatch, capsys
+):
+  """The interpreter early return used to hide config_error in text
+  output while --json still reported it."""
+  monkeypatch.setenv("BQAA_PYTHON", "/nonexistent/python-binary-xyz")
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_MAX_CONTENT_LENGTH", "bad")
+
+  assert main(argv=[]) == 1
+  text = capsys.readouterr().out
+  assert "/nonexistent/python-binary-xyz" in text
+  assert (
+      "[INVALID] BQAA_* settings: BQAA_MAX_CONTENT_LENGTH must be an"
+      " integer" in text
+  )
+  assert "Status: ACTION NEEDED" in text
+
+  assert main(argv=["--json"]) == 1
+  parsed = json.loads(capsys.readouterr().out)
+  assert parsed["python_ok"] is False
+  assert parsed["config_ok"] is False
