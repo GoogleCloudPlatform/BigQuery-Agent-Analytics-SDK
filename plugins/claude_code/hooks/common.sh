@@ -29,9 +29,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_DIR="$(dirname "$SCRIPT_DIR")"
 PYTHON_BIN="${BQAA_PYTHON:-python3}"
 
-if [[ "${BQAA_TRACE_ENABLED:-true}" != "true" ]]; then
-  exit 0
-fi
+# Match config.py, which lower-cases a set value and compares it to
+# "true", so TRUE / True enable tracing here too and any other set
+# value, including an empty one, disables it. Only an unset variable
+# defaults to on, hence ${var-true} rather than ${var:-true}. A case
+# glob (not ${var,,}) keeps this working on the Bash 3.2 that macOS
+# ships as /bin/bash.
+case "${BQAA_TRACE_ENABLED-true}" in
+  [Tt][Rr][Uu][Ee]) ;;
+  *) exit 0 ;;
+esac
 
 export PYTHONPATH="${PLUGIN_DIR}/vendor:${PYTHONPATH:-}"
 
