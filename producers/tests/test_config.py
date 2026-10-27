@@ -85,6 +85,13 @@ def test_from_env_defaults_with_empty_env():
   assert config.drain_idle_seconds == DEFAULT_DRAIN_IDLE_SECONDS
   assert config.drain_batch_size == DEFAULT_DRAIN_BATCH_SIZE
   assert config.writer_label == DEFAULT_WRITER_LABEL
+  # Numeric defaults keep the type the env parser always produced.
+  assert type(config.state_ttl_hours) is float
+  assert type(config.drain_idle_seconds) is float
+  assert type(config.drain_poll_seconds) is float
+  assert type(config.max_content_length) is int
+  assert type(config.transcript_max_bytes) is int
+  assert type(config.drain_batch_size) is int
 
 
 def test_from_env_reads_bqaa_specific_vars(monkeypatch):

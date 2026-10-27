@@ -93,7 +93,7 @@ def _env_number(
     cast: Callable[[str], _Number],
     kind: str,
 ) -> _Number:
-  """``cast`` of the variable, or ``default`` when it is unset.
+  """``cast`` of the variable, or ``cast(default)`` when it is unset.
 
   Parses exactly as ``cast(value)`` would; only the error changes, so it
   names the variable instead of a bare "invalid literal". The error does
@@ -102,7 +102,9 @@ def _env_number(
   """
   raw = os.environ.get(name)
   if raw is None:
-    return default
+    # Cast the default too, as before: DEFAULT_STATE_TTL_HOURS is the
+    # int 24, but state_ttl_hours has always been a float.
+    return cast(default)
   try:
     return cast(raw)
   except ValueError:
