@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 
 import pytest
@@ -43,7 +44,11 @@ _ALL_BQAA_ENV = [
 
 @pytest.fixture(autouse=True)
 def _isolate_env(monkeypatch):
-  for name in _ALL_BQAA_ENV:
+  # Also every inherited BQAA_* variable: collect_report() now calls
+  # BQAAConfig.from_env(), which parses numeric knobs such as
+  # BQAA_MAX_CONTENT_LENGTH.
+  inherited = [name for name in os.environ if name.startswith("BQAA_")]
+  for name in [*_ALL_BQAA_ENV, *inherited]:
     monkeypatch.delenv(name, raising=False)
   yield
 
@@ -426,3 +431,52 @@ def test_main_bad_bqaa_python_does_not_crash(monkeypatch, capsys):
   assert parsed["python_ok"] is False
   assert parsed["interpreter_error"] is not None
   assert "/nonexistent/python-binary-xyz" in parsed["interpreter_error"]
+
+
+# ---------------------------------------------------------------------------
+# BQAA_* settings the runtime cannot parse
+# ---------------------------------------------------------------------------
+
+
+def test_report_flags_a_setting_the_runtime_cannot_parse(
+    monkeypatch, fake_probes, capsys
+):
+  """A malformed numeric setting makes BQAAConfig.from_env() raise, so the
+  hooks cannot build their config and emit nothing. The check must not
+  say READY then: it names the variable and exits 1."""
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_MAX_CONTENT_LENGTH", "bad")
+
+  report = collect_report()
+  assert report.config_error == (
+      "BQAA_MAX_CONTENT_LENGTH must be an integer, got 'bad'"
+  )
+  assert report.config_ok is False
+  assert report.all_ok is False
+
+  text = _format_report(report)
+  assert (
+      "[INVALID] BQAA_* settings: BQAA_MAX_CONTENT_LENGTH must be an"
+      " integer, got 'bad'" in text
+  )
+  assert "Status: ACTION NEEDED" in text
+
+  assert main(argv=["--json"]) == 1
+  parsed = json.loads(capsys.readouterr().out)
+  assert parsed["config_ok"] is False
+  assert parsed["all_ok"] is False
+  assert "BQAA_MAX_CONTENT_LENGTH" in parsed["config_error"]
+
+
+def test_report_accepts_settings_the_runtime_parses(monkeypatch, fake_probes):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_MAX_CONTENT_LENGTH", " 42 ")
+  monkeypatch.setenv("BQAA_STATE_TTL_HOURS", "1e1")
+
+  report = collect_report()
+
+  assert report.config_error is None
+  assert report.all_ok is True
+  assert "[INVALID]" not in _format_report(report)

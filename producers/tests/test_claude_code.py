@@ -621,3 +621,77 @@ def test_claude_code_module_is_invocable_as_python_m(tmp_path):
 
 def test_claude_code_default_agent_constant_is_stable():
   assert CLAUDE_CODE_DEFAULT_AGENT == "claude-code"
+
+
+# ----------------------------------------------------------------------------
+# Malformed BQAA_* settings at hook entry
+# ----------------------------------------------------------------------------
+
+
+def test_main_does_not_raise_on_a_malformed_numeric_setting(
+    monkeypatch, tmp_path, capsys
+):
+  """BQAAConfig.from_env() used to run outside main()'s error guard, so a
+  malformed numeric setting raised a traceback and exited 1. It must exit
+  0 like every other hook error and say which setting is wrong."""
+  log = tmp_path / "bad.log"
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  monkeypatch.setenv("BQAA_MAX_CONTENT_LENGTH", "bad")
+  monkeypatch.setenv("BQAA_LOG_FILE", str(log))
+  monkeypatch.setenv("BQAA_STATE_DIR", str(tmp_path / "state"))
+  monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
+
+  rc = main(argv=["SessionEnd"])
+
+  assert rc == 0
+  expected = (
+      "ERROR hook=SessionEnd: invalid BQAA configuration:"
+      " BQAA_MAX_CONTENT_LENGTH must be an integer, got 'bad'"
+  )
+  assert expected in capsys.readouterr().err
+  assert expected in log.read_text()
+
+
+def test_main_stays_silent_on_a_malformed_setting_when_tracing_is_off(
+    monkeypatch, tmp_path, capsys
+):
+  monkeypatch.setenv("BQAA_TRACE_ENABLED", "false")
+  monkeypatch.setenv("BQAA_MAX_CONTENT_LENGTH", "bad")
+  monkeypatch.setenv("BQAA_LOG_FILE", str(tmp_path / "off.log"))
+  monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
+
+  assert main(argv=["SessionEnd"]) == 0
+  assert capsys.readouterr().err == ""
+  assert not (tmp_path / "off.log").exists()
+
+
+def test_hook_module_exits_zero_on_a_malformed_numeric_setting(tmp_path):
+  """The reviewer's repro through ``python -m``, which is what common.sh
+  execs: exit 0, a one-line message on stderr, no traceback."""
+  src_root = Path(__file__).resolve().parents[1] / "src"
+  env = {
+      "PYTHONPATH": str(src_root),
+      "PATH": "/usr/bin:/bin",
+      "BQAA_PROJECT_ID": "synthetic-project",
+      "BQAA_DATASET": "synthetic_dataset",
+      "BQAA_DRY_RUN": "true",
+      "BQAA_MAX_CONTENT_LENGTH": "bad",
+      "BQAA_LOG_FILE": str(tmp_path / "m.log"),
+      "BQAA_STATE_DIR": str(tmp_path / "state"),
+  }
+  result = subprocess.run(
+      [
+          sys.executable,
+          "-m",
+          "bigquery_agent_analytics_tracing.claude_code",
+          "SessionEnd",
+      ],
+      env=env,
+      input="{}",
+      capture_output=True,
+      text=True,
+      timeout=15,
+  )
+  assert result.returncode == 0, result.stderr
+  assert "Traceback" not in result.stderr
+  assert "BQAA_MAX_CONTENT_LENGTH must be an integer" in result.stderr

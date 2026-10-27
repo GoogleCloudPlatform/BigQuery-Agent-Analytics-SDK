@@ -156,3 +156,32 @@ def test_writer_label_env_override_wins(monkeypatch):
   monkeypatch.setenv("BQAA_WRITER_LABEL", "custom/9.9.9")
   config = BQAAConfig.from_env()
   assert config.writer_label == "custom/9.9.9"
+
+
+_NUMERIC_VARS = [
+    ("BQAA_MAX_CONTENT_LENGTH", "an integer"),
+    ("BQAA_TRANSCRIPT_MAX_BYTES", "an integer"),
+    ("BQAA_DRAIN_BATCH_SIZE", "an integer"),
+    ("BQAA_STATE_TTL_HOURS", "a number"),
+    ("BQAA_DRAIN_IDLE_SECONDS", "a number"),
+    ("BQAA_DRAIN_POLL_SECONDS", "a number"),
+]
+
+
+@pytest.mark.parametrize("name, kind", _NUMERIC_VARS)
+def test_from_env_names_a_malformed_numeric_var(monkeypatch, name, kind):
+  """The error names the variable, so the hook log and /bqaa-setup can
+  say which setting to fix instead of a bare "invalid literal"."""
+  monkeypatch.setenv(name, "abc")
+  with pytest.raises(ValueError) as excinfo:
+    BQAAConfig.from_env()
+  assert str(excinfo.value) == f"{name} must be {kind}, got 'abc'"
+
+
+def test_from_env_numeric_parsing_is_unchanged(monkeypatch):
+  """Values int()/float() accepted before are still accepted."""
+  monkeypatch.setenv("BQAA_MAX_CONTENT_LENGTH", " 42 ")
+  monkeypatch.setenv("BQAA_STATE_TTL_HOURS", "1e1")
+  config = BQAAConfig.from_env()
+  assert config.max_content_length == 42
+  assert config.state_ttl_hours == 10.0

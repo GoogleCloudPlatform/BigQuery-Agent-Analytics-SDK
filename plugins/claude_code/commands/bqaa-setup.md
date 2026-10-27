@@ -42,6 +42,13 @@ before agent events can land in BigQuery.
 - `google-cloud-bigquery-storage` + `pyarrow` — required only for the
   lower-latency Storage Write path; absence is reported as advisory
   (the drainer falls back to `insert_rows_json`).
+- Numeric `BQAA_*` settings (`BQAA_MAX_CONTENT_LENGTH`,
+  `BQAA_TRANSCRIPT_MAX_BYTES`, `BQAA_DRAIN_BATCH_SIZE`,
+  `BQAA_STATE_TTL_HOURS`, `BQAA_DRAIN_IDLE_SECONDS`,
+  `BQAA_DRAIN_POLL_SECONDS`) — must parse as numbers. If one does not,
+  the hooks cannot load their configuration and emit nothing (each hook
+  exits 0 and writes the error to stderr and the log file), so the check
+  reports `[INVALID]` with the variable name and exits `1`.
 
 ## What the check does NOT do
 
