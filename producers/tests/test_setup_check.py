@@ -18,11 +18,15 @@ from __future__ import annotations
 
 import io
 import json
+import os
+from pathlib import Path
 import sys
 
 import pytest
 
 from bigquery_agent_analytics_tracing import setup_check
+from bigquery_agent_analytics_tracing.config import BQAAConfig
+from bigquery_agent_analytics_tracing.config import DEFAULT_LOG_FILE
 from bigquery_agent_analytics_tracing.setup_check import _format_report
 from bigquery_agent_analytics_tracing.setup_check import _ImportProbe
 from bigquery_agent_analytics_tracing.setup_check import _resolve_python_bin
@@ -35,15 +39,22 @@ _ALL_BQAA_ENV = [
     "BQAA_DATASET",
     "BQAA_PYTHON",
     "BQAA_TRACE_ENABLED",
+    "BQAA_DRY_RUN",
+    "BQAA_LOG_FILE",
     "GCP_PROJECT_ID",
     "GOOGLE_CLOUD_PROJECT",
     "BQ_DATASET",
+    "BQ_TABLE",
 ]
 
 
 @pytest.fixture(autouse=True)
 def _isolate_env(monkeypatch):
-  for name in _ALL_BQAA_ENV:
+  # Every inherited BQAA_* variable, not only the ones above: the parity
+  # tests call BQAAConfig.from_env(), which also parses numeric knobs
+  # such as BQAA_MAX_CONTENT_LENGTH.
+  inherited = [name for name in os.environ if name.startswith("BQAA_")]
+  for name in [*_ALL_BQAA_ENV, *inherited]:
     monkeypatch.delenv(name, raising=False)
   yield
 
@@ -246,6 +257,118 @@ def test_report_trace_disabled_via_env(monkeypatch, fake_probes):
   assert report.all_ok
 
 
+def test_report_dry_run_defaults_off_with_default_log_file(
+    monkeypatch, fake_probes
+):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+
+  report = collect_report()
+
+  assert report.dry_run is False
+  assert report.log_file == DEFAULT_LOG_FILE
+  assert report.all_ok
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", "True"])
+def test_report_dry_run_enabled_case_insensitively(
+    monkeypatch, fake_probes, value
+):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", value)
+
+  report = collect_report()
+
+  assert report.dry_run is True
+  # Like trace_enabled, dry-run is runtime intent rather than a missing
+  # prerequisite, so it must not flip all_ok.
+  assert report.all_ok
+
+
+@pytest.mark.parametrize(
+    "env_value, expected, relative",
+    [
+        (None, DEFAULT_LOG_FILE, False),
+        ("/var/tmp/bqaa-dry-run.log", "/var/tmp/bqaa-dry-run.log", False),
+        ("", "", False),
+        # Kept as is, never stripped or expanded, like the runtime.
+        (" ", " ", True),
+        ("dry.log", "dry.log", True),
+        ("~/dry.log", "~/dry.log", True),
+        ("~root/dry.log", "~root/dry.log", False),
+    ],
+    ids=[
+        "unset",
+        "custom-path",
+        "empty",
+        "whitespace",
+        "relative",
+        "tilde",
+        "tilde-user",
+    ],
+)
+def test_report_log_file_matches_runtime_config(
+    monkeypatch, fake_probes, env_value, expected, relative
+):
+  """The dry-run destination must resolve exactly like the runtime
+  (``BQAAConfig.from_env``). An empty BQAA_LOG_FILE stays empty there and
+  log_to_file() then drops every dry-run row, so the report must not
+  swap in the default path. A path that each hook resolves for itself
+  (relative or "~") is flagged."""
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  if env_value is not None:
+    monkeypatch.setenv("BQAA_LOG_FILE", env_value)
+
+  report = collect_report()
+
+  assert report.log_file == expected
+  # Same destination the runtime logger writes dry-run rows to.
+  assert report.log_file == BQAAConfig.from_env().log_file
+  assert report.log_file_is_default is (env_value is None)
+  assert report.log_file_is_relative is relative
+
+
+# Every value the runtime parses: only "true" in any case, unpadded, is on.
+_FLAG_VALUES = [
+    ("true", True),
+    ("TRUE", True),
+    ("True", True),
+    ("tRuE", True),
+    ("false", False),
+    ("FALSE", False),
+    ("0", False),
+    ("1", False),
+    ("yes", False),
+    ("on", False),
+    ("t", False),
+    ("trueX", False),
+    (" true", False),
+    ("true ", False),
+    ("", False),
+    (" ", False),
+]
+
+
+@pytest.mark.parametrize("value, expected", _FLAG_VALUES)
+def test_report_mode_flags_match_runtime_config(
+    monkeypatch, fake_probes, value, expected
+):
+  """/bqaa-setup must parse the mode flags exactly like the runtime
+  (``BQAAConfig.from_env``); otherwise it reports a mode the hooks do
+  not actually run in."""
+  monkeypatch.setenv("BQAA_TRACE_ENABLED", value)
+  monkeypatch.setenv("BQAA_DRY_RUN", value)
+
+  report = collect_report()
+  config = BQAAConfig.from_env()
+
+  assert report.trace_enabled is expected
+  assert report.dry_run is expected
+  assert report.trace_enabled is config.enabled
+  assert report.dry_run is config.dry_run
+
+
 def test_report_interpreter_error_breaks_all_ok(monkeypatch, fake_probes):
   monkeypatch.setenv("BQAA_PROJECT_ID", "p")
   monkeypatch.setenv("BQAA_DATASET", "d")
@@ -315,6 +438,196 @@ def test_format_report_warns_when_trace_disabled(monkeypatch, fake_probes):
   assert "off" in text.lower()
 
 
+def test_format_report_shows_dry_run_off_by_default(monkeypatch, fake_probes):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+
+  text = _format_report(collect_report())
+
+  assert "BQAA_DRY_RUN: off" in text
+  assert "dry-run mode is active" not in text
+  assert "Status: READY" in text
+
+
+def test_format_report_warns_when_dry_run_on(
+    monkeypatch, fake_probes, tmp_path
+):
+  """Moving from the dry-run walkthrough to a live BigQuery smoke test
+  with BQAA_DRY_RUN=true still exported must not look like a plain
+  READY: the note says events go to the local log, names that log, and
+  says how to switch back to live writes."""
+  custom = str(tmp_path / "dry-run.log")
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  monkeypatch.setenv("BQAA_LOG_FILE", custom)
+
+  text = _format_report(collect_report())
+
+  assert "BQAA_DRY_RUN: on" in text
+  assert f"try to write dry-run events to {custom} instead of BigQuery" in text
+  # The runtime may refuse the path, so the note must not promise
+  # delivery.
+  assert (
+      "drop them silently if the runtime refuses that path (for example a"
+      " read-only file, a symlink, or a file in a directory that your"
+      " group or other users can write)." in text
+  )
+  # An absolute explicit path is used as is: no caveat.
+  assert "pin it" not in text
+  assert "BQAA_DRY_RUN=false" in text
+  # Dry-run is a mode, not a missing prerequisite.
+  assert "Status: READY" in text
+
+
+@pytest.mark.parametrize("log_file", ["dry.log", "~", "~/dry.log", " "])
+def test_format_report_dry_run_note_flags_a_relative_log_file(
+    monkeypatch, fake_probes, log_file
+):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  monkeypatch.setenv("BQAA_LOG_FILE", log_file)
+
+  text = _format_report(collect_report())
+
+  assert (
+      f"try to write dry-run events to {log_file} (not an absolute path:"
+      " each hook resolves it against its own working directory, and"
+      ' "~" or "~/" against its own HOME. Set BQAA_LOG_FILE to an absolute'
+      " path to pin it) instead of BigQuery" in text
+  ), text
+  assert "is empty" not in text
+
+
+@pytest.mark.parametrize("home", ["/home-a", "/home-b"])
+def test_format_report_dry_run_note_expands_a_tilde_user_log_file(
+    monkeypatch, fake_probes, home
+):
+  """``~user/...`` expands through the account database, as the
+  runtime's ``Path.expanduser()`` does, not through each hook's HOME: it
+  is not flagged as relative, and the note names the expansion, which
+  does not depend on HOME."""
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  monkeypatch.setenv("BQAA_LOG_FILE", "~root/dry.log")
+  monkeypatch.setenv("HOME", home)
+  expanded = Path("~root/dry.log").expanduser()
+  assert not str(expanded).startswith(home)
+
+  report = collect_report()
+  text = _format_report(report)
+
+  assert report.log_file_is_relative is False
+  assert (
+      "try to write dry-run events to ~root/dry.log (expanded through the"
+      f" account database to {expanded}, the same for every hook) instead"
+      " of BigQuery" in text
+  ), text
+  assert "pin it" not in text
+
+
+def test_format_report_dry_run_note_flags_an_unknown_tilde_user(
+    monkeypatch, fake_probes
+):
+  """The runtime cannot expand ``~user`` for a user that does not exist
+  (``Path.expanduser()`` raises RuntimeError and ``log_to_file`` drops
+  the row), so the note must say the events are discarded."""
+  missing = "~bqaa-no-such-user-0/dry.log"
+  with pytest.raises(RuntimeError):
+    Path(missing).expanduser()
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  monkeypatch.setenv("BQAA_LOG_FILE", missing)
+
+  report = collect_report()
+  text = _format_report(report)
+
+  assert report.log_file_is_relative is False
+  assert (
+      f"try to write dry-run events to {missing} (the user named after"
+      ' "~" was not found in the account database, so the runtime cannot'
+      " expand the path and discards dry-run events)" in text
+  ), text
+  # Exit status and READY are unchanged: the note carries the warning.
+  assert "Status: READY" in text
+
+
+@pytest.mark.parametrize("log_file", [None, "/var/tmp/dry.log", ""])
+def test_format_report_dry_run_note_with_tracing_off(
+    monkeypatch, fake_probes, log_file
+):
+  """The hooks exit at the shell gate while tracing is off, so the note
+  names no destination, whatever BQAA_LOG_FILE is."""
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_TRACE_ENABLED", "false")
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  if log_file is not None:
+    monkeypatch.setenv("BQAA_LOG_FILE", log_file)
+
+  text = _format_report(collect_report())
+
+  assert (
+      "BQAA_DRY_RUN: on\n  Note: dry-run mode is active, but nothing is"
+      " emitted while BQAA_TRACE_ENABLED is off.\n" in text
+  ), text
+  assert "try to write" not in text
+  assert "discarded" not in text
+
+
+def test_format_report_dry_run_note_uses_default_log_file(
+    monkeypatch, fake_probes
+):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", "TRUE")
+
+  text = _format_report(collect_report())
+
+  assert "BQAA_DRY_RUN: on" in text
+  assert f"the default log file ({DEFAULT_LOG_FILE} for this shell's" in text
+  assert "the hooks resolve it from their own TMPDIR" in text
+
+
+def test_format_report_warns_dry_run_discards_when_log_file_empty(
+    monkeypatch, fake_probes
+):
+  """BQAA_LOG_FILE set but empty: the runtime drops every dry-run row,
+  so the note must say the events are discarded instead of naming a log
+  file that never receives them."""
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  monkeypatch.setenv("BQAA_LOG_FILE", "")
+
+  text = _format_report(collect_report())
+
+  assert "BQAA_DRY_RUN: on" in text
+  assert "BQAA_LOG_FILE is empty so dry-run events are discarded" in text
+  assert "events write to" not in text
+  assert DEFAULT_LOG_FILE not in text
+  # Still a mode, not a missing prerequisite: the note carries the warning.
+  assert "Status: READY" in text
+
+
+def test_format_report_shows_dry_run_when_interpreter_broken(
+    monkeypatch, fake_probes
+):
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  fake_probes["interpreter_error"] = "interpreter not found: /bad/path"
+
+  text = _format_report(collect_report())
+
+  # Mode flags print before the skipped-checks early return, same as
+  # BQAA_TRACE_ENABLED.
+  assert "BQAA_DRY_RUN: on" in text
+  assert "skipped" in text.lower()
+  assert "ACTION NEEDED" in text
+
+
 def test_format_report_surfaces_interpreter_error_actionably(
     monkeypatch, fake_probes
 ):
@@ -380,6 +693,57 @@ def test_main_json_mode_emits_structured_report(
   )
 
 
+def test_main_json_mode_reports_dry_run_defaults(
+    monkeypatch, fake_probes, capsys
+):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+
+  rc = main(argv=["--json"])
+
+  assert rc == 0
+  parsed = json.loads(capsys.readouterr().out)
+  assert parsed["dry_run"] is False
+  assert parsed["log_file"] == DEFAULT_LOG_FILE
+
+
+def test_main_json_mode_reports_dry_run_and_log_file(
+    monkeypatch, fake_probes, capsys, tmp_path
+):
+  custom = str(tmp_path / "dry-run.log")
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", "True")
+  monkeypatch.setenv("BQAA_LOG_FILE", custom)
+
+  rc = main(argv=["--json"])
+
+  # Dry-run is reported but does not turn READY into ACTION NEEDED.
+  assert rc == 0
+  parsed = json.loads(capsys.readouterr().out)
+  assert parsed["dry_run"] is True
+  assert parsed["log_file"] == custom
+  assert parsed["all_ok"] is True
+
+
+def test_main_json_mode_reports_empty_log_file(
+    monkeypatch, fake_probes, capsys
+):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  monkeypatch.setenv("BQAA_LOG_FILE", "")
+
+  rc = main(argv=["--json"])
+
+  assert rc == 0
+  parsed = json.loads(capsys.readouterr().out)
+  assert parsed["dry_run"] is True
+  # Empty like the runtime config, not the default path, so a consumer
+  # can tell dry-run rows are being dropped.
+  assert parsed["log_file"] == ""
+
+
 def test_main_json_mode_exit_one_with_actionable_payload(
     monkeypatch, fake_probes, capsys
 ):
@@ -426,3 +790,28 @@ def test_main_bad_bqaa_python_does_not_crash(monkeypatch, capsys):
   assert parsed["python_ok"] is False
   assert parsed["interpreter_error"] is not None
   assert "/nonexistent/python-binary-xyz" in parsed["interpreter_error"]
+
+
+@pytest.mark.parametrize("argv", [[], ["--json"]], ids=["text", "json"])
+def test_main_survives_a_log_file_that_is_not_utf8(
+    monkeypatch, fake_probes, argv
+):
+  """A BQAA_LOG_FILE with a 0xff byte reaches Python as a surrogate
+  escape. Printing it to a strict UTF-8 stdout used to raise
+  UnicodeEncodeError in text mode; it must be escaped instead."""
+  bad = os.fsdecode(b"/var/tmp/bad-\xff.log")
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRY_RUN", "true")
+  monkeypatch.setenv("BQAA_LOG_FILE", bad)
+  raw = io.BytesIO()
+  strict = io.TextIOWrapper(raw, encoding="utf-8", errors="strict")
+  monkeypatch.setattr(sys, "stdout", strict)
+
+  rc = main(argv=argv)
+
+  strict.flush()
+  out = raw.getvalue().decode("utf-8")
+  assert rc == 0
+  assert "bad-" in out
+  assert "\\udcff" in out

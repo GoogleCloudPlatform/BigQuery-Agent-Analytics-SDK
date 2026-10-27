@@ -25,6 +25,10 @@ Surfaces:
     insert_rows_json).
   * bigquery_agent_analytics_tracing itself — sanity check the
     vendored layout works on BQAA_PYTHON.
+  * BQAA_TRACE_ENABLED / BQAA_DRY_RUN — reported mode flags that never
+    change the exit code; dry-run also names the BQAA_LOG_FILE the hooks
+    try to write events to instead of BigQuery, or warns that an empty
+    BQAA_LOG_FILE (or tracing being off) means nothing is recorded.
 
 This script is **advisory-only**. It never mutates the environment,
 shell rc files, GCP resources, or IAM. It only reports what is
@@ -45,9 +49,12 @@ from dataclasses import dataclass
 from dataclasses import field
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 from typing import Iterable
+
+from .config import DEFAULT_LOG_FILE
 
 # Modules whose absence blocks the writer entirely.
 _REQUIRED_IMPORTS: tuple[tuple[str, str], ...] = (
@@ -83,6 +90,22 @@ class _SetupReport:
   project_id: str | None
   dataset: str | None
   trace_enabled: bool
+  # Operational mode, like trace_enabled: reported but not part of
+  # all_ok. When dry_run is on, rows go to log_file, not BigQuery; an
+  # empty log_file (BQAA_LOG_FILE="") means they are discarded.
+  dry_run: bool = False
+  log_file: str = DEFAULT_LOG_FILE
+  # True when BQAA_LOG_FILE is unset, so log_file is DEFAULT_LOG_FILE as
+  # resolved from this process's TMPDIR. Each hook resolves the default
+  # from its own TMPDIR, which differs when shell commands run
+  # sandboxed, so log_file is then not necessarily the hooks' path.
+  log_file_is_default: bool = True
+  # True when BQAA_LOG_FILE is set to a path that is not absolute: the
+  # runtime opens a relative path in each hook's working directory and
+  # expands "~" and "~/..." with each hook's HOME, so log_file as printed
+  # is then not necessarily the hooks' path either. "~user/..." is not
+  # flagged: it expands through the account database for every process.
+  log_file_is_relative: bool = False
   # Non-None when the configured interpreter cannot be executed
   # (FileNotFoundError, permission denied, timeout, non-zero exit on a
   # trivial command). Surfacing this separately tells the user "fix
@@ -220,6 +243,45 @@ def _probe_imports(
   return results
 
 
+def _is_relative_path(value: str | None) -> bool:
+  """Whether an explicit BQAA_LOG_FILE resolves per hook process.
+
+  Unset and empty values are reported separately. ``~`` and ``~/...``
+  count as relative: the runtime expands them with the hook's own HOME.
+  ``~user/...`` does not: it expands through the account database, the
+  same for every process (see ``_tilde_user_note``).
+  """
+  if not value:
+    return False
+  if value.startswith("~"):
+    return value == "~" or value.startswith("~/")
+  return not os.path.isabs(value)
+
+
+def _tilde_user_note(value: str) -> str | None:
+  """How the runtime expands a ``~user/...`` BQAA_LOG_FILE, or None.
+
+  Like ``_utils._open_log``, which calls ``Path.expanduser()``: the
+  account database gives the user's home directory, and an unknown user
+  raises RuntimeError, which ``log_to_file`` swallows, dropping every
+  dry-run row.
+  """
+  if not value.startswith("~") or _is_relative_path(value):
+    return None
+  try:
+    expanded = Path(value).expanduser()
+  except RuntimeError:
+    return (
+        f'{value} (the user named after "~" was not found in the account'
+        " database, so the runtime cannot expand the path and discards"
+        " dry-run events)"
+    )
+  return (
+      f"{value} (expanded through the account database to {expanded}, the"
+      " same for every hook)"
+  )
+
+
 def collect_report(python_bin: str | None = None) -> _SetupReport:
   """Run the full set of checks against ``python_bin`` (or BQAA_PYTHON
   fallback) and return a structured report.
@@ -254,6 +316,12 @@ def collect_report(python_bin: str | None = None) -> _SetupReport:
       trace_enabled=(
           os.environ.get("BQAA_TRACE_ENABLED", "true").lower() == "true"
       ),
+      dry_run=(os.environ.get("BQAA_DRY_RUN", "false").lower() == "true"),
+      # Resolve like BQAAConfig.from_env: an empty BQAA_LOG_FILE stays
+      # empty, and log_to_file() then drops every dry-run row.
+      log_file=os.environ.get("BQAA_LOG_FILE", DEFAULT_LOG_FILE),
+      log_file_is_default="BQAA_LOG_FILE" not in os.environ,
+      log_file_is_relative=_is_relative_path(os.environ.get("BQAA_LOG_FILE")),
       package_imports=package_imports,
       required_imports=required_imports,
       storage_write_imports=storage_write_imports,
@@ -281,6 +349,9 @@ def _format_report(report: _SetupReport) -> str:
         "  Note: emission is disabled. Set BQAA_TRACE_ENABLED=true"
         " (or unset it) to enable."
     )
+  lines.append(f"BQAA_DRY_RUN: {'on' if report.dry_run else 'off'}")
+  if report.dry_run:
+    lines.append(_dry_run_note(report))
   lines.append("")
 
   if report.interpreter_error:
@@ -361,6 +432,54 @@ def _format_report(report: _SetupReport) -> str:
   return "\n".join(lines) + "\n"
 
 
+def _dry_run_note(report: _SetupReport) -> str:
+  """The note under ``BQAA_DRY_RUN: on``.
+
+  It never promises delivery: the runtime drops dry-run rows silently
+  when it refuses the log path (``_utils._open_log``), and the hooks
+  resolve the default path from their own TMPDIR, which this shell may
+  not share.
+  """
+  live = " Set BQAA_DRY_RUN=false (or unset it) for live BigQuery writes."
+  if not report.trace_enabled:
+    # The hooks exit at the shell gate, so nothing reaches the log.
+    return (
+        "  Note: dry-run mode is active, but nothing is emitted while"
+        " BQAA_TRACE_ENABLED is off."
+    )
+  if not report.log_file:
+    return (
+        "  Note: dry-run mode is active, but BQAA_LOG_FILE is empty so"
+        " dry-run events are discarded (not written to a file or"
+        " BigQuery). Unset BQAA_LOG_FILE (or set a file path) to record"
+        " dry-run events, or set BQAA_DRY_RUN=false (or unset it) for"
+        " live BigQuery writes."
+    )
+  if report.log_file_is_default:
+    # DEFAULT_LOG_FILE comes from tempfile.gettempdir() of this process.
+    target = (
+        f"the default log file ({report.log_file} for this shell's"
+        " TMPDIR; the hooks resolve it from their own TMPDIR, which"
+        " differs when shell commands run sandboxed. Set BQAA_LOG_FILE"
+        " to an absolute path to pin it)"
+    )
+  elif report.log_file_is_relative:
+    target = (
+        f"{report.log_file} (not an absolute path: each hook resolves it"
+        ' against its own working directory, and "~" or "~/" against its'
+        " own HOME. Set BQAA_LOG_FILE to an absolute path to pin it)"
+    )
+  else:
+    target = _tilde_user_note(report.log_file) or report.log_file
+  return (
+      "  Note: dry-run mode is active. The hooks try to write dry-run"
+      f" events to {target} instead of BigQuery, and drop them silently"
+      " if the runtime refuses that path (for example a read-only file,"
+      " a symlink, or a file in a directory that your group or other"
+      f" users can write).{live}"
+  )
+
+
 def _report_to_json(report: _SetupReport) -> str:
   return json.dumps(
       {
@@ -392,6 +511,12 @@ def main(argv: list[str] | None = None) -> int:
       help="Emit a JSON report instead of human-readable text.",
   )
   args = parser.parse_args(argv)
+  # Environment values reach the text report as they are; one that is
+  # not valid in the output encoding (e.g. a BQAA_LOG_FILE with a 0xff
+  # byte, decoded as a surrogate escape) is escaped instead of crashing.
+  reconfigure = getattr(sys.stdout, "reconfigure", None)
+  if reconfigure is not None:
+    reconfigure(errors="backslashreplace")
   report = collect_report()
   if args.json:
     sys.stdout.write(_report_to_json(report) + "\n")
