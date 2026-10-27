@@ -322,3 +322,49 @@ def test_envelope_dataclass_round_trip(tmp_path):
   assert envelope.path == path
   assert envelope.config_dict["location"] == "US"
   assert envelope.row["content"] == '{"x":1}'
+
+
+# ---------------------------------------------------------------------------
+# Malformed BQAA_* settings at drainer entry
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value", ["SYNTHETIC_SECRET_549", "0", "nan"], ids=["bad", "zero", "nan"]
+)
+def test_drainer_module_reports_invalid_config_without_traceback(
+    tmp_path, value
+):
+  """``python -m ...drain`` used to load its config outside the error
+  guard, so a bad setting exited 1 with a traceback. It still exits 1, but
+  with one line naming the variable (not the value) on stderr and in the
+  log."""
+  src_root = Path(__file__).resolve().parents[1] / "src"
+  log = tmp_path / "drain.log"
+  env = {
+      "PYTHONPATH": str(src_root),
+      "PATH": "/usr/bin:/bin",
+      "HOME": str(tmp_path),
+      "BQAA_PROJECT_ID": "synthetic-project",
+      "BQAA_DATASET": "synthetic_dataset",
+      "BQAA_DRAIN_POLL_SECONDS": value,
+      "BQAA_LOG_FILE": str(log),
+      "BQAA_STATE_DIR": str(tmp_path / "state"),
+      "BQAA_SPOOL_DIR": str(tmp_path / "spool"),
+  }
+  result = subprocess.run(
+      [sys.executable, "-m", "bigquery_agent_analytics_tracing.drain"],
+      env=env,
+      capture_output=True,
+      text=True,
+      timeout=15,
+  )
+  assert result.returncode == 1
+  assert "Traceback" not in result.stderr
+  expected = (
+      "DRAINER invalid BQAA configuration: BQAA_DRAIN_POLL_SECONDS must be"
+  )
+  assert expected in result.stderr
+  assert expected in log.read_text()
+  assert "SYNTHETIC_SECRET_549" not in result.stderr
+  assert "SYNTHETIC_SECRET_549" not in log.read_text()

@@ -85,6 +85,13 @@ def test_from_env_defaults_with_empty_env():
   assert config.drain_idle_seconds == DEFAULT_DRAIN_IDLE_SECONDS
   assert config.drain_batch_size == DEFAULT_DRAIN_BATCH_SIZE
   assert config.writer_label == DEFAULT_WRITER_LABEL
+  # Numeric defaults keep the type the env parser always produced.
+  assert type(config.state_ttl_hours) is float
+  assert type(config.drain_idle_seconds) is float
+  assert type(config.drain_poll_seconds) is float
+  assert type(config.max_content_length) is int
+  assert type(config.transcript_max_bytes) is int
+  assert type(config.drain_batch_size) is int
 
 
 def test_from_env_reads_bqaa_specific_vars(monkeypatch):
@@ -156,3 +163,64 @@ def test_writer_label_env_override_wins(monkeypatch):
   monkeypatch.setenv("BQAA_WRITER_LABEL", "custom/9.9.9")
   config = BQAAConfig.from_env()
   assert config.writer_label == "custom/9.9.9"
+
+
+_NUMERIC_VARS = [
+    ("BQAA_MAX_CONTENT_LENGTH", "an integer"),
+    ("BQAA_TRANSCRIPT_MAX_BYTES", "an integer"),
+    ("BQAA_DRAIN_BATCH_SIZE", "an integer"),
+    ("BQAA_STATE_TTL_HOURS", "a number"),
+    ("BQAA_DRAIN_IDLE_SECONDS", "a number"),
+    ("BQAA_DRAIN_POLL_SECONDS", "a number"),
+]
+
+
+@pytest.mark.parametrize("name, kind", _NUMERIC_VARS)
+def test_from_env_names_a_malformed_numeric_var(monkeypatch, name, kind):
+  """The error names the variable, so the hook log and /bqaa-setup can
+  say which setting to fix instead of a bare "invalid literal"."""
+  monkeypatch.setenv(name, "abc")
+  with pytest.raises(ValueError) as excinfo:
+    BQAAConfig.from_env()
+  assert str(excinfo.value) == f"{name} must be {kind}"
+  assert "abc" not in str(excinfo.value)
+
+
+def test_from_env_numeric_parsing_is_unchanged(monkeypatch):
+  """Values int()/float() accepted before are still accepted."""
+  monkeypatch.setenv("BQAA_MAX_CONTENT_LENGTH", " 42 ")
+  monkeypatch.setenv("BQAA_STATE_TTL_HOURS", "1e1")
+  config = BQAAConfig.from_env()
+  assert config.max_content_length == 42
+  assert config.state_ttl_hours == 10.0
+
+
+@pytest.mark.parametrize(
+    "name", ["BQAA_DRAIN_IDLE_SECONDS", "BQAA_DRAIN_POLL_SECONDS"]
+)
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf", "1e309"])
+def test_from_env_rejects_non_positive_or_non_finite_drain_timing(
+    monkeypatch, name, value
+):
+  """A poll interval of 0 never lets the drainer go idle, and NaN makes it
+  exit without draining; both must be reported, not accepted."""
+  monkeypatch.setenv(name, value)
+  with pytest.raises(ValueError) as excinfo:
+    BQAAConfig.from_env()
+  assert str(excinfo.value) == f"{name} must be a positive number"
+
+
+def test_from_env_keeps_non_positive_limits_meaning_unlimited(monkeypatch):
+  """Only the drainer timings are range-checked: 0 / negative content and
+  transcript limits and TTL still mean "unlimited" / "disabled"."""
+  monkeypatch.setenv("BQAA_MAX_CONTENT_LENGTH", "0")
+  monkeypatch.setenv("BQAA_TRANSCRIPT_MAX_BYTES", "-1")
+  monkeypatch.setenv("BQAA_STATE_TTL_HOURS", "0")
+  monkeypatch.setenv("BQAA_DRAIN_IDLE_SECONDS", "0.05")
+  monkeypatch.setenv("BQAA_DRAIN_POLL_SECONDS", "1e-3")
+  config = BQAAConfig.from_env()
+  assert config.max_content_length == 0
+  assert config.transcript_max_bytes == -1
+  assert config.state_ttl_hours == 0.0
+  assert config.drain_idle_seconds == 0.05
+  assert config.drain_poll_seconds == 0.001

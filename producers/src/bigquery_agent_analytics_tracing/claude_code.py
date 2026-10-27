@@ -66,7 +66,9 @@ from ._utils import PrivateDir
 from ._utils import safe_json_loads
 from ._utils import timestamp_ms
 from ._utils import to_jsonable
+from .config import _env_bool
 from .config import BQAAConfig
+from .config import DEFAULT_LOG_FILE
 from .config import DEFAULT_STATE_DIR
 from .logger import BigQueryAgentAnalyticsLogger
 
@@ -665,6 +667,30 @@ def run_claude_hook(
   adapter.process(hook_name, payload or {})
 
 
+def _report_invalid_config(hook_name: str, exc: Exception) -> int:
+  """Handle BQAA_* settings that ``BQAAConfig.from_env()`` cannot parse.
+
+  The hook cannot run without a config, but it must not break the host
+  agent either: exit 0 like every other hook error, and leave a message
+  on stderr and in the log file. Only the settings the log needs are
+  read here, none of which is parsed as a number.
+  """
+  if not _env_bool("BQAA_TRACE_ENABLED", True):
+    return 0
+  message = f"ERROR hook={hook_name}: invalid BQAA configuration: {exc}"
+  print(f"bqaa-claude-hook: {message}", file=sys.stderr)
+  log_to_file(
+      BQAAConfig(
+          project_id="",
+          dataset="",
+          log_file=os.environ.get("BQAA_LOG_FILE", DEFAULT_LOG_FILE),
+          state_dir=os.environ.get("BQAA_STATE_DIR", DEFAULT_STATE_DIR),
+      ),
+      message,
+  )
+  return 0
+
+
 def main(argv: list[str] | None = None) -> int:
   """Hook entry: read JSON payload from stdin, dispatch by hook name.
 
@@ -680,7 +706,10 @@ def main(argv: list[str] | None = None) -> int:
   hook_name = argv[0]
   raw = sys.stdin.read()
   payload = safe_json_loads(raw, {}) if raw.strip() else {}
-  config = BQAAConfig.from_env()
+  try:
+    config = BQAAConfig.from_env()
+  except Exception as exc:  # E.g. BQAA_MAX_CONTENT_LENGTH=abc.
+    return _report_invalid_config(hook_name, exc)
   if not config.enabled:
     return 0
   try:

@@ -54,6 +54,7 @@ import subprocess
 import sys
 from typing import Iterable
 
+from .config import BQAAConfig
 from .config import DEFAULT_LOG_FILE
 
 # Modules whose absence blocks the writer entirely.
@@ -112,6 +113,11 @@ class _SetupReport:
   # BQAA_PYTHON" instead of N misleading "import failed" lines that
   # all stem from the same root cause.
   interpreter_error: str | None = None
+  # Non-None when BQAAConfig.from_env() rejects a BQAA_* setting (e.g. a
+  # BQAA_MAX_CONTENT_LENGTH that is not an integer). The hooks cannot
+  # build their config then and emit nothing, so this is a missing
+  # prerequisite, not just a note.
+  config_error: str | None = None
   package_imports: list[_ImportProbe] = field(default_factory=list)
   required_imports: list[_ImportProbe] = field(default_factory=list)
   storage_write_imports: list[_ImportProbe] = field(default_factory=list)
@@ -123,6 +129,10 @@ class _SetupReport:
   @property
   def env_ok(self) -> bool:
     return bool(self.project_id) and bool(self.dataset)
+
+  @property
+  def config_ok(self) -> bool:
+    return self.config_error is None
 
   @property
   def package_ok(self) -> bool:
@@ -143,6 +153,7 @@ class _SetupReport:
     return (
         self.python_ok
         and self.env_ok
+        and self.config_ok
         and self.package_ok
         and self.required_deps_ok
     )
@@ -243,6 +254,19 @@ def _probe_imports(
   return results
 
 
+def _probe_config() -> str | None:
+  """Why the hooks cannot build their config from BQAA_*, or None.
+
+  Calls the same ``BQAAConfig.from_env()`` the hooks call, which only
+  reads the environment.
+  """
+  try:
+    BQAAConfig.from_env()
+  except Exception as exc:  # A ValueError naming the bad variable.
+    return str(exc) or type(exc).__name__
+  return None
+
+
 def _is_relative_path(value: str | None) -> bool:
   """Whether an explicit BQAA_LOG_FILE resolves per hook process.
 
@@ -304,6 +328,7 @@ def collect_report(python_bin: str | None = None) -> _SetupReport:
   return _SetupReport(
       python_bin=resolved,
       interpreter_error=interpreter_error,
+      config_error=_probe_config(),
       project_id=(
           os.environ.get("BQAA_PROJECT_ID")
           or os.environ.get("GCP_PROJECT_ID")
@@ -325,6 +350,14 @@ def collect_report(python_bin: str | None = None) -> _SetupReport:
       package_imports=package_imports,
       required_imports=required_imports,
       storage_write_imports=storage_write_imports,
+  )
+
+
+def _append_config_error(lines: list[str], config_error: str) -> None:
+  lines.append(f"  [INVALID] BQAA_* settings: {config_error}")
+  lines.append(
+      "  Fix: correct or unset that variable; the hooks cannot load"
+      " their configuration and emit no trace events until then."
   )
 
 
@@ -357,6 +390,11 @@ def _format_report(report: _SetupReport) -> str:
   if report.interpreter_error:
     # Skip the per-import sections — they're all empty when the
     # interpreter is broken, and printing empty checklists is noise.
+    # A bad BQAA_* setting is found without the interpreter, so still
+    # report it; otherwise only --json would name the variable.
+    if report.config_error:
+      _append_config_error(lines, report.config_error)
+      lines.append("")
     lines.append("Import + env checks skipped: interpreter unavailable.")
     lines.append("")
     lines.append("Status: ACTION NEEDED")
@@ -378,6 +416,9 @@ def _format_report(report: _SetupReport) -> str:
       lines.append("  export BQAA_PROJECT_ID=your-gcp-project")
     if not report.dataset:
       lines.append("  export BQAA_DATASET=agent_analytics")
+  if report.config_error:
+    lines.append("")
+    _append_config_error(lines, report.config_error)
   lines.append("")
 
   lines.append("Package import:")
@@ -486,6 +527,7 @@ def _report_to_json(report: _SetupReport) -> str:
           **asdict(report),
           "python_ok": report.python_ok,
           "env_ok": report.env_ok,
+          "config_ok": report.config_ok,
           "package_ok": report.package_ok,
           "required_deps_ok": report.required_deps_ok,
           "storage_write_ok": report.storage_write_ok,

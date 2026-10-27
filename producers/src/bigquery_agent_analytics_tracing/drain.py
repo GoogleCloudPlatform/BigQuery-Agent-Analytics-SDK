@@ -67,6 +67,8 @@ from ._utils import log_to_file  # noqa: E402
 from ._utils import PrivateDir  # noqa: E402
 from ._writer_identity import DEFAULT_WRITER_LABEL  # noqa: E402
 from .config import BQAAConfig  # noqa: E402
+from .config import DEFAULT_LOG_FILE  # noqa: E402
+from .config import DEFAULT_STATE_DIR  # noqa: E402
 from .schema import bq_schema  # noqa: E402
 
 
@@ -677,9 +679,33 @@ async def _run(config: BQAAConfig) -> None:
         idle = 0.0
 
 
+def _report_invalid_config(exc: Exception) -> int:
+  """One-line diagnostic for BQAA_* settings ``from_env()`` rejects.
+
+  Mirrors the hook entry: no traceback, and the message names the
+  variable but not its value. The log file is resolved from
+  ``BQAA_LOG_FILE`` / ``BQAA_STATE_DIR`` only, which are never parsed.
+  """
+  message = f"DRAINER invalid BQAA configuration: {exc}"
+  print(f"bqaa-drainer: {message}", file=sys.stderr)
+  log_to_file(
+      BQAAConfig(
+          project_id="",
+          dataset="",
+          log_file=os.environ.get("BQAA_LOG_FILE", DEFAULT_LOG_FILE),
+          state_dir=os.environ.get("BQAA_STATE_DIR", DEFAULT_STATE_DIR),
+      ),
+      message,
+  )
+  return 1
+
+
 def main(argv: list[str] | None = None) -> int:
   del argv
-  config = BQAAConfig.from_env()
+  try:
+    config = BQAAConfig.from_env()
+  except Exception as exc:  # E.g. BQAA_DRAIN_POLL_SECONDS=abc or 0.
+    return _report_invalid_config(exc)
   if config.dry_run:
     return 0
   try:
