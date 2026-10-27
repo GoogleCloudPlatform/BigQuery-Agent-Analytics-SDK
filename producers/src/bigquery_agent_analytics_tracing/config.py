@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import getpass
+import math
 import os
 import tempfile
 from typing import Callable, TypeVar
@@ -85,6 +86,19 @@ def _env_int(name: str, default: int) -> int:
 
 def _env_float(name: str, default: float) -> float:
   return _env_number(name, default, float, "a number")
+
+
+def _env_positive_float(name: str, default: float) -> float:
+  """Like ``_env_float``, but the value must be finite and above zero.
+
+  For the drainer's timing knobs: a poll interval of 0 never advances the
+  idle clock (the drainer never exits), and NaN makes ``idle < limit``
+  false at once (it exits without draining).
+  """
+  value = _env_float(name, default)
+  if not (math.isfinite(value) and value > 0):
+    raise ValueError(f"{name} must be a positive number")
+  return value
 
 
 def _env_number(
@@ -181,13 +195,13 @@ class BQAAConfig:
         transcript_max_bytes=_env_int(
             "BQAA_TRANSCRIPT_MAX_BYTES", DEFAULT_TRANSCRIPT_MAX_BYTES
         ),
-        drain_idle_seconds=_env_float(
+        drain_idle_seconds=_env_positive_float(
             "BQAA_DRAIN_IDLE_SECONDS", DEFAULT_DRAIN_IDLE_SECONDS
         ),
         drain_batch_size=_env_int(
             "BQAA_DRAIN_BATCH_SIZE", DEFAULT_DRAIN_BATCH_SIZE
         ),
-        drain_poll_seconds=_env_float(
+        drain_poll_seconds=_env_positive_float(
             "BQAA_DRAIN_POLL_SECONDS", DEFAULT_DRAIN_POLL_SECONDS
         ),
         writer_label=(

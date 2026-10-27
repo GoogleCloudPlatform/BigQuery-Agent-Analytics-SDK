@@ -525,3 +525,22 @@ def test_text_report_names_a_bad_setting_when_the_interpreter_is_broken(
   parsed = json.loads(capsys.readouterr().out)
   assert parsed["python_ok"] is False
   assert parsed["config_ok"] is False
+
+
+@pytest.mark.parametrize("value", ["0", "nan"])
+def test_report_flags_drain_timing_the_drainer_cannot_use(
+    monkeypatch, fake_probes, value
+):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  monkeypatch.setenv("BQAA_DRAIN_POLL_SECONDS", value)
+
+  report = collect_report()
+
+  assert (
+      report.config_error == "BQAA_DRAIN_POLL_SECONDS must be a positive number"
+  )
+  assert report.all_ok is False
+  assert "[INVALID] BQAA_* settings: BQAA_DRAIN_POLL_SECONDS" in _format_report(
+      report
+  )

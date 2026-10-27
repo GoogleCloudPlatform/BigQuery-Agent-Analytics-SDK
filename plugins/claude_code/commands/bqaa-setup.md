@@ -45,9 +45,10 @@ before agent events can land in BigQuery.
 - Numeric `BQAA_*` settings (`BQAA_MAX_CONTENT_LENGTH`,
   `BQAA_TRANSCRIPT_MAX_BYTES`, `BQAA_DRAIN_BATCH_SIZE`,
   `BQAA_STATE_TTL_HOURS`, `BQAA_DRAIN_IDLE_SECONDS`,
-  `BQAA_DRAIN_POLL_SECONDS`) — must parse as numbers. If one does not,
-  the hooks cannot load their configuration and emit no trace events.
-  Each hook still exits 0. When tracing is enabled it prints the error
+  `BQAA_DRAIN_POLL_SECONDS`) — must parse as numbers, and the two
+  `BQAA_DRAIN_*_SECONDS` timings must also be finite and above zero.
+  If one is not, the hooks cannot load their configuration and emit no
+  trace events. Each hook still exits 0. When tracing is enabled it prints the error
   to stderr and tries to append it to the configured log file (a
   logging failure does not stop the hook); when tracing is off it stays
   silent. The check reports `[INVALID]` with the variable name (not the
