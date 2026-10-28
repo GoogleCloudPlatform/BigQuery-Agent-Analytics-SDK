@@ -1,6 +1,6 @@
 # BigQuery Agent Analytics: Coding-Agent Mod
 
-`bigquery-agent-analytics-mod` is an in-process plugin ([mod](https://code.claude.com/docs/en/plugins/mods/overview)) for Claude Code that streams coding-agent sessions—prompts, model requests, tool calls, subagent runs, token usage, and latency—to BigQuery. The mod uses the [BigQuery Agent Analytics](https://adk.dev/integrations/bigquery-agent-analytics/) `agent_events` schema, so you can analyze coding-agent activity alongside ADK agents. Its version 2 schema adds `event_id` for deduplication. Tables created by [`bigquery-agent-analytics-tracing`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/plugins/claude_code) use version 1; follow the upgrade instructions under [The dataset](#the-dataset) before reusing one.
+`bigquery-agent-analytics-mod` is an in-process [mod](https://code.claude.com/docs/en/plugins/mods/overview) for Claude Code that streams coding-agent sessions—prompts, model requests, tool calls, subagent runs, token usage, and latency—to BigQuery. The mod uses the [BigQuery Agent Analytics](https://adk.dev/integrations/bigquery-agent-analytics/) `agent_events` schema (including `event_id` for deduplication), so you can analyze coding-agent activity alongside ADK agents.
 
 The mod records events inside the CLI and sends them to BigQuery in batches in the background, so your session never waits on uploads, and if the mod itself fails your session carries on as normal. Start with [QUICKSTART.md](QUICKSTART.md) to connect your own project or join your team's setup.
 
@@ -29,7 +29,7 @@ export BQAA_PROJECT_ID=my-gcp-project BQAA_DATASET=agent_analytics
 claude --plugin-dir ./plugins/claude_code_mod
 ```
 
-> **Note:** Enable either `bigquery-agent-analytics-mod` **or** `bigquery-agent-analytics-tracing` for a given table, never both—running both writes every event twice. See [MIGRATION.md](MIGRATION.md) when moving from an older install, and [docs/managed-settings.md](docs/managed-settings.md) for organization-wide deployment.
+See [docs/managed-settings.md](docs/managed-settings.md) for organization-wide deployment.
 
 ### Updating and removing
 
@@ -40,7 +40,7 @@ claude --plugin-dir ./plugins/claude_code_mod
 
 The BigQuery dataset must exist before the mod can write. [`setup.sh`](setup.sh) uses the `bq` CLI to create everything idempotently:
 
-- **Events dataset and table**: Creates `<dataset>` (in `BQAA_LOCATION`, default `US`) and the day-partitioned, clustered `agent_events` table defined in [`sql/agent_events_ddl.sql`](sql/agent_events_ddl.sql) (schema version 2, including `event_id`). Once the dataset exists, the mod also auto-creates `agent_events` on first `404` unless `BQAA_AUTO_CREATE_TABLE=false`, though only `setup.sh` creates the reporting views.
+- **Events dataset and table**: Creates `<dataset>` (in `BQAA_LOCATION`, default `US`) and the day-partitioned, clustered `agent_events` table defined in [`sql/agent_events_ddl.sql`](sql/agent_events_ddl.sql) (including `event_id`). Once the dataset exists, the mod also auto-creates `agent_events` on first `404` unless `BQAA_AUTO_CREATE_TABLE=false`, though only `setup.sh` creates the reporting views.
 - **Reporting views**: Creates `<dataset>_reporting` with two daily aggregate views—[`daily_usage_by_model`](sql/views/daily_usage_by_model.sql) and [`daily_usage_by_user`](sql/views/daily_usage_by_user.sql)—filtered to this mod's `LLM_RESPONSE` rows, deduplicated on `(timestamp, event_id)`, and grouped by UTC `day`.
 
 ```bash
@@ -48,17 +48,12 @@ BQAA_PROJECT_ID=my-gcp-project BQAA_DATASET=agent_analytics \
   ./plugins/claude_code_mod/setup.sh
 ```
 
-Note that standalone `setup.sh` runs read `BQAA_LOCATION` from your shell environment rather than the plugin's `location` setting (pass `BQAA_LOCATION=EU` for non-`US` datasets). Pass `--dry-run` to preview the `bq` commands and SQL without executing them, and see [docs/service-account-auth.md](docs/service-account-auth.md) to configure write-only team credentials and view readers. Example view query:
+Note that standalone `setup.sh` runs read `BQAA_LOCATION` from your shell environment rather than the mod's `location` setting (pass `BQAA_LOCATION=EU` for non-`US` datasets). Pass `--dry-run` to preview the `bq` commands and SQL without executing them, and see [docs/service-account-auth.md](docs/service-account-auth.md) to configure write-only team credentials and view readers. Example view query:
 
 ```bash
 bq query --use_legacy_sql=false \
   'SELECT * FROM `my-gcp-project.agent_analytics_reporting.daily_usage_by_user` ORDER BY day DESC LIMIT 14'
 ```
-
-> **Reusing a table from `bigquery-agent-analytics-tracing`?** That table has no `event_id` column. Inserts still succeed, but BigQuery drops the ID, so retries and backfills can't be deduplicated and the deduplication query under [What it writes](#what-it-writes) fails. Run `setup.sh` once against that dataset (it adds the column), or run:
-> ```sql
-> ALTER TABLE `YOUR_PROJECT.YOUR_DATASET.agent_events` ADD COLUMN IF NOT EXISTS event_id STRING;
-> ```
 
 ## Configure
 
@@ -155,8 +150,6 @@ Key correlation, token, and deduplication fields:
 - `attributes.writer.plugin` — Set to `"bigquery-agent-analytics-mod"` so queries can isolate this mod's rows on shared tables.
 - `event_id` — Unique 32-hex row ID preserved across retries and backfills (also sent as `insertId`).
 
-> **Reusing a table from `bigquery-agent-analytics-tracing`?** That table has no `event_id` column. Inserts still succeed, but BigQuery drops the ID, so retries and backfills can't be deduplicated. Run `setup.sh` once against that dataset (see [The dataset](#the-dataset)), or run ``ALTER TABLE `YOUR_PROJECT.YOUR_DATASET.agent_events` ADD COLUMN IF NOT EXISTS event_id STRING;`` before relying on the query below.
-
 When querying `agent_events` directly, deduplicate on `event_id` inside a time-bounded CTE before aggregating:
 
 ```sql
@@ -242,8 +235,8 @@ The CI suite verifies marketplace sync against release tags, tests `setup.sh` wi
 - **Subagent parent span and detection**: A subagent's span attaches directly under the main turn rather than under the `Agent` tool call that launched it, and subagent turns are distinguished from main turns via `turn.start`'s `agentId` (from `2.1.299`).
 - **Permission decision window (`2 s`)**: No separate `HITL_*` rows are written; tool permission answers come from the `tool_decision` collector record on `TOOL_COMPLETED`, and rejections arriving more than 2 seconds after the tool returned are not recorded.
 - **Exit spill, table-scoped dead letters, and completion records**: `session.end` writes queued rows to a spill file rather than starting network requests. Dead-letter and spill files are replayed only by a session configured for that exact `<project.dataset.table>`, and files without a matching completion record (such as an interrupted write) stay on disk as `incomplete` in `/bqaa-status` for manual inspection.
-- **Mid-session reload or crash**: Reloading plugins mid-session (`/reload-plugins` or `--plugin-dir` edits) or a worker crash can lose up to one `flushIntervalMs` window of buffered in-memory rows, plus any batch currently in retry backoff.
-- **User-tier classic hooks on managed CLIs**: On organization-managed CLIs, a user-installed plugin does not receive `classic.SessionStart`, `classic.SubagentStart`, or `classic.PermissionRequest` (session-start rows are omitted, subagent starts are inferred, and `allowManagedModsOnly` or web-fetch policies can block user mods; see [docs/managed-settings.md](docs/managed-settings.md)).
+- **Mid-session reload or crash**: Reloading mods mid-session (`/reload-plugins` or `--plugin-dir` edits) or a worker crash can lose up to one `flushIntervalMs` window of buffered in-memory rows, plus any batch currently in retry backoff.
+- **User-tier classic hooks on managed CLIs**: On organization-managed CLIs, a user-installed mod does not receive `classic.SessionStart`, `classic.SubagentStart`, or `classic.PermissionRequest` (session-start rows are omitted, subagent starts are inferred, and `allowManagedModsOnly` or web-fetch policies can block user mods; see [docs/managed-settings.md](docs/managed-settings.md)).
 - **Best-effort free-text redaction**: Structured JSON keys use a strict allowlist (redacting unlisted keys such as MCP tool arguments), whereas free-text shell and URL scrubbing uses bounded heuristics rather than full shell parsing. Known open edge cases pinned in `tests/units.test.ts` (see [#546](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/546)) include:
   - Backslash-escaped credential names after a quoted space in a flag list (`VERSION="a b",DB_PA\SSWORD=...`), locale-quoted flag names with separate values (`--pass$"word" ...`), or ANSI-C option names containing NUL bytes (`$'--password\0'`).
   - Provider-token-shaped variable names rewritten before `name=value` parsing (`github_pat_...=value`), or values trailing `[REDACTED]` / provider tokens when the shell word end is uncertain.
@@ -255,8 +248,7 @@ The CI suite verifies marketplace sync against release tags, tests `setup.sh` wi
 
 ```text
 QUICKSTART.md                 5-minute setup for sandboxes, team members, and admins
-MIGRATION.md                  migrating from older marketplaces or the settings-hook tracer
-.claude-plugin/plugin.json    plugin manifest and userConfig schema
+.claude-plugin/plugin.json    mod manifest and userConfig schema
 hooks/                        in-process hooks, row builder, allowlist, sanitizer, and writer
 setup.sh                      idempotent BigQuery dataset, table, and reporting-views setup
 build_dist.sh / sync_dist.sh  builds and verifies the marketplace copy in claude_code_dist
