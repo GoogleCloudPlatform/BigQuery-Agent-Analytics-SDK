@@ -29,7 +29,7 @@ export BQAA_PROJECT_ID=my-gcp-project BQAA_DATASET=agent_analytics
 claude --plugin-dir ./plugins/claude_code_mod
 ```
 
-See [docs/managed-settings.md](docs/managed-settings.md) for organization-wide deployment.
+Already have an installation (mod ID ending in `@bigquery-agent-analytics-plugin`)? Follow [Moving to this marketplace](MIGRATION.md) before installing or updating, so only the intended copy loads and each session is recorded once. For organization-wide deployment, see [docs/managed-settings.md](docs/managed-settings.md).
 
 ### Updating and removing
 
@@ -150,6 +150,15 @@ Key correlation, token, and deduplication fields:
 - `attributes.writer.plugin` — Set to `"bigquery-agent-analytics-mod"` so queries can isolate this mod's rows on shared tables.
 - `event_id` — Unique 32-hex row ID preserved across retries and backfills (also sent as `insertId`).
 
+> **Reusing an existing `agent_events` table?** Make sure it has an `event_id STRING` column. Run `setup.sh` once for that dataset, or have the table admin run:
+>
+> ```sql
+> ALTER TABLE `YOUR_PROJECT.YOUR_DATASET.agent_events`
+> ADD COLUMN IF NOT EXISTS event_id STRING;
+> ```
+>
+> Without the column, uploads succeed but the IDs are discarded and the query below fails. Adding it later doesn't recover IDs already dropped.
+
 When querying `agent_events` directly, deduplicate on `event_id` inside a time-bounded CTE before aggregating:
 
 ```sql
@@ -248,6 +257,7 @@ The CI suite verifies marketplace sync against release tags, tests `setup.sh` wi
 
 ```text
 QUICKSTART.md                 5-minute setup for sandboxes, team members, and admins
+MIGRATION.md                  moving from an earlier marketplace or installation
 .claude-plugin/plugin.json    mod manifest and userConfig schema
 hooks/                        in-process hooks, row builder, allowlist, sanitizer, and writer
 setup.sh                      idempotent BigQuery dataset, table, and reporting-views setup

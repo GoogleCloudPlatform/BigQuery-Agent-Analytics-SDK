@@ -6,7 +6,7 @@
 - [B. Your team set it up](#b-your-team-set-it-up) — connect to a shared BigQuery table your administrator already created.
 - [For administrators](#for-administrators) — set up a shared table, write-only credentials, and usage views for a team.
 
-For all configuration options, event schemas, and redaction details, see [README.md](README.md) (especially [Privacy and security](README.md#privacy-and-security)).
+For all configuration options, event schemas, and redaction details, see [README.md](README.md) (especially [Privacy and security](README.md#privacy-and-security)). Moving from an earlier installation (mod ID ending in `@bigquery-agent-analytics-plugin`)? Follow [MIGRATION.md](MIGRATION.md) before installing or updating. Reusing an earlier `agent_events` table? Before enabling the mod, have the table admin check for an `event_id STRING` column and add it if missing; see the SQL in [What it writes](README.md#what-it-writes). Without it, uploads silently discard event IDs, and adding the column later can't recover them.
 
 ## A. Your own sandbox
 
@@ -105,7 +105,7 @@ When rows cannot reach BigQuery, the mod buffers them on disk and shows the caus
 | `no working Google credentials` | Do what the notice's "To fix" part says. Usually that's `gcloud auth application-default login` (default setup) or `gcloud auth login` (a team setup that impersonates a writer). If it names another token command, fix that command. If you set `BQAA_ACCESS_TOKEN`, set a fresh one or unset it. Rows wait in the meantime, and your next prompt retries right away. |
 | `BigQuery denied the identity access to the dataset` (`403`) | Ask your admin for insert-only access (`bigquery.tables.get` and `bigquery.tables.updateData` on `agent_events`), then run `/bqaa-backfill` to replay buffered rows. |
 | `BigQuery cannot find the dataset ...` or `BigQuery cannot find the table ...` (`404`) | Verify `project` and `dataset`, or run the `setup.sh` command shown in `/bqaa-status`. Newly created tables can take a few minutes to accept streaming inserts; queued rows send automatically once ready. |
-| Duplicate events in BigQuery | Retries or backfills can duplicate rows because `insertAll` deduplication is best-effort; deduplicate on `event_id` using the query in [What it writes](README.md#what-it-writes). |
+| Duplicate events in BigQuery | First check whether both this mod and `bigquery-agent-analytics-tracing` (or manual tracing hooks) write to the same table; if so, turn off the tracer as described in [MIGRATION.md](MIGRATION.md). With only the mod enabled, retries or backfills can still duplicate rows because `insertAll` deduplication is best-effort; deduplicate on `event_id` using the query in [What it writes](README.md#what-it-writes). |
 | `Plugin "bigquery-agent-analytics-mod" not found in marketplace` | Your cached `bqaa-tracing` marketplace predates the mod. Run `claude plugin marketplace update bqaa-tracing` and install again. |
 
 ## For administrators
