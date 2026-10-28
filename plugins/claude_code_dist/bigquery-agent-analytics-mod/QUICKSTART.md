@@ -6,7 +6,7 @@
 - [B. Your team set it up](#b-your-team-set-it-up) — connect to a shared BigQuery table your administrator already created.
 - [For administrators](#for-administrators) — set up a shared table, write-only credentials, and usage views for a team.
 
-For all configuration options, event schemas, and redaction details, see [README.md](README.md) (especially [Privacy and security](README.md#privacy-and-security)). Already have an installation (mod ID ending in `@bigquery-agent-analytics-plugin`) or reusing an earlier `agent_events` table? Follow [MIGRATION.md](MIGRATION.md) before installing or updating.
+For all configuration options, event schemas, and redaction details, see [README.md](README.md) (especially [Privacy and security](README.md#privacy-and-security)). Moving from an earlier installation (mod ID ending in `@bigquery-agent-analytics-plugin`)? Follow [MIGRATION.md](MIGRATION.md) before installing or updating. Reusing an earlier `agent_events` table? Before enabling the mod, have the table admin check for an `event_id STRING` column and add it if missing; see the SQL in [What it writes](README.md#what-it-writes). Without it, uploads silently discard event IDs, and adding the column later can't recover them.
 
 ## A. Your own sandbox
 
