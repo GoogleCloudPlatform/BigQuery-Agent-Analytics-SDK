@@ -1,6 +1,6 @@
 # BigQuery Agent Analytics: Coding-Agent Mod
 
-`bigquery-agent-analytics-mod` is an in-process plugin ([mod](https://code.claude.com/docs/en/plugins/mods/overview)) for Claude Code that streams coding-agent sessions—prompts, model requests, tool calls, subagent runs, token usage, and latency—to BigQuery. Because it writes the same [BigQuery Agent Analytics](https://adk.dev/integrations/bigquery-agent-analytics/) `agent_events` schema (version 2, which adds `event_id`) as ADK's BigQuery Agent Analytics plugin and [`bigquery-agent-analytics-tracing`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/plugins/claude_code), you can query coding-agent activity alongside ADK agents with one set of SQL queries and dashboards.
+`bigquery-agent-analytics-mod` is an in-process plugin ([mod](https://code.claude.com/docs/en/plugins/mods/overview)) for Claude Code that streams coding-agent sessions—prompts, model requests, tool calls, subagent runs, token usage, and latency—to BigQuery. The mod uses the [BigQuery Agent Analytics](https://adk.dev/integrations/bigquery-agent-analytics/) `agent_events` schema, so you can analyze coding-agent activity alongside ADK agents. Its version 2 schema adds `event_id` for deduplication. Tables created by [`bigquery-agent-analytics-tracing`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/plugins/claude_code) use version 1; follow the upgrade instructions under [The dataset](#the-dataset) before reusing one.
 
 The mod records events inside the CLI and sends them to BigQuery in batches in the background, so your session never waits on uploads, and if the mod itself fails your session carries on as normal. Start with [QUICKSTART.md](QUICKSTART.md) to connect your own project or join your team's setup.
 
@@ -34,7 +34,7 @@ claude --plugin-dir ./plugins/claude_code_mod
 ### Updating and removing
 
 - **Update**: Run `claude plugin marketplace update bqaa-tracing`, then `claude plugin update bigquery-agent-analytics-mod@bqaa-tracing`. While prerelease revisions share version `0.1.0`, `plugin update` may report `already at the latest version (0.1.0)`—in that case, uninstall and reinstall with the same `--config` flags, then run `/reload-plugins` or start a new session.
-- **Pause or uninstall**: Run `claude plugin disable bigquery-agent-analytics-mod@bqaa-tracing` (or set `--config enabled=false`) to pause capture while keeping settings, or `claude plugin uninstall bigquery-agent-analytics-mod@bqaa-tracing` to remove it. Delete `~/.bqaa-mod` (or your custom `deadLetterDir` and its sibling `dry-run` directory) if you also want to clear local dead-letter and dry-run files.
+- **Pause or uninstall**: Run `claude plugin disable bigquery-agent-analytics-mod@bqaa-tracing` to pause capture while keeping settings, or set `enabled` to `false` with `/plugin configure` or `/config` (use `--config enabled=false` when installing). Run `claude plugin uninstall bigquery-agent-analytics-mod@bqaa-tracing` to remove the mod. After uninstalling, delete `~/.bqaa-mod` if you also want to discard the mod's local files, including unsent rows. If you configured `deadLetterDir`, remove only the mod's files in that directory and its sibling `dry-run` directory. Keep the directories themselves, their parents, and any unrelated files.
 
 ### The dataset
 
@@ -62,7 +62,7 @@ bq query --use_legacy_sql=false \
 
 ## Configure
 
-Set options with `--config key=value` at install time, `/plugin configure`, `/config`, or environment variable fallbacks. For boolean environment variables (`BQAA_TRACE_ENABLED`, `BQAA_DRY_RUN`, `BQAA_AUTO_CREATE_TABLE`, `BQAA_AUTO_BACKFILL`), `true`/`1`/`yes`/`on` enables and `false`/`0`/`no`/`off` disables (case-insensitive).
+Set options with `--config key=value` at install time, `/plugin configure`, `/config`, or environment variable fallbacks. Boolean environment values are case-insensitive. `BQAA_TRACE_ENABLED=false`, `0`, `no`, or `off` always disables capture; a true value cannot override `enabled=false`. `BQAA_DRY_RUN=true`, `1`, `yes`, or `on` always enables dry-run output; a false value cannot override `dryRun=true`. `BQAA_AUTO_CREATE_TABLE` and `BQAA_AUTO_BACKFILL` default to enabled and are disabled by `false`, `0`, `no`, or `off`.
 
 | Option | Environment fallback | Default | Description |
 | --- | --- | --- | --- |
@@ -70,8 +70,8 @@ Set options with `--config key=value` at install time, `/plugin configure`, `/co
 | `dataset` | `BQAA_DATASET`, `BQ_DATASET` | *(required)* | BigQuery dataset containing the events table. |
 | `table` | `BQAA_TABLE`, `BQ_TABLE` | `agent_events` | Target BigQuery events table. |
 | `location` | `BQAA_LOCATION` | `US` | Dataset location shown in `/bqaa-status` and its generated `setup.sh` command (manual `setup.sh` runs read `BQAA_LOCATION` from the environment). |
-| `enabled` | `BQAA_TRACE_ENABLED` | `true` | Turn event capture on or off without uninstalling. |
-| `dryRun` | `BQAA_DRY_RUN` | `false` | Write JSONL batches locally to `<deadLetterDir>/../dry-run/` instead of BigQuery (a dry-run file can contain the same `event_id` twice if a session ends mid-write). |
+| `enabled` | `BQAA_TRACE_ENABLED` (one-way disable: `false`/`0`/`no`/`off`) | `true` | Turn event capture on or off without uninstalling. |
+| `dryRun` | `BQAA_DRY_RUN` (one-way enable: `true`/`1`/`yes`/`on`) | `false` | Write JSONL batches locally to `<deadLetterDir>/../dry-run/` instead of BigQuery (a dry-run file can contain the same `event_id` twice if a session ends mid-write). |
 | `maxPayloadChars` | — | `16384` (`1024`–`500000`) | Max characters per JSON payload column (`content`, `attributes`); excess sets `is_truncated = true`. |
 | `flushIntervalMs` | — | `5000` (`1000`–`300000`) | How often (ms) the background writer flushes queued rows. |
 | `deadLetterDir` | `BQAA_DEAD_LETTER_DIR` | `~/.bqaa-mod/dead-letter` | Local directory for unsent JSONL batches, partitioned per `<project.dataset.table>`. |
@@ -128,17 +128,20 @@ Host hook ──► sanitize & enqueue (in-memory, <= 5,000 rows / 8 MiB) ──
 
 ## What it writes
 
-| Host event | BQAA `event_type` | `content` JSON | Notable `attributes` & top-level `latency_ms` |
+| Host event | BQAA `event_type` | `content` JSON | Notable `attributes` and top-level `latency_ms` |
 | --- | --- | --- | --- |
 | `classic.SessionStart` | `STATE_DELTA` | `{"session_start": true}` | `attributes.state_delta.{start_source, model}`, `attributes.session_metadata` |
 | `prompt.submit` | `USER_MESSAGE_RECEIVED` | `{"text_summary": prompt}` | `attributes.prompt_origin`, `attributes.submitted_during_turn` |
 | `turn.start` (main loop) | `INVOCATION_STARTING` | `{}` | `attributes.turn_number`, `attributes.session_metadata` |
 | `turn.step` (request) | `LLM_REQUEST` | `{"prompt": [...]}` (turn's first request; `[]` after) | `attributes.model`, `attributes.llm_config.effort`, `attributes.step_index`, `attributes.message_count` |
-| `turn.step` (response / error) | `LLM_RESPONSE` / `LLM_ERROR` | `{"tool_uses", "response"}` (`null` on `LLM_ERROR`) | `attributes.model`, `attributes.usage_metadata`, `attributes.finish_reason`; `latency_ms.total_ms`, `latency_ms.time_to_first_token_ms` |
-| `tool.call` (before / after) | `TOOL_STARTING` / `TOOL_COMPLETED` | `{"tool", "tool_origin", "args"}` / `{"tool", "tool_origin", "result"}` | `attributes.tool_use_id`, permission fields, `error_message` on error/deny; `latency_ms.total_ms` on `TOOL_COMPLETED` |
+| `turn.step` (response) | `LLM_RESPONSE` | `{"tool_uses": [...], "response": answer}` | `attributes.model`, `attributes.usage_metadata`, `attributes.finish_reason`; `latency_ms.total_ms` and, when available, `latency_ms.time_to_first_token_ms` |
+| `turn.step` (error) | `LLM_ERROR` | `null` | `attributes.model`, `attributes.step_index`; `latency_ms.total_ms`; top-level `error_message` |
+| `tool.call` (before) | `TOOL_STARTING` | `{"tool", "tool_origin", "args"}` | `attributes.tool_use_id`; no `latency_ms` |
+| `tool.call` (after) | `TOOL_COMPLETED` | `{"tool", "tool_origin", "result"}` | `attributes.tool_use_id`, permission fields, `attributes.denied` and top-level `error_message` on error/deny; `latency_ms.total_ms` |
 | `classic.SubagentStart` | `AGENT_STARTING` | `{"agent_type", "agent_id"}` | Sets top-level `agent` column to the subagent type |
 | `turn.complete` (subagent) | `AGENT_COMPLETED` / `AGENT_ERROR` | `{}` | `attributes.usage_metadata` (subagent totals); `latency_ms.total_ms` |
-| `turn.complete` (main loop) | `AGENT_RESPONSE` (when answered) + `INVOCATION_COMPLETED` / `INVOCATION_ERROR` | `{"response": answer}` on `AGENT_RESPONSE`; `{}` on `INVOCATION_*` | `attributes.finish_reason`, `attributes.is_aborted`, `attributes.step_count`, `attributes.usage_metadata`; `latency_ms.total_ms` |
+| `turn.complete` (main loop, answered) | `AGENT_RESPONSE` | `{"response": answer}` | `attributes.source_turn_id` only; no `latency_ms` |
+| `turn.complete` (main loop, completion or error) | `INVOCATION_COMPLETED` / `INVOCATION_ERROR` | `{}` on completion; `{"reason": reason}` on error | `attributes.finish_reason`, `attributes.is_aborted`, `attributes.step_count`, `attributes.usage_metadata`; `latency_ms.total_ms` |
 | `classic.PermissionRequest` | *(no separate row)* | — | Sets `attributes.permission_requested` on the waiting tool's `TOOL_COMPLETED` row |
 | `telemetry.log` (`tool_decision`) | *(no separate row)* | — | Sets `attributes.permission_decision` (`accept`/`reject`) and `attributes.permission_decision_source` on `TOOL_COMPLETED` |
 | `session.end` | `STATE_DELTA` | `{"session_end": true}` | `attributes.state_delta.{reason, trace_count, duration_ms}` |
@@ -146,7 +149,7 @@ Host hook ──► sanitize & enqueue (in-memory, <= 5,000 rows / 8 MiB) ──
 Key correlation, token, and deduplication fields:
 
 - `session_id` — Re-read on every event so rows after `/clear`, `/resume`, or `/branch` carry the updated session ID.
-- `invocation_id` & `trace_id` — Turn ID and 32-hex trace ID shared across a main-loop turn and any subagents started during it (`NULL` on session-start and session-end `STATE_DELTA` rows).
+- `invocation_id` & `trace_id` — Identify the main-loop turn and its subagents. Session `STATE_DELTA` rows use the active main turn's IDs when available; otherwise these fields are `NULL`.
 - `span_id` & `parent_span_id` — Call hierarchy (`turn` -> `model step` or `subagent` -> `tool call`; `parent_span_id` is `NULL` on top-level turn and session `STATE_DELTA` rows).
 - `attributes.usage_metadata` — Carries both BQAA normalized totals (`prompt_tokens` = input + cache read + cache write, `completion_tokens`, `total_tokens`) and raw API counts (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`).
 - `attributes.writer.plugin` — Set to `"bigquery-agent-analytics-mod"` so queries can isolate this mod's rows on shared tables.
@@ -175,10 +178,13 @@ See [`sql/sample_queries.sql`](sql/sample_queries.sql) for query templates (fill
 
 ### Sample rows
 
-[`examples/sample-rows.jsonl`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/plugins/claude_code_mod/examples/sample-rows.jsonl) contains the complete 26-row fixture sequence emitted by `tests/sample-rows.test.ts` (prompts, model requests, tool calls, a subagent, permission decisions, and session end). Refresh it from a repository checkout with:
+[`examples/sample-rows.jsonl`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/plugins/claude_code_mod/examples/sample-rows.jsonl) contains the complete 26-row fixture sequence emitted by `tests/sample-rows.test.ts` (prompts, model requests, tool calls, a subagent, permission decisions, and session end). Refresh it from the repository root with:
 
 ```bash
-claude plugin test . 2>&1 | sed -n 's/^BQAA_SAMPLE_ROW //p' > examples/sample-rows.jsonl
+(
+  cd plugins/claude_code_mod || exit
+  claude plugin test . 2>&1 | sed -n 's/^BQAA_SAMPLE_ROW //p' > examples/sample-rows.jsonl
+)
 ```
 
 ## Privacy and security
@@ -194,31 +200,35 @@ Treat the BigQuery dataset with the same access controls as raw coding-agent tra
 
 ## Testing
 
-Run these checks from a full repository checkout (the marketplace copy in `claude_code_dist` omits `tests/` and `examples/`).
+Run each block from the repository root of a full checkout (the marketplace copy in `claude_code_dist` omits `tests/` and `examples/`).
 
 **Offline checks (run in CI without the host CLI or GCP):**
 
 ```bash
-cd plugins/claude_code_mod
-# Needs release tags; on a shallow clone run: git fetch --unshallow --tags
-bash build_dist.sh --check
-bash tests/build_dist.test.sh
-bash tests/setup.test.sh
-bash tests/version.test.sh
-node tests/reload.test.mjs        # requires Node 24+
-python3 -m venv .venv && .venv/bin/pip install duckdb
-.venv/bin/python tests/views.test.py
+(
+  cd plugins/claude_code_mod || exit
+  # Needs release tags; on a shallow clone run: git fetch --unshallow --tags
+  bash build_dist.sh --check
+  bash tests/build_dist.test.sh
+  bash tests/setup.test.sh
+  bash tests/version.test.sh
+  node tests/reload.test.mjs        # requires Node 24+
+  python3 -m venv .venv && .venv/bin/pip install duckdb
+  .venv/bin/python tests/views.test.py
+)
 ```
 
 **Before a release (requires the host CLI or a test GCP project):**
 
 ```bash
-claude plugin validate plugins/claude_code_mod
-cd plugins/claude_code_mod
-claude plugin test
-bash tests/state-contract.test.sh
-# Start one interactive `claude --plugin-dir .` session first so it generates .claude-plugin/types/:
-npx -p typescript tsc -p .
+(
+  cd plugins/claude_code_mod || exit
+  claude plugin validate .
+  claude plugin test .
+  bash tests/state-contract.test.sh
+  # Start one interactive `claude --plugin-dir .` session first so it generates .claude-plugin/types/:
+  npx -p typescript tsc -p .
+)
 ```
 
 The CI suite verifies marketplace sync against release tags, tests `setup.sh` with a stand-in `bq` binary, checks welcome-card behavior across hot reloads in Node 24+, and executes both reporting views in DuckDB. The host CLI suite validates `plugin.json`, exercises hooks/redaction/retries/backfill against stubbed host APIs and mock timers, and verifies host state semantics. Live GCP scripts (`tests/access.live.sh`, `tests/queries.live.py`, and `tests/managed-settings.live.sh`) verify IAM isolation, SQL queries, and managed policies before cutting a release.
