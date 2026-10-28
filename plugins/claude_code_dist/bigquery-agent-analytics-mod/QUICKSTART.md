@@ -1,6 +1,6 @@
 # Quickstart
 
-`bigquery-agent-analytics-mod` records your coding-agent sessions in BigQuery—prompts, model answers, tool calls, token counts, and latency—from the background so your terminal never waits on network requests. Pick the setup path that matches how you work:
+`bigquery-agent-analytics-mod` records your coding-agent sessions in BigQuery—prompts, model answers, tool calls, token counts, and latency—in the background so your terminal never waits on uploads. Pick the setup path that matches how you work:
 
 - [A. Your own sandbox](#a-your-own-sandbox) — try it in your own Google Cloud project in about 5 minutes.
 - [B. Your team set it up](#b-your-team-set-it-up) — connect to a shared BigQuery table your administrator already created.
@@ -10,45 +10,54 @@ For all configuration options, event schemas, and redaction details, see [README
 
 ## Before you start
 
-Run `claude plugin list` (or `/plugin` inside a session) to check your current setup:
+If you have never installed a BigQuery Agent Analytics plugin before, skip straight to [A. Your own sandbox](#a-your-own-sandbox) or [B. Your team set it up](#b-your-team-set-it-up). Otherwise, run `claude plugin list` (or `/plugin` inside a session) to check what you already have:
 
-- **Turn off the older shell-hook tracer if enabled**: If `bigquery-agent-analytics-tracing` is active for the same table, disable it so every event isn't written twice:
+- **Turn off `bigquery-agent-analytics-tracing` if enabled**: If the older settings-hook tracer (`bigquery-agent-analytics-tracing`) is active for the same table, disable it using the plugin ID shown by `claude plugin list` so every event isn't written twice:
   ```bash
   claude plugin disable bigquery-agent-analytics-tracing@bqaa-tracing
+  # or, for earlier installs:
+  claude plugin disable bigquery-agent-analytics-tracing@bigquery-agent-analytics-plugin
   ```
   Also remove any manual tracing hooks you previously added to `~/.claude/settings.json`.
-- **Update an existing marketplace checkout**: If you added the `bqaa-tracing` marketplace earlier, refresh it before installing so you get the current mod:
-  ```bash
-  claude plugin marketplace update bqaa-tracing
+- **Reusing a table from `bigquery-agent-analytics-tracing`?** That table has no `event_id` column. Inserts still succeed, but BigQuery drops the ID, so retries and backfills can't be deduplicated and deduplicated queries fail. Run `setup.sh` once against that dataset (it adds the column), or run:
+  ```sql
+  ALTER TABLE `YOUR_PROJECT.YOUR_DATASET.agent_events` ADD COLUMN IF NOT EXISTS event_id STRING;
   ```
+- **Already using this marketplace?** Run `claude plugin marketplace update bqaa-tracing`, then `claude plugin update bigquery-agent-analytics-mod@bqaa-tracing`. If it says the mod is already at the latest version (`0.1.0`) while you need a newer build, uninstall it (`claude plugin uninstall bigquery-agent-analytics-mod@bqaa-tracing`) and install it again with the same `--config` values. Then run `/reload-plugins` or start a new session.
 - **Migrating from an older marketplace?** If your existing plugin ID ends in `@bigquery-agent-analytics-plugin`, follow [MIGRATION.md](MIGRATION.md).
 
 ## A. Your own sandbox
 
 ### 1. Prerequisites
 
-- Claude Code CLI v2.1.296 or newer (`claude --version`)
+- Claude Code CLI v2.1.296 or newer (`claude --version`) in a macOS or Linux terminal (Windows, the desktop app, and editor extensions are not tested)
 - Google Cloud CLI (`gcloud` and `bq`)
 - A Google Cloud project where you can create BigQuery datasets
 
 ### 2. Sign in to Google Cloud
 
 ```bash
-gcloud auth login
-gcloud auth application-default login
+gcloud auth login                         # for gcloud and bq CLI commands
+gcloud auth application-default login     # for the mod's default token command
 ```
 
 ### 3. Create the BigQuery dataset and table
 
+Replace `YOUR_PROJECT` with your real Google Cloud project ID:
+
 ```bash
-git clone --depth 1 https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK
+git clone --depth 1 --filter=blob:none --sparse \
+  https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK
+git -C BigQuery-Agent-Analytics-SDK sparse-checkout set plugins/claude_code_mod
 BQAA_PROJECT_ID=YOUR_PROJECT BQAA_DATASET=agent_analytics \
   ./BigQuery-Agent-Analytics-SDK/plugins/claude_code_mod/setup.sh
 ```
 
-`setup.sh` creates the `agent_analytics` dataset, the `agent_events` table, and two daily usage views in `agent_analytics_reporting`.
+`setup.sh` creates the `agent_analytics` dataset, the `agent_events` table, and two daily usage views in `agent_analytics_reporting` (in a personal sandbox, you can ignore its closing team-access hint). A newly created table can take a few minutes to accept streaming inserts—rows wait in the meantime and are sent automatically.
 
 ### 4. Install the mod
+
+Replace `YOUR_PROJECT` with your Google Cloud project ID:
 
 ```bash
 claude plugin marketplace add GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK \
@@ -57,13 +66,13 @@ claude plugin install bigquery-agent-analytics-mod@bqaa-tracing \
   --config project=YOUR_PROJECT --config dataset=agent_analytics
 ```
 
-If you already have a `claude` session open, run `/reload-plugins` or start a new session.
+The installer may print `11 userConfig options not yet set — ...`; that's fine because every other option has a default. If you already have a `claude` session open, run `/reload-plugins` or start a new session.
 
 ### 5. Verify and query your rows
 
-Start `claude`, send a quick test prompt (for example, `"list the files here"`), wait about 5 seconds for the background batch to flush, and run `/bqaa-status`. You should see `BigQuery Agent Analytics mod: enabled, target YOUR_PROJECT.agent_analytics.agent_events (US)` and `requests: 1 ok` (or more).
+Start a new `claude` session. A card above the prompt names your table. A few seconds after your first prompt (try `"list the files here"`), it shows **✓ First rows landed in BigQuery**. To check by hand, run `/bqaa-status`: the first line should read `BigQuery Agent Analytics mod: enabled, target YOUR_PROJECT.agent_analytics.agent_events (US)`, there should be no `notice` line, and `requests:` should show `1 ok` or more. If you created the dataset a minute ago and see `BigQuery cannot find the table`, wait a few minutes—your rows are kept and sent automatically.
 
-Then query your logged events in BigQuery:
+Then query your logged events in BigQuery (replace `YOUR_PROJECT` in both places):
 
 ```bash
 bq --project_id=YOUR_PROJECT query --use_legacy_sql=false \
@@ -75,11 +84,14 @@ bq --project_id=YOUR_PROJECT query --use_legacy_sql=false \
    ORDER BY events DESC'
 ```
 
+After one prompt, you should see `STATE_DELTA` (session start), `USER_MESSAGE_RECEIVED`, `INVOCATION_STARTING`, `LLM_REQUEST`, `LLM_RESPONSE`, `AGENT_RESPONSE`, and `INVOCATION_COMPLETED` (plus `TOOL_STARTING` and `TOOL_COMPLETED` if a tool ran).
+
 ## B. Your team set it up
 
-### 1. What you need from your admin
+### 1. Prerequisites and details from your admin
 
-Ask your administrator for the GCP `project`, `dataset`, and optional `accessTokenCommand`. If your organization deployed [managed settings](docs/managed-settings.md), the mod is already enabled and configured for you—skip straight to Step 2.
+- **On your machine**: Claude Code CLI v2.1.296 or newer (`claude --version`, macOS or Linux terminal) and Google Cloud CLI (`gcloud`).
+- **From your administrator**: the GCP `project`, `dataset`, and optional `accessTokenCommand` (typically `gcloud auth print-access-token --impersonate-service-account=bqaa-row-writer@THE_PROJECT.iam.gserviceaccount.com`). If your organization deployed [managed settings](docs/managed-settings.md), the mod is already enabled and configured for you—skip straight to Step 2.
 
 ### 2. Sign in to Google Cloud
 
@@ -88,21 +100,21 @@ Ask your administrator for the GCP `project`, `dataset`, and optional `accessTok
 
 ### 3. Install the mod
 
-Skip this step if `claude plugin list` already shows `bigquery-agent-analytics-mod` enabled. Otherwise:
+Skip this step if `claude plugin list` already shows `bigquery-agent-analytics-mod` enabled. Otherwise, replace `THE_PROJECT`, `THE_DATASET`, and the service-account email with the values from your admin:
 
 ```bash
 claude plugin marketplace add GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK \
   --sparse .claude-plugin plugins/claude_code_dist
 claude plugin install bigquery-agent-analytics-mod@bqaa-tracing \
   --config project=THE_PROJECT --config dataset=THE_DATASET \
-  --config "accessTokenCommand=THE_TOKEN_COMMAND"
+  --config "accessTokenCommand=gcloud auth print-access-token --impersonate-service-account=bqaa-row-writer@THE_PROJECT.iam.gserviceaccount.com"
 ```
 
-Omit `--config "accessTokenCommand=..."` if your administrator did not provide one.
+Omit `--config "accessTokenCommand=..."` if your administrator did not give you one. Any `userConfig options not yet set` note from the installer is normal.
 
 ### 4. Verify
 
-Start `claude`, send a prompt, wait 5 seconds, and run `/bqaa-status`. Confirm it shows `enabled` with your team's target table, no `notice` line, and `requests: 1 ok` (or more). Note that write-only team roles cannot run `SELECT` queries against `agent_events` directly.
+Start a new `claude` session, send a prompt, wait a few seconds for **✓ First rows landed in BigQuery**, and run `/bqaa-status`. Confirm the first line names your team's table, there is no `notice` line, and `requests:` shows `1 ok` or more. You won't be able to query the raw `agent_events` table yourself—that's by design, since it holds everyone's prompts and tool output.
 
 ## If rows are not written
 
@@ -110,15 +122,24 @@ When rows cannot reach BigQuery, the mod buffers them on disk and shows the caus
 
 | Symptom or message | How to fix it |
 | --- | --- |
-| `no working Google credentials` | Sign in again: run `gcloud auth login` when using managed settings or a custom `accessTokenCommand`, or `gcloud auth application-default login` when using default credentials. |
+| `no working Google credentials` | Do what the notice's "To fix" part says. Usually that's `gcloud auth application-default login` (default setup) or `gcloud auth login` (a team setup that impersonates a writer). If it names another token command, fix that command. If you set `BQAA_ACCESS_TOKEN`, set a fresh one or unset it. Rows wait in the meantime, and your next prompt retries right away. |
 | `BigQuery denied the identity access to the dataset` (`403`) | Ask your admin for insert-only access (`bigquery.tables.get` and `bigquery.tables.updateData` on `agent_events`), then run `/bqaa-backfill` to replay buffered rows. |
-| `BigQuery cannot find the dataset ...` or `BigQuery cannot find the table ...` (`404`) | Verify `project` and `dataset`, or run the `setup.sh` command shown in `/bqaa-status`. Newly created tables can take a couple of minutes to accept streaming inserts; queued rows send automatically once ready. |
-| Duplicate events in BigQuery | Both this mod and `bigquery-agent-analytics-tracing` (or manual `~/.claude/settings.json` hooks) are enabled. Disable the older tracer as shown in [Before you start](#before-you-start). |
+| `BigQuery cannot find the dataset ...` or `BigQuery cannot find the table ...` (`404`) | Verify `project` and `dataset`, or run the `setup.sh` command shown in `/bqaa-status`. Newly created tables can take a few minutes to accept streaming inserts; queued rows send automatically once ready. |
+| Duplicate events in BigQuery | Both this mod and `bigquery-agent-analytics-tracing` (or manual `~/.claude/settings.json` hooks) are enabled. Disable `bigquery-agent-analytics-tracing` as shown in [Before you start](#before-you-start). |
 | `Plugin "bigquery-agent-analytics-mod" not found in marketplace` | Your cached `bqaa-tracing` marketplace predates the mod. Run `claude plugin marketplace update bqaa-tracing` and install again. |
 
 ## For administrators
 
 1. **Create the dataset, table, and views**: Run `setup.sh` (see [Step A.3](#3-create-the-bigquery-dataset-and-table)) in a dedicated GCP project where regular users do not hold project-wide BigQuery read roles. This creates `<dataset>.agent_events` and two aggregate views (`daily_usage_by_user`, `daily_usage_by_model`) in `<dataset>_reporting`.
-2. **Provision write-only and view-reader access**: Run [`setup_gcp_prereqs.py`](https://github.com/haiyuan-eng-google/bigquery_agent_analytics_skill/blob/main/plugins/bigquery-agent-analytics-tracing/scripts/setup_gcp_prereqs.py) with `--service-account bqaa-row-writer --writer-role row-writer` to grant developers insert-only impersonation (`bigquery.tables.get` and `bigquery.tables.updateData` only) and grant your reader group access strictly to `<dataset>_reporting`. See [docs/service-account-auth.md](docs/service-account-auth.md) for the full setup and `tests/access.live.sh` verification.
-3. **Roll out to developers**: Share the `project`, `dataset`, and impersonation `accessTokenCommand` for [Path B](#b-your-team-set-it-up), or deploy an organization policy with [docs/managed-settings.md](docs/managed-settings.md).
-4. **Query usage and traces**: Point stakeholders to `<dataset>_reporting` (`daily_usage_by_user`, `daily_usage_by_model`) for daily adoption and token metrics, and use [`sql/sample_queries.sql`](sql/sample_queries.sql) and [docs/value.md](docs/value.md) for admin-level latency, tool-error, and trace queries.
+2. **Create the writer service account and grant your two groups**: The bootstrap script lives in a separate repository and runs in a Python virtual environment with `google-cloud-bigquery`:
+   ```bash
+   git clone --depth 1 https://github.com/haiyuan-eng-google/bigquery_agent_analytics_skill
+   python3 -m venv .venv && .venv/bin/pip install google-cloud-bigquery
+   .venv/bin/python bigquery_agent_analytics_skill/plugins/bigquery-agent-analytics-tracing/scripts/setup_gcp_prereqs.py \
+     --project YOUR_PROJECT --dataset agent_analytics --no-create-dataset --no-create-table \
+     --service-account bqaa-row-writer --writer-role row-writer \
+     --token-creator group:WRITERS@example.com --reader group:READERS@example.com
+   ```
+   Review the plan it prints, then run the same command again with `--execute` (if it stops on grants it cannot verify via Cloud Identity, audit them and add `--accept-unverified`). Verify isolation with `tests/access.live.sh`—see [docs/service-account-auth.md#set-it-up](docs/service-account-auth.md#set-it-up).
+3. **Roll out to developers**: Share `project`, `dataset`, and `accessTokenCommand` (`gcloud auth print-access-token --impersonate-service-account=bqaa-row-writer@YOUR_PROJECT.iam.gserviceaccount.com`) for [Path B](#b-your-team-set-it-up), or deploy an organization policy with [docs/managed-settings.md](docs/managed-settings.md).
+4. **Query usage and traces**: Point stakeholders to `<dataset>_reporting` (`daily_usage_by_user`, `daily_usage_by_model`) for daily adoption and token counts, and use [`sql/sample_queries.sql`](sql/sample_queries.sql) (filling in `{PROJECT}`, `{DATASET}`, and `{TABLE}`) and [docs/value.md](docs/value.md) for admin-level latency, tool-error, and trace queries.
