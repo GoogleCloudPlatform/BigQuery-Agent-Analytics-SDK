@@ -1,30 +1,12 @@
 # Quickstart
 
-`bigquery-agent-analytics-mod` records your coding-agent sessions in BigQuery—prompts, model answers, tool calls, token counts, and latency—in the background so your terminal never waits on uploads. Pick the setup path that matches how you work:
+`bigquery-agent-analytics-mod` records your coding-agent sessions in BigQuery—prompts, model answers, tool calls, token counts, and latency. Logging to BigQuery happens in the background so your terminal never waits on uploads. Pick the setup path that matches how you work:
 
 - [A. Your own sandbox](#a-your-own-sandbox) — try it in your own Google Cloud project in about 5 minutes.
 - [B. Your team set it up](#b-your-team-set-it-up) — connect to a shared BigQuery table your administrator already created.
 - [For administrators](#for-administrators) — set up a shared table, write-only credentials, and usage views for a team.
 
 For all configuration options, event schemas, and redaction details, see [README.md](README.md) (especially [Privacy and security](README.md#privacy-and-security)).
-
-## Before you start
-
-If you have never installed a BigQuery Agent Analytics plugin before, skip straight to [A. Your own sandbox](#a-your-own-sandbox) or [B. Your team set it up](#b-your-team-set-it-up). Otherwise, run `claude plugin list` (or `/plugin` inside a session) to check what you already have:
-
-- **Turn off `bigquery-agent-analytics-tracing` if enabled**: If the older settings-hook tracer (`bigquery-agent-analytics-tracing`) is active for the same table, disable it using the plugin ID shown by `claude plugin list` so every event isn't written twice:
-  ```bash
-  claude plugin disable bigquery-agent-analytics-tracing@bqaa-tracing
-  # or, for earlier installs:
-  claude plugin disable bigquery-agent-analytics-tracing@bigquery-agent-analytics-plugin
-  ```
-  Also remove any manual tracing hooks you previously added to `~/.claude/settings.json`.
-- **Reusing a table from `bigquery-agent-analytics-tracing`?** That table has no `event_id` column. Inserts still succeed, but BigQuery drops the ID, so retries and backfills can't be deduplicated and deduplicated queries fail. Run `setup.sh` once against that dataset (it adds the column), or run:
-  ```sql
-  ALTER TABLE `YOUR_PROJECT.YOUR_DATASET.agent_events` ADD COLUMN IF NOT EXISTS event_id STRING;
-  ```
-- **Already using this marketplace?** Run `claude plugin marketplace update bqaa-tracing`, then `claude plugin update bigquery-agent-analytics-mod@bqaa-tracing`. If it says the mod is already at the latest version (`0.1.0`) while you need a newer build, uninstall it (`claude plugin uninstall bigquery-agent-analytics-mod@bqaa-tracing`) and install it again with the same `--config` values. Then run `/reload-plugins` or start a new session.
-- **Migrating from an older marketplace?** If your existing plugin ID ends in `@bigquery-agent-analytics-plugin`, follow [MIGRATION.md](MIGRATION.md).
 
 ## A. Your own sandbox
 
@@ -53,8 +35,6 @@ BQAA_PROJECT_ID=YOUR_PROJECT BQAA_DATASET=agent_analytics \
   ./BigQuery-Agent-Analytics-SDK/plugins/claude_code_mod/setup.sh
 ```
 
-`setup.sh` creates the `agent_analytics` dataset, the `agent_events` table, and two daily usage views in `agent_analytics_reporting` (in a personal sandbox, you can ignore its closing team-access hint). A newly created table can take a few minutes to accept streaming inserts—rows wait in the meantime and are sent automatically.
-
 ### 4. Install the mod
 
 Replace `YOUR_PROJECT` with your Google Cloud project ID:
@@ -70,7 +50,7 @@ The installer may print `11 userConfig options not yet set — ...`; that's fine
 
 ### 5. Verify and query your rows
 
-Start a session and send a short prompt (for example, `"list the files here"`). In the first session after installing a new plugin version, a welcome card names your table and shows **✓ First rows landed in BigQuery** after a successful upload. The card may be absent in later sessions. In any session, wait a few seconds and run `/bqaa-status`: confirm the correct table (`BigQuery Agent Analytics mod: enabled, target YOUR_PROJECT.agent_analytics.agent_events (US)`), no `notice` line, and at least `1 ok` request. If the table was just created and you see `BigQuery cannot find the table`, wait a few minutes; queued rows retry automatically.
+Start a session and send a short prompt (for example, `"list the files here"`). In the first session after installing a new mod version, a welcome card names your table and shows **✓ First rows landed in BigQuery** after a successful upload. The card may be absent in later sessions. In any session, wait a few seconds and run `/bqaa-status`: confirm the correct table (`BigQuery Agent Analytics mod: enabled, target YOUR_PROJECT.agent_analytics.agent_events (US)`), no `notice` line, and at least `1 ok` request. If the table was just created and you see `BigQuery cannot find the table`, wait a few minutes; queued rows retry automatically.
 
 Then query your logged events in BigQuery (replace `YOUR_PROJECT` in both places):
 
@@ -114,7 +94,7 @@ Omit `--config "accessTokenCommand=..."` if your administrator did not give you 
 
 ### 4. Verify
 
-Start a session and send a prompt. If this is the first session for a newly installed plugin version, a welcome card may confirm **✓ First rows landed in BigQuery**; later sessions need not show it. In any session, wait a few seconds after the prompt finishes, then run `/bqaa-status` and confirm your team's table, no `notice` line, and at least `1 ok` request. If it still shows `0 ok`, wait for the next flush and check again. If your admin created the table in the last few minutes and you see `BigQuery cannot find the table`, wait a few minutes; queued rows retry automatically. You won't be able to query the raw `agent_events` table yourself—that's by design, since it holds everyone's prompts and tool output.
+Start a session and send a prompt. If this is the first session for a newly installed mod version, a welcome card may confirm **✓ First rows landed in BigQuery**; later sessions need not show it. In any session, wait a few seconds after the prompt finishes, then run `/bqaa-status` and confirm your team's table, no `notice` line, and at least `1 ok` request. If it still shows `0 ok`, wait for the next flush and check again. If your admin created the table in the last few minutes and you see `BigQuery cannot find the table`, wait a few minutes; queued rows retry automatically. You won't be able to query the raw `agent_events` table yourself—that's by design, since it holds everyone's prompts and tool output.
 
 ## If rows are not written
 
@@ -125,7 +105,7 @@ When rows cannot reach BigQuery, the mod buffers them on disk and shows the caus
 | `no working Google credentials` | Do what the notice's "To fix" part says. Usually that's `gcloud auth application-default login` (default setup) or `gcloud auth login` (a team setup that impersonates a writer). If it names another token command, fix that command. If you set `BQAA_ACCESS_TOKEN`, set a fresh one or unset it. Rows wait in the meantime, and your next prompt retries right away. |
 | `BigQuery denied the identity access to the dataset` (`403`) | Ask your admin for insert-only access (`bigquery.tables.get` and `bigquery.tables.updateData` on `agent_events`), then run `/bqaa-backfill` to replay buffered rows. |
 | `BigQuery cannot find the dataset ...` or `BigQuery cannot find the table ...` (`404`) | Verify `project` and `dataset`, or run the `setup.sh` command shown in `/bqaa-status`. Newly created tables can take a few minutes to accept streaming inserts; queued rows send automatically once ready. |
-| Duplicate events in BigQuery | Check whether both this mod and `bigquery-agent-analytics-tracing` (or manual hooks in your settings file) are enabled; if so, disable the tracer as shown in [Before you start](#before-you-start). With only the mod enabled, retries or backfills can still duplicate rows because `insertAll` deduplication is best-effort; deduplicate on `event_id` using the query in [What it writes](README.md#what-it-writes). |
+| Duplicate events in BigQuery | Retries or backfills can duplicate rows because `insertAll` deduplication is best-effort; deduplicate on `event_id` using the query in [What it writes](README.md#what-it-writes). |
 | `Plugin "bigquery-agent-analytics-mod" not found in marketplace` | Your cached `bqaa-tracing` marketplace predates the mod. Run `claude plugin marketplace update bqaa-tracing` and install again. |
 
 ## For administrators
