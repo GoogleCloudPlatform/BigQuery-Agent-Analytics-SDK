@@ -114,7 +114,7 @@ Omit `--config "accessTokenCommand=..."` if your administrator did not give you 
 
 ### 4. Verify
 
-Start a session and send a prompt. If this is the first session for a newly installed plugin version, a welcome card may confirm **✓ First rows landed in BigQuery**; later sessions need not show it. In any session, run `/bqaa-status` and confirm your team's table, no `notice` line, and at least `1 ok` request. If your admin created the table in the last few minutes and you see `BigQuery cannot find the table`, wait a few minutes; queued rows retry automatically. You won't be able to query the raw `agent_events` table yourself—that's by design, since it holds everyone's prompts and tool output.
+Start a session and send a prompt. If this is the first session for a newly installed plugin version, a welcome card may confirm **✓ First rows landed in BigQuery**; later sessions need not show it. In any session, wait a few seconds after the prompt finishes, then run `/bqaa-status` and confirm your team's table, no `notice` line, and at least `1 ok` request. If it still shows `0 ok`, wait for the next flush and check again. If your admin created the table in the last few minutes and you see `BigQuery cannot find the table`, wait a few minutes; queued rows retry automatically. You won't be able to query the raw `agent_events` table yourself—that's by design, since it holds everyone's prompts and tool output.
 
 ## If rows are not written
 

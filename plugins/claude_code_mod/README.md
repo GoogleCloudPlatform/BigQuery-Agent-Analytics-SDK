@@ -137,7 +137,7 @@ Host hook ──► sanitize & enqueue (in-memory, <= 5,000 rows / 8 MiB) ──
 | `turn.step` (response) | `LLM_RESPONSE` | `{"tool_uses": [...], "response": answer}` | `attributes.model`, `attributes.usage_metadata`, `attributes.finish_reason`; `latency_ms.total_ms` and, when available, `latency_ms.time_to_first_token_ms` |
 | `turn.step` (error) | `LLM_ERROR` | `null` | `attributes.model`, `attributes.step_index`; `latency_ms.total_ms`; top-level `error_message` |
 | `tool.call` (before) | `TOOL_STARTING` | `{"tool", "tool_origin", "args"}` | `attributes.tool_use_id`; no `latency_ms` |
-| `tool.call` (after) | `TOOL_COMPLETED` | `{"tool", "tool_origin", "result"}` | `attributes.tool_use_id`, permission fields, `attributes.denied` and top-level `error_message` on error/deny; `latency_ms.total_ms` |
+| `tool.call` (after) | `TOOL_COMPLETED` | `{"tool", "tool_origin", "result"}` | `attributes.tool_use_id`, permission fields when available; `attributes.denied = true` only on denial; top-level `status = "ERROR"` and `error_message` on error or denial; `latency_ms.total_ms` |
 | `classic.SubagentStart` | `AGENT_STARTING` | `{"agent_type", "agent_id"}` | Sets top-level `agent` column to the subagent type |
 | `turn.complete` (subagent) | `AGENT_COMPLETED` / `AGENT_ERROR` | `{}` | `attributes.usage_metadata` (subagent totals); `latency_ms.total_ms` |
 | `turn.complete` (main loop, answered) | `AGENT_RESPONSE` | `{"response": answer}` | `attributes.source_turn_id` only; no `latency_ms` |
