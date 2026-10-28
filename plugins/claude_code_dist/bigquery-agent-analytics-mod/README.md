@@ -34,7 +34,7 @@ claude --plugin-dir ./plugins/claude_code_mod
 ### Updating and removing
 
 - **Update**: Run `claude plugin marketplace update bqaa-tracing`, then `claude plugin update bigquery-agent-analytics-mod@bqaa-tracing`. While prerelease revisions share version `0.1.0`, `plugin update` may report `already at the latest version (0.1.0)`—in that case, uninstall and reinstall with the same `--config` flags, then run `/reload-plugins` or start a new session.
-- **Pause or uninstall**: Run `claude plugin disable bigquery-agent-analytics-mod@bqaa-tracing` (or set `--config enabled=false`) to pause capture while keeping settings, or `claude plugin uninstall bigquery-agent-analytics-mod@bqaa-tracing` to remove it. Delete `~/.bqaa-mod` (or your custom `deadLetterDir` parent) if you also want to clear local dead-letter and dry-run files.
+- **Pause or uninstall**: Run `claude plugin disable bigquery-agent-analytics-mod@bqaa-tracing` (or set `--config enabled=false`) to pause capture while keeping settings, or `claude plugin uninstall bigquery-agent-analytics-mod@bqaa-tracing` to remove it. Delete `~/.bqaa-mod` (or your custom `deadLetterDir` and its sibling `dry-run` directory) if you also want to clear local dead-letter and dry-run files.
 
 ### The dataset
 
@@ -130,7 +130,7 @@ Host hook ──► sanitize & enqueue (in-memory, <= 5,000 rows / 8 MiB) ──
 
 | Host event | BQAA `event_type` | `content` JSON | Notable `attributes` & top-level `latency_ms` |
 | --- | --- | --- | --- |
-| `classic.SessionStart` | `STATE_DELTA` | `{"session_start": true}` | `attributes.state_delta.start_source`, `attributes.model`, `attributes.session_metadata` |
+| `classic.SessionStart` | `STATE_DELTA` | `{"session_start": true}` | `attributes.state_delta.{start_source, model}`, `attributes.session_metadata` |
 | `prompt.submit` | `USER_MESSAGE_RECEIVED` | `{"text_summary": prompt}` | `attributes.prompt_origin`, `attributes.submitted_during_turn` |
 | `turn.start` (main loop) | `INVOCATION_STARTING` | `{}` | `attributes.turn_number`, `attributes.session_metadata` |
 | `turn.step` (request) | `LLM_REQUEST` | `{"prompt": [...]}` (turn's first request; `[]` after) | `attributes.model`, `attributes.llm_config.effort`, `attributes.step_index`, `attributes.message_count` |
@@ -141,18 +141,18 @@ Host hook ──► sanitize & enqueue (in-memory, <= 5,000 rows / 8 MiB) ──
 | `turn.complete` (main loop) | `AGENT_RESPONSE` (when answered) + `INVOCATION_COMPLETED` / `INVOCATION_ERROR` | `{"response": answer}` on `AGENT_RESPONSE`; `{}` on `INVOCATION_*` | `attributes.finish_reason`, `attributes.is_aborted`, `attributes.step_count`, `attributes.usage_metadata`; `latency_ms.total_ms` |
 | `classic.PermissionRequest` | *(no separate row)* | — | Sets `attributes.permission_requested` on the waiting tool's `TOOL_COMPLETED` row |
 | `telemetry.log` (`tool_decision`) | *(no separate row)* | — | Sets `attributes.permission_decision` (`accept`/`reject`) and `attributes.permission_decision_source` on `TOOL_COMPLETED` |
-| `session.end` | `STATE_DELTA` | `{"session_end": true}` | `attributes.state_delta.reason`, `attributes.trace_count`, `attributes.duration_ms` |
+| `session.end` | `STATE_DELTA` | `{"session_end": true}` | `attributes.state_delta.{reason, trace_count, duration_ms}` |
 
 Key correlation, token, and deduplication fields:
 
 - `session_id` — Re-read on every event so rows after `/clear`, `/resume`, or `/branch` carry the updated session ID.
 - `invocation_id` & `trace_id` — Turn ID and 32-hex trace ID shared across a main-loop turn and any subagents started during it (`NULL` on session-start and session-end `STATE_DELTA` rows).
-- `span_id` & `parent_span_id` — Call hierarchy (`turn` -> `model step` or `subagent` -> `tool call`; `NULL` on session `STATE_DELTA` rows).
+- `span_id` & `parent_span_id` — Call hierarchy (`turn` -> `model step` or `subagent` -> `tool call`; `parent_span_id` is `NULL` on top-level turn and session `STATE_DELTA` rows).
 - `attributes.usage_metadata` — Carries both BQAA normalized totals (`prompt_tokens` = input + cache read + cache write, `completion_tokens`, `total_tokens`) and raw API counts (`input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`).
 - `attributes.writer.plugin` — Set to `"bigquery-agent-analytics-mod"` so queries can isolate this mod's rows on shared tables.
 - `event_id` — Unique 32-hex row ID preserved across retries and backfills (also sent as `insertId`).
 
-> **Reusing a table from `bigquery-agent-analytics-tracing`?** That table has no `event_id` column. Inserts still succeed, but BigQuery drops the ID, so retries and backfills can't be deduplicated. Run `setup.sh` once against that dataset, or run `ALTER TABLE \`YOUR_PROJECT.YOUR_DATASET.agent_events\` ADD COLUMN IF NOT EXISTS event_id STRING;` before relying on the query below.
+> **Reusing a table from `bigquery-agent-analytics-tracing`?** That table has no `event_id` column. Inserts still succeed, but BigQuery drops the ID, so retries and backfills can't be deduplicated. Run `setup.sh` once against that dataset (see [The dataset](#the-dataset)), or run ``ALTER TABLE `YOUR_PROJECT.YOUR_DATASET.agent_events` ADD COLUMN IF NOT EXISTS event_id STRING;`` before relying on the query below.
 
 When querying `agent_events` directly, deduplicate on `event_id` inside a time-bounded CTE before aggregating:
 
