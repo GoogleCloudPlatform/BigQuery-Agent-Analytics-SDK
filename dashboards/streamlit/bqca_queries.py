@@ -149,7 +149,6 @@ MODEL_NAME_EXPR = (
     "COALESCE(NULLIF(JSON_VALUE(attributes, '$.model'), ''),"
     " NULLIF(JSON_VALUE(attributes, '$.model_version'), ''))"
 )
-MODEL_VERSION_EXPR = "NULLIF(JSON_VALUE(attributes, '$.model_version'), '')"
 # Token counts live in ``attributes.usage_metadata`` (the model's own key
 # names), with the shorter ``*_tokens`` spellings and ``content.usage`` as
 # fallbacks. Thinking and cached tokens only exist under their

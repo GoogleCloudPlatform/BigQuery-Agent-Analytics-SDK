@@ -13,23 +13,21 @@
 # limitations under the License.
 
 """Shared helpers for serialization, hashing, timestamps, private
-directories, file locking, and log emission. No dependencies on other package
+directories, and log emission. No dependencies on other package
 modules so this can be safely imported from anywhere in the package."""
 
 from __future__ import annotations
 
-import contextlib
 from datetime import datetime
 from datetime import timezone
 import errno
-import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import stat
 import time
-from typing import Any, Iterator, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 import uuid
 import weakref
 
@@ -391,21 +389,6 @@ def _open_private_dir(
     os.close(fd)
     raise
   return PrivateDir(path, fd)
-
-
-@contextlib.contextmanager
-def file_lock(path: Path, mode: int = fcntl.LOCK_EX) -> Iterator[int]:
-  """Open a lockfile exclusively. Blocks until the lock is acquired."""
-  path.parent.mkdir(parents=True, exist_ok=True)
-  fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
-  try:
-    fcntl.flock(fd, mode)
-    yield fd
-  finally:
-    try:
-      fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-      os.close(fd)
 
 
 # The process's own standard streams: written to as they are.
