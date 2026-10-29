@@ -45,6 +45,9 @@ if ! "$RUNNER_PYTHON" -c "pass" >/dev/null 2>&1; then
   RUNNER_PYTHON="python3"
 fi
 
-export PYTHONPATH="${PLUGIN_DIR}/vendor:${PYTHONPATH:-}"
+# As in hooks/common.sh: keep the working directory off sys.path, for
+# this module and for the interpreter probes it runs.
+export PYTHONSAFEPATH=1
+export PYTHONPATH="${PLUGIN_DIR}/vendor${PYTHONPATH:+:${PYTHONPATH}}"
 
 exec "$RUNNER_PYTHON" -m bigquery_agent_analytics_tracing.setup_check "$@"

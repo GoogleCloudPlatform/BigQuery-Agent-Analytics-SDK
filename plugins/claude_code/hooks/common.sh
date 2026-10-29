@@ -40,6 +40,12 @@ case "${BQAA_TRACE_ENABLED-true}" in
   *) exit 0 ;;
 esac
 
-export PYTHONPATH="${PLUGIN_DIR}/vendor:${PYTHONPATH:-}"
+# Hooks run in the session's working directory, often a checked-out
+# repository. Keep it off sys.path so a file there such as json.py
+# cannot shadow a module the package imports: PYTHONSAFEPATH stops
+# `python -m` from prepending it (Python 3.11+; the drainer inherits
+# it), and PYTHONPATH gets no empty entry, which would add it as well.
+export PYTHONSAFEPATH=1
+export PYTHONPATH="${PLUGIN_DIR}/vendor${PYTHONPATH:+:${PYTHONPATH}}"
 
 exec "$PYTHON_BIN" -m bigquery_agent_analytics_tracing.claude_code "$1"
