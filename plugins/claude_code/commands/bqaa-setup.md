@@ -16,7 +16,8 @@ before agent events can land in BigQuery.
    ```
 
    The wrapper sets `PYTHONPATH` to the vendored package root and runs
-   `python -m bigquery_agent_analytics_tracing.setup_check`. Exit code is
+   `bigquery_agent_analytics_tracing.setup_check` like `python -m`, without
+   the working directory on `sys.path`. Exit code is
    `0` when the runtime is ready, `1` when something required is missing
    or unconfigured.
 

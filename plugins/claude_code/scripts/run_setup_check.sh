@@ -36,6 +36,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_DIR="$(dirname "$SCRIPT_DIR")"
 
+# As in hooks/common.sh, and before the first interpreter starts (the
+# liveness check below): keep the working directory off sys.path. Drop
+# empty PYTHONPATH entries, and run the module like `python -m` but
+# without the entry -m and -c put first on sys.path. The import probes
+# setup_check runs drop that entry too.
+pythonpath="${PLUGIN_DIR}/vendor"
+rest="${PYTHONPATH-}"
+while [ -n "$rest" ]; do
+  entry="${rest%%:*}"
+  if [ "$entry" = "$rest" ]; then rest=""; else rest="${rest#*:}"; fi
+  if [ -n "$entry" ]; then pythonpath="${pythonpath}:${entry}"; fi
+done
+export PYTHONPATH="$pythonpath"
+
 RUNNER_PYTHON="${BQAA_PYTHON:-python3}"
 # Quick liveness check: if the configured interpreter cannot even
 # exec a no-op, fall back to python3. setup_check.py still probes
@@ -45,6 +59,12 @@ if ! "$RUNNER_PYTHON" -c "pass" >/dev/null 2>&1; then
   RUNNER_PYTHON="python3"
 fi
 
-export PYTHONPATH="${PLUGIN_DIR}/vendor:${PYTHONPATH:-}"
+RUN_MODULE='import sys
+if not getattr(sys.flags, "safe_path", False):
+    del sys.path[0]
+del sys.argv[0]
+import runpy
+runpy.run_module(sys.argv[0], run_name="__main__", alter_sys=True)'
 
-exec "$RUNNER_PYTHON" -m bigquery_agent_analytics_tracing.setup_check "$@"
+exec "$RUNNER_PYTHON" -c "$RUN_MODULE" \
+  bigquery_agent_analytics_tracing.setup_check "$@"

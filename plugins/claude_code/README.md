@@ -36,13 +36,16 @@ so the wheel and the plugin always ship the same code.
 
 1. Claude Code fires a hook (e.g. `PreToolUse`) per the manifest.
 2. The matching `hooks/<hook>.sh` execs `hooks/common.sh <HookName>`.
-3. `common.sh` prepends `${CLAUDE_PLUGIN_ROOT}/vendor` to `PYTHONPATH`
-   and execs
-   `python -m bigquery_agent_analytics_tracing.claude_code <HookName>`.
+3. `common.sh` prepends `${CLAUDE_PLUGIN_ROOT}/vendor` to `PYTHONPATH`,
+   dropping empty entries, and runs
+   `bigquery_agent_analytics_tracing.claude_code <HookName>` like
+   `python -m` does, but without the working directory (usually the
+   session's repository) on `sys.path`, so nothing is imported from it.
 4. The hook process writes one spool envelope and spawns the drainer
-   subprocess. The drainer inherits the same `PYTHONPATH` via
-   `os.environ.copy()` so the vendored package resolves on the spawned
-   process too — no separate wheel install required on `BQAA_PYTHON`.
+   subprocess the same way. The drainer inherits the same `PYTHONPATH`
+   via `os.environ.copy()` so the vendored package resolves on the
+   spawned process too — no separate wheel install required on
+   `BQAA_PYTHON`.
 
 ## Required runtime deps on `BQAA_PYTHON`
 

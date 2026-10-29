@@ -466,14 +466,14 @@ def test_vendored_plugin_spools_and_spawns_drainer_with_inherited_pythonpath(
   )
   assert writer["label"].endswith(f"/{resolved_version}")
 
-  # 2. Drainer subprocess was actually spawned with the right -m args.
+  # 2. Drainer subprocess was actually spawned for the drain module.
   assert (
       recorder_log.exists()
   ), "drainer spawn never fired the recorder — vendored runtime is broken"
   log_text = recorder_log.read_text()
   assert (
-      "-m bigquery_agent_analytics_tracing.drain" in log_text
-  ), f"drainer argv missing -m invocation: {log_text!r}"
+      "bigquery_agent_analytics_tracing.drain" in log_text
+  ), f"drainer argv missing the drain module: {log_text!r}"
 
   # 3. PYTHONPATH was inherited so the drainer can import the vendored
   # package without a wheel install — the exact runtime contract for
