@@ -136,6 +136,53 @@ def _bqca_column_ids(comp: dict[str, Any]) -> list[Any]:
   ]
 
 
+def _bqca_spec_roles(comp: dict[str, Any]) -> dict[str, list[Any]]:
+  """Return a component's column IDs by role, in `spec.<kind>.fields` order.
+
+  A scorecard's `primaryMetricId` is its only metric. A bar or line chart
+  reads `primaryAxis.fieldId`, `metricSeries.metricIds` and
+  `primaryAxis.sort`; a pie chart reads `dimensionId`, `metricId` and `sort`;
+  and a table reads `dimensionIds`, `metricIds` and `sort`. Each sort clause
+  gives one `sortFieldId` and one `sortDir`.
+
+  Returns:
+    The `dimensions` and `metrics` column IDs, and the `sort_columns` and
+    `sort_dirs` of the sort clauses, each list in manifest order.
+  """
+  kind = _SPEC_KIND_BY_CHART_TYPE.get(comp.get("chart_type"), "")
+  spec = comp.get("spec")
+  inner = spec.get(kind) if isinstance(spec, dict) else None
+  fields = inner.get("fields") if isinstance(inner, dict) else None
+  fields = fields if isinstance(fields, dict) else {}
+  axis = fields.get("primaryAxis")
+  axis = axis if isinstance(axis, dict) else {}
+  if kind == "scorecard":
+    dimensions, metrics, clauses = [], [fields.get("primaryMetricId")], []
+  elif kind in ("barChart", "lineChart"):
+    series = fields.get("metricSeries")
+    dimensions = [axis.get("fieldId")]
+    metrics = series.get("metricIds") if isinstance(series, dict) else []
+    clauses = axis.get("sort")
+  elif kind == "pieChart":
+    dimensions = [fields.get("dimensionId")]
+    metrics = [fields.get("metricId")]
+    clauses = fields.get("sort")
+  else:
+    dimensions = fields.get("dimensionIds")
+    metrics = fields.get("metricIds")
+    clauses = fields.get("sort")
+  clauses = [
+      clause if isinstance(clause, dict) else {}
+      for clause in (clauses if isinstance(clauses, list) else [])
+  ]
+  return {
+      "dimensions": list(dimensions) if isinstance(dimensions, list) else [],
+      "metrics": list(metrics) if isinstance(metrics, list) else [],
+      "sort_columns": [clause.get("sortFieldId") for clause in clauses],
+      "sort_dirs": [clause.get("sortDir") for clause in clauses],
+  }
+
+
 def _bqca_report_wide_column_id_errors(
     components: list[dict[str, Any]], source: str
 ) -> list[str]:
@@ -2240,6 +2287,11 @@ def _normalized_aggregation(value: Any) -> str:
   return "" if value in (None, "", "NONE") else str(value)
 
 
+def _concept_ref(value: str | None) -> str | None:
+  """Return a concept reference without its `t0.` namespace prefix."""
+  return value.removeprefix("t0.") if value is not None else None
+
+
 def validate_live_report_textproto(
     textproto_path: pathlib.Path,
     root: pathlib.Path = ROOT,
@@ -2254,16 +2306,23 @@ def validate_live_report_textproto(
   `spec/bqca_chart_manifest.yaml` and `bindings/bqca_report_template.yaml`.
 
   Returns:
-    One error for each `concept_defs` name that is not a `qt_` ID or whose
-    `id` is not `t0.<name>`; each name that repeats a name used earlier in
-    the report; each component reference (`concept_names`, `sort_column`)
-    that names no concept of its component, and each concept that no such
-    reference names; each manifest component that is missing, whose
+    One error for: a dump that cannot be read as protobuf text format; a
+    component that appears twice; each `concept_defs` name that is not a
+    `qt_` ID, or whose `id` is not `t0.<name>`; each name that repeats inside
+    its component, or that repeats a name of an earlier component; each
+    component reference (`concept_names`, `sort_column`) that names no
+    concept of its component, and each concept that no such reference names;
+    each manifest component that is missing; each manifest component whose
     `(name, source_field_name, aggregation)` concepts are not exactly the
-    manifest's `(id, fieldName, aggregation)` columns, or that binds another
-    data source; each data component that the manifest lacks; a report-level
-    data source that is not the binding's `datasource_id`; and a missing
-    `ds0` alias or one that points at another data source.
+    manifest's `(id, fieldName, aggregation)` columns; whose dimension
+    `concept_names`, metric `concept_names`, `sort_column`s or `sort_dir`s
+    differ, in order, from the dimension IDs, metric IDs, `sortFieldId`s or
+    `sortDir`s of its `spec.<kind>.fields`; or whose `datasource_id` or
+    `dataset_id` is missing or is not its manifest `datasource_id`; each
+    component that defines concepts but is not in the manifest; a missing
+    report-level `datasource_id`, or one that is not the binding's
+    `datasource_id`; and a missing `ds0` alias, or one that points at another
+    data source.
   """
   label = f"live report {textproto_path}"
   manifest = (
@@ -2311,7 +2370,12 @@ def validate_live_report_textproto(
             f" {concept_id!r} is not 't0.{name}'"
         )
       if name is not None:
-        if name in name_owner:
+        if name in defined:
+          errors.append(
+              f"{label}: component {component_id} repeats concept_defs name"
+              f" {name!r}"
+          )
+        elif name in name_owner:
           errors.append(
               f"{label}: concept_defs name {name!r} in component"
               f" {component_id} repeats the one in {name_owner[name]}; names"
@@ -2349,10 +2413,36 @@ def validate_live_report_textproto(
           f"{label}: component {component_id} concept_defs name {name!r} is"
           " not referenced by any concept_names or sort_column"
       )
+    # A saved report lists a component's dimension and metric concept_names
+    # under `dimensions` and `metrics` (in `labeled_concepts` entries), and
+    # each sort clause in its own `sort` message.
+    role_names = {
+        role: [
+            _concept_ref(ref)
+            for key, value in component_property
+            if key == role and isinstance(value, list)
+            for _, ref in _tp_scalars(value, ("concept_names",))
+        ]
+        for role in ("dimensions", "metrics")
+    }
+    sort_clauses = [
+        value
+        for key, value in component_property
+        if key == "sort" and isinstance(value, list)
+    ]
     components.setdefault(
         component_id,
         {
             "concepts": sorted(concept_bindings),
+            "dimensions": role_names["dimensions"],
+            "metrics": role_names["metrics"],
+            "sort_columns": [
+                _concept_ref(_tp_scalar(clause, "sort_column"))
+                for clause in sort_clauses
+            ],
+            "sort_dirs": [
+                _tp_scalar(clause, "sort_dir") for clause in sort_clauses
+            ],
             "datasource_id": _tp_scalar(config, "datasource_id"),
             "dataset_id": _tp_scalar(
                 _tp_message(component_property, "dataset"), "dataset_id"
@@ -2389,13 +2479,35 @@ def validate_live_report_textproto(
             f" {sorted((live_counts - expected_counts).elements())}, manifest"
             f" only {sorted((expected_counts - live_counts).elements())}"
         )
+      spec_roles = _bqca_spec_roles(comp)
+      if live["dimensions"] != spec_roles["dimensions"]:
+        errors.append(
+            f"{label}: component {where} dimensions concept_names"
+            f" {live['dimensions']} != manifest dimension IDs"
+            f" {spec_roles['dimensions']}"
+        )
+      if live["metrics"] != spec_roles["metrics"]:
+        errors.append(
+            f"{label}: component {where} metrics concept_names"
+            f" {live['metrics']} != manifest metric IDs {spec_roles['metrics']}"
+        )
+      if live["sort_columns"] != spec_roles["sort_columns"]:
+        errors.append(
+            f"{label}: component {where} sort_column {live['sort_columns']} !="
+            f" manifest sortFieldId {spec_roles['sort_columns']}"
+        )
+      if live["sort_dirs"] != spec_roles["sort_dirs"]:
+        errors.append(
+            f"{label}: component {where} sort_dir {live['sort_dirs']} !="
+            f" manifest sortDir {spec_roles['sort_dirs']}"
+        )
       if live["datasource_id"] != comp.get("datasource_id"):
         errors.append(
             f"{label}: component {where} datasource_id"
             f" {live['datasource_id']!r} != manifest"
             f" {comp.get('datasource_id')!r}"
         )
-      if live["dataset_id"] not in (None, comp.get("datasource_id")):
+      if live["dataset_id"] != comp.get("datasource_id"):
         errors.append(
             f"{label}: component {where} dataset_id {live['dataset_id']!r} !="
             f" manifest {comp.get('datasource_id')!r}"
@@ -2413,9 +2525,12 @@ def validate_live_report_textproto(
       _tp_message(report, "report_config") or report, "report"
   )
   report_datasource_id = _tp_scalar(report_message, "datasource_id")
-  if report_datasource_id is not None and report_datasource_id != (
-      datasource_id
-  ):
+  if report_datasource_id is None:
+    errors.append(
+        f"{label}: report datasource_id is missing; the binding expects"
+        f" {datasource_id!r}"
+    )
+  elif report_datasource_id != datasource_id:
     errors.append(
         f"{label}: report datasource_id {report_datasource_id!r} != binding"
         f" datasource_id {datasource_id!r}"

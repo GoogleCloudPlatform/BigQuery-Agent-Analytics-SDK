@@ -318,8 +318,9 @@ column's position in `spec.<kind>.dataset.columns`, and `field_name` is its
 column ID that is not a `qt_` ID, that repeats inside a component or anywhere
 in the report, that differs between `spec/bqca_chart_manifest.yaml` and
 `spec/bqca_dashboard_template.json`, or that a chart field or sort references
-without defining. It also rejects two scorecards on one page that share the
-same `(field, aggregation, tile_filter)`.
+without defining. It also rejects an embedded spec `sort` that is not a list,
+and two scorecards on one page that share the same
+`(field, aggregation, tile_filter)`.
 
 The live template keeps the legacy generic IDs until it is synced from these
 contracts. Until then, `live_template_verification.verified_date` in
@@ -335,15 +336,28 @@ of it (its report configuration in protobuf text format) and run:
 python3 tools/validate_contracts.py --live-report-textproto /path/to/report.txt
 ```
 
-The check fails unless every `concept_defs.name` is a `qt_` ID whose `id` is
-`t0.<name>`, no name repeats anywhere in the report, every chart reference
-(`concept_names`, `sort_column`) resolves inside its component and every
-concept is referenced, each of the 34 manifest components defines exactly the
-`(name, source_field_name, aggregation)` concepts that
-`spec/bqca_chart_manifest.yaml` lists as its `(id, fieldName, aggregation)`
-columns and binds the same data source, and the report has a `ds0` alias,
-with both that alias and the report-level data source pointing at the
-`datasource_id` in `bindings/bqca_report_template.yaml`.
+The command exits 1 and prints one error for each of these defects:
+
+- the dump cannot be read as protobuf text format;
+- a component appears twice;
+- a `concept_defs.name` is not a `qt_` ID, or its `id` is not `t0.<name>`;
+- a name repeats inside its component, or repeats the name of an earlier
+  component;
+- a chart reference (`concept_names`, `sort_column`) names no concept of its
+  component, or a concept is not referenced;
+- one of the 34 manifest components is missing;
+- a manifest component's `(name, source_field_name, aggregation)` concepts are
+  not exactly the `(id, fieldName, aggregation)` columns that
+  `spec/bqca_chart_manifest.yaml` lists for it;
+- a manifest component's dimension `concept_names`, metric `concept_names`,
+  `sort_column`s, or `sort_dir`s differ, in order, from the dimension IDs,
+  metric IDs, `sortFieldId`s, or `sortDir`s of its `spec.<kind>.fields`;
+- a manifest component's `datasource_id` or `dataset_id` is missing or is not
+  its manifest `datasource_id`;
+- a component that defines concepts is not in the manifest;
+- the report-level `datasource_id` is missing or is not the `datasource_id` in
+  `bindings/bqca_report_template.yaml`;
+- the report has no `ds0` alias, or the alias points at another data source.
 
 ### Fallback paths
 

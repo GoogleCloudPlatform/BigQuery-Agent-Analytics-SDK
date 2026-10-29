@@ -2315,6 +2315,16 @@ def test_validate_contracts_rejects_generic_or_repeated_column_ids():
         " id 'qt_ffffffff'"
     ], sort_errors
 
+  # The sort clauses must be a list.
+  def _unlist_sort(comp):
+    axis = _bqca_spec_inner(comp)["fields"]["primaryAxis"]
+    axis["sort"] = axis["sort"][0]
+
+  unlisted_errors = _validate(bar["id"], _unlist_sort)
+  assert unlisted_errors == [
+      f"chart {bar['id']} embedded spec sort must be a list"
+  ], unlisted_errors
+
   # Two scorecards on one page must not show the same measure.
   def _show_total_tokens(comp):
     comp["field"] = "total_tokens"
@@ -2335,22 +2345,55 @@ def test_validate_contracts_rejects_generic_or_repeated_column_ids():
   )
 
 
+def _bqca_spec_role_ids(comp):
+  """Return a component's (dimension IDs, metric IDs, sort clauses) in order."""
+  fields = _bqca_spec_inner(comp)["fields"]
+  if "primaryMetricId" in fields:
+    return [], [fields["primaryMetricId"]], []
+  if "primaryAxis" in fields:
+    return (
+        [fields["primaryAxis"]["fieldId"]],
+        fields["metricSeries"]["metricIds"],
+        fields["primaryAxis"]["sort"],
+    )
+  if "dimensionId" in fields:
+    return [fields["dimensionId"]], [fields["metricId"]], fields["sort"]
+  return fields["dimensionIds"], fields["metricIds"], fields["sort"]
+
+
 def _render_bqca_live_report(
     manifest,
     *,
     names=None,
     source_fields=None,
+    aggregations=None,
+    concept_ids=None,
+    overrides=None,
     report_datasource_id=BQCA_DATASOURCE_ID,
     aliases=((BQCA_DATASOURCE_ALIAS, BQCA_DATASOURCE_ID),),
 ):
   """Render the manifest as a Looker Studio report textproto dump.
 
-  `names` and `source_fields` map `(component id, slot)` to the concept name
-  or source field to write instead of the manifest's; `aliases` lists the
-  report's `(alias, datasource_id)` data source alias entries.
+  The layout follows a saved live report: each component lists its dimension
+  and its metric `concept_names` in `spec.<kind>.fields` order, each list
+  under one `labeled_concepts` entry keyed `primary` (a scorecard's
+  `dimensions` is empty), then one `sort` clause per manifest sort clause,
+  then one `concept_defs` per column.
+
+  `names`, `source_fields`, `aggregations` and `concept_ids` map
+  `(component id, slot)` to the concept name, source field, aggregation or
+  concept `id` to write instead of the manifest's; references follow a
+  renamed concept. `overrides` maps a component id to the `datasource_id`,
+  `dataset_id`, `dimensions` or `metrics` (lists of names), or `sort`
+  (`(sort_column, sort_dir)` pairs) to write instead. A None `concept_ids`,
+  `datasource_id`, `dataset_id` or `report_datasource_id` value omits that
+  field. `aliases` lists the report's `(alias, datasource_id)` alias entries.
   """
   names = names or {}
   source_fields = source_fields or {}
+  aggregations = aggregations or {}
+  concept_ids = concept_ids or {}
+  overrides = overrides or {}
   out = [
       "report_config {",
       "  shareable {",
@@ -2361,62 +2404,82 @@ def _render_bqca_live_report(
     out += ["  page {", f'    page_id: "{page["id"]}"', "    page {"]
     for comp in page["components"]:
       columns = _bqca_spec_columns(comp)
-      slot_by_id = {column["id"]: slot for slot, column in enumerate(columns)}
-      concept = [
-          names.get((comp["id"], slot), column["id"])
+      concept = {
+          column["id"]: names.get((comp["id"], slot), column["id"])
           for slot, column in enumerate(columns)
-      ]
+      }
+      dimension_ids, metric_ids, clauses = _bqca_spec_role_ids(comp)
+      own = {
+          "datasource_id": comp["datasource_id"],
+          "dataset_id": comp["datasource_id"],
+          "dimensions": [concept[column_id] for column_id in dimension_ids],
+          "metrics": [concept[column_id] for column_id in metric_ids],
+          "sort": [
+              (concept[clause["sortFieldId"]], clause["sortDir"])
+              for clause in clauses
+          ],
+          **overrides.get(comp["id"], {}),
+      }
+      out.append("      component_config {")
+      if own["datasource_id"] is not None:
+        out.append(f'        datasource_id: "{own["datasource_id"]}"')
       out += [
-          "      component_config {",
-          f'        datasource_id: "{comp["datasource_id"]}"',
           f'        component_id: "{comp["component_id"]}"',
           "        property_config {",
           "          component_property {",
           "            dataset {",
           "              dataset_type: DATASOURCE",
-          f'              dataset_id: "{comp["datasource_id"]}"',
-          "            }",
       ]
-      for group, metric in (("dimensions", False), ("metrics", True)):
-        out.append(f"            {group} {{")
-        for slot, column in enumerate(columns):
-          if ("aggregation" in column) == metric:
-            out += [
-                "              labeled_concepts {",
-                f'                key: "slot{slot}"',
-                f'                value {{ concept_names: "{concept[slot]}" }}',
-                "              }",
-            ]
+      if own["dataset_id"] is not None:
+        out.append(f'              dataset_id: "{own["dataset_id"]}"')
+      out.append("            }")
+      for role in ("dimensions", "metrics"):
+        out.append(f"            {role} {{")
+        if own[role]:
+          out += [
+              "              labeled_concepts {",
+              '                key: "primary"',
+              "                value {",
+              *(f'                  concept_names: "{n}"' for n in own[role]),
+              "                }",
+              "              }",
+          ]
         out.append("            }")
-      for sort_id in _bqca_spec_sort_ids(comp):
+      for sort_column, sort_dir in own["sort"]:
         out += [
             "            sort {",
-            "              sort_dir: DESC",
-            f'              sort_column: "{concept[slot_by_id[sort_id]]}"',
+            f"              sort_dir: {sort_dir}",
+            f'              sort_column: "{sort_column}"',
             "            }",
         ]
+      if comp["chart_type"] in ("bar_chart", "pie_chart"):
+        out.append("            reverse_sort_order: false")
       out += ["          }", "        }"]
       for slot, column in enumerate(columns):
-        field = source_fields.get((comp["id"], slot), column["fieldName"])
+        key = (comp["id"], slot)
+        name = concept[column["id"]]
+        concept_id = concept_ids.get(key, f"t0.{name}")
+        field = source_fields.get(key, column["fieldName"])
+        aggregation = aggregations.get(key, column.get("aggregation"))
+        out.append("        concept_defs {")
+        if concept_id is not None:
+          out.append(f'          id: "{concept_id}"')
         out += [
-            "        concept_defs {",
-            f'          id: "t0.{concept[slot]}"',
-            f'          name: "{concept[slot]}"',
+            f'          name: "{name}"',
             '          namespace: "t0"',
             "          query_time_transformation {",
             "            data_transformation {",
             f'              source_field_name: "{field}"',
         ]
-        if "aggregation" in column:
-          out.append(f"              aggregation: {column['aggregation']}")
+        if aggregation is not None:
+          out.append(f"              aggregation: {aggregation}")
         out += ["            }", "          }", "        }"]
       out.append("      }")
     out += ["    }", "  }"]
-  out += [
-      "  report {",
-      f'    datasource_id: "{report_datasource_id}"',
-      "    resource {",
-  ]
+  out.append("  report {")
+  if report_datasource_id is not None:
+    out.append(f'    datasource_id: "{report_datasource_id}"')
+  out.append("    resource {")
   for alias, alias_datasource_id in aliases:
     out += [
         "      datasource_alias {",
@@ -2428,34 +2491,474 @@ def _render_bqca_live_report(
   return "\n".join(out) + "\n"
 
 
-def _bqca_concepts_differ(path, where, live_only, manifest_only):
+def _render_bqca_live_report_with_copied_kpi(manifest, component_id, column_id):
+  """Render the manifest plus a copy of its first scorecard.
+
+  The copy gets `component_id` and one column named `column_id`, so its only
+  concept repeats no other name in the report.
+  """
+  extended = json.loads(json.dumps(manifest))
+  first_page = extended["pages"][0]["components"]
+  copy = json.loads(json.dumps(first_page[0]))
+  copy["component_id"] = component_id
+  inner = _bqca_spec_inner(copy)
+  inner["dataset"]["columns"][0]["id"] = column_id
+  inner["fields"]["primaryMetricId"] = column_id
+  first_page.append(copy)
+  return _render_bqca_live_report(extended)
+
+
+def _render_bqca_live_report_without_first_kpi(manifest):
+  """Render the manifest without its first scorecard."""
+  trimmed = json.loads(json.dumps(manifest))
+  trimmed["pages"][0]["components"].pop(0)
+  return _render_bqca_live_report(trimmed)
+
+
+def _bqca_concepts_differ(where, live_only, manifest_only):
   """Return the live audit's error for a component whose concepts differ."""
   return (
-      f"live report {path}: component {where} concept_defs (name,"
-      " source_field_name, aggregation) differ from the manifest's (id,"
-      f" fieldName, aggregation): live only {live_only}, manifest only"
-      f" {manifest_only}"
+      f"component {where} concept_defs (name, source_field_name,"
+      " aggregation) differ from the manifest's (id, fieldName, aggregation):"
+      f" live only {live_only}, manifest only {manifest_only}"
   )
 
 
-def test_live_report_textproto_audit_catches_shared_concept_names(
+BQCA_STALE_DATASOURCE_ID = "00000000-0000-4000-8000-000000000000"
+BQCA_KPI_TOTAL = "kpi_total_tokens (cd-vWRq2EdpQyI)"
+BQCA_KPI_INPUT = "kpi_input_tokens (cd-gQM6-qRztkI)"
+BQCA_OVER_TIME = "chart_tokens_over_time (cd-kM4cFH3pweE)"
+BQCA_OVER_TIME_METRICS = ["qt_af86847d", "qt_42018c0c", "qt_0db8b52b"]
+BQCA_SQL_TABLE = "tbl_prompt_response_sql (cd-oUw97rpumWM)"
+BQCA_SQL_TABLE_DIMENSIONS = [
+    "qt_40f9b407",
+    "qt_b684d2ed",
+    "qt_54bd6219",
+    "qt_7a28e588",
+    "qt_800b7f96",
+    "qt_bbf261e0",
+    "qt_1ada8666",
+    "qt_abb7920b",
+    "qt_a04329d9",
+    "qt_42c77379",
+]
+BQCA_SQL_TABLE_DIMENSIONS_SWAPPED = [
+    "qt_b684d2ed",
+    "qt_40f9b407",
+    *BQCA_SQL_TABLE_DIMENSIONS[2:],
+]
+
+# One case per guard of `validate_live_report_textproto`: a function that
+# renders the defective report from the manifest, and the exact errors it
+# must produce, each without its "live report <path>: " prefix.
+BQCA_LIVE_REPORT_DEFECTS = [
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            names={
+                ("kpi_total_tokens", 0): "met",
+                ("kpi_input_tokens", 0): "met",
+            },
+        ),
+        [
+            "component cd-vWRq2EdpQyI concept_defs name"
+            f" 'met'{BQCA_NOT_QT_SUFFIX}",
+            "component cd-gQM6-qRztkI concept_defs name"
+            f" 'met'{BQCA_NOT_QT_SUFFIX}",
+            "concept_defs name 'met' in component cd-gQM6-qRztkI repeats the"
+            " one in cd-vWRq2EdpQyI; names must be unique across the report",
+            _bqca_concepts_differ(
+                BQCA_KPI_TOTAL,
+                [("met", "_total_tokens_", "SUM")],
+                [("qt_d779815a", "_total_tokens_", "SUM")],
+            ),
+            f"component {BQCA_KPI_TOTAL} metrics concept_names ['met'] !="
+            " manifest metric IDs ['qt_d779815a']",
+            _bqca_concepts_differ(
+                BQCA_KPI_INPUT,
+                [("met", "_input_tokens_", "SUM")],
+                [("qt_c90b69a4", "_input_tokens_", "SUM")],
+            ),
+            f"component {BQCA_KPI_INPUT} metrics concept_names ['met'] !="
+            " manifest metric IDs ['qt_c90b69a4']",
+        ],
+        id="generic_name_shared_by_two_components",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m, concept_ids={("kpi_total_tokens", 0): "t1.qt_d779815a"}
+        ),
+        [
+            "component cd-vWRq2EdpQyI concept_defs id 't1.qt_d779815a' is not"
+            " 't0.qt_d779815a'"
+        ],
+        id="concept_id_in_another_namespace",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m, concept_ids={("kpi_total_tokens", 0): None}
+        ),
+        [
+            "component cd-vWRq2EdpQyI concept_defs id None is not"
+            " 't0.qt_d779815a'"
+        ],
+        id="concept_id_missing",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m, names={("chart_tokens_over_time", 2): "qt_af86847d"}
+        ),
+        [
+            "component cd-kM4cFH3pweE repeats concept_defs name 'qt_af86847d'",
+            _bqca_concepts_differ(
+                BQCA_OVER_TIME,
+                [("qt_af86847d", "_output_tokens_", "SUM")],
+                [("qt_42018c0c", "_output_tokens_", "SUM")],
+            ),
+            f"component {BQCA_OVER_TIME} metrics concept_names ['qt_af86847d',"
+            " 'qt_af86847d', 'qt_0db8b52b'] != manifest metric IDs"
+            f" {BQCA_OVER_TIME_METRICS}",
+        ],
+        id="name_repeated_inside_a_component",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m, names={("kpi_input_tokens", 0): "qt_d779815a"}
+        ),
+        [
+            "concept_defs name 'qt_d779815a' in component cd-gQM6-qRztkI"
+            " repeats the one in cd-vWRq2EdpQyI; names must be unique across"
+            " the report",
+            _bqca_concepts_differ(
+                BQCA_KPI_INPUT,
+                [("qt_d779815a", "_input_tokens_", "SUM")],
+                [("qt_c90b69a4", "_input_tokens_", "SUM")],
+            ),
+            f"component {BQCA_KPI_INPUT} metrics concept_names"
+            " ['qt_d779815a'] != manifest metric IDs ['qt_c90b69a4']",
+        ],
+        id="qt_name_repeated_by_another_component",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m, overrides={"kpi_total_tokens": {"metrics": ["qt_deadbeef"]}}
+        ),
+        [
+            "component cd-vWRq2EdpQyI concept_names 'qt_deadbeef' names none"
+            " of its concept_defs",
+            "component cd-vWRq2EdpQyI concept_defs name 'qt_d779815a' is not"
+            " referenced by any concept_names or sort_column",
+            f"component {BQCA_KPI_TOTAL} metrics concept_names"
+            " ['qt_deadbeef'] != manifest metric IDs ['qt_d779815a']",
+        ],
+        id="concept_names_dangles",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "chart_tokens_over_time": {"sort": [("qt_deadbeef", "ASC")]}
+            },
+        ),
+        [
+            "component cd-kM4cFH3pweE sort_column 'qt_deadbeef' names none of"
+            " its concept_defs",
+            f"component {BQCA_OVER_TIME} sort_column ['qt_deadbeef'] !="
+            " manifest sortFieldId ['qt_e7eb0560']",
+        ],
+        id="sort_column_dangles",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m, overrides={"kpi_total_tokens": {"metrics": []}}
+        ),
+        [
+            "component cd-vWRq2EdpQyI concept_defs name 'qt_d779815a' is not"
+            " referenced by any concept_names or sort_column",
+            f"component {BQCA_KPI_TOTAL} metrics concept_names [] != manifest"
+            " metric IDs ['qt_d779815a']",
+        ],
+        id="concept_unreferenced",
+    ),
+    pytest.param(
+        _render_bqca_live_report_without_first_kpi,
+        [f"manifest component {BQCA_KPI_TOTAL} is missing"],
+        id="manifest_component_missing",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report_with_copied_kpi(
+            m, "cd-vWRq2EdpQyI", "qt_0d0d0d0d"
+        ),
+        ["component cd-vWRq2EdpQyI appears twice"],
+        id="component_appears_twice",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report_with_copied_kpi(
+            m, "cd-extra000000", "qt_0e0e0e0e"
+        ),
+        [
+            "component cd-extra000000 defines concepts but is not in"
+            " spec/bqca_chart_manifest.yaml"
+        ],
+        id="component_not_in_manifest",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m, source_fields={("kpi_input_tokens", 0): "_output_tokens_"}
+        ),
+        [
+            _bqca_concepts_differ(
+                BQCA_KPI_INPUT,
+                [("qt_c90b69a4", "_output_tokens_", "SUM")],
+                [("qt_c90b69a4", "_input_tokens_", "SUM")],
+            )
+        ],
+        id="concept_bound_to_another_field",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m, aggregations={("kpi_total_tokens", 0): "AVG"}
+        ),
+        [
+            _bqca_concepts_differ(
+                BQCA_KPI_TOTAL,
+                [("qt_d779815a", "_total_tokens_", "AVG")],
+                [("qt_d779815a", "_total_tokens_", "SUM")],
+            )
+        ],
+        id="concept_with_another_aggregation",
+    ),
+    pytest.param(
+        # chart_tokens_over_time sums `_input_tokens_` in slot 1
+        # (qt_af86847d) and `_output_tokens_` in slot 2 (qt_42018c0c); swap
+        # the two concept names, whose references follow them.
+        lambda m: _render_bqca_live_report(
+            m,
+            names={
+                ("chart_tokens_over_time", 1): "qt_42018c0c",
+                ("chart_tokens_over_time", 2): "qt_af86847d",
+            },
+        ),
+        [
+            _bqca_concepts_differ(
+                BQCA_OVER_TIME,
+                [
+                    ("qt_42018c0c", "_input_tokens_", "SUM"),
+                    ("qt_af86847d", "_output_tokens_", "SUM"),
+                ],
+                [
+                    ("qt_42018c0c", "_output_tokens_", "SUM"),
+                    ("qt_af86847d", "_input_tokens_", "SUM"),
+                ],
+            ),
+            f"component {BQCA_OVER_TIME} metrics concept_names ['qt_42018c0c',"
+            " 'qt_af86847d', 'qt_0db8b52b'] != manifest metric IDs"
+            f" {BQCA_OVER_TIME_METRICS}",
+        ],
+        id="concept_names_swapped",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m, names={("kpi_total_tokens", 0): "qt_0000beef"}
+        ),
+        [
+            _bqca_concepts_differ(
+                BQCA_KPI_TOTAL,
+                [("qt_0000beef", "_total_tokens_", "SUM")],
+                [("qt_d779815a", "_total_tokens_", "SUM")],
+            ),
+            f"component {BQCA_KPI_TOTAL} metrics concept_names"
+            " ['qt_0000beef'] != manifest metric IDs ['qt_d779815a']",
+        ],
+        id="concept_renamed_to_an_unused_qt_id",
+    ),
+    pytest.param(
+        # The concept_defs stay the manifest's; only the order in which the
+        # chart lists its input and output token metrics changes.
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "chart_tokens_over_time": {
+                    "metrics": ["qt_42018c0c", "qt_af86847d", "qt_0db8b52b"]
+                }
+            },
+        ),
+        [
+            f"component {BQCA_OVER_TIME} metrics concept_names ['qt_42018c0c',"
+            " 'qt_af86847d', 'qt_0db8b52b'] != manifest metric IDs"
+            f" {BQCA_OVER_TIME_METRICS}"
+        ],
+        id="metric_references_reordered",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "tbl_prompt_response_sql": {
+                    "dimensions": BQCA_SQL_TABLE_DIMENSIONS_SWAPPED
+                }
+            },
+        ),
+        [
+            f"component {BQCA_SQL_TABLE} dimensions concept_names"
+            f" {BQCA_SQL_TABLE_DIMENSIONS_SWAPPED} != manifest dimension IDs"
+            f" {BQCA_SQL_TABLE_DIMENSIONS}"
+        ],
+        id="dimension_references_reordered",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "chart_tokens_over_time": {
+                    "dimensions": ["qt_af86847d"],
+                    "metrics": ["qt_e7eb0560", "qt_42018c0c", "qt_0db8b52b"],
+                }
+            },
+        ),
+        [
+            f"component {BQCA_OVER_TIME} dimensions concept_names"
+            " ['qt_af86847d'] != manifest dimension IDs ['qt_e7eb0560']",
+            f"component {BQCA_OVER_TIME} metrics concept_names ['qt_e7eb0560',"
+            " 'qt_42018c0c', 'qt_0db8b52b'] != manifest metric IDs"
+            f" {BQCA_OVER_TIME_METRICS}",
+        ],
+        id="dimension_and_metric_trade_roles",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "chart_tokens_over_time": {"sort": [("qt_af86847d", "ASC")]}
+            },
+        ),
+        [
+            f"component {BQCA_OVER_TIME} sort_column ['qt_af86847d'] !="
+            " manifest sortFieldId ['qt_e7eb0560']"
+        ],
+        id="sort_column_repointed",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "chart_tokens_over_time": {"sort": [("qt_e7eb0560", "DESC")]}
+            },
+        ),
+        [
+            f"component {BQCA_OVER_TIME} sort_dir ['DESC'] != manifest sortDir"
+            " ['ASC']"
+        ],
+        id="sort_direction_flipped",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "kpi_total_tokens": {"datasource_id": BQCA_STALE_DATASOURCE_ID}
+            },
+        ),
+        [
+            f"component {BQCA_KPI_TOTAL} datasource_id"
+            f" {BQCA_STALE_DATASOURCE_ID!r} != manifest {BQCA_DATASOURCE_ID!r}"
+        ],
+        id="component_datasource_stale",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m, overrides={"kpi_total_tokens": {"datasource_id": None}}
+        ),
+        [
+            f"component {BQCA_KPI_TOTAL} datasource_id None != manifest"
+            f" {BQCA_DATASOURCE_ID!r}"
+        ],
+        id="component_datasource_missing",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "kpi_total_tokens": {"dataset_id": BQCA_STALE_DATASOURCE_ID}
+            },
+        ),
+        [
+            f"component {BQCA_KPI_TOTAL} dataset_id"
+            f" {BQCA_STALE_DATASOURCE_ID!r} != manifest {BQCA_DATASOURCE_ID!r}"
+        ],
+        id="component_dataset_stale",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m, overrides={"kpi_total_tokens": {"dataset_id": None}}
+        ),
+        [
+            f"component {BQCA_KPI_TOTAL} dataset_id None != manifest"
+            f" {BQCA_DATASOURCE_ID!r}"
+        ],
+        id="component_dataset_missing",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m, report_datasource_id=BQCA_STALE_DATASOURCE_ID
+        ),
+        [
+            f"report datasource_id {BQCA_STALE_DATASOURCE_ID!r} != binding"
+            f" datasource_id {BQCA_DATASOURCE_ID!r}"
+        ],
+        id="report_datasource_stale",
+    ),
+    pytest.param(
+        # Only the report-level datasource_id goes; `ds0` and every
+        # component still name the binding's data source.
+        lambda m: _render_bqca_live_report(m, report_datasource_id=None),
+        [
+            "report datasource_id is missing; the binding expects"
+            f" {BQCA_DATASOURCE_ID!r}"
+        ],
+        id="report_datasource_missing",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(m, aliases=()),
+        [
+            "report resource has no data source alias"
+            f" {BQCA_DATASOURCE_ALIAS!r}; the binding maps it to datasource_id"
+            f" {BQCA_DATASOURCE_ID!r}"
+        ],
+        id="alias_missing",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m, aliases=(("ds1", BQCA_DATASOURCE_ID),)
+        ),
+        [
+            "report resource has no data source alias"
+            f" {BQCA_DATASOURCE_ALIAS!r}; the binding maps it to datasource_id"
+            f" {BQCA_DATASOURCE_ID!r}"
+        ],
+        id="alias_renamed",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m, aliases=((BQCA_DATASOURCE_ALIAS, BQCA_STALE_DATASOURCE_ID),)
+        ),
+        [
+            f"data source alias {BQCA_DATASOURCE_ALIAS!r} points at"
+            f" {BQCA_STALE_DATASOURCE_ID!r}, not binding datasource_id"
+            f" {BQCA_DATASOURCE_ID!r}"
+        ],
+        id="alias_points_at_another_datasource",
+    ),
+]
+
+
+def test_live_report_textproto_audit_accepts_the_synced_report(
     tmp_path, capsys
 ):
-  """#check-can-fail: `--live-report-textproto` audits a saved live report."""
+  """`--live-report-textproto` passes a report that matches the contracts."""
   validator = _load_dashboard_module("validate_contracts")
   manifest = yaml.safe_load(
       (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text()
   )
-
-  def _audit(name, text):
-    path = tmp_path / name
-    path.write_text(text, encoding="utf-8")
-    return path, validator.validate_live_report_textproto(path)
-
-  def _main(path):
-    return validator.main(
-        ["--profile", "bqca", "--live-report-textproto", str(path)]
-    )
 
   # The stdlib reader keeps repeated fields, decodes escapes, and joins
   # adjacent strings.
@@ -2469,236 +2972,76 @@ def test_live_report_textproto_audit_catches_shared_concept_names(
       ("d", "E2"),
   ]
 
-  fixed, errors = _audit("fixed.txtpb", _render_bqca_live_report(manifest))
-  assert errors == []
-  assert _main(fixed) == 0
+  # The rendered report has the saved report's reference layout: 21
+  # scorecards with one metric each, 13 charts with 23 dimension and 21 more
+  # metric references, and 13 sort clauses (one ASC).
+  text = _render_bqca_live_report(manifest)
+  assert text.count("concept_names:") == 23 + 42
+  assert text.count('key: "primary"') == 21 + 2 * 13
+  assert text.count("sort_dir: DESC") == 12
+  assert text.count("sort_dir: ASC") == 1
+  fixed = tmp_path / "fixed.txtpb"
+  fixed.write_text(text, encoding="utf-8")
+  assert validator.validate_live_report_textproto(fixed) == []
+  assert (
+      validator.main(
+          ["--profile", "bqca", "--live-report-textproto", str(fixed)]
+      )
+      == 0
+  )
   assert f"ok: live report validated ({fixed})" in capsys.readouterr().out
   with pytest.raises(SystemExit) as adk_only:
     validator.main(["--profile", "adk", "--live-report-textproto", str(fixed)])
   assert adk_only.value.code == 2
-  capsys.readouterr()
-
-  # The published template's defect: two components each define their own
-  # `met` concept. Each resolves inside its component, yet the report fails.
-  shared, errors = _audit(
-      "shared.txtpb",
-      _render_bqca_live_report(
-          manifest,
-          names={
-              ("kpi_total_tokens", 0): "met",
-              ("kpi_input_tokens", 0): "met",
-          },
-      ),
-  )
-  assert errors == [
-      f"live report {shared}: component cd-vWRq2EdpQyI concept_defs name"
-      f" 'met'{BQCA_NOT_QT_SUFFIX}",
-      f"live report {shared}: component cd-gQM6-qRztkI concept_defs name"
-      f" 'met'{BQCA_NOT_QT_SUFFIX}",
-      f"live report {shared}: concept_defs name 'met' in component"
-      " cd-gQM6-qRztkI repeats the one in cd-vWRq2EdpQyI; names must be"
-      " unique across the report",
-      _bqca_concepts_differ(
-          shared,
-          "kpi_total_tokens (cd-vWRq2EdpQyI)",
-          [("met", "_total_tokens_", "SUM")],
-          [("qt_d779815a", "_total_tokens_", "SUM")],
-      ),
-      _bqca_concepts_differ(
-          shared,
-          "kpi_input_tokens (cd-gQM6-qRztkI)",
-          [("met", "_input_tokens_", "SUM")],
-          [("qt_c90b69a4", "_input_tokens_", "SUM")],
-      ),
-  ]
-  assert _main(shared) == 1
-  assert "repeats the one in cd-vWRq2EdpQyI" in capsys.readouterr().err
-
-  # A qt_ name reused by another component fails too.
-  reused, errors = _audit(
-      "reused.txtpb",
-      _render_bqca_live_report(
-          manifest, names={("kpi_input_tokens", 0): "qt_d779815a"}
-      ),
-  )
-  assert errors == [
-      f"live report {reused}: concept_defs name 'qt_d779815a' in component"
-      " cd-gQM6-qRztkI repeats the one in cd-vWRq2EdpQyI; names must be"
-      " unique across the report",
-      _bqca_concepts_differ(
-          reused,
-          "kpi_input_tokens (cd-gQM6-qRztkI)",
-          [("qt_d779815a", "_input_tokens_", "SUM")],
-          [("qt_c90b69a4", "_input_tokens_", "SUM")],
-      ),
-  ]
-
-  # A reference that names no concept of its component fails, and so does
-  # the concept that no reference names any more.
-  dangling, errors = _audit(
-      "dangling.txtpb",
-      _render_bqca_live_report(manifest).replace(
-          'concept_names: "qt_d779815a"', 'concept_names: "qt_deadbeef"', 1
-      ),
-  )
-  assert errors == [
-      f"live report {dangling}: component cd-vWRq2EdpQyI concept_names"
-      " 'qt_deadbeef' names none of its concept_defs",
-      f"live report {dangling}: component cd-vWRq2EdpQyI concept_defs name"
-      " 'qt_d779815a' is not referenced by any concept_names or sort_column",
-  ]
-
-  # A component bound to another field, a missing component, and a stale
-  # report-level data source each fail.
-  swapped, errors = _audit(
-      "swapped.txtpb",
-      _render_bqca_live_report(
-          manifest, source_fields={("kpi_input_tokens", 0): "_output_tokens_"}
-      ),
-  )
-  assert errors == [
-      _bqca_concepts_differ(
-          swapped,
-          "kpi_input_tokens (cd-gQM6-qRztkI)",
-          [("qt_c90b69a4", "_output_tokens_", "SUM")],
-          [("qt_c90b69a4", "_input_tokens_", "SUM")],
-      )
-  ]
-  trimmed = json.loads(json.dumps(manifest))
-  trimmed["pages"][0]["components"].pop(0)
-  missing, errors = _audit("missing.txtpb", _render_bqca_live_report(trimmed))
-  assert errors == [
-      f"live report {missing}: manifest component kpi_total_tokens"
-      " (cd-vWRq2EdpQyI) is missing"
-  ]
-  stale_id = "00000000-0000-4000-8000-000000000000"
-  stale, errors = _audit(
-      "stale.txtpb",
-      _render_bqca_live_report(manifest, report_datasource_id=stale_id),
-  )
-  assert errors == [
-      f"live report {stale}: report datasource_id {stale_id!r} != binding"
-      f" datasource_id {BQCA_DATASOURCE_ID!r}"
-  ]
-
-  # Text that is not protobuf text format, or no file at all, fails closed.
-  truncated, errors = _audit("truncated.txtpb", "report_config {\n  page {\n")
-  assert len(errors) == 1, errors
-  assert "cannot read it as protobuf text format" in errors[0]
-  absent = validator.validate_live_report_textproto(tmp_path / "absent.txtpb")
-  assert len(absent) == 1, absent
-  assert "cannot read it as protobuf text format" in absent[0]
 
 
-def test_live_report_textproto_audit_pins_exact_concepts_and_alias(
-    tmp_path, capsys
+@pytest.mark.parametrize("render, expected", BQCA_LIVE_REPORT_DEFECTS)
+def test_live_report_textproto_audit_rejects_each_defect(
+    render, expected, tmp_path, capsys
 ):
-  """#check-can-fail: the live audit pins every concept's qt_ ID and `ds0`.
-
-  Swapping two qt_ IDs inside a component, or renaming one to an unused qt_
-  ID, keeps every name a report-wide unique qt_ ID whose references resolve,
-  so only the exact `(name, source_field_name, aggregation)` comparison with
-  the manifest's `(id, fieldName, aggregation)` columns catches it.
-  """
+  """#check-can-fail: each live report defect yields exactly its errors."""
   validator = _load_dashboard_module("validate_contracts")
   manifest = yaml.safe_load(
       (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text()
   )
-
-  def _audit(name, text):
-    path = tmp_path / name
-    path.write_text(text, encoding="utf-8")
-    return path, validator.validate_live_report_textproto(path)
-
-  # chart_tokens_over_time sums `_input_tokens_` in slot 1 (qt_af86847d) and
-  # `_output_tokens_` in slot 2 (qt_42018c0c); swap the two IDs.
-  swapped, errors = _audit(
-      "swapped_ids.txtpb",
-      _render_bqca_live_report(
-          manifest,
-          names={
-              ("chart_tokens_over_time", 1): "qt_42018c0c",
-              ("chart_tokens_over_time", 2): "qt_af86847d",
-          },
-      ),
-  )
-  assert errors == [
-      _bqca_concepts_differ(
-          swapped,
-          "chart_tokens_over_time (cd-kM4cFH3pweE)",
-          [
-              ("qt_42018c0c", "_input_tokens_", "SUM"),
-              ("qt_af86847d", "_output_tokens_", "SUM"),
-          ],
-          [
-              ("qt_42018c0c", "_output_tokens_", "SUM"),
-              ("qt_af86847d", "_input_tokens_", "SUM"),
-          ],
-      )
-  ]
+  path = tmp_path / "report.txtpb"
+  path.write_text(render(manifest), encoding="utf-8")
+  errors = [f"live report {path}: {message}" for message in expected]
+  assert validator.validate_live_report_textproto(path) == errors
   assert (
       validator.main(
-          ["--profile", "bqca", "--live-report-textproto", str(swapped)]
+          ["--profile", "bqca", "--live-report-textproto", str(path)]
       )
       == 1
   )
-  assert "chart_tokens_over_time (cd-kM4cFH3pweE)" in capsys.readouterr().err
+  assert capsys.readouterr().err.splitlines() == [f"ERROR: {e}" for e in errors]
 
-  # Another well-formed, unused qt_ ID in place of the manifest's fails.
-  renamed, errors = _audit(
-      "renamed_id.txtpb",
-      _render_bqca_live_report(
-          manifest, names={("kpi_total_tokens", 0): "qt_0000beef"}
-      ),
+
+def test_live_report_textproto_audit_fails_closed_on_unreadable_input(
+    tmp_path, capsys
+):
+  """#check-can-fail: text that is not protobuf text format, or no file."""
+  validator = _load_dashboard_module("validate_contracts")
+  truncated = tmp_path / "truncated.txtpb"
+  truncated.write_text("report_config {\n  page {\n", encoding="utf-8")
+  error = (
+      f"live report {truncated}: cannot read it as protobuf text format:"
+      " unterminated message: missing '}'"
   )
-  assert errors == [
-      _bqca_concepts_differ(
-          renamed,
-          "kpi_total_tokens (cd-vWRq2EdpQyI)",
-          [("qt_0000beef", "_total_tokens_", "SUM")],
-          [("qt_d779815a", "_total_tokens_", "SUM")],
+  assert validator.validate_live_report_textproto(truncated) == [error]
+  assert (
+      validator.main(
+          ["--profile", "bqca", "--live-report-textproto", str(truncated)]
       )
-  ]
-
-  # A concept that no concept_names or sort_column names is dead and fails.
-  unreferenced, errors = _audit(
-      "unreferenced.txtpb",
-      _render_bqca_live_report(manifest).replace(
-          'value { concept_names: "qt_d779815a" }', "value { }", 1
-      ),
+      == 1
   )
-  assert errors == [
-      f"live report {unreferenced}: component cd-vWRq2EdpQyI concept_defs"
-      " name 'qt_d779815a' is not referenced by any concept_names or"
-      " sort_column"
-  ]
-
-  # The report must map the `ds0` alias, and map it to the binding's data
-  # source.
-  for name, aliases in (
-      ("no_alias.txtpb", ()),
-      ("other_alias.txtpb", (("ds1", BQCA_DATASOURCE_ID),)),
-  ):
-    path, errors = _audit(
-        name, _render_bqca_live_report(manifest, aliases=aliases)
-    )
-    assert errors == [
-        f"live report {path}: report resource has no data source alias"
-        f" {BQCA_DATASOURCE_ALIAS!r}; the binding maps it to datasource_id"
-        f" {BQCA_DATASOURCE_ID!r}"
-    ]
-  stale_id = "00000000-0000-4000-8000-000000000000"
-  stale_alias, errors = _audit(
-      "stale_alias.txtpb",
-      _render_bqca_live_report(
-          manifest, aliases=((BQCA_DATASOURCE_ALIAS, stale_id),)
-      ),
-  )
-  assert errors == [
-      f"live report {stale_alias}: data source alias"
-      f" {BQCA_DATASOURCE_ALIAS!r} points at {stale_id!r}, not binding"
-      f" datasource_id {BQCA_DATASOURCE_ID!r}"
-  ]
+  assert capsys.readouterr().err.splitlines() == [f"ERROR: {error}"]
+  absent = tmp_path / "absent.txtpb"
+  errors = validator.validate_live_report_textproto(absent)
+  assert len(errors) == 1, errors
+  assert errors[0].startswith(
+      f"live report {absent}: cannot read it as protobuf text format: "
+  ), errors
 
 
 @pytest.mark.parametrize("profile", ["adk", "bqca"])
