@@ -694,8 +694,8 @@ def _report_invalid_config(hook_name: str, exc: Exception) -> int:
 def main(argv: list[str] | None = None) -> int:
   """Hook entry: read JSON payload from stdin, dispatch by hook name.
 
-  Invoked by hook shell wrappers as
-  ``python -m bigquery_agent_analytics_tracing.claude_code <HookName>``
+  Invoked by hook shell wrappers, which run this module like
+  ``python -m bigquery_agent_analytics_tracing.claude_code <HookName>``,
   or via the ``bqaa-claude-hook`` console script. Errors are logged but
   never propagated so the host agent's hot path stays clean.
   """

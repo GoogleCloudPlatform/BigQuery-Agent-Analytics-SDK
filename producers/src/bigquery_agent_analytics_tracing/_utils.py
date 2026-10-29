@@ -13,8 +13,9 @@
 # limitations under the License.
 
 """Shared helpers for serialization, hashing, timestamps, private
-directories, and log emission. No dependencies on other package
-modules so this can be safely imported from anywhere in the package."""
+directories, log emission, and starting Python subprocesses. No
+dependencies on other package modules so this can be safely imported
+from anywhere in the package."""
 
 from __future__ import annotations
 
@@ -33,6 +34,25 @@ import weakref
 
 if TYPE_CHECKING:
   from .config import BQAAConfig
+
+# ``python -c`` code that drops the entry -c (like -m) puts first on
+# sys.path: the working directory, which for a hook is usually a
+# checked-out repository. Python 3.11+ leaves that entry out under
+# PYTHONSAFEPATH or -P (``sys.flags.safe_path``); 3.10 always adds it. It
+# runs before anything else is imported.
+PYTHON_C_DROP_WORKING_DIR = (
+    "import sys\n"
+    'if not getattr(sys.flags, "safe_path", False):\n'
+    "    del sys.path[0]\n"
+)
+# ``[python, "-c", PYTHON_C_RUN_MODULE, module, *args]`` runs ``module``
+# like ``python -m module *args``, minus the working directory on
+# sys.path. The plugin's shell launchers carry the same code.
+PYTHON_C_RUN_MODULE = PYTHON_C_DROP_WORKING_DIR + (
+    "del sys.argv[0]\n"
+    "import runpy\n"
+    'runpy.run_module(sys.argv[0], run_name="__main__", alter_sys=True)\n'
+)
 
 SENSITIVE_KEYS = frozenset(
     {
