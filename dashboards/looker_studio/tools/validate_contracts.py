@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import collections
+from collections.abc import Iterable
+import datetime
 import hashlib
 import json
 import pathlib
@@ -84,21 +86,45 @@ _SPEC_KIND_BY_CHART_TYPE = {
     "table": "table",
 }
 
-# Looker Studio column (concept) IDs. The repository's BQCA manifest and bundle
-# give every column a deterministic `qt_<8 hex>` ID (`bqca_qt_column_id`) that
-# must match this and be unique across the whole report. The live template
-# keeps its legacy generic IDs (`met`, `dim`, `m0`, `d0`, ...), with which
-# components on one page of a report created through the 1-click link show
-# each other's values, until it is synced from these contracts;
-# `verified_date` in `bindings/bqca_report_template.yaml` stays 2026-10-09
-# until then, and reports copied before the sync must be re-created after it.
+# The keys under `spec.<kind>.fields` from which each kind reads its columns,
+# as dotted key paths (a list adds no step to a path).
+_BAR_OR_LINE_REFERENCE_PATHS = frozenset(
+    {
+        "primaryAxis.fieldId",
+        "metricSeries.metricIds",
+        "primaryAxis.sort.sortFieldId",
+    }
+)
+_SPEC_REFERENCE_PATHS = {
+    "scorecard": frozenset({"primaryMetricId"}),
+    "barChart": _BAR_OR_LINE_REFERENCE_PATHS,
+    "lineChart": _BAR_OR_LINE_REFERENCE_PATHS,
+    "pieChart": frozenset({"dimensionId", "metricId", "sort.sortFieldId"}),
+    "table": frozenset({"dimensionIds", "metricIds", "sort.sortFieldId"}),
+}
+
+# Looker Studio column (concept) IDs. This repository requires every column of
+# the BQCA manifest and bundle to have a `qt_` ID that matches this, is unique
+# across the whole report, and is its slot's derived ID
+# (`bqca_derive_report_column_ids`). Looker Studio itself also accepts generic
+# names: the live template keeps its legacy generic IDs (`met`, `dim`, `m0`,
+# `d0`, ...), with which components on one page of a report created through
+# the 1-click link can show each other's values, until it is synced from these
+# contracts. `live_template_verification.pending_live_sync` in
+# `bindings/bqca_report_template.yaml` tracks that sync, and reports copied
+# before it must be re-created after it.
 _QT_COLUMN_ID_RE = re.compile(r"^qt_[a-z0-9]{3,10}$")
+# The digest prefix lengths, in hex digits, that a derived column ID may take.
+_QT_DERIVED_HEX_LENGTHS = (8, 9, 10)
 
 
 def bqca_qt_column_id(
     component_id: str, slot_index: int, field_name: str
 ) -> str:
-  """Return the deterministic, report-wide unique ID of one BQCA column.
+  """Return the 8-hex-digit `qt_` ID of one BQCA column slot.
+
+  `bqca_derive_report_column_ids` gives a slot this ID unless another slot of
+  the report shares its first 8 hex digits.
 
   Args:
     component_id: The Looker Studio component ID (`cd-...`).
@@ -113,6 +139,63 @@ def bqca_qt_column_id(
       f"{component_id}:{slot_index}:{field_name}".encode("utf-8")
   ).hexdigest()
   return f"qt_{digest[:8]}"
+
+
+def bqca_derive_report_column_ids(
+    slots: Iterable[tuple[str, int, str]],
+) -> dict[tuple[str, int, str], str]:
+  """Return the report-wide unique ID of every BQCA column slot.
+
+  A slot is `(component_id, slot_index, field_name)`, as for
+  `bqca_qt_column_id`, and its digest is the SHA-256 of
+  `"{component_id}:{slot_index}:{field_name}"`. Its ID is `qt_` followed by
+  the shortest prefix of its digest, 8, 9 or 10 hex digits long, that no other
+  slot's digest starts with. While no two slots share their first 8 hex
+  digits, every ID is therefore `bqca_qt_column_id`; when two slots do, both
+  IDs grow, so the IDs depend only on the set of slots, never on their order.
+
+  Args:
+    slots: Every column slot of the report. A slot listed twice counts once.
+
+  Returns:
+    The ID of each slot.
+
+  Raises:
+    ValueError: Two slots share their first 10 hex digits, so no `qt_` ID
+      with at most 10 hex digits tells them apart.
+  """
+  name_by_slot = {slot: "{}:{}:{}".format(*slot) for slot in slots}
+  digest_by_name = {
+      name: hashlib.sha256(name.encode("utf-8")).hexdigest()
+      for name in set(name_by_slot.values())
+  }
+  prefix_counts = {
+      length: collections.Counter(
+          digest[:length] for digest in digest_by_name.values()
+      )
+      for length in _QT_DERIVED_HEX_LENGTHS
+  }
+  id_by_name: dict[str, str] = {}
+  for name, digest in sorted(digest_by_name.items()):
+    unique_lengths = [
+        length
+        for length in _QT_DERIVED_HEX_LENGTHS
+        if prefix_counts[length][digest[:length]] == 1
+    ]
+    if not unique_lengths:
+      prefix = digest[: _QT_DERIVED_HEX_LENGTHS[-1]]
+      clashing = sorted(
+          other
+          for other, other_digest in digest_by_name.items()
+          if other_digest.startswith(prefix)
+      )
+      raise ValueError(
+          f"column slots {', '.join(clashing)} share the first {len(prefix)}"
+          f" hex digits {prefix!r} of their SHA-256, so no qt_ ID with at"
+          f" most {len(prefix)} hex digits tells them apart"
+      )
+    id_by_name[name] = f"qt_{digest[:unique_lengths[0]]}"
+  return {slot: id_by_name[name] for slot, name in name_by_slot.items()}
 
 
 def _bqca_spec_columns(comp: dict[str, Any]) -> list[Any]:
@@ -136,7 +219,7 @@ def _bqca_column_ids(comp: dict[str, Any]) -> list[Any]:
   ]
 
 
-def _bqca_spec_roles(comp: dict[str, Any]) -> dict[str, list[Any]]:
+def _bqca_spec_roles(comp: dict[str, Any]) -> dict[str, list[Any]] | None:
   """Return a component's column IDs by role, in `spec.<kind>.fields` order.
 
   A scorecard's `primaryMetricId` is its only metric. A bar or line chart
@@ -147,7 +230,8 @@ def _bqca_spec_roles(comp: dict[str, Any]) -> dict[str, list[Any]]:
 
   Returns:
     The `dimensions` and `metrics` column IDs, and the `sort_columns` and
-    `sort_dirs` of the sort clauses, each list in manifest order.
+    `sort_dirs` of the sort clauses, each list in manifest order; or None for
+    a `chart_type` that is none of these kinds, whose references are unknown.
   """
   kind = _SPEC_KIND_BY_CHART_TYPE.get(comp.get("chart_type"), "")
   spec = comp.get("spec")
@@ -167,10 +251,12 @@ def _bqca_spec_roles(comp: dict[str, Any]) -> dict[str, list[Any]]:
     dimensions = [fields.get("dimensionId")]
     metrics = [fields.get("metricId")]
     clauses = fields.get("sort")
-  else:
+  elif kind == "table":
     dimensions = fields.get("dimensionIds")
     metrics = fields.get("metricIds")
     clauses = fields.get("sort")
+  else:
+    return None
   clauses = [
       clause if isinstance(clause, dict) else {}
       for clause in (clauses if isinstance(clauses, list) else [])
@@ -205,6 +291,64 @@ def _bqca_report_wide_column_id_errors(
             " across the report"
         )
   return errors
+
+
+def _bqca_derived_column_id_errors(
+    components: list[dict[str, Any]], source: str
+) -> list[str]:
+  """Name every `qt_` column ID that is not its slot's derived ID.
+
+  The IDs are derived from every column slot of `components` together
+  (`bqca_derive_report_column_ids`). A column ID that is not a `qt_` ID at all
+  is reported by `_validate_component_embedded_spec` instead.
+  """
+  columns = [
+      (
+          comp,
+          (str(comp.get("component_id")), slot, str(col.get("fieldName"))),
+          col.get("id"),
+      )
+      for comp in components
+      for slot, col in enumerate(_bqca_spec_columns(comp))
+      if isinstance(col, dict)
+  ]
+  try:
+    derived = bqca_derive_report_column_ids(key for _, key, _ in columns)
+  except ValueError as exc:
+    return [f"bqca {source} column IDs cannot be derived: {exc}"]
+  errors: list[str] = []
+  for comp, key, cid in columns:
+    if (
+        isinstance(cid, str)
+        and _QT_COLUMN_ID_RE.fullmatch(cid)
+        and cid != derived[key]
+    ):
+      errors.append(
+          f"bqca {source} component {comp.get('id')}"
+          f" ({comp.get('component_id')}) column {key[1]} id {cid!r} is not"
+          f" its derived ID {derived[key]!r}"
+      )
+  return errors
+
+
+def _spec_field_references(node: Any, path: str = "") -> list[tuple[str, Any]]:
+  """Return `(dotted key path, value)` for each `*Id`/`*Ids` key under `node`.
+
+  A list adds no step to a path, so every sort clause's `sortFieldId` under
+  `primaryAxis.sort` has the path `primaryAxis.sort.sortFieldId`.
+  """
+  found: list[tuple[str, Any]] = []
+  if isinstance(node, dict):
+    for key, value in node.items():
+      key_path = f"{path}.{key}" if path else str(key)
+      if str(key).endswith(("Id", "Ids")):
+        found.append((key_path, value))
+      else:
+        found.extend(_spec_field_references(value, key_path))
+  elif isinstance(node, list):
+    for item in node:
+      found.extend(_spec_field_references(item, path))
+  return found
 
 
 def canonical_pages_sha256(pages: list[dict[str, Any]]) -> str:
@@ -397,7 +541,8 @@ def _validate_component_embedded_spec(
     if not isinstance(cid, str) or not _QT_COLUMN_ID_RE.fullmatch(cid):
       errors.append(
           f"component {comp_id} spec.{spec_kind}.dataset.columns id {cid!r} is"
-          " not a Looker Studio qt_ concept ID (^qt_[a-z0-9]{3,10}$)"
+          " not a qt_ column ID (^qt_[a-z0-9]{3,10}$), which this repository"
+          " requires"
       )
     if isinstance(cid, str):
       if cid in col_by_id:
@@ -422,6 +567,27 @@ def _validate_component_embedded_spec(
     )
 
   fields_cfg = inner.get("fields", {})
+  # Every `*Id`/`*Ids` key must sit where this kind reads its columns, and
+  # every column must be referenced from such a key. A reference there to an
+  # undefined column is reported below, with its role.
+  referenced: set[str] = set()
+  for path, value in _spec_field_references(fields_cfg):
+    if path not in _SPEC_REFERENCE_PATHS[spec_kind]:
+      errors.append(
+          f"component {comp_id} spec.{spec_kind}.fields.{path} {value!r} is"
+          f" not a column reference a {spec_kind} reads"
+      )
+      continue
+    for ref in value if isinstance(value, list) else [value]:
+      if isinstance(ref, str):
+        referenced.add(ref)
+  for cid in col_by_id:
+    if cid not in referenced:
+      errors.append(
+          f"component {comp_id} spec.{spec_kind}.dataset.columns id {cid!r} is"
+          f" not referenced by spec.{spec_kind}.fields"
+      )
+
   if comp.get("category") == "scorecard":
     primary_id = fields_cfg.get("primaryMetricId")
     primary_col = (
@@ -1356,6 +1522,97 @@ def _validate_bqca_sql_behavioral_oracle(sql_text: str) -> list[str]:
   return errs
 
 
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_REPOSITORY_ISSUE_URL_RE = re.compile(
+    r"https://github\.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK"
+    r"/issues/[1-9][0-9]*"
+)
+
+
+def _bqca_pending_live_sync_errors(live: dict[str, Any]) -> list[str]:
+  """Check the record of a live template sync that is still to happen.
+
+  `verified_manifest_sha256` and `verified_template_bundle_sha256` keep the
+  manifest and bundle digests that were pinned when the live template was
+  last verified. While `manifest_sha256` or `template_bundle_sha256` differs
+  from them, the repository describes a template that is not live yet, and
+  `pending_live_sync` must give a non-empty `reason`, a quoted `since_date`
+  (YYYY-MM-DD), the `tracking_issue` URL of an issue of this repository and a
+  non-empty list of `required_actions`. Once both digests equal the verified
+  ones again, `pending_live_sync` must be removed.
+  """
+  prefix = "bqca live_template_verification"
+  errors: list[str] = []
+  differing: list[str] = []
+  for pinned_key, verified_key in (
+      ("manifest_sha256", "verified_manifest_sha256"),
+      ("template_bundle_sha256", "verified_template_bundle_sha256"),
+  ):
+    verified = live.get(verified_key)
+    if not isinstance(verified, str) or not _SHA256_HEX_RE.fullmatch(verified):
+      errors.append(
+          f"{prefix}.{verified_key} {verified!r} is not a SHA-256 hex digest"
+      )
+    if live.get(pinned_key) != verified:
+      differing.append(f"{pinned_key} != {verified_key}")
+  pending = live.get("pending_live_sync")
+  if not differing:
+    if pending is not None:
+      errors.append(
+          f"{prefix}.pending_live_sync must be removed: manifest_sha256 and"
+          " template_bundle_sha256 equal their verified digests"
+      )
+    return errors
+  if pending is None:
+    errors.append(
+        f"{prefix}.pending_live_sync is required while"
+        f" {' and '.join(differing)}"
+    )
+    return errors
+  if not isinstance(pending, dict):
+    return errors + [f"{prefix}.pending_live_sync must be a mapping"]
+  reason = pending.get("reason")
+  if not isinstance(reason, str) or not reason.strip():
+    errors.append(
+        f"{prefix}.pending_live_sync.reason {reason!r} must be a non-empty"
+        " string"
+    )
+  since_date = pending.get("since_date")
+  try:
+    valid_since_date = bool(
+        isinstance(since_date, str)
+        and _ISO_DATE_RE.fullmatch(since_date)
+        and datetime.date.fromisoformat(since_date)
+    )
+  except ValueError:
+    valid_since_date = False
+  if not valid_since_date:
+    errors.append(
+        f"{prefix}.pending_live_sync.since_date {since_date!r} is not a quoted"
+        " YYYY-MM-DD date"
+    )
+  tracking_issue = pending.get("tracking_issue")
+  if not isinstance(
+      tracking_issue, str
+  ) or not _REPOSITORY_ISSUE_URL_RE.fullmatch(tracking_issue):
+    errors.append(
+        f"{prefix}.pending_live_sync.tracking_issue {tracking_issue!r} is not"
+        " the URL of an issue of this repository"
+    )
+  actions = pending.get("required_actions")
+  if (
+      not isinstance(actions, list)
+      or not actions
+      or not all(isinstance(a, str) and a.strip() for a in actions)
+  ):
+    errors.append(
+        f"{prefix}.pending_live_sync.required_actions {actions!r} must be a"
+        " non-empty list of non-empty strings"
+    )
+  return errors
+
+
 def validate_bqca(
     root: pathlib.Path = ROOT,
     *,
@@ -1781,21 +2038,16 @@ def validate_bqca(
       )
 
     # Two scorecards on one page must not show the same measure.
-    scorecard_by_measure: dict[tuple[Any, Any, str], Any] = {}
+    scorecard_by_measure: dict[tuple[Any, Any], Any] = {}
     for comp in page_m_comps:
       if comp.get("category") != "scorecard":
         continue
-      measure = (
-          comp.get("field"),
-          comp.get("aggregation"),
-          json.dumps(comp.get("tile_filter"), sort_keys=True),
-      )
+      measure = (comp.get("field"), comp.get("aggregation"))
       if measure in scorecard_by_measure:
         errors.append(
             f"bqca page {m_page.get('id')} scorecards"
             f" {scorecard_by_measure[measure]} and {comp.get('id')} both show"
-            f" {comp.get('aggregation')}({comp.get('field')}) with tile_filter"
-            f" {comp.get('tile_filter')!r}"
+            f" {comp.get('aggregation')}({comp.get('field')})"
         )
       else:
         scorecard_by_measure[measure] = comp.get("id")
@@ -1866,7 +2118,7 @@ def validate_bqca(
     errors.append(
         f"bqca component totals expected 21+13=34, got {total_sc}+{total_ch}"
     )
-  if [c["id"] for c in flat_from_pages] != [c["id"] for c in m_comps]:
+  if flat_from_pages != m_comps:
     errors.append(
         "bqca manifest top-level components list does not match page components"
     )
@@ -1877,6 +2129,10 @@ def validate_bqca(
   errors.extend(_bqca_report_wide_column_id_errors(flat_from_pages, "manifest"))
   errors.extend(
       _bqca_report_wide_column_id_errors(flat_from_bundle_pages, "bundle")
+  )
+  errors.extend(_bqca_derived_column_id_errors(flat_from_pages, "manifest"))
+  errors.extend(
+      _bqca_derived_column_id_errors(flat_from_bundle_pages, "bundle")
   )
 
   # 4. SHA-256 digests (SQL, contract pages, manifest, and JSON template bundle)
@@ -1925,6 +2181,7 @@ def validate_bqca(
         "bqca live_template_verification.template_bundle_sha256 mismatch:"
         f" expected {bundle_sha}, got {live.get('template_bundle_sha256')}"
     )
+  errors.extend(_bqca_pending_live_sync_errors(live))
 
   # 5. Semantic SQL invariants (M03, M04, M07, M14, M15, M16, R4-1..R4-3, R4-N2) & behavioral oracle
   sql_norm = " ".join(_strip_sql_comments(sql_text).split())
@@ -2112,6 +2369,9 @@ _TEXTPROTO_ESCAPES = {
 
 TextprotoMessage = list[tuple[str, Any]]
 
+# The deepest message nesting that `parse_report_textproto` reads.
+_TEXTPROTO_MAX_DEPTH = 64
+
 
 def _decode_textproto_string(literal: str) -> str:
   """Decode one quoted protobuf text-format string literal."""
@@ -2162,9 +2422,18 @@ def parse_report_textproto(text: str) -> TextprotoMessage:
   occurrence; a nested message value is such a list, and a scalar value is a
   string (quoted strings decoded, enum names and numbers verbatim).
 
+  It reads the subset of the format that a saved report uses: `#` comments, a
+  leading UTF-8 byte order mark, `{}` and `<>` messages, `[...]` lists after a
+  `:`, and `,` or `;` separators. It rejects, as text it cannot read,
+  `[type.googleapis.com/...]` extension or `Any` field names, a message list
+  without a `:` (`field [ {...} ]`), and messages nested more than
+  `_TEXTPROTO_MAX_DEPTH` (64) levels deep.
+
   Raises:
-    ValueError: The text is not well-formed protobuf text format.
+    ValueError: The text is not well-formed protobuf text format, or uses
+      syntax outside that subset.
   """
+  text = text.removeprefix("\ufeff")
   tokens: list[tuple[str, str]] = []
   pos = 0
   while pos < len(text):
@@ -2179,15 +2448,19 @@ def parse_report_textproto(text: str) -> TextprotoMessage:
   def peek() -> tuple[str, str] | None:
     return tokens[index] if index < len(tokens) else None
 
-  def parse_value(name: str) -> Any:
+  def parse_value(name: str, depth: int) -> Any:
     nonlocal index
     token = peek()
     if token is None:
       raise ValueError(f"field {name!r} has no value")
     kind, value = token
     if kind == "punct" and value in ("{", "<"):
+      if depth >= _TEXTPROTO_MAX_DEPTH:
+        raise ValueError(
+            f"messages nest more than {_TEXTPROTO_MAX_DEPTH} levels deep"
+        )
       index += 1
-      return parse_message("}" if value == "{" else ">")
+      return parse_message("}" if value == "{" else ">", depth + 1)
     if kind == "string":
       parts: list[str] = []
       while index < len(tokens) and tokens[index][0] == "string":
@@ -2199,7 +2472,7 @@ def parse_report_textproto(text: str) -> TextprotoMessage:
       return value
     raise ValueError(f"field {name!r} has unexpected value {value!r}")
 
-  def parse_message(closer: str | None) -> TextprotoMessage:
+  def parse_message(closer: str | None, depth: int) -> TextprotoMessage:
     nonlocal index
     fields: TextprotoMessage = []
     while True:
@@ -2226,18 +2499,18 @@ def parse_report_textproto(text: str) -> TextprotoMessage:
       if has_colon and token == ("punct", "["):
         index += 1
         while peek() != ("punct", "]"):
-          fields.append((name, parse_value(name)))
+          fields.append((name, parse_value(name, depth)))
           if peek() == ("punct", ","):
             index += 1
           elif peek() != ("punct", "]"):
             raise ValueError(f"list field {name!r} is missing ',' or ']'")
         index += 1
       else:
-        fields.append((name, parse_value(name)))
+        fields.append((name, parse_value(name, depth)))
       if peek() in (("punct", ","), ("punct", ";")):
         index += 1
 
-  return parse_message(None)
+  return parse_message(None, 0)
 
 
 def _tp_scalar(message: TextprotoMessage, name: str) -> str | None:
@@ -2317,7 +2590,9 @@ def validate_live_report_textproto(
     manifest's `(id, fieldName, aggregation)` columns; whose dimension
     `concept_names`, metric `concept_names`, `sort_column`s or `sort_dir`s
     differ, in order, from the dimension IDs, metric IDs, `sortFieldId`s or
-    `sortDir`s of its `spec.<kind>.fields`; or whose `datasource_id` or
+    `sortDir`s of its `spec.<kind>.fields`; whose `chart_type` is not a kind
+    whose references the audit can read (it then skips those four
+    comparisons); or whose `datasource_id` or
     `dataset_id` is missing or is not its manifest `datasource_id`; each
     component that defines concepts but is not in the manifest; a missing
     report-level `datasource_id`, or one that is not the binding's
@@ -2362,7 +2637,8 @@ def validate_live_report_textproto(
       if name is None or not _QT_COLUMN_ID_RE.fullmatch(name):
         errors.append(
             f"{label}: component {component_id} concept_defs name {name!r} is"
-            " not a Looker Studio qt_ concept ID (^qt_[a-z0-9]{3,10}$)"
+            " not a qt_ column ID (^qt_[a-z0-9]{3,10}$), which this"
+            " repository requires"
         )
       if concept_id != f"t0.{name}":
         errors.append(
@@ -2480,27 +2756,36 @@ def validate_live_report_textproto(
             f" only {sorted((expected_counts - live_counts).elements())}"
         )
       spec_roles = _bqca_spec_roles(comp)
-      if live["dimensions"] != spec_roles["dimensions"]:
+      if spec_roles is None:
         errors.append(
-            f"{label}: component {where} dimensions concept_names"
-            f" {live['dimensions']} != manifest dimension IDs"
-            f" {spec_roles['dimensions']}"
+            f"{label}: component {where} has chart_type"
+            f" {comp.get('chart_type')!r}, whose dimension, metric and sort"
+            " references the audit cannot read"
         )
-      if live["metrics"] != spec_roles["metrics"]:
-        errors.append(
-            f"{label}: component {where} metrics concept_names"
-            f" {live['metrics']} != manifest metric IDs {spec_roles['metrics']}"
-        )
-      if live["sort_columns"] != spec_roles["sort_columns"]:
-        errors.append(
-            f"{label}: component {where} sort_column {live['sort_columns']} !="
-            f" manifest sortFieldId {spec_roles['sort_columns']}"
-        )
-      if live["sort_dirs"] != spec_roles["sort_dirs"]:
-        errors.append(
-            f"{label}: component {where} sort_dir {live['sort_dirs']} !="
-            f" manifest sortDir {spec_roles['sort_dirs']}"
-        )
+      else:
+        if live["dimensions"] != spec_roles["dimensions"]:
+          errors.append(
+              f"{label}: component {where} dimensions concept_names"
+              f" {live['dimensions']} != manifest dimension IDs"
+              f" {spec_roles['dimensions']}"
+          )
+        if live["metrics"] != spec_roles["metrics"]:
+          errors.append(
+              f"{label}: component {where} metrics concept_names"
+              f" {live['metrics']} != manifest metric IDs"
+              f" {spec_roles['metrics']}"
+          )
+        if live["sort_columns"] != spec_roles["sort_columns"]:
+          errors.append(
+              f"{label}: component {where} sort_column"
+              f" {live['sort_columns']} != manifest sortFieldId"
+              f" {spec_roles['sort_columns']}"
+          )
+        if live["sort_dirs"] != spec_roles["sort_dirs"]:
+          errors.append(
+              f"{label}: component {where} sort_dir {live['sort_dirs']} !="
+              f" manifest sortDir {spec_roles['sort_dirs']}"
+          )
       if live["datasource_id"] != comp.get("datasource_id"):
         errors.append(
             f"{label}: component {where} datasource_id"

@@ -1175,6 +1175,20 @@ BQCA_DATASOURCE_ID = "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
 RETIRED_BQCA_DATASOURCE_ID_SHA256 = (
     "dab46990e866e28766d6d686428437120f5ba12773da5e4894e9f0d131213fa2"
 )
+# The manifest and JSON bundle digests that were pinned when the live template
+# was last verified (2026-10-09). The repository has changed both since, so
+# `live_template_verification.pending_live_sync` records the live sync that is
+# still to happen, tracked on BQCA_LIVE_SYNC_ISSUE.
+BQCA_LIVE_VERIFIED_MANIFEST_SHA256 = (
+    "a6b4effd99d59097d3c014cf6242a4f2750da8622e7ad71a03b8f5585a486054"
+)
+BQCA_LIVE_VERIFIED_BUNDLE_SHA256 = (
+    "2631f878a9c382b0a81ab94347b434a7a8666fa2eae75844c86fca48216eb347"
+)
+BQCA_LIVE_SYNC_ISSUE = (
+    "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK"
+    "/issues/559"
+)
 BQCA_DATASOURCE_ALIAS = "ds0"
 BQCA_DEFAULT_TABLE = "bqca_prompt_response_logs"
 SHARED_SENTINELS = (
@@ -1835,13 +1849,19 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
 
   # The live evidence names the exact SQL, pages, manifest, and JSON bundle it was gathered for.
   assert bqca["reviewed_template_sql"]["sha256"] == digest
-  evidence = bqca["live_template_verification"]
+  # The manifest and bundle it was gathered for are the `verified_*` digests.
+  # Both have changed since, so their pinned digests differ, and a pending
+  # live sync is recorded until the live template matches them again.
+  evidence = dict(bqca["live_template_verification"])
+  pending = evidence.pop("pending_live_sync")
   assert evidence == {
       "verified_date": "2026-10-09",
       "repository_sql_sha256": digest,
       "pages_sha256": pages_digest,
       "manifest_sha256": manifest_digest,
       "template_bundle_sha256": bundle_digest,
+      "verified_manifest_sha256": BQCA_LIVE_VERIFIED_MANIFEST_SHA256,
+      "verified_template_bundle_sha256": BQCA_LIVE_VERIFIED_BUNDLE_SHA256,
       "method": [
           "data_studio_web_service_publish_datasource",
           "data_studio_web_service_get_block_datasource",
@@ -1883,6 +1903,30 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
       <= verified
       <= datetime.date.today()
   )
+  assert manifest_digest != BQCA_LIVE_VERIFIED_MANIFEST_SHA256
+  assert bundle_digest != BQCA_LIVE_VERIFIED_BUNDLE_SHA256
+  # The pending sync gives its reason, its start, its tracking issue, and the
+  # actions that end it: the exact qt_ IDs, the copy's own data source, and a
+  # clean live audit before the record is removed.
+  assert list(pending) == [
+      "reason",
+      "since_date",
+      "tracking_issue",
+      "required_actions",
+  ]
+  assert pending["reason"].strip()
+  assert pending["since_date"] == "2026-10-29"
+  assert (
+      verified
+      <= datetime.date.fromisoformat(pending["since_date"])
+      <= datetime.date.today()
+  )
+  assert pending["tracking_issue"] == BQCA_LIVE_SYNC_ISSUE
+  rename, repoint, reverify = pending["required_actions"]
+  assert "exact qt_ IDs in spec/bqca_chart_manifest.yaml" in rename
+  assert repoint.endswith(f"datasource_id to {BQCA_DATASOURCE_ID}.")
+  assert "--live-report-textproto" in reverify
+  assert reverify.endswith("remove pending_live_sync.")
 
   # The contract states the gate to pass after every publish, and points at
   # the evidence of the last run.
@@ -2102,7 +2146,8 @@ BQCA_SPEC_REFERENCE_KEYS = (
 )
 BQCA_SPEC_REFERENCE_LIST_KEYS = ("dimensionIds", "metricIds")
 BQCA_NOT_QT_SUFFIX = (
-    " is not a Looker Studio qt_ concept ID (^qt_[a-z0-9]{3,10}$)"
+    " is not a qt_ column ID (^qt_[a-z0-9]{3,10}$), which this repository"
+    " requires"
 )
 
 
@@ -2198,7 +2243,8 @@ def test_validate_contracts_rejects_generic_or_repeated_column_ids():
   """#check-can-fail: each column-ID or same-page scorecard defect fails.
 
   Every case re-pins the manifest and bundle digests to the mutated
-  documents, so only the column-ID checks can catch it.
+  documents, so only the column-ID, column-reference, or scorecard checks
+  can catch it.
   """
   validator = _load_dashboard_module("validate_contracts")
   manifest = yaml.safe_load(
@@ -2213,14 +2259,11 @@ def test_validate_contracts_rejects_generic_or_repeated_column_ids():
   page_components = _bqca_page_components(manifest)
   by_id = {comp["id"]: comp for comp in page_components}
 
-  def _validate(component, mutate, *, manifest_too=True):
-    """Apply `mutate` to every copy of `component`, re-pin, and validate."""
+  def _validate_documents(mutate_documents):
+    """Apply `mutate_documents` to copies of both documents, re-pin, validate."""
     m_copy = json.loads(json.dumps(manifest))
     b_copy = json.loads(json.dumps(bundle))
-    for document in (m_copy, b_copy) if manifest_too else (b_copy,):
-      for comp in _bqca_page_components(document) + document["components"]:
-        if comp["id"] == component:
-          mutate(comp)
+    mutate_documents(m_copy, b_copy)
     repinned = json.loads(json.dumps(binding))
     live = repinned["live_template_verification"]
     live["manifest_sha256"] = hashlib.sha256(
@@ -2233,6 +2276,23 @@ def test_validate_contracts_rejects_generic_or_repeated_column_ids():
         manifest_override=m_copy,
         bundle_override=b_copy,
         binding_override=repinned,
+    )
+
+  def _mutating(mutations, *, manifest_too=True):
+    """Return a document mutation applying `mutations[id]` to each copy of id."""
+
+    def mutate_documents(m_copy, b_copy):
+      for document in (m_copy, b_copy) if manifest_too else (b_copy,):
+        for comp in _bqca_page_components(document) + document["components"]:
+          if comp["id"] in mutations:
+            mutations[comp["id"]](comp)
+
+    return mutate_documents
+
+  def _validate(component, mutate, *, manifest_too=True):
+    """Apply `mutate` to every copy of `component`, re-pin, and validate."""
+    return _validate_documents(
+        _mutating({component: mutate}, manifest_too=manifest_too)
     )
 
   def _rename(slot, new_id):
@@ -2260,16 +2320,99 @@ def test_validate_contracts_rejects_generic_or_repeated_column_ids():
         f" {bad_id!r}{BQCA_NOT_QT_SUFFIX}"
     ], bad_id
 
-  # A qt_ ID reused by another component fails, on the same page or not.
+  # A unique, well-formed qt_ ID fails when it is not its slot's derived ID,
+  # in the manifest and in the bundle.
+  for fake_id in ("qt_deadbeef", "qt_12345678"):
+    assert _validate("kpi_total_tokens", _rename(0, fake_id)) == [
+        f"bqca {source} component {BQCA_KPI_TOTAL} column 0 id {fake_id!r} is"
+        " not its derived ID 'qt_d779815a'"
+        for source in ("manifest", "bundle")
+    ], fake_id
+
+  # A qt_ ID reused by another component fails, on the same page or not, and
+  # is not that component's derived ID either.
   last_on_last_page = manifest["pages"][-1]["components"][-1]
   for component in ("kpi_input_tokens", last_on_last_page["id"]):
     owner = f"{component} ({by_id[component]['component_id']})"
+    own_id = _bqca_spec_columns(by_id[component])[0]["id"]
     assert _validate(component, _rename(0, "qt_d779815a")) == [
         f"bqca {source} column id 'qt_d779815a' is used by both"
         f" kpi_total_tokens (cd-vWRq2EdpQyI) and {owner}; column IDs must be"
         " unique across the report"
         for source in ("manifest", "bundle")
+    ] + [
+        f"bqca {source} component {owner} column 0 id 'qt_d779815a' is not"
+        f" its derived ID {own_id!r}"
+        for source in ("manifest", "bundle")
     ], component
+
+  # Two slots whose digests share their first 8 (or 9) hex digits both get a
+  # 9- (or 10-) hex-digit ID, and two that share 10 cannot be told apart.
+  # Moving the two scorecards to such component IDs needs exactly those IDs.
+  def _move(
+      total_component_id, input_component_id, total_id=None, input_id=None
+  ):
+    """Move both scorecards, renaming their columns to the IDs given."""
+
+    def moving(component_id, column_id):
+      def mutate(comp):
+        comp["component_id"] = comp["spec"]["id"] = component_id
+        if column_id is not None:
+          _rename(0, column_id)(comp)
+
+      return mutate
+
+    return _mutating(
+        {
+            "kpi_total_tokens": moving(total_component_id, total_id),
+            "kpi_input_tokens": moving(input_component_id, input_id),
+        }
+    )
+
+  for total_component_id, input_component_id, total_id, input_id in (
+      ("cd-t0000166904", "cd-i0000005894", "qt_d96d65ad4", "qt_d96d65ad9"),
+      ("cd-t0000022648", "cd-i0000082636", "qt_fed2087483", "qt_fed208748b"),
+  ):
+    assert _validate_documents(
+        _move(total_component_id, input_component_id)
+    ) == [
+        error
+        for source in ("manifest", "bundle")
+        for error in (
+            f"bqca {source} component kpi_total_tokens ({total_component_id})"
+            f" column 0 id 'qt_d779815a' is not its derived ID {total_id!r}",
+            f"bqca {source} component kpi_input_tokens ({input_component_id})"
+            f" column 0 id 'qt_c90b69a4' is not its derived ID {input_id!r}",
+        )
+    ], total_id
+    assert (
+        _validate_documents(
+            _move(total_component_id, input_component_id, total_id, input_id)
+        )
+        == []
+    ), total_id
+
+  collision = (
+      "column IDs cannot be derived: column slots"
+      " cd-i0000212782:0:_input_tokens_, cd-t0002954566:0:_total_tokens_ share"
+      " the first 10 hex digits '75f609f3f6' of their SHA-256, so no qt_ ID"
+      " with at most 10 hex digits tells them apart"
+  )
+  assert _validate_documents(_move("cd-t0002954566", "cd-i0000212782")) == [
+      f"bqca {source} {collision}" for source in ("manifest", "bundle")
+  ]
+
+  # The manifest's top-level components list must repeat its pages'
+  # components in full, not only their ids.
+  def _rename_top_level_copy(m_copy, b_copy):
+    del b_copy
+    for comp in m_copy["components"]:
+      if comp["id"] == "kpi_total_tokens":
+        _rename(0, "met")(comp)
+
+  assert _validate_documents(_rename_top_level_copy) == [
+      "bqca manifest top-level components list does not match page components"
+  ]
 
   # A component that repeats its own column ID is named once.
   over_time_ids = [
@@ -2325,6 +2468,53 @@ def test_validate_contracts_rejects_generic_or_repeated_column_ids():
       f"chart {bar['id']} embedded spec sort must be a list"
   ], unlisted_errors
 
+  # Every `*Id`/`*Ids` key under `fields` must be one that the kind reads its
+  # columns from: a bar chart reads its sort from `primaryAxis.sort` only, and
+  # a table has no `primaryMetricId`. This holds for a column the component
+  # defines, too.
+  bar_metric = _bqca_spec_inner(bar)["fields"]["metricSeries"]["metricIds"][0]
+  for sort_field in ("met", bar_metric):
+
+    def _add_fields_sort(comp, sort_field=sort_field):
+      _bqca_spec_inner(comp)["fields"]["sort"] = [
+          {"sortFieldId": sort_field, "sortDir": "DESC"}
+      ]
+
+    assert _validate(bar["id"], _add_fields_sort) == [
+        f"component {bar['id']} spec.barChart.fields.sort.sortFieldId"
+        f" {sort_field!r} is not a column reference a barChart reads"
+    ], sort_field
+
+  table = next(c for c in page_components if c["chart_type"] == "table")
+  table_dimension = _bqca_spec_inner(table)["fields"]["dimensionIds"][0]
+
+  def _add_primary_metric(comp):
+    _bqca_spec_inner(comp)["fields"]["primaryMetricId"] = table_dimension
+
+  assert _validate(table["id"], _add_primary_metric) == [
+      f"component {table['id']} spec.table.fields.primaryMetricId"
+      f" {table_dimension!r} is not a column reference a table reads"
+  ]
+
+  # Every column must be referenced from one of those keys.
+  extra_field = "_timestamp_"
+  assert extra_field not in bar["columns"]
+  extra_slot = len(_bqca_spec_columns(bar))
+  extra_id = validator.bqca_qt_column_id(
+      bar["component_id"], extra_slot, extra_field
+  )
+
+  def _add_unreferenced_column(comp):
+    _bqca_spec_inner(comp)["dataset"]["columns"].append(
+        {"id": extra_id, "fieldName": extra_field, "displayName": "Timestamp"}
+    )
+    comp["columns"].append(extra_field)
+
+  assert _validate(bar["id"], _add_unreferenced_column) == [
+      f"component {bar['id']} spec.barChart.dataset.columns id {extra_id!r} is"
+      " not referenced by spec.barChart.fields"
+  ]
+
   # Two scorecards on one page must not show the same measure.
   def _show_total_tokens(comp):
     comp["field"] = "total_tokens"
@@ -2332,17 +2522,337 @@ def test_validate_contracts_rejects_generic_or_repeated_column_ids():
 
   assert (
       "bqca page p_539b9240 scorecards kpi_total_tokens and kpi_input_tokens"
-      " both show SUM(total_tokens) with tile_filter None"
+      " both show SUM(total_tokens)"
   ) in _validate("kpi_input_tokens", _show_total_tokens)
 
-  def _show_filtered_total_tokens(comp):
+  # The same field under another aggregation is another measure.
+  def _show_average_total_tokens(comp):
     _show_total_tokens(comp)
-    comp["tile_filter"] = {"field": "persona", "values": ["analyst"]}
+    comp["aggregation"] = "AVG"
+    _bqca_spec_columns(comp)[0]["aggregation"] = "AVG"
 
   assert not any(
       "both show" in e
-      for e in _validate("kpi_input_tokens", _show_filtered_total_tokens)
+      for e in _validate("kpi_input_tokens", _show_average_total_tokens)
   )
+
+
+def test_bqca_derive_report_column_ids_lengthens_only_colliding_ids():
+  """Two slots that share 8 hex digits both get longer IDs, up to 10 digits.
+
+  The IDs depend only on the set of slots, and two slots that share their
+  first 10 hex digits fail with both slots named.
+  """
+  validator = _load_dashboard_module("validate_contracts")
+  manifest = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text()
+  )
+  slots = [
+      (comp["component_id"], slot, column["fieldName"])
+      for comp in _bqca_page_components(manifest)
+      for slot, column in enumerate(_bqca_spec_columns(comp))
+  ]
+  assert len(slots) == 65
+  derived = validator.bqca_derive_report_column_ids(slots)
+  # No two of the 65 slots share 8 hex digits, so each has its 8-digit ID,
+  # which is the ID the manifest gives it.
+  assert derived == {slot: validator.bqca_qt_column_id(*slot) for slot in slots}
+  assert [derived[slot] for slot in slots] == [
+      column["id"]
+      for comp in _bqca_page_components(manifest)
+      for column in _bqca_spec_columns(comp)
+  ]
+  assert validator.bqca_derive_report_column_ids(reversed(slots)) == derived
+  assert validator.bqca_derive_report_column_ids(slots + slots[:1]) == derived
+
+  for total, inputs, total_id, input_id in (
+      (
+          ("cd-t0000166904", 0, "_total_tokens_"),
+          ("cd-i0000005894", 0, "_input_tokens_"),
+          "qt_d96d65ad4",
+          "qt_d96d65ad9",
+      ),
+      (
+          ("cd-t0000022648", 0, "_total_tokens_"),
+          ("cd-i0000082636", 0, "_input_tokens_"),
+          "qt_fed2087483",
+          "qt_fed208748b",
+      ),
+  ):
+    assert validator.bqca_qt_column_id(*total) == validator.bqca_qt_column_id(
+        *inputs
+    )
+    for ordered in ([total, inputs, *slots], [*slots, inputs, total]):
+      assert validator.bqca_derive_report_column_ids(ordered) == {
+          **derived,
+          total: total_id,
+          inputs: input_id,
+      }, total_id
+    # A slot listed twice is one slot, so it collides with nothing.
+    assert validator.bqca_derive_report_column_ids([total, total]) == {
+        total: validator.bqca_qt_column_id(*total)
+    }
+
+  with pytest.raises(ValueError) as raised:
+    validator.bqca_derive_report_column_ids(
+        [
+            ("cd-t0002954566", 0, "_total_tokens_"),
+            *slots,
+            ("cd-i0000212782", 0, "_input_tokens_"),
+        ]
+    )
+  assert str(raised.value) == (
+      "column slots cd-i0000212782:0:_input_tokens_,"
+      " cd-t0002954566:0:_total_tokens_ share the first 10 hex digits"
+      " '75f609f3f6' of their SHA-256, so no qt_ ID with at most 10 hex digits"
+      " tells them apart"
+  )
+
+
+_BQCA_DROP = object()
+BQCA_LIVE_PENDING = "bqca live_template_verification.pending_live_sync"
+BQCA_LIVE_SYNCED = (
+    (("verified_manifest_sha256",), lambda live: live["manifest_sha256"]),
+    (
+        ("verified_template_bundle_sha256",),
+        lambda live: live["template_bundle_sha256"],
+    ),
+)
+
+
+def _bqca_live_edit(*edits):
+  """Return an edit of a binding's `live_template_verification` mapping.
+
+  Each edit is a `(key path, value)` pair; a `_BQCA_DROP` value deletes the
+  key, and a callable value is called with the mapping to get the value.
+  """
+
+  def edit(live):
+    for path, value in edits:
+      *parents, key = path
+      node = live
+      for parent in parents:
+        node = node[parent]
+      if value is _BQCA_DROP:
+        del node[key]
+      else:
+        node[key] = value(live) if callable(value) else value
+
+  return edit
+
+
+def _bqca_pending_edit(key, value):
+  """Return an edit of one key of `pending_live_sync`."""
+  return _bqca_live_edit((("pending_live_sync", key), value))
+
+
+def _bqca_pending_cases(key, message, values):
+  """Return one case per `(id, value)` that must fail with `message`."""
+  return [
+      pytest.param(
+          _bqca_pending_edit(key, value),
+          [
+              f"{BQCA_LIVE_PENDING}.{key}"
+              f" {None if value is _BQCA_DROP else value!r} {message}"
+          ],
+          id=f"{key}_{case_id}",
+      )
+      for case_id, value in values
+  ]
+
+
+BQCA_ISSUE_PREFIX = (
+    "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK"
+)
+# One case per rule of the pending live sync record: an edit of the binding's
+# `live_template_verification` and the exact errors it must produce.
+BQCA_PENDING_LIVE_SYNC_CASES = [
+    pytest.param(_bqca_live_edit(), [], id="recorded"),
+    pytest.param(
+        _bqca_live_edit((("pending_live_sync",), _BQCA_DROP)),
+        [
+            f"{BQCA_LIVE_PENDING} is required while manifest_sha256 !="
+            " verified_manifest_sha256 and template_bundle_sha256 !="
+            " verified_template_bundle_sha256"
+        ],
+        id="missing_while_both_digests_differ",
+    ),
+    pytest.param(
+        _bqca_live_edit(
+            BQCA_LIVE_SYNCED[0], (("pending_live_sync",), _BQCA_DROP)
+        ),
+        [
+            f"{BQCA_LIVE_PENDING} is required while template_bundle_sha256 !="
+            " verified_template_bundle_sha256"
+        ],
+        id="missing_while_the_bundle_differs",
+    ),
+    pytest.param(
+        _bqca_live_edit(
+            BQCA_LIVE_SYNCED[1], (("pending_live_sync",), _BQCA_DROP)
+        ),
+        [
+            f"{BQCA_LIVE_PENDING} is required while manifest_sha256 !="
+            " verified_manifest_sha256"
+        ],
+        id="missing_while_the_manifest_differs",
+    ),
+    pytest.param(
+        _bqca_live_edit(*BQCA_LIVE_SYNCED),
+        [
+            f"{BQCA_LIVE_PENDING} must be removed: manifest_sha256 and"
+            " template_bundle_sha256 equal their verified digests"
+        ],
+        id="kept_after_the_sync",
+    ),
+    pytest.param(
+        _bqca_live_edit(
+            *BQCA_LIVE_SYNCED, (("pending_live_sync",), _BQCA_DROP)
+        ),
+        [],
+        id="removed_after_the_sync",
+    ),
+    *(
+        pytest.param(
+            _bqca_live_edit(((key,), value)),
+            [
+                "bqca live_template_verification."
+                f"{key} {None if value is _BQCA_DROP else value!r} is not a"
+                " SHA-256 hex digest"
+            ],
+            id=f"{key}_{case_id}",
+        )
+        for key, case_id, value in (
+            ("verified_manifest_sha256", "truncated", "a6b4effd"),
+            (
+                "verified_manifest_sha256",
+                "uppercase",
+                BQCA_LIVE_VERIFIED_MANIFEST_SHA256.upper(),
+            ),
+            ("verified_template_bundle_sha256", "missing", _BQCA_DROP),
+        )
+    ),
+    pytest.param(
+        _bqca_live_edit((("pending_live_sync",), "see the tracking issue")),
+        [f"{BQCA_LIVE_PENDING} must be a mapping"],
+        id="not_a_mapping",
+    ),
+    *_bqca_pending_cases(
+        "reason",
+        "must be a non-empty string",
+        (("empty", ""), ("blank", "  "), ("missing", _BQCA_DROP)),
+    ),
+    *_bqca_pending_cases(
+        "since_date",
+        "is not a quoted YYYY-MM-DD date",
+        (
+            ("unquoted", datetime.date(2026, 10, 29)),
+            ("impossible", "2026-13-01"),
+            ("with_time", "2026-10-29T00:00"),
+            ("basic_format", "20261029"),
+            ("missing", _BQCA_DROP),
+        ),
+    ),
+    *_bqca_pending_cases(
+        "tracking_issue",
+        "is not the URL of an issue of this repository",
+        (
+            ("pull_request", f"{BQCA_ISSUE_PREFIX}/pull/559"),
+            ("issue_zero", f"{BQCA_ISSUE_PREFIX}/issues/0"),
+            (
+                "other_repository",
+                "https://github.com/GoogleCloudPlatform/other/issues/559",
+            ),
+            ("trailing_slash", f"{BQCA_LIVE_SYNC_ISSUE}/"),
+            ("missing", _BQCA_DROP),
+        ),
+    ),
+    *_bqca_pending_cases(
+        "required_actions",
+        "must be a non-empty list of non-empty strings",
+        (
+            ("empty", []),
+            ("empty_string", [""]),
+            ("blank_string", [" "]),
+            ("not_a_string", ["Sync the template.", 1]),
+            # A single word, so that only the list check can reject it: read
+            # as a list of characters, a string with a space fails on the
+            # blank one.
+            ("a_string", "Resync."),
+            ("missing", _BQCA_DROP),
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize("edit, expected", BQCA_PENDING_LIVE_SYNC_CASES)
+def test_validate_contracts_requires_a_pending_live_sync_record(edit, expected):
+  """#check-can-fail: an unverified live state is recorded, exactly.
+
+  While the pinned manifest or bundle digest differs from the one the live
+  template was verified against, `pending_live_sync` must give a reason, a
+  quoted since-date, the tracking issue of this repository, and the required
+  actions; once both match again it must be removed.
+  """
+  validator = _load_dashboard_module("validate_contracts")
+  binding = yaml.safe_load(
+      (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+  )
+  edit(binding["live_template_verification"])
+  assert validator.validate_bqca(binding_override=binding) == expected
+
+
+BQCA_CONTRACT_FILES = (
+    "bindings/bqca_report_template.yaml",
+    "spec/bqca_chart_manifest.yaml",
+    "spec/bqca_compatibility_profile.json",
+    "spec/bqca_dashboard_template.json",
+    "spec/bqca_product_contract.yaml",
+    "sql/bqca_events_v1.template.sql",
+)
+
+
+def test_validate_contracts_cli_rejects_a_column_id_that_is_not_derived(
+    tmp_path, monkeypatch, capsys
+):
+  """#check-can-fail: `--profile bqca` alone rejects a non-derived qt_ ID.
+
+  A copy of the BQCA contracts gives the first scorecard's column a
+  well-formed, unique qt_ ID in the manifest and the bundle, and re-pins both
+  digests, so only the derivation check can fail.
+  """
+  validator = _load_dashboard_module("validate_contracts")
+  for relative in BQCA_CONTRACT_FILES:
+    (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(DASHBOARD / relative, tmp_path / relative)
+  monkeypatch.setattr(validator, "ROOT", tmp_path)
+  assert validator.main(["--profile", "bqca"]) == 0
+  assert capsys.readouterr().out == "ok: contracts validated (bqca)\n"
+
+  binding_path = tmp_path / "bindings/bqca_report_template.yaml"
+  binding_bytes = binding_path.read_bytes()
+  # The column ID and its primaryMetricId; the manifest's top-level list
+  # aliases its page components, and the bundle's repeats them.
+  for relative, occurrences in (
+      ("spec/bqca_chart_manifest.yaml", 2),
+      ("spec/bqca_dashboard_template.json", 4),
+  ):
+    path = tmp_path / relative
+    original = path.read_bytes()
+    assert original.count(b"qt_d779815a") == occurrences, relative
+    path.write_bytes(original.replace(b"qt_d779815a", b"qt_deadbeef"))
+    old_digest = hashlib.sha256(original).hexdigest().encode()
+    new_digest = hashlib.sha256(path.read_bytes()).hexdigest().encode()
+    assert binding_bytes.count(old_digest) == 1, relative
+    binding_bytes = binding_bytes.replace(old_digest, new_digest)
+  binding_path.write_bytes(binding_bytes)
+
+  assert validator.main(["--profile", "bqca"]) == 1
+  assert capsys.readouterr().err.splitlines() == [
+      f"ERROR: bqca {source} component {BQCA_KPI_TOTAL} column 0 id"
+      " 'qt_deadbeef' is not its derived ID 'qt_d779815a'"
+      for source in ("manifest", "bundle")
+  ]
 
 
 def _bqca_spec_role_ids(comp):
@@ -3042,6 +3552,211 @@ def test_live_report_textproto_audit_fails_closed_on_unreadable_input(
   assert errors[0].startswith(
       f"live report {absent}: cannot read it as protobuf text format: "
   ), errors
+
+
+def test_live_report_textproto_reader_keeps_to_its_documented_subset(
+    tmp_path, capsys
+):
+  """#check-can-fail: the reader's limits hold, and each fails closed.
+
+  It reads 64 levels of nested messages and skips a leading byte order mark.
+  It rejects a 65th level, an extension or `Any` field name, and a message
+  list without a `:` as text it cannot read, without a traceback.
+  """
+  validator = _load_dashboard_module("validate_contracts")
+  manifest = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text()
+  )
+
+  def nested(depth):
+    return "a { " * depth + "} " * depth
+
+  message = validator.parse_report_textproto(nested(64))
+  for _ in range(64):
+    ((name, message),) = message
+    assert name == "a"
+  assert message == []
+  with pytest.raises(
+      ValueError, match=r"^messages nest more than 64 levels deep$"
+  ):
+    validator.parse_report_textproto(nested(65))
+
+  assert validator.parse_report_textproto("\ufeffa: 1") == [("a", "1")]
+  with_bom = tmp_path / "with_bom.txtpb"
+  with_bom.write_bytes(
+      b"\xef\xbb\xbf" + _render_bqca_live_report(manifest).encode("utf-8")
+  )
+  assert validator.validate_live_report_textproto(with_bom) == []
+
+  for name, text, reason in (
+      ("deep", nested(2000), "messages nest more than 64 levels deep"),
+      (
+          "extension_name",
+          "[type.googleapis.com/x.Y] { a: 1 }\n",
+          "expected a field name, got '['",
+      ),
+      (
+          "list_without_colon",
+          "a [ { b: 1 }, { b: 2 } ]\n",
+          "field 'a' needs ':' before its value",
+      ),
+  ):
+    path = tmp_path / f"{name}.txtpb"
+    path.write_text(text, encoding="utf-8")
+    error = (
+        f"live report {path}: cannot read it as protobuf text format: {reason}"
+    )
+    assert validator.validate_live_report_textproto(path) == [error], name
+    assert (
+        validator.main(
+            ["--profile", "bqca", "--live-report-textproto", str(path)]
+        )
+        == 1
+    ), name
+    assert capsys.readouterr().err.splitlines() == [f"ERROR: {error}"], name
+
+
+def test_live_report_textproto_audit_names_a_chart_type_it_cannot_read(
+    tmp_path,
+):
+  """#check-can-fail: a manifest kind with unknown references is named.
+
+  The audit does not compare the live roles of such a component with an
+  empty or guessed set of manifest references.
+  """
+  validator = _load_dashboard_module("validate_contracts")
+  manifest = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text()
+  )
+  path = tmp_path / "report.txtpb"
+  path.write_text(_render_bqca_live_report(manifest), encoding="utf-8")
+  for comp in _bqca_page_components(manifest):
+    if comp["id"] == "kpi_total_tokens":
+      comp["chart_type"] = "gauge"
+  assert validator.validate_live_report_textproto(
+      path, manifest_override=manifest
+  ) == [
+      f"live report {path}: {message}"
+      for message in (
+          _bqca_concepts_differ(
+              BQCA_KPI_TOTAL, [("qt_d779815a", "_total_tokens_", "SUM")], []
+          ),
+          f"component {BQCA_KPI_TOTAL} has chart_type 'gauge', whose"
+          " dimension, metric and sort references the audit cannot read",
+      )
+  ]
+
+
+BQCA_LIVE_DUMP_FIXTURE = (
+    ROOT / "tests/fixtures/bqca_live_report_42e79a1f_sanitized.textproto"
+)
+BQCA_LIVE_DUMP_REMAPPED_FIXTURE = (
+    ROOT
+    / "tests/fixtures/bqca_live_report_42e79a1f_sanitized_remapped.textproto"
+)
+
+
+def test_live_report_textproto_audit_on_a_sanitized_live_dump(capsys):
+  """The audit's verdict on a cut of a real dump of the live template.
+
+  The fixture keeps, from a dump saved before the live sync, every field the
+  audit reads. Its 65 concepts keep their generic names, and its
+  report-level data source is not the copy's own, so the audit fails with
+  209 errors of known kinds. Its twin applies the two sync actions to the
+  same text, renaming the 65 concepts and repointing the report-level data
+  source and nothing else, and passes.
+  """
+  validator = _load_dashboard_module("validate_contracts")
+  label = f"live report {BQCA_LIVE_DUMP_FIXTURE}: "
+  errors = validator.validate_live_report_textproto(BQCA_LIVE_DUMP_FIXTURE)
+  assert all(error.startswith(label) for error in errors), errors
+  messages = [error[len(label) :] for error in errors]
+  assert len(messages) == 209
+  kinds = {
+      # Every concept has a generic name (`met`, `dim`, `m0`, `d0`, ...),
+      "is not a qt_ column ID": 65,
+      # most of which an earlier component already uses,
+      "names must be unique across the report": 49,
+      # so no component has the manifest's concepts or references,
+      "differ from the manifest's (id, fieldName, aggregation)": 34,
+      "metrics concept_names": 34,
+      "dimensions concept_names": 13,
+      "sort_column [": 13,
+      # while every sort direction already matches;
+      "sort_dir [": 0,
+      # and the report-level data source is the source report's.
+      "report datasource_id": 1,
+  }
+  found = []
+  for message in messages:
+    matching = [kind for kind in kinds if kind in message]
+    assert len(matching) == 1, message
+    found.append(matching[0])
+  assert {kind: found.count(kind) for kind in kinds} == kinds
+  assert (
+      f"report datasource_id {BQCA_STALE_DATASOURCE_ID!r} != binding"
+      f" datasource_id {BQCA_DATASOURCE_ID!r}"
+  ) in messages
+  assert (
+      validator.main(
+          [
+              "--profile",
+              "bqca",
+              "--live-report-textproto",
+              str(BQCA_LIVE_DUMP_FIXTURE),
+          ]
+      )
+      == 1
+  )
+  assert capsys.readouterr().err.splitlines() == [
+      f"ERROR: {error}" for error in errors
+  ]
+
+  assert (
+      validator.validate_live_report_textproto(BQCA_LIVE_DUMP_REMAPPED_FIXTURE)
+      == []
+  )
+  assert (
+      validator.main(
+          [
+              "--profile",
+              "bqca",
+              "--live-report-textproto",
+              str(BQCA_LIVE_DUMP_REMAPPED_FIXTURE),
+          ]
+      )
+      == 0
+  )
+
+  # The twin has the same fields in the same order; only the concept names
+  # and IDs, the references to them, and the report-level data source differ.
+  def leaves(message, path=()):
+    for name, value in message:
+      if isinstance(value, list):
+        yield from leaves(value, path + (name,))
+      else:
+        yield path + (name,), value
+
+  original, remapped = (
+      leaves(
+          validator.parse_report_textproto(fixture.read_text(encoding="utf-8"))
+      )
+      for fixture in (BQCA_LIVE_DUMP_FIXTURE, BQCA_LIVE_DUMP_REMAPPED_FIXTURE)
+  )
+  changed = {}
+  for (path, value), (twin_path, twin_value) in zip(
+      original, remapped, strict=True
+  ):
+    assert path == twin_path
+    if value != twin_value:
+      changed[path[-1]] = changed.get(path[-1], 0) + 1
+  assert changed == {
+      "name": 65,
+      "id": 65,
+      "concept_names": 65,
+      "sort_column": 13,
+      "datasource_id": 1,
+  }
 
 
 @pytest.mark.parametrize("profile", ["adk", "bqca"])
