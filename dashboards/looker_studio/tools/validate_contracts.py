@@ -10,6 +10,7 @@ enforces the BQCA nine-event allowlist (zero tool or LLM_REQUEST events).
 from __future__ import annotations
 
 import argparse
+import collections
 import hashlib
 import json
 import pathlib
@@ -82,6 +83,81 @@ _SPEC_KIND_BY_CHART_TYPE = {
     "pie_chart": "pieChart",
     "table": "table",
 }
+
+# Looker Studio column (concept) IDs. The repository's BQCA manifest and bundle
+# give every column a deterministic `qt_<8 hex>` ID (`bqca_qt_column_id`) that
+# must match this and be unique across the whole report. The live template
+# keeps its legacy generic IDs (`met`, `dim`, `m0`, `d0`, ...), with which
+# components on one page of a report created through the 1-click link show
+# each other's values, until it is synced from these contracts;
+# `verified_date` in `bindings/bqca_report_template.yaml` stays 2026-10-09
+# until then, and reports copied before the sync must be re-created after it.
+_QT_COLUMN_ID_RE = re.compile(r"^qt_[a-z0-9]{3,10}$")
+
+
+def bqca_qt_column_id(
+    component_id: str, slot_index: int, field_name: str
+) -> str:
+  """Return the deterministic, report-wide unique ID of one BQCA column.
+
+  Args:
+    component_id: The Looker Studio component ID (`cd-...`).
+    slot_index: The column's position in `spec.<kind>.dataset.columns`.
+    field_name: The column's `fieldName` (for example `_total_tokens_`).
+
+  Returns:
+    `qt_` followed by the first 8 hex digits of the SHA-256 of
+    `"{component_id}:{slot_index}:{field_name}"`.
+  """
+  digest = hashlib.sha256(
+      f"{component_id}:{slot_index}:{field_name}".encode("utf-8")
+  ).hexdigest()
+  return f"qt_{digest[:8]}"
+
+
+def _bqca_spec_columns(comp: dict[str, Any]) -> list[Any]:
+  """Return a component's `spec.<kind>.dataset.columns` list, or []."""
+  spec = comp.get("spec")
+  if not isinstance(spec, dict):
+    return []
+  inner = spec.get(_SPEC_KIND_BY_CHART_TYPE.get(comp.get("chart_type"), ""))
+  if not isinstance(inner, dict):
+    return []
+  dataset = inner.get("dataset")
+  columns = dataset.get("columns") if isinstance(dataset, dict) else None
+  return columns if isinstance(columns, list) else []
+
+
+def _bqca_column_ids(comp: dict[str, Any]) -> list[Any]:
+  """Return a component's embedded spec column IDs in slot order."""
+  return [
+      col.get("id") if isinstance(col, dict) else None
+      for col in _bqca_spec_columns(comp)
+  ]
+
+
+def _bqca_report_wide_column_id_errors(
+    components: list[dict[str, Any]], source: str
+) -> list[str]:
+  """Name every pair of components that share a column ID."""
+  errors: list[str] = []
+  owner_by_id: dict[str, tuple[int, str]] = {}
+  for position, comp in enumerate(components):
+    owner = f"{comp.get('id')} ({comp.get('component_id')})"
+    for cid in _bqca_column_ids(comp):
+      if not isinstance(cid, str):
+        continue
+      if cid not in owner_by_id:
+        owner_by_id[cid] = (position, owner)
+      elif owner_by_id[cid][0] != position:
+        # A repeat inside one component is reported by
+        # _validate_component_embedded_spec.
+        errors.append(
+            f"bqca {source} column id {cid!r} is used by both"
+            f" {owner_by_id[cid][1]} and {owner}; column IDs must be unique"
+            " across the report"
+        )
+  return errors
 
 
 def canonical_pages_sha256(pages: list[dict[str, Any]]) -> str:
@@ -271,8 +347,19 @@ def _validate_component_embedded_spec(
   for col in spec_cols:
     cid = col.get("id")
     fname = col.get("fieldName")
+    if not isinstance(cid, str) or not _QT_COLUMN_ID_RE.fullmatch(cid):
+      errors.append(
+          f"component {comp_id} spec.{spec_kind}.dataset.columns id {cid!r} is"
+          " not a Looker Studio qt_ concept ID (^qt_[a-z0-9]{3,10}$)"
+      )
     if isinstance(cid, str):
-      col_by_id[cid] = col
+      if cid in col_by_id:
+        errors.append(
+            f"component {comp_id} repeats column id {cid!r} in"
+            f" spec.{spec_kind}.dataset.columns"
+        )
+      else:
+        col_by_id[cid] = col
     if isinstance(fname, str):
       spec_field_names.append(fname)
     if fname not in field_by_name:
@@ -332,6 +419,21 @@ def _validate_component_embedded_spec(
       met_ids = list(fields_cfg.get("metricIds", []))
     else:
       dim_ids, met_ids = [], []
+
+    if spec_kind in ("barChart", "lineChart"):
+      sort_clauses = fields_cfg.get("primaryAxis", {}).get("sort", [])
+    else:
+      sort_clauses = fields_cfg.get("sort", [])
+    if not isinstance(sort_clauses, list):
+      errors.append(f"chart {comp_id} embedded spec sort must be a list")
+      sort_clauses = []
+    for clause in sort_clauses:
+      sort_id = clause.get("sortFieldId") if isinstance(clause, dict) else None
+      if not isinstance(sort_id, str) or sort_id not in col_by_id:
+        errors.append(
+            f"chart {comp_id} embedded spec sort references undefined column"
+            f" id {sort_id!r}"
+        )
 
     expected_dims = list(comp.get("dimensions", []))
     actual_dim_fields: list[str] = []
@@ -1540,6 +1642,13 @@ def validate_bqca(
               f"bqca bundle component {m_comp.get('id')} key {shared_key!r}"
               " diverges from manifest"
           )
+      m_column_ids = _bqca_column_ids(m_comp)
+      b_column_ids = _bqca_column_ids(b_comp)
+      if b_column_ids != m_column_ids:
+        errors.append(
+            f"bqca bundle component {m_comp.get('id')} column ids"
+            f" {b_column_ids} != manifest column ids {m_column_ids}"
+        )
       gp = b_comp.get("grid_position")
       if not b_comp.get("responsive_section") or not isinstance(gp, dict):
         errors.append(
@@ -1624,6 +1733,26 @@ def validate_bqca(
           )
       )
 
+    # Two scorecards on one page must not show the same measure.
+    scorecard_by_measure: dict[tuple[Any, Any, str], Any] = {}
+    for comp in page_m_comps:
+      if comp.get("category") != "scorecard":
+        continue
+      measure = (
+          comp.get("field"),
+          comp.get("aggregation"),
+          json.dumps(comp.get("tile_filter"), sort_keys=True),
+      )
+      if measure in scorecard_by_measure:
+        errors.append(
+            f"bqca page {m_page.get('id')} scorecards"
+            f" {scorecard_by_measure[measure]} and {comp.get('id')} both show"
+            f" {comp.get('aggregation')}({comp.get('field')}) with tile_filter"
+            f" {comp.get('tile_filter')!r}"
+        )
+      else:
+        scorecard_by_measure[measure] = comp.get("id")
+
     m_sc_by_id = {
         c["id"]: c for c in page_m_comps if c.get("category") == "scorecard"
     }
@@ -1698,6 +1827,10 @@ def validate_bqca(
     errors.append(
         "bqca bundle top-level components list does not match page components"
     )
+  errors.extend(_bqca_report_wide_column_id_errors(flat_from_pages, "manifest"))
+  errors.extend(
+      _bqca_report_wide_column_id_errors(flat_from_bundle_pages, "bundle")
+  )
 
   # 4. SHA-256 digests (SQL, contract pages, manifest, and JSON template bundle)
   sql_bytes = (
@@ -1906,6 +2039,409 @@ def validate_bqca(
   return errors
 
 
+_TEXTPROTO_TOKEN_RE = re.compile(
+    r"""
+    (?P<skip>\s+|\#[^\n]*)
+  | (?P<string>"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')
+  | (?P<punct>[{}<>:\[\],;])
+  | (?P<word>[^\s{}<>:\[\],;"'\#]+)
+    """,
+    re.VERBOSE,
+)
+_TEXTPROTO_FIELD_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_TEXTPROTO_ESCAPES = {
+    "a": 0x07,
+    "b": 0x08,
+    "f": 0x0C,
+    "n": 0x0A,
+    "r": 0x0D,
+    "t": 0x09,
+    "v": 0x0B,
+    "\\": 0x5C,
+    "'": 0x27,
+    '"': 0x22,
+    "?": 0x3F,
+}
+
+TextprotoMessage = list[tuple[str, Any]]
+
+
+def _decode_textproto_string(literal: str) -> str:
+  """Decode one quoted protobuf text-format string literal."""
+  body = literal[1:-1]
+  out = bytearray()
+  i = 0
+  while i < len(body):
+    ch = body[i]
+    if ch != "\\":
+      out.extend(ch.encode("utf-8"))
+      i += 1
+      continue
+    # The tokenizer guarantees that a character follows every backslash.
+    esc = body[i + 1]
+    if esc in _TEXTPROTO_ESCAPES:
+      out.append(_TEXTPROTO_ESCAPES[esc])
+      i += 2
+    elif esc in "01234567":
+      digits = re.match(r"[0-7]{1,3}", body[i + 1 :]).group()
+      if int(digits, 8) > 0xFF:
+        raise ValueError(f"octal escape \\{digits} does not fit in a byte")
+      out.append(int(digits, 8))
+      i += 1 + len(digits)
+    elif esc in "xX":
+      hex_match = re.match(r"[0-9A-Fa-f]{1,2}", body[i + 2 :])
+      if hex_match is None:
+        raise ValueError("\\x escape without hex digits")
+      out.append(int(hex_match.group(), 16))
+      i += 2 + len(hex_match.group())
+    elif esc in "uU":
+      width = 4 if esc == "u" else 8
+      hex_digits = body[i + 2 : i + 2 + width]
+      if not re.fullmatch(f"[0-9A-Fa-f]{{{width}}}", hex_digits):
+        raise ValueError(f"\\{esc} escape needs {width} hex digits")
+      out.extend(chr(int(hex_digits, 16)).encode("utf-8"))
+      i += 2 + width
+    else:
+      raise ValueError(f"unsupported escape \\{esc}")
+  return out.decode("utf-8", errors="replace")
+
+
+def parse_report_textproto(text: str) -> TextprotoMessage:
+  """Parse protobuf text format into nested `(field, value)` pairs.
+
+  A stdlib-only reader for a Looker Studio report textproto dump (a report
+  configuration saved in protobuf text format). A message becomes a
+  list of `(field, value)` pairs in file order, so repeated fields keep every
+  occurrence; a nested message value is such a list, and a scalar value is a
+  string (quoted strings decoded, enum names and numbers verbatim).
+
+  Raises:
+    ValueError: The text is not well-formed protobuf text format.
+  """
+  tokens: list[tuple[str, str]] = []
+  pos = 0
+  while pos < len(text):
+    match = _TEXTPROTO_TOKEN_RE.match(text, pos)
+    if match is None:
+      raise ValueError(f"unexpected character {text[pos]!r} at offset {pos}")
+    pos = match.end()
+    if match.lastgroup != "skip":
+      tokens.append((match.lastgroup, match.group()))
+  index = 0
+
+  def peek() -> tuple[str, str] | None:
+    return tokens[index] if index < len(tokens) else None
+
+  def parse_value(name: str) -> Any:
+    nonlocal index
+    token = peek()
+    if token is None:
+      raise ValueError(f"field {name!r} has no value")
+    kind, value = token
+    if kind == "punct" and value in ("{", "<"):
+      index += 1
+      return parse_message("}" if value == "{" else ">")
+    if kind == "string":
+      parts: list[str] = []
+      while index < len(tokens) and tokens[index][0] == "string":
+        parts.append(_decode_textproto_string(tokens[index][1]))
+        index += 1
+      return "".join(parts)
+    if kind == "word":
+      index += 1
+      return value
+    raise ValueError(f"field {name!r} has unexpected value {value!r}")
+
+  def parse_message(closer: str | None) -> TextprotoMessage:
+    nonlocal index
+    fields: TextprotoMessage = []
+    while True:
+      token = peek()
+      if token is None:
+        if closer is None:
+          return fields
+        raise ValueError(f"unterminated message: missing {closer!r}")
+      kind, value = token
+      if kind == "punct" and value == closer:
+        index += 1
+        return fields
+      if kind != "word" or not _TEXTPROTO_FIELD_NAME_RE.fullmatch(value):
+        raise ValueError(f"expected a field name, got {value!r}")
+      name = value
+      index += 1
+      has_colon = peek() == ("punct", ":")
+      if has_colon:
+        index += 1
+      token = peek()
+      opens_message = token in (("punct", "{"), ("punct", "<"))
+      if not has_colon and not opens_message:
+        raise ValueError(f"field {name!r} needs ':' before its value")
+      if has_colon and token == ("punct", "["):
+        index += 1
+        while peek() != ("punct", "]"):
+          fields.append((name, parse_value(name)))
+          if peek() == ("punct", ","):
+            index += 1
+          elif peek() != ("punct", "]"):
+            raise ValueError(f"list field {name!r} is missing ',' or ']'")
+        index += 1
+      else:
+        fields.append((name, parse_value(name)))
+      if peek() in (("punct", ","), ("punct", ";")):
+        index += 1
+
+  return parse_message(None)
+
+
+def _tp_scalar(message: TextprotoMessage, name: str) -> str | None:
+  """Return the first scalar value of field `name`, or None."""
+  for key, value in message:
+    if key == name and isinstance(value, str):
+      return value
+  return None
+
+
+def _tp_message(message: TextprotoMessage, name: str) -> TextprotoMessage:
+  """Return the first message value of field `name`, or []."""
+  for key, value in message:
+    if key == name and isinstance(value, list):
+      return value
+  return []
+
+
+def _tp_messages(
+    message: TextprotoMessage, name: str
+) -> list[TextprotoMessage]:
+  """Return every message value of field `name`, searching depth first."""
+  found: list[TextprotoMessage] = []
+  for key, value in message:
+    if isinstance(value, list):
+      if key == name:
+        found.append(value)
+      found.extend(_tp_messages(value, name))
+  return found
+
+
+def _tp_scalars(
+    message: TextprotoMessage, names: tuple[str, ...]
+) -> list[tuple[str, str]]:
+  """Return `(field, value)` for every scalar field in `names`, depth first."""
+  found: list[tuple[str, str]] = []
+  for key, value in message:
+    if isinstance(value, list):
+      found.extend(_tp_scalars(value, names))
+    elif key in names:
+      found.append((key, value))
+  return found
+
+
+def _normalized_aggregation(value: Any) -> str:
+  """Map a missing or NONE aggregation (a dimension) to ''."""
+  return "" if value in (None, "", "NONE") else str(value)
+
+
+def validate_live_report_textproto(
+    textproto_path: pathlib.Path,
+    root: pathlib.Path = ROOT,
+    *,
+    manifest_override: dict[str, Any] | None = None,
+    binding_override: dict[str, Any] | None = None,
+) -> list[str]:
+  """Audit a saved BQCA Looker Studio report configuration.
+
+  `textproto_path` holds a Looker Studio report textproto dump of the live
+  report (its configuration in protobuf text format). It is compared with
+  `spec/bqca_chart_manifest.yaml` and `bindings/bqca_report_template.yaml`.
+
+  Returns:
+    One error for each `concept_defs` name that is not a `qt_` ID or whose
+    `id` is not `t0.<name>`; each name that repeats a name used earlier in
+    the report; each component reference (`concept_names`, `sort_column`)
+    that names no concept of its component, and each concept that no such
+    reference names; each manifest component that is missing, whose
+    `(name, source_field_name, aggregation)` concepts are not exactly the
+    manifest's `(id, fieldName, aggregation)` columns, or that binds another
+    data source; each data component that the manifest lacks; a report-level
+    data source that is not the binding's `datasource_id`; and a missing
+    `ds0` alias or one that points at another data source.
+  """
+  label = f"live report {textproto_path}"
+  manifest = (
+      manifest_override
+      if manifest_override is not None
+      else _load_yaml(root / "spec/bqca_chart_manifest.yaml")
+  )
+  binding = (
+      binding_override
+      if binding_override is not None
+      else _load_yaml(root / "bindings/bqca_report_template.yaml")
+  )
+  try:
+    report = parse_report_textproto(
+        pathlib.Path(textproto_path).read_text(encoding="utf-8")
+    )
+  except (OSError, ValueError) as exc:
+    return [f"{label}: cannot read it as protobuf text format: {exc}"]
+
+  errors: list[str] = []
+  components: dict[str, dict[str, Any]] = {}
+  name_owner: dict[str, str] = {}
+  for config in _tp_messages(report, "component_config"):
+    component_id = _tp_scalar(config, "component_id") or "<no component_id>"
+    if component_id in components:
+      errors.append(f"{label}: component {component_id} appears twice")
+    defined: set[str] = set()
+    concept_bindings: list[tuple[str, str, str]] = []
+    concepts = [
+        value
+        for key, value in config
+        if key == "concept_defs" and isinstance(value, list)
+    ]
+    for concept in concepts:
+      name = _tp_scalar(concept, "name")
+      concept_id = _tp_scalar(concept, "id")
+      if name is None or not _QT_COLUMN_ID_RE.fullmatch(name):
+        errors.append(
+            f"{label}: component {component_id} concept_defs name {name!r} is"
+            " not a Looker Studio qt_ concept ID (^qt_[a-z0-9]{3,10}$)"
+        )
+      if concept_id != f"t0.{name}":
+        errors.append(
+            f"{label}: component {component_id} concept_defs id"
+            f" {concept_id!r} is not 't0.{name}'"
+        )
+      if name is not None:
+        if name in name_owner:
+          errors.append(
+              f"{label}: concept_defs name {name!r} in component"
+              f" {component_id} repeats the one in {name_owner[name]}; names"
+              " must be unique across the report"
+          )
+        else:
+          name_owner[name] = component_id
+        defined.add(name)
+      transform = _tp_message(
+          _tp_message(concept, "query_time_transformation"),
+          "data_transformation",
+      )
+      concept_bindings.append(
+          (
+              "" if name is None else name,
+              str(_tp_scalar(transform, "source_field_name")),
+              _normalized_aggregation(_tp_scalar(transform, "aggregation")),
+          )
+      )
+    component_property = _tp_message(
+        _tp_message(config, "property_config"), "component_property"
+    )
+    referenced: set[str] = set()
+    for field, ref in _tp_scalars(
+        component_property, ("concept_names", "sort_column")
+    ):
+      referenced.add(ref.removeprefix("t0."))
+      if ref.removeprefix("t0.") not in defined:
+        errors.append(
+            f"{label}: component {component_id} {field} {ref!r} names none of"
+            " its concept_defs"
+        )
+    for name in sorted(defined - referenced):
+      errors.append(
+          f"{label}: component {component_id} concept_defs name {name!r} is"
+          " not referenced by any concept_names or sort_column"
+      )
+    components.setdefault(
+        component_id,
+        {
+            "concepts": sorted(concept_bindings),
+            "datasource_id": _tp_scalar(config, "datasource_id"),
+            "dataset_id": _tp_scalar(
+                _tp_message(component_property, "dataset"), "dataset_id"
+            ),
+        },
+    )
+
+  manifest_component_ids: set[Any] = set()
+  for page in manifest.get("pages", []):
+    for comp in page.get("components", []):
+      component_id = comp.get("component_id")
+      manifest_component_ids.add(component_id)
+      where = f"{comp.get('id')} ({component_id})"
+      live = components.get(component_id)
+      if live is None:
+        errors.append(f"{label}: manifest component {where} is missing")
+        continue
+      expected = sorted(
+          (
+              str(col.get("id")),
+              str(col.get("fieldName")),
+              _normalized_aggregation(col.get("aggregation")),
+          )
+          for col in _bqca_spec_columns(comp)
+          if isinstance(col, dict)
+      )
+      if live["concepts"] != expected:
+        live_counts = collections.Counter(live["concepts"])
+        expected_counts = collections.Counter(expected)
+        errors.append(
+            f"{label}: component {where} concept_defs (name,"
+            " source_field_name, aggregation) differ from the manifest's"
+            " (id, fieldName, aggregation): live only"
+            f" {sorted((live_counts - expected_counts).elements())}, manifest"
+            f" only {sorted((expected_counts - live_counts).elements())}"
+        )
+      if live["datasource_id"] != comp.get("datasource_id"):
+        errors.append(
+            f"{label}: component {where} datasource_id"
+            f" {live['datasource_id']!r} != manifest"
+            f" {comp.get('datasource_id')!r}"
+        )
+      if live["dataset_id"] not in (None, comp.get("datasource_id")):
+        errors.append(
+            f"{label}: component {where} dataset_id {live['dataset_id']!r} !="
+            f" manifest {comp.get('datasource_id')!r}"
+        )
+  for component_id, live in components.items():
+    if component_id not in manifest_component_ids and live["concepts"]:
+      errors.append(
+          f"{label}: component {component_id} defines concepts but is not in"
+          " spec/bqca_chart_manifest.yaml"
+      )
+
+  datasource_id = binding.get("datasource_id")
+  alias = binding.get("data_source_alias")
+  report_message = _tp_message(
+      _tp_message(report, "report_config") or report, "report"
+  )
+  report_datasource_id = _tp_scalar(report_message, "datasource_id")
+  if report_datasource_id is not None and report_datasource_id != (
+      datasource_id
+  ):
+    errors.append(
+        f"{label}: report datasource_id {report_datasource_id!r} != binding"
+        f" datasource_id {datasource_id!r}"
+    )
+  alias_entries = [
+      entry
+      for entry in _tp_messages(
+          _tp_message(report_message, "resource"), "datasource_alias"
+      )
+      if _tp_scalar(entry, "alias") == alias
+  ]
+  if not alias_entries:
+    errors.append(
+        f"{label}: report resource has no data source alias {alias!r}; the"
+        f" binding maps it to datasource_id {datasource_id!r}"
+    )
+  for entry in alias_entries:
+    if _tp_scalar(entry, "datasource_id") != datasource_id:
+      errors.append(
+          f"{label}: data source alias {alias!r} points at"
+          f" {_tp_scalar(entry, 'datasource_id')!r}, not binding"
+          f" datasource_id {datasource_id!r}"
+      )
+  return errors
+
+
 def main(argv: list[str] | None = None) -> int:
   parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
   parser.add_argument(
@@ -1914,17 +2450,32 @@ def main(argv: list[str] | None = None) -> int:
       default="all",
       help="dashboard profile to validate (default: all)",
   )
+  parser.add_argument(
+      "--live-report-textproto",
+      type=pathlib.Path,
+      metavar="PATH",
+      help=(
+          "also audit the Looker Studio report textproto dump of the BQCA"
+          " report at PATH against spec/bqca_chart_manifest.yaml"
+      ),
+  )
   args = parser.parse_args(argv)
+  if args.live_report_textproto is not None and args.profile == "adk":
+    parser.error("--live-report-textproto needs --profile bqca or all")
   errors: list[str] = []
   if args.profile in ("adk", "all"):
     errors.extend(validate_adk(ROOT))
   if args.profile in ("bqca", "all"):
     errors.extend(validate_bqca(ROOT))
+  if args.live_report_textproto is not None:
+    errors.extend(validate_live_report_textproto(args.live_report_textproto))
   if errors:
     for err in errors:
       print(f"ERROR: {err}", file=sys.stderr)
     return 1
   print(f"ok: contracts validated ({args.profile})")
+  if args.live_report_textproto is not None:
+    print(f"ok: live report validated ({args.live_report_textproto})")
   return 0
 
 

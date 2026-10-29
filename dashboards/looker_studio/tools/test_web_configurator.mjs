@@ -1457,6 +1457,27 @@ assert.equal(
   ).searchParams.get("ds.ds0.billingProjectId"),
   "billing-project-123",
 );
+// Every 1-click link keeps the template data source's fields, which the
+// report's charts bind to: `refreshFields=false` is its only refreshFields
+// parameter, for both profiles and with or without a billing project.
+for (const profile of ["adk", "bqca"]) {
+  const alias = resolveProfileConfig(profile).dataSourceAlias;
+  for (const input of [values, advanced]) {
+    const url = buildDashboardUrl({ ...input, profile });
+    const params = new URL(url).searchParams;
+    assert.deepEqual(
+      [...params.keys()].filter((key) => key.endsWith(".refreshFields")),
+      [`ds.${alias}.refreshFields`],
+      `${profile} links carry exactly one refreshFields parameter`,
+    );
+    assert.deepEqual(params.getAll(`ds.${alias}.refreshFields`), ["false"]);
+    assert.ok(
+      url.split("?")[1].split("&").includes(`ds.${alias}.refreshFields=false`),
+      url,
+    );
+    assert.ok(!url.includes("refreshFields=true"), url);
+  }
+}
 assert.throws(
   () => buildDashboardUrl({ ...values, profile: "bqca", project: "xsentinelbqaaevents" }),
   (error) => error.field === "tableId" && error.segment === "project",

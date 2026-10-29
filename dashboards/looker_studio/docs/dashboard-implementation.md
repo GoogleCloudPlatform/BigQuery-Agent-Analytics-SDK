@@ -232,14 +232,15 @@ former 365-day default. The same exact-query check verified that events dated
 BigQuery Conversational Analytics (BQCA) Prompt & Response Logging uses a
 separate, dedicated 7-page tool-free Looker Studio report template
 (`42e79a1f-a979-4de8-911f-80d5a99543d5`, data source alias `ds0`, embedded
-`BlockDatasource` ID `4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc`) rather than the
+`BlockDatasource` ID `70e5ac1e-65bb-4c89-a9df-fa9990cb6029`) rather than the
 8-page ADK template (`5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40`). The report is a
 copy that its owner made on 2026-10-09 of the first published BQCA template,
-whose organization allowed sharing only inside the organization. The
-`BlockDatasource` ID and the live verification evidence were recorded on that
-source report and have not been re-recorded for the copy. The owner turned on
-public link sharing for the copy on 2026-10-09; the copy check from a signed-in
-outside Google account is still pending.
+whose organization allowed sharing only inside the organization. The copy's
+`BlockDatasource` ID and its `ds0` alias were re-recorded on 2026-10-29 from
+the copy's report configuration; the live verification evidence was recorded
+on the source report and has not been re-recorded for the copy. The owner
+turned on public link sharing for the copy on 2026-10-09; the copy check from
+a signed-in outside Google account is still pending.
 
 ### Contract and manifest artifacts
 
@@ -282,7 +283,7 @@ outside Google account is still pending.
 
 The embedded `CUSTOM_QUERY` (`sql/bqca_events_v1.template.sql`) filters `timestamp`
 using `PARSE_DATE('%Y%m%d', @DS_START_DATE)` and `PARSE_DATE('%Y%m%d', @DS_END_DATE)`.
-On the published `BlockDatasource` (`4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc`):
+On the published `BlockDatasource` (`70e5ac1e-65bb-4c89-a9df-fa9990cb6029`):
 
 1. `use_datetime_type: true` and `parameter_configuration: [DS_START_DATE, DS_END_DATE]`
    must remain enabled so Looker Studio binds the report date window instead of
@@ -291,6 +292,58 @@ On the published `BlockDatasource` (`4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc`):
    `YEAR_MONTH_DAY_SECOND`), and `_event_hour_` (`TIMESTAMP` /
    `YEAR_MONTH_DAY_HOUR`) must retain `use_native_date_time: true` across the
    41-field schema.
+
+### Report-wide unique `qt_` column IDs
+
+Looker Studio column (concept) IDs have the form `qt_` followed by 3 to 10
+lowercase letters or digits (`^qt_[a-z0-9]{3,10}$`). The live template
+(`42e79a1f-a979-4de8-911f-80d5a99543d5`) reuses generic IDs across its 34
+components (`met`, `dim`, `m0`..`m3`, `d0`..`d9`), and in reports created from
+it with the 1-click link, components on the same page show each other's
+values: for example, the Total, Input, Output, and Thinking Tokens scorecards
+all sum `total_tokens`.
+
+The repository contracts, `spec/bqca_chart_manifest.yaml` and
+`spec/bqca_dashboard_template.json`, now give each of the 65 column slots its
+own `qt_<8 hex digits>` ID, unique across the whole report and derived
+deterministically by `bqca_qt_column_id` in `tools/validate_contracts.py`:
+
+```python
+"qt_" + sha256(f"{component_id}:{slot_index}:{field_name}".encode()).hexdigest()[:8]
+```
+
+where `component_id` is the component's `cd-...` ID, `slot_index` is the
+column's position in `spec.<kind>.dataset.columns`, and `field_name` is its
+`fieldName`. `python3 tools/validate_contracts.py --profile bqca` rejects a
+column ID that is not a `qt_` ID, that repeats inside a component or anywhere
+in the report, that differs between `spec/bqca_chart_manifest.yaml` and
+`spec/bqca_dashboard_template.json`, or that a chart field or sort references
+without defining. It also rejects two scorecards on one page that share the
+same `(field, aggregation, tile_filter)`.
+
+The live template keeps the legacy generic IDs until it is synced from these
+contracts. Until then, `live_template_verification.verified_date` in
+`bindings/bqca_report_template.yaml` stays `2026-10-09`, and the live audit
+below fails on the template. A report copied from the template keeps the
+column IDs it was copied with, so after the live template is updated,
+re-create any previously copied report from the 1-click link.
+
+To audit the live template itself, save a Looker Studio report textproto dump
+of it (its report configuration in protobuf text format) and run:
+
+```bash
+python3 tools/validate_contracts.py --live-report-textproto /path/to/report.txt
+```
+
+The check fails unless every `concept_defs.name` is a `qt_` ID whose `id` is
+`t0.<name>`, no name repeats anywhere in the report, every chart reference
+(`concept_names`, `sort_column`) resolves inside its component and every
+concept is referenced, each of the 34 manifest components defines exactly the
+`(name, source_field_name, aggregation)` concepts that
+`spec/bqca_chart_manifest.yaml` lists as its `(id, fieldName, aggregation)`
+columns and binds the same data source, and the report has a `ds0` alias,
+with both that alias and the report-level data source pointing at the
+`datasource_id` in `bindings/bqca_report_template.yaml`.
 
 ### Fallback paths
 
