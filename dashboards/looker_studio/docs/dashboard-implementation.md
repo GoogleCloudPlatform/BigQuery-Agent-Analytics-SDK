@@ -327,7 +327,10 @@ prefix, 9 or 10 hex digits long, that no other digest starts with, so the IDs
 do not depend on the order of the slots. If two digests share their first 10
 hex digits (for 65 slots, a chance of about 2 in a billion), the validator
 fails and names both slots; moving one of the two columns to another position
-in its `dataset.columns` gives it a new digest. A slot's ID changes whenever
+in its `dataset.columns` gives it a new digest (or, if neither column can move
+— for example, two single-column scorecards — extend `_QT_DERIVED_HEX_LENGTHS`
+and the upper bound of `_QT_COLUMN_ID_RE` in `tools/validate_contracts.py` and
+sync the live template). A slot's ID changes whenever
 its column moves to another position, its `fieldName` changes, or a new slot
 collides with it, and each such change needs the live sync described below.
 
@@ -378,9 +381,11 @@ of it (its report configuration in protobuf text format) and run:
 python3 tools/validate_contracts.py --live-report-textproto /path/to/report.txt
 ```
 
-Saving such a dump needs internal tooling and access to the template report,
-so only maintainers with that access can audit the live template; anyone can
-run the audit on the sanitized fixtures described below.
+Looker Studio does not expose a public API for exporting a report's raw
+textproto configuration; maintainers with read access to the template report
+export the dump with internal inspection tooling and strip non-contract fields,
+while anyone can run `--live-report-textproto` on the checked-in sanitized
+fixtures described below.
 
 The command exits 1 and prints one error for each of these defects:
 
@@ -394,15 +399,20 @@ The command exits 1 and prints one error for each of these defects:
 - a `concept_defs.name` is not a `qt_` ID, or its `id` is not `t0.<name>`;
 - a name repeats inside its component, or repeats the name of an earlier
   component;
-- a chart reference (`concept_names`, `sort_column`) names no concept of its
-  component, or a concept is not referenced;
+- a `concept_names` or `sort_column` field appears under `component_property`
+  outside `dimensions.labeled_concepts.value.concept_names`,
+  `metrics.labeled_concepts.value.concept_names`, or `sort.sort_column`;
+- a chart reference (`concept_names`, `sort_column`) at one of those paths
+  names no concept of its component, or a concept is not referenced there;
 - one of the 34 manifest components is missing;
 - a manifest component's `(name, source_field_name, aggregation)` concepts are
   not exactly the `(id, fieldName, aggregation)` columns that
   `spec/bqca_chart_manifest.yaml` lists for it;
-- a manifest component's dimension `concept_names`, metric `concept_names`,
-  `sort_column`s, or `sort_dir`s differ, in order, from the dimension IDs,
-  metric IDs, `sortFieldId`s, or `sortDir`s of its `spec.<kind>.fields`;
+- a manifest component's `dimensions` or `metrics` `labeled_concepts` entries
+  (each a single `primary` entry of `concept_names`), `sort_column`s,
+  `sort_dir`s, or `reverse_sort_order` differ, in order, from the dimension
+  IDs, metric IDs, `sortFieldId`s, `sortDir`s, or `reverseSortOrder` of its
+  `spec.<kind>.fields`;
 - a manifest component's `chart_type` is not one whose dimension, metric, and
   sort references the audit can read, so the comparison above cannot run;
 - a manifest component's `datasource_id` or `dataset_id` is missing or is not
@@ -412,10 +422,14 @@ The command exits 1 and prints one error for each of these defects:
   `bindings/bqca_report_template.yaml`;
 - the report has no `ds0` alias, or the alias points at another data source.
 
+**Not audited by `--live-report-textproto`:** chart row limits (`limit` /
+`row`), pie-chart other-slice grouping (`includeOthers` /
+`include_total_others`), visual styling, and page layout geometry. Those stay
+governed by the offline manifest and bundle validators.
+
 `tests/fixtures/bqca_live_report_42e79a1f_sanitized.textproto` is a sanitized
 cut of a dump of the live template saved on 2026-10-29, before the sync. It
-keeps only the fields that the audit reads, plus the `key` of each
-`labeled_concepts` entry. Its report-level `datasource_id`, which named the
+keeps only the fields that the audit reads. Its report-level `datasource_id`, which named the
 source report's retired data source, reads
 `00000000-0000-4000-8000-000000000000`. The audit reports 209 errors on it:
 65 generic concept names, 49 repeated names, 34 components whose concepts

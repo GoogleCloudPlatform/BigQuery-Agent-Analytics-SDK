@@ -1632,9 +1632,19 @@ assert.match(
 );
 assert.match(
   bqcaPageSource,
-  /<aside[^>]*class="notice notice-warning"[^>]*id="bqca-template-note"[^>]*>.*Public link sharing is on; the outside-account copy check is pending\..*<details class="advanced-bqca-options">/s,
-  "the BQCA note says public link sharing is on but the outside-account copy check is pending, and collapses advanced CLI/Streamlit options",
+  /<aside[^>]*class="notice notice-warning"[^>]*id="bqca-template-note"[^>]*>.*Public link sharing is on; the outside-account copy check is pending\..*<p id="bqca-column-id-note">.*issues\/559.*legacy generic column IDs.*<details class="advanced-bqca-options">/s,
+  "the BQCA note says public link sharing is on, warns about the #559 generic column ID sync before creating reports, and collapses advanced CLI/Streamlit options",
 );
+for (const [label, source] of [
+  ["docs/index.html", pageSource],
+  ["docs/bqca/index.html", bqcaPageSource],
+]) {
+  assert.match(
+    source,
+    /<p id="bqca-column-id-note">[\s\S]*?https:\/\/github\.com\/GoogleCloudPlatform\/BigQuery-Agent-Analytics-SDK\/issues\/559[\s\S]*?legacy generic column IDs[\s\S]*?re-create\s+any\s+report\s+created\s+before\s+the\s+sync[\s\S]*?<\/p>/,
+    `${label} includes the #559 known-issue column ID notice inside #bqca-template-note`,
+  );
+}
 const bqcaHeroLedeMatch = bqcaPageSource.match(
   /<p class="lede" data-profile-only="bqca">([\s\S]*?)<\/p>/,
 );

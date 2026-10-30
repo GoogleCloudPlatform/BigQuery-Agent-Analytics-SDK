@@ -87,20 +87,24 @@ _SPEC_KIND_BY_CHART_TYPE = {
 }
 
 # The keys under `spec.<kind>.fields` from which each kind reads its columns,
-# as dotted key paths (a list adds no step to a path).
+# as key tuples (a list adds no step to a path).
 _BAR_OR_LINE_REFERENCE_PATHS = frozenset(
     {
-        "primaryAxis.fieldId",
-        "metricSeries.metricIds",
-        "primaryAxis.sort.sortFieldId",
+        ("primaryAxis", "fieldId"),
+        ("metricSeries", "metricIds"),
+        ("primaryAxis", "sort", "sortFieldId"),
     }
 )
 _SPEC_REFERENCE_PATHS = {
-    "scorecard": frozenset({"primaryMetricId"}),
+    "scorecard": frozenset({("primaryMetricId",)}),
     "barChart": _BAR_OR_LINE_REFERENCE_PATHS,
     "lineChart": _BAR_OR_LINE_REFERENCE_PATHS,
-    "pieChart": frozenset({"dimensionId", "metricId", "sort.sortFieldId"}),
-    "table": frozenset({"dimensionIds", "metricIds", "sort.sortFieldId"}),
+    "pieChart": frozenset(
+        {("dimensionId",), ("metricId",), ("sort", "sortFieldId")}
+    ),
+    "table": frozenset(
+        {("dimensionIds",), ("metricIds",), ("sort", "sortFieldId")}
+    ),
 }
 
 # Looker Studio column (concept) IDs. This repository requires every column of
@@ -219,19 +223,21 @@ def _bqca_column_ids(comp: dict[str, Any]) -> list[Any]:
   ]
 
 
-def _bqca_spec_roles(comp: dict[str, Any]) -> dict[str, list[Any]] | None:
+def _bqca_spec_roles(comp: dict[str, Any]) -> dict[str, Any] | None:
   """Return a component's column IDs by role, in `spec.<kind>.fields` order.
 
   A scorecard's `primaryMetricId` is its only metric. A bar or line chart
-  reads `primaryAxis.fieldId`, `metricSeries.metricIds` and
-  `primaryAxis.sort`; a pie chart reads `dimensionId`, `metricId` and `sort`;
-  and a table reads `dimensionIds`, `metricIds` and `sort`. Each sort clause
-  gives one `sortFieldId` and one `sortDir`.
+  reads `primaryAxis.fieldId`, `metricSeries.metricIds`, `primaryAxis.sort`,
+  and `primaryAxis.reverseSortOrder`; a pie chart reads `dimensionId`,
+  `metricId`, `sort`, and `reverseSortOrder`; and a table reads
+  `dimensionIds`, `metricIds`, `sort`, and `reverseSortOrder`. Each sort
+  clause gives one `sortFieldId` and one `sortDir`.
 
   Returns:
-    The `dimensions` and `metrics` column IDs, and the `sort_columns` and
-    `sort_dirs` of the sort clauses, each list in manifest order; or None for
-    a `chart_type` that is none of these kinds, whose references are unknown.
+    The `dimensions` and `metrics` column IDs, the `sort_columns` and
+    `sort_dirs` of the sort clauses, each list in manifest order, and
+    `reverse_sort_order` (False when omitted); or None for a `chart_type`
+    that is none of these kinds, whose references are unknown.
   """
   kind = _SPEC_KIND_BY_CHART_TYPE.get(comp.get("chart_type"), "")
   spec = comp.get("spec")
@@ -242,19 +248,23 @@ def _bqca_spec_roles(comp: dict[str, Any]) -> dict[str, list[Any]] | None:
   axis = axis if isinstance(axis, dict) else {}
   if kind == "scorecard":
     dimensions, metrics, clauses = [], [fields.get("primaryMetricId")], []
+    reverse_sort_order = False
   elif kind in ("barChart", "lineChart"):
     series = fields.get("metricSeries")
     dimensions = [axis.get("fieldId")]
     metrics = series.get("metricIds") if isinstance(series, dict) else []
     clauses = axis.get("sort")
+    reverse_sort_order = axis.get("reverseSortOrder", False)
   elif kind == "pieChart":
     dimensions = [fields.get("dimensionId")]
     metrics = [fields.get("metricId")]
     clauses = fields.get("sort")
+    reverse_sort_order = fields.get("reverseSortOrder", False)
   elif kind == "table":
     dimensions = fields.get("dimensionIds")
     metrics = fields.get("metricIds")
     clauses = fields.get("sort")
+    reverse_sort_order = fields.get("reverseSortOrder", False)
   else:
     return None
   clauses = [
@@ -266,6 +276,7 @@ def _bqca_spec_roles(comp: dict[str, Any]) -> dict[str, list[Any]] | None:
       "metrics": list(metrics) if isinstance(metrics, list) else [],
       "sort_columns": [clause.get("sortFieldId") for clause in clauses],
       "sort_dirs": [clause.get("sortDir") for clause in clauses],
+      "reverse_sort_order": reverse_sort_order,
   }
 
 
@@ -331,16 +342,18 @@ def _bqca_derived_column_id_errors(
   return errors
 
 
-def _spec_field_references(node: Any, path: str = "") -> list[tuple[str, Any]]:
-  """Return `(dotted key path, value)` for each `*Id`/`*Ids` key under `node`.
+def _spec_field_references(
+    node: Any, path: tuple[str, ...] = ()
+) -> list[tuple[tuple[str, ...], Any]]:
+  """Return `(key path, value)` for each `*Id`/`*Ids` key under `node`.
 
   A list adds no step to a path, so every sort clause's `sortFieldId` under
-  `primaryAxis.sort` has the path `primaryAxis.sort.sortFieldId`.
+  `primaryAxis.sort` has the path `('primaryAxis', 'sort', 'sortFieldId')`.
   """
-  found: list[tuple[str, Any]] = []
+  found: list[tuple[tuple[str, ...], Any]] = []
   if isinstance(node, dict):
     for key, value in node.items():
-      key_path = f"{path}.{key}" if path else str(key)
+      key_path = (*path, str(key))
       if str(key).endswith(("Id", "Ids")):
         found.append((key_path, value))
       else:
@@ -349,6 +362,13 @@ def _spec_field_references(node: Any, path: str = "") -> list[tuple[str, Any]]:
     for item in node:
       found.extend(_spec_field_references(item, path))
   return found
+
+
+def _format_key_path(path: tuple[str, ...]) -> str:
+  """Format a tuple of mapping keys for a diagnostic message."""
+  return "".join(
+      f".{step}" if step.isidentifier() else f"[{step!r}]" for step in path
+  )
 
 
 def canonical_pages_sha256(pages: list[dict[str, Any]]) -> str:
@@ -522,14 +542,19 @@ def _validate_component_embedded_spec(
     return errors
 
   inner = spec[spec_kind]
-  dataset = inner.get("dataset", {})
+  dataset = inner.get("dataset")
+  dataset = dataset if isinstance(dataset, dict) else {}
   if dataset.get("datasourceId") != datasource_id:
     errors.append(
         f"component {comp_id} spec.{spec_kind}.dataset.datasourceId mismatch"
     )
 
   spec_cols = dataset.get("columns", [])
-  if not isinstance(spec_cols, list) or not spec_cols:
+  if (
+      not isinstance(spec_cols, list)
+      or not spec_cols
+      or not all(isinstance(col, dict) for col in spec_cols)
+  ):
     errors.append(f"component {comp_id} spec.{spec_kind}.dataset.columns empty")
     return errors
 
@@ -566,7 +591,12 @@ def _validate_component_embedded_spec(
         f" {spec_field_names} != summary columns {comp.get('columns')}"
     )
 
-  fields_cfg = inner.get("fields", {})
+  fields_cfg = inner.get("fields")
+  if not isinstance(fields_cfg, dict):
+    errors.append(
+        f"component {comp_id} missing embedded spec.{spec_kind}.fields mapping"
+    )
+    return errors
   # Every `*Id`/`*Ids` key must sit where this kind reads its columns, and
   # every column must be referenced from such a key. A reference there to an
   # undefined column is reported below, with its role.
@@ -574,8 +604,9 @@ def _validate_component_embedded_spec(
   for path, value in _spec_field_references(fields_cfg):
     if path not in _SPEC_REFERENCE_PATHS[spec_kind]:
       errors.append(
-          f"component {comp_id} spec.{spec_kind}.fields.{path} {value!r} is"
-          f" not a column reference a {spec_kind} reads"
+          f"component {comp_id}"
+          f" spec.{spec_kind}.fields{_format_key_path(path)} {value!r} is not"
+          f" a column reference a {spec_kind} reads"
       )
       continue
     for ref in value if isinstance(value, list) else [value]:
@@ -621,22 +652,38 @@ def _validate_component_embedded_spec(
           f" to STRING field {expected_field!r}"
       )
   else:
+    axis = fields_cfg.get("primaryAxis")
+    axis = axis if isinstance(axis, dict) else {}
+    series = fields_cfg.get("metricSeries")
+    series = series if isinstance(series, dict) else {}
     if spec_kind in ("barChart", "lineChart"):
-      dim_ids = [fields_cfg.get("primaryAxis", {}).get("fieldId")]
-      met_ids = list(fields_cfg.get("metricSeries", {}).get("metricIds", []))
+      dim_ids = [axis.get("fieldId")]
+      raw_met_ids = series.get("metricIds", [])
+      met_ids = list(raw_met_ids) if isinstance(raw_met_ids, list) else []
+      sort_clauses = axis.get("sort", [])
+      rev_holder = axis
     elif spec_kind == "pieChart":
       dim_ids = [fields_cfg.get("dimensionId")]
       met_ids = [fields_cfg.get("metricId")]
-    elif spec_kind == "table":
-      dim_ids = list(fields_cfg.get("dimensionIds", []))
-      met_ids = list(fields_cfg.get("metricIds", []))
-    else:
-      dim_ids, met_ids = [], []
-
-    if spec_kind in ("barChart", "lineChart"):
-      sort_clauses = fields_cfg.get("primaryAxis", {}).get("sort", [])
-    else:
       sort_clauses = fields_cfg.get("sort", [])
+      rev_holder = fields_cfg
+    elif spec_kind == "table":
+      raw_dim_ids = fields_cfg.get("dimensionIds", [])
+      raw_met_ids = fields_cfg.get("metricIds", [])
+      dim_ids = list(raw_dim_ids) if isinstance(raw_dim_ids, list) else []
+      met_ids = list(raw_met_ids) if isinstance(raw_met_ids, list) else []
+      sort_clauses = fields_cfg.get("sort", [])
+      rev_holder = fields_cfg
+    else:
+      dim_ids, met_ids, sort_clauses, rev_holder = [], [], [], {}
+
+    if "reverseSortOrder" in rev_holder and not isinstance(
+        rev_holder.get("reverseSortOrder"), bool
+    ):
+      errors.append(
+          f"chart {comp_id} embedded spec reverseSortOrder"
+          f" {rev_holder.get('reverseSortOrder')!r} must be a bool"
+      )
     if not isinstance(sort_clauses, list):
       errors.append(f"chart {comp_id} embedded spec sort must be a list")
       sort_clauses = []
@@ -646,6 +693,12 @@ def _validate_component_embedded_spec(
         errors.append(
             f"chart {comp_id} embedded spec sort references undefined column"
             f" id {sort_id!r}"
+        )
+      sort_dir = clause.get("sortDir") if isinstance(clause, dict) else None
+      if sort_dir not in ("ASC", "DESC"):
+        errors.append(
+            f"chart {comp_id} embedded spec sortDir {sort_dir!r} must be"
+            " 'ASC' or 'DESC'"
         )
 
     expected_dims = list(comp.get("dimensions", []))
@@ -1538,12 +1591,31 @@ def _bqca_pending_live_sync_errors(live: dict[str, Any]) -> list[str]:
   last verified. While `manifest_sha256` or `template_bundle_sha256` differs
   from them, the repository describes a template that is not live yet, and
   `pending_live_sync` must give a non-empty `reason`, a quoted `since_date`
-  (YYYY-MM-DD), the `tracking_issue` URL of an issue of this repository and a
-  non-empty list of `required_actions`. Once both digests equal the verified
-  ones again, `pending_live_sync` must be removed.
+  (YYYY-MM-DD, not before `verified_date` and not in the future), the
+  `tracking_issue` URL of an issue of this repository and a non-empty list of
+  `required_actions`. Once both digests equal the verified ones again,
+  `pending_live_sync` must be removed.
   """
   prefix = "bqca live_template_verification"
   errors: list[str] = []
+  today = max(
+      datetime.date.today(),
+      datetime.datetime.now(datetime.timezone.utc).date(),
+  )
+  verified_date = live.get("verified_date")
+  verified_dt: datetime.date | None = None
+  if isinstance(verified_date, str) and _ISO_DATE_RE.fullmatch(verified_date):
+    try:
+      verified_dt = datetime.date.fromisoformat(verified_date)
+    except ValueError:
+      verified_dt = None
+  if verified_dt is None:
+    errors.append(
+        f"{prefix}.verified_date {verified_date!r} is not a quoted YYYY-MM-DD"
+        " date"
+    )
+  elif verified_dt > today:
+    errors.append(f"{prefix}.verified_date {verified_date!r} is in the future")
   differing: list[str] = []
   for pinned_key, verified_key in (
       ("manifest_sha256", "verified_manifest_sha256"),
@@ -1579,19 +1651,32 @@ def _bqca_pending_live_sync_errors(live: dict[str, Any]) -> list[str]:
         " string"
     )
   since_date = pending.get("since_date")
-  try:
-    valid_since_date = bool(
-        isinstance(since_date, str)
-        and _ISO_DATE_RE.fullmatch(since_date)
-        and datetime.date.fromisoformat(since_date)
-    )
-  except ValueError:
-    valid_since_date = False
-  if not valid_since_date:
+  since_dt: datetime.date | None = None
+  if isinstance(since_date, str) and _ISO_DATE_RE.fullmatch(since_date):
+    try:
+      since_dt = datetime.date.fromisoformat(since_date)
+    except ValueError:
+      since_dt = None
+  if since_dt is None:
     errors.append(
         f"{prefix}.pending_live_sync.since_date {since_date!r} is not a quoted"
         " YYYY-MM-DD date"
     )
+  else:
+    if (
+        verified_dt is not None
+        and verified_dt <= today
+        and since_dt < verified_dt
+    ):
+      errors.append(
+          f"{prefix}.pending_live_sync.since_date {since_date!r} is before"
+          f" verified_date {verified_date!r}"
+      )
+    if since_dt > today:
+      errors.append(
+          f"{prefix}.pending_live_sync.since_date {since_date!r} is in the"
+          " future"
+      )
   tracking_issue = pending.get("tracking_issue")
   if not isinstance(
       tracking_issue, str
@@ -2542,16 +2627,18 @@ def _tp_messages(
   return found
 
 
-def _tp_scalars(
-    message: TextprotoMessage, names: tuple[str, ...]
-) -> list[tuple[str, str]]:
-  """Return `(field, value)` for every scalar field in `names`, depth first."""
-  found: list[tuple[str, str]] = []
+def _tp_scalar_paths(
+    message: list[tuple[str, Any]],
+    names: Iterable[str],
+    path: tuple[str, ...] = (),
+) -> list[tuple[tuple[str, ...], str]]:
+  """Return `(path, value)` for every scalar field in `names` in `message`."""
+  found: list[tuple[tuple[str, ...], str]] = []
   for key, value in message:
     if isinstance(value, list):
-      found.extend(_tp_scalars(value, names))
+      found.extend(_tp_scalar_paths(value, names, (*path, key)))
     elif key in names:
-      found.append((key, value))
+      found.append(((*path, key), value))
   return found
 
 
@@ -2563,6 +2650,91 @@ def _normalized_aggregation(value: Any) -> str:
 def _concept_ref(value: str | None) -> str | None:
   """Return a concept reference without its `t0.` namespace prefix."""
   return value.removeprefix("t0.") if value is not None else None
+
+
+_LIVE_REFERENCE_PATHS = frozenset(
+    {
+        ("dimensions", "labeled_concepts", "value", "concept_names"),
+        ("metrics", "labeled_concepts", "value", "concept_names"),
+        ("sort", "sort_column"),
+    }
+)
+
+
+def _live_role_entries(
+    component_property: list[tuple[str, Any]], role: str
+) -> list[Any]:
+  """Return `(key, [concept_names, ...])` for each `labeled_concepts` of `role`.
+
+  Any scalar `role` field, any field under `role` other than
+  `labeled_concepts`, or any `labeled_concepts` entry that does not have a
+  single string `key` and a single `value` message of `concept_names` strings
+  is kept as a raw `(name, value)` pair so it cannot compare equal to the
+  manifest's `[('primary', expected_ids)]` or `[]`.
+  """
+  entries: list[Any] = []
+  for key, value in component_property:
+    if key != role:
+      continue
+    if not isinstance(value, list):
+      entries.append((key, value))
+      continue
+    for entry_key, entry_val in value:
+      if entry_key != "labeled_concepts" or not isinstance(entry_val, list):
+        entries.append((entry_key, entry_val))
+        continue
+      keys = [v for k, v in entry_val if k == "key" and isinstance(v, str)]
+      values = [v for k, v in entry_val if k == "value" and isinstance(v, list)]
+      if (
+          len(keys) == 1
+          and len(values) == 1
+          and len(entry_val) == 2
+          and all(
+              k == "concept_names" and isinstance(v, str) for k, v in values[0]
+          )
+      ):
+        entries.append((keys[0], [_concept_ref(v) for _, v in values[0]]))
+      else:
+        entries.append((entry_key, entry_val))
+  return entries
+
+
+def _live_sort_clauses(
+    component_property: list[tuple[str, Any]],
+) -> tuple[list[Any], list[Any]]:
+  """Return `(sort_columns, sort_dirs)` for the `sort` fields of a component.
+
+  Each valid `sort` field is a message with a single string `sort_column` and
+  a single string `sort_dir` and no other fields. A scalar `sort` field or a
+  `sort` message with missing, repeated, or extra fields keeps its raw `(key,
+  value)` pair in the affected list so it cannot compare equal to the
+  manifest's `sortFieldId` or `sortDir` list.
+  """
+  sort_columns: list[Any] = []
+  sort_dirs: list[Any] = []
+  for key, value in component_property:
+    if key != "sort":
+      continue
+    if not isinstance(value, list):
+      sort_columns.append((key, value))
+      continue
+    cols = [
+        _concept_ref(v)
+        for k, v in value
+        if k == "sort_column" and isinstance(v, str)
+    ]
+    dirs = [v for k, v in value if k == "sort_dir" and isinstance(v, str)]
+    if len(cols) == 1 and len(dirs) == 1 and len(value) == 2:
+      sort_columns.append(cols[0])
+      sort_dirs.append(dirs[0])
+    else:
+      sort_columns.append(
+          cols[0]
+          if len(cols) == 1 and len(value) == 1 + len(dirs) and dirs
+          else (key, value)
+      )
+      sort_dirs.append(dirs[0] if len(dirs) == 1 else (key, value))
+  return sort_columns, sort_dirs
 
 
 def validate_live_report_textproto(
@@ -2583,21 +2755,25 @@ def validate_live_report_textproto(
     component that appears twice; each `concept_defs` name that is not a
     `qt_` ID, or whose `id` is not `t0.<name>`; each name that repeats inside
     its component, or that repeats a name of an earlier component; each
-    component reference (`concept_names`, `sort_column`) that names no
-    concept of its component, and each concept that no such reference names;
-    each manifest component that is missing; each manifest component whose
-    `(name, source_field_name, aggregation)` concepts are not exactly the
-    manifest's `(id, fieldName, aggregation)` columns; whose dimension
-    `concept_names`, metric `concept_names`, `sort_column`s or `sort_dir`s
-    differ, in order, from the dimension IDs, metric IDs, `sortFieldId`s or
-    `sortDir`s of its `spec.<kind>.fields`; whose `chart_type` is not a kind
-    whose references the audit can read (it then skips those four
-    comparisons); or whose `datasource_id` or
-    `dataset_id` is missing or is not its manifest `datasource_id`; each
-    component that defines concepts but is not in the manifest; a missing
-    report-level `datasource_id`, or one that is not the binding's
-    `datasource_id`; and a missing `ds0` alias, or one that points at another
-    data source.
+    `concept_names` or `sort_column` under `component_property` outside
+    `dimensions.labeled_concepts.value.concept_names`,
+    `metrics.labeled_concepts.value.concept_names`, or `sort.sort_column`;
+    each component reference (`concept_names`, `sort_column`) at one of those
+    paths that names no concept of its component, and each concept that no
+    such reference names; each manifest component that is missing; each
+    manifest component whose `(name, source_field_name, aggregation)`
+    concepts are not exactly the manifest's `(id, fieldName, aggregation)`
+    columns; whose `dimensions` or `metrics` `labeled_concepts` entries (each
+    a single `primary` entry of `concept_names`), `sort_column`s, `sort_dir`s,
+    or `reverse_sort_order` differ, in order, from the dimension IDs, metric
+    IDs, `sortFieldId`s, `sortDir`s, or `reverseSortOrder` of its
+    `spec.<kind>.fields`; whose `chart_type` is not a kind whose references
+    the audit can read (it then skips those role and sort comparisons); or
+    whose `datasource_id` or `dataset_id` is missing or is not its manifest
+    `datasource_id`; each component that defines concepts but is not in the
+    manifest; a missing report-level `datasource_id`, or one that is not the
+    binding's `datasource_id`; and a missing `ds0` alias, or one that points
+    at another data source.
   """
   label = f"live report {textproto_path}"
   manifest = (
@@ -2675,14 +2851,22 @@ def validate_live_report_textproto(
         _tp_message(config, "property_config"), "component_property"
     )
     referenced: set[str] = set()
-    for field, ref in _tp_scalars(
+    for path, ref in _tp_scalar_paths(
         component_property, ("concept_names", "sort_column")
     ):
-      referenced.add(ref.removeprefix("t0."))
-      if ref.removeprefix("t0.") not in defined:
+      if path not in _LIVE_REFERENCE_PATHS:
         errors.append(
-            f"{label}: component {component_id} {field} {ref!r} names none of"
-            " its concept_defs"
+            f"{label}: component {component_id} {path[-1]} {ref!r} at"
+            f" component_property.{'.'.join(path)} is not a reference the"
+            " audit reads"
+        )
+        continue
+      col_id = _concept_ref(ref)
+      referenced.add(col_id)
+      if col_id not in defined:
+        errors.append(
+            f"{label}: component {component_id} {path[-1]} {ref!r} names none"
+            " of its concept_defs"
         )
     for name in sorted(defined - referenced):
       errors.append(
@@ -2690,35 +2874,31 @@ def validate_live_report_textproto(
           " not referenced by any concept_names or sort_column"
       )
     # A saved report lists a component's dimension and metric concept_names
-    # under `dimensions` and `metrics` (in `labeled_concepts` entries), and
-    # each sort clause in its own `sort` message.
-    role_names = {
-        role: [
-            _concept_ref(ref)
-            for key, value in component_property
-            if key == role and isinstance(value, list)
-            for _, ref in _tp_scalars(value, ("concept_names",))
-        ]
-        for role in ("dimensions", "metrics")
-    }
-    sort_clauses = [
+    # under `dimensions` and `metrics` (each in one `labeled_concepts` entry
+    # keyed `primary`), each sort clause in its own `sort` message, and
+    # `reverse_sort_order` when set.
+    sort_columns, sort_dirs = _live_sort_clauses(component_property)
+    raw_rev = [
         value
         for key, value in component_property
-        if key == "sort" and isinstance(value, list)
+        if key == "reverse_sort_order"
     ]
+    if not raw_rev:
+      rev_valid, live_rev = True, False
+    elif len(raw_rev) == 1 and raw_rev[0] in ("true", "false"):
+      rev_valid, live_rev = True, (raw_rev[0] == "true")
+    else:
+      rev_valid, live_rev = False, raw_rev
     components.setdefault(
         component_id,
         {
             "concepts": sorted(concept_bindings),
-            "dimensions": role_names["dimensions"],
-            "metrics": role_names["metrics"],
-            "sort_columns": [
-                _concept_ref(_tp_scalar(clause, "sort_column"))
-                for clause in sort_clauses
-            ],
-            "sort_dirs": [
-                _tp_scalar(clause, "sort_dir") for clause in sort_clauses
-            ],
+            "dimensions": _live_role_entries(component_property, "dimensions"),
+            "metrics": _live_role_entries(component_property, "metrics"),
+            "sort_columns": sort_columns,
+            "sort_dirs": sort_dirs,
+            "reverse_sort_order": live_rev,
+            "reverse_sort_order_valid": rev_valid,
             "datasource_id": _tp_scalar(config, "datasource_id"),
             "dataset_id": _tp_scalar(
                 _tp_message(component_property, "dataset"), "dataset_id"
@@ -2763,18 +2943,36 @@ def validate_live_report_textproto(
             " references the audit cannot read"
         )
       else:
-        if live["dimensions"] != spec_roles["dimensions"]:
-          errors.append(
-              f"{label}: component {where} dimensions concept_names"
-              f" {live['dimensions']} != manifest dimension IDs"
-              f" {spec_roles['dimensions']}"
-          )
-        if live["metrics"] != spec_roles["metrics"]:
-          errors.append(
-              f"{label}: component {where} metrics concept_names"
-              f" {live['metrics']} != manifest metric IDs"
-              f" {spec_roles['metrics']}"
-          )
+        for role, singular in (
+            ("dimensions", "dimension"),
+            ("metrics", "metric"),
+        ):
+          expected_ids = spec_roles[role]
+          expected_entries = [("primary", expected_ids)] if expected_ids else []
+          actual_entries = live[role]
+          if actual_entries != expected_entries:
+            is_single_primary = not actual_entries or (
+                len(actual_entries) == 1
+                and isinstance(actual_entries[0], tuple)
+                and len(actual_entries[0]) == 2
+                and actual_entries[0][0] == "primary"
+                and isinstance(actual_entries[0][1], list)
+            )
+            names = (
+                []
+                if not actual_entries or not is_single_primary
+                else actual_entries[0][1]
+            )
+            if is_single_primary and names != expected_ids:
+              errors.append(
+                  f"{label}: component {where} {role} concept_names {names}"
+                  f" != manifest {singular} IDs {expected_ids}"
+              )
+            else:
+              errors.append(
+                  f"{label}: component {where} {role} labeled_concepts"
+                  f" {actual_entries!r} != manifest {expected_entries!r}"
+              )
         if live["sort_columns"] != spec_roles["sort_columns"]:
           errors.append(
               f"{label}: component {where} sort_column"
@@ -2785,6 +2983,17 @@ def validate_live_report_textproto(
           errors.append(
               f"{label}: component {where} sort_dir {live['sort_dirs']} !="
               f" manifest sortDir {spec_roles['sort_dirs']}"
+          )
+        if not live["reverse_sort_order_valid"]:
+          errors.append(
+              f"{label}: component {where} reverse_sort_order"
+              f" {live['reverse_sort_order']!r} is not a single true or false"
+          )
+        elif live["reverse_sort_order"] != spec_roles["reverse_sort_order"]:
+          errors.append(
+              f"{label}: component {where} reverse_sort_order"
+              f" {live['reverse_sort_order']!r} != manifest reverseSortOrder"
+              f" {spec_roles['reverse_sort_order']!r}"
           )
       if live["datasource_id"] != comp.get("datasource_id"):
         errors.append(

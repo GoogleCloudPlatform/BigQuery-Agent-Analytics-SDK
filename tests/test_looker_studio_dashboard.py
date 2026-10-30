@@ -1926,6 +1926,10 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
   assert "exact qt_ IDs in spec/bqca_chart_manifest.yaml" in rename
   assert repoint.endswith(f"datasource_id to {BQCA_DATASOURCE_ID}.")
   assert "--live-report-textproto" in reverify
+  assert "README.md" in reverify
+  assert "USER_MANUAL.md" in reverify
+  assert "docs/guides/bqca-prompt-response-logging-manual.md" in reverify
+  assert "#bqca-column-id-note" in reverify
   assert reverify.endswith("remove pending_live_sync.")
 
   # The contract states the gate to pass after every publish, and points at
@@ -2468,6 +2472,45 @@ def test_validate_contracts_rejects_generic_or_repeated_column_ids():
       f"chart {bar['id']} embedded spec sort must be a list"
   ], unlisted_errors
 
+  # Sort direction must be 'ASC' or 'DESC', reverseSortOrder (when present)
+  # must be a bool, and null mapping/list nodes return structured errors.
+  for chart in (bar, other):
+
+    def _bad_sort_dir(comp):
+      fields = _bqca_spec_inner(comp)["fields"]
+      clauses = (fields.get("primaryAxis") or fields)["sort"]
+      clauses[0]["sortDir"] = "SIDEWAYS"
+
+    assert _validate(chart["id"], _bad_sort_dir) == [
+        f"chart {chart['id']} embedded spec sortDir 'SIDEWAYS' must be"
+        " 'ASC' or 'DESC'"
+    ]
+
+    def _bad_reverse_sort_order(comp):
+      fields = _bqca_spec_inner(comp)["fields"]
+      holder = fields.get("primaryAxis") or fields
+      holder["reverseSortOrder"] = "false"
+
+    assert _validate(chart["id"], _bad_reverse_sort_order) == [
+        f"chart {chart['id']} embedded spec reverseSortOrder 'false' must be a"
+        " bool"
+    ]
+
+  def _null_fields(comp):
+    _bqca_spec_inner(comp)["fields"] = None
+
+  assert _validate(bar["id"], _null_fields) == [
+      f"component {bar['id']} missing embedded spec.barChart.fields mapping"
+  ]
+
+  def _null_dataset(comp):
+    _bqca_spec_inner(comp)["dataset"] = None
+
+  assert _validate(bar["id"], _null_dataset) == [
+      f"component {bar['id']} spec.barChart.dataset.datasourceId mismatch",
+      f"component {bar['id']} spec.barChart.dataset.columns empty",
+  ]
+
   # Every `*Id`/`*Ids` key under `fields` must be one that the kind reads its
   # columns from: a bar chart reads its sort from `primaryAxis.sort` only, and
   # a table has no `primaryMetricId`. This holds for a column the component
@@ -2515,19 +2558,90 @@ def test_validate_contracts_rejects_generic_or_repeated_column_ids():
       " not referenced by spec.barChart.fields"
   ]
 
-  # Two scorecards on one page must not show the same measure.
-  def _show_total_tokens(comp):
-    comp["field"] = "total_tokens"
-    _bqca_spec_columns(comp)[0]["fieldName"] = "_total_tokens_"
+  # A top-level key containing a dot (such as `'primaryAxis.fieldId'`) is a
+  # single key, not the nested path `('primaryAxis', 'fieldId')`, so it is
+  # rejected as an unread key and does not count as referencing `extra_id`.
+  def _add_dotted_top_level_reference(comp):
+    _add_unreferenced_column(comp)
+    _bqca_spec_inner(comp)["fields"]["primaryAxis.fieldId"] = extra_id
 
-  assert (
-      "bqca page p_539b9240 scorecards kpi_total_tokens and kpi_input_tokens"
-      " both show SUM(total_tokens)"
-  ) in _validate("kpi_input_tokens", _show_total_tokens)
+  assert _validate(bar["id"], _add_dotted_top_level_reference) == [
+      f"component {bar['id']} spec.barChart.fields['primaryAxis.fieldId']"
+      f" {extra_id!r} is not a column reference a barChart reads",
+      f"component {bar['id']} spec.barChart.dataset.columns id {extra_id!r} is"
+      " not referenced by spec.barChart.fields",
+  ]
+
+  # Two scorecards on one page must not show the same `(field, aggregation)`
+  # measure, even when every column ID, digest, and contract entry is coherent
+  # and even when one or both scorecards carry `tile_filter` metadata (since
+  # the embedded scorecard spec has no filter clause).
+  dup_id = validator.bqca_qt_column_id("cd-gQM6-qRztkI", 0, "_total_tokens_")
+  contract = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_product_contract.yaml").read_text()
+  )
+  for total_filter, input_filter in (
+      (None, None),
+      (None, {"field": "persona", "values": ["analyst"]}),
+      (
+          {"field": "persona", "values": ["analyst"]},
+          {"field": "persona", "values": ["engineer"]},
+      ),
+  ):
+    m_dup = json.loads(json.dumps(manifest))
+    b_dup = json.loads(json.dumps(bundle))
+    c_dup = json.loads(json.dumps(contract))
+    bi_dup = json.loads(json.dumps(binding))
+    for doc in (m_dup, b_dup):
+      for collection in (
+          [c for p in doc["pages"] for c in p["components"]],
+          doc["components"],
+      ):
+        for comp in collection:
+          if comp["id"] == "kpi_total_tokens" and total_filter is not None:
+            comp["tile_filter"] = total_filter
+          elif comp["id"] == "kpi_input_tokens":
+            comp["field"] = "total_tokens"
+            comp["columns"] = ["_total_tokens_"]
+            inner = _bqca_spec_inner(comp)
+            inner["dataset"]["columns"][0]["id"] = dup_id
+            inner["dataset"]["columns"][0]["fieldName"] = "_total_tokens_"
+            inner["fields"]["primaryMetricId"] = dup_id
+            if input_filter is not None:
+              comp["tile_filter"] = input_filter
+    for page in c_dup["pages"]:
+      for sc in page.get("scorecards", []):
+        if sc["id"] == "kpi_total_tokens" and total_filter is not None:
+          sc["tile_filter"] = total_filter
+        elif sc["id"] == "kpi_input_tokens":
+          sc["field"] = "total_tokens"
+          if input_filter is not None:
+            sc["tile_filter"] = input_filter
+    bi_dup["live_template_verification"]["manifest_sha256"] = hashlib.sha256(
+        yaml.safe_dump(m_dup, sort_keys=False).encode("utf-8")
+    ).hexdigest()
+    bi_dup["live_template_verification"]["template_bundle_sha256"] = (
+        hashlib.sha256(
+            (json.dumps(b_dup, indent=2) + "\n").encode("utf-8")
+        ).hexdigest()
+    )
+    bi_dup["live_template_verification"]["pages_sha256"] = (
+        validator.canonical_pages_sha256(c_dup["pages"])
+    )
+    assert validator.validate_bqca(
+        contract_override=c_dup,
+        manifest_override=m_dup,
+        binding_override=bi_dup,
+        bundle_override=b_dup,
+    ) == [
+        "bqca page p_539b9240 scorecards kpi_total_tokens and kpi_input_tokens"
+        " both show SUM(total_tokens)"
+    ]
 
   # The same field under another aggregation is another measure.
   def _show_average_total_tokens(comp):
-    _show_total_tokens(comp)
+    comp["field"] = "total_tokens"
+    _bqca_spec_columns(comp)[0]["fieldName"] = "_total_tokens_"
     comp["aggregation"] = "AVG"
     _bqca_spec_columns(comp)[0]["aggregation"] = "AVG"
 
@@ -2753,6 +2867,87 @@ BQCA_PENDING_LIVE_SYNC_CASES = [
             ("missing", _BQCA_DROP),
         ),
     ),
+    *(
+        pytest.param(
+            _bqca_live_edit((("verified_date",), value)),
+            [
+                "bqca live_template_verification.verified_date"
+                f" {None if value is _BQCA_DROP else value!r} is not a quoted"
+                " YYYY-MM-DD date"
+            ],
+            id=f"verified_date_{case_id}",
+        )
+        for case_id, value in (
+            ("unquoted", datetime.date(2026, 10, 9)),
+            ("impossible", "2026-13-01"),
+            ("with_time", "2026-10-09T00:00"),
+            ("basic_format", "20261009"),
+            ("missing", _BQCA_DROP),
+        )
+    ),
+    pytest.param(
+        _bqca_live_edit(
+            *BQCA_LIVE_SYNCED,
+            (("pending_live_sync",), _BQCA_DROP),
+            (("verified_date",), "2026-02-30"),
+        ),
+        [
+            "bqca live_template_verification.verified_date '2026-02-30' is not"
+            " a quoted YYYY-MM-DD date"
+        ],
+        id="verified_date_invalid_after_sync",
+    ),
+    pytest.param(
+        _bqca_live_edit((("verified_date",), "2099-01-01")),
+        [
+            "bqca live_template_verification.verified_date '2099-01-01' is in the future"
+        ],
+        id="verified_date_in_the_future",
+    ),
+    pytest.param(
+        _bqca_live_edit(
+            *BQCA_LIVE_SYNCED,
+            (("pending_live_sync",), _BQCA_DROP),
+            (
+                ("verified_date",),
+                max(
+                    datetime.date.today(),
+                    datetime.datetime.now(datetime.timezone.utc).date(),
+                ).isoformat(),
+            ),
+        ),
+        [],
+        id="verified_date_today",
+    ),
+    pytest.param(
+        _bqca_pending_edit("since_date", "2026-10-08"),
+        [
+            f"{BQCA_LIVE_PENDING}.since_date '2026-10-08' is before"
+            " verified_date '2026-10-09'"
+        ],
+        id="since_date_before_verified_date",
+    ),
+    pytest.param(
+        _bqca_pending_edit("since_date", "2026-10-09"),
+        [],
+        id="since_date_equal_to_verified_date",
+    ),
+    pytest.param(
+        _bqca_pending_edit("since_date", "2099-01-01"),
+        [f"{BQCA_LIVE_PENDING}.since_date '2099-01-01' is in the future"],
+        id="since_date_in_the_future",
+    ),
+    pytest.param(
+        _bqca_pending_edit(
+            "since_date",
+            max(
+                datetime.date.today(),
+                datetime.datetime.now(datetime.timezone.utc).date(),
+            ).isoformat(),
+        ),
+        [],
+        id="since_date_today",
+    ),
     *_bqca_pending_cases(
         "tracking_issue",
         "is not the URL of an issue of this repository",
@@ -2879,6 +3074,7 @@ def _render_bqca_live_report(
     aggregations=None,
     concept_ids=None,
     overrides=None,
+    prefix_references="",
     report_datasource_id=BQCA_DATASOURCE_ID,
     aliases=((BQCA_DATASOURCE_ALIAS, BQCA_DATASOURCE_ID),),
 ):
@@ -2894,10 +3090,15 @@ def _render_bqca_live_report(
   `(component id, slot)` to the concept name, source field, aggregation or
   concept `id` to write instead of the manifest's; references follow a
   renamed concept. `overrides` maps a component id to the `datasource_id`,
-  `dataset_id`, `dimensions` or `metrics` (lists of names), or `sort`
-  (`(sort_column, sort_dir)` pairs) to write instead. A None `concept_ids`,
-  `datasource_id`, `dataset_id` or `report_datasource_id` value omits that
-  field. `aliases` lists the report's `(alias, datasource_id)` alias entries.
+  `dataset_id`, `dimensions` or `metrics` (lists of names), `role_entries`
+  (mapping a role to `(key, names)` pairs, where `key=None` omits the `key`
+  field), `sort` (`(sort_column, sort_dir)` pairs), `reverse_sort_order`
+  (a string or list of strings), or `extra_property_lines` (raw textproto
+  lines inside `component_property`) to write instead. `prefix_references`
+  prepends a prefix (such as `'t0.'`) to every `concept_names` and
+  `sort_column` value. A None `concept_ids`, `datasource_id`, `dataset_id`
+  or `report_datasource_id` value omits that field. `aliases` lists the
+  report's `(alias, datasource_id)` alias entries.
   """
   names = names or {}
   source_fields = source_fields or {}
@@ -2919,15 +3120,21 @@ def _render_bqca_live_report(
           for slot, column in enumerate(columns)
       }
       dimension_ids, metric_ids, clauses = _bqca_spec_role_ids(comp)
+      default_rev = (
+          ["false"] if comp["chart_type"] in ("bar_chart", "pie_chart") else []
+      )
       own = {
           "datasource_id": comp["datasource_id"],
           "dataset_id": comp["datasource_id"],
           "dimensions": [concept[column_id] for column_id in dimension_ids],
           "metrics": [concept[column_id] for column_id in metric_ids],
+          "role_entries": {},
           "sort": [
               (concept[clause["sortFieldId"]], clause["sortDir"])
               for clause in clauses
           ],
+          "reverse_sort_order": default_rev,
+          "extra_property_lines": [],
           **overrides.get(comp["id"], {}),
       }
       out.append("      component_config {")
@@ -2945,12 +3152,19 @@ def _render_bqca_live_report(
       out.append("            }")
       for role in ("dimensions", "metrics"):
         out.append(f"            {role} {{")
-        if own[role]:
+        entries = own["role_entries"].get(
+            role, [("primary", own[role])] if own[role] else []
+        )
+        for entry_key, entry_names in entries:
+          out.append("              labeled_concepts {")
+          if entry_key is not None:
+            out.append(f'                key: "{entry_key}"')
           out += [
-              "              labeled_concepts {",
-              '                key: "primary"',
               "                value {",
-              *(f'                  concept_names: "{n}"' for n in own[role]),
+              *(
+                  f'                  concept_names: "{prefix_references}{n}"'
+                  for n in entry_names
+              ),
               "                }",
               "              }",
           ]
@@ -2959,11 +3173,16 @@ def _render_bqca_live_report(
         out += [
             "            sort {",
             f"              sort_dir: {sort_dir}",
-            f'              sort_column: "{sort_column}"',
+            f'              sort_column: "{prefix_references}{sort_column}"',
             "            }",
         ]
-      if comp["chart_type"] in ("bar_chart", "pie_chart"):
-        out.append("            reverse_sort_order: false")
+      rev_values = own["reverse_sort_order"]
+      if isinstance(rev_values, str):
+        rev_values = [rev_values]
+      for rev_val in rev_values or []:
+        out.append(f"            reverse_sort_order: {rev_val}")
+      for extra_line in own["extra_property_lines"]:
+        out.append(f"            {extra_line}")
       out += ["          }", "        }"]
       for slot, column in enumerate(columns):
         key = (comp["id"], slot)
@@ -3449,7 +3668,8 @@ BQCA_LIVE_REPORT_DEFECTS = [
     ),
     pytest.param(
         lambda m: _render_bqca_live_report(
-            m, aliases=((BQCA_DATASOURCE_ALIAS, BQCA_STALE_DATASOURCE_ID),)
+            m,
+            aliases=((BQCA_DATASOURCE_ALIAS, BQCA_STALE_DATASOURCE_ID),),
         ),
         [
             f"data source alias {BQCA_DATASOURCE_ALIAS!r} points at"
@@ -3457,6 +3677,228 @@ BQCA_LIVE_REPORT_DEFECTS = [
             f" {BQCA_DATASOURCE_ID!r}"
         ],
         id="alias_points_at_another_datasource",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={"kpi_total_tokens": {"metrics": ["t1.qt_d779815a"]}},
+        ),
+        [
+            "component cd-vWRq2EdpQyI concept_names 't1.qt_d779815a' names none"
+            " of its concept_defs",
+            "component cd-vWRq2EdpQyI concept_defs name 'qt_d779815a' is not"
+            " referenced by any concept_names or sort_column",
+            f"component {BQCA_KPI_TOTAL} metrics concept_names"
+            " ['t1.qt_d779815a'] != manifest metric IDs ['qt_d779815a']",
+        ],
+        id="concept_names_in_another_namespace",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "chart_tokens_over_time": {"sort": [("t1.qt_e7eb0560", "ASC")]}
+            },
+        ),
+        [
+            "component cd-kM4cFH3pweE sort_column 't1.qt_e7eb0560' names none"
+            " of its concept_defs",
+            f"component {BQCA_OVER_TIME} sort_column ['t1.qt_e7eb0560'] !="
+            " manifest sortFieldId ['qt_e7eb0560']",
+        ],
+        id="sort_column_in_another_namespace",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "kpi_total_tokens": {
+                    "role_entries": {
+                        "metrics": [("drillDown", ["qt_d779815a"])]
+                    }
+                }
+            },
+        ),
+        [
+            f"component {BQCA_KPI_TOTAL} metrics labeled_concepts"
+            " [('drillDown', ['qt_d779815a'])] != manifest"
+            " [('primary', ['qt_d779815a'])]"
+        ],
+        id="labeled_concepts_wrong_key",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "kpi_total_tokens": {
+                    "role_entries": {"metrics": [(None, ["qt_d779815a"])]}
+                }
+            },
+        ),
+        [
+            f"component {BQCA_KPI_TOTAL} metrics labeled_concepts"
+            " [('labeled_concepts', [('value', [('concept_names',"
+            " 'qt_d779815a')])])] != manifest [('primary', ['qt_d779815a'])]"
+        ],
+        id="labeled_concepts_missing_key",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "chart_tokens_over_time": {
+                    "role_entries": {
+                        "metrics": [
+                            ("primary", ["qt_af86847d"]),
+                            ("primary", ["qt_42018c0c", "qt_0db8b52b"]),
+                        ]
+                    }
+                }
+            },
+        ),
+        [
+            f"component {BQCA_OVER_TIME} metrics labeled_concepts"
+            " [('primary', ['qt_af86847d']), ('primary', ['qt_42018c0c',"
+            " 'qt_0db8b52b'])] != manifest [('primary', ['qt_af86847d',"
+            " 'qt_42018c0c', 'qt_0db8b52b'])]"
+        ],
+        id="labeled_concepts_split_across_entries",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "kpi_total_tokens": {
+                    "metrics": [],
+                    "extra_property_lines": [
+                        'secondary_sort { sort_column: "qt_d779815a" }'
+                    ],
+                }
+            },
+        ),
+        [
+            "component cd-vWRq2EdpQyI sort_column 'qt_d779815a' at"
+            " component_property.secondary_sort.sort_column is not a reference"
+            " the audit reads",
+            "component cd-vWRq2EdpQyI concept_defs name 'qt_d779815a' is not"
+            " referenced by any concept_names or sort_column",
+            f"component {BQCA_KPI_TOTAL} metrics concept_names [] != manifest"
+            " metric IDs ['qt_d779815a']",
+        ],
+        id="unread_reference_path_under_component_property",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={"chart_tokens_by_agent": {"reverse_sort_order": "true"}},
+        ),
+        [
+            "component chart_tokens_by_agent (cd-kctXIOqrPyQ)"
+            " reverse_sort_order True != manifest reverseSortOrder False"
+        ],
+        id="reverse_sort_order_true_when_manifest_false",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={"chart_tokens_by_agent": {"reverse_sort_order": "1"}},
+        ),
+        [
+            "component chart_tokens_by_agent (cd-kctXIOqrPyQ)"
+            " reverse_sort_order ['1'] is not a single true or false"
+        ],
+        id="reverse_sort_order_invalid_value",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "chart_tokens_by_agent": {
+                    "reverse_sort_order": ["false", "true"]
+                }
+            },
+        ),
+        [
+            "component chart_tokens_by_agent (cd-kctXIOqrPyQ)"
+            " reverse_sort_order ['false', 'true'] is not a single true or"
+            " false"
+        ],
+        id="reverse_sort_order_repeated",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "chart_tokens_over_time": {
+                    "sort": [],
+                    "extra_property_lines": [
+                        'sort { sort_dir: ASC sort_column: "qt_e7eb0560"'
+                        " reverse_sort_order: true }"
+                    ],
+                }
+            },
+        ),
+        [
+            f"component {BQCA_OVER_TIME} sort_column [('sort', [('sort_dir',"
+            " 'ASC'), ('sort_column', 'qt_e7eb0560'), ('reverse_sort_order',"
+            " 'true')])] != manifest sortFieldId ['qt_e7eb0560']"
+        ],
+        id="sort_unexpected_field_or_reverse_sort_order",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "chart_tokens_over_time": {
+                    "sort": [],
+                    "extra_property_lines": [
+                        'sort { sort_dir: ASC sort_column: "qt_e7eb0560"'
+                        ' sort_column: "qt_af86847d" }'
+                    ],
+                }
+            },
+        ),
+        [
+            f"component {BQCA_OVER_TIME} sort_column [('sort', [('sort_dir',"
+            " 'ASC'), ('sort_column', 'qt_e7eb0560'), ('sort_column',"
+            " 'qt_af86847d')])] != manifest sortFieldId ['qt_e7eb0560']"
+        ],
+        id="sort_duplicate_field",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "chart_tokens_over_time": {
+                    "sort": [],
+                    "extra_property_lines": [
+                        "sort { sort_dir: ASC sort_dir: DESC sort_column:"
+                        ' "qt_e7eb0560" }'
+                    ],
+                }
+            },
+        ),
+        [
+            f"component {BQCA_OVER_TIME} sort_dir [('sort', [('sort_dir',"
+            " 'ASC'), ('sort_dir', 'DESC'), ('sort_column', 'qt_e7eb0560')])]"
+            " != manifest sortDir ['ASC']"
+        ],
+        id="sort_duplicate_dir",
+    ),
+    pytest.param(
+        lambda m: _render_bqca_live_report(
+            m,
+            overrides={
+                "kpi_total_tokens": {
+                    "extra_property_lines": ['sort: "ignored"']
+                }
+            },
+        ),
+        [
+            f"component {BQCA_KPI_TOTAL} sort_column [('sort', 'ignored')] !="
+            " manifest sortFieldId []"
+        ],
+        id="sort_scalar_on_scorecard",
     ),
 ]
 
@@ -3500,6 +3942,52 @@ def test_live_report_textproto_audit_accepts_the_synced_report(
       == 0
   )
   assert f"ok: live report validated ({fixed})" in capsys.readouterr().out
+
+  # `t0.`-prefixed references (`concept_names: "t0.qt_..."` and
+  # `sort_column: "t0.qt_..."`) are normalized to their `qt_` IDs and accepted.
+  text_t0 = _render_bqca_live_report(manifest, prefix_references="t0.")
+  assert text_t0.count('concept_names: "t0.qt_') == 23 + 42
+  assert text_t0.count('sort_column: "t0.qt_') == 13
+  fixed_t0 = tmp_path / "fixed_t0.txtpb"
+  fixed_t0.write_text(text_t0, encoding="utf-8")
+  assert validator.validate_live_report_textproto(fixed_t0) == []
+  assert (
+      validator.main(
+          ["--profile", "bqca", "--live-report-textproto", str(fixed_t0)]
+      )
+      == 0
+  )
+  assert f"ok: live report validated ({fixed_t0})" in capsys.readouterr().out
+
+  # A component whose manifest `reverseSortOrder` is True requires
+  # `reverse_sort_order: true` in the live report and rejects `false`.
+  manifest_rev = json.loads(json.dumps(manifest))
+  for comp in _bqca_page_components(manifest_rev):
+    if comp["id"] == "chart_tokens_by_agent":
+      comp["spec"]["barChart"]["fields"]["primaryAxis"][
+          "reverseSortOrder"
+      ] = True
+  rev_true = tmp_path / "rev_true.txtpb"
+  rev_true.write_text(
+      _render_bqca_live_report(
+          manifest_rev,
+          overrides={"chart_tokens_by_agent": {"reverse_sort_order": "true"}},
+      ),
+      encoding="utf-8",
+  )
+  assert (
+      validator.validate_live_report_textproto(
+          rev_true, manifest_override=manifest_rev
+      )
+      == []
+  )
+  assert validator.validate_live_report_textproto(
+      fixed, manifest_override=manifest_rev
+  ) == [
+      f"live report {fixed}: component chart_tokens_by_agent (cd-kctXIOqrPyQ)"
+      " reverse_sort_order False != manifest reverseSortOrder True"
+  ]
+
   with pytest.raises(SystemExit) as adk_only:
     validator.main(["--profile", "adk", "--live-report-textproto", str(fixed)])
   assert adk_only.value.code == 2
@@ -3730,6 +4218,12 @@ def test_live_report_textproto_audit_on_a_sanitized_live_dump(capsys):
 
   # The twin has the same fields in the same order; only the concept names
   # and IDs, the references to them, and the report-level data source differ.
+  for fixture in (BQCA_LIVE_DUMP_FIXTURE, BQCA_LIVE_DUMP_REMAPPED_FIXTURE):
+    assert (
+        fixture.read_text(encoding="utf-8").count("reverse_sort_order: false")
+        == 10
+    )
+
   def leaves(message, path=()):
     for name, value in message:
       if isinstance(value, list):
@@ -3862,6 +4356,10 @@ def test_bqca_deep_link_page_is_published_with_the_site():
   assert "2026-10-09" in note
   assert "Dedicated 7-page tool-free BQCA Looker Studio template" in note
   assert '<details class="advanced-bqca-options">' in note
+  assert 'id="bqca-column-id-note"' in note
+  assert BQCA_LIVE_SYNC_ISSUE in note
+  assert "legacy generic column IDs" in note
+  assert "re-create any report created" in note
   assert BQCA_REPORT_ID in note
   assert "dashboards/looker_studio/sql/bqca_events_v1.sql.tmpl" in note
   assert "--profile bqca --custom-sql-out" in note

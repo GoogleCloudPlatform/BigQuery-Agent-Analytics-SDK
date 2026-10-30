@@ -113,7 +113,11 @@ live_template_verification:
       - >-
         Check that tools/validate_contracts.py --live-report-textproto passes
         on a new dump of the live template, then set a new verified_date, set
-        both verified digests to the pinned ones, and remove pending_live_sync.
+        both verified digests to the pinned ones, remove the #559 known-issue
+        notes from README.md, USER_MANUAL.md,
+        docs/guides/bqca-prompt-response-logging-manual.md, and
+        #bqca-column-id-note in docs/index.html (re-running
+        tools/render_web_config.py), and remove pending_live_sync.
   method:
     - data_studio_web_service_publish_datasource
     - data_studio_web_service_get_block_datasource

@@ -8,9 +8,9 @@
 # reads are kept, in their original order: the report-level `datasource_id`,
 # the `ds0` data source alias and, for each of the 34 components, its
 # `component_id` and `datasource_id`, its dataset, dimension, metric and sort
-# references, and each concept's `id`, `name`, source field and aggregation.
-# The `key` of each `labeled_concepts` entry is kept too, although the audit
-# does not read it. Every other field of the dump is dropped. One value is
+# references (including each `labeled_concepts` `key` and `reverse_sort_order`),
+# and each concept's `id`, `name`, source field and aggregation. Every other
+# field of the dump is dropped. One value is
 # replaced: the report-level `datasource_id` named the source report's retired
 # data source, which this repository does not name, and reads
 # 00000000-0000-4000-8000-000000000000 here.
@@ -142,6 +142,7 @@ report_config {
               sort_dir: DESC
               sort_column: "met"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -192,6 +193,7 @@ report_config {
               sort_dir: DESC
               sort_column: "m0"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -339,6 +341,7 @@ report_config {
               sort_dir: DESC
               sort_column: "m0"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -537,6 +540,7 @@ report_config {
               sort_dir: DESC
               sort_column: "m0"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -587,6 +591,7 @@ report_config {
               sort_dir: DESC
               sort_column: "m0"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -765,6 +770,7 @@ report_config {
               sort_dir: DESC
               sort_column: "m0"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -815,6 +821,7 @@ report_config {
               sort_dir: DESC
               sort_column: "m0"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -1024,6 +1031,7 @@ report_config {
               sort_dir: DESC
               sort_column: "m0"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -1076,6 +1084,7 @@ report_config {
               sort_dir: ASC
               sort_column: "dim"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -1274,6 +1283,7 @@ report_config {
               sort_dir: DESC
               sort_column: "m0"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {

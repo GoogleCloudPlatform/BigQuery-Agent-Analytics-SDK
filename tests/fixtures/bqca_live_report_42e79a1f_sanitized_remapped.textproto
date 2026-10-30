@@ -4,7 +4,9 @@
 # dashboards/looker_studio/spec/bqca_chart_manifest.yaml (as its `name`, in its
 # `id`, and in every `concept_names` and `sort_column` that refers to it), and
 # the report-level `datasource_id` is 70e5ac1e-65bb-4c89-a9df-fa9990cb6029.
-# Nothing else differs. This file is not a dump of a synced template.
+# Nothing else in bqca_live_report_42e79a1f_sanitized.textproto (including each
+# `labeled_concepts` `key` and `reverse_sort_order`) differs. This file is not a
+# dump of a synced template.
 #
 # tests/test_looker_studio_dashboard.py pins that the audit reports no errors on
 # it.
@@ -132,6 +134,7 @@ report_config {
               sort_dir: DESC
               sort_column: "qt_0a6310c4"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -182,6 +185,7 @@ report_config {
               sort_dir: DESC
               sort_column: "qt_cac76a3a"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -329,6 +333,7 @@ report_config {
               sort_dir: DESC
               sort_column: "qt_dd7d7d10"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -527,6 +532,7 @@ report_config {
               sort_dir: DESC
               sort_column: "qt_79ac4183"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -577,6 +583,7 @@ report_config {
               sort_dir: DESC
               sort_column: "qt_891b1a3f"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -755,6 +762,7 @@ report_config {
               sort_dir: DESC
               sort_column: "qt_f8bf601a"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -805,6 +813,7 @@ report_config {
               sort_dir: DESC
               sort_column: "qt_63d8de68"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -1014,6 +1023,7 @@ report_config {
               sort_dir: DESC
               sort_column: "qt_3fcfd7ea"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -1066,6 +1076,7 @@ report_config {
               sort_dir: ASC
               sort_column: "qt_e7eb0560"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
@@ -1264,6 +1275,7 @@ report_config {
               sort_dir: DESC
               sort_column: "qt_e056d0a6"
             }
+            reverse_sort_order: false
           }
         }
         concept_defs {
