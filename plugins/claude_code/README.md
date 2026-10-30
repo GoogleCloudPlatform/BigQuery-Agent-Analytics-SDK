@@ -10,12 +10,12 @@ plugins/claude_code/
 ├── .claude-plugin/
 │   └── plugin.json          # native Claude Code manifest
 ├── hooks/
-│   ├── common.sh            # shared hook entry (PYTHONPATH + python -m)
+│   ├── common.sh            # shared hook entry (PYTHONPATH + python -c runner)
 │   └── <hook>.sh            # one per Claude Code hook
 ├── commands/
 │   └── bqaa-setup.md        # /bqaa-setup slash command
 ├── scripts/
-│   └── run_setup_check.sh   # /bqaa-setup wrapper (PYTHONPATH + python -m)
+│   └── run_setup_check.sh   # /bqaa-setup wrapper (PYTHONPATH + python -c runner)
 ├── MARKETPLACE.md           # submission checklist + IAM + verification
 └── vendor/                  # generated at build time (git-ignored)
     ├── bigquery_agent_analytics_tracing/
@@ -39,13 +39,24 @@ so the wheel and the plugin always ship the same code.
 3. `common.sh` prepends `${CLAUDE_PLUGIN_ROOT}/vendor` to `PYTHONPATH`,
    dropping empty entries, and runs
    `bigquery_agent_analytics_tracing.claude_code <HookName>` like
-   `python -m` does, but without the working directory (usually the
-   session's repository) on `sys.path`, so nothing is imported from it.
+   `python -m` does, but without adding the working directory (usually
+   the session's repository) to `sys.path`. Non-empty `PYTHONPATH`
+   entries you set are kept as given, so `.` or another relative entry
+   still resolves against the working directory and can import code
+   from it.
 4. The hook process writes one spool envelope and spawns the drainer
    subprocess the same way. The drainer inherits the same `PYTHONPATH`
    via `os.environ.copy()` so the vendored package resolves on the
    spawned process too — no separate wheel install required on
    `BQAA_PYTHON`.
+
+The marketplace catalog installs the copy committed under
+[`plugins/claude_code_dist/`](../claude_code_dist/), which changes only
+when a release is synced, so an installed plugin may predate the
+behavior described here and in
+[`commands/bqaa-setup.md`](commands/bqaa-setup.md). If the installed
+`hooks/common.sh` still runs `python -m`, it predates the launcher
+above and puts the working directory first on `sys.path`.
 
 ## Required runtime deps on `BQAA_PYTHON`
 
