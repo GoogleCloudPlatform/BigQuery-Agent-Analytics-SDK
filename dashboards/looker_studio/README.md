@@ -66,6 +66,7 @@ billing project is supported as an optional advanced setting.
 | `tools/render_web_config.py` | Renders `docs/report-config.mjs` from the bindings and derives `docs/bqca/index.html` from `docs/index.html` (`--profile adk\|bqca\|all`, `--check`) |
 | `tools/validate_contracts.py` | CI assertions over the ADK and BQCA product contracts, chart manifests, and report template bindings (`--profile adk\|bqca\|all`) |
 | `tools/gen_bqca_rename_map.py` | Lists the rename of the BQCA live template sync (#559): each concept's old name and its `qt_` ID, by page and component (`--csv`, `--md`) |
+| `tools/apply_bqca_rename_map.py` | Applies that rename to a dump taken before the sync and writes the dump's remapped twin, so the sync can be reviewed offline: it writes only after four checks pass, with mode 0600, and never inside the repository (`--map`, `--out`, `--force`, `--check`) |
 | `tools/finalize_live_sync.py` | Records a live template verification in `bindings/bqca_report_template.yaml` only after `validate_contracts.py --live-report-textproto` passes on a dump that names the live report, with a `--captured-from` attestation it records (`--check` to preview) |
 | `tools/validate_live_bqaa.py` | Read-only 37-query smoke test for a real BQAA dataset; writes only a sanitized local receipt |
 | `docs/index.html` | Client-only configurator for the public dashboard template, with an ADK Agents / BQCA Prompt & Response Logging surface toggle |

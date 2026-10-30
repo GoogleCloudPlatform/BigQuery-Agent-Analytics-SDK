@@ -20,7 +20,8 @@
 and only with positive evidence that the dump is one: a `--captured-from`
 attestation that names the report, and a dump that names the report in a
 field. `tools/gen_bqca_rename_map.py` lists the rename that the sync applies
-to the concepts of the live template.
+to the concepts of the live template. `tools/apply_bqca_rename_map.py` applies
+it to a dump of the live template, offline, and writes the remapped dump.
 
 The finalize tests run the tool from a copy of `dashboards/looker_studio`, so
 they never write to the repository. A successful write uses a dump that
@@ -29,13 +30,20 @@ a `report_id` field and the ATTESTATION. The checked-in sanitized cuts of the
 2026-10-29 dump name the report in no field, so neither they nor any
 reordering or audit-inert edit of them can be written; `--check` still
 previews with them.
+
+The apply tests remap the checked-in sanitized dump. Those that could write
+into a repository (the refusals and the failures) run the tool from a copy of
+`dashboards/looker_studio` too, and every output goes to `tmp_path`.
 """
 
 import collections
 import copy
 import csv
+import dataclasses
+import errno
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -1067,7 +1075,7 @@ def test_finalize_restores_the_binding_when_the_audit_fails_after_the_write(
   )
   # Both audits read the same private copy of the dump; the second ran on the
   # written binding, which is then restored.
-  ((audited, before_write), (audited_again, after_write)) = calls
+  (audited, before_write), (audited_again, after_write) = calls
   assert audited == audited_again and audited.resolve() != dump.resolve()
   assert (before_write, after_write) == (True, False)
   assert (tree / BINDING).read_bytes() == original
@@ -1614,3 +1622,1620 @@ def test_rename_map_rejects_concepts_and_references_it_cannot_map(
   assert error in result.stderr
   assert not out_csv.exists()
   assert not out_md.exists()
+
+
+APPLY_TOOL = DASHBOARD / "tools/apply_bqca_rename_map.py"
+
+
+def _load_apply(tree):
+  spec = importlib.util.spec_from_file_location(
+      "live_sync_apply", tree / "tools/apply_bqca_rename_map.py"
+  )
+  assert spec is not None and spec.loader is not None
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
+
+
+def _apply(*args):
+  return subprocess.run(
+      [sys.executable, str(APPLY_TOOL), *args],
+      capture_output=True,
+      text=True,
+      check=False,
+  )
+
+
+def _header_and_body(data):
+  """Split a dump's bytes into its leading `#` comment lines and the rest."""
+  lines = data.splitlines(keepends=True)
+  count = 0
+  while count < len(lines) and lines[count].startswith(b"#"):
+    count += 1
+  return b"".join(lines[:count]), b"".join(lines[count:])
+
+
+def _remapped_sanitized_dump():
+  """Return the bytes that the tool writes for the sanitized dump.
+
+  The tool keeps every comment, and the sanitized dump and its remapped twin
+  have different ones. So the result is the sanitized dump's header and, from
+  its first line that is not a comment on, the twin.
+  """
+  header = _header_and_body(GENERIC_DUMP.read_bytes())[0]
+  return header + _header_and_body(REMAPPED_DUMP.read_bytes())[1]
+
+
+@pytest.fixture
+def apply_tree(tmp_path):
+  """A copy of dashboards/looker_studio, as `repo/dashboards/looker_studio`.
+
+  The tool sees the copy as its repository, so a write that it should refuse
+  lands in `tmp_path`, never in this repository.
+  """
+  copy_root = tmp_path / "repo/dashboards/looker_studio"
+  shutil.copytree(
+      DASHBOARD, copy_root, ignore=shutil.ignore_patterns("__pycache__")
+  )
+  return copy_root
+
+
+@pytest.fixture
+def work(tmp_path):
+  """An empty directory outside any repository, for dumps and outputs."""
+  path = tmp_path / "work"
+  path.mkdir()
+  return path
+
+
+def test_apply_renames_the_sanitized_dump_into_its_remapped_twin(tmp_path):
+  out = tmp_path / "remapped.textproto"
+
+  result = _apply("--dump", str(GENERIC_DUMP), "--out", str(out))
+
+  assert result.returncode == 0, result.stdout + result.stderr
+  assert result.stderr == ""
+  written = out.read_bytes()
+  assert _mode(out) == 0o600
+  # The comments are kept, so the output has the sanitized dump's, not the
+  # twin's. From its first line that is not a comment on, it is the twin, byte
+  # for byte.
+  assert written != REMAPPED_DUMP.read_bytes()
+  header, body = _header_and_body(written)
+  assert header == _header_and_body(GENERIC_DUMP.read_bytes())[0]
+  assert body == _header_and_body(REMAPPED_DUMP.read_bytes())[1]
+  assert written == _remapped_sanitized_dump()
+  # 209 lines change, one literal each: the 65 concept names and ids, the 65
+  # `concept_names` (23 dimensions, 42 metrics), the 13 `sort_column`s and the
+  # report-level `datasource_id`.
+  before = GENERIC_DUMP.read_text(encoding="utf-8").splitlines()
+  after = written.decode("utf-8").splitlines()
+  assert len(after) == len(before)
+  assert collections.Counter(
+      new.split(":")[0].strip() for old, new in zip(before, after) if old != new
+  ) == {
+      "name": 65,
+      "id": 65,
+      "concept_names": 65,
+      "sort_column": 13,
+      "datasource_id": 1,
+  }
+  generic = GENERIC_DUMP.read_bytes()
+  summary = result.stdout.splitlines()
+  assert summary[:-1] == [
+      f"snapshot of {GENERIC_DUMP}: {len(generic)} bytes, sha256"
+      f" {hashlib.sha256(generic).hexdigest()}",
+      "map: 65 concepts in 34 components, from the dump and"
+      " spec/bqca_chart_manifest.yaml",
+      "edits: 209 scalars in 209 lines: name 65, id 65, dimension 23, metric"
+      " 42, sort 13, datasource_id 1",
+      f"report datasource_id: '{STALE_DATASOURCE_ID}' -> '{DATASOURCE_ID}'",
+      "verified: only the planned scalars differ, and the remapped dump is the"
+      " dump with the map applied",
+      "audit: tools/validate_contracts.py --profile bqca"
+      " --live-report-textproto exits 0 on the remapped dump, which"
+      " gen_bqca_rename_map.py accepts as its twin",
+      f"written: {out} ({len(written)} bytes, sha256"
+      f" {hashlib.sha256(written).hexdigest()}, mode 600)",
+  ]
+  # It says what the result is not: a dump of a synced template.
+  assert "is not a dump of a synced template" in summary[-1]
+  assert "tools/finalize_live_sync.py" in summary[-1]
+
+  # The same dump gives the same bytes, and a file is replaced only when asked.
+  again = _apply("--dump", str(GENERIC_DUMP), "--out", str(out))
+  assert again.returncode == 1
+  assert f"{out} exists; --force replaces it" in again.stderr
+  assert out.read_bytes() == written
+  out.chmod(0o644)
+  forced = _apply("--dump", str(GENERIC_DUMP), "--out", str(out), "--force")
+  assert forced.returncode == 0, forced.stdout + forced.stderr
+  assert out.read_bytes() == written
+  assert _mode(out) == 0o600
+  assert [path.name for path in tmp_path.iterdir()] == ["remapped.textproto"]
+
+
+def test_apply_maps_a_dump_that_has_the_new_ids_to_itself(tmp_path):
+  out = tmp_path / "remapped.textproto"
+
+  result = _apply("--dump", str(REMAPPED_DUMP), "--out", str(out))
+
+  assert result.returncode == 0, result.stdout + result.stderr
+  assert out.read_bytes() == REMAPPED_DUMP.read_bytes()
+  assert "edits: none; the dump already carries every new ID" in result.stdout
+  assert f"report datasource_id: already '{DATASOURCE_ID}'" in result.stdout
+
+
+def test_apply_accepts_the_map_that_gen_bqca_rename_map_writes(tmp_path):
+  map_csv = tmp_path / "rename-map.csv"
+  assert _rename_map("--csv", str(map_csv)).returncode == 0
+  plain, mapped = tmp_path / "plain.textproto", tmp_path / "mapped.textproto"
+  assert (
+      _apply("--dump", str(GENERIC_DUMP), "--out", str(plain)).returncode == 0
+  )
+
+  result = _apply(
+      "--dump", str(GENERIC_DUMP), "--map", str(map_csv), "--out", str(mapped)
+  )
+
+  assert result.returncode == 0, result.stdout + result.stderr
+  assert mapped.read_bytes() == plain.read_bytes()
+  assert f"; {map_csv} matches it exactly" in result.stdout
+
+
+@pytest.mark.parametrize("target", ["none", "new", "existing"])
+def test_apply_check_runs_every_check_and_writes_nothing(tmp_path, target):
+  out = tmp_path / "remapped.textproto"
+  args = ["--dump", str(GENERIC_DUMP), "--check"]
+  if target != "none":
+    args += ["--out", str(out)]
+  if target == "existing":
+    out.write_bytes(b"earlier")
+
+  result = _apply(*args)
+
+  assert result.returncode == 0, result.stdout + result.stderr
+  assert result.stderr == ""
+  lines = result.stdout.splitlines()
+  assert lines[2].startswith("edits: 209 scalars in 209 lines: ")
+  assert lines[4].startswith("verified: ")
+  assert lines[5].startswith("audit: ")
+  if target == "existing":
+    assert lines[6] == (
+        f"check: every check passed, but a write would refuse it: {out} exists;"
+        " --force replaces it; nothing written"
+    )
+    assert out.read_bytes() == b"earlier"
+    assert list(tmp_path.iterdir()) == [out]
+  else:
+    assert lines[6] == "check: every check passed; nothing written"
+    assert list(tmp_path.iterdir()) == []
+  assert "is not a dump of a synced template" in lines[7]
+
+
+@pytest.mark.parametrize("via", ["path", "dot-dot", "symlink"])
+def test_apply_refuses_an_out_inside_the_repository(
+    apply_tree, work, capsys, via
+):
+  apply = _load_apply(apply_tree)
+  repository = apply_tree.parent.parent
+  inside = repository / "report.textproto"
+  out = {
+      "path": inside,
+      "dot-dot": apply_tree / "../../report.textproto",
+      "symlink": work / "link.textproto",
+  }[via]
+  if via == "symlink":
+    out.symlink_to(inside)
+  before = _snapshot(repository)
+
+  code = apply.main(["--dump", str(GENERIC_DUMP), "--out", str(out), "--force"])
+
+  assert code == 1
+  assert "is inside this repository" in capsys.readouterr().err
+  assert not inside.exists()
+  assert _snapshot(repository) == before
+
+
+def _out_by_link(repository, work, via):
+  """Lay out a link by which an `--out` is, or seems to be, in the repository.
+
+  Returns the `--out`, the link of the repository that must survive the run,
+  and what that link leads to outside the repository.
+  """
+  outside = work / "outside.textproto"
+  if via == "directory-link-to-outside":
+    outside = work / "elsewhere"
+    outside.mkdir()
+    link = repository / "linked"
+    link.symlink_to(outside)
+    return link / "out.textproto", link, outside
+  if via != "link-to-missing-file":
+    outside.write_bytes(b"earlier")
+  if via == "outside-link-to-directory":
+    (repository / "sub").mkdir()
+    link = repository / "sub/leaked.textproto"
+    link.symlink_to(outside)
+    (work / "linked").symlink_to(repository / "sub")
+    return work / "linked/leaked.textproto", link, outside
+  link = repository / "leaked.textproto"
+  link.symlink_to(outside)
+  return link, link, outside
+
+
+@pytest.mark.parametrize("force", [False, True], ids=["plain", "force"])
+@pytest.mark.parametrize(
+    "via",
+    [
+        "link-to-file",
+        "link-to-missing-file",
+        "outside-link-to-directory",
+        "directory-link-to-outside",
+    ],
+)
+def test_apply_refuses_an_out_that_a_link_puts_in_the_repository(
+    apply_tree, work, capsys, via, force
+):
+  """A write replaces the entry `--out` and never writes through a link.
+
+  So an `--out` that is a link in the repository, or is in a directory that
+  leads there, would become a regular file in the repository, wherever the link
+  points. An `--out` whose path goes through a link in the repository is
+  refused too, wherever the link leads: it can be pointed elsewhere.
+  """
+  apply = _load_apply(apply_tree)
+  repository = apply_tree.parent.parent
+  out, link, target = _out_by_link(repository, work, via)
+  repository_before, work_before = _snapshot(repository), _snapshot(work)
+  args = ["--dump", str(GENERIC_DUMP), "--out", str(out)]
+
+  code = apply.main([*args, "--force"] if force else args)
+
+  assert code == 1
+  assert "is inside this repository" in capsys.readouterr().err
+  assert link.is_symlink() and Path(os.readlink(link)) == target
+  assert _snapshot(repository) == repository_before
+  assert _snapshot(work) == work_before
+
+
+@pytest.mark.parametrize("force", [False, True], ids=["plain", "force"])
+@pytest.mark.parametrize("via", ["same-path", "symlink", "hard-link"])
+def test_apply_refuses_an_out_that_is_the_dump(
+    apply_tree, work, capsys, via, force
+):
+  apply = _load_apply(apply_tree)
+  dump = work / "dump.textproto"
+  shutil.copyfile(GENERIC_DUMP, dump)
+  out = work / "out.textproto"
+  if via == "symlink":
+    out.symlink_to(dump)
+  elif via == "hard-link":
+    os.link(dump, out)
+  else:
+    out = dump
+  args = ["--dump", str(dump), "--out", str(out)] + (
+      ["--force"] if force else []
+  )
+
+  assert apply.main(args) == 1
+
+  assert f"{out} is the dump itself" in capsys.readouterr().err
+  assert dump.read_bytes() == GENERIC_DUMP.read_bytes()
+  assert sorted(path.name for path in work.iterdir()) == sorted(
+      {"dump.textproto", out.name}
+  )
+
+
+def test_apply_replaces_an_existing_out_only_with_force(
+    apply_tree, work, capsys
+):
+  apply = _load_apply(apply_tree)
+  out = work / "out.textproto"
+  out.write_bytes(b"earlier")
+  out.chmod(0o644)
+  args = ["--dump", str(GENERIC_DUMP), "--out", str(out)]
+
+  assert apply.main(args) == 1
+
+  assert f"{out} exists; --force replaces it" in capsys.readouterr().err
+  assert (out.read_bytes(), _mode(out)) == (b"earlier", 0o644)
+
+  assert apply.main([*args, "--force"]) == 0
+
+  assert out.read_bytes() == _remapped_sanitized_dump()
+  assert _mode(out) == 0o600
+  assert [path.name for path in work.iterdir()] == ["out.textproto"]
+
+
+def test_apply_refuses_an_out_it_cannot_create(apply_tree, work, capsys):
+  apply = _load_apply(apply_tree)
+  (work / "directory").mkdir()
+  missing = work / "missing/out.textproto"
+
+  for out, error in [
+      (missing, f"the directory of {missing} does not exist"),
+      (work / "directory", f"{work / 'directory'} is a directory"),
+  ]:
+    code = apply.main(
+        ["--dump", str(GENERIC_DUMP), "--out", str(out), "--force"]
+    )
+
+    assert code == 1
+    assert error in capsys.readouterr().err
+  assert [path.name for path in work.iterdir()] == ["directory"]
+
+
+def test_apply_refuses_an_out_below_a_missing_directory_and_dot_dot(work):
+  # `missing/..` folds into `work`, which exists, but a write opens the path as
+  # it is spelled, and fails. So the write and the check must agree.
+  out = work / "missing/../out.textproto"
+  error = f"the directory of {out} does not exist"
+  args = ["--dump", str(GENERIC_DUMP), "--out", str(out)]
+
+  written = _apply(*args)
+  checked = _apply(*args, "--check")
+
+  assert written.returncode == 1
+  assert error in written.stderr
+  assert checked.returncode == 0, checked.stdout + checked.stderr
+  assert (
+      f"check: every check passed, but a write would refuse it: {error};"
+      " nothing written"
+  ) in checked.stdout
+  assert list(work.iterdir()) == []
+
+
+@pytest.mark.parametrize("force", [False, True], ids=["plain", "force"])
+def test_apply_leaves_nothing_behind_when_the_write_fails(
+    apply_tree, work, capsys, monkeypatch, force
+):
+  apply = _load_apply(apply_tree)
+  monkeypatch.setattr(apply, "_audit", lambda path: (0, ""))
+  out = work / "out.textproto"
+  if force:
+    out.write_bytes(b"earlier")
+
+  def fail(*args, **kwargs):
+    raise OSError(errno.EIO, "the disk failed")
+
+  monkeypatch.setattr(apply.os, "replace" if force else "link", fail)
+  args = ["--dump", str(GENERIC_DUMP), "--out", str(out)]
+
+  code = apply.main([*args, "--force"] if force else args)
+
+  assert code == 1
+  assert f"cannot write {out}: the disk failed" in capsys.readouterr().err
+  assert [path.name for path in work.iterdir()] == (
+      ["out.textproto"] if force else []
+  )
+  if force:
+    assert out.read_bytes() == b"earlier"
+
+
+@pytest.mark.parametrize(
+    "args, error",
+    [
+        ([], "the following arguments are required: --dump"),
+        (
+            ["--dump", "dump.textproto"],
+            "a write needs --out; --check runs the checks without it",
+        ),
+        (
+            ["--dump", "dump.textproto", "--check", "--force"],
+            "--force replaces an existing --out, which is not given",
+        ),
+    ],
+    ids=["no-dump", "no-out-or-check", "force-without-out"],
+)
+def test_apply_exits_2_on_bad_arguments(apply_tree, capsys, args, error):
+  apply = _load_apply(apply_tree)
+
+  with pytest.raises(SystemExit) as exit_info:
+    apply.main(args)
+
+  assert exit_info.value.code == 2
+  assert error in capsys.readouterr().err
+
+
+@pytest.fixture(scope="module")
+def rename_map_text(tmp_path_factory):
+  """Return the rename map of the sanitized dump, as the generator writes it."""
+  path = tmp_path_factory.mktemp("rename-map") / "rename-map.csv"
+  result = _rename_map("--csv", str(path))
+  assert result.returncode == 0, result.stderr
+  return path.read_text(encoding="utf-8")
+
+
+def _csv_rows(text):
+  return list(csv.reader(io.StringIO(text, newline="")))
+
+
+def _csv_text(rows):
+  out = io.StringIO()
+  csv.writer(out, lineterminator="\n").writerows(rows)
+  return out.getvalue()
+
+
+def _with_cell(rows, index, column, value):
+  edited = [list(row) for row in rows]
+  edited[index][RENAME_MAP_HEADER.index(column)] = value
+  return edited
+
+
+@pytest.mark.parametrize(
+    "mutate, error",
+    [
+        (
+            lambda rows: _with_cell(rows, 1, "new_qt_id", "qt_deadbeef"),
+            "new_qt_id is 'qt_deadbeef', not '",
+        ),
+        (
+            lambda rows: _with_cell(rows, 7, "old_name", "met2"),
+            "old_name is 'met2', not '",
+        ),
+        (
+            lambda rows: _with_cell(rows, 3, "display_name", "Another name"),
+            "display_name is 'Another name', not '",
+        ),
+        (
+            lambda rows: rows[:-1],
+            "the map has 64 rows, but the dump and the manifest give 65",
+        ),
+        (
+            lambda rows: [*rows, rows[-1]],
+            "the map has 66 rows, but the dump and the manifest give 65",
+        ),
+        (
+            lambda rows: rows[:1],
+            "the map has 0 rows, but the dump and the manifest give 65",
+        ),
+        (
+            lambda rows: [rows[0], rows[2], rows[1], *rows[3:]],
+            "map line 2 (",
+        ),
+        (
+            lambda rows: [["pages", *RENAME_MAP_HEADER[1:]], *rows[1:]],
+            "the map's columns are ['pages', ",
+        ),
+        (lambda rows: [], "the map is empty"),
+        (
+            lambda rows: [*rows[:3], [*rows[3], "extra"], *rows[4:]],
+            "map line 4 does not have 12 cells",
+        ),
+        (
+            lambda rows: [*rows[:3], rows[3][:-1], *rows[4:]],
+            "map line 4 does not have 12 cells",
+        ),
+    ],
+    ids=[
+        "another-new-id",
+        "another-old-name",
+        "another-display-name",
+        "missing-row",
+        "extra-row",
+        "header-only",
+        "swapped-rows",
+        "renamed-column",
+        "empty",
+        "extra-cell",
+        "missing-cell",
+    ],
+)
+def test_apply_rejects_a_map_that_differs_from_the_derived_one(
+    apply_tree, work, capsys, rename_map_text, mutate, error
+):
+  apply = _load_apply(apply_tree)
+  map_path, out = work / "rename-map.csv", work / "out.textproto"
+  map_path.write_text(
+      _csv_text(mutate(_csv_rows(rename_map_text))),
+      encoding="utf-8",
+      newline="",
+  )
+
+  code = apply.main(
+      ["--dump", str(GENERIC_DUMP), "--map", str(map_path), "--out", str(out)]
+  )
+
+  assert code == 1
+  stderr = capsys.readouterr().err
+  assert f"ERROR: {map_path}: " in stderr
+  assert error in stderr
+  assert stderr.endswith("not remapped: nothing written\n")
+  assert not out.exists()
+
+
+@pytest.mark.parametrize(
+    "content", [None, b"page,\xff\n"], ids=["missing", "not-utf-8"]
+)
+def test_apply_rejects_a_map_it_cannot_read(apply_tree, work, capsys, content):
+  apply = _load_apply(apply_tree)
+  map_path, out = work / "rename-map.csv", work / "out.textproto"
+  if content is not None:
+    map_path.write_bytes(content)
+
+  code = apply.main(
+      ["--dump", str(GENERIC_DUMP), "--map", str(map_path), "--out", str(out)]
+  )
+
+  assert code == 1
+  assert f"ERROR: cannot read the map {map_path}: " in capsys.readouterr().err
+  assert not out.exists()
+
+
+def _replaced(old, new):
+  """Return a function that replaces the first `old` of a dump with `new`."""
+
+  def replace(text):
+    assert old in text
+    return text.replace(old, new, 1)
+
+  return replace
+
+
+def _with_component_text(component):
+  """Return a function that adds `component` before a dump's first one."""
+
+  def insert(text):
+    anchor = "      component_config {\n"
+    assert anchor in text
+    return text.replace(anchor, component + anchor, 1)
+
+  return insert
+
+
+def _without_first_component(text):
+  closer = "\n      }\n"
+  start = text.index("      component_config {\n")
+  return text[:start] + text[text.index(closer, start) + len(closer) :]
+
+
+_REPORT_DATASOURCE_ID = f'    datasource_id: "{STALE_DATASOURCE_ID}"\n'
+_NOT_ONE_QUOTED_STRING = (
+    "name 'met' is not one quoted string, so its literal cannot be replaced in"
+    " place"
+)
+
+
+@pytest.mark.parametrize(
+    "mutate, error",
+    [
+        (
+            _replaced('concept_names: "met"\n', 'concept_names: "ghost"\n'),
+            "concept_names 'ghost' at"
+            " component_property.metrics.labeled_concepts.value.concept_names"
+            " names none of its concepts",
+        ),
+        (
+            _with_component_text(_EXTRA_COMPONENT.replace("NAME", "met")),
+            _EXTRA_IN_DUMP,
+        ),
+        (
+            _with_component_text(_REFERENCE_ONLY_COMPONENT),
+            _REFERENCE_ONLY_IN_DUMP,
+        ),
+        (
+            _with_component_text(_EXTRA_COMPONENT.replace("NAME", "met") * 2),
+            "component cd-extra appears twice",
+        ),
+        (_without_first_component, "of the manifest is not in the dump"),
+        (
+            _replaced('id: "t0.met"', 'id: "t1.met"'),
+            "has the id 't1.met', not 't0.met'",
+        ),
+        (
+            _replaced('name: "met"', 'name: "m" "et"'),
+            _NOT_ONE_QUOTED_STRING,
+        ),
+        (_replaced('name: "met"', "name: met"), _NOT_ONE_QUOTED_STRING),
+        (
+            _replaced(
+                "            dimensions {\n            }\n",
+                "            dimensions {\n            }\n"
+                '            filters {\n              concept_names: "met"\n'
+                "            }\n",
+            ),
+            "concept_names 'met' at component_property.filters.concept_names,"
+            " which the live audit does not read",
+        ),
+        (
+            _replaced(
+                "        concept_defs {\n",
+                "        component_config {\n        }\n        concept_defs {\n",
+            ),
+            "a component_config is nested in a component_config",
+        ),
+        (
+            _replaced(
+                "        concept_defs {\n",
+                "        property_config {\n        }\n        concept_defs {\n",
+            ),
+            "has more than one property_config or component_property",
+        ),
+        (
+            _replaced(_REPORT_DATASOURCE_ID, ""),
+            "report_config.report has 0 datasource_id fields, not one",
+        ),
+        (
+            _replaced(_REPORT_DATASOURCE_ID, _REPORT_DATASOURCE_ID * 2),
+            "report_config.report has 2 datasource_id fields, not one",
+        ),
+        (
+            _replaced(_REPORT_DATASOURCE_ID, "    datasource_id: unquoted\n"),
+            "the report datasource_id 'unquoted' is not one quoted string",
+        ),
+        (
+            lambda text: text + "}\n",
+            "cannot read the dump: expected a field name, got '}'",
+        ),
+        (
+            lambda text: text.rstrip("\n").removesuffix("}"),
+            "cannot read the dump: unterminated message: missing '}'",
+        ),
+    ],
+    ids=[
+        "dangling-reference",
+        "extra-component",
+        "reference-only-component",
+        "repeated-component",
+        "missing-component",
+        "id-is-not-t0-name",
+        "name-in-two-literals",
+        "name-is-not-quoted",
+        "reference-at-a-path-the-audit-does-not-read",
+        "nested-component-config",
+        "two-property-configs",
+        "no-report-datasource-id",
+        "two-report-datasource-ids",
+        "unquoted-report-datasource-id",
+        "closing-brace-too-many",
+        "closing-brace-missing",
+    ],
+)
+def test_apply_refuses_a_dump_it_cannot_remap_one_to_one(
+    apply_tree, work, capsys, mutate, error
+):
+  apply = _load_apply(apply_tree)
+  dump, out = work / "dump.textproto", work / "out.textproto"
+  dump.write_text(
+      mutate(GENERIC_DUMP.read_text(encoding="utf-8")), encoding="utf-8"
+  )
+
+  code = apply.main(["--dump", str(dump), "--out", str(out)])
+
+  assert code == 1
+  stderr = capsys.readouterr().err
+  assert "ERROR: " in stderr
+  assert error in stderr
+  assert stderr.endswith("not remapped: nothing written\n")
+  assert [path.name for path in work.iterdir()] == ["dump.textproto"]
+
+
+@pytest.mark.parametrize("target", ["none", "new"])
+def test_apply_check_rejects_what_a_write_rejects(
+    apply_tree, work, capsys, target
+):
+  apply = _load_apply(apply_tree)
+  dump = work / "dump.textproto"
+  dump.write_text(
+      _replaced('concept_names: "met"\n', 'concept_names: "ghost"\n')(
+          GENERIC_DUMP.read_text(encoding="utf-8")
+      ),
+      encoding="utf-8",
+  )
+  out = work / "out.textproto"
+  args = ["--dump", str(dump), "--check"]
+  if target == "new":
+    args += ["--out", str(out)]
+
+  code = apply.main(args)
+
+  assert code == 1
+  stderr = capsys.readouterr().err
+  assert "concept_names 'ghost' at" in stderr
+  assert stderr.endswith("not remapped: nothing written\n")
+  assert not out.exists()
+
+
+@pytest.mark.parametrize(
+    "content", [None, b"report_config {\n\xff}\n"], ids=["missing", "not-utf-8"]
+)
+def test_apply_rejects_a_dump_it_cannot_read(apply_tree, work, capsys, content):
+  apply = _load_apply(apply_tree)
+  dump, out = work / "dump.textproto", work / "out.textproto"
+  if content is not None:
+    dump.write_bytes(content)
+
+  code = apply.main(["--dump", str(dump), "--out", str(out)])
+
+  assert code == 1
+  stderr = capsys.readouterr().err
+  if content is None:
+    assert f"not remapped: cannot read {dump}: " in stderr
+  else:
+    assert f"ERROR: {dump} is not UTF-8 text: " in stderr
+  assert not out.exists()
+
+
+# What the tool must keep as it is: a byte order mark, a comment and a field
+# of no meaning to the audit, with text outside the Basic Multilingual Plane,
+# a line of white space, and CRLF line ends.
+_NOISE = (
+    "\ufeff# caf\u00e9 \U0001f600 stays as it is\n"
+    'capture_note: "caf\\u00e9 \U0001f600"; # and so does this\n'
+    "\t\n"
+    "\n"
+)
+
+
+def _noisy(text):
+  return (_NOISE + text).replace("\n", "\r\n")
+
+
+def test_apply_keeps_every_byte_that_it_does_not_edit(apply_tree, work):
+  apply = _load_apply(apply_tree)
+  generic = GENERIC_DUMP.read_text(encoding="utf-8")
+  # The first name is single-quoted, and the quotes stay. Another is written
+  # with an escape, and a plain literal replaces it.
+  quoted = generic.replace('name: "met"', "name: 'met'", 1)
+  escaped = quoted.replace('name: "dim"', 'name: "d\\x69m"', 1)
+  assert "name: 'met'" in escaped and escaped.count("\\x69") == 1
+  noisy = _noisy(escaped).encode("utf-8")
+  dump, out = work / "dump.textproto", work / "out.textproto"
+  dump.write_bytes(noisy)
+
+  code = apply.main(["--dump", str(dump), "--out", str(out)])
+
+  assert code == 0
+  remapped = _remapped_sanitized_dump().decode("utf-8")
+  first = re.search(r'name: "(qt_[a-z0-9]+)"', remapped)
+  assert first is not None
+  expected = _noisy(
+      remapped.replace(first.group(), f"name: '{first.group(1)}'", 1)
+  ).encode("utf-8")
+  written = out.read_bytes()
+  assert written == expected
+  assert written.startswith("\ufeff# caf\u00e9 \U0001f600".encode("utf-8"))
+  assert written.count(b"\n") == written.count(b"\r\n")
+  assert dump.read_bytes() == noisy
+
+
+def test_apply_refuses_a_remapped_dump_that_the_audit_refuses(
+    apply_tree, work, capsys
+):
+  """The tool does not edit the data source of the alias, so the audit does."""
+  apply = _load_apply(apply_tree)
+  alias = f'        datasource_id: "{DATASOURCE_ID}"\n        alias: "ds0"\n'
+  dump, out = work / "dump.textproto", work / "out.textproto"
+  dump.write_text(
+      _replaced(alias, alias.replace(DATASOURCE_ID, STALE_DATASOURCE_ID))(
+          GENERIC_DUMP.read_text(encoding="utf-8")
+      ),
+      encoding="utf-8",
+  )
+
+  code = apply.main(["--dump", str(dump), "--out", str(out)])
+
+  assert code == 1
+  stderr = capsys.readouterr().err
+  assert (
+      "ERROR: tools/validate_contracts.py exited 1 on the remapped dump:"
+      in stderr
+  )
+  assert f"data source alias 'ds0' points at '{STALE_DATASOURCE_ID}'" in stderr
+  assert "apply_bqca_rename_map_" not in stderr
+  assert stderr.endswith("not remapped: nothing written\n")
+  assert [path.name for path in work.iterdir()] == ["dump.textproto"]
+
+
+def test_apply_refuses_a_remapped_dump_that_is_not_the_twin(
+    apply_tree, work, capsys, monkeypatch
+):
+  """The twin check of gen_bqca_rename_map.py rejects a result on its own."""
+  apply = _load_apply(apply_tree)
+  apply_edits = apply.apply_edits
+
+  def without_the_first_sort_edit(text, edits):
+    skipped = next(edit for edit in edits if edit.kind == "sort")
+    return apply_edits(text, [edit for edit in edits if edit is not skipped])
+
+  monkeypatch.setattr(apply, "apply_edits", without_the_first_sort_edit)
+  # The other checks stay out of it, so that this one has to reject the result.
+  monkeypatch.setattr(apply, "verification_errors", lambda *args: [])
+  out = work / "out.textproto"
+
+  code = apply.main(["--dump", str(GENERIC_DUMP), "--out", str(out)])
+
+  assert code == 1
+  stderr = capsys.readouterr().err
+  assert re.search(
+      r"^ERROR: remapped dump: remapped twin: .* references ", stderr, re.M
+  )
+  assert stderr.endswith("not remapped: nothing written\n")
+  assert not out.exists()
+
+
+@pytest.mark.parametrize("count", [2, 25], ids=["few", "capped"])
+def test_apply_prints_the_errors_of_the_audit(
+    apply_tree, work, capsys, monkeypatch, count
+):
+  apply = _load_apply(apply_tree)
+  audited = []
+
+  def audit(path):
+    audited.append(path)
+    return 1, "".join(
+        f"ERROR: live report {path}: problem {number}\n\n"
+        for number in range(count)
+    )
+
+  monkeypatch.setattr(apply, "_audit", audit)
+  out = work / "out.textproto"
+
+  code = apply.main(["--dump", str(GENERIC_DUMP), "--out", str(out)])
+
+  assert code == 1
+  expected = [
+      "ERROR: tools/validate_contracts.py exited 1 on the remapped dump:",
+      *[
+          f"ERROR:   live report the remapped dump: problem {number}"
+          for number in range(count)
+      ],
+  ]
+  if len(expected) > 20:
+    expected = [*expected[:20], f"ERROR: ... and {len(expected) - 20} more"]
+  assert capsys.readouterr().err.splitlines() == [
+      *expected,
+      "not remapped: nothing written",
+  ]
+  assert not out.exists()
+  assert len(audited) == 1 and not audited[0].exists()
+
+
+def test_apply_checks_and_writes_the_bytes_that_it_read(
+    apply_tree, work, monkeypatch
+):
+  """A file that replaces the dump while the tool runs is never read."""
+  apply = _load_apply(apply_tree)
+  gen = apply._load_tool("gen_bqca_rename_map")
+  dump, out = work / "dump.textproto", work / "out.textproto"
+  shutil.copyfile(GENERIC_DUMP, dump)
+  read_dump, audit = gen.read_dump, apply._audit
+  readers, audited = [], []
+
+  def replacing_read_dump(validator, path):
+    readers.append((path, _mode(path), path.read_bytes()))
+    dump.write_text("# another file\n", encoding="utf-8")
+    return read_dump(validator, path)
+
+  def replacing_audit(path):
+    audited.append((path, _mode(path), path.read_bytes()))
+    shutil.copyfile(REMAPPED_DUMP, dump)
+    return audit(path)
+
+  monkeypatch.setattr(gen, "read_dump", replacing_read_dump)
+  monkeypatch.setattr(apply, "_audit", replacing_audit)
+
+  code = apply.main(["--dump", str(dump), "--out", str(out)])
+
+  assert code == 0
+  written = out.read_bytes()
+  assert written == _remapped_sanitized_dump()
+  # The map is read from a read-only copy of the dump, the twin from one of the
+  # remapped dump, and the audit reads the same remapped bytes that are
+  # written.
+  assert [(mode, data) for _, mode, data in readers] == [
+      (0o400, GENERIC_DUMP.read_bytes()),
+      (0o400, written),
+  ]
+  assert [(mode, data) for _, mode, data in audited] == [(0o400, written)]
+  private = [path for path, _, _ in [*readers, *audited]]
+  assert dump.resolve() not in private and out.resolve() not in private
+  assert not any(path.exists() for path in private)
+  assert dump.read_bytes() == REMAPPED_DUMP.read_bytes()
+
+
+def test_apply_sets_the_report_data_source_that_the_binding_names(
+    apply_tree, work, capsys, monkeypatch
+):
+  apply = _load_apply(apply_tree)
+  # The audit compares the dump with the binding's data source, and this
+  # binding names another one.
+  monkeypatch.setattr(apply, "_audit", lambda path: (0, ""))
+  binding = apply_tree / BINDING
+  text, count = re.subn(
+      r"(?m)^datasource_id: .*$",
+      "datasource_id: another-source.id_2",
+      binding.read_text(encoding="utf-8"),
+  )
+  assert count == 1
+  binding.write_text(text, encoding="utf-8")
+  out = work / "out.textproto"
+
+  code = apply.main(["--dump", str(GENERIC_DUMP), "--out", str(out)])
+
+  assert code == 0
+  report = f'\n    datasource_id: "{DATASOURCE_ID}"\n'
+  remapped = _remapped_sanitized_dump().decode("utf-8")
+  assert remapped.count(report) == 1
+  assert out.read_text(encoding="utf-8") == remapped.replace(
+      report, '\n    datasource_id: "another-source.id_2"\n'
+  )
+  assert (
+      f"report datasource_id: '{STALE_DATASOURCE_ID}' ->"
+      " 'another-source.id_2'" in capsys.readouterr().out
+  )
+
+
+@pytest.mark.parametrize(
+    "line, shown",
+    [
+        ('datasource_id: "has space"', "'has space'"),
+        ("datasource_id: 12345", "12345"),
+        ("", "None"),
+    ],
+    ids=["not-plain", "not-a-string", "missing"],
+)
+def test_apply_refuses_a_binding_without_a_plain_data_source_id(
+    apply_tree, work, capsys, line, shown
+):
+  apply = _load_apply(apply_tree)
+  binding = apply_tree / BINDING
+  text, count = re.subn(
+      r"(?m)^datasource_id: .*\n",
+      f"{line}\n" if line else "",
+      binding.read_text(encoding="utf-8"),
+  )
+  assert count == 1
+  binding.write_text(text, encoding="utf-8")
+  out = work / "out.textproto"
+
+  code = apply.main(["--dump", str(GENERIC_DUMP), "--out", str(out)])
+
+  assert code == 1
+  assert (
+      f"ERROR: {BINDING} datasource_id {shown} is not a plain ID"
+      in capsys.readouterr().err
+  )
+  assert not out.exists()
+
+
+@pytest.fixture(scope="module")
+def apply_module():
+  """The tool, loaded from this repository, for tests that write nothing."""
+  return _load_apply(DASHBOARD)
+
+
+@pytest.fixture(scope="module")
+def sanitized_plan(apply_module):
+  """The map, the edits and the remapped text of the sanitized dump."""
+  validator = apply_module._load_tool("validate_contracts")
+  gen = apply_module._load_tool("gen_bqca_rename_map")
+  manifest = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text(encoding="utf-8")
+  )
+  components, _, errors = gen.read_dump(validator, GENERIC_DUMP)
+  rows, row_errors = gen.build_rows(validator, manifest, components)
+  assert errors == [] and row_errors == []
+  renames = {
+      (row["component_id"], row["old_name"]): row["new_qt_id"] for row in rows
+  }
+  text = GENERIC_DUMP.read_text(encoding="utf-8")
+  edits = apply_module.plan_edits(
+      apply_module.read_textproto(text), renames, DATASOURCE_ID
+  )
+  return types.SimpleNamespace(
+      renames=renames,
+      text=text,
+      edits=edits,
+      remapped=apply_module.apply_edits(text, edits),
+      apply=apply_module.apply_edits,
+  )
+
+
+# Text format that exercises the reader: comments, both separators, both
+# quotes, adjacent strings, every kind of escape, lists, and `<>` messages.
+_TRICKY = r"""
+# Comments are skipped, and so are the separators.
+count: 1; ratio: -1.5e3, flag: true
+words: [one, 'two', "thr" 'ee']
+joined: "a" 'b'   "c"
+escapes: "tab\there \\ \x41\101\u00e9\U0001F600 \"q\" \'s\'"
+single: 'it\'s'
+angled < inner: 1 >
+nested {
+  list: [ { n: 1 }, < n: 2 > ]
+  empty {}
+}
+"""
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            lambda: GENERIC_DUMP.read_text(encoding="utf-8"), id="sanitized"
+        ),
+        pytest.param(
+            lambda: REMAPPED_DUMP.read_text(encoding="utf-8"), id="remapped"
+        ),
+        pytest.param(lambda: _TRICKY, id="every-kind-of-syntax"),
+        pytest.param(lambda: "\ufeff" + _TRICKY, id="byte-order-mark"),
+        pytest.param(lambda: "", id="empty"),
+        pytest.param(lambda: "a {" * 64 + "}" * 64, id="64-levels-deep"),
+    ],
+)
+def test_apply_reads_textproto_as_the_validator_does(apply_module, text):
+  text = text()
+  validator = apply_module._load_tool("validate_contracts")
+
+  tree = apply_module.read_textproto(text.removeprefix("\ufeff"))
+
+  assert apply_module._plain(tree) == validator.parse_report_textproto(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a:",
+        "a 1",
+        "a [ { } ]",
+        "a: [1 2]",
+        "a { b: 1",
+        "a < b: 1",
+        "}",
+        "a: }",
+        "[a]: 1",
+        "[type.googleapis.com/x] { }",
+        "1a: 2",
+        'a: "x',
+        r'a: "\q"',
+        r'a: "\xZ"',
+        r'a: "\u12"',
+        r'a: "\400"',
+        "a {" * 65 + "}" * 65,
+    ],
+    ids=[
+        "no-value",
+        "no-colon",
+        "message-list-without-colon",
+        "list-without-comma",
+        "unterminated-message",
+        "unterminated-angle-message",
+        "stray-closer",
+        "closer-as-value",
+        "list-as-field-name",
+        "extension-name",
+        "digit-field-name",
+        "unterminated-string",
+        "unsupported-escape",
+        "hex-escape-without-digits",
+        "short-unicode-escape",
+        "octal-escape-too-big",
+        "65-levels-deep",
+    ],
+)
+def test_apply_rejects_textproto_as_the_validator_does(apply_module, text):
+  validator = apply_module._load_tool("validate_contracts")
+  with pytest.raises(ValueError) as expected:
+    validator.parse_report_textproto(text)
+
+  with pytest.raises(ValueError) as actual:
+    apply_module.read_textproto(text)
+
+  assert str(actual.value) == str(expected.value)
+
+
+_MICRO_COMPONENT = """\
+    component_config {
+      datasource_id: "source"
+      component_id: "@C@"
+      property_config {
+        component_property {
+          dimensions {
+            labeled_concepts {
+              key: "primary"
+              value { concept_names: "@D@" }
+            }
+          }
+          metrics {
+            labeled_concepts {
+              key: "primary"
+              value { concept_names: "t0.@M@" }
+            }
+          }
+          sort { sort_column: "t0.@M@" }
+        }
+      }
+      concept_defs { id: "t0.@D@" name: "@D@" }
+      concept_defs { id: "t0.@M@" name: "@M@" }
+    }
+"""
+_MICRO_REPORT = '  report { datasource_id: "old-source" }\n'
+_MICRO_RENAMES = {("c1", "d0"): "qt_dim00", ("c1", "m0"): "qt_met00"}
+
+
+def _micro_component(component="c1", dimension="d0", metric="m0"):
+  return (
+      _MICRO_COMPONENT.replace("@C@", component)
+      .replace("@D@", dimension)
+      .replace("@M@", metric)
+  )
+
+
+def _micro_dump(*components, report=_MICRO_REPORT):
+  return (
+      "report_config {\n  page {\n"
+      + "".join(components or [_micro_component()])
+      + "  }\n"
+      + report
+      + "}\n"
+  )
+
+
+def _micro_plan(apply_module, text, renames=None, datasource_id="new-source"):
+  return apply_module.plan_edits(
+      apply_module.read_textproto(text),
+      _MICRO_RENAMES if renames is None else renames,
+      datasource_id,
+  )
+
+
+def test_apply_plans_each_literal_in_the_order_of_the_dump(apply_module):
+  text = _micro_dump()
+
+  edits = _micro_plan(apply_module, text)
+
+  assert [(edit.kind, edit.old, edit.new) for edit in edits] == [
+      ("dimension", "d0", "qt_dim00"),
+      ("metric", "t0.m0", "t0.qt_met00"),
+      ("sort", "t0.m0", "t0.qt_met00"),
+      ("id", "t0.d0", "t0.qt_dim00"),
+      ("name", "d0", "qt_dim00"),
+      ("id", "t0.m0", "t0.qt_met00"),
+      ("name", "m0", "qt_met00"),
+      ("datasource_id", "old-source", "new-source"),
+  ]
+  assert apply_module.apply_edits(text, edits) == _micro_dump(
+      _micro_component("c1", "qt_dim00", "qt_met00"),
+      report='  report { datasource_id: "new-source" }\n',
+  )
+
+
+def test_apply_keys_a_rename_by_component_and_name(apply_module):
+  """Two components that name a concept alike get their own new IDs."""
+  text = _micro_dump(_micro_component("c1"), _micro_component("c2"))
+  renames = {
+      ("c1", "d0"): "qt_aaa",
+      ("c1", "m0"): "qt_bbb",
+      ("c2", "d0"): "qt_ccc",
+      ("c2", "m0"): "qt_ddd",
+  }
+
+  edits = _micro_plan(apply_module, text, renames)
+
+  assert apply_module.apply_edits(text, edits) == _micro_dump(
+      _micro_component("c1", "qt_aaa", "qt_bbb"),
+      _micro_component("c2", "qt_ccc", "qt_ddd"),
+      report='  report { datasource_id: "new-source" }\n',
+  )
+
+
+def test_apply_plans_nothing_for_values_that_have_their_new_value(
+    apply_module,
+):
+  text = _micro_dump(
+      _micro_component("c1", "qt_dim00", "qt_met00"),
+      report='  report { datasource_id: "new-source" }\n',
+  )
+  renames = {("c1", "qt_dim00"): "qt_dim00", ("c1", "qt_met00"): "qt_met00"}
+
+  assert _micro_plan(apply_module, text, renames) == []
+
+
+def test_apply_plans_a_dump_that_has_no_report_config(apply_module):
+  text = _micro_component() + _MICRO_REPORT
+  edits = _micro_plan(apply_module, text)
+
+  remapped = apply_module.apply_edits(text, edits)
+
+  assert remapped == _micro_component(
+      "c1", "qt_dim00", "qt_met00"
+  ) + _MICRO_REPORT.replace("old-source", "new-source")
+  assert (
+      apply_module.verification_errors(
+          text, remapped, edits, _MICRO_RENAMES, "new-source"
+      )
+      == []
+  )
+
+
+@pytest.mark.parametrize(
+    "mutate, error",
+    [
+        (
+            lambda text: 'report_config {\n  report { datasource_id: "x" }\n}\n',
+            "the dump has no component_config",
+        ),
+        (
+            _replaced(
+                '      concept_defs { id: "t0.d0"',
+                '      component_config {}\n      concept_defs { id: "t0.d0"',
+            ),
+            "a component_config is nested in a component_config",
+        ),
+        (
+            _replaced('      component_id: "c1"\n', ""),
+            "a component_config has 0 component_id fields, not one quoted",
+        ),
+        (
+            _replaced(
+                'component_id: "c1"\n',
+                'component_id: "c1"\n component_id: "c1"\n',
+            ),
+            "a component_config has 2 component_id fields, not one quoted",
+        ),
+        (
+            _replaced('component_id: "c1"', "component_id: c1"),
+            "a component_config has 1 component_id fields, not one quoted",
+        ),
+        (
+            lambda text: _micro_dump(_micro_component(), _micro_component()),
+            "component c1 appears twice",
+        ),
+        (
+            _replaced(
+                'concept_defs { id: "t0.d0" name: "d0" }',
+                'concept_defs { name: "d0" }',
+            ),
+            "component c1 has a concept_defs without exactly one name and one"
+            " id",
+        ),
+        (
+            _replaced('name: "d0" }', 'name: "d0" name: "d0" }'),
+            "component c1 has a concept_defs without exactly one name and one"
+            " id",
+        ),
+        (
+            _replaced('id: "t0.d0" name', 'id: "t1.d0" name'),
+            "component c1 concept 'd0' has the id 't1.d0', not 't0.d0'",
+        ),
+        (
+            _replaced(
+                '      concept_defs { id: "t0.m0"',
+                '      concept_defs { id: "t0.d0" name: "d0" }\n'
+                '      concept_defs { id: "t0.m0"',
+            ),
+            "component c1 repeats the concept 'd0'",
+        ),
+        (
+            _replaced('concept_names: "d0"', 'concept_names: "ghost"'),
+            "component c1 concept_names 'ghost' names none of its concepts",
+        ),
+        (
+            _replaced('sort_column: "t0.m0"', 'sort_column: "t0.ghost"'),
+            "component c1 sort_column 't0.ghost' names none of its concepts",
+        ),
+        (
+            _replaced(
+                '          sort { sort_column: "t0.m0" }\n',
+                '          sort { sort_column: "t0.m0" }\n'
+                '          filters { concept_names: "d0" }\n',
+            ),
+            "component c1 has concept_names 'd0' at"
+            " component_property.filters.concept_names, which the live audit"
+            " does not read",
+        ),
+        (
+            _replaced(
+                '      concept_defs { id: "t0.d0"',
+                '      property_config {}\n      concept_defs { id: "t0.d0"',
+            ),
+            "component c1 has more than one property_config or"
+            " component_property",
+        ),
+        (
+            _replaced(
+                '        }\n      }\n      concept_defs { id: "t0.d0"',
+                "        }\n        component_property {}\n      }\n"
+                '      concept_defs { id: "t0.d0"',
+            ),
+            "component c1 has more than one property_config or"
+            " component_property",
+        ),
+        (
+            _replaced(
+                '  report { datasource_id: "old-source" }\n', "  report {}\n"
+            ),
+            "report_config.report has 0 datasource_id fields, not one",
+        ),
+        (
+            _replaced(
+                'datasource_id: "old-source" }',
+                'datasource_id: "old-source" datasource_id: "old-source" }',
+            ),
+            "report_config.report has 2 datasource_id fields, not one",
+        ),
+        (
+            _replaced(
+                'datasource_id: "old-source"', "datasource_id: old-source"
+            ),
+            "the report datasource_id 'old-source' is not one quoted string,"
+            " so its literal cannot be replaced in place",
+        ),
+        (
+            _replaced(
+                'datasource_id: "old-source"', 'datasource_id: "old-" "source"'
+            ),
+            "the report datasource_id 'old-source' is not one quoted string,"
+            " so its literal cannot be replaced in place",
+        ),
+        (
+            _replaced('name: "d0" }', 'name: "d" "0" }'),
+            "component c1 name 'd0' is not one quoted string, so its literal"
+            " cannot be replaced in place",
+        ),
+    ],
+    ids=[
+        "no-component",
+        "nested-component",
+        "no-component-id",
+        "two-component-ids",
+        "unquoted-component-id",
+        "repeated-component",
+        "concept-without-id",
+        "concept-with-two-names",
+        "id-is-not-t0-name",
+        "repeated-concept",
+        "dangling-reference",
+        "dangling-sort-column",
+        "reference-at-a-path-the-audit-does-not-read",
+        "two-property-configs",
+        "two-component-properties",
+        "no-report-datasource-id",
+        "two-report-datasource-ids",
+        "unquoted-report-datasource-id",
+        "split-report-datasource-id",
+        "split-concept-name",
+    ],
+)
+def test_apply_plan_rejects_a_dump_it_cannot_rename_one_to_one(
+    apply_module, mutate, error
+):
+  text = mutate(_micro_dump())
+
+  with pytest.raises(ValueError) as exc_info:
+    _micro_plan(apply_module, text)
+
+  assert str(exc_info.value) == error
+
+
+@pytest.mark.parametrize(
+    "renames, datasource_id, error",
+    [
+        (
+            {("c1", "d0"): "qt_dim00"},
+            "new-source",
+            "component c1 concept 'm0' is not in the rename map",
+        ),
+        (
+            {**_MICRO_RENAMES, ("c9", "x"): "qt_zzz00"},
+            "new-source",
+            "the rename map has concepts the dump lacks: [('c9', 'x')]",
+        ),
+        (
+            {**_MICRO_RENAMES, ("c1", "d0"): 'bad"id'},
+            "new-source",
+            "component c1 would need the name 'bad\"id' escaped",
+        ),
+        (
+            {**_MICRO_RENAMES, ("c1", "d0"): "bad\\id"},
+            "new-source",
+            "component c1 would need the name 'bad\\\\id' escaped",
+        ),
+        (
+            {**_MICRO_RENAMES, ("c1", "d0"): "bad id"},
+            "new-source",
+            "component c1 would need the name 'bad id' escaped",
+        ),
+        (
+            _MICRO_RENAMES,
+            "bad id",
+            "the report would need the datasource_id 'bad id' escaped",
+        ),
+    ],
+    ids=[
+        "concept-not-in-map",
+        "concept-not-in-dump",
+        "new-id-with-quote",
+        "new-id-with-backslash",
+        "new-id-with-space",
+        "data-source-id-with-space",
+    ],
+)
+def test_apply_plan_rejects_a_map_that_does_not_fit_the_dump(
+    apply_module, renames, datasource_id, error
+):
+  with pytest.raises(ValueError) as exc_info:
+    _micro_plan(apply_module, _micro_dump(), renames, datasource_id)
+
+  assert str(exc_info.value) == error
+
+
+def test_apply_plans_the_edits_that_make_the_remapped_twin(
+    apply_module, sanitized_plan
+):
+  validator = apply_module._load_tool("validate_contracts")
+  plan, twin = sanitized_plan, REMAPPED_DUMP.read_text(encoding="utf-8")
+
+  assert collections.Counter(edit.kind for edit in plan.edits) == {
+      "name": 65,
+      "id": 65,
+      "dimension": 23,
+      "metric": 42,
+      "sort": 13,
+      "datasource_id": 1,
+  }
+  assert [edit.node.start for edit in plan.edits] == sorted(
+      edit.node.start for edit in plan.edits
+  )
+  assert (
+      _header_and_body(plan.remapped.encode("utf-8"))[1]
+      == _header_and_body(twin.encode("utf-8"))[1]
+  )
+  # The traversal that checks the edits shares no code with them.
+  assert apply_module.expected_tree(
+      validator.parse_report_textproto(plan.text),
+      plan.renames,
+      DATASOURCE_ID,
+  ) == validator.parse_report_textproto(twin)
+  assert (
+      apply_module.verification_errors(
+          plan.text, plan.remapped, plan.edits, plan.renames, DATASOURCE_ID
+      )
+      == []
+  )
+
+
+@pytest.mark.parametrize(
+    "doctor, error",
+    [
+        (
+            _replaced(
+                'source_field_name: "_turn_latency_ms_"',
+                'source_field_name: "_turn_latency_ms"',
+            ),
+            "210 tokens of the remapped dump differ from the dump's, but 209"
+            " edits were planned",
+        ),
+        (
+            _replaced("report_config {", "report_config  {"),
+            "210 tokens of the remapped dump differ from the dump's, but 209"
+            " edits were planned",
+        ),
+        (
+            _replaced("# A sanitized cut", "# A sanitised cut"),
+            "210 tokens of the remapped dump differ from the dump's, but 209"
+            " edits were planned",
+        ),
+        (
+            _replaced(
+                f'\n    datasource_id: "{DATASOURCE_ID}"\n',
+                f"\n    datasource_id: '{DATASOURCE_ID}'\n",
+            ),
+            "was not rewritten in place from"
+            f" '{STALE_DATASOURCE_ID}' to '{DATASOURCE_ID}'",
+        ),
+        (lambda text: text + "# trailing\n", " tokens, the dump "),
+        (
+            lambda text: text + '"',
+            "the remapped dump cannot be read: unexpected character '\"'",
+        ),
+    ],
+    ids=[
+        "another-scalar-changed",
+        "white-space-changed",
+        "comment-changed",
+        "quote-changed",
+        "trailing-text",
+        "unterminated-string",
+    ],
+)
+def test_apply_verification_rejects_a_result_that_is_not_the_planned_edits(
+    apply_module, sanitized_plan, doctor, error
+):
+  plan = sanitized_plan
+
+  errors = apply_module.verification_errors(
+      plan.text,
+      doctor(plan.remapped),
+      plan.edits,
+      plan.renames,
+      DATASOURCE_ID,
+  )
+
+  assert any(error in message for message in errors), errors
+
+
+@pytest.mark.parametrize(
+    "doctor, error",
+    [
+        (
+            lambda plan: plan.apply(plan.text, plan.edits[1:]),
+            "208 tokens of the remapped dump differ from the dump's, but 209"
+            " edits were planned",
+        ),
+        (
+            lambda plan: plan.apply(
+                plan.text,
+                [
+                    dataclasses.replace(plan.edits[0], new="qt_other0"),
+                    *plan.edits[1:],
+                ],
+            ),
+            "the remapped dump does not parse to the dump with the map applied",
+        ),
+    ],
+    ids=["edit-missing", "another-new-value"],
+)
+def test_apply_verification_rejects_a_result_made_from_other_edits(
+    apply_module, sanitized_plan, doctor, error
+):
+  plan = sanitized_plan
+
+  errors = apply_module.verification_errors(
+      plan.text, doctor(plan), plan.edits, plan.renames, DATASOURCE_ID
+  )
+
+  assert any(error in message for message in errors), errors
+
+
+def test_apply_verification_rejects_a_map_or_data_source_it_was_not_given(
+    apply_module, sanitized_plan
+):
+  plan = sanitized_plan
+
+  other_source = apply_module.verification_errors(
+      plan.text, plan.remapped, plan.edits, plan.renames, "another-source"
+  )
+  fewer = dict(plan.renames)
+  del fewer[next(iter(fewer))]
+  other_map = apply_module.verification_errors(
+      plan.text, plan.remapped, plan.edits, fewer, DATASOURCE_ID
+  )
+
+  assert (
+      "the remapped dump does not parse to the dump with the map applied"
+      in other_source
+  )
+  assert any(
+      error.startswith("the dump with the map applied cannot be built: ")
+      for error in other_map
+  )
+
+
+def test_apply_verification_says_which_dump_it_could_not_use(
+    apply_module, sanitized_plan
+):
+  plan = sanitized_plan
+  fewer = dict(plan.renames)
+  del fewer[next(iter(fewer))]
+
+  unbuildable = apply_module.verification_errors(
+      plan.text, plan.remapped, plan.edits, fewer, DATASOURCE_ID
+  )
+  unparsable = apply_module.verification_errors(
+      plan.text, plan.remapped + "}", plan.edits, plan.renames, DATASOURCE_ID
+  )
+
+  assert any(
+      error.startswith("the dump with the map applied cannot be built: ")
+      for error in unbuildable
+  )
+  assert not any("could not be parsed" in error for error in unbuildable)
+  assert any(
+      error.startswith(
+          "remapped dump could not be parsed for tree comparison: "
+      )
+      for error in unparsable
+  )
+  assert not any("cannot be built" in error for error in unparsable)

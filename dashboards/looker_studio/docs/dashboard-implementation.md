@@ -444,7 +444,7 @@ it. `tests/test_looker_studio_dashboard.py` pins both verdicts.
 
 #### Finalizing the live template sync
 
-Two tools support the sync; neither changes the live template.
+Three tools support the sync; none of them changes the live template.
 `tools/gen_bqca_rename_map.py` lists the rename, one row per concept in page,
 component, and column order: the old name, the new `qt_` ID, the source field
 and aggregation to keep, and the chart references to update. It fails,
@@ -459,6 +459,60 @@ sync:
 ```bash
 python3 tools/gen_bqca_rename_map.py --csv rename-map.csv --md rename-map.md
 ```
+
+`tools/apply_bqca_rename_map.py` applies that rename to a dump taken before the
+sync and writes the result, the dump's remapped twin, so the sync can be
+reviewed before anyone touches the live template. In the dump it renames each
+`concept_defs` `name` to its new `qt_` ID and its `id` to `t0.` followed by
+that ID, renames each dimension or metric `concept_names` entry and each
+`sort_column` of the same component that refers to the concept, and sets
+`report_config.report.datasource_id` to the `datasource_id` of
+`bindings/bqca_report_template.yaml`. Every other byte, comments and spacing
+included, is kept: each edit replaces one quoted literal in place. The live
+names repeat across components, so a rename is keyed by the component and the
+old name, never by the name alone. The data source IDs of the components and of
+the `ds0` alias are not edited; the audit refuses a dump where one of them
+names another data source, and nothing is written for it.
+
+```bash
+python3 tools/apply_bqca_rename_map.py --dump <dump> --check
+python3 tools/apply_bqca_rename_map.py --dump <dump> \
+    --out <path outside the repository>
+```
+
+The map is the one `gen_bqca_rename_map.py` derives from the dump and the
+manifest. `--map PATH` also reads a CSV that tool wrote, and fails, writing
+nothing, unless the CSV matches the derived map exactly. Before the tool writes
+anything, it checks the result four ways:
+
+- its tokens equal the dump's, except for the edited literals, and exactly the
+  planned scalars differ;
+- it parses to the parsed dump with the map applied, by a traversal that does
+  not use the edits;
+- `tools/gen_bqca_rename_map.py` accepts it as the remapped twin of the dump;
+- `tools/validate_contracts.py --profile bqca --live-report-textproto` exits 0
+  on it.
+
+The tool reads the dump once. Every check reads a private, read-only copy of
+those bytes, never the path again, so a file that replaces the dump while the
+tool runs cannot be mixed in, and the file written is the bytes that passed. It
+is written with mode 0600, atomically. The tool refuses an `--out` inside this
+repository by its path, its directory, or the place a link leads to (a dump of
+the live template does not belong in it), an `--out` that is the dump, and an
+`--out` that exists, unless `--force` replaces it. `--check` runs every check,
+says whether a write would be refused and why, and writes nothing; it needs no
+`--out`. The tool exits 0 when it wrote the remapped dump, and with `--check`
+when every check passed, even if a write would be refused; 1 when it rejected
+the dump or the map, a check failed, or the write was refused; and 2 on bad
+arguments.
+
+A dump that already carries the new IDs maps to itself, and the tool writes a
+copy. Applied to the sanitized cut above, the tool writes the cut's own header
+comments, since it keeps every comment and the twin has others, and from the
+first line that is not a comment on, the checked-in twin byte for byte;
+`tests/test_looker_studio_live_sync.py` pins that. The result previews the
+sync; it is not a dump of a synced template. `tools/finalize_live_sync.py`,
+below, needs a new dump of the live template itself.
 
 After the sync, save a new dump of the live template, keep it, and run:
 
