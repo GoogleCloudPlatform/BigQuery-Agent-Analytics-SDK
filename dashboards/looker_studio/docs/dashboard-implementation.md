@@ -479,9 +479,13 @@ default today), copies `manifest_sha256` and `template_bundle_sha256` into
 `pending_live_sync`, keeping every other line and comment. The new binding
 replaces the old one atomically (a staged file and `os.replace`); the tool
 audits the dump again after the write and puts the original bytes back if
-that audit fails, raises, or is interrupted. `--check` prints the change as a
-diff, says why a write would be refused, and writes nothing; it needs no
-attestation and previews with the checked-in fixtures too.
+that audit fails, raises, or is interrupted. It reads the dump once: the
+identity checks below, both audits (through a private, read-only copy), and
+the recorded digest all use that snapshot, never the path again, so a file
+that replaces the dump while the tool runs cannot be mixed in. `--check`
+prints the change as a diff, says why a write would be refused, and writes
+nothing; it needs no attestation and previews with the checked-in fixtures
+too.
 
 A write fails closed unless it has positive evidence that the dump is a dump
 of the live template:

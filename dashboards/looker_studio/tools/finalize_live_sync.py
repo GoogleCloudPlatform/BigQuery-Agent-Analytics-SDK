@@ -18,6 +18,11 @@ atomically, and the audit runs again after the write; if it fails, raises or
 is interrupted, the original bytes are put back. ``--check`` runs the same
 audit and prints the change as a diff without writing it.
 
+The dump is read once. The identity check, both audits (through a private,
+read-only copy) and the recorded digest use those bytes, never the path
+again, so a file that replaces the dump while the tool runs cannot be mixed
+in.
+
 A write fails closed unless the dump carries positive evidence that it is a
 dump of the live template:
 
@@ -354,14 +359,17 @@ def dump_identity_errors(text: str, binding: dict) -> list[str] | None:
 
 
 def write_blockers(
-    dump: pathlib.Path, captured_from: str | None, binding: dict
+    dump: pathlib.Path,
+    snapshot: bytes,
+    captured_from: str | None,
+    binding: dict,
 ) -> list[str]:
-  """Return why a write with `dump` would be refused (empty if it would not).
+  """Return why a write would be refused (empty if it would not).
 
   A write needs positive evidence that the dump is a dump of the live
-  template: an attestation that names the report, and a dump that is not a
-  test fixture of this repository and identifies the report
-  (`dump_identity_errors`).
+  template: an attestation that names the report, a dump path `dump` that is
+  not a test fixture of this repository, and dump bytes `snapshot` that
+  identify the report (`dump_identity_errors`).
   """
   blockers = []
   report_id = str(binding.get("report_id"))
@@ -373,8 +381,8 @@ def write_blockers(
   if dump.resolve().is_relative_to(fixtures.resolve()):
     blockers.append(f"{dump} is a test fixture of this repository")
   try:
-    text = dump.read_text(encoding="utf-8")
-  except (OSError, UnicodeDecodeError):
+    text = snapshot.decode("utf-8")
+  except UnicodeDecodeError:
     return blockers
   return blockers + (dump_identity_errors(text, binding) or [])
 
@@ -451,6 +459,41 @@ def main(argv: list[str] | None = None) -> int:
         "a write needs --captured-from, an attestation of how the dump was"
         " captured from the live template; --check previews without it"
     )
+  # Read the dump once. The fixture-path check uses the path as given; the
+  # identity check, both audits and the recorded digest use only these bytes
+  # (the audits through a private, read-only copy), never the path again, so
+  # a file that replaces the dump while this runs cannot be mixed in.
+  dump = args.dump.resolve()
+  try:
+    snapshot = dump.read_bytes()
+  except OSError as exc:
+    print(
+        f"not finalized: cannot read {args.dump}: {exc.strerror or exc};"
+        f" {BINDING_PATH} is unchanged",
+        file=sys.stderr,
+    )
+    return 1
+  print(
+      f"snapshot of {args.dump}: {len(snapshot)} bytes, sha256"
+      f" {hashlib.sha256(snapshot).hexdigest()}"
+  )
+  with tempfile.TemporaryDirectory(prefix="finalize_live_sync_") as private:
+    audited = pathlib.Path(private) / (dump.name or "dump.textproto")
+    audited.write_bytes(snapshot)
+    audited.chmod(stat.S_IRUSR)
+    return _finalize_snapshot(args, dump, snapshot, audited)
+
+
+def _finalize_snapshot(
+    args: argparse.Namespace,
+    dump: pathlib.Path,
+    snapshot: bytes,
+    audited: pathlib.Path,
+) -> int:
+  """Check, audit and record the dump `snapshot`, read from `dump`.
+
+  Both audits read `audited`, a private copy of `snapshot`.
+  """
   verified_date = args.verified_date or datetime.date.today().isoformat()
   unchanged = f"{BINDING_PATH} is unchanged"
   binding_path = ROOT / BINDING_PATH
@@ -459,11 +502,11 @@ def main(argv: list[str] | None = None) -> int:
   binding = binding if isinstance(binding, dict) else {}
 
   # A write fails closed without positive evidence of a live dump.
-  blockers = write_blockers(args.dump, args.captured_from, binding)
+  blockers = write_blockers(dump, snapshot, args.captured_from, binding)
   if blockers and not args.check:
     print(f"not finalized: {'; '.join(blockers)}; {unchanged}", file=sys.stderr)
     return 1
-  code = _audit(args.dump)
+  code = _audit(audited)
   if code != 0:
     print(
         f"not finalized: {VALIDATOR_PATH} exited {code} on {args.dump};"
@@ -486,7 +529,7 @@ def main(argv: list[str] | None = None) -> int:
           original,
           verified_date,
           args.captured_from or CAPTURE_PLACEHOLDER,
-          hashlib.sha256(args.dump.read_bytes()).hexdigest(),
+          hashlib.sha256(snapshot).hexdigest(),
       )
     except ValueError as exc:
       error = str(exc)
@@ -519,7 +562,7 @@ def main(argv: list[str] | None = None) -> int:
   original_bytes = original.encode("utf-8")
   try:
     _replace_file(binding_path, updated.encode("utf-8"))
-    code = _audit(args.dump)
+    code = _audit(audited)
   except BaseException as exc:
     _replace_file(binding_path, original_bytes)
     if not isinstance(exc, Exception):

@@ -478,27 +478,36 @@ def test_finalize_check_prints_the_change_and_writes_nothing(
   assert "finalized:" not in result.stdout
 
 
+def _stale_dump(tree):
+  """A rendered dump that identifies the report but keeps a generic concept."""
+  text = _render_dump(tree)
+  assert text.count("qt_d779815a") == 3
+  return text.replace("qt_d779815a", "met")
+
+
 @pytest.mark.parametrize("check", [False, True], ids=["write", "check"])
-@pytest.mark.parametrize(
-    "source, error",
-    [
-        ("stale", "is not a qt_ column ID"),
-        ("missing", "cannot read it as protobuf text format"),
-    ],
-)
+@pytest.mark.parametrize("source", ["stale", "missing"])
 def test_finalize_rejects_a_dump_that_fails_the_audit_and_writes_nothing(
-    tree, tmp_path, source, error, check
+    tree, tmp_path, source, check
 ):
   """A stale or unreadable dump leaves every file of the copy unchanged.
 
   The stale dump identifies the live template, but one of its concepts keeps
-  a generic name.
+  a generic name, so its audit fails. A missing dump cannot be read at all.
   """
   path = tmp_path / "report.textproto"
   if source == "stale":
-    text = _render_dump(tree)
-    assert text.count("qt_d779815a") == 3
-    path.write_text(text.replace("qt_d779815a", "met"), encoding="utf-8")
+    path.write_text(_stale_dump(tree), encoding="utf-8")
+    expected = [
+        "is not a qt_ column ID",
+        f"not finalized: tools/validate_contracts.py exited 1 on {path};"
+        f" {BINDING} is unchanged",
+    ]
+  else:
+    expected = [
+        f"not finalized: cannot read {path}: No such file or directory;"
+        f" {BINDING} is unchanged"
+    ]
   before = _snapshot(tree)
 
   result = _finalize(
@@ -509,12 +518,98 @@ def test_finalize_rejects_a_dump_that_fails_the_audit_and_writes_nothing(
   )
 
   assert result.returncode == 1
-  assert error in result.stderr
-  assert (
-      f"not finalized: tools/validate_contracts.py exited 1 on {path};"
-      f" {BINDING} is unchanged"
-  ) in result.stderr
+  for error in expected:
+    assert error in result.stderr
   assert _snapshot(tree) == before
+
+
+@pytest.mark.parametrize(
+    "snapshot_kind, replacement_kind, replaced",
+    [
+        ("stale", "remapped", "after-identity-check"),
+        ("valid", "stale", "after-identity-check"),
+        ("valid", "remapped", "after-read"),
+    ],
+    ids=[
+        "stale-snapshot-then-passing-file",
+        "valid-snapshot-then-stale-file",
+        "valid-snapshot-then-unidentified-file",
+    ],
+)
+def test_finalize_uses_only_the_snapshot_it_read_first(
+    tree, tmp_path, monkeypatch, snapshot_kind, replacement_kind, replaced
+):
+  """The dump is read once; a file that replaces it later changes nothing.
+
+  Another file lands at the caller's path right after the identity check or
+  right after the dump is read. The identity check, both audits (through a
+  private copy) and the recorded digest use the snapshot, never that path:
+  a stale snapshot is refused although its replacement (the remapped
+  fixture) passes the audit, and a valid snapshot is finalized with its own
+  digest although its replacement is stale or names no report.
+  """
+  finalize = _load_finalize(tree)
+  valid, stale = _render_dump(tree), _stale_dump(tree)
+  snapshot = (stale if snapshot_kind == "stale" else valid).encode("utf-8")
+  replacement = (
+      REMAPPED_DUMP.read_bytes()
+      if replacement_kind == "remapped"
+      else stale.encode("utf-8")
+  )
+  assert _audit(tree, REMAPPED_DUMP).returncode == 0
+  path = tmp_path / "report.textproto"
+  path.write_bytes(snapshot)
+  original = (tree / BINDING).read_bytes()
+  date = _since_date(tree)
+  real_blockers, real_audit = finalize.write_blockers, finalize._audit
+  real_finalize_snapshot = finalize._finalize_snapshot
+  audited = []
+
+  def blockers_then_replace(*args, **kwargs):
+    blockers = real_blockers(*args, **kwargs)
+    path.write_bytes(replacement)
+    return blockers
+
+  def replace_then_finalize(*args, **kwargs):
+    path.write_bytes(replacement)
+    return real_finalize_snapshot(*args, **kwargs)
+
+  def audit(audited_path):
+    audited.append((Path(audited_path), Path(audited_path).read_bytes()))
+    return real_audit(audited_path)
+
+  if replaced == "after-identity-check":
+    monkeypatch.setattr(finalize, "write_blockers", blockers_then_replace)
+  else:
+    monkeypatch.setattr(finalize, "_finalize_snapshot", replace_then_finalize)
+  monkeypatch.setattr(finalize, "_audit", audit)
+
+  code = finalize.main(
+      [
+          "--dump",
+          str(path),
+          "--captured-from",
+          ATTESTATION,
+          "--verified-date",
+          date,
+      ]
+  )
+
+  assert path.read_bytes() == replacement
+  assert audited
+  assert [data for _, data in audited] == [snapshot] * len(audited)
+  assert all(item.resolve() != path.resolve() for item, _ in audited)
+  if snapshot_kind == "stale":
+    assert code == 1
+    assert len(audited) == 1
+    assert (tree / BINDING).read_bytes() == original
+  else:
+    assert code == 0
+    assert len(audited) == 2
+    assert (
+        _live(tree)["verified_dump_sha256"]
+        == hashlib.sha256(snapshot).hexdigest()
+    )
 
 
 def _swap_id_and_name(text):
@@ -837,8 +932,11 @@ def test_finalize_restores_the_binding_when_the_audit_fails_after_the_write(
   assert (
       finalize.main(["--dump", str(dump), "--captured-from", ATTESTATION]) == 1
   )
-  # The second audit ran on the written binding, which is then restored.
-  assert calls == [(dump, True), (dump, False)]
+  # Both audits read the same private copy of the dump; the second ran on the
+  # written binding, which is then restored.
+  ((audited, before_write), (audited_again, after_write)) = calls
+  assert audited == audited_again and audited.resolve() != dump.resolve()
+  assert (before_write, after_write) == (True, False)
   assert (tree / BINDING).read_bytes() == original
   assert (
       "not finalized: tools/validate_contracts.py exited 1 after the write,"
