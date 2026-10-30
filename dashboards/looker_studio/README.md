@@ -317,6 +317,16 @@ so external access is not yet verified. External non-owner Google accounts
 that see "This report isn't shared with you" should use the
 [Self-Hosted Streamlit BQCA Dashboard](../streamlit/)
 (`dashboards/streamlit/`) or `--custom-sql-out`.
+
+**Known issue ([#559](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/559)).**
+The live template still uses generic column IDs, so components on one page of
+a report created from it can show each other's values. The repository
+contracts already give every column a unique `qt_` ID, and
+`live_template_verification.pending_live_sync` in
+`bindings/bqca_report_template.yaml` tracks the sync of the live template.
+After the live template sync (#559), re-create any report created before it
+from the 1-click link.
+
 Because BQCA never logs tool events, all tool-usage pages, tool-latency series,
 and tool-error charts are omitted from the template:
 

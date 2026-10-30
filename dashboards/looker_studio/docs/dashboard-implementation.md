@@ -232,14 +232,15 @@ former 365-day default. The same exact-query check verified that events dated
 BigQuery Conversational Analytics (BQCA) Prompt & Response Logging uses a
 separate, dedicated 7-page tool-free Looker Studio report template
 (`42e79a1f-a979-4de8-911f-80d5a99543d5`, data source alias `ds0`, embedded
-`BlockDatasource` ID `4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc`) rather than the
+`BlockDatasource` ID `70e5ac1e-65bb-4c89-a9df-fa9990cb6029`) rather than the
 8-page ADK template (`5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40`). The report is a
 copy that its owner made on 2026-10-09 of the first published BQCA template,
-whose organization allowed sharing only inside the organization. The
-`BlockDatasource` ID and the live verification evidence were recorded on that
-source report and have not been re-recorded for the copy. The owner turned on
-public link sharing for the copy on 2026-10-09; the copy check from a signed-in
-outside Google account is still pending.
+whose organization allowed sharing only inside the organization. The copy's
+`BlockDatasource` ID and its `ds0` alias were re-recorded on 2026-10-29 from
+the copy's report configuration; the live verification evidence was recorded
+on the source report and has not been re-recorded for the copy. The owner
+turned on public link sharing for the copy on 2026-10-09; the copy check from
+a signed-in outside Google account is still pending.
 
 ### Contract and manifest artifacts
 
@@ -260,7 +261,10 @@ outside Google account is still pending.
   `bindings/bqca_template_bindings.yaml` pin the report ID, `ds0` alias,
   sentinel replacement identifiers, `reviewed_template_sql.sha256`,
   `live_template_verification` (`repository_sql_sha256`, `pages_sha256`,
-  `manifest_sha256`), and `external_access_verification`.
+  `manifest_sha256`, `template_bundle_sha256`, the
+  `verified_manifest_sha256` and `verified_template_bundle_sha256` digests of
+  the last live verification, and `pending_live_sync`), and
+  `external_access_verification`.
 - **Contract validator**: `python3 tools/validate_contracts.py --profile bqca`
   verifies 1:1 parity across `spec/bqca_product_contract.yaml`,
   `spec/bqca_chart_manifest.yaml`, and `bindings/bqca_report_template.yaml`.
@@ -282,7 +286,7 @@ outside Google account is still pending.
 
 The embedded `CUSTOM_QUERY` (`sql/bqca_events_v1.template.sql`) filters `timestamp`
 using `PARSE_DATE('%Y%m%d', @DS_START_DATE)` and `PARSE_DATE('%Y%m%d', @DS_END_DATE)`.
-On the published `BlockDatasource` (`4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc`):
+On the published `BlockDatasource` (`70e5ac1e-65bb-4c89-a9df-fa9990cb6029`):
 
 1. `use_datetime_type: true` and `parameter_configuration: [DS_START_DATE, DS_END_DATE]`
    must remain enabled so Looker Studio binds the report date window instead of
@@ -291,6 +295,152 @@ On the published `BlockDatasource` (`4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc`):
    `YEAR_MONTH_DAY_SECOND`), and `_event_hour_` (`TIMESTAMP` /
    `YEAR_MONTH_DAY_HOUR`) must retain `use_native_date_time: true` across the
    41-field schema.
+
+### Report-wide unique `qt_` column IDs
+
+This repository requires every column (concept) of the BQCA manifest and
+bundle to have a `qt_` ID, `qt_` followed by 3 to 10 lowercase letters or
+digits (`^qt_[a-z0-9]{3,10}$`), that is unique across the whole report. This
+is the repository's convention, not a Looker Studio rule: Looker Studio also
+accepts generic names, and the live template
+(`42e79a1f-a979-4de8-911f-80d5a99543d5`) still reuses generic IDs across its
+34 components (`met`, `dim`, `m0`..`m3`, `d0`..`d9`). With those IDs,
+components on the same page of a report created from it with the 1-click link
+can show each other's values: for example, the Total, Input, Output, and
+Thinking Tokens scorecards can all sum `total_tokens`.
+
+The repository contracts, `spec/bqca_chart_manifest.yaml` and
+`spec/bqca_dashboard_template.json`, give each of the 65 column slots the ID
+that `bqca_derive_report_column_ids` in `tools/validate_contracts.py` derives
+from the slot's digest:
+
+```python
+sha256(f"{component_id}:{slot_index}:{field_name}".encode()).hexdigest()
+```
+
+where `component_id` is the component's `cd-...` ID, `slot_index` is the
+column's position in `spec.<kind>.dataset.columns`, and `field_name` is its
+`fieldName`. The ID is `qt_` followed by the first 8 hex digits of the digest
+(`bqca_qt_column_id`), as it is for all 65 slots today. If the digests of two
+slots share their first 8 hex digits, both IDs instead take the shortest
+prefix, 9 or 10 hex digits long, that no other digest starts with, so the IDs
+do not depend on the order of the slots. If two digests share their first 10
+hex digits (for 65 slots, a chance of about 2 in a billion), the validator
+fails and names both slots; moving one of the two columns to another position
+in its `dataset.columns` gives it a new digest (or, if neither column can move
+— for example, two single-column scorecards — extend `_QT_DERIVED_HEX_LENGTHS`
+and the upper bound of `_QT_COLUMN_ID_RE` in `tools/validate_contracts.py` and
+sync the live template). A slot's ID changes whenever
+its column moves to another position, its `fieldName` changes, or a new slot
+collides with it, and each such change needs the live sync described below.
+
+`python3 tools/validate_contracts.py --profile bqca` rejects:
+
+- a column ID that is not a `qt_` ID, or is not its slot's derived ID;
+- a column ID that repeats inside a component or anywhere in the report, or
+  that differs between `spec/bqca_chart_manifest.yaml` and
+  `spec/bqca_dashboard_template.json`;
+- a `*Id` or `*Ids` key under `spec.<kind>.fields` other than those the kind
+  reads its columns from: `primaryMetricId` for a scorecard;
+  `primaryAxis.fieldId`, `metricSeries.metricIds`, and
+  `primaryAxis.sort.sortFieldId` for a bar or line chart; `dimensionId`,
+  `metricId`, and `sort.sortFieldId` for a pie chart; and `dimensionIds`,
+  `metricIds`, and `sort.sortFieldId` for a table;
+- a reference from one of those keys to a column that its component does not
+  define, and a column that none of them references;
+- an embedded spec `sort` that is not a list;
+- a manifest top-level `components` list that is not exactly the components
+  of its pages, in page order;
+- two scorecards on one page that show the same `(field, aggregation)`.
+
+The live template keeps its legacy generic IDs, and its report-level
+`datasource_id` still names the source report's data source, until it is
+synced from these contracts
+([#559](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/559)).
+The sync must rename the 65 concepts of its 34 components to exactly the `qt_`
+IDs in `spec/bqca_chart_manifest.yaml`, keeping each concept's source field
+and aggregation and updating every `concept_names` and `sort_column` that
+refers to it, and repoint the report-level `datasource_id` to
+`70e5ac1e-65bb-4c89-a9df-fa9990cb6029`. The live audit below compares names
+exactly, so it fails on any other name. Until the sync,
+`live_template_verification` in `bindings/bqca_report_template.yaml` keeps
+`verified_date: "2026-10-09"` and the `verified_manifest_sha256` and
+`verified_template_bundle_sha256` digests of that verification, and
+`pending_live_sync` records the sync (`reason`, `since_date`,
+`tracking_issue`, and `required_actions`). The validator requires
+`pending_live_sync` while `manifest_sha256` or `template_bundle_sha256`
+differs from its verified digest, and rejects it once both match again. A
+report copied from the template before the sync can keep the generic IDs it
+was copied with, so after the sync, re-create any such report from the
+1-click link.
+
+To audit the live template itself, save a Looker Studio report textproto dump
+of it (its report configuration in protobuf text format) and run:
+
+```bash
+python3 tools/validate_contracts.py --live-report-textproto /path/to/report.txt
+```
+
+Looker Studio does not expose a public API for exporting a report's raw
+textproto configuration; maintainers with read access to the template report
+export the dump with internal inspection tooling and strip non-contract fields,
+while anyone can run `--live-report-textproto` on the checked-in sanitized
+fixtures described below.
+
+The command exits 1 and prints one error for each of these defects:
+
+- the dump cannot be read: the reader accepts the subset of protobuf text
+  format that a saved report uses (`#` comments, a leading UTF-8 byte order
+  mark, `{}` and `<>` messages, `[...]` lists after a `:`, and `,` or `;`
+  separators), and rejects `[type.googleapis.com/...]` extension or `Any`
+  field names, a message list without a `:` (`field [ {...} ]`), and messages
+  nested more than 64 levels deep;
+- a component appears twice;
+- a `concept_defs.name` is not a `qt_` ID, or its `id` is not `t0.<name>`;
+- a name repeats inside its component, or repeats the name of an earlier
+  component;
+- a `concept_names` or `sort_column` field appears under `component_property`
+  outside `dimensions.labeled_concepts.value.concept_names`,
+  `metrics.labeled_concepts.value.concept_names`, or `sort.sort_column`;
+- a chart reference (`concept_names`, `sort_column`) at one of those paths
+  names no concept of its component, or a concept is not referenced there;
+- one of the 34 manifest components is missing;
+- a manifest component's `(name, source_field_name, aggregation)` concepts are
+  not exactly the `(id, fieldName, aggregation)` columns that
+  `spec/bqca_chart_manifest.yaml` lists for it;
+- a manifest component's `dimensions` or `metrics` `labeled_concepts` entries
+  (each a single `primary` entry of `concept_names`), `sort_column`s,
+  `sort_dir`s, or `reverse_sort_order` differ, in order, from the dimension
+  IDs, metric IDs, `sortFieldId`s, `sortDir`s, or `reverseSortOrder` of its
+  `spec.<kind>.fields`;
+- a manifest component's `chart_type` is not one whose dimension, metric, and
+  sort references the audit can read, so the comparison above cannot run;
+- a manifest component's `datasource_id` or `dataset_id` is missing or is not
+  its manifest `datasource_id`;
+- a component that defines concepts is not in the manifest;
+- the report-level `datasource_id` is missing or is not the `datasource_id` in
+  `bindings/bqca_report_template.yaml`;
+- the report has no `ds0` alias, or the alias points at another data source.
+
+**Not audited by `--live-report-textproto`:** chart row limits (`limit` /
+`row`), pie-chart other-slice grouping (`includeOthers` /
+`include_total_others`), visual styling, and page layout geometry. Those stay
+governed by the offline manifest and bundle validators.
+
+`tests/fixtures/bqca_live_report_42e79a1f_sanitized.textproto` is a sanitized
+cut of a dump of the live template saved on 2026-10-29, before the sync. It
+keeps only the fields that the audit reads. Its report-level `datasource_id`, which named the
+source report's retired data source, reads
+`00000000-0000-4000-8000-000000000000`. The audit reports 209 errors on it:
+65 generic concept names, 49 repeated names, 34 components whose concepts
+differ from the manifest's columns, 34 metric `concept_names` lists, 13
+dimension `concept_names` lists, 13 `sort_column` lists, and the report-level
+`datasource_id`. Its twin,
+`tests/fixtures/bqca_live_report_42e79a1f_sanitized_remapped.textproto`,
+applies the sync's rename and repoint to the same text (the 65 concept names,
+their `id`s and every reference to them, and the report-level
+`datasource_id`) and changes nothing else, and the audit reports no errors on
+it. `tests/test_looker_studio_dashboard.py` pins both verdicts.
 
 ### Fallback paths
 
