@@ -442,6 +442,48 @@ their `id`s and every reference to them, and the report-level
 `datasource_id`) and changes nothing else, and the audit reports no errors on
 it. `tests/test_looker_studio_dashboard.py` pins both verdicts.
 
+#### Finalizing the live template sync
+
+Two tools support the sync; neither changes the live template.
+`tools/gen_bqca_rename_map.py` lists the rename, one row per concept in page,
+component, and column order: the old name, the new `qt_` ID, the source field
+and aggregation to keep, and the chart references to update. By default it
+reads the sanitized cut above and checks the map against its remapped twin;
+`--dump PATH` reads a newer dump taken before the sync:
+
+```bash
+python3 tools/gen_bqca_rename_map.py --csv rename-map.csv --md rename-map.md
+```
+
+After the sync, save a new dump of the live template and run:
+
+```bash
+python3 tools/finalize_live_sync.py --dump /path/to/report.txt --check
+python3 tools/finalize_live_sync.py --dump /path/to/report.txt
+```
+
+`tools/finalize_live_sync.py` runs `tools/validate_contracts.py --profile bqca
+--live-report-textproto` on the dump and edits
+`bindings/bqca_report_template.yaml` only if it exits 0. In
+`live_template_verification` it sets `verified_date` (`--verified-date`,
+default today), copies `manifest_sha256` and `template_bundle_sha256` into
+`verified_manifest_sha256` and `verified_template_bundle_sha256`, and removes
+`pending_live_sync`, keeping every other line and comment. It audits the dump
+again after the write and restores the binding if that fails. `--check` prints
+the change as a diff and writes nothing. It never writes with a dump from
+`tests/fixtures/`, which are stand-ins, not dumps of the live template.
+
+The tool does not edit documentation or tests. In the same change, remove the
+#559 known-issue notes that `pending_live_sync.required_actions` lists (and
+run `tools/render_web_config.py`), update the comments above
+`live_template_verification`, and update the tests in
+`tests/test_looker_studio_dashboard.py` that pin the pending sync:
+`test_bqca_block_datasource_invariants_and_live_attestation_are_recorded`,
+`test_validate_contracts_requires_a_pending_live_sync_record`,
+`test_validate_contracts_rejects_generic_or_repeated_column_ids`, and
+`test_validate_contracts_cli_rejects_a_column_id_that_is_not_derived`. Then
+check the token scorecards of a report created with the 1-click link.
+
 ### Fallback paths
 
 When a user's Workspace organization blocks external Looker Studio templates or
