@@ -34,7 +34,6 @@ previews with them.
 import collections
 import copy
 import csv
-import difflib
 import hashlib
 import importlib.util
 import json
@@ -69,9 +68,9 @@ ATTESTATION = (
     "test-only: rendered by tests/test_looker_studio_live_sync.py from the"
     f" manifest of report {REPORT_ID}"
 )
-NAMES_NO_REPORT = (
-    f"the dump names report {REPORT_ID} in no field (comments do not count)"
-)
+# The structured field where a dump of the live template names its report.
+REPORT_ID_FIELD = "report_config.shareable.id"
+NO_REPORT_FIELD = f"the dump's {REPORT_ID_FIELD} is [], not ['{REPORT_ID}']"
 
 # `_reopen` gives a finalized copy the state of the binding before #559: a
 # verification on 2026-10-09 and a live sync pending since 2026-10-29. The
@@ -150,14 +149,17 @@ def _reopen(tree):
   path.write_text(f"{head}\n{LIVE}:\n{block}", encoding="utf-8")
 
 
-@pytest.fixture
-def tree(tmp_path):
+@pytest.fixture(params=["pending", "reopened"])
+def tree(request, tmp_path):
   """A copy of dashboards/looker_studio with a pending live sync.
 
   The copy sits at `repo/dashboards/looker_studio`, so its tools see
-  `repo/tests/fixtures` as the repository's fixtures. Until #559 is closed
-  the repository binding already records the pending sync; after that, the
-  copy is re-opened. The test fails if the repository binding changes.
+  `repo/tests/fixtures` as the repository's fixtures. In the `pending` state
+  the copy keeps the repository binding's pending sync (re-opened once #559
+  is closed). In the `reopened` state the copy is first finalized by its own
+  tool, so its binding carries a capture record, and then re-opened, as a
+  later sync would find it. The test fails if the repository binding
+  changes.
   """
   copy_root = tmp_path / "repo/dashboards/looker_studio"
   shutil.copytree(
@@ -165,6 +167,21 @@ def tree(tmp_path):
   )
   if PENDING not in _live(copy_root):
     _reopen(copy_root)
+  if request.param == "reopened":
+    earlier = tmp_path / "earlier-dump.textproto"
+    earlier.write_text(_render_dump(copy_root), encoding="utf-8")
+    result = _finalize(
+        copy_root,
+        "--dump",
+        str(earlier),
+        "--captured-from",
+        f"an earlier capture of report {REPORT_ID}",
+        "--verified-date",
+        _since_date(copy_root),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    _reopen(copy_root)
+    assert "captured_from" in _live(copy_root)
   repository_binding = (DASHBOARD / BINDING).read_bytes()
   yield copy_root
   assert (DASHBOARD / BINDING).read_bytes() == repository_binding
@@ -203,27 +220,41 @@ def _spec_roles(component):
   return dimensions, metrics, sorts, axis.get("reverseSortOrder", False)
 
 
-def _render_dump(tree, report_datasource_id=None, name_report=True):
+def _render_dump(
+    tree,
+    report_datasource_id=None,
+    report_ids=None,
+    alias_datasource_id=None,
+    extra_lines=(),
+):
   """Render a dump of the synced live template from the copy's manifest.
 
   The dump is generated here, not taken from the checked-in fixtures: a
-  `report_id` field naming the binding's report (test-only provenance, left
-  out with `name_report=False`), one `component_config` per manifest
-  component, in manifest order, with its `qt_` concepts and the references
-  to them, then the report-level data source and `ds0` alias of the binding.
-  `report_datasource_id` replaces the report-level data source.
+  `shareable` entry whose `id` names the binding's report (test-only
+  provenance), one `component_config` per manifest component, in manifest
+  order, with its `qt_` concepts and the references to them, then the
+  report-level data source and `ds0` alias of the binding.
+  `report_datasource_id`, `report_ids` (the `shareable.id` values) and
+  `alias_datasource_id` replace those; `extra_lines` go first in
+  `report_config`.
   """
   manifest = yaml.safe_load(
       (tree / "spec/bqca_chart_manifest.yaml").read_text(encoding="utf-8")
   )
   binding = yaml.safe_load((tree / BINDING).read_text(encoding="utf-8"))
   report_datasource_id = report_datasource_id or binding["datasource_id"]
+  alias_datasource_id = alias_datasource_id or binding["datasource_id"]
+  if report_ids is None:
+    report_ids = [binding["report_id"]]
   lines = [
       "# Rendered by tests/test_looker_studio_live_sync.py",
       "report_config {",
+      *(f"  {line}" for line in extra_lines),
+      "  shareable {",
+      *(f'    id: "{report_id}"' for report_id in report_ids),
+      '    name: "BQCA - Prompt & Response Logging"',
+      "  }",
   ]
-  if name_report:
-    lines.append(f'  report_id: "{binding["report_id"]}"')
   for page in manifest["pages"]:
     lines += ["  page {", f'    page_id: "{page["id"]}"', "    page {"]
     for component in page["components"]:
@@ -267,7 +298,7 @@ def _render_dump(tree, report_datasource_id=None, name_report=True):
       "  report {",
       f'    datasource_id: "{report_datasource_id}"',
       "    resource { datasource_alias {",
-      f'      datasource_id: "{binding["datasource_id"]}"',
+      f'      datasource_id: "{alias_datasource_id}"',
       f'      alias: "{binding["data_source_alias"]}"',
       "    } }",
       "  }",
@@ -319,6 +350,51 @@ def _mode(path):
   return stat.S_IMODE(path.stat().st_mode)
 
 
+# The keys of live_template_verification that finalizing writes.
+_RECORD_KEYS = (
+    "verified_date",
+    "verified_manifest_sha256",
+    "verified_template_bundle_sha256",
+    "captured_from",
+    "verified_dump_sha256",
+)
+
+
+def _live_block(lines):
+  """Return the (start, end) line range of live_template_verification."""
+  start = lines.index(f"{LIVE}:\n") + 1
+  end = next(
+      (
+          index
+          for index in range(start, len(lines))
+          if lines[index].strip() and not lines[index].startswith(" ")
+      ),
+      len(lines),
+  )
+  return start, end
+
+
+def _is_record_line(line):
+  return any(line.startswith(f"  {key}: ") for key in _RECORD_KEYS)
+
+
+def _record_lines(text):
+  """Return the record key lines of live_template_verification, in order."""
+  lines = text.splitlines(keepends=True)
+  start, end = _live_block(lines)
+  return [line for line in lines[start:end] if _is_record_line(line)]
+
+
+def _without_record(lines):
+  """Return `lines` without the record lines of live_template_verification."""
+  start, end = _live_block(lines)
+  return (
+      lines[:start]
+      + [line for line in lines[start:end] if not _is_record_line(line)]
+      + lines[end:]
+  )
+
+
 def test_finalize_records_the_live_verification_after_a_clean_audit(tree, dump):
   """A dump that passes the audit finalizes the binding, and only that.
 
@@ -360,30 +436,28 @@ def test_finalize_records_the_live_verification_after_a_clean_audit(tree, dump):
   assert _mode(tree / BINDING) == before_mode
   assert sorted(path.name for path in (tree / "bindings").iterdir()) == bindings
 
-  diff = list(
-      difflib.ndiff(
-          before_text.splitlines(keepends=True),
-          after_text.splitlines(keepends=True),
-      )
-  )
-  added = [line[2:] for line in diff if line.startswith("+ ")]
-  removed = [line[2:] for line in diff if line.startswith("- ")]
-  assert added == [
+  # The verification record of live_template_verification is exactly these
+  # lines, in this order, whether the binding had a capture record before
+  # (the `reopened` state) or not.
+  assert _record_lines(after_text) == [
       f'  verified_date: "{date}"\n',
       f"  verified_manifest_sha256: {live['manifest_sha256']}\n",
       f"  verified_template_bundle_sha256: {live['template_bundle_sha256']}\n",
-      f"  captured_from: {json.dumps(ATTESTATION)}\n",
+      f"  captured_from: {json.dumps(ATTESTATION, ensure_ascii=False)}\n",
       f"  verified_dump_sha256: {dump_sha256}\n",
   ]
-  assert [line.split(":")[0] for line in removed[:4]] == [
-      "  verified_date",
-      "  verified_manifest_sha256",
-      "  verified_template_bundle_sha256",
-      "  pending_live_sync",
-  ]
-  assert removed[3] == "  pending_live_sync:\n"
-  assert all(line.startswith("    ") for line in removed[4:])
-  assert len(removed) > 4
+  # Every other line, comments included, is kept, and only the lines of
+  # pending_live_sync (its own line and the lines nested under it) are gone.
+  before_lines = before_text.splitlines(keepends=True)
+  start = before_lines.index(f"  {PENDING}:\n")
+  end = start + 1
+  while before_lines[end].startswith("    "):
+    end += 1
+  assert end > start + 1
+  kept = before_lines[:start] + before_lines[end:]
+  assert _without_record(kept) == _without_record(
+      after_text.splitlines(keepends=True)
+  )
 
   # The finalized copy passes the contract validator on its own.
   check = subprocess.run(
@@ -401,9 +475,20 @@ def test_finalize_records_the_live_verification_after_a_clean_audit(tree, dump):
   assert check.stdout == "ok: contracts validated (bqca)\n"
 
 
-def test_finalize_records_the_attestation_text_exactly(tree, dump):
-  attestation = f'export "v2" of report {REPORT_ID} \\ by the café team'
+@pytest.mark.parametrize(
+    "attestation",
+    [
+        f'export "v2" of report {REPORT_ID} \\ by the café team',
+        f"export of report {REPORT_ID} \U0001f4e6 \U0001d11e",
+    ],
+    ids=["quotes-backslash-bmp", "non-bmp"],
+)
+def test_finalize_records_the_attestation_text_exactly(tree, dump, attestation):
+  """The attestation is recorded as given, including non-BMP characters.
 
+  A JSON string with escaped surrogate pairs would load back from YAML as
+  two lone surrogates.
+  """
   result = _finalize(
       tree,
       "--dump",
@@ -430,7 +515,7 @@ def test_finalize_records_the_attestation_text_exactly(tree, dump):
             "fixture",
             False,
             ", but a write would refuse it: --captured-from is not given;"
-            f" {NAMES_NO_REPORT}; nothing written",
+            f" {NO_REPORT_FIELD}; nothing written",
         ),
         (
             "generated",
@@ -657,6 +742,21 @@ def _naming_the_report_in_comments(text):
   )
 
 
+def _naming_the_report_in_an_inert_field(text):
+  assert text.count("report_config {\n") == 1
+  return text.replace(
+      "report_config {\n",
+      f'report_config {{\n  capture_note: "copied fixture for {REPORT_ID}"\n',
+  )
+
+
+def _naming_the_report_in_another_field(text):
+  assert text.count("report_config {\n") == 1
+  return text.replace(
+      "report_config {\n", f'report_config {{\n  report_id: "{REPORT_ID}"\n'
+  )
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -666,6 +766,8 @@ def _naming_the_report_in_comments(text):
         _with_inert_field,
         _with_inert_fields_everywhere,
         _naming_the_report_in_comments,
+        _naming_the_report_in_an_inert_field,
+        _naming_the_report_in_another_field,
     ],
     ids=[
         "byte-identical-copy",
@@ -674,6 +776,8 @@ def _naming_the_report_in_comments(text):
         "audit-inert-field",
         "audit-inert-fields-everywhere",
         "report-named-in-comments",
+        "report-named-in-an-inert-field",
+        "report-named-in-another-field",
     ],
 )
 def test_finalize_refuses_a_reordered_or_audit_inert_stand_in(
@@ -682,9 +786,11 @@ def test_finalize_refuses_a_reordered_or_audit_inert_stand_in(
   """No edit of a checked-in stand-in that keeps its fields finalizes.
 
   Each mutation of the remapped fixture, outside tests/fixtures, still passes
-  the live audit, so only the positive evidence can refuse it: with an
-  attestation, the write fails because no field of the dump names the
-  report, and the binding stays byte-identical. `--check` still previews.
+  the live audit, so only the positive evidence can refuse it. With the
+  test-only attestation, the write fails because report_config.shareable.id
+  does not name the report, even when another field (an audit-inert note,
+  or another `report_id` field) contains the report ID, and the binding
+  stays byte-identical. `--check` still previews.
   """
   path = tmp_path / "elsewhere/report.textproto"
   path.parent.mkdir()
@@ -699,9 +805,8 @@ def test_finalize_refuses_a_reordered_or_audit_inert_stand_in(
   refused = _finalize(tree, "--dump", str(path), "--captured-from", ATTESTATION)
 
   assert refused.returncode == 1
-  assert (
-      f"not finalized: {NAMES_NO_REPORT}; {BINDING} is unchanged"
-  ) in refused.stderr
+  assert f"not finalized: {NO_REPORT_FIELD}" in refused.stderr
+  assert f"{BINDING} is unchanged" in refused.stderr
   assert "ok: live report validated" not in refused.stdout
   assert (tree / BINDING).read_bytes() == binding
   assert _snapshot(tree) == before
@@ -712,7 +817,7 @@ def test_finalize_refuses_a_reordered_or_audit_inert_stand_in(
   assert f"a write would refuse it: --captured-from is not given;" in (
       preview.stdout
   )
-  assert NAMES_NO_REPORT in preview.stdout
+  assert NO_REPORT_FIELD in preview.stdout
   assert _snapshot(tree) == before
 
 
@@ -737,40 +842,68 @@ def test_checked_in_stand_ins_name_the_report_in_no_field(tree, fixture):
 
   errors = finalize.dump_identity_errors(text, binding)
 
-  assert errors is not None and errors[0] == NAMES_NO_REPORT
+  assert errors is not None and errors[0] == NO_REPORT_FIELD
+
+
+_DATASOURCE_FIELD = "report_config.report.datasource_id"
 
 
 @pytest.mark.parametrize(
-    "variant, error",
+    "variant, render, error",
     [
-        ("no-report-field", NAMES_NO_REPORT),
+        ("no-report-field", {"report_ids": []}, NO_REPORT_FIELD),
+        (
+            "report-id-in-a-longer-value",
+            {"report_ids": [f"copy of {REPORT_ID}"]},
+            f"the dump's {REPORT_ID_FIELD} is ['copy of {REPORT_ID}'], not"
+            f" ['{REPORT_ID}']",
+        ),
+        (
+            "report-id-twice",
+            {"report_ids": [REPORT_ID, REPORT_ID]},
+            f"the dump's {REPORT_ID_FIELD} is ['{REPORT_ID}', '{REPORT_ID}'],"
+            f" not ['{REPORT_ID}']",
+        ),
+        (
+            "report-id-in-another-field",
+            {"report_ids": [], "extra_lines": [f'report_id: "{REPORT_ID}"']},
+            f"{NO_REPORT_FIELD} (the report ID is in report_config.report_id)",
+        ),
         (
             "other-report-datasource",
-            f"its report-level datasource_id is '{STALE_DATASOURCE_ID}', not"
-            f" '{DATASOURCE_ID}'",
+            {"report_datasource_id": STALE_DATASOURCE_ID},
+            f"the dump's {_DATASOURCE_FIELD} is ['{STALE_DATASOURCE_ID}'], not"
+            f" ['{DATASOURCE_ID}']",
         ),
+        (
+            "other-alias-datasource",
+            {"alias_datasource_id": STALE_DATASOURCE_ID},
+            f"the dump's ds0 data source alias in"
+            f" report_config.report.resource.datasource_alias points at"
+            f" ['{STALE_DATASOURCE_ID}'], not ['{DATASOURCE_ID}']",
+        ),
+    ],
+    ids=[
+        "no-report-field",
+        "report-id-in-a-longer-value",
+        "report-id-twice",
+        "report-id-in-another-field",
+        "other-report-datasource",
+        "other-alias-datasource",
     ],
 )
 def test_finalize_refuses_a_dump_that_does_not_identify_the_live_template(
-    tree, tmp_path, variant, error
+    tree, tmp_path, variant, render, error
 ):
-  """A write needs a dump that names the report and its report data source.
+  """A write needs the exact report and data source IDs in their fields.
 
-  Both are checked before the audit runs.
+  The report ID must be the one value of report_config.shareable.id, the
+  report-level data source the one value of
+  report_config.report.datasource_id, and the `ds0` alias must point at it;
+  all are checked before the audit runs.
   """
   path = tmp_path / "report.textproto"
-  path.write_text(
-      _render_dump(
-          tree,
-          name_report=variant != "no-report-field",
-          report_datasource_id=(
-              STALE_DATASOURCE_ID
-              if variant == "other-report-datasource"
-              else None
-          ),
-      ),
-      encoding="utf-8",
-  )
+  path.write_text(_render_dump(tree, **render), encoding="utf-8")
   before = _snapshot(tree)
 
   result = _finalize(tree, "--dump", str(path), "--captured-from", ATTESTATION)
@@ -1238,6 +1371,19 @@ def test_rename_map_lists_the_65_concepts_in_page_and_component_order(
     assert f"`{row['old_name']}` | `{row['new_qt_id']}`" in markdown
   assert f"`{DATASOURCE_ID}`" in markdown
   assert str(ROOT) not in markdown
+  # Every input the map is built from is listed with its digest, the
+  # binding (which gives the repointed datasource_id) included.
+  inputs = [
+      ("dump", GENERIC_DUMP),
+      ("manifest", DASHBOARD / "spec/bqca_chart_manifest.yaml"),
+      ("binding", DASHBOARD / BINDING),
+      ("remapped twin", REMAPPED_DUMP),
+  ]
+  assert [line for line in markdown.splitlines() if line.endswith("`)")] == [
+      f"- {role}: `{path.relative_to(ROOT).as_posix()}` (sha256"
+      f" `{hashlib.sha256(path.read_bytes()).hexdigest()}`)"
+      for role, path in inputs
+  ]
 
   # The same inputs give the same bytes.
   again_csv, again_md = tmp_path / "again.csv", tmp_path / "again.md"

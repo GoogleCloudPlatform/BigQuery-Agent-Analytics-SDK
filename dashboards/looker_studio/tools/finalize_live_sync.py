@@ -28,16 +28,20 @@ dump of the live template:
 
 * ``--captured-from`` attests how the dump was captured, and names the
   binding's ``report_id``;
-* a field of the dump (comments do not count) names that ``report_id``, and
-  its report-level ``datasource_id`` is the binding's;
+* the dump's ``report_config.shareable.id`` is exactly that ``report_id``,
+  and its ``report_config.report.datasource_id`` and ``ds0`` data source
+  alias are exactly the binding's ``datasource_id`` (``REPORT_ID_FIELD``,
+  ``REPORT_DATASOURCE_FIELD``, ``ALIAS_FIELD``); the ID in any other field,
+  inside a longer value, or in a comment does not count;
 * the dump is not under this repository's ``tests/fixtures``.
 
-The checked-in fixtures name the report in no field, so neither they nor a
-reordered or otherwise audit-inert edit of them can be written; their
-``--check`` previews still run. Nothing in a file proves where it came from:
-a file that someone edits to name the report, with a false attestation,
-passes. The attestation and the dump's digest in the binding make that a
-deliberate, reviewable statement rather than an accident.
+The checked-in fixtures have no ``report_config.shareable`` entry, so neither
+they nor a reordered or otherwise audit-inert edit of them can be written,
+even one that adds the report ID to another field; their ``--check``
+previews still run. Nothing in a file proves where it came from: a file that
+someone edits to put the report ID in ``report_config.shareable.id``, with a
+false attestation, passes. The attestation and the dump's digest in the
+binding make that a deliberate, reviewable statement rather than an accident.
 
 This tool does not edit documentation or tests. See "Finalizing the live
 template sync" in ``docs/dashboard-implementation.md`` for the rest of the
@@ -83,6 +87,17 @@ CAPTURE_KEYS = ("captured_from", "verified_dump_sha256")
 # Shown in a `--check` preview given no `--captured-from`.
 CAPTURE_PLACEHOLDER = "<the --captured-from attestation>"
 MAX_ATTESTATION_LENGTH = 500
+# The fields where a dump of the live template identifies it, as parsed field
+# paths. A saved report's `report_config.report` holds its report-level data
+# source and data source aliases, which the live audit reads too. Its own
+# entry, `report_config.shareable`, holds its name; this tool expects the
+# report ID as that entry's `id`. No dump in this repository keeps the report
+# ID (the sanitized cuts drop it), so if the first real dump names the report
+# in another field, a write is refused with that field's path, and this
+# constant needs that path.
+REPORT_ID_FIELD = ("report_config", "shareable", "id")
+REPORT_DATASOURCE_FIELD = ("report_config", "report", "datasource_id")
+ALIAS_FIELD = ("report_config", "report", "resource", "datasource_alias")
 NEXT_STEPS = """\
 In the same change:
   - remove the #559 known-issue notes: #bqca-column-id-note in
@@ -190,9 +205,11 @@ def finalized_binding_text(
           f"{LIVE_KEY}.{pinned_key} {pinned!r} is not a SHA-256 hex digest"
       )
     values[verified_key] = pinned
-  # A JSON string is a YAML double-quoted scalar.
+  # A JSON string is a YAML double-quoted scalar. ensure_ascii=False keeps a
+  # non-BMP character as itself: its escaped surrogate pair would load back
+  # as two lone surrogates.
   record = {
-      "captured_from": json.dumps(captured_from),
+      "captured_from": json.dumps(captured_from, ensure_ascii=False),
       "verified_dump_sha256": dump_sha256,
   }
 
@@ -317,43 +334,80 @@ def _load_validator():
   return module
 
 
-def _scalar_values(message: list) -> Iterator[str]:
-  """Yield every scalar field value of a parsed textproto message."""
-  for _, value in message:
+def _values_at(message: list, path: tuple[str, ...]) -> list:
+  """Return every value of the field at `path`, through repeated messages."""
+  values: list = [message]
+  for key in path:
+    values = [
+        value
+        for parent in values
+        if isinstance(parent, list)
+        for name, value in parent
+        if name == key
+    ]
+  return values
+
+
+def _scalar_paths(
+    message: list, path: tuple[str, ...] = ()
+) -> Iterator[tuple[tuple[str, ...], str]]:
+  """Yield `(field path, value)` for every scalar field of a message."""
+  for name, value in message:
     if isinstance(value, list):
-      yield from _scalar_values(value)
+      yield from _scalar_paths(value, (*path, name))
     else:
-      yield value
+      yield (*path, name), value
 
 
 def dump_identity_errors(text: str, binding: dict) -> list[str] | None:
   """Return why a dump does not identify the live template, or None.
 
-  The dump must name the binding's `report_id` in a field value (comments do
-  not count), and its report-level `datasource_id` must be the binding's.
-  Returns None for a dump that cannot be read, which the live audit rejects
-  with its own error.
+  Each identity field must hold exactly one value, equal to the binding's:
+  REPORT_ID_FIELD its `report_id`, REPORT_DATASOURCE_FIELD its
+  `datasource_id`, and the `datasource_id` of the ALIAS_FIELD entry for its
+  `data_source_alias` that same data source. A value elsewhere, or one that
+  only contains the ID, does not count; when the dump has the report ID in
+  other fields, the error names them. Returns None for a dump that cannot be
+  read, which the live audit rejects with its own error.
   """
-  validator = _load_validator()
   try:
-    report = validator.parse_report_textproto(text)
+    report = _load_validator().parse_report_textproto(text)
   except ValueError:
     return None
   errors = []
-  report_id = str(binding.get("report_id"))
-  if not any(report_id in value for value in _scalar_values(report)):
-    errors.append(
-        f"the dump names report {report_id} in no field (comments do not"
-        " count)"
+  report_id = binding.get("report_id")
+  report_ids = _values_at(report, REPORT_ID_FIELD)
+  if report_ids != [report_id]:
+    found = sorted(
+        {
+            ".".join(path)
+            for path, value in _scalar_paths(report)
+            if value == report_id and path != REPORT_ID_FIELD
+        }
     )
-  report_message = validator._tp_message(
-      validator._tp_message(report, "report_config") or report, "report"
-  )
-  datasource_id = validator._tp_scalar(report_message, "datasource_id")
-  if datasource_id != binding.get("datasource_id"):
+    where = f" (the report ID is in {', '.join(found)})" if found else ""
     errors.append(
-        f"its report-level datasource_id is {datasource_id!r}, not"
-        f" {binding.get('datasource_id')!r}"
+        f"the dump's {'.'.join(REPORT_ID_FIELD)} is {report_ids}, not"
+        f" [{report_id!r}]{where}"
+    )
+  datasource_id = binding.get("datasource_id")
+  datasource_ids = _values_at(report, REPORT_DATASOURCE_FIELD)
+  if datasource_ids != [datasource_id]:
+    errors.append(
+        f"the dump's {'.'.join(REPORT_DATASOURCE_FIELD)} is {datasource_ids},"
+        f" not [{datasource_id!r}]"
+    )
+  alias = binding.get("data_source_alias")
+  targets = [
+      target
+      for entry in _values_at(report, ALIAS_FIELD)
+      if isinstance(entry, list) and _values_at(entry, ("alias",)) == [alias]
+      for target in _values_at(entry, ("datasource_id",))
+  ]
+  if targets != [datasource_id]:
+    errors.append(
+        f"the dump's {alias} data source alias in {'.'.join(ALIAS_FIELD)}"
+        f" points at {targets}, not [{datasource_id!r}]"
     )
   return errors
 

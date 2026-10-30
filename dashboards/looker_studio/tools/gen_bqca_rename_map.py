@@ -499,12 +499,16 @@ def main(argv: list[str] | None = None) -> int:
     print(line, file=sys.stderr)
 
   csv_text = render_csv(rows)
+  # Every file the map is built from, the binding (the repointed
+  # datasource_id) included.
   inputs = [
       ("dump", _display_path(args.dump), _sha256(args.dump)),
-      (
-          "manifest",
-          _display_path(ROOT / MANIFEST_PATH),
-          _sha256(ROOT / MANIFEST_PATH),
+      *(
+          (role, _display_path(ROOT / path), _sha256(ROOT / path))
+          for role, path in (
+              ("manifest", MANIFEST_PATH),
+              ("binding", BINDING_PATH),
+          )
       ),
   ]
   if args.remapped is not None:

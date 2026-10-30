@@ -493,23 +493,33 @@ of the live template:
 - a one-line `--captured-from` attestation of how the dump was captured,
   which names the binding's `report_id`
   (`42e79a1f-a979-4de8-911f-80d5a99543d5`);
-- a field of the dump (comments do not count) that names that `report_id`,
-  and a report-level `datasource_id` that is the binding's
-  (`70e5ac1e-65bb-4c89-a9df-fa9990cb6029`);
+- the identity fields of the dump, each with exactly one value equal to the
+  binding's: `report_config.shareable.id` is the `report_id`, and
+  `report_config.report.datasource_id` and the `ds0` entry of
+  `report_config.report.resource.datasource_alias` are the `datasource_id`
+  (`70e5ac1e-65bb-4c89-a9df-fa9990cb6029`); the report ID in any other field,
+  inside a longer value, or in a comment does not count;
 - a dump that is not under `tests/fixtures/`.
 
-The checked-in fixtures name the report in no field, so a write refuses them,
-copies of them anywhere, and any reordering or audit-inert edit of them. The
-check cannot prove where a file came from: a file that someone edits to name
-the report, written with a false attestation, passes. The binding then records
-that attestation and the dump's digest, so the statement is deliberate and
-reviewable, and anyone with the dump can check the digest. The tool does not
-compare the dump's audit-relevant fields with the fixtures: the remapped
-fixture is exactly what those fields must be after a correct sync (the audit
-compares them with the manifest), so such a comparison would refuse every
-genuine dump. If an export of the live template does not name its report in
-any field, a write refuses it; take an export that includes the report's
-identity.
+The checked-in fixtures have no `report_config.shareable` entry, so a write
+refuses them, copies of them anywhere, and any reordering or audit-inert edit
+of them, including one that adds the report ID to another field. The data
+source fields are those a saved report keeps and the live audit reads. No
+dump in this repository keeps the report ID (the sanitized cuts drop it), so
+`report_config.shareable.id`, the report's own entry, is where the tool
+expects it (`REPORT_ID_FIELD` in `tools/finalize_live_sync.py`). If a real
+export names the report in another field, a write is refused with that
+field's path, and `REPORT_ID_FIELD` needs to name it; an export that does not
+name its report at all is refused.
+
+The check cannot prove where a file came from: a file that someone edits to
+put the report ID in `report_config.shareable.id`, written with a false
+attestation, passes. The binding then records that attestation and the dump's
+digest, so the statement is deliberate and reviewable, and anyone with the
+dump can check the digest. The tool does not compare the dump's
+audit-relevant fields with the fixtures: the remapped fixture is exactly what
+those fields must be after a correct sync (the audit compares them with the
+manifest), so such a comparison would refuse every genuine dump.
 
 The tool does not edit documentation or tests. In the same change, remove the
 #559 known-issue notes that `pending_live_sync.required_actions` lists (and
