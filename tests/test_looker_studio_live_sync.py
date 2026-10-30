@@ -21,9 +21,10 @@
 concepts of the live template.
 
 The finalize tests run the tool from a copy of `dashboards/looker_studio`, so
-they never write to the repository. The checked-in sanitized cuts of the
-2026-10-29 dump stand in for dumps: the audit accepts the remapped twin and
-rejects the generic cut.
+they never write to the repository. A successful write uses a dump that
+`_render_dump` generates from the copy's manifest. The checked-in sanitized
+cuts of the 2026-10-29 dump are stand-ins: the tool refuses to write with
+their content wherever it is, and only `--check` may preview with them.
 """
 
 import collections
@@ -31,11 +32,14 @@ import copy
 import csv
 import difflib
 import importlib.util
+import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import types
 
 import pytest
 import yaml
@@ -51,6 +55,7 @@ BINDING = "bindings/bqca_report_template.yaml"
 LIVE = "live_template_verification"
 PENDING = "pending_live_sync"
 DATASOURCE_ID = "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+STALE_DATASOURCE_ID = "00000000-0000-4000-8000-000000000000"
 QT_ID = re.compile(r"qt_[a-z0-9]{3,10}")
 
 # `_reopen` gives a finalized copy the state of the binding before #559: a
@@ -70,6 +75,16 @@ _REOPENED_PENDING = """\
 def _load_validator():
   path = DASHBOARD / "tools/validate_contracts.py"
   spec = importlib.util.spec_from_file_location("live_sync_validator", path)
+  assert spec is not None and spec.loader is not None
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
+
+
+def _load_finalize(tree):
+  spec = importlib.util.spec_from_file_location(
+      "live_sync_finalize", tree / "tools/finalize_live_sync.py"
+  )
   assert spec is not None and spec.loader is not None
   module = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(module)
@@ -140,6 +155,118 @@ def tree(tmp_path):
   assert (DASHBOARD / BINDING).read_bytes() == repository_binding
 
 
+def _spec_inner(component):
+  (inner,) = [
+      value
+      for value in component["spec"].values()
+      if isinstance(value, dict) and "dataset" in value
+  ]
+  return inner
+
+
+def _spec_columns(component):
+  return _spec_inner(component)["dataset"]["columns"]
+
+
+def _spec_roles(component):
+  """Return a component's dimension IDs, metric IDs, sorts and reverse flag."""
+  fields = _spec_inner(component)["fields"]
+  if "primaryMetricId" in fields:
+    return [], [fields["primaryMetricId"]], [], False
+  if "primaryAxis" in fields:
+    axis = fields["primaryAxis"]
+    dimensions, metrics = [axis["fieldId"]], fields["metricSeries"]["metricIds"]
+  elif "dimensionId" in fields:
+    axis = fields
+    dimensions, metrics = [fields["dimensionId"]], [fields["metricId"]]
+  else:
+    axis = fields
+    dimensions, metrics = fields["dimensionIds"], fields["metricIds"]
+  sorts = [
+      (clause["sortFieldId"], clause["sortDir"]) for clause in axis["sort"]
+  ]
+  return dimensions, metrics, sorts, axis.get("reverseSortOrder", False)
+
+
+def _render_dump(tree, report_datasource_id=None):
+  """Render a dump of the synced live template from the copy's manifest.
+
+  The dump is generated here, not taken from the checked-in fixtures: one
+  `component_config` per manifest component, in manifest order, with its
+  `qt_` concepts and the references to them, then the report-level data
+  source and `ds0` alias of the binding. `report_datasource_id` replaces the
+  report-level data source.
+  """
+  manifest = yaml.safe_load(
+      (tree / "spec/bqca_chart_manifest.yaml").read_text(encoding="utf-8")
+  )
+  binding = yaml.safe_load((tree / BINDING).read_text(encoding="utf-8"))
+  report_datasource_id = report_datasource_id or binding["datasource_id"]
+  lines = [
+      "# Rendered by tests/test_looker_studio_live_sync.py",
+      "report_config {",
+  ]
+  for page in manifest["pages"]:
+    lines += ["  page {", f'    page_id: "{page["id"]}"', "    page {"]
+    for component in page["components"]:
+      dimensions, metrics, sorts, reverse = _spec_roles(component)
+      datasource_id = component["datasource_id"]
+      lines += [
+          "      component_config {",
+          f'        datasource_id: "{datasource_id}"',
+          f'        component_id: "{component["component_id"]}"',
+          "        property_config { component_property {",
+          f'          dataset {{ dataset_id: "{datasource_id}" }}',
+      ]
+      for role, ids in (("dimensions", dimensions), ("metrics", metrics)):
+        names = " ".join(f'concept_names: "{column_id}"' for column_id in ids)
+        entry = (
+            f' labeled_concepts {{ key: "primary" value {{ {names} }} }}'
+            if ids
+            else ""
+        )
+        lines.append(f"          {role} {{{entry} }}")
+      for column_id, direction in sorts:
+        lines.append(
+            f"          sort {{ sort_dir: {direction}"
+            f' sort_column: "{column_id}" }}'
+        )
+      if reverse:
+        lines.append("          reverse_sort_order: true")
+      lines.append("        } }")
+      for column in _spec_columns(component):
+        transform = f'source_field_name: "{column["fieldName"]}"'
+        if column.get("aggregation"):
+          transform += f" aggregation: {column['aggregation']}"
+        lines.append(
+            f'        concept_defs {{ id: "t0.{column["id"]}" name:'
+            f' "{column["id"]}" query_time_transformation {{'
+            f" data_transformation {{ {transform} }} }} }}"
+        )
+      lines.append("      }")
+    lines += ["    }", "  }"]
+  lines += [
+      "  report {",
+      f'    datasource_id: "{report_datasource_id}"',
+      "    resource { datasource_alias {",
+      f'      datasource_id: "{binding["datasource_id"]}"',
+      f'      alias: "{binding["data_source_alias"]}"',
+      "    } }",
+      "  }",
+      "}",
+  ]
+  return "\n".join(lines) + "\n"
+
+
+@pytest.fixture
+def dump(tree, tmp_path):
+  """A generated dump of the synced live template, outside any fixtures."""
+  path = tmp_path / "dumps/report.textproto"
+  path.parent.mkdir()
+  path.write_text(_render_dump(tree), encoding="utf-8")
+  return path
+
+
 def _finalize(tree, *args):
   return subprocess.run(
       [sys.executable, str(tree / "tools/finalize_live_sync.py"), *args],
@@ -154,19 +281,29 @@ def _since_date(tree):
   return _live(tree)[PENDING]["since_date"]
 
 
-def test_finalize_records_the_live_verification_after_a_clean_audit(tree):
+def _mode(path):
+  return stat.S_IMODE(path.stat().st_mode)
+
+
+def test_finalize_records_the_live_verification_after_a_clean_audit(tree, dump):
   """A dump that passes the audit finalizes the binding, and only that.
 
   `verified_date` and both verified digests change, `pending_live_sync` goes,
-  and every other line of the binding, comments included, is kept.
+  and every other line of the binding, comments included, is kept. The
+  binding keeps its permissions, and no staged file is left behind.
   """
+  finalize = _load_finalize(tree)
+  assert (
+      finalize.normalized_dump_sha256(dump.read_text(encoding="utf-8"))
+      not in finalize.KNOWN_FIXTURE_SHA256
+  )
   date = _since_date(tree)
   before_text = (tree / BINDING).read_text(encoding="utf-8")
   before = yaml.safe_load(before_text)
+  before_mode = _mode(tree / BINDING)
+  bindings = sorted(path.name for path in (tree / "bindings").iterdir())
 
-  result = _finalize(
-      tree, "--dump", str(REMAPPED_DUMP), "--verified-date", date
-  )
+  result = _finalize(tree, "--dump", str(dump), "--verified-date", date)
 
   assert result.returncode == 0, result.stdout + result.stderr
   assert "ok: live report validated" in result.stdout
@@ -179,6 +316,8 @@ def test_finalize_records_the_live_verification_after_a_clean_audit(tree):
   live["verified_template_bundle_sha256"] = live["template_bundle_sha256"]
   del live[PENDING]
   assert yaml.safe_load(after_text) == expected
+  assert _mode(tree / BINDING) == before_mode
+  assert sorted(path.name for path in (tree / "bindings").iterdir()) == bindings
 
   diff = list(
       difflib.ndiff(
@@ -219,12 +358,17 @@ def test_finalize_records_the_live_verification_after_a_clean_audit(tree):
   assert check.stdout == "ok: contracts validated (bqca)\n"
 
 
-def test_finalize_check_prints_the_change_and_writes_nothing(tree):
+@pytest.mark.parametrize("source", ["fixture", "generated"])
+def test_finalize_check_prints_the_change_and_writes_nothing(
+    tree, dump, source
+):
+  """`--check` previews the change, with a stand-in fixture too."""
+  path = REMAPPED_DUMP if source == "fixture" else dump
   date = _since_date(tree)
   before = _snapshot(tree)
 
   result = _finalize(
-      tree, "--dump", str(REMAPPED_DUMP), "--check", "--verified-date", date
+      tree, "--dump", str(path), "--check", "--verified-date", date
   )
 
   assert result.returncode == 0, result.stdout + result.stderr
@@ -234,69 +378,149 @@ def test_finalize_check_prints_the_change_and_writes_nothing(tree):
   assert "-  pending_live_sync:\n" in result.stdout
   assert f'+  verified_date: "{date}"\n' in result.stdout
   assert "nothing written" in result.stdout
+  assert ("a stand-in: a write would refuse it" in result.stdout) == (
+      source == "fixture"
+  )
   assert "finalized:" not in result.stdout
 
 
 @pytest.mark.parametrize("check", [False, True], ids=["write", "check"])
 @pytest.mark.parametrize(
-    "dump, error",
+    "source, error",
     [
-        (GENERIC_DUMP, "is not a qt_ column ID"),
         (
-            FIXTURES / "no_such_dump.textproto",
-            "cannot read it as protobuf text format",
+            "stale",
+            f"report datasource_id '{STALE_DATASOURCE_ID}' != binding"
+            f" datasource_id '{DATASOURCE_ID}'",
         ),
+        ("missing", "cannot read it as protobuf text format"),
     ],
-    ids=["generic-dump", "missing-dump"],
 )
 def test_finalize_rejects_a_dump_that_fails_the_audit_and_writes_nothing(
-    tree, dump, error, check
+    tree, tmp_path, source, error, check
 ):
   """A stale or unreadable dump leaves every file of the copy unchanged."""
+  path = tmp_path / "report.textproto"
+  if source == "stale":
+    path.write_text(
+        _render_dump(tree, report_datasource_id=STALE_DATASOURCE_ID),
+        encoding="utf-8",
+    )
   before = _snapshot(tree)
 
-  result = _finalize(tree, "--dump", str(dump), *(["--check"] if check else []))
+  result = _finalize(tree, "--dump", str(path), *(["--check"] if check else []))
 
   assert result.returncode == 1
   assert error in result.stderr
   assert (
-      f"not finalized: tools/validate_contracts.py exited 1 on {dump};"
+      f"not finalized: tools/validate_contracts.py exited 1 on {path};"
       f" {BINDING} is unchanged"
   ) in result.stderr
   assert _snapshot(tree) == before
 
 
+def _reformatted(text):
+  """Return `text` without comments, re-indented, with extra blank lines."""
+  lines = [line.strip() for line in text.splitlines()]
+  kept = [f"\t{line}  " for line in lines if line and not line.startswith("#")]
+  return "# A stand-in, re-indented.\n\n" + "\n\n".join(kept) + "\n"
+
+
 @pytest.mark.parametrize(
-    "date, code, error",
+    "fixture, prepare",
     [
-        ("2026-10-28", 1, "is before pending_live_sync.since_date"),
-        ("2999-01-01", 1, "--verified-date 2999-01-01 is in the future"),
-        ("2026-13-01", 2, "'2026-13-01' is not a YYYY-MM-DD date"),
-        ("20261030", 2, "'20261030' is not a YYYY-MM-DD date"),
+        (REMAPPED_DUMP, "copy"),
+        (REMAPPED_DUMP, "reformat"),
+        (REMAPPED_DUMP, "in-place"),
+        (GENERIC_DUMP, "copy"),
+    ],
+    ids=[
+        "remapped-copy",
+        "remapped-reformatted",
+        "remapped-in-place",
+        "generic-copy",
     ],
 )
-def test_finalize_rejects_a_verified_date_it_cannot_record(
-    tree, date, code, error
+def test_finalize_refuses_stand_in_content_wherever_it_is(
+    tree, tmp_path, fixture, prepare
 ):
+  """A checked-in stand-in never finalizes the binding, by content.
+
+  A byte-identical copy outside tests/fixtures, a copy with other comments
+  and whitespace, and the checked-in file of another checkout are refused
+  for a write; the binding stays byte-identical. `--check` still previews.
+  """
+  if prepare == "in-place":
+    path = fixture
+  else:
+    path = tmp_path / "elsewhere/report.textproto"
+    path.parent.mkdir()
+    text = fixture.read_text(encoding="utf-8")
+    path.write_text(
+        _reformatted(text) if prepare == "reformat" else text, encoding="utf-8"
+    )
+    if prepare == "copy":
+      assert path.read_bytes() == fixture.read_bytes()
+  binding = (tree / BINDING).read_bytes()
   before = _snapshot(tree)
 
-  result = _finalize(
-      tree, "--dump", str(REMAPPED_DUMP), "--verified-date", date
-  )
+  refused = _finalize(tree, "--dump", str(path))
 
-  assert result.returncode == code
-  assert error in result.stderr
+  assert refused.returncode == 1
+  assert (
+      f"not finalized: {path} has the content of tests/fixtures/{fixture.name},"
+      " a stand-in, not a dump of the live template;"
+      f" {BINDING} is unchanged"
+  ) in refused.stderr
+  assert "ok: live report validated" not in refused.stdout
+  assert (tree / BINDING).read_bytes() == binding
   assert _snapshot(tree) == before
 
+  preview = _finalize(tree, "--dump", str(path), "--check")
 
-def test_finalize_refuses_to_record_a_checked_in_fixture(tree):
+  assert _snapshot(tree) == before
+  if fixture == REMAPPED_DUMP:
+    assert preview.returncode == 0, preview.stdout + preview.stderr
+    assert "-  pending_live_sync:\n" in preview.stdout
+    assert "a stand-in: a write would refuse it" in preview.stdout
+  else:
+    assert preview.returncode == 1
+    assert "is not a qt_ column ID" in preview.stderr
+
+
+def test_known_fixture_digests_are_those_of_the_checked_in_stand_ins(tree):
+  """KNOWN_FIXTURE_SHA256 names every textproto fixture by its own digest.
+
+  The digest covers the parsed fields in order, so comments and whitespace
+  do not change it, and any field value does.
+  """
+  finalize = _load_finalize(tree)
+  fixtures = sorted(FIXTURES.glob("*.textproto"))
+  assert fixtures == sorted([GENERIC_DUMP, REMAPPED_DUMP])
+  assert finalize.KNOWN_FIXTURE_SHA256 == {
+      finalize.normalized_dump_sha256(path.read_text(encoding="utf-8")): (
+          f"tests/fixtures/{path.name}"
+      )
+      for path in fixtures
+  }
+  text = REMAPPED_DUMP.read_text(encoding="utf-8")
+  digest = finalize.normalized_dump_sha256(text)
+  assert finalize.normalized_dump_sha256(_reformatted(text)) == digest
+  assert text.count("qt_d779815a") == 3
+  changed = text.replace("qt_d779815a", "qt_d779815b")
+  assert finalize.normalized_dump_sha256(changed) != digest
+  assert finalize.normalized_dump_sha256("report_config {") is None
+
+
+def test_finalize_refuses_to_record_a_checked_in_fixture(tree, dump):
   """A dump among the repository's test fixtures is not the live template.
 
-  `--check` may still preview the change with it.
+  The path alone refuses a write, whatever the content; `--check` may still
+  preview the change with it.
   """
   stand_in = tree.parents[1] / "tests/fixtures/stand_in.textproto"
   stand_in.parent.mkdir(parents=True)
-  shutil.copyfile(REMAPPED_DUMP, stand_in)
+  shutil.copyfile(dump, stand_in)
   before = _snapshot(tree)
 
   refused = _finalize(tree, "--dump", str(stand_in))
@@ -315,20 +539,41 @@ def test_finalize_refuses_to_record_a_checked_in_fixture(tree):
   assert _snapshot(tree) == before
 
 
-def test_finalize_is_idempotent_and_can_record_a_later_sync(tree):
+@pytest.mark.parametrize(
+    "date, code, error",
+    [
+        ("2026-10-28", 1, "is before pending_live_sync.since_date"),
+        ("2999-01-01", 1, "--verified-date 2999-01-01 is in the future"),
+        ("2026-13-01", 2, "'2026-13-01' is not a YYYY-MM-DD date"),
+        ("20261030", 2, "'20261030' is not a YYYY-MM-DD date"),
+    ],
+)
+def test_finalize_rejects_a_verified_date_it_cannot_record(
+    tree, dump, date, code, error
+):
+  before = _snapshot(tree)
+
+  result = _finalize(tree, "--dump", str(dump), "--verified-date", date)
+
+  assert result.returncode == code
+  assert error in result.stderr
+  assert _snapshot(tree) == before
+
+
+def test_finalize_is_idempotent_and_can_record_a_later_sync(tree, dump):
   date = _since_date(tree)
-  first = _finalize(tree, "--dump", str(REMAPPED_DUMP), "--verified-date", date)
+  first = _finalize(tree, "--dump", str(dump), "--verified-date", date)
   assert first.returncode == 0, first.stdout + first.stderr
   finalized = _snapshot(tree)
 
-  again = _finalize(tree, "--dump", str(REMAPPED_DUMP))
+  again = _finalize(tree, "--dump", str(dump))
 
   assert again.returncode == 0, again.stdout + again.stderr
   assert f"nothing to finalize: {BINDING} has no" in again.stdout
   assert _snapshot(tree) == finalized
 
   _reopen(tree)
-  later = _finalize(tree, "--dump", str(REMAPPED_DUMP), "--verified-date", date)
+  later = _finalize(tree, "--dump", str(dump), "--verified-date", date)
 
   assert later.returncode == 0, later.stdout + later.stderr
   live = _live(tree)
@@ -339,37 +584,122 @@ def test_finalize_is_idempotent_and_can_record_a_later_sync(tree):
   )
 
 
-def _load_finalize(tree):
-  spec = importlib.util.spec_from_file_location(
-      "live_sync_finalize", tree / "tools/finalize_live_sync.py"
-  )
-  assert spec is not None and spec.loader is not None
-  module = importlib.util.module_from_spec(spec)
-  spec.loader.exec_module(module)
-  return module
-
-
 def test_finalize_restores_the_binding_when_the_audit_fails_after_the_write(
-    tree, monkeypatch, capsys
+    tree, dump, monkeypatch, capsys
 ):
   finalize = _load_finalize(tree)
   original = (tree / BINDING).read_bytes()
   calls = []
 
-  def audit(dump):
-    calls.append((dump, (tree / BINDING).read_bytes() == original))
+  def audit(path):
+    calls.append((path, (tree / BINDING).read_bytes() == original))
     return 0 if len(calls) == 1 else 1
 
   monkeypatch.setattr(finalize, "_audit", audit)
 
-  assert finalize.main(["--dump", str(REMAPPED_DUMP)]) == 1
+  assert finalize.main(["--dump", str(dump)]) == 1
   # The second audit ran on the written binding, which is then restored.
-  assert calls == [(REMAPPED_DUMP, True), (REMAPPED_DUMP, False)]
+  assert calls == [(dump, True), (dump, False)]
   assert (tree / BINDING).read_bytes() == original
   assert (
       "not finalized: tools/validate_contracts.py exited 1 after the write,"
       f" so {BINDING} was restored"
   ) in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["audit-launch-error", "audit-interrupted", "write-interrupted"],
+)
+def test_finalize_restores_the_binding_after_an_error_or_interrupt(
+    tree, dump, monkeypatch, capsys, failure
+):
+  """An exception or interrupt during the write or post-write audit rolls back.
+
+  The post-write audit fails to launch (OSError) or is interrupted, or the
+  write is interrupted right after the new binding replaced the old one.
+  Each time the original bytes come back, and no staged file is left.
+  """
+  finalize = _load_finalize(tree)
+  original = (tree / BINDING).read_bytes()
+  bindings = sorted(path.name for path in (tree / "bindings").iterdir())
+  launches = []
+  real_run = subprocess.run
+
+  def run(*args, **kwargs):
+    launches.append(args)
+    if len(launches) == 2:
+      if failure == "audit-launch-error":
+        raise OSError("cannot launch the validator")
+      raise KeyboardInterrupt
+    return real_run(*args, **kwargs)
+
+  writes = []
+  real_replace_file = finalize._replace_file
+
+  def replace_file(path, data):
+    writes.append(data)
+    real_replace_file(path, data)
+    if len(writes) == 1:
+      assert (tree / BINDING).read_bytes() != original
+      raise KeyboardInterrupt
+
+  if failure == "write-interrupted":
+    monkeypatch.setattr(finalize, "_replace_file", replace_file)
+  else:
+    monkeypatch.setattr(finalize, "subprocess", types.SimpleNamespace(run=run))
+
+  if failure == "audit-launch-error":
+    assert finalize.main(["--dump", str(dump)]) == 1
+    assert (
+        "not finalized: OSError: cannot launch the validator after the write,"
+        f" so {BINDING} was restored"
+    ) in capsys.readouterr().err
+  else:
+    with pytest.raises(KeyboardInterrupt):
+      finalize.main(["--dump", str(dump)])
+    assert f"interrupted: {BINDING} was restored" in capsys.readouterr().err
+  assert (tree / BINDING).read_bytes() == original
+  assert sorted(path.name for path in (tree / "bindings").iterdir()) == bindings
+  if failure == "write-interrupted":
+    assert writes[1] == original
+
+
+def test_replace_file_keeps_the_target_until_the_staged_copy_is_complete(
+    tree, monkeypatch
+):
+  """The binding is replaced atomically: staged next to it, then renamed."""
+  finalize = _load_finalize(tree)
+  target = tree / BINDING
+  original = target.read_bytes()
+  mode = _mode(target)
+  bindings = sorted(path.name for path in target.parent.iterdir())
+  renames = []
+  real_replace = os.replace
+
+  def failing_fsync(descriptor):
+    raise OSError("disk full")
+
+  monkeypatch.setattr(os, "fsync", failing_fsync)
+  with pytest.raises(OSError, match="disk full"):
+    finalize._replace_file(target, b"partial\n")
+  monkeypatch.undo()
+  assert target.read_bytes() == original
+  assert sorted(path.name for path in target.parent.iterdir()) == bindings
+
+  def replace(source, destination):
+    renames.append((Path(source), Path(destination)))
+    real_replace(source, destination)
+
+  monkeypatch.setattr(os, "replace", replace)
+  finalize._replace_file(target, b"replaced\n")
+  monkeypatch.undo()
+  assert target.read_bytes() == b"replaced\n"
+  assert _mode(target) == mode
+  ((staged, destination),) = renames
+  assert destination == target
+  assert staged.parent == target.parent and staged != target
+  assert sorted(path.name for path in target.parent.iterdir()) == bindings
 
 
 @pytest.mark.parametrize(
@@ -439,15 +769,6 @@ def _rename_map(*args):
       text=True,
       check=False,
   )
-
-
-def _spec_columns(component):
-  (inner,) = [
-      value
-      for value in component["spec"].values()
-      if isinstance(value, dict) and "dataset" in value
-  ]
-  return inner["dataset"]["columns"]
 
 
 def _dump_concepts(validator, path):
@@ -556,7 +877,7 @@ def test_rename_map_lists_the_65_concepts_in_page_and_component_order(
       " IDs.",
       "78 references to rename: 65 concept_names (23 dimension, 42 metric)"
       " and 13 sort_column.",
-      "Report-level datasource_id: '00000000-0000-4000-8000-000000000000' ->"
+      f"Report-level datasource_id: '{STALE_DATASOURCE_ID}' ->"
       f" '{DATASOURCE_ID}'.",
       "Cross-checked with the remapped twin"
       " tests/fixtures/bqca_live_report_42e79a1f_sanitized_remapped.textproto:"
@@ -639,3 +960,128 @@ def test_rename_map_rejects_inputs_that_do_not_line_up(
   assert result.returncode == 1
   assert error in result.stderr
   assert not out_csv.exists()
+
+
+# A concept-bearing component that the manifest does not have, inserted
+# before the first component of a dump.
+_EXTRA_COMPONENT = """\
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-extra"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "NAME"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.NAME"
+          name: "NAME"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_total_tokens_"
+              aggregation: SUM
+            }
+          }
+        }
+      }
+"""
+
+
+def _with_extra_component(fixture, path, name):
+  text = fixture.read_text(encoding="utf-8")
+  anchor = "      component_config {\n"
+  assert anchor in text
+  extra = _EXTRA_COMPONENT.replace("NAME", name)
+  path.write_text(text.replace(anchor, extra + anchor, 1), encoding="utf-8")
+  return path
+
+
+def _with_dangling_reference(fixture, path):
+  text = fixture.read_text(encoding="utf-8")
+  old = 'concept_names: "met"\n'
+  assert old in text
+  path.write_text(
+      text.replace(old, 'concept_names: "ghost"\n', 1), encoding="utf-8"
+  )
+  return path
+
+
+@pytest.mark.parametrize(
+    "case, error",
+    [
+        (
+            "extra-in-dump",
+            "component cd-extra of the dump defines concepts ['met'] but is"
+            " not in spec/bqca_chart_manifest.yaml",
+        ),
+        (
+            "extra-in-dump-with-remapped",
+            "component cd-extra of the dump defines concepts ['met'] but is"
+            " not in spec/bqca_chart_manifest.yaml",
+        ),
+        (
+            "extra-in-remapped",
+            "remapped twin: its concept-bearing components differ from the"
+            " dump's: dump only [], twin only ['cd-extra']",
+        ),
+        (
+            "dangling-reference",
+            "concept_names 'ghost' at"
+            " component_property.metrics.labeled_concepts.value.concept_names"
+            " names none of its concepts",
+        ),
+    ],
+    ids=[
+        "extra-in-dump",
+        "extra-in-dump-with-remapped",
+        "extra-in-remapped",
+        "dangling-reference",
+    ],
+)
+def test_rename_map_rejects_concepts_and_references_it_cannot_map(
+    tmp_path, case, error
+):
+  """Every concept and reference of the dump must be in the map.
+
+  A component of the dump that defines concepts but is not in the manifest,
+  with or without `--remapped`, a remapped twin with such a component, and a
+  reference that names no concept of its component each fail, writing
+  neither output file.
+  """
+  dump, remapped = GENERIC_DUMP, None
+  if case.startswith("extra-in-dump"):
+    dump = _with_extra_component(GENERIC_DUMP, tmp_path / "dump.txtpb", "met")
+    if case.endswith("with-remapped"):
+      remapped = REMAPPED_DUMP
+  elif case == "extra-in-remapped":
+    remapped = _with_extra_component(
+        REMAPPED_DUMP, tmp_path / "remapped.txtpb", "qt_extra01"
+    )
+  else:
+    dump = _with_dangling_reference(GENERIC_DUMP, tmp_path / "dump.txtpb")
+  out_csv, out_md = tmp_path / "rename-map.csv", tmp_path / "rename-map.md"
+
+  result = _rename_map(
+      "--dump",
+      str(dump),
+      *(["--remapped", str(remapped)] if remapped else []),
+      "--csv",
+      str(out_csv),
+      "--md",
+      str(out_md),
+  )
+
+  assert result.returncode == 1
+  assert error in result.stderr
+  assert not out_csv.exists()
+  assert not out_md.exists()

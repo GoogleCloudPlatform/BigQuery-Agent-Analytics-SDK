@@ -447,9 +447,13 @@ it. `tests/test_looker_studio_dashboard.py` pins both verdicts.
 Two tools support the sync; neither changes the live template.
 `tools/gen_bqca_rename_map.py` lists the rename, one row per concept in page,
 component, and column order: the old name, the new `qt_` ID, the source field
-and aggregation to keep, and the chart references to update. By default it
-reads the sanitized cut above and checks the map against its remapped twin;
-`--dump PATH` reads a newer dump taken before the sync:
+and aggregation to keep, and the chart references to update. It fails,
+writing nothing, when a concept or reference of the dump would be left out of
+the map: a component that defines concepts but is not in the manifest, or a
+reference that names no concept of its component. By default it reads the
+sanitized cut above and checks the map against its remapped twin, which must
+have the same concept-bearing components; `--dump PATH` reads a newer dump
+taken before the sync:
 
 ```bash
 python3 tools/gen_bqca_rename_map.py --csv rename-map.csv --md rename-map.md
@@ -468,10 +472,15 @@ python3 tools/finalize_live_sync.py --dump /path/to/report.txt
 `live_template_verification` it sets `verified_date` (`--verified-date`,
 default today), copies `manifest_sha256` and `template_bundle_sha256` into
 `verified_manifest_sha256` and `verified_template_bundle_sha256`, and removes
-`pending_live_sync`, keeping every other line and comment. It audits the dump
-again after the write and restores the binding if that fails. `--check` prints
-the change as a diff and writes nothing. It never writes with a dump from
-`tests/fixtures/`, which are stand-ins, not dumps of the live template.
+`pending_live_sync`, keeping every other line and comment. The new binding
+replaces the old one atomically (a staged file and `os.replace`); the tool
+audits the dump again after the write and puts the original bytes back if
+that audit fails, raises, or is interrupted. `--check` prints the change as a
+diff and writes nothing. The checked-in fixtures are stand-ins, not dumps of
+the live template, so a write refuses a dump under `tests/fixtures/` and,
+wherever it is, a dump with the content of one of them: the tool compares a
+SHA-256 of the fields it parses, which comments and whitespace do not change.
+`--check` still previews with them.
 
 The tool does not edit documentation or tests. In the same change, remove the
 #559 known-issue notes that `pending_live_sync.required_actions` lists (and

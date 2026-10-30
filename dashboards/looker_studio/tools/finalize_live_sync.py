@@ -11,11 +11,16 @@ DUMP``. Only if it exits 0 does this record the verification in
 * removes ``pending_live_sync``.
 
 Every other line of the binding, comments included, is kept. The edit must
-parse to exactly that change, and the audit runs again after the write; if it
-fails, the binding is restored. ``--check`` runs the same audit and prints the
-change as a diff without writing it. A dump among this repository's test
-fixtures is a stand-in, not a dump of the live template: ``--check`` accepts
-it, a write does not.
+parse to exactly that change. The new binding replaces the old one
+atomically, and the audit runs again after the write; if it fails, raises or
+is interrupted, the original bytes are put back. ``--check`` runs the same
+audit and prints the change as a diff without writing it.
+
+The checked-in fixtures are stand-ins, not dumps of the live template:
+``--check`` accepts them, a write does not. A write refuses a dump under this
+repository's ``tests/fixtures``, and a dump anywhere whose content is that of
+a checked-in stand-in (``normalized_dump_sha256``, which ignores comments and
+whitespace).
 
 This tool does not edit documentation or tests. See "Finalizing the live
 template sync" in ``docs/dashboard-implementation.md`` for the rest of the
@@ -29,10 +34,17 @@ import argparse
 import copy
 import datetime
 import difflib
+import functools
+import hashlib
+import importlib.util
+import json
+import os
 import pathlib
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 
 import yaml
 
@@ -43,6 +55,18 @@ VALIDATOR_PATH = "tools/validate_contracts.py"
 FIXTURES_PATH = "tests/fixtures"
 LIVE_KEY = "live_template_verification"
 PENDING_KEY = "pending_live_sync"
+# The normalized digests (`normalized_dump_sha256`) of the checked-in
+# stand-ins, so that a copy of one is refused wherever it is, even when this
+# checkout has no `tests/fixtures`. tests/test_looker_studio_live_sync.py
+# checks that they are those of the files.
+KNOWN_FIXTURE_SHA256 = {
+    "65749b99444871cdfa49239acd693c96d1cd8b45e91b19d3fc2f8dc0b330afe6": (
+        "tests/fixtures/bqca_live_report_42e79a1f_sanitized.textproto"
+    ),
+    "c7714fe895a6699e5d3f6a042d028c3d7be142110564b5f7c9e2925c50233e37": (
+        "tests/fixtures/bqca_live_report_42e79a1f_sanitized_remapped.textproto"
+    ),
+}
 # Each `verified_*` key and the pinned digest it takes.
 VERIFIED_DIGEST_KEYS = {
     "verified_manifest_sha256": "manifest_sha256",
@@ -222,9 +246,76 @@ def _verified_date_error(verified_date: str, live: dict) -> str | None:
   return None
 
 
-def _is_repository_fixture(dump: pathlib.Path) -> bool:
-  fixtures = (REPOSITORY_ROOT / FIXTURES_PATH).resolve()
-  return dump.resolve().is_relative_to(fixtures)
+@functools.cache
+def _load_validator():
+  """Import `validate_contracts.py` from this tool's directory, once."""
+  path = pathlib.Path(__file__).resolve().parent / "validate_contracts.py"
+  spec = importlib.util.spec_from_file_location("validate_contracts", path)
+  assert spec is not None and spec.loader is not None
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
+
+
+def normalized_dump_sha256(text: str) -> str | None:
+  """Return the SHA-256 of a dump's fields, or None if it cannot be read.
+
+  The digest covers the fields and values that the live audit's reader
+  parses, in order, so comments, whitespace, separators and quoting do not
+  change it.
+  """
+  try:
+    message = _load_validator().parse_report_textproto(text)
+  except ValueError:
+    return None
+  canonical = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+  return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _stand_in(dump: pathlib.Path) -> str | None:
+  """Return why `dump` is a stand-in rather than a dump, or None.
+
+  A file under this repository's `tests/fixtures` is a stand-in by its path.
+  A file anywhere whose normalized digest is that of a checked-in stand-in
+  (KNOWN_FIXTURE_SHA256, or any `*.textproto` under `tests/fixtures`) is one
+  by its content.
+  """
+  fixtures = REPOSITORY_ROOT / FIXTURES_PATH
+  if dump.resolve().is_relative_to(fixtures.resolve()):
+    return f"{dump} is a test fixture of this repository"
+  try:
+    digest = normalized_dump_sha256(dump.read_text(encoding="utf-8"))
+  except (OSError, UnicodeDecodeError):
+    return None
+  known = dict(KNOWN_FIXTURE_SHA256)
+  for fixture in sorted(fixtures.glob("*.textproto")):
+    fixture_digest = normalized_dump_sha256(fixture.read_text(encoding="utf-8"))
+    known.setdefault(fixture_digest, f"{FIXTURES_PATH}/{fixture.name}")
+  if digest is not None and digest in known:
+    return f"{dump} has the content of {known[digest]}, a stand-in"
+  return None
+
+
+def _replace_file(path: pathlib.Path, data: bytes) -> None:
+  """Atomically replace `path` with `data`, keeping its permission bits.
+
+  The data is written and synced to a staged file next to `path`, which
+  then replaces it with `os.replace`; on any failure the staged file is
+  removed and `path` keeps its old bytes.
+  """
+  descriptor, staged = tempfile.mkstemp(
+      dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+  )
+  try:
+    with os.fdopen(descriptor, "wb") as handle:
+      handle.write(data)
+      handle.flush()
+      os.fsync(handle.fileno())
+    os.chmod(staged, stat.S_IMODE(path.stat().st_mode))
+    os.replace(staged, path)
+  except BaseException:
+    pathlib.Path(staged).unlink(missing_ok=True)
+    raise
 
 
 def _audit(dump: pathlib.Path) -> int:
@@ -266,11 +357,11 @@ def main(argv: list[str] | None = None) -> int:
   verified_date = args.verified_date or datetime.date.today().isoformat()
   unchanged = f"{BINDING_PATH} is unchanged"
 
-  fixture = _is_repository_fixture(args.dump)
-  if fixture and not args.check:
+  stand_in = _stand_in(args.dump)
+  if stand_in is not None and not args.check:
     print(
-        f"not finalized: {args.dump} is a test fixture of this repository,"
-        f" not a dump of the live template; {unchanged}",
+        f"not finalized: {stand_in}, not a dump of the live template;"
+        f" {unchanged}",
         file=sys.stderr,
     )
     return 1
@@ -312,17 +403,32 @@ def main(argv: list[str] | None = None) -> int:
       )
   )
   if args.check:
-    note = " (a test fixture: a write would refuse it)" if fixture else ""
+    note = " (a stand-in: a write would refuse it)" if stand_in else ""
     print(
         f"check: the live audit of {args.dump}{note} passed; {BINDING_PATH}"
         " would change as above; nothing written"
     )
     return 0
 
-  binding_path.write_bytes(updated.encode("utf-8"))
-  code = _audit(args.dump)
+  # Until the audit of the written binding passes, any failure, exception or
+  # interrupt puts the original bytes back.
+  original_bytes = original.encode("utf-8")
+  try:
+    _replace_file(binding_path, updated.encode("utf-8"))
+    code = _audit(args.dump)
+  except BaseException as exc:
+    _replace_file(binding_path, original_bytes)
+    if not isinstance(exc, Exception):
+      print(f"interrupted: {BINDING_PATH} was restored", file=sys.stderr)
+      raise
+    print(
+        f"not finalized: {type(exc).__name__}: {exc} after the write, so"
+        f" {BINDING_PATH} was restored",
+        file=sys.stderr,
+    )
+    return 1
   if code != 0:
-    binding_path.write_bytes(original.encode("utf-8"))
+    _replace_file(binding_path, original_bytes)
     print(
         f"not finalized: {VALIDATOR_PATH} exited {code} after the write, so"
         f" {BINDING_PATH} was restored",

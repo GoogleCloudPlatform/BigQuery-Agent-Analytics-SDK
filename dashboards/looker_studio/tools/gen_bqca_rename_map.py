@@ -12,15 +12,18 @@ concept, in manifest page, component and column (slot) order. Each row gives:
 * the chart references to update (``dimension``, ``metric``, ``sort``).
 
 It matches each concept of the dump to the manifest column of its component
-with the same ``(source_field_name, aggregation)``. It reports:
+with the same ``(source_field_name, aggregation)``, so that every concept and
+reference of the dump is in the map: it rejects a component of the dump that
+defines concepts but is not in the manifest, and a reference that names no
+concept of its component. It reports:
 
 * how many concept names the live audit (``validate_contracts.py
   --live-report-textproto``) rejects as not ``qt_`` IDs;
 * the report-level ``datasource_id`` that the sync repoints.
 
 With ``--remapped``, it also checks the map against a remapped twin of the
-dump: the twin must pass the live audit and carry each new ID at its old
-name's place.
+dump: the twin must pass the live audit, have the same concept-bearing
+components as the dump, and carry each new ID at its old name's place.
 
 With no ``--dump``, it reads the checked-in sanitized cut of the 2026-10-29
 dump and its remapped twin. ``--csv`` and ``--md`` write the map as CSV and
@@ -164,9 +167,11 @@ def build_rows(validator, manifest: dict, components: dict):
   """
   rows: list[dict] = []
   errors: list[str] = []
+  manifest_ids = set()
   for page in manifest.get("pages", []):
     for component in page.get("components", []):
       component_id = component.get("component_id")
+      manifest_ids.add(component_id)
       where = f"component {component.get('id')} ({component_id})"
       dumped = components.get(component_id)
       if dumped is None:
@@ -176,6 +181,13 @@ def build_rows(validator, manifest: dict, components: dict):
       if len(set(names)) != len(names):
         errors.append(f"{where} repeats a concept name: {names}")
         continue
+      for path, ref in dumped.references:
+        if ref not in names:
+          errors.append(
+              f"{where} {path[-1]} {ref!r} at"
+              f" component_property.{'.'.join(path)} names none of its"
+              " concepts"
+          )
       by_binding = collections.defaultdict(list)
       for index, concept in enumerate(dumped.concepts):
         key = (
@@ -228,17 +240,34 @@ def build_rows(validator, manifest: dict, components: dict):
               f" {concept.aggregation or 'no aggregation'}) matches no column"
               " of the manifest"
           )
+  # A concept outside the manifest would be left out of the map.
+  for component_id, dumped in components.items():
+    if component_id not in manifest_ids and dumped.concepts:
+      names = [concept.name for concept in dumped.concepts]
+      errors.append(
+          f"component {component_id} of the dump defines concepts {names} but"
+          f" is not in {MANIFEST_PATH}"
+      )
   return rows, errors
 
 
 def twin_errors(rows: list[dict], components: dict, twin: dict) -> list[str]:
   """Return how a remapped twin differs from the dump renamed by `rows`.
 
-  The twin must have the dump's concepts, in order, each named by its new ID
-  with the same source field and aggregation, and the dump's references, in
-  order, renamed the same way.
+  The twin must have the same concept-bearing components as the dump, the
+  dump's concepts, in order, each named by its new ID with the same source
+  field and aggregation, and the dump's references, in order, renamed the
+  same way.
   """
   errors: list[str] = []
+  dumped_ids = {key for key, value in components.items() if value.concepts}
+  twinned_ids = {key for key, value in twin.items() if value.concepts}
+  if dumped_ids != twinned_ids:
+    errors.append(
+        "remapped twin: its concept-bearing components differ from the"
+        f" dump's: dump only {sorted(dumped_ids - twinned_ids)}, twin only"
+        f" {sorted(twinned_ids - dumped_ids)}"
+    )
   new_names = collections.defaultdict(dict)
   where = {}
   for row in rows:
