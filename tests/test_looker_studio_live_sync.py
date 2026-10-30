@@ -16,22 +16,28 @@
 
 `tools/finalize_live_sync.py` records a live template verification in
 `bindings/bqca_report_template.yaml` only after `tools/validate_contracts.py
---profile bqca --live-report-textproto` passes on a dump of the live template.
-`tools/gen_bqca_rename_map.py` lists the rename that the sync applies to the
-concepts of the live template.
+--profile bqca --live-report-textproto` passes on a dump of the live template,
+and only with positive evidence that the dump is one: a `--captured-from`
+attestation that names the report, and a dump that names the report in a
+field. `tools/gen_bqca_rename_map.py` lists the rename that the sync applies
+to the concepts of the live template.
 
 The finalize tests run the tool from a copy of `dashboards/looker_studio`, so
 they never write to the repository. A successful write uses a dump that
-`_render_dump` generates from the copy's manifest. The checked-in sanitized
-cuts of the 2026-10-29 dump are stand-ins: the tool refuses to write with
-their content wherever it is, and only `--check` may preview with them.
+`_render_dump` generates from the copy's manifest, with test-only provenance:
+a `report_id` field and the ATTESTATION. The checked-in sanitized cuts of the
+2026-10-29 dump name the report in no field, so neither they nor any
+reordering or audit-inert edit of them can be written; `--check` still
+previews with them.
 """
 
 import collections
 import copy
 import csv
 import difflib
+import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import re
@@ -54,9 +60,18 @@ REMAPPED_DUMP = (
 BINDING = "bindings/bqca_report_template.yaml"
 LIVE = "live_template_verification"
 PENDING = "pending_live_sync"
+REPORT_ID = "42e79a1f-a979-4de8-911f-80d5a99543d5"
 DATASOURCE_ID = "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
 STALE_DATASOURCE_ID = "00000000-0000-4000-8000-000000000000"
 QT_ID = re.compile(r"qt_[a-z0-9]{3,10}")
+# Test-only provenance for the dumps that `_render_dump` generates.
+ATTESTATION = (
+    "test-only: rendered by tests/test_looker_studio_live_sync.py from the"
+    f" manifest of report {REPORT_ID}"
+)
+NAMES_NO_REPORT = (
+    f"the dump names report {REPORT_ID} in no field (comments do not count)"
+)
 
 # `_reopen` gives a finalized copy the state of the binding before #559: a
 # verification on 2026-10-09 and a live sync pending since 2026-10-29. The
@@ -188,14 +203,15 @@ def _spec_roles(component):
   return dimensions, metrics, sorts, axis.get("reverseSortOrder", False)
 
 
-def _render_dump(tree, report_datasource_id=None):
+def _render_dump(tree, report_datasource_id=None, name_report=True):
   """Render a dump of the synced live template from the copy's manifest.
 
-  The dump is generated here, not taken from the checked-in fixtures: one
-  `component_config` per manifest component, in manifest order, with its
-  `qt_` concepts and the references to them, then the report-level data
-  source and `ds0` alias of the binding. `report_datasource_id` replaces the
-  report-level data source.
+  The dump is generated here, not taken from the checked-in fixtures: a
+  `report_id` field naming the binding's report (test-only provenance, left
+  out with `name_report=False`), one `component_config` per manifest
+  component, in manifest order, with its `qt_` concepts and the references
+  to them, then the report-level data source and `ds0` alias of the binding.
+  `report_datasource_id` replaces the report-level data source.
   """
   manifest = yaml.safe_load(
       (tree / "spec/bqca_chart_manifest.yaml").read_text(encoding="utf-8")
@@ -206,6 +222,8 @@ def _render_dump(tree, report_datasource_id=None):
       "# Rendered by tests/test_looker_studio_live_sync.py",
       "report_config {",
   ]
+  if name_report:
+    lines.append(f'  report_id: "{binding["report_id"]}"')
   for page in manifest["pages"]:
     lines += ["  page {", f'    page_id: "{page["id"]}"', "    page {"]
     for component in page["components"]:
@@ -276,6 +294,22 @@ def _finalize(tree, *args):
   )
 
 
+def _audit(tree, path):
+  return subprocess.run(
+      [
+          sys.executable,
+          str(tree / "tools/validate_contracts.py"),
+          "--profile",
+          "bqca",
+          "--live-report-textproto",
+          str(path),
+      ],
+      capture_output=True,
+      text=True,
+      check=False,
+  )
+
+
 def _since_date(tree):
   """A valid `--verified-date`: the day the pending sync started."""
   return _live(tree)[PENDING]["since_date"]
@@ -288,22 +322,27 @@ def _mode(path):
 def test_finalize_records_the_live_verification_after_a_clean_audit(tree, dump):
   """A dump that passes the audit finalizes the binding, and only that.
 
-  `verified_date` and both verified digests change, `pending_live_sync` goes,
-  and every other line of the binding, comments included, is kept. The
-  binding keeps its permissions, and no staged file is left behind.
+  `verified_date` and both verified digests change, the attestation and the
+  dump's SHA-256 are recorded, `pending_live_sync` goes, and every other line
+  of the binding, comments included, is kept. The binding keeps its
+  permissions, and no staged file is left behind.
   """
-  finalize = _load_finalize(tree)
-  assert (
-      finalize.normalized_dump_sha256(dump.read_text(encoding="utf-8"))
-      not in finalize.KNOWN_FIXTURE_SHA256
-  )
   date = _since_date(tree)
+  dump_sha256 = hashlib.sha256(dump.read_bytes()).hexdigest()
   before_text = (tree / BINDING).read_text(encoding="utf-8")
   before = yaml.safe_load(before_text)
   before_mode = _mode(tree / BINDING)
   bindings = sorted(path.name for path in (tree / "bindings").iterdir())
 
-  result = _finalize(tree, "--dump", str(dump), "--verified-date", date)
+  result = _finalize(
+      tree,
+      "--dump",
+      str(dump),
+      "--captured-from",
+      ATTESTATION,
+      "--verified-date",
+      date,
+  )
 
   assert result.returncode == 0, result.stdout + result.stderr
   assert "ok: live report validated" in result.stdout
@@ -314,6 +353,8 @@ def test_finalize_records_the_live_verification_after_a_clean_audit(tree, dump):
   live["verified_date"] = date
   live["verified_manifest_sha256"] = live["manifest_sha256"]
   live["verified_template_bundle_sha256"] = live["template_bundle_sha256"]
+  live["captured_from"] = ATTESTATION
+  live["verified_dump_sha256"] = dump_sha256
   del live[PENDING]
   assert yaml.safe_load(after_text) == expected
   assert _mode(tree / BINDING) == before_mode
@@ -331,6 +372,8 @@ def test_finalize_records_the_live_verification_after_a_clean_audit(tree, dump):
       f'  verified_date: "{date}"\n',
       f"  verified_manifest_sha256: {live['manifest_sha256']}\n",
       f"  verified_template_bundle_sha256: {live['template_bundle_sha256']}\n",
+      f"  captured_from: {json.dumps(ATTESTATION)}\n",
+      f"  verified_dump_sha256: {dump_sha256}\n",
   ]
   assert [line.split(":")[0] for line in removed[:4]] == [
       "  verified_date",
@@ -358,17 +401,66 @@ def test_finalize_records_the_live_verification_after_a_clean_audit(tree, dump):
   assert check.stdout == "ok: contracts validated (bqca)\n"
 
 
-@pytest.mark.parametrize("source", ["fixture", "generated"])
+def test_finalize_records_the_attestation_text_exactly(tree, dump):
+  attestation = f'export "v2" of report {REPORT_ID} \\ by the café team'
+
+  result = _finalize(
+      tree,
+      "--dump",
+      str(dump),
+      "--captured-from",
+      attestation,
+      "--verified-date",
+      _since_date(tree),
+  )
+
+  assert result.returncode == 0, result.stdout + result.stderr
+  live = _live(tree)
+  assert live["captured_from"] == attestation
+  assert (
+      live["verified_dump_sha256"]
+      == hashlib.sha256(dump.read_bytes()).hexdigest()
+  )
+
+
+@pytest.mark.parametrize(
+    "source, attest, refusal",
+    [
+        (
+            "fixture",
+            False,
+            ", but a write would refuse it: --captured-from is not given;"
+            f" {NAMES_NO_REPORT}; nothing written",
+        ),
+        (
+            "generated",
+            False,
+            ", but a write would refuse it: --captured-from is not given;"
+            " nothing written",
+        ),
+        ("generated", True, "; nothing written"),
+    ],
+    ids=["fixture", "generated-unattested", "generated-attested"],
+)
 def test_finalize_check_prints_the_change_and_writes_nothing(
-    tree, dump, source
+    tree, dump, source, attest, refusal
 ):
-  """`--check` previews the change, with a stand-in fixture too."""
+  """`--check` previews the change, and says why a write would be refused.
+
+  It previews with a checked-in stand-in too, and needs no attestation.
+  """
   path = REMAPPED_DUMP if source == "fixture" else dump
   date = _since_date(tree)
   before = _snapshot(tree)
 
   result = _finalize(
-      tree, "--dump", str(path), "--check", "--verified-date", date
+      tree,
+      "--dump",
+      str(path),
+      "--check",
+      "--verified-date",
+      date,
+      *(["--captured-from", ATTESTATION] if attest else []),
   )
 
   assert result.returncode == 0, result.stdout + result.stderr
@@ -377,10 +469,12 @@ def test_finalize_check_prints_the_change_and_writes_nothing(
   assert f"--- a/{BINDING}\n+++ b/{BINDING}\n" in result.stdout
   assert "-  pending_live_sync:\n" in result.stdout
   assert f'+  verified_date: "{date}"\n' in result.stdout
-  assert "nothing written" in result.stdout
-  assert ("a stand-in: a write would refuse it" in result.stdout) == (
-      source == "fixture"
-  )
+  recorded = ATTESTATION if attest else "<the --captured-from attestation>"
+  assert f"+  captured_from: {json.dumps(recorded)}\n" in result.stdout
+  assert (
+      f"check: the live audit of {path} passed; {BINDING} would change as"
+      f" above{refusal}\n"
+  ) in result.stdout
   assert "finalized:" not in result.stdout
 
 
@@ -388,27 +482,31 @@ def test_finalize_check_prints_the_change_and_writes_nothing(
 @pytest.mark.parametrize(
     "source, error",
     [
-        (
-            "stale",
-            f"report datasource_id '{STALE_DATASOURCE_ID}' != binding"
-            f" datasource_id '{DATASOURCE_ID}'",
-        ),
+        ("stale", "is not a qt_ column ID"),
         ("missing", "cannot read it as protobuf text format"),
     ],
 )
 def test_finalize_rejects_a_dump_that_fails_the_audit_and_writes_nothing(
     tree, tmp_path, source, error, check
 ):
-  """A stale or unreadable dump leaves every file of the copy unchanged."""
+  """A stale or unreadable dump leaves every file of the copy unchanged.
+
+  The stale dump identifies the live template, but one of its concepts keeps
+  a generic name.
+  """
   path = tmp_path / "report.textproto"
   if source == "stale":
-    path.write_text(
-        _render_dump(tree, report_datasource_id=STALE_DATASOURCE_ID),
-        encoding="utf-8",
-    )
+    text = _render_dump(tree)
+    assert text.count("qt_d779815a") == 3
+    path.write_text(text.replace("qt_d779815a", "met"), encoding="utf-8")
   before = _snapshot(tree)
 
-  result = _finalize(tree, "--dump", str(path), *(["--check"] if check else []))
+  result = _finalize(
+      tree,
+      "--dump",
+      str(path),
+      *(["--check"] if check else ["--captured-from", ATTESTATION]),
+  )
 
   assert result.returncode == 1
   assert error in result.stderr
@@ -419,58 +517,95 @@ def test_finalize_rejects_a_dump_that_fails_the_audit_and_writes_nothing(
   assert _snapshot(tree) == before
 
 
-def _reformatted(text):
-  """Return `text` without comments, re-indented, with extra blank lines."""
-  lines = [line.strip() for line in text.splitlines()]
-  kept = [f"\t{line}  " for line in lines if line and not line.startswith("#")]
-  return "# A stand-in, re-indented.\n\n" + "\n\n".join(kept) + "\n"
+def _swap_id_and_name(text):
+  """Swap the adjacent `id` and `name` fields of one concept."""
+  pair = '          id: "t0.qt_1e5c0a97"\n          name: "qt_1e5c0a97"\n'
+  assert text.count(pair) == 1
+  swapped = '          name: "qt_1e5c0a97"\n          id: "t0.qt_1e5c0a97"\n'
+  return text.replace(pair, swapped)
+
+
+def _swap_first_two_components(text):
+  lines = text.splitlines(keepends=True)
+  starts = [
+      index
+      for index, line in enumerate(lines)
+      if line == "      component_config {\n"
+  ]
+  first, second = starts[:2]
+  end = lines.index("      }\n", second) + 1
+  assert lines[second - 1] == "      }\n"
+  return "".join(
+      lines[:first] + lines[second:end] + lines[first:second] + lines[end:]
+  )
+
+
+def _with_inert_field(text):
+  assert text.count("report_config {\n") == 1
+  return text.replace(
+      "report_config {\n",
+      'report_config {\n  capture_note: "still a copied stand-in"\n',
+  )
+
+
+def _with_inert_fields_everywhere(text):
+  return re.sub(
+      r'(?m)^(        component_id: "[^"]+"\n)',
+      r'\1        layout_note: "copied"\n',
+      text,
+  )
+
+
+def _naming_the_report_in_comments(text):
+  return (
+      f'# report_id: "{REPORT_ID}"\n# captured from report {REPORT_ID}\n' + text
+  )
 
 
 @pytest.mark.parametrize(
-    "fixture, prepare",
+    "mutate",
     [
-        (REMAPPED_DUMP, "copy"),
-        (REMAPPED_DUMP, "reformat"),
-        (REMAPPED_DUMP, "in-place"),
-        (GENERIC_DUMP, "copy"),
+        lambda text: text,
+        _swap_id_and_name,
+        _swap_first_two_components,
+        _with_inert_field,
+        _with_inert_fields_everywhere,
+        _naming_the_report_in_comments,
     ],
     ids=[
-        "remapped-copy",
-        "remapped-reformatted",
-        "remapped-in-place",
-        "generic-copy",
+        "byte-identical-copy",
+        "reordered-fields",
+        "reordered-components",
+        "audit-inert-field",
+        "audit-inert-fields-everywhere",
+        "report-named-in-comments",
     ],
 )
-def test_finalize_refuses_stand_in_content_wherever_it_is(
-    tree, tmp_path, fixture, prepare
+def test_finalize_refuses_a_reordered_or_audit_inert_stand_in(
+    tree, tmp_path, mutate
 ):
-  """A checked-in stand-in never finalizes the binding, by content.
+  """No edit of a checked-in stand-in that keeps its fields finalizes.
 
-  A byte-identical copy outside tests/fixtures, a copy with other comments
-  and whitespace, and the checked-in file of another checkout are refused
-  for a write; the binding stays byte-identical. `--check` still previews.
+  Each mutation of the remapped fixture, outside tests/fixtures, still passes
+  the live audit, so only the positive evidence can refuse it: with an
+  attestation, the write fails because no field of the dump names the
+  report, and the binding stays byte-identical. `--check` still previews.
   """
-  if prepare == "in-place":
-    path = fixture
-  else:
-    path = tmp_path / "elsewhere/report.textproto"
-    path.parent.mkdir()
-    text = fixture.read_text(encoding="utf-8")
-    path.write_text(
-        _reformatted(text) if prepare == "reformat" else text, encoding="utf-8"
-    )
-    if prepare == "copy":
-      assert path.read_bytes() == fixture.read_bytes()
+  path = tmp_path / "elsewhere/report.textproto"
+  path.parent.mkdir()
+  path.write_text(
+      mutate(REMAPPED_DUMP.read_text(encoding="utf-8")), encoding="utf-8"
+  )
+  audit = _audit(tree, path)
+  assert audit.returncode == 0, audit.stderr
   binding = (tree / BINDING).read_bytes()
   before = _snapshot(tree)
 
-  refused = _finalize(tree, "--dump", str(path))
+  refused = _finalize(tree, "--dump", str(path), "--captured-from", ATTESTATION)
 
   assert refused.returncode == 1
   assert (
-      f"not finalized: {path} has the content of tests/fixtures/{fixture.name},"
-      " a stand-in, not a dump of the live template;"
-      f" {BINDING} is unchanged"
+      f"not finalized: {NAMES_NO_REPORT}; {BINDING} is unchanged"
   ) in refused.stderr
   assert "ok: live report validated" not in refused.stdout
   assert (tree / BINDING).read_bytes() == binding
@@ -478,38 +613,112 @@ def test_finalize_refuses_stand_in_content_wherever_it_is(
 
   preview = _finalize(tree, "--dump", str(path), "--check")
 
+  assert preview.returncode == 0, preview.stdout + preview.stderr
+  assert f"a write would refuse it: --captured-from is not given;" in (
+      preview.stdout
+  )
+  assert NAMES_NO_REPORT in preview.stdout
   assert _snapshot(tree) == before
-  if fixture == REMAPPED_DUMP:
-    assert preview.returncode == 0, preview.stdout + preview.stderr
-    assert "-  pending_live_sync:\n" in preview.stdout
-    assert "a stand-in: a write would refuse it" in preview.stdout
-  else:
-    assert preview.returncode == 1
-    assert "is not a qt_ column ID" in preview.stderr
 
 
-def test_known_fixture_digests_are_those_of_the_checked_in_stand_ins(tree):
-  """KNOWN_FIXTURE_SHA256 names every textproto fixture by its own digest.
+@pytest.mark.parametrize(
+    "fixture", sorted(FIXTURES.glob("*.textproto")), ids=lambda path: path.name
+)
+def test_checked_in_stand_ins_name_the_report_in_no_field(tree, fixture):
+  """No textproto fixture names the report in a field, so none is written.
 
-  The digest covers the parsed fields in order, so comments and whitespace
-  do not change it, and any field value does.
+  A fixture names the report at most in a comment. A new fixture that names
+  it in a field would let a copy of it pass the identity check; this test
+  then fails.
   """
   finalize = _load_finalize(tree)
-  fixtures = sorted(FIXTURES.glob("*.textproto"))
-  assert fixtures == sorted([GENERIC_DUMP, REMAPPED_DUMP])
-  assert finalize.KNOWN_FIXTURE_SHA256 == {
-      finalize.normalized_dump_sha256(path.read_text(encoding="utf-8")): (
-          f"tests/fixtures/{path.name}"
-      )
-      for path in fixtures
-  }
-  text = REMAPPED_DUMP.read_text(encoding="utf-8")
-  digest = finalize.normalized_dump_sha256(text)
-  assert finalize.normalized_dump_sha256(_reformatted(text)) == digest
-  assert text.count("qt_d779815a") == 3
-  changed = text.replace("qt_d779815a", "qt_d779815b")
-  assert finalize.normalized_dump_sha256(changed) != digest
-  assert finalize.normalized_dump_sha256("report_config {") is None
+  binding = yaml.safe_load((tree / BINDING).read_text(encoding="utf-8"))
+  text = fixture.read_text(encoding="utf-8")
+  assert all(
+      line.lstrip().startswith("#")
+      for line in text.splitlines()
+      if REPORT_ID in line
+  )
+
+  errors = finalize.dump_identity_errors(text, binding)
+
+  assert errors is not None and errors[0] == NAMES_NO_REPORT
+
+
+@pytest.mark.parametrize(
+    "variant, error",
+    [
+        ("no-report-field", NAMES_NO_REPORT),
+        (
+            "other-report-datasource",
+            f"its report-level datasource_id is '{STALE_DATASOURCE_ID}', not"
+            f" '{DATASOURCE_ID}'",
+        ),
+    ],
+)
+def test_finalize_refuses_a_dump_that_does_not_identify_the_live_template(
+    tree, tmp_path, variant, error
+):
+  """A write needs a dump that names the report and its report data source.
+
+  Both are checked before the audit runs.
+  """
+  path = tmp_path / "report.textproto"
+  path.write_text(
+      _render_dump(
+          tree,
+          name_report=variant != "no-report-field",
+          report_datasource_id=(
+              STALE_DATASOURCE_ID
+              if variant == "other-report-datasource"
+              else None
+          ),
+      ),
+      encoding="utf-8",
+  )
+  before = _snapshot(tree)
+
+  result = _finalize(tree, "--dump", str(path), "--captured-from", ATTESTATION)
+
+  assert result.returncode == 1
+  assert f"not finalized: {error}; {BINDING} is unchanged" in result.stderr
+  assert "ok: live report validated" not in result.stdout
+  assert _snapshot(tree) == before
+
+
+@pytest.mark.parametrize(
+    "args, code, error",
+    [
+        ([], 2, "a write needs --captured-from"),
+        (
+            ["--captured-from", "exported by hand from the live template"],
+            1,
+            f"not finalized: --captured-from does not name report {REPORT_ID}",
+        ),
+        (["--captured-from", "   "], 2, "must be 1 to 500 characters long"),
+        (
+            ["--captured-from", f"report {REPORT_ID}\nsecond line"],
+            2,
+            "must be one line of printable text",
+        ),
+        (
+            ["--captured-from", REPORT_ID + "x" * 500],
+            2,
+            "must be 1 to 500 characters long",
+        ),
+    ],
+    ids=["missing", "not-naming-the-report", "blank", "two-lines", "too-long"],
+)
+def test_finalize_requires_an_attestation_that_names_the_report(
+    tree, dump, args, code, error
+):
+  before = _snapshot(tree)
+
+  result = _finalize(tree, "--dump", str(dump), *args)
+
+  assert result.returncode == code
+  assert error in result.stderr
+  assert _snapshot(tree) == before
 
 
 def test_finalize_refuses_to_record_a_checked_in_fixture(tree, dump):
@@ -523,12 +732,14 @@ def test_finalize_refuses_to_record_a_checked_in_fixture(tree, dump):
   shutil.copyfile(dump, stand_in)
   before = _snapshot(tree)
 
-  refused = _finalize(tree, "--dump", str(stand_in))
+  refused = _finalize(
+      tree, "--dump", str(stand_in), "--captured-from", ATTESTATION
+  )
 
   assert refused.returncode == 1
   assert (
-      f"not finalized: {stand_in} is a test fixture of this repository, not"
-      " a dump of the live template"
+      f"not finalized: {stand_in} is a test fixture of this repository;"
+      f" {BINDING} is unchanged"
   ) in refused.stderr
   assert _snapshot(tree) == before
 
@@ -536,6 +747,7 @@ def test_finalize_refuses_to_record_a_checked_in_fixture(tree, dump):
 
   assert preview.returncode == 0, preview.stdout + preview.stderr
   assert "-  pending_live_sync:\n" in preview.stdout
+  assert f"{stand_in} is a test fixture of this repository" in preview.stdout
   assert _snapshot(tree) == before
 
 
@@ -553,7 +765,15 @@ def test_finalize_rejects_a_verified_date_it_cannot_record(
 ):
   before = _snapshot(tree)
 
-  result = _finalize(tree, "--dump", str(dump), "--verified-date", date)
+  result = _finalize(
+      tree,
+      "--dump",
+      str(dump),
+      "--captured-from",
+      ATTESTATION,
+      "--verified-date",
+      date,
+  )
 
   assert result.returncode == code
   assert error in result.stderr
@@ -562,18 +782,31 @@ def test_finalize_rejects_a_verified_date_it_cannot_record(
 
 def test_finalize_is_idempotent_and_can_record_a_later_sync(tree, dump):
   date = _since_date(tree)
-  first = _finalize(tree, "--dump", str(dump), "--verified-date", date)
+  attested = ("--captured-from", ATTESTATION)
+  first = _finalize(
+      tree, "--dump", str(dump), *attested, "--verified-date", date
+  )
   assert first.returncode == 0, first.stdout + first.stderr
   finalized = _snapshot(tree)
 
-  again = _finalize(tree, "--dump", str(dump))
+  again = _finalize(tree, "--dump", str(dump), *attested)
 
   assert again.returncode == 0, again.stdout + again.stderr
   assert f"nothing to finalize: {BINDING} has no" in again.stdout
   assert _snapshot(tree) == finalized
 
+  # A later sync replaces the capture record instead of adding another.
   _reopen(tree)
-  later = _finalize(tree, "--dump", str(dump), "--verified-date", date)
+  later_attestation = f"a later capture of report {REPORT_ID}"
+  later = _finalize(
+      tree,
+      "--dump",
+      str(dump),
+      "--captured-from",
+      later_attestation,
+      "--verified-date",
+      date,
+  )
 
   assert later.returncode == 0, later.stdout + later.stderr
   live = _live(tree)
@@ -582,6 +815,10 @@ def test_finalize_is_idempotent_and_can_record_a_later_sync(tree, dump):
   assert live["verified_template_bundle_sha256"] == (
       live["template_bundle_sha256"]
   )
+  assert live["captured_from"] == later_attestation
+  text = (tree / BINDING).read_text(encoding="utf-8")
+  assert text.count("\n  captured_from: ") == 1
+  assert text.count("\n  verified_dump_sha256: ") == 1
 
 
 def test_finalize_restores_the_binding_when_the_audit_fails_after_the_write(
@@ -597,7 +834,9 @@ def test_finalize_restores_the_binding_when_the_audit_fails_after_the_write(
 
   monkeypatch.setattr(finalize, "_audit", audit)
 
-  assert finalize.main(["--dump", str(dump)]) == 1
+  assert (
+      finalize.main(["--dump", str(dump), "--captured-from", ATTESTATION]) == 1
+  )
   # The second audit ran on the written binding, which is then restored.
   assert calls == [(dump, True), (dump, False)]
   assert (tree / BINDING).read_bytes() == original
@@ -648,16 +887,17 @@ def test_finalize_restores_the_binding_after_an_error_or_interrupt(
     monkeypatch.setattr(finalize, "_replace_file", replace_file)
   else:
     monkeypatch.setattr(finalize, "subprocess", types.SimpleNamespace(run=run))
+  argv = ["--dump", str(dump), "--captured-from", ATTESTATION]
 
   if failure == "audit-launch-error":
-    assert finalize.main(["--dump", str(dump)]) == 1
+    assert finalize.main(argv) == 1
     assert (
         "not finalized: OSError: cannot launch the validator after the write,"
         f" so {BINDING} was restored"
     ) in capsys.readouterr().err
   else:
     with pytest.raises(KeyboardInterrupt):
-      finalize.main(["--dump", str(dump)])
+      finalize.main(argv)
     assert f"interrupted: {BINDING} was restored" in capsys.readouterr().err
   assert (tree / BINDING).read_bytes() == original
   assert sorted(path.name for path in (tree / "bindings").iterdir()) == bindings
@@ -715,6 +955,11 @@ def test_replace_file_keeps_the_target_until_the_staged_copy_is_complete(
             '  verified_date: "2026-10-30"\n  method:',
             "exactly one verified_date line",
         ),
+        (
+            r"^  method:$",
+            '  captured_from: "a"\n  captured_from: "b"\n  method:',
+            "at most one captured_from line",
+        ),
         # A one-line edit of a multi-line value would leave a stray line.
         (
             r'^  verified_date: "(\d{4}-\d{2}-\d{2})"$',
@@ -725,6 +970,7 @@ def test_replace_file_keeps_the_target_until_the_staged_copy_is_complete(
     ids=[
         "pending-not-a-plain-block",
         "repeated-verified-date",
+        "repeated-captured-from",
         "folded-verified-date",
     ],
 )
@@ -743,7 +989,7 @@ def test_finalized_binding_text_refuses_a_binding_it_cannot_edit_exactly(
   assert PENDING in yaml.safe_load(edited)[LIVE]
 
   with pytest.raises(ValueError, match=re.escape(error)):
-    finalize.finalized_binding_text(edited, "2026-10-30")
+    finalize.finalized_binding_text(edited, "2026-10-30", ATTESTATION, "a" * 64)
 
 
 RENAME_MAP_HEADER = [
@@ -995,14 +1241,33 @@ _EXTRA_COMPONENT = """\
         }
       }
 """
+# A component that the manifest does not have, with a reference and no
+# concepts.
+_REFERENCE_ONLY_COMPONENT = """\
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-reference-only"
+        property_config {
+          component_property {
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "ghost"
+                }
+              }
+            }
+          }
+        }
+      }
+"""
 
 
-def _with_extra_component(fixture, path, name):
+def _with_component(fixture, path, component):
   text = fixture.read_text(encoding="utf-8")
   anchor = "      component_config {\n"
   assert anchor in text
-  extra = _EXTRA_COMPONENT.replace("NAME", name)
-  path.write_text(text.replace(anchor, extra + anchor, 1), encoding="utf-8")
+  path.write_text(text.replace(anchor, component + anchor, 1), encoding="utf-8")
   return path
 
 
@@ -1016,23 +1281,32 @@ def _with_dangling_reference(fixture, path):
   return path
 
 
+_EXTRA_IN_DUMP = (
+    "component cd-extra of the dump defines concepts ['met'] but is not in"
+    " spec/bqca_chart_manifest.yaml"
+)
+_REFERENCE_ONLY_IN_DUMP = (
+    "component cd-reference-only of the dump references ['ghost'] but is not"
+    " in spec/bqca_chart_manifest.yaml"
+)
+
+
 @pytest.mark.parametrize(
     "case, error",
     [
-        (
-            "extra-in-dump",
-            "component cd-extra of the dump defines concepts ['met'] but is"
-            " not in spec/bqca_chart_manifest.yaml",
-        ),
-        (
-            "extra-in-dump-with-remapped",
-            "component cd-extra of the dump defines concepts ['met'] but is"
-            " not in spec/bqca_chart_manifest.yaml",
-        ),
+        ("extra-in-dump", _EXTRA_IN_DUMP),
+        ("extra-in-dump-with-remapped", _EXTRA_IN_DUMP),
         (
             "extra-in-remapped",
-            "remapped twin: its concept-bearing components differ from the"
-            " dump's: dump only [], twin only ['cd-extra']",
+            "remapped twin: its components with concepts or references differ"
+            " from the dump's: dump only [], twin only ['cd-extra']",
+        ),
+        ("reference-only-in-dump", _REFERENCE_ONLY_IN_DUMP),
+        ("reference-only-in-dump-with-remapped", _REFERENCE_ONLY_IN_DUMP),
+        (
+            "reference-only-in-remapped",
+            "remapped twin: its components with concepts or references differ"
+            " from the dump's: dump only [], twin only ['cd-reference-only']",
         ),
         (
             "dangling-reference",
@@ -1045,6 +1319,9 @@ def _with_dangling_reference(fixture, path):
         "extra-in-dump",
         "extra-in-dump-with-remapped",
         "extra-in-remapped",
+        "reference-only-in-dump",
+        "reference-only-in-dump-with-remapped",
+        "reference-only-in-remapped",
         "dangling-reference",
     ],
 )
@@ -1053,22 +1330,30 @@ def test_rename_map_rejects_concepts_and_references_it_cannot_map(
 ):
   """Every concept and reference of the dump must be in the map.
 
-  A component of the dump that defines concepts but is not in the manifest,
-  with or without `--remapped`, a remapped twin with such a component, and a
-  reference that names no concept of its component each fail, writing
-  neither output file.
+  A component of the dump that is not in the manifest and defines concepts
+  or holds references, with or without `--remapped`, a remapped twin with
+  such a component, and a reference that names no concept of its component
+  each fail, writing neither output file.
   """
   dump, remapped = GENERIC_DUMP, None
   if case.startswith("extra-in-dump"):
-    dump = _with_extra_component(GENERIC_DUMP, tmp_path / "dump.txtpb", "met")
-    if case.endswith("with-remapped"):
-      remapped = REMAPPED_DUMP
+    extra = _EXTRA_COMPONENT.replace("NAME", "met")
+    dump = _with_component(GENERIC_DUMP, tmp_path / "dump.txtpb", extra)
+  elif case.startswith("reference-only-in-dump"):
+    dump = _with_component(
+        GENERIC_DUMP, tmp_path / "dump.txtpb", _REFERENCE_ONLY_COMPONENT
+    )
   elif case == "extra-in-remapped":
-    remapped = _with_extra_component(
-        REMAPPED_DUMP, tmp_path / "remapped.txtpb", "qt_extra01"
+    extra = _EXTRA_COMPONENT.replace("NAME", "qt_extra01")
+    remapped = _with_component(REMAPPED_DUMP, tmp_path / "twin.txtpb", extra)
+  elif case == "reference-only-in-remapped":
+    remapped = _with_component(
+        REMAPPED_DUMP, tmp_path / "twin.txtpb", _REFERENCE_ONLY_COMPONENT
     )
   else:
     dump = _with_dangling_reference(GENERIC_DUMP, tmp_path / "dump.txtpb")
+  if case.endswith("with-remapped"):
+    remapped = REMAPPED_DUMP
   out_csv, out_md = tmp_path / "rename-map.csv", tmp_path / "rename-map.md"
 
   result = _rename_map(

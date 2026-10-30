@@ -8,6 +8,8 @@ DUMP``. Only if it exits 0 does this record the verification in
 * sets ``verified_date`` to ``--verified-date`` (default: today);
 * copies the pinned ``manifest_sha256`` and ``template_bundle_sha256`` into
   ``verified_manifest_sha256`` and ``verified_template_bundle_sha256``;
+* records ``captured_from`` (the ``--captured-from`` attestation) and
+  ``verified_dump_sha256`` (the SHA-256 of the dump's bytes);
 * removes ``pending_live_sync``.
 
 Every other line of the binding, comments included, is kept. The edit must
@@ -16,11 +18,21 @@ atomically, and the audit runs again after the write; if it fails, raises or
 is interrupted, the original bytes are put back. ``--check`` runs the same
 audit and prints the change as a diff without writing it.
 
-The checked-in fixtures are stand-ins, not dumps of the live template:
-``--check`` accepts them, a write does not. A write refuses a dump under this
-repository's ``tests/fixtures``, and a dump anywhere whose content is that of
-a checked-in stand-in (``normalized_dump_sha256``, which ignores comments and
-whitespace).
+A write fails closed unless the dump carries positive evidence that it is a
+dump of the live template:
+
+* ``--captured-from`` attests how the dump was captured, and names the
+  binding's ``report_id``;
+* a field of the dump (comments do not count) names that ``report_id``, and
+  its report-level ``datasource_id`` is the binding's;
+* the dump is not under this repository's ``tests/fixtures``.
+
+The checked-in fixtures name the report in no field, so neither they nor a
+reordered or otherwise audit-inert edit of them can be written; their
+``--check`` previews still run. Nothing in a file proves where it came from:
+a file that someone edits to name the report, with a false attestation,
+passes. The attestation and the dump's digest in the binding make that a
+deliberate, reviewable statement rather than an accident.
 
 This tool does not edit documentation or tests. See "Finalizing the live
 template sync" in ``docs/dashboard-implementation.md`` for the rest of the
@@ -31,6 +43,7 @@ Exits 0 when the binding is finalized, would be (``--check``), or already is;
 """
 
 import argparse
+from collections.abc import Iterator
 import copy
 import datetime
 import difflib
@@ -55,23 +68,16 @@ VALIDATOR_PATH = "tools/validate_contracts.py"
 FIXTURES_PATH = "tests/fixtures"
 LIVE_KEY = "live_template_verification"
 PENDING_KEY = "pending_live_sync"
-# The normalized digests (`normalized_dump_sha256`) of the checked-in
-# stand-ins, so that a copy of one is refused wherever it is, even when this
-# checkout has no `tests/fixtures`. tests/test_looker_studio_live_sync.py
-# checks that they are those of the files.
-KNOWN_FIXTURE_SHA256 = {
-    "65749b99444871cdfa49239acd693c96d1cd8b45e91b19d3fc2f8dc0b330afe6": (
-        "tests/fixtures/bqca_live_report_42e79a1f_sanitized.textproto"
-    ),
-    "c7714fe895a6699e5d3f6a042d028c3d7be142110564b5f7c9e2925c50233e37": (
-        "tests/fixtures/bqca_live_report_42e79a1f_sanitized_remapped.textproto"
-    ),
-}
 # Each `verified_*` key and the pinned digest it takes.
 VERIFIED_DIGEST_KEYS = {
     "verified_manifest_sha256": "manifest_sha256",
     "verified_template_bundle_sha256": "template_bundle_sha256",
 }
+# The capture record, written after `verified_template_bundle_sha256`.
+CAPTURE_KEYS = ("captured_from", "verified_dump_sha256")
+# Shown in a `--check` preview given no `--captured-from`.
+CAPTURE_PLACEHOLDER = "<the --captured-from attestation>"
+MAX_ATTESTATION_LENGTH = 500
 NEXT_STEPS = """\
 In the same change:
   - remove the #559 known-issue notes: #bqca-column-id-note in
@@ -81,6 +87,8 @@ In the same change:
   - update the comments above live_template_verification in
     bindings/bqca_report_template.yaml and the tests that pin the pending
     sync (listed in docs/dashboard-implementation.md);
+  - keep the dump for review: verified_dump_sha256 is its SHA-256, and
+    captured_from records your attestation of how it was captured;
   - create a report with the 1-click link and check that its Total, Input,
     Output and Thinking Tokens scorecards each show their own value."""
 
@@ -99,6 +107,18 @@ def _iso_date(value: str) -> str:
   except ValueError:
     pass
   raise argparse.ArgumentTypeError(f"{value!r} is not a YYYY-MM-DD date")
+
+
+def _attestation(value: str) -> str:
+  """Return `value` stripped if it is a one-line attestation (argparse type)."""
+  value = value.strip()
+  if not value or len(value) > MAX_ATTESTATION_LENGTH:
+    raise argparse.ArgumentTypeError(
+        f"must be 1 to {MAX_ATTESTATION_LENGTH} characters long"
+    )
+  if not value.isprintable():
+    raise argparse.ArgumentTypeError("must be one line of printable text")
+  return value
 
 
 def _end_of_children(lines: list[str], index: int, end: int) -> int:
@@ -122,25 +142,31 @@ def _end_of_children(lines: list[str], index: int, end: int) -> int:
   return index
 
 
-def finalized_binding_text(text: str, verified_date: str) -> str:
+def finalized_binding_text(
+    text: str, verified_date: str, captured_from: str, dump_sha256: str
+) -> str:
   """Return the binding `text` with its pending live sync recorded as verified.
 
   In `live_template_verification`, replaces the `verified_date` line and the
-  two `verified_*_sha256` lines, and removes the `pending_live_sync:` line
-  and the lines nested under it. Every other line is kept as it is.
+  two `verified_*_sha256` lines, writes the `captured_from` and
+  `verified_dump_sha256` lines (replacing them, or adding them after
+  `verified_template_bundle_sha256`), and removes the `pending_live_sync:`
+  line and the lines nested under it. Every other line is kept as it is.
 
   Args:
     text: The text of `bindings/bqca_report_template.yaml`.
     verified_date: The new `verified_date`, YYYY-MM-DD.
+    captured_from: The attestation of how the dump was captured.
+    dump_sha256: The SHA-256 of the dump's bytes.
 
   Returns:
     The edited text.
 
   Raises:
     ValueError: The binding is not valid YAML or has no pending live sync, a
-      pinned digest is not a SHA-256 hex digest, one of those lines is
-      missing, repeated, or not a plain block entry, or the edited text does
-      not parse to exactly that change.
+      pinned digest or `dump_sha256` is not a SHA-256 hex digest, one of
+      those lines is missing, repeated, or not a plain block entry, or the
+      edited text does not parse to exactly that change.
   """
   try:
     binding = yaml.safe_load(text)
@@ -149,6 +175,8 @@ def finalized_binding_text(text: str, verified_date: str) -> str:
   live = binding.get(LIVE_KEY) if isinstance(binding, dict) else None
   if not isinstance(live, dict) or PENDING_KEY not in live:
     raise ValueError(f"{LIVE_KEY} has no {PENDING_KEY} to finalize")
+  if not _SHA256_RE.fullmatch(dump_sha256):
+    raise ValueError(f"{dump_sha256!r} is not a SHA-256 hex digest")
   values = {"verified_date": f'"{verified_date}"'}
   for verified_key, pinned_key in VERIFIED_DIGEST_KEYS.items():
     pinned = live.get(pinned_key)
@@ -157,6 +185,11 @@ def finalized_binding_text(text: str, verified_date: str) -> str:
           f"{LIVE_KEY}.{pinned_key} {pinned!r} is not a SHA-256 hex digest"
       )
     values[verified_key] = pinned
+  # A JSON string is a YAML double-quoted scalar.
+  record = {
+      "captured_from": json.dumps(captured_from),
+      "verified_dump_sha256": dump_sha256,
+  }
 
   lines = text.splitlines(keepends=True)
   starts = [
@@ -175,6 +208,17 @@ def finalized_binding_text(text: str, verified_date: str) -> str:
       ),
       len(lines),
   )
+  block_keys = [
+      match.group(1)
+      for match in map(_BLOCK_KEY_RE.match, lines[start:end])
+      if match
+  ]
+  for key in CAPTURE_KEYS:
+    if block_keys.count(key) > 1:
+      raise ValueError(
+          f"expected at most one {key} line in {LIVE_KEY}, found"
+          f" {block_keys.count(key)}"
+      )
   counts = dict.fromkeys([*values, PENDING_KEY], 0)
   edited = lines[:start]
   index = start
@@ -191,6 +235,15 @@ def finalized_binding_text(text: str, verified_date: str) -> str:
     elif key in values:
       counts[key] += 1
       edited.append(f"  {key}: {values[key]}\n")
+      if key == "verified_template_bundle_sha256":
+        edited.extend(
+            f"  {name}: {value}\n"
+            for name, value in record.items()
+            if name not in block_keys
+        )
+      continue
+    elif key in record:
+      edited.append(f"  {key}: {record[key]}\n")
       continue
     edited.append(line)
   edited.extend(lines[end:])
@@ -208,6 +261,8 @@ def finalized_binding_text(text: str, verified_date: str) -> str:
   expected_live["verified_date"] = verified_date
   for verified_key, pinned_key in VERIFIED_DIGEST_KEYS.items():
     expected_live[verified_key] = expected_live[pinned_key]
+  expected_live["captured_from"] = captured_from
+  expected_live["verified_dump_sha256"] = dump_sha256
   del expected_live[PENDING_KEY]
   try:
     parsed = yaml.safe_load(new_text)
@@ -257,43 +312,71 @@ def _load_validator():
   return module
 
 
-def normalized_dump_sha256(text: str) -> str | None:
-  """Return the SHA-256 of a dump's fields, or None if it cannot be read.
+def _scalar_values(message: list) -> Iterator[str]:
+  """Yield every scalar field value of a parsed textproto message."""
+  for _, value in message:
+    if isinstance(value, list):
+      yield from _scalar_values(value)
+    else:
+      yield value
 
-  The digest covers the fields and values that the live audit's reader
-  parses, in order, so comments, whitespace, separators and quoting do not
-  change it.
+
+def dump_identity_errors(text: str, binding: dict) -> list[str] | None:
+  """Return why a dump does not identify the live template, or None.
+
+  The dump must name the binding's `report_id` in a field value (comments do
+  not count), and its report-level `datasource_id` must be the binding's.
+  Returns None for a dump that cannot be read, which the live audit rejects
+  with its own error.
   """
+  validator = _load_validator()
   try:
-    message = _load_validator().parse_report_textproto(text)
+    report = validator.parse_report_textproto(text)
   except ValueError:
     return None
-  canonical = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
-  return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+  errors = []
+  report_id = str(binding.get("report_id"))
+  if not any(report_id in value for value in _scalar_values(report)):
+    errors.append(
+        f"the dump names report {report_id} in no field (comments do not"
+        " count)"
+    )
+  report_message = validator._tp_message(
+      validator._tp_message(report, "report_config") or report, "report"
+  )
+  datasource_id = validator._tp_scalar(report_message, "datasource_id")
+  if datasource_id != binding.get("datasource_id"):
+    errors.append(
+        f"its report-level datasource_id is {datasource_id!r}, not"
+        f" {binding.get('datasource_id')!r}"
+    )
+  return errors
 
 
-def _stand_in(dump: pathlib.Path) -> str | None:
-  """Return why `dump` is a stand-in rather than a dump, or None.
+def write_blockers(
+    dump: pathlib.Path, captured_from: str | None, binding: dict
+) -> list[str]:
+  """Return why a write with `dump` would be refused (empty if it would not).
 
-  A file under this repository's `tests/fixtures` is a stand-in by its path.
-  A file anywhere whose normalized digest is that of a checked-in stand-in
-  (KNOWN_FIXTURE_SHA256, or any `*.textproto` under `tests/fixtures`) is one
-  by its content.
+  A write needs positive evidence that the dump is a dump of the live
+  template: an attestation that names the report, and a dump that is not a
+  test fixture of this repository and identifies the report
+  (`dump_identity_errors`).
   """
+  blockers = []
+  report_id = str(binding.get("report_id"))
+  if captured_from is None:
+    blockers.append("--captured-from is not given")
+  elif report_id not in captured_from:
+    blockers.append(f"--captured-from does not name report {report_id}")
   fixtures = REPOSITORY_ROOT / FIXTURES_PATH
   if dump.resolve().is_relative_to(fixtures.resolve()):
-    return f"{dump} is a test fixture of this repository"
+    blockers.append(f"{dump} is a test fixture of this repository")
   try:
-    digest = normalized_dump_sha256(dump.read_text(encoding="utf-8"))
+    text = dump.read_text(encoding="utf-8")
   except (OSError, UnicodeDecodeError):
-    return None
-  known = dict(KNOWN_FIXTURE_SHA256)
-  for fixture in sorted(fixtures.glob("*.textproto")):
-    fixture_digest = normalized_dump_sha256(fixture.read_text(encoding="utf-8"))
-    known.setdefault(fixture_digest, f"{FIXTURES_PATH}/{fixture.name}")
-  if digest is not None and digest in known:
-    return f"{dump} has the content of {known[digest]}, a stand-in"
-  return None
+    return blockers
+  return blockers + (dump_identity_errors(text, binding) or [])
 
 
 def _replace_file(path: pathlib.Path, data: bytes) -> None:
@@ -348,22 +431,37 @@ def main(argv: list[str] | None = None) -> int:
       help="audit the dump and print the change without writing it",
   )
   parser.add_argument(
+      "--captured-from",
+      type=_attestation,
+      metavar="TEXT",
+      help=(
+          "required to write: how the dump was captured from the live"
+          " template, naming its report_id; recorded in the binding"
+      ),
+  )
+  parser.add_argument(
       "--verified-date",
       type=_iso_date,
       metavar="YYYY-MM-DD",
       help="the date to record as verified_date (default: today)",
   )
   args = parser.parse_args(argv)
+  if not args.check and args.captured_from is None:
+    parser.error(
+        "a write needs --captured-from, an attestation of how the dump was"
+        " captured from the live template; --check previews without it"
+    )
   verified_date = args.verified_date or datetime.date.today().isoformat()
   unchanged = f"{BINDING_PATH} is unchanged"
+  binding_path = ROOT / BINDING_PATH
+  original = binding_path.read_bytes().decode("utf-8")
+  binding = yaml.safe_load(original)
+  binding = binding if isinstance(binding, dict) else {}
 
-  stand_in = _stand_in(args.dump)
-  if stand_in is not None and not args.check:
-    print(
-        f"not finalized: {stand_in}, not a dump of the live template;"
-        f" {unchanged}",
-        file=sys.stderr,
-    )
+  # A write fails closed without positive evidence of a live dump.
+  blockers = write_blockers(args.dump, args.captured_from, binding)
+  if blockers and not args.check:
+    print(f"not finalized: {'; '.join(blockers)}; {unchanged}", file=sys.stderr)
     return 1
   code = _audit(args.dump)
   if code != 0:
@@ -374,10 +472,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     return 1
 
-  binding_path = ROOT / BINDING_PATH
-  original = binding_path.read_bytes().decode("utf-8")
-  binding = yaml.safe_load(original)
-  live = binding.get(LIVE_KEY) if isinstance(binding, dict) else None
+  live = binding.get(LIVE_KEY)
   if not isinstance(live, dict) or PENDING_KEY not in live:
     print(
         f"nothing to finalize: {BINDING_PATH} has no"
@@ -387,7 +482,12 @@ def main(argv: list[str] | None = None) -> int:
   error = _verified_date_error(verified_date, live)
   if error is None:
     try:
-      updated = finalized_binding_text(original, verified_date)
+      updated = finalized_binding_text(
+          original,
+          verified_date,
+          args.captured_from or CAPTURE_PLACEHOLDER,
+          hashlib.sha256(args.dump.read_bytes()).hexdigest(),
+      )
     except ValueError as exc:
       error = str(exc)
   if error is not None:
@@ -403,10 +503,14 @@ def main(argv: list[str] | None = None) -> int:
       )
   )
   if args.check:
-    note = " (a stand-in: a write would refuse it)" if stand_in else ""
+    refusal = (
+        f", but a write would refuse it: {'; '.join(blockers)}"
+        if blockers
+        else ""
+    )
     print(
-        f"check: the live audit of {args.dump}{note} passed; {BINDING_PATH}"
-        " would change as above; nothing written"
+        f"check: the live audit of {args.dump} passed; {BINDING_PATH} would"
+        f" change as above{refusal}; nothing written"
     )
     return 0
 

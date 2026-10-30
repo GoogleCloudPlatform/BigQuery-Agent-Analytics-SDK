@@ -449,21 +449,23 @@ Two tools support the sync; neither changes the live template.
 component, and column order: the old name, the new `qt_` ID, the source field
 and aggregation to keep, and the chart references to update. It fails,
 writing nothing, when a concept or reference of the dump would be left out of
-the map: a component that defines concepts but is not in the manifest, or a
-reference that names no concept of its component. By default it reads the
-sanitized cut above and checks the map against its remapped twin, which must
-have the same concept-bearing components; `--dump PATH` reads a newer dump
-taken before the sync:
+the map: a component that is not in the manifest but defines concepts or
+holds references, or a reference, in any component, that names no concept of
+its own component. By default it reads the sanitized cut above and checks the
+map against its remapped twin, which must have the same components with
+concepts or references; `--dump PATH` reads a newer dump taken before the
+sync:
 
 ```bash
 python3 tools/gen_bqca_rename_map.py --csv rename-map.csv --md rename-map.md
 ```
 
-After the sync, save a new dump of the live template and run:
+After the sync, save a new dump of the live template, keep it, and run:
 
 ```bash
-python3 tools/finalize_live_sync.py --dump /path/to/report.txt --check
-python3 tools/finalize_live_sync.py --dump /path/to/report.txt
+python3 tools/finalize_live_sync.py --dump <dump> --check
+python3 tools/finalize_live_sync.py --dump <dump> \
+    --captured-from "<how the dump of 42e79a1f-a979-4de8-911f-80d5a99543d5 was captured>"
 ```
 
 `tools/finalize_live_sync.py` runs `tools/validate_contracts.py --profile bqca
@@ -471,16 +473,39 @@ python3 tools/finalize_live_sync.py --dump /path/to/report.txt
 `bindings/bqca_report_template.yaml` only if it exits 0. In
 `live_template_verification` it sets `verified_date` (`--verified-date`,
 default today), copies `manifest_sha256` and `template_bundle_sha256` into
-`verified_manifest_sha256` and `verified_template_bundle_sha256`, and removes
+`verified_manifest_sha256` and `verified_template_bundle_sha256`, records
+`captured_from` (the `--captured-from` attestation) and
+`verified_dump_sha256` (the SHA-256 of the dump's bytes), and removes
 `pending_live_sync`, keeping every other line and comment. The new binding
 replaces the old one atomically (a staged file and `os.replace`); the tool
 audits the dump again after the write and puts the original bytes back if
 that audit fails, raises, or is interrupted. `--check` prints the change as a
-diff and writes nothing. The checked-in fixtures are stand-ins, not dumps of
-the live template, so a write refuses a dump under `tests/fixtures/` and,
-wherever it is, a dump with the content of one of them: the tool compares a
-SHA-256 of the fields it parses, which comments and whitespace do not change.
-`--check` still previews with them.
+diff, says why a write would be refused, and writes nothing; it needs no
+attestation and previews with the checked-in fixtures too.
+
+A write fails closed unless it has positive evidence that the dump is a dump
+of the live template:
+
+- a one-line `--captured-from` attestation of how the dump was captured,
+  which names the binding's `report_id`
+  (`42e79a1f-a979-4de8-911f-80d5a99543d5`);
+- a field of the dump (comments do not count) that names that `report_id`,
+  and a report-level `datasource_id` that is the binding's
+  (`70e5ac1e-65bb-4c89-a9df-fa9990cb6029`);
+- a dump that is not under `tests/fixtures/`.
+
+The checked-in fixtures name the report in no field, so a write refuses them,
+copies of them anywhere, and any reordering or audit-inert edit of them. The
+check cannot prove where a file came from: a file that someone edits to name
+the report, written with a false attestation, passes. The binding then records
+that attestation and the dump's digest, so the statement is deliberate and
+reviewable, and anyone with the dump can check the digest. The tool does not
+compare the dump's audit-relevant fields with the fixtures: the remapped
+fixture is exactly what those fields must be after a correct sync (the audit
+compares them with the manifest), so such a comparison would refuse every
+genuine dump. If an export of the live template does not name its report in
+any field, a write refuses it; take an export that includes the report's
+identity.
 
 The tool does not edit documentation or tests. In the same change, remove the
 #559 known-issue notes that `pending_live_sync.required_actions` lists (and
