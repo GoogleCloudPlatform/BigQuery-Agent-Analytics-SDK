@@ -7,13 +7,14 @@
 #
 # This report is a copy that its owner made on 2026-10-09 of the first
 # published BQCA template, whose organization allowed sharing only inside the
-# organization. `datasource_id`, `published_date`, `live_template_verification`
-# and `product_verification` below were recorded on that source report and
-# have not been re-recorded for the copy; the copy's `ds0` alias has not been
-# re-checked either.
+# organization. `datasource_id` below is the copy's own embedded
+# BlockDatasource, re-recorded on 2026-10-29 from the copy's report
+# configuration, which also maps the `ds0` alias to it. `published_date`,
+# `live_template_verification` and `product_verification` below were recorded
+# on that source report and have not been re-recorded for the copy.
 report_id: 42e79a1f-a979-4de8-911f-80d5a99543d5
 data_source_alias: ds0
-datasource_id: 4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc
+datasource_id: 70e5ac1e-65bb-4c89-a9df-fa9990cb6029
 product_contract: spec/bqca_product_contract.yaml
 chart_manifest: spec/bqca_chart_manifest.yaml
 dashboard_template_bundle: spec/bqca_dashboard_template.json
@@ -69,13 +70,54 @@ block_datasource:
 # `spec/bqca_dashboard_template.json`, so mutating any component or metric fails CI.
 # The evidence was gathered on the source report this template was copied
 # from (see the note at the top); the digests were re-pinned on 2026-10-09
-# only because the report ID in the manifest and bundle changed.
+# only because the report ID in the manifest and bundle changed, and again on
+# 2026-10-29 only because the manifest and bundle now give every column a
+# report-wide unique `qt_` ID and name the copy's own `datasource_id`.
+# `verified_manifest_sha256` and `verified_template_bundle_sha256` keep the
+# digests pinned with that verification (as re-pinned on 2026-10-09). The live
+# template has not been re-verified since: it keeps the legacy generic column
+# IDs, and its report-level `datasource_id` still names the source report's
+# data source, until it is synced from these contracts. The sync must rename
+# the 65 concepts of its 34 components to exactly the `qt_` IDs in
+# `spec/bqca_chart_manifest.yaml` (the live audit,
+# `tools/validate_contracts.py --live-report-textproto`, fails on any other
+# name) and repoint the report-level `datasource_id` to
+# `70e5ac1e-65bb-4c89-a9df-fa9990cb6029`; `verified_date` stays 2026-10-09
+# until then. `pending_live_sync` records that sync: the validator requires it
+# while `manifest_sha256` or `template_bundle_sha256` differs from its
+# verified digest, and rejects it once both match again.
 live_template_verification:
   verified_date: "2026-10-09"
   repository_sql_sha256: c915abe82c9e6d54aac6fffe78e34f90b436e852697c86747632a6c238754096
   pages_sha256: b3c14c7dfc8ed51690f7f3e0ac6d24506c31dc63038591f479c51362715a89c4
-  manifest_sha256: a6b4effd99d59097d3c014cf6242a4f2750da8622e7ad71a03b8f5585a486054
-  template_bundle_sha256: 2631f878a9c382b0a81ab94347b434a7a8666fa2eae75844c86fca48216eb347
+  manifest_sha256: c450625ea44b671938587f33589b66d1a3adce00546e43ccae5b6e968428dd44
+  template_bundle_sha256: c2fdbbb49b22333782dca1cfb8fa33aea3cc5d90490cd1b493538f2ccf954b62
+  verified_manifest_sha256: a6b4effd99d59097d3c014cf6242a4f2750da8622e7ad71a03b8f5585a486054
+  verified_template_bundle_sha256: 2631f878a9c382b0a81ab94347b434a7a8666fa2eae75844c86fca48216eb347
+  pending_live_sync:
+    reason: >-
+      The live template still uses the legacy generic column IDs and the
+      source report's report-level data source, so it does not match the
+      manifest and bundle pinned above.
+    since_date: "2026-10-29"
+    tracking_issue: https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/559
+    required_actions:
+      - >-
+        Rename the 65 concepts of the 34 live components to the exact qt_ IDs
+        in spec/bqca_chart_manifest.yaml, keeping each concept's source field
+        and aggregation and updating every concept_names and sort_column that
+        refers to it.
+      - >-
+        Repoint the report-level datasource_id to
+        70e5ac1e-65bb-4c89-a9df-fa9990cb6029.
+      - >-
+        Check that tools/validate_contracts.py --live-report-textproto passes
+        on a new dump of the live template, then set a new verified_date, set
+        both verified digests to the pinned ones, remove the #559 known-issue
+        notes from README.md, USER_MANUAL.md,
+        docs/guides/bqca-prompt-response-logging-manual.md, and
+        #bqca-column-id-note in docs/index.html (re-running
+        tools/render_web_config.py), and remove pending_live_sync.
   method:
     - data_studio_web_service_publish_datasource
     - data_studio_web_service_get_block_datasource

@@ -1,0 +1,1550 @@
+# bqca_live_report_42e79a1f_sanitized.textproto with the two sync actions of
+# https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/559
+# applied locally: each of the 65 concepts carries the `qt_` ID of its column in
+# dashboards/looker_studio/spec/bqca_chart_manifest.yaml (as its `name`, in its
+# `id`, and in every `concept_names` and `sort_column` that refers to it), and
+# the report-level `datasource_id` is 70e5ac1e-65bb-4c89-a9df-fa9990cb6029.
+# Nothing else in bqca_live_report_42e79a1f_sanitized.textproto (including each
+# `labeled_concepts` `key` and `reverse_sort_order`) differs. This file is not a
+# dump of a synced template.
+#
+# tests/test_looker_studio_dashboard.py pins that the audit reports no errors on
+# it.
+report_config {
+  page {
+    page {
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-vHrTArr4HTQ"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_1e5c0a97"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_1e5c0a97"
+          name: "qt_1e5c0a97"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_turn_latency_ms_"
+              aggregation: AVG
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-siIPn3A0DhI"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_235cb0ae"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_235cb0ae"
+          name: "qt_235cb0ae"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_llm_latency_ms_"
+              aggregation: AVG
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-l9SJjy2jR-o"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_16a686b5"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_16a686b5"
+          name: "qt_16a686b5"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_total_latency_ms_"
+              aggregation: AVG
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-lC6BhR7QWAA"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_6d704d5c"
+                }
+              }
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_0a6310c4"
+                }
+              }
+            }
+            sort {
+              sort_dir: DESC
+              sort_column: "qt_0a6310c4"
+            }
+            reverse_sort_order: false
+          }
+        }
+        concept_defs {
+          id: "t0.qt_6d704d5c"
+          name: "qt_6d704d5c"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_fast_path_label_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_0a6310c4"
+          name: "qt_0a6310c4"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_invocation_id_"
+              aggregation: COUNT_DISTINCT
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-i2nWigxiP7g"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_a286c105"
+                }
+              }
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_cac76a3a"
+                }
+              }
+            }
+            sort {
+              sort_dir: DESC
+              sort_column: "qt_cac76a3a"
+            }
+            reverse_sort_order: false
+          }
+        }
+        concept_defs {
+          id: "t0.qt_a286c105"
+          name: "qt_a286c105"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_fast_path_label_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_cac76a3a"
+          name: "qt_cac76a3a"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_turn_latency_ms_"
+              aggregation: AVG
+            }
+          }
+        }
+      }
+    }
+  }
+  page {
+    page {
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-oQfDfyi8Lv0"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_d6385c41"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_d6385c41"
+          name: "qt_d6385c41"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_persona_"
+              aggregation: COUNT_DISTINCT
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-uRA2-9wgZ2Y"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_aeca08f6"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_aeca08f6"
+          name: "qt_aeca08f6"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_user_id_"
+              aggregation: COUNT_DISTINCT
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-g1BkEGfLfKs"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_a42e18b1"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_a42e18b1"
+          name: "qt_a42e18b1"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_conversation_id_"
+              aggregation: COUNT_DISTINCT
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-raUF_PPS3LM"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_c4ad495e"
+                }
+              }
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_dd7d7d10"
+                }
+              }
+            }
+            sort {
+              sort_dir: DESC
+              sort_column: "qt_dd7d7d10"
+            }
+            reverse_sort_order: false
+          }
+        }
+        concept_defs {
+          id: "t0.qt_c4ad495e"
+          name: "qt_c4ad495e"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_persona_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_dd7d7d10"
+          name: "qt_dd7d7d10"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_invocation_id_"
+              aggregation: COUNT_DISTINCT
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-rMs1c5cC9Fw"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_8070d8ac"
+                  concept_names: "qt_2b3c89df"
+                }
+              }
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_cbce3e14"
+                  concept_names: "qt_c1b8027d"
+                  concept_names: "qt_174cfaac"
+                }
+              }
+            }
+            sort {
+              sort_dir: DESC
+              sort_column: "qt_cbce3e14"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_8070d8ac"
+          name: "qt_8070d8ac"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_persona_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_2b3c89df"
+          name: "qt_2b3c89df"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_data_agent_id_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_cbce3e14"
+          name: "qt_cbce3e14"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_invocation_id_"
+              aggregation: COUNT_DISTINCT
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_c1b8027d"
+          name: "qt_c1b8027d"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_total_tokens_"
+              aggregation: SUM
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_174cfaac"
+          name: "qt_174cfaac"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_turn_latency_ms_"
+              aggregation: AVG
+            }
+          }
+        }
+      }
+    }
+  }
+  page {
+    page {
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-piLo6w29Khs"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_a813429f"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_a813429f"
+          name: "qt_a813429f"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_error_message_"
+              aggregation: COUNT
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-m7c2OcIbUxo"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_a8ab9425"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_a8ab9425"
+          name: "qt_a8ab9425"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_error_message_"
+              aggregation: COUNT_DISTINCT
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-oZj1Bbl96QQ"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_8eff7d70"
+                }
+              }
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_79ac4183"
+                }
+              }
+            }
+            sort {
+              sort_dir: DESC
+              sort_column: "qt_79ac4183"
+            }
+            reverse_sort_order: false
+          }
+        }
+        concept_defs {
+          id: "t0.qt_8eff7d70"
+          name: "qt_8eff7d70"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_event_type_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_79ac4183"
+          name: "qt_79ac4183"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_error_message_"
+              aggregation: COUNT
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-tSjvZNK6aLc"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_3859cfd6"
+                }
+              }
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_891b1a3f"
+                }
+              }
+            }
+            sort {
+              sort_dir: DESC
+              sort_column: "qt_891b1a3f"
+            }
+            reverse_sort_order: false
+          }
+        }
+        concept_defs {
+          id: "t0.qt_3859cfd6"
+          name: "qt_3859cfd6"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_data_agent_id_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_891b1a3f"
+          name: "qt_891b1a3f"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_error_message_"
+              aggregation: COUNT
+            }
+          }
+        }
+      }
+    }
+  }
+  page {
+    page {
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-ldwCpp7xYjA"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_581cc2cf"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_581cc2cf"
+          name: "qt_581cc2cf"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_llm_latency_ms_"
+              aggregation: COUNT
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-qiFfbAM3qa0"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_f4c85165"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_f4c85165"
+          name: "qt_f4c85165"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_llm_latency_ms_"
+              aggregation: AVG
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-vvYZt2if5WY"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_1444bfec"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_1444bfec"
+          name: "qt_1444bfec"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_ttft_ms_"
+              aggregation: AVG
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-gc3G-O-taBE"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_291ed8e1"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_291ed8e1"
+          name: "qt_291ed8e1"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_similar_queries_count_"
+              aggregation: SUM
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-hqCAkMPqIPw"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_09afcfdb"
+                }
+              }
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_f8bf601a"
+                }
+              }
+            }
+            sort {
+              sort_dir: DESC
+              sort_column: "qt_f8bf601a"
+            }
+            reverse_sort_order: false
+          }
+        }
+        concept_defs {
+          id: "t0.qt_09afcfdb"
+          name: "qt_09afcfdb"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_model_version_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_f8bf601a"
+          name: "qt_f8bf601a"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_total_tokens_"
+              aggregation: SUM
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-sL-0J4IkqLU"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_69a5beaa"
+                }
+              }
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_63d8de68"
+                }
+              }
+            }
+            sort {
+              sort_dir: DESC
+              sort_column: "qt_63d8de68"
+            }
+            reverse_sort_order: false
+          }
+        }
+        concept_defs {
+          id: "t0.qt_69a5beaa"
+          name: "qt_69a5beaa"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_embedding_suggestion_reason_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_63d8de68"
+          name: "qt_63d8de68"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_similar_queries_count_"
+              aggregation: SUM
+            }
+          }
+        }
+      }
+    }
+  }
+  page {
+    page {
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-vWRq2EdpQyI"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_d779815a"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_d779815a"
+          name: "qt_d779815a"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_total_tokens_"
+              aggregation: SUM
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-gQM6-qRztkI"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_c90b69a4"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_c90b69a4"
+          name: "qt_c90b69a4"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_input_tokens_"
+              aggregation: SUM
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-tGVUrOkdidM"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_893d21f1"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_893d21f1"
+          name: "qt_893d21f1"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_output_tokens_"
+              aggregation: SUM
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-mNCe2wVAOSU"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_a6d27140"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_a6d27140"
+          name: "qt_a6d27140"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_thoughts_tokens_"
+              aggregation: SUM
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-q_nXnTUZkLs"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_31dd80a8"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_31dd80a8"
+          name: "qt_31dd80a8"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_cached_tokens_"
+              aggregation: SUM
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-kctXIOqrPyQ"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_47948fbd"
+                }
+              }
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_3fcfd7ea"
+                }
+              }
+            }
+            sort {
+              sort_dir: DESC
+              sort_column: "qt_3fcfd7ea"
+            }
+            reverse_sort_order: false
+          }
+        }
+        concept_defs {
+          id: "t0.qt_47948fbd"
+          name: "qt_47948fbd"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_data_agent_id_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_3fcfd7ea"
+          name: "qt_3fcfd7ea"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_total_tokens_"
+              aggregation: SUM
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-kM4cFH3pweE"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_e7eb0560"
+                }
+              }
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_af86847d"
+                  concept_names: "qt_42018c0c"
+                  concept_names: "qt_0db8b52b"
+                }
+              }
+            }
+            sort {
+              sort_dir: ASC
+              sort_column: "qt_e7eb0560"
+            }
+            reverse_sort_order: false
+          }
+        }
+        concept_defs {
+          id: "t0.qt_e7eb0560"
+          name: "qt_e7eb0560"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_event_date_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_af86847d"
+          name: "qt_af86847d"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_input_tokens_"
+              aggregation: SUM
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_42018c0c"
+          name: "qt_42018c0c"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_output_tokens_"
+              aggregation: SUM
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_0db8b52b"
+          name: "qt_0db8b52b"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_thoughts_tokens_"
+              aggregation: SUM
+            }
+          }
+        }
+      }
+    }
+  }
+  page {
+    page {
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-soVsNR_PepA"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_a96c5e06"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_a96c5e06"
+          name: "qt_a96c5e06"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_data_agent_id_"
+              aggregation: COUNT_DISTINCT
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-jzLBUUj5DHY"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_d206edb0"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_d206edb0"
+          name: "qt_d206edb0"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_invocation_id_"
+              aggregation: COUNT_DISTINCT
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-i7aDBnf14Bo"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_f0daf8fa"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_f0daf8fa"
+          name: "qt_f0daf8fa"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_completed_turn_id_"
+              aggregation: COUNT_DISTINCT
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-lGEjuCElXpw"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_d4c2022b"
+                }
+              }
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_d4c2022b"
+          name: "qt_d4c2022b"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_extracted_sql_"
+              aggregation: COUNT
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-mfKlsOmAHaM"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_9fb169eb"
+                }
+              }
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_e056d0a6"
+                }
+              }
+            }
+            sort {
+              sort_dir: DESC
+              sort_column: "qt_e056d0a6"
+            }
+            reverse_sort_order: false
+          }
+        }
+        concept_defs {
+          id: "t0.qt_9fb169eb"
+          name: "qt_9fb169eb"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_data_agent_id_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_e056d0a6"
+          name: "qt_e056d0a6"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_invocation_id_"
+              aggregation: COUNT_DISTINCT
+            }
+          }
+        }
+      }
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-rVzCGnjYxo0"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_d0a517af"
+                }
+              }
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_a7ce9b32"
+                  concept_names: "qt_d188b546"
+                  concept_names: "qt_38e443e7"
+                  concept_names: "qt_abd056f8"
+                }
+              }
+            }
+            sort {
+              sort_dir: DESC
+              sort_column: "qt_a7ce9b32"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_d0a517af"
+          name: "qt_d0a517af"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_data_agent_id_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_a7ce9b32"
+          name: "qt_a7ce9b32"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_invocation_id_"
+              aggregation: COUNT_DISTINCT
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_d188b546"
+          name: "qt_d188b546"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_turn_latency_ms_"
+              aggregation: AVG
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_38e443e7"
+          name: "qt_38e443e7"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_total_tokens_"
+              aggregation: SUM
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_abd056f8"
+          name: "qt_abd056f8"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_error_message_"
+              aggregation: COUNT
+            }
+          }
+        }
+      }
+    }
+  }
+  page {
+    page {
+      component_config {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        component_id: "cd-oUw97rpumWM"
+        property_config {
+          component_property {
+            dataset {
+              dataset_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+            }
+            dimensions {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_40f9b407"
+                  concept_names: "qt_b684d2ed"
+                  concept_names: "qt_54bd6219"
+                  concept_names: "qt_7a28e588"
+                  concept_names: "qt_800b7f96"
+                  concept_names: "qt_bbf261e0"
+                  concept_names: "qt_1ada8666"
+                  concept_names: "qt_abb7920b"
+                  concept_names: "qt_a04329d9"
+                  concept_names: "qt_42c77379"
+                }
+              }
+            }
+            metrics {
+              labeled_concepts {
+                key: "primary"
+                value {
+                  concept_names: "qt_a5d93a61"
+                  concept_names: "qt_e3fa0159"
+                }
+              }
+            }
+            sort {
+              sort_dir: DESC
+              sort_column: "qt_40f9b407"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_40f9b407"
+          name: "qt_40f9b407"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_event_date_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_b684d2ed"
+          name: "qt_b684d2ed"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_session_id_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_54bd6219"
+          name: "qt_54bd6219"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_data_agent_id_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_7a28e588"
+          name: "qt_7a28e588"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_persona_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_800b7f96"
+          name: "qt_800b7f96"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_event_type_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_bbf261e0"
+          name: "qt_bbf261e0"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_fast_path_label_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_1ada8666"
+          name: "qt_1ada8666"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_user_prompt_text_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_abb7920b"
+          name: "qt_abb7920b"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_extracted_sql_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_a04329d9"
+          name: "qt_a04329d9"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_summary_text_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_42c77379"
+          name: "qt_42c77379"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_error_message_"
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_a5d93a61"
+          name: "qt_a5d93a61"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_total_latency_ms_"
+              aggregation: AVG
+            }
+          }
+        }
+        concept_defs {
+          id: "t0.qt_e3fa0159"
+          name: "qt_e3fa0159"
+          query_time_transformation {
+            data_transformation {
+              source_field_name: "_total_tokens_"
+              aggregation: SUM
+            }
+          }
+        }
+      }
+    }
+  }
+  report {
+    datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+    resource {
+      datasource_alias {
+        datasource_id: "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
+        alias: "ds0"
+      }
+    }
+  }
+}
