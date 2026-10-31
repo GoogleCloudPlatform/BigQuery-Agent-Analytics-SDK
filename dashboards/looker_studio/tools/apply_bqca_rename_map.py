@@ -45,12 +45,15 @@ without writing.
 A dump that already carries the new IDs maps to itself, so the tool writes a
 copy (adding the ``# bqca-offline-preview:`` header comment line once if it is
 not already present). The twin previews the sync; it is not a dump of a synced
-template, and it can never finalize the binding:
-``tools/finalize_live_sync.py`` writes only with a capture receipt that a
-listed signer signed for a fresh export of the live template
-(``tools/sign_live_capture.py``). This tool never writes or reads a receipt, so
-editing or removing the marker does not make the twin one. After the rename is
-applied to the live template, export it again, and sign that export's receipt.
+template. This tool never writes or reads a capture receipt, and
+``tools/sign_live_capture.py`` and ``tools/finalize_live_sync.py`` refuse the
+twin, and any edit of its comments or spacing (the marker included), as the
+capture of the synced template: ``preview_tree`` gives them its parsed content,
+which they compare with that of the capture after the write-back. A listed
+signer who edits a field of the twin and signs it can still get it written;
+see "Capture receipts" in ``docs/dashboard-implementation.md``. After the
+rename is applied to the live template, capture it again with
+``tools/sign_live_capture.py``.
 
 Exits 0 when the remapped dump is written, and with ``--check`` when every check
 passes, whether or not a write to ``--out`` would be refused; the output says
@@ -90,9 +93,9 @@ KINDS = ("name", "id", "dimension", "metric", "sort", "datasource_id")
 MAX_ERRORS = 20
 NOT_A_DUMP_OF_A_SYNCED_TEMPLATE = (
     "the remapped dump previews the sync; it is not a dump of a synced"
-    " template, and tools/finalize_live_sync.py never records it. After the"
-    " rename is applied to the live template, export it again and sign that"
-    " export's capture receipt with tools/sign_live_capture.py."
+    " template, and tools/finalize_live_sync.py refuses it as one. After the"
+    " rename is applied to the live template, capture it again with"
+    " tools/sign_live_capture.py --before <the capture before the write-back>."
 )
 OFFLINE_PREVIEW_MARKER = (
     "# bqca-offline-preview: written by tools/apply_bqca_rename_map.py;"
@@ -546,6 +549,54 @@ def verification_errors(
         "the remapped dump does not parse to the dump with the map applied"
     )
   return errors
+
+
+def preview_tree(snapshot: bytes) -> list:
+  """Return the parsed content of the remapped dump written for `snapshot`.
+
+  That is the tree that `validate_contracts.parse_report_textproto` reads
+  from it, with universal newlines: comments, spacing and quoting are not in
+  it, so neither the offline-preview marker nor any edit of them changes it.
+  The map is derived from `snapshot` and the manifest, as for a write.
+
+  Raises:
+    ValueError: This tool would refuse to remap `snapshot`.
+  """
+  validator = _load_tool("validate_contracts")
+  gen = _load_tool("gen_bqca_rename_map")
+  try:
+    text = snapshot.decode("utf-8")
+  except UnicodeDecodeError as exc:
+    raise ValueError(f"it is not UTF-8 text: {exc}") from exc
+  manifest = yaml.safe_load((ROOT / MANIFEST_PATH).read_text(encoding="utf-8"))
+  binding = yaml.safe_load((ROOT / BINDING_PATH).read_text(encoding="utf-8"))
+  datasource_id = (
+      binding.get("datasource_id") if isinstance(binding, dict) else None
+  )
+  if not isinstance(datasource_id, str) or not _PLAIN_VALUE_RE.fullmatch(
+      datasource_id
+  ):
+    raise ValueError(
+        f"{BINDING_PATH} datasource_id {datasource_id!r} is not a plain ID"
+    )
+  with tempfile.TemporaryDirectory(prefix="apply_bqca_rename_map_") as private:
+    copy = pathlib.Path(private) / "dump.textproto"
+    copy.write_bytes(snapshot)
+    components, _, errors = gen.read_dump(validator, copy)
+    rows, row_errors = gen.build_rows(validator, manifest, components)
+  errors += row_errors
+  if errors:
+    raise ValueError("; ".join(errors[:MAX_ERRORS]))
+  renames = {
+      (row["component_id"], row["old_name"]): row["new_qt_id"] for row in rows
+  }
+  universal = text.replace("\r\n", "\n").replace("\r", "\n")
+  try:
+    return expected_tree(
+        validator.parse_report_textproto(universal), renames, datasource_id
+    )
+  except KeyError as exc:
+    raise ValueError(f"the map has no concept {exc}") from exc
 
 
 def map_drift(rows: list[dict], text: str) -> list[str]:

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Finalize the BQCA live template sync from a dump of the live template.
+"""Finalize the BQCA live template sync from a capture of the live template.
 
 Runs ``tools/validate_contracts.py --profile bqca --live-report-textproto
 DUMP``. Only if it exits 0 does this record the verification in
 ``bindings/bqca_report_template.yaml``. In ``live_template_verification`` it:
 
-* sets ``verified_date`` to ``--verified-date`` (default: today);
+* sets ``verified_date`` to ``--verified-date`` (default: today, in UTC);
 * copies the pinned ``manifest_sha256`` and ``template_bundle_sha256`` into
   ``verified_manifest_sha256`` and ``verified_template_bundle_sha256``;
 * records the capture: ``verified_revision`` (``--revision``, the revision of
@@ -14,31 +14,45 @@ DUMP``. Only if it exits 0 does this record the verification in
   the dump's capture receipt) and ``captured_by`` (the receipt's signer);
 * removes ``pending_live_sync``.
 
+It also commits the dump's capture receipt and signature as
+``bindings/bqca_live_capture_receipt.json`` and
+``bindings/bqca_live_capture_receipt.json.sig``, which
+``tools/validate_contracts.py`` requires, and checks, of any binding without
+``pending_live_sync``.
+
 Every other line of the binding, comments included, is kept. The edit must
-parse to exactly that change. The new binding replaces the old one
-atomically, and the audit runs again after the write; if it fails, raises or
-is interrupted, the original bytes are put back. ``--check`` runs the same
-checks and audit, prints the change as a diff and every reason a write would
-be refused, and writes nothing.
+parse to exactly that change. The new files replace the old ones atomically,
+and the audit runs again after the write; if it fails, raises or is
+interrupted, the original bytes of all three are put back. ``--check`` runs
+the same checks and audit, prints the change as a diff and every reason a
+write would be refused, and writes nothing.
 
-The dump, its capture receipt and the receipt's signature are each read once.
-The checks, both audits (through a private, read-only copy of the dump) and
-the recorded digests use those bytes, never the paths again, so a file that
-replaces one of them while the tool runs cannot be mixed in.
+A capture is what ``tools/sign_live_capture.py`` writes when it exports the
+live template: the export (``--dump``, or ``--before``), its capture receipt
+(``<export>.receipt.json``) and the receipt's SSH signature
+(``<export>.receipt.json.sig``). A write needs two: the capture after the
+write-back (``--dump``) and the capture before it (``--before``), whose
+receipt the dump's names. The exports, receipts and signatures are each read
+once; the checks, both audits (through a private, read-only copy of the dump)
+and the recorded digests use those bytes, never the paths again.
 
-Nothing in a dump proves where it came from, and an offline preview from
-``tools/apply_bqca_rename_map.py`` audits exactly like a dump of the synced
-template. So a write needs a capture receipt (``--receipt``): the JSON file
-that ``tools/sign_live_capture.py`` writes for a fresh export of the live
-template, with its SSH signature next to it (``<receipt>.sig``). A write
-fails closed unless:
+A write fails closed unless:
 
-* ``ssh-keygen -Y verify`` verifies the signature in the
-  ``bqca-live-capture-receipt`` namespace, made by a key that
-  ``bindings/bqca_live_capture_signers`` lists for the receipt's ``signer``;
-* the receipt is a well-formed ``bqca-live-capture-receipt/v1`` receipt for
-  the binding's ``report_id``, for ``--revision``, and for the SHA-256 of the
-  dump's exact bytes;
+* ``ssh-keygen -Y verify`` verifies both receipts' signatures in the
+  ``bqca-live-capture-receipt`` namespace, made by keys that
+  ``bindings/bqca_live_capture_signers`` lists for their signers;
+* both receipts are well-formed ``bqca-live-capture-receipt/v2`` receipts of
+  the exports' exact bytes, for the binding's ``report_id``, its pinned
+  manifest and bundle digests, and its pending sync, signed on or after the
+  day that sync began (``pending_live_sync.since_date``) and not in the
+  future; the dump's receipt is for ``--revision``;
+* the dump's receipt names the ``--before`` capture (its SHA-256 and
+  revision), the dump is of another revision, and the ``--before`` receipt is
+  of a capture taken before any write-back;
+* the dump's parsed content differs from that of the offline preview that
+  ``tools/apply_bqca_rename_map.py`` writes for the ``--before`` export:
+  comments and spacing aside, some field of the live report changed after
+  the write-back;
 * the dump decodes as UTF-8 and parses as protobuf text format (with
   universal-newline normalization matching ``tools/validate_contracts.py``),
   and its ``report_config.shareable.id`` is exactly that ``report_id``, and
@@ -51,11 +65,14 @@ fails closed unless:
   not under this repository's ``tests/fixtures`` (checked by path and by
   ``os.path.samestat`` so a case-insensitive spelling cannot bypass it).
 
-The offline tools never write a receipt, and only a listed signer can sign
-one, so no offline preview can be written, whether or not its marker is
-edited or removed. The trust is in the listed signers: one who signs a
-receipt for anything but an unedited export of the live template makes a
-false statement, which the receipt and the binding attribute to them.
+So the offline preview is refused, with its marker kept, edited or removed,
+and so is any edit of its comments or spacing. What no check can refuse is a
+listed signer who signs a receipt for content that the export command did
+not fetch from the live report: one who also edits a field of the preview, or
+signs receipt bytes directly with ssh-keygen. That is a false signed
+statement, which the receipt and the binding (``captured_by``) attribute to
+the signer; review of the committed receipt and of the signer list is the
+last check.
 
 This tool does not edit documentation or tests. See "Finalizing the live
 template sync" in ``docs/dashboard-implementation.md`` for the rest of the
@@ -81,11 +98,11 @@ import json
 import os
 import pathlib
 import re
-import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import types
 
 import yaml
 
@@ -94,11 +111,6 @@ REPOSITORY_ROOT = ROOT.parent.parent
 BINDING_PATH = "bindings/bqca_report_template.yaml"
 VALIDATOR_PATH = "tools/validate_contracts.py"
 FIXTURES_PATH = "tests/fixtures"
-# The SSH keys trusted to sign capture receipts, one OpenSSH allowed signers
-# line each (see ssh-keygen(1)). A key is trusted only through a reviewed
-# change to this file; no command-line option or environment variable names
-# another one.
-SIGNERS_PATH = "bindings/bqca_live_capture_signers"
 LIVE_KEY = "live_template_verification"
 PENDING_KEY = "pending_live_sync"
 # Each `verified_*` key and the pinned digest it takes.
@@ -117,23 +129,9 @@ CAPTURE_KEYS = (
 # give.
 CAPTURE_PLACEHOLDERS = {
     "verified_revision": "<the --revision>",
-    "capture_receipt_sha256": "<the SHA-256 of the --receipt file>",
-    "captured_by": "<the signer of the --receipt>",
+    "capture_receipt_sha256": "<the SHA-256 of the dump's capture receipt>",
+    "captured_by": "<the signer of the dump's capture receipt>",
 }
-# A capture receipt is a JSON object with exactly these fields, signed byte
-# for byte as it is; `tools/sign_live_capture.py` writes it.
-RECEIPT_FORMAT = "bqca-live-capture-receipt/v1"
-RECEIPT_FIELDS = (
-    "format",
-    "report_id",
-    "revision",
-    "dump_sha256",
-    "signed_at",
-    "signer",
-)
-# The namespace of a receipt's SSH signature, so that no signature the same
-# key made for anything else (a commit, a file) verifies as a receipt's.
-RECEIPT_NAMESPACE = "bqca-live-capture-receipt"
 # The fields where a dump of the live template identifies it, as parsed field
 # paths. A saved report's `report_config.report` holds its report-level data
 # source and data source aliases, which the live audit reads too. Its own
@@ -145,13 +143,23 @@ RECEIPT_NAMESPACE = "bqca-live-capture-receipt"
 REPORT_ID_FIELD = ("report_config", "shareable", "id")
 REPORT_DATASOURCE_FIELD = ("report_config", "report", "datasource_id")
 ALIAS_FIELD = ("report_config", "report", "resource", "datasource_alias")
+NO_REVISION = (
+    "--revision is not given: a write needs the revision of the live report"
+    " that the dump captured, as its receipt records it"
+)
+NO_BEFORE = (
+    "--before is not given: a write needs the capture taken before the"
+    " write-back, whose offline preview the dump must differ from"
+)
 NEXT_STEPS = """\
 In the same change:
-  - commit the capture receipt and its signature as
+  - commit bindings/bqca_report_template.yaml with
     bindings/bqca_live_capture_receipt.json and
-    bindings/bqca_live_capture_receipt.json.sig (they hold no secret), and
-    the line that lists the signer in bindings/bqca_live_capture_signers if
-    it is new; keep the dump privately: verified_dump_sha256 is its SHA-256;
+    bindings/bqca_live_capture_receipt.json.sig, which this tool wrote (they
+    hold no secret), and the line that lists the signer in
+    bindings/bqca_live_capture_signers if it is new; keep both exports
+    privately: verified_dump_sha256 is the SHA-256 of the one after the
+    write-back;
   - remove the #559 known-issue notes: #bqca-column-id-note in
     docs/index.html (then run tools/render_web_config.py), the BQCA notes in
     README.md and USER_MANUAL.md, and the section 7.4 troubleshooting row in
@@ -164,16 +172,10 @@ In the same change:
 
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
-_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
-# A report ID, revision or signer is a plain token, the same in a receipt, on a
-# command line and in the binding. A signer is also a literal principal of the
-# signers file, never a pattern (`*`, `?`, `!`, `,`).
-_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}")
-_SIGNER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}")
 # The marker that `tools/apply_bqca_rename_map.py` writes, in any letter case
 # and spacing, anywhere in the text. It is a tripwire for an offline preview;
-# the receipt, not the marker, is what a write requires.
+# the comparison with the preview of the `--before` export does not depend on
+# it.
 _OFFLINE_PREVIEW_RE = re.compile(
     r"bqca[\s_-]*offline[\s_-]*preview", re.IGNORECASE
 )
@@ -194,7 +196,7 @@ def _iso_date(value: str) -> str:
 
 def revision_argument(value: str) -> str:
   """Return `value` if it is a revision token (an argparse type)."""
-  if not _TOKEN_RE.fullmatch(value):
+  if not _load_validator().BQCA_CAPTURE_TOKEN_RE.fullmatch(value):
     raise argparse.ArgumentTypeError(
         f"{value!r} is not a revision: 1 to 128 letters, digits, '.', '_',"
         " ':', '+' or '-', starting with a letter or digit"
@@ -204,7 +206,7 @@ def revision_argument(value: str) -> str:
 
 def signer_argument(value: str) -> str:
   """Return `value` if it is a signer principal (an argparse type)."""
-  if not _SIGNER_RE.fullmatch(value):
+  if not _load_validator().BQCA_CAPTURE_SIGNER_RE.fullmatch(value):
     raise argparse.ArgumentTypeError(
         f"{value!r} is not a signer: 1 to 128 letters, digits, '.', '_', '@',"
         " '+' or '-', starting with a letter or digit"
@@ -370,8 +372,15 @@ def finalized_binding_text(
   return new_text
 
 
-def _verified_date_error(verified_date: str, live: dict) -> str | None:
-  """Return why `verified_date` cannot be recorded, or None."""
+def _verified_date_error(
+    verified_date: str, live: dict, signed_at: str | None
+) -> str | None:
+  """Return why `verified_date` cannot be recorded, or None.
+
+  It must not be in the future, nor before `pending_live_sync.since_date`,
+  the earlier `verified_date`, or the day (in UTC) that the dump's receipt
+  was signed at `signed_at`, if one is given.
+  """
   value = datetime.date.fromisoformat(verified_date)
   today = max(
       datetime.date.today(),
@@ -393,6 +402,14 @@ def _verified_date_error(verified_date: str, live: dict) -> str | None:
           return f"--verified-date {verified_date} is before {label} {earlier}"
       except ValueError:
         continue
+  if signed_at is not None:
+    # A receipt signed in the future is refused on its own.
+    signed = _load_validator().bqca_capture_time(signed_at).date()
+    if value < signed <= today:
+      return (
+          f"--verified-date {verified_date} is before the dump's receipt was"
+          f" signed, at {signed_at}"
+      )
   return None
 
 
@@ -468,7 +485,9 @@ def _inside_directory(path: pathlib.Path, directory: pathlib.Path) -> bool:
   return False
 
 
-def dump_identity_errors(text: str, binding: dict) -> list[str]:
+def dump_identity_errors(
+    text: str, binding: dict, data_sources: bool = True
+) -> list[str]:
   """Return why a dump does not identify the live template.
 
   Each identity field must hold exactly one value, equal to the binding's:
@@ -476,8 +495,10 @@ def dump_identity_errors(text: str, binding: dict) -> list[str]:
   `datasource_id`, and the `datasource_id` of the ALIAS_FIELD entry for its
   `data_source_alias` that same data source. A value elsewhere, or one that
   only contains the ID, does not count; when the dump has the report ID in
-  other fields, the error names them. A dump that cannot be read as protobuf
-  text format fails closed with its parse error.
+  other fields, the error names them. Without `data_sources`, as for an
+  export taken before the sync repoints them, only REPORT_ID_FIELD is
+  checked. A dump that cannot be read as protobuf text format fails closed
+  with its parse error.
   """
   normalized = text.replace("\r\n", "\n").replace("\r", "\n")
   try:
@@ -500,6 +521,8 @@ def dump_identity_errors(text: str, binding: dict) -> list[str]:
         f"the dump's {'.'.join(REPORT_ID_FIELD)} is {report_ids}, not"
         f" [{report_id!r}]{where}"
     )
+  if not data_sources:
+    return errors
   datasource_id = binding.get("datasource_id")
   datasource_ids = _values_at(report, REPORT_DATASOURCE_FIELD)
   if datasource_ids != [datasource_id]:
@@ -522,165 +545,20 @@ def dump_identity_errors(text: str, binding: dict) -> list[str]:
   return errors
 
 
-def signature_path(receipt: pathlib.Path) -> pathlib.Path:
-  """Return where the SSH signature of the capture receipt `receipt` is."""
-  return receipt.with_name(f"{receipt.name}.sig")
+@functools.cache
+def _load_applier() -> types.ModuleType:
+  """Import `apply_bqca_rename_map.py` from this tool's directory, once."""
+  path = pathlib.Path(__file__).resolve().parent / "apply_bqca_rename_map.py"
+  spec = importlib.util.spec_from_file_location("apply_bqca_rename_map", path)
+  assert spec is not None and spec.loader is not None
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
 
 
-def parse_receipt(data: bytes) -> dict[str, str]:
-  """Return the fields of the capture receipt `data`.
-
-  Raises:
-    ValueError: `data` is not a RECEIPT_FORMAT receipt: a UTF-8 JSON object
-      that gives each of RECEIPT_FIELDS, and nothing else, once, as a string
-      of its form.
-  """
-  try:
-    text = data.decode("utf-8")
-  except UnicodeDecodeError as exc:
-    raise ValueError(f"it is not UTF-8 text: {exc}") from exc
-
-  def unique(pairs: list) -> dict:
-    names = [name for name, _ in pairs]
-    repeated = sorted({name for name in names if names.count(name) > 1})
-    if repeated:
-      raise ValueError(f"it gives {', '.join(repeated)} more than once")
-    return dict(pairs)
-
-  try:
-    receipt = json.loads(text, object_pairs_hook=unique)
-  except json.JSONDecodeError as exc:
-    raise ValueError(f"it is not JSON: {exc}") from exc
-  if not isinstance(receipt, dict):
-    raise ValueError("it is not a JSON object")
-  if sorted(receipt) != sorted(RECEIPT_FIELDS):
-    raise ValueError(
-        f"its fields are {sorted(receipt)}, not {sorted(RECEIPT_FIELDS)}"
-    )
-  forms = {
-      "format": (re.compile(re.escape(RECEIPT_FORMAT)), repr(RECEIPT_FORMAT)),
-      "report_id": (_TOKEN_RE, "a report ID"),
-      "revision": (_TOKEN_RE, "a revision"),
-      "dump_sha256": (_SHA256_RE, "a SHA-256 hex digest"),
-      "signed_at": (_TIMESTAMP_RE, "a UTC time, YYYY-MM-DDTHH:MM:SSZ"),
-      "signer": (_SIGNER_RE, "a signer"),
-  }
-  for name, (form, described) in forms.items():
-    value = receipt[name]
-    if not isinstance(value, str) or not form.fullmatch(value):
-      raise ValueError(f"its {name} {value!r} is not {described}")
-  try:
-    datetime.datetime.strptime(receipt["signed_at"], _TIMESTAMP_FORMAT)
-  except ValueError as exc:
-    raise ValueError(
-        f"its signed_at {receipt['signed_at']!r} is not a UTC time: {exc}"
-    ) from exc
-  return receipt
-
-
-def receipt_signature_error(
-    data: bytes, signature: bytes, signer: str
-) -> str | None:
-  """Return why `signature` is not a trusted signature of the receipt `data`.
-
-  Runs `ssh-keygen -Y verify` in RECEIPT_NAMESPACE for the identity `signer`
-  on private copies of SIGNERS_PATH, read once, and of `signature`. Returns
-  None if the signature verifies.
-  """
-  ssh_keygen = shutil.which("ssh-keygen")
-  if ssh_keygen is None:
-    return (
-        "cannot verify the receipt's signature: ssh-keygen (OpenSSH 8.2 or"
-        " later) is not on PATH"
-    )
-  try:
-    signers = (ROOT / SIGNERS_PATH).read_bytes()
-  except OSError as exc:
-    return f"cannot read {SIGNERS_PATH}: {exc.strerror or exc}"
-  if not any(
-      line.strip() and not line.lstrip().startswith(b"#")
-      for line in signers.splitlines()
-  ):
-    return f"{SIGNERS_PATH} lists no signer, so it trusts no receipt"
-  with tempfile.TemporaryDirectory(prefix="receipt_signature_") as private:
-    signers_copy = pathlib.Path(private) / "allowed_signers"
-    signature_copy = pathlib.Path(private) / "receipt.sig"
-    signers_copy.write_bytes(signers)
-    signature_copy.write_bytes(signature)
-    return _signature_error(
-        ssh_keygen, data, signers_copy, signature_copy, signer
-    )
-
-
-def _signature_error(
-    ssh_keygen: str,
-    data: bytes,
-    signers: pathlib.Path,
-    signature: pathlib.Path,
-    signer: str,
-) -> str | None:
-  """Run `ssh-keygen -Y verify` on the files `signers` and `signature`."""
-  verified = subprocess.run(
-      [
-          ssh_keygen,
-          "-Y",
-          "verify",
-          "-f",
-          str(signers),
-          "-I",
-          signer,
-          "-n",
-          RECEIPT_NAMESPACE,
-          "-s",
-          str(signature),
-      ],
-      input=data,
-      capture_output=True,
-      check=False,
-  )
-  if verified.returncode == 0:
-    return None
-  # The signature is valid, but the signers file does not trust its key for
-  # this signer (ssh-keygen may say why: a malformed line, an expired key, a
-  # key restricted to other namespaces); or it is not a valid receipt
-  # signature at all.
-  details = [
-      line.strip().replace(str(signers), SIGNERS_PATH)
-      for line in verified.stderr.decode("utf-8", "replace").splitlines()
-      if line.strip() and line.strip() != "Could not verify signature."
-  ]
-  valid = subprocess.run(
-      [
-          ssh_keygen,
-          "-Y",
-          "check-novalidate",
-          "-n",
-          RECEIPT_NAMESPACE,
-          "-s",
-          str(signature),
-      ],
-      input=data,
-      capture_output=True,
-      check=False,
-  )
-  if valid.returncode == 0:
-    detail = f" ({'; '.join(details)})" if details else ""
-    return (
-        f"the receipt is not signed by a key that {SIGNERS_PATH} lists for"
-        f" its signer {signer!r}{detail}"
-    )
-  reason = next(
-      (
-          line.strip()
-          for line in valid.stderr.decode("utf-8", "replace").splitlines()
-          if line.strip()
-      ),
-      f"ssh-keygen exited {valid.returncode}",
-  )
-  return (
-      f"the receipt's signature is not a valid {RECEIPT_NAMESPACE} signature"
-      f" of the receipt: {reason}"
-  )
+def receipt_path(export: pathlib.Path) -> pathlib.Path:
+  """Return where the capture receipt of the export `export` is."""
+  return export.with_name(f"{export.name}.receipt.json")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -698,80 +576,244 @@ class Receipt:
 
   @classmethod
   def read(cls, path: pathlib.Path) -> "Receipt":
-    """Read the receipt at `path` and its signature, once each."""
-    contents, errors = [], []
-    for what, source in (
-        ("the capture receipt", path),
-        ("the receipt's signature", signature_path(path)),
-    ):
-      try:
-        contents.append(source.read_bytes())
-      except OSError as exc:
-        contents.append(None)
-        errors.append(f"cannot read {what} {source}: {exc.strerror or exc}")
-    return cls(path, *contents, tuple(errors))
+    """Read the receipt at `path` and then its signature, once each."""
+    try:
+      data = path.read_bytes()
+    except OSError as exc:
+      return cls(
+          path,
+          None,
+          None,
+          (f"cannot read the capture receipt {path}: {exc.strerror or exc}",),
+      )
+    signature_path = _load_validator().bqca_capture_signature_path(path)
+    try:
+      signature = signature_path.read_bytes()
+    except OSError as exc:
+      return cls(
+          path,
+          data,
+          None,
+          (
+              "cannot read the receipt's signature"
+              f" {signature_path}: {exc.strerror or exc}",
+          ),
+      )
+    return cls(path, data, signature, ())
 
-  def fields(self) -> dict[str, str] | None:
+  def fields(self) -> dict | None:
     """Return the receipt's fields, or None if it cannot be read as one."""
     if self.data is None:
       return None
     try:
-      return parse_receipt(self.data)
+      return _load_validator().parse_bqca_capture_receipt(self.data)
     except ValueError:
       return None
 
 
-def receipt_blockers(
-    receipt: Receipt, revision: str | None, dump_sha256: str, binding: dict
-) -> list[str]:
-  """Return why `receipt` is not a trusted receipt of the dump.
+@dataclasses.dataclass(frozen=True)
+class Capture:
+  """The capture before the write-back: its export and receipt, read once."""
 
-  The receipt must be read and well-formed, its signature must verify
-  (`receipt_signature_error`), and it must be for the binding's
-  `report_id`, for `revision` (when given), and for `dump_sha256`.
+  path: pathlib.Path
+  data: bytes | None
+  receipt: Receipt
+  errors: tuple[str, ...]
+
+  @classmethod
+  def read(cls, path: pathlib.Path) -> "Capture":
+    """Read the export at `path`, then its receipt and signature."""
+    try:
+      data, errors = path.read_bytes(), ()
+    except OSError as exc:
+      data = None
+      errors = (f"cannot read --before {path}: {exc.strerror or exc}",)
+    return cls(path, data, Receipt.read(receipt_path(path)), errors)
+
+
+def receipt_blockers(
+    receipt: Receipt,
+    subject: str,
+    export: str,
+    export_sha256: str | None,
+    binding: dict,
+    signers: bytes,
+    now: datetime.datetime,
+) -> tuple[dict | None, list[str]]:
+  """Return the fields of `receipt`, and why it is not trusted for this sync.
+
+  The receipt, named `subject` in the reasons, must be read and well-formed,
+  its signature must verify against `signers` (the bytes of the signers
+  file), and it must be for the binding's report, its pinned manifest and
+  bundle digests and its pending sync, signed on or after the day that sync
+  began and not in the future, and for the bytes of the export named
+  `export`, whose SHA-256 is `export_sha256` (unknown when None).
   """
+  validator = _load_validator()
   blockers = list(receipt.errors)
   if receipt.data is None:
-    return blockers
+    return None, blockers
   try:
-    fields = parse_receipt(receipt.data)
+    fields = validator.parse_bqca_capture_receipt(receipt.data)
   except ValueError as exc:
-    return blockers + [
-        f"{receipt.path} is not a {RECEIPT_FORMAT} capture receipt: {exc}"
+    return None, blockers + [
+        f"{receipt.path} is not a {validator.BQCA_CAPTURE_RECEIPT_FORMAT}"
+        f" capture receipt: {exc}"
     ]
   if receipt.signature is not None:
-    error = receipt_signature_error(
-        receipt.data, receipt.signature, fields["signer"]
+    error = validator.bqca_capture_signature_error(
+        receipt.data, receipt.signature, fields["signer"], signers
     )
     if error is not None:
       blockers.append(error)
   report_id = binding.get("report_id")
   if fields["report_id"] != report_id:
     blockers.append(
-        f"the receipt is for report {fields['report_id']!r}, not"
-        f" {report_id!r}"
+        f"{subject} is for report {fields['report_id']!r}, not {report_id!r}"
     )
-  if revision is not None and fields["revision"] != revision:
+  live = binding.get(LIVE_KEY)
+  live = live if isinstance(live, dict) else {}
+  for key in ("manifest_sha256", "template_bundle_sha256"):
+    if fields[key] != live.get(key):
+      blockers.append(
+          f"{subject} is for {key} {fields[key]}, not the pinned"
+          f" {live.get(key)}"
+      )
+  pending = live.get(PENDING_KEY)
+  since = pending.get("since_date") if isinstance(pending, dict) else None
+  if fields["pending_since_date"] != since:
     blockers.append(
-        f"the receipt is for revision {fields['revision']!r}, not --revision"
-        f" {revision!r}"
+        f"{subject} is for the live sync pending since"
+        f" {fields['pending_since_date']}, not the one pending since {since}"
     )
-  if fields["dump_sha256"] != dump_sha256:
+  blockers += validator.bqca_capture_time_errors(fields, now, subject)
+  if export_sha256 is not None and fields["dump_sha256"] != export_sha256:
     blockers.append(
-        f"the receipt is for a dump with sha256 {fields['dump_sha256']}, not"
-        f" this dump, whose sha256 is {dump_sha256}"
+        f"{subject} is for a dump with sha256 {fields['dump_sha256']}, not"
+        f" {export}, whose sha256 is {export_sha256}"
+    )
+  return fields, blockers
+
+
+def offline_preview_blockers(
+    dump: pathlib.Path,
+    snapshot: bytes,
+    before: pathlib.Path,
+    before_data: bytes,
+) -> list[str]:
+  """Return why the dump bytes `snapshot` are the offline preview of `before`.
+
+  `tools/apply_bqca_rename_map.py` writes, for the export `before_data`
+  (read from `before`), an offline preview whose parsed content
+  (`preview_tree`) has no comments or spacing. A dump with that same parsed
+  content is refused, however its comments, spacing or marker differ: a
+  capture of the live report after the write-back that matches it in every
+  field does not show that the live report was written.
+  """
+  try:
+    preview = _load_applier().preview_tree(before_data)
+  except ValueError as exc:
+    return [
+        f"cannot derive the offline preview of --before {before}, so nothing"
+        f" tells the dump apart from it: {exc}"
+    ]
+  try:
+    tree = _load_validator().parse_report_textproto(_decode_snapshot(snapshot))
+  except (UnicodeDecodeError, ValueError):
+    # `dump_blockers` says why the dump cannot be read.
+    return []
+  if tree != preview:
+    return []
+  return [
+      f"{dump} has the parsed content of the offline preview that"
+      f" tools/apply_bqca_rename_map.py writes for --before {before}"
+      " (comments and spacing aside): no field of the live report changed"
+      " after the write-back, so it does not show that the live template was"
+      " written"
+  ]
+
+
+def before_blockers(
+    fields: dict | None,
+    before: Capture,
+    binding: dict,
+    signers: bytes,
+    now: datetime.datetime,
+) -> list[str]:
+  """Return why `before` is not the capture before the dump's write-back.
+
+  `fields` are those of the dump's receipt, if it could be read. The
+  `--before` receipt must be trusted for this sync like the dump's and be of
+  a capture taken before any write-back, the dump's receipt must name it (its
+  SHA-256 and revision) and be signed no earlier, and the dump must be of
+  another revision.
+  """
+  validator = _load_validator()
+  before_sha256 = (
+      hashlib.sha256(before.data).hexdigest()
+      if before.data is not None
+      else None
+  )
+  before_fields, blockers = receipt_blockers(
+      before.receipt,
+      "the receipt of --before",
+      "--before",
+      before_sha256,
+      binding,
+      signers,
+      now,
+  )
+  blockers = list(before.errors) + blockers
+  if before_fields is None:
+    return blockers
+  if before_fields["before_dump_sha256"] is not None:
+    blockers.append(
+        f"--before {before.path} is a capture taken after a write-back, not"
+        " the capture before it"
+    )
+  if fields is None:
+    return blockers
+  if before_sha256 is not None and fields["before_dump_sha256"] not in (
+      None,
+      before_sha256,
+  ):
+    blockers.append(
+        "the receipt names the capture before the write-back with sha256"
+        f" {fields['before_dump_sha256']}, not --before, whose sha256 is"
+        f" {before_sha256}"
+    )
+  if fields["before_revision"] not in (None, before_fields["revision"]):
+    blockers.append(
+        "the receipt names the capture before the write-back of revision"
+        f" {fields['before_revision']!r}, not that of --before,"
+        f" {before_fields['revision']!r}"
+    )
+  if fields["revision"] == before_fields["revision"]:
+    blockers.append(
+        f"the dump and --before are both of revision {fields['revision']!r}:"
+        " the live report has no new revision after the write-back"
+    )
+  if validator.bqca_capture_time(
+      fields["signed_at"]
+  ) < validator.bqca_capture_time(before_fields["signed_at"]):
+    blockers.append(
+        f"the receipt was signed at {fields['signed_at']}, before the receipt"
+        f" of --before, at {before_fields['signed_at']}"
     )
   return blockers
 
 
 def dump_blockers(
-    dump: pathlib.Path, snapshot: bytes, binding: dict
+    dump: pathlib.Path,
+    snapshot: bytes,
+    binding: dict,
+    data_sources: bool = True,
 ) -> list[str]:
   """Return why the dump bytes `snapshot`, read from `dump`, are refused.
 
   `dump` must not be a test fixture of this repository, and `snapshot` must
   decode as UTF-8, carry no offline-preview marker, and identify the report
-  (`dump_identity_errors`).
+  (`dump_identity_errors`, with `data_sources`).
   """
   blockers = []
   fixtures = REPOSITORY_ROOT / FIXTURES_PATH
@@ -787,48 +829,84 @@ def dump_blockers(
         f"{dump} is an offline preview from tools/apply_bqca_rename_map.py,"
         " not a dump of the synced live template"
     )
-  return blockers + dump_identity_errors(text, binding)
+  return blockers + dump_identity_errors(text, binding, data_sources)
 
 
 def write_blockers(
     dump: pathlib.Path,
     snapshot: bytes,
-    receipt: Receipt | None,
+    receipt: Receipt,
+    before: Capture | None,
     revision: str | None,
     binding: dict,
+    now: datetime.datetime,
 ) -> list[str]:
   """Return why a write would be refused (empty if it would not).
 
-  A write needs a trusted capture receipt `receipt` of the dump bytes
-  `snapshot` for the revision `revision` (`receipt_blockers`), and dump bytes
-  that `dump_blockers` does not refuse.
+  A write needs a trusted receipt of the dump bytes `snapshot`, of a capture
+  after the write-back, for the revision `revision` (`receipt_blockers`); the
+  capture before the write-back that it names (`before_blockers`); dump bytes
+  whose parsed content differs from the offline preview of that capture
+  (`offline_preview_blockers`); and dump bytes that `dump_blockers` does not
+  refuse. The signers file is read once, here.
   """
-  blockers = []
-  if receipt is None:
-    blockers.append(
-        "--receipt is not given: a write needs the capture receipt that"
-        " tools/sign_live_capture.py signs for a fresh export of the live"
-        " template"
-    )
+  validator = _load_validator()
+  try:
+    signers = (ROOT / validator.BQCA_CAPTURE_SIGNERS_PATH).read_bytes()
+  except OSError as exc:
+    signers = b""
+    signers_error = [
+        f"cannot read {validator.BQCA_CAPTURE_SIGNERS_PATH}:"
+        f" {exc.strerror or exc}"
+    ]
+  else:
+    signers_error = []
+  fields, blockers = receipt_blockers(
+      receipt,
+      "the receipt",
+      "this dump",
+      hashlib.sha256(snapshot).hexdigest(),
+      binding,
+      signers,
+      now,
+  )
+  blockers = signers_error + blockers
+  if fields is not None:
+    if revision is not None and fields["revision"] != revision:
+      blockers.append(
+          f"the receipt is for revision {fields['revision']!r}, not --revision"
+          f" {revision!r}"
+      )
+    if fields["before_dump_sha256"] is None:
+      blockers.append(
+          "the receipt is of a capture taken before the write-back (it names"
+          " no capture before it), not after it"
+      )
   if revision is None:
-    blockers.append(
-        "--revision is not given: a write needs the revision of the live"
-        " report that the dump captured, as its receipt records it"
-    )
-  if receipt is not None:
-    blockers += receipt_blockers(
-        receipt, revision, hashlib.sha256(snapshot).hexdigest(), binding
-    )
+    blockers.append(NO_REVISION)
+  if before is None:
+    blockers.append(NO_BEFORE)
+  else:
+    blockers += before_blockers(fields, before, binding, signers, now)
+    if before.data is not None:
+      blockers += offline_preview_blockers(
+          dump, snapshot, before.path, before.data
+      )
   return blockers + dump_blockers(dump, snapshot, binding)
 
 
 def _replace_file(path: pathlib.Path, data: bytes) -> None:
-  """Atomically replace `path` with `data`, keeping its permission bits.
+  """Atomically replace or create `path` with `data`.
 
   The data is written and synced to a staged file next to `path`, which
   then replaces it with `os.replace`; on any failure the staged file is
-  removed and `path` keeps its old bytes.
+  removed and `path` keeps its old bytes. A replaced file keeps its
+  permission bits; a new one gets mode 0644.
   """
+  try:
+    mode = stat.S_IMODE(path.stat().st_mode)
+  except FileNotFoundError:
+    mode = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
   descriptor, staged = tempfile.mkstemp(
       dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
   )
@@ -837,11 +915,20 @@ def _replace_file(path: pathlib.Path, data: bytes) -> None:
       handle.write(data)
       handle.flush()
       os.fsync(handle.fileno())
-    os.chmod(staged, stat.S_IMODE(path.stat().st_mode))
+    os.chmod(staged, mode)
     os.replace(staged, path)
   except BaseException:
     pathlib.Path(staged).unlink(missing_ok=True)
     raise
+
+
+def _restore(originals: list[tuple[pathlib.Path, bytes | None]]) -> None:
+  """Put back each file's original bytes, or remove a file that was new."""
+  for path, data in originals:
+    if data is None:
+      path.unlink(missing_ok=True)
+    else:
+      _replace_file(path, data)
 
 
 def _audit(dump: pathlib.Path) -> int:
@@ -866,7 +953,11 @@ def main(argv: list[str] | None = None) -> int:
       type=pathlib.Path,
       required=True,
       metavar="PATH",
-      help="Looker Studio report textproto dump of the live BQCA template",
+      help=(
+          "the capture of the live template after the write-back, which"
+          " tools/sign_live_capture.py wrote with its receipt at"
+          " PATH.receipt.json"
+      ),
   )
   parser.add_argument(
       "--check",
@@ -877,13 +968,12 @@ def main(argv: list[str] | None = None) -> int:
       ),
   )
   parser.add_argument(
-      "--receipt",
+      "--before",
       type=pathlib.Path,
       metavar="PATH",
       help=(
-          "required to write: the capture receipt that"
-          " tools/sign_live_capture.py signed for the dump, with its"
-          " signature at PATH.sig"
+          "required to write: the capture of the live template before the"
+          " write-back, with its receipt at PATH.receipt.json"
       ),
   )
   parser.add_argument(
@@ -892,24 +982,24 @@ def main(argv: list[str] | None = None) -> int:
       metavar="REVISION",
       help=(
           "required to write: the revision of the live report that the dump"
-          " captured, as the receipt records it; recorded in the binding"
+          " captured, as its receipt records it; recorded in the binding"
       ),
   )
   parser.add_argument(
       "--verified-date",
       type=_iso_date,
       metavar="YYYY-MM-DD",
-      help="the date to record as verified_date (default: today)",
+      help="the date to record as verified_date (default: today, in UTC)",
   )
   args = parser.parse_args(argv)
-  if not args.check and (args.receipt is None or args.revision is None):
+  if not args.check and (args.before is None or args.revision is None):
     parser.error(
-        "a write needs --receipt, the signed capture receipt of the dump, and"
-        " --revision, the live revision it captured; --check lists what a"
-        " write would refuse without them"
+        "a write needs --before, the capture before the write-back, and"
+        " --revision, the live revision that the dump captured; --check lists"
+        " what a write would refuse without them"
     )
-  # Read the dump, the receipt and its signature once. The fixture-path check
-  # uses the dump's path as given; everything else uses only these bytes (the
+  # Read each export, receipt and signature once. The fixture-path check uses
+  # the dump's path as given; everything else uses only these bytes (the
   # audits through a private, read-only copy of the dump), never the paths
   # again, so a file that replaces one of them while this runs cannot be
   # mixed in.
@@ -927,35 +1017,47 @@ def main(argv: list[str] | None = None) -> int:
       f"snapshot of {args.dump}: {len(snapshot)} bytes, sha256"
       f" {hashlib.sha256(snapshot).hexdigest()}"
   )
-  receipt = Receipt.read(args.receipt) if args.receipt is not None else None
-  if receipt is not None and receipt.data is not None:
-    print(
-        f"receipt {args.receipt}: {len(receipt.data)} bytes, sha256"
-        f" {hashlib.sha256(receipt.data).hexdigest()}"
-    )
+  receipt = Receipt.read(receipt_path(args.dump))
+  before = Capture.read(args.before) if args.before is not None else None
+  for label, data in (
+      (f"receipt {receipt.path}", receipt.data),
+      (
+          f"--before {args.before}",
+          before.data if before is not None else None,
+      ),
+      (
+          f"receipt {before.receipt.path}" if before is not None else "",
+          before.receipt.data if before is not None else None,
+      ),
+  ):
+    if data is not None:
+      print(
+          f"{label}: {len(data)} bytes, sha256"
+          f" {hashlib.sha256(data).hexdigest()}"
+      )
   with tempfile.TemporaryDirectory(prefix="finalize_live_sync_") as private:
     audited = pathlib.Path(private) / (dump.name or "dump.textproto")
     audited.write_bytes(snapshot)
     audited.chmod(stat.S_IRUSR)
-    return _finalize_snapshot(args, dump, snapshot, receipt, audited)
+    return _finalize_snapshot(args, dump, snapshot, receipt, before, audited)
 
 
 def capture_record(
-    revision: str | None, snapshot: bytes, receipt: Receipt | None
+    revision: str | None, snapshot: bytes, receipt: Receipt
 ) -> dict[str, str]:
   """Return the capture record for the dump `snapshot` and its `receipt`.
 
   A value that only a write's arguments give is a placeholder when it is
   missing (CAPTURE_PLACEHOLDERS), as in a `--check` preview.
   """
-  fields = receipt.fields() if receipt is not None else None
+  fields = receipt.fields()
   return {
       "verified_revision": revision
       or CAPTURE_PLACEHOLDERS["verified_revision"],
       "verified_dump_sha256": hashlib.sha256(snapshot).hexdigest(),
       "capture_receipt_sha256": (
           hashlib.sha256(receipt.data).hexdigest()
-          if receipt is not None and receipt.data is not None
+          if receipt.data is not None
           else CAPTURE_PLACEHOLDERS["capture_receipt_sha256"]
       ),
       "captured_by": (
@@ -970,23 +1072,36 @@ def _finalize_snapshot(
     args: argparse.Namespace,
     dump: pathlib.Path,
     snapshot: bytes,
-    receipt: Receipt | None,
+    receipt: Receipt,
+    before: Capture | None,
     audited: pathlib.Path,
 ) -> int:
   """Check, audit and record the dump `snapshot`, read from `dump`.
 
-  `receipt` is the capture receipt given, if any, read once. Both audits
-  read `audited`, a private copy of `snapshot`.
+  `receipt` is the dump's capture receipt and `before` the capture before
+  the write-back, if given, each read once. Both audits read `audited`, a
+  private copy of `snapshot`.
   """
-  verified_date = args.verified_date or datetime.date.today().isoformat()
+  validator = _load_validator()
+  now = datetime.datetime.now(datetime.timezone.utc)
+  verified_date = args.verified_date or now.date().isoformat()
   unchanged = f"{BINDING_PATH} is unchanged"
   binding_path = ROOT / BINDING_PATH
   original = binding_path.read_bytes().decode("utf-8")
   binding = yaml.safe_load(original)
   binding = binding if isinstance(binding, dict) else {}
+  live = binding.get(LIVE_KEY)
+  if not isinstance(live, dict) or PENDING_KEY not in live:
+    print(
+        f"nothing to finalize: {BINDING_PATH} has no"
+        f" {LIVE_KEY}.{PENDING_KEY}; it is unchanged"
+    )
+    return 0
 
-  # A write fails closed without a trusted capture receipt of these bytes.
-  blockers = write_blockers(dump, snapshot, receipt, args.revision, binding)
+  # A write fails closed without a trusted capture of these bytes.
+  blockers = write_blockers(
+      dump, snapshot, receipt, before, args.revision, binding, now
+  )
   if blockers and not args.check:
     print(f"not finalized: {'; '.join(blockers)}; {unchanged}", file=sys.stderr)
     return 1
@@ -999,15 +1114,11 @@ def _finalize_snapshot(
     )
     return 1
 
-  live = binding.get(LIVE_KEY)
-  if not isinstance(live, dict) or PENDING_KEY not in live:
-    print(
-        f"nothing to finalize: {BINDING_PATH} has no"
-        f" {LIVE_KEY}.{PENDING_KEY}; it is unchanged"
-    )
-    return 0
   record = capture_record(args.revision, snapshot, receipt)
-  error = _verified_date_error(verified_date, live)
+  fields = receipt.fields()
+  error = _verified_date_error(
+      verified_date, live, fields["signed_at"] if fields is not None else None
+  )
   if error is None:
     try:
       updated = finalized_binding_text(original, verified_date, record)
@@ -1025,6 +1136,7 @@ def _finalize_snapshot(
           f"b/{BINDING_PATH}",
       )
   )
+  committed = validator.BQCA_CAPTURE_RECEIPT_PATH
   if args.check:
     refusal = (
         f", but a write would refuse it: {'; '.join(blockers)}"
@@ -1033,39 +1145,60 @@ def _finalize_snapshot(
     )
     print(
         f"check: the live audit of {args.dump} passed; {BINDING_PATH} would"
-        f" change as above{refusal}; nothing written"
+        f" change as above, and {committed} and its signature would be"
+        f" written{refusal}; nothing written"
     )
     return 0
 
-  # Until the audit of the written binding passes, any failure, exception or
-  # interrupt puts the original bytes back.
-  original_bytes = original.encode("utf-8")
+  # The receipt and its signature go first and the binding last; until the
+  # audit of the written binding passes, any failure, exception or interrupt
+  # puts the original bytes of all three back.
+  receipt_target = ROOT / committed
+  writes = [
+      (receipt_target, receipt.data),
+      (
+          validator.bqca_capture_signature_path(receipt_target),
+          receipt.signature,
+      ),
+      (binding_path, updated.encode("utf-8")),
+  ]
+  originals = []
+  for path, _ in reversed(writes):
+    try:
+      originals.append((path, path.read_bytes()))
+    except FileNotFoundError:
+      originals.append((path, None))
   try:
-    _replace_file(binding_path, updated.encode("utf-8"))
+    for path, data in writes:
+      _replace_file(path, data)
     code = _audit(audited)
   except BaseException as exc:
-    _replace_file(binding_path, original_bytes)
+    _restore(originals)
     if not isinstance(exc, Exception):
-      print(f"interrupted: {BINDING_PATH} was restored", file=sys.stderr)
+      print(
+          f"interrupted: {BINDING_PATH} and {committed} were restored",
+          file=sys.stderr,
+      )
       raise
     print(
         f"not finalized: {type(exc).__name__}: {exc} after the write, so"
-        f" {BINDING_PATH} was restored",
+        f" {BINDING_PATH} and {committed} were restored",
         file=sys.stderr,
     )
     return 1
   if code != 0:
-    _replace_file(binding_path, original_bytes)
+    _restore(originals)
     print(
         f"not finalized: {VALIDATOR_PATH} exited {code} after the write, so"
-        f" {BINDING_PATH} was restored",
+        f" {BINDING_PATH} and {committed} were restored",
         file=sys.stderr,
     )
     return 1
   print(
       f"finalized: {BINDING_PATH} records the live verification of"
       f" {verified_date} (revision {record['verified_revision']}, receipt"
-      f" signed by {record['captured_by']}) and has no {PENDING_KEY}."
+      f" signed by {record['captured_by']}) and has no {PENDING_KEY};"
+      f" {committed} and its signature are written."
   )
   print(NEXT_STEPS)
   return 0

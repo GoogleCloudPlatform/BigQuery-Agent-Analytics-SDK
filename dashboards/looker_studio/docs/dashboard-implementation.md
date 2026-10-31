@@ -476,8 +476,10 @@ that ID, renames each dimension or metric `concept_names` entry and each
 included, is kept: each edit replaces one quoted literal in place, and the tool
 prepends `# bqca-offline-preview: written by tools/apply_bqca_rename_map.py;
 not a dump of a synced live template.` as the first line (after any UTF-8 byte
-order mark). The tool never writes or reads a capture receipt (below), so its
-output can never finalize the binding, with or without that marker.
+order mark). The tool never writes or reads a capture receipt (below). The
+capture tool and `tools/finalize_live_sync.py` refuse its output as the
+capture after the write-back whatever its marker, comments, or spacing say:
+they compare that capture's parsed content with the preview's.
 The live names repeat across components, so a rename is keyed by the component
 and the old name, never by the name alone. The data source IDs of the
 components and of the `ds0` alias are not edited; the audit refuses a dump
@@ -525,60 +527,82 @@ comments, since it keeps every comment and the twin has others, and from the
 first line that is not a comment on, the checked-in twin byte for byte;
 `tests/test_looker_studio_live_sync.py` pins that. The result previews the
 sync; it is not a dump of a synced template. `tools/finalize_live_sync.py`,
-below, needs a new export of the live template itself, with its signed capture
-receipt.
+below, needs two captures of the live template itself, made by
+`tools/sign_live_capture.py` before and after the write-back.
 
-After the sync, export the live template again with the internal report
-tooling and keep the export privately (outside the repository). Right after
-the export, sign its capture receipt, then finalize:
+##### The capture, apply, write-back, capture, finalize steps
+
+`tools/sign_live_capture.py` replaces the bare export command: it runs the
+internal export command given after `--`, which must write the report
+textproto of the live template to standard output, and keeps the bytes it
+reads from that pipe, never a file's. It writes them to `--out` (mode 0600;
+never inside the repository) with a signed capture receipt of those bytes.
+Run it before the write-back and again after it, with `--before` naming the
+first capture:
 
 ```bash
-python3 tools/sign_live_capture.py --dump <export> --revision <revision> \
-    --signer <signer> --key <SSH key file>
-python3 tools/finalize_live_sync.py --dump <export> \
-    --receipt <export>.receipt.json --revision <revision> --check
-python3 tools/finalize_live_sync.py --dump <export> \
-    --receipt <export>.receipt.json --revision <revision>
+python3 tools/sign_live_capture.py --out <D0> --revision <revision before> \
+    --signer <signer> --key <SSH key file> -- <export command>
+python3 tools/apply_bqca_rename_map.py --dump <D0> --out <offline preview>
+# Write the offline preview back to the live template with the internal
+# tooling, then:
+python3 tools/sign_live_capture.py --out <D1> --before <D0> \
+    --revision <revision after> --signer <signer> --key <SSH key file> \
+    -- <export command>
+python3 tools/finalize_live_sync.py --dump <D1> --before <D0> \
+    --revision <revision after> --check
+python3 tools/finalize_live_sync.py --dump <D1> --before <D0> \
+    --revision <revision after>
 ```
+
+A capture is three files: the export, `<export>.receipt.json`, and
+`<export>.receipt.json.sig`. Keep both exports privately (outside the
+repository); finalizing commits only the receipt of the second.
 
 ##### Capture receipts
 
-Nothing in a dump proves where it came from, and an offline preview from
-`tools/apply_bqca_rename_map.py` has exactly the audited content of a dump of
-the synced template (the audit compares that content with the manifest). A
-marker comment cannot tell them apart either: changing its letter case or
-deleting it is a one-line edit. So a write needs evidence from outside the
-dump: a capture receipt, signed by a maintainer who exports the live template.
+Nothing in a dump proves where it came from, and the offline preview from
+`tools/apply_bqca_rename_map.py` has exactly the audited content of a
+capture of the synced template (the audit compares that content with the
+manifest). A marker comment cannot tell them apart either: changing its letter
+case or deleting it is a one-line edit. So a write needs evidence from outside
+the dump, and the capture after the write-back must differ, in some field, from
+the offline preview of the capture before it.
 
 A capture receipt is a JSON object with exactly these fields, each once
 (`tools/sign_live_capture.py` writes them in this order):
 
 | Field | Value |
 |---|---|
-| `format` | `bqca-live-capture-receipt/v1` |
+| `format` | `bqca-live-capture-receipt/v2` |
 | `report_id` | the `report_id` of `bindings/bqca_report_template.yaml` |
 | `revision` | the revision of the live report that the export captured, as the export tooling or the report's version history shows it: 1 to 128 letters, digits, `.`, `_`, `:`, `+`, or `-` |
-| `dump_sha256` | the SHA-256 of the export's exact bytes |
+| `dump_sha256` | the SHA-256 of the exported bytes |
 | `signed_at` | when the receipt was signed, in UTC, `YYYY-MM-DDTHH:MM:SSZ` |
 | `signer` | the signer's name in `bindings/bqca_live_capture_signers` |
+| `export_command_sha256` | the SHA-256 of the export command as a JSON list, so that no internal command, path, or token is published |
+| `manifest_sha256`, `template_bundle_sha256` | the binding's pinned digests when the export was captured |
+| `pending_since_date` | the `since_date` of the binding's `pending_live_sync` when the export was captured |
+| `before_dump_sha256`, `before_revision` | for the capture after the write-back, the SHA-256 and revision of the `--before` capture; `null` for the capture before it |
 
 Its signature, `<receipt>.sig`, is an OpenSSH signature (`ssh-keygen -Y
 sign`) of the receipt's exact bytes in the `bqca-live-capture-receipt`
 namespace, so no signature that the same key made for anything else (a commit,
-a file) verifies as one.
+a file) verifies as one. `--key` is an SSH private key file, or the public key
+file of a key that ssh-agent holds; ssh-keygen asks for any passphrase.
 
-`tools/sign_live_capture.py` produces both in the live-export step. Run it
-right after the export, on the export itself, with `--revision`, `--signer`,
-and `--key` (an SSH private key file, or the public key file of a key that
-ssh-agent holds; ssh-keygen asks for any passphrase). It reads the export
-once, writes the receipt to `--out` (default `<export>.receipt.json`) and the
-signature next to it, both with mode 0644, and refuses an existing receipt or
-signature unless `--force`. It writes nothing for an export that
-`tools/finalize_live_sync.py` would refuse (one under `tests/fixtures/`, one
-that does not decode, parse, and identify the live template, and one that
-carries the offline-preview marker in any form), and nothing unless
-`bindings/bqca_live_capture_signers` lists the key for `--signer`; that error
-prints the line that would list it.
+The capture tool writes nothing for an export that does not decode, parse, and
+name the live template in `report_config.shareable.id`, or that carries the
+offline-preview marker in any form; after the write-back, the report-level
+data source and the `ds0` alias must be the binding's too. It writes nothing
+unless the binding has a pending sync and `bindings/bqca_live_capture_signers`
+lists the key for `--signer` (that error prints the line that would list it).
+With `--before`, it also writes nothing unless the `--before` capture has a
+trusted receipt of a capture before any write-back for the same pending sync,
+`--revision` differs from that capture's, the export differs from it, and the
+export's parsed content (comments and spacing aside) differs from that of the
+offline preview of the `--before` export. It refuses an existing capture
+unless `--force`.
 
 `bindings/bqca_live_capture_signers` lists the trusted keys in the OpenSSH
 allowed signers format (see `ssh-keygen(1)`), one line per maintainer who
@@ -604,33 +628,44 @@ shasum -a 256 <export>  # the receipt's dump_sha256
 ##### What finalizing checks and records
 
 `tools/finalize_live_sync.py` runs `tools/validate_contracts.py --profile bqca
---live-report-textproto` on the export and edits
-`bindings/bqca_report_template.yaml` only if it exits 0. In
+--live-report-textproto` on the capture after the write-back (`--dump`) and
+edits `bindings/bqca_report_template.yaml` only if it exits 0. In
 `live_template_verification` it sets `verified_date` (`--verified-date`,
-default today), copies `manifest_sha256` and `template_bundle_sha256` into
-`verified_manifest_sha256` and `verified_template_bundle_sha256`, records the
-capture (`verified_revision`, the `--revision`; `verified_dump_sha256`, the
-SHA-256 of the export's bytes; `capture_receipt_sha256`, the SHA-256 of the
-receipt's bytes; and `captured_by`, the receipt's signer), and removes
-`pending_live_sync`, keeping every other line and comment. The new binding
-replaces the old one atomically (a staged file and `os.replace`); the tool
-audits the export again after the write and puts the original bytes back if
-that audit fails, raises, or is interrupted. It reads the export, the receipt,
-and the signature once each: the checks below, both audits (through a
-private, read-only copy of the export), and the recorded digests all use
-those bytes, never the paths again, so a file that replaces one of them while
-the tool runs cannot be mixed in.
+default today in UTC), copies `manifest_sha256` and `template_bundle_sha256`
+into `verified_manifest_sha256` and `verified_template_bundle_sha256`, records
+the capture (`verified_revision`, the `--revision`; `verified_dump_sha256`,
+the SHA-256 of the export; `capture_receipt_sha256`, the SHA-256 of its
+receipt; and `captured_by`, the receipt's signer), and removes
+`pending_live_sync`, keeping every other line and comment. It also commits the
+receipt and its signature as `bindings/bqca_live_capture_receipt.json` and
+`bindings/bqca_live_capture_receipt.json.sig`. The new files replace the old
+ones atomically (staged files and `os.replace`; the binding last); the tool
+audits the export again after the write and puts the original bytes of all
+three back (or removes a receipt that was new) if that audit fails, raises, or
+is interrupted. It reads each export, receipt, and signature once: the checks
+below, both audits (through a private, read-only copy of the export), and the
+recorded digests use those bytes, never the paths again. With nothing pending,
+it exits 0 and writes nothing.
 
-A write fails closed, exiting 1 and leaving the binding unchanged, unless:
+A write fails closed, exiting 1 and leaving every file unchanged, unless:
 
-- `ssh-keygen -Y verify` verifies the receipt's signature in the
-  `bqca-live-capture-receipt` namespace, made by a key that
-  `bindings/bqca_live_capture_signers` lists for the receipt's `signer`;
-- the receipt is exactly a v1 receipt, as above (a receipt or signature that
-  cannot be read, other or repeated fields, and malformed values are
-  refused);
-- the receipt is for the binding's `report_id`, for the `--revision` given,
-  and for the SHA-256 of the export's exact bytes;
+- `ssh-keygen -Y verify` verifies both receipts' signatures in the
+  `bqca-live-capture-receipt` namespace, made by keys that
+  `bindings/bqca_live_capture_signers` lists for their signers;
+- both receipts are exactly v2 receipts of the exports' bytes (a receipt or
+  signature that cannot be read, other or repeated fields, and malformed
+  values are refused), for the binding's `report_id`, its pinned manifest and
+  bundle digests, and its pending sync (`pending_since_date`), signed on or
+  after the day that sync began (inclusive, in UTC) and not in the future
+  (with five minutes of clock skew); the dump's receipt is for `--revision`;
+- the dump's receipt is of a capture after a write-back that names the
+  `--before` capture (its SHA-256 and revision); the `--before` receipt is of
+  a capture before any write-back, signed no later; and the two are of
+  different revisions;
+- the dump's parsed content differs from that of the offline preview that
+  `tools/apply_bqca_rename_map.py` writes for the `--before` export
+  (`preview_tree`): comments, spacing, and the marker aside, some field of the
+  live report changed after the write-back;
 - the export decodes as UTF-8, parses as protobuf text format (with
   universal-newline normalization matching `tools/validate_contracts.py`), and
   its identity fields each have exactly one value equal to the binding's:
@@ -642,24 +677,53 @@ A write fails closed, exiting 1 and leaving the binding unchanged, unless:
 - the export carries no offline-preview marker of
   `tools/apply_bqca_rename_map.py`, in any letter case or spacing, anywhere,
   and is not under `tests/fixtures/` (checked both by path prefix and by
-  `os.path.samestat`).
+  `os.path.samestat`);
+- `--verified-date` is not in the future, nor before `since_date` or the day
+  the dump's receipt was signed.
 
-A write without `--receipt` or `--revision` exits 2; the free-text
-`--captured-from` attestation of earlier revisions of this tool is gone.
-`--check` runs the same checks and the audit, prints the change as a diff
-(with placeholders for the values that only a write's arguments give), lists
-every reason a write would be refused, and writes nothing; it needs no
-receipt and previews with the checked-in fixtures and with offline previews
-too. It exits 0 when the audit passes, even if a write would be refused.
+A write without `--before` or `--revision` exits 2; the free-text
+`--captured-from` attestation of earlier revisions of this tool is gone, and
+the dump's receipt is always the one next to it. `--check` runs the same checks
+and the audit, prints the change as a diff (with placeholders for the values
+that only a write's arguments give), lists every reason a write would be
+refused, and writes nothing; it needs no receipt and previews with the
+checked-in fixtures and with offline previews too. It exits 0 when the audit
+passes, even if a write would be refused.
 
-The offline tools never write a receipt, and only a listed signer can sign
-one, so no offline preview can be written, whether its marker is kept,
-edited, or removed. The marker stays a tripwire on top: even a receipt that a
-listed key signed does not finalize an export that carries it. The trust is
-in the listed signers. A signer who signs a receipt for anything but an
-unedited export of the live template makes a false statement, which the
-receipt and the binding (`captured_by`) attribute to them; reviewers of the
-finalization change check the receipt's signature and the signer.
+If the export of the synced template has exactly the parsed content of the
+offline preview, so that no field of the live report (a revision or update
+time, for example) changed with the write-back, the capture tool and finalize
+refuse it: nothing then tells it apart from the preview. Report that on the
+tracking issue instead of editing the export.
+
+##### The committed receipt
+
+`tools/validate_contracts.py` checks every binding without
+`pending_live_sync` whose verified digests equal the pinned ones: it needs
+`bindings/bqca_live_capture_receipt.json` and its signature, which must verify
+against `bindings/bqca_live_capture_signers`, and the receipt must be of a
+capture after a write-back, for the binding's report and pinned digests,
+signed on or after its `pending_since_date` and not in the future.
+`verified_revision`, `verified_dump_sha256`, `capture_receipt_sha256`, and
+`captured_by` must be the receipt's, and `verified_date` must not be before
+the receipt was signed. So a hand edit that re-pins the verified digests and
+deletes `pending_live_sync` fails validation; only a binding that finalize
+wrote with its receipt passes.
+
+##### The trust boundary
+
+The tools refuse the offline preview as the capture after the write-back,
+whether its marker is kept, edited, or removed, and any edit of its comments
+or spacing; they refuse a receipt that is not trusted, not for this pending
+sync, stale, in the future, or for other bytes; and the capture tool signs
+only bytes that an export command printed. What no check can refuse is
+a listed signer who signs for content that the export command did not fetch
+from the live report: one who passes as the export command a program that
+prints a file and also edits a field of the preview, or who signs receipt bytes
+directly with `ssh-keygen`. That is a false signed statement, which the
+receipt and the binding (`captured_by`) attribute to the signer. Review of
+each change to the signers file, and of the committed receipt, is the last
+check; `tests/test_looker_studio_live_sync.py` pins this boundary.
 
 The checked-in fixtures have no `report_config.shareable` entry, so a write
 refuses them, copies of them anywhere, and any reordering or audit-inert edit
@@ -667,22 +731,18 @@ of them, including one that adds the report ID to another field, even with a
 receipt. The data source fields are those a saved report keeps and the live
 audit reads. No dump in this repository keeps the report ID (the sanitized
 cuts drop it), so `report_config.shareable.id`, the report's own entry, is
-where the tool expects it (`REPORT_ID_FIELD` in
+where the tools expect it (`REPORT_ID_FIELD` in
 `tools/finalize_live_sync.py`). If a real export names the report in another
-field, a write is refused with that field's path, and `REPORT_ID_FIELD` needs
-to name it; an export that does not name its report at all is refused. The
-tool does not compare the export's audit-relevant fields with the fixtures:
-the remapped fixture is exactly what those fields must be after a correct sync
-(the audit compares them with the manifest), so such a comparison would
-refuse every genuine export.
+field, a capture or write is refused with that field's path, and
+`REPORT_ID_FIELD` needs to name it; an export that does not name its report at
+all is refused.
 
 The tool does not edit documentation or tests. In the same change, commit the
-receipt and its signature as `bindings/bqca_live_capture_receipt.json` and
-`bindings/bqca_live_capture_receipt.json.sig` (they hold no secret; the
-export stays private), with the line that lists the signer in
-`bindings/bqca_live_capture_signers` if it is new; remove the #559 known-issue
-notes that `pending_live_sync.required_actions` lists (and run
-`tools/render_web_config.py`); update the comments above
+binding with `bindings/bqca_live_capture_receipt.json` and its signature,
+which it wrote (they hold no secret; both exports stay private), and the line
+that lists the signer in `bindings/bqca_live_capture_signers` if it is new;
+remove the #559 known-issue notes that `pending_live_sync.required_actions`
+lists (and run `tools/render_web_config.py`); update the comments above
 `live_template_verification`; and update the tests in
 `tests/test_looker_studio_dashboard.py` that pin the pending sync:
 `test_bqca_block_datasource_invariants_and_live_attestation_are_recorded`,

@@ -1,11 +1,13 @@
 # Signers of BQCA live capture receipts (#559), in the OpenSSH allowed signers
 # format (see "ALLOWED SIGNERS" in ssh-keygen(1)).
 #
-# tools/finalize_live_sync.py records a live template verification in
-# bindings/bqca_report_template.yaml only with a capture receipt that
+# tools/sign_live_capture.py signs capture receipts of exports of the live
+# template. tools/finalize_live_sync.py records a live template verification
+# in bindings/bqca_report_template.yaml, and tools/validate_contracts.py
+# accepts a binding without pending_live_sync, only with capture receipts that
 # `ssh-keygen -Y verify` verifies against this file, in the
-# `bqca-live-capture-receipt` namespace, for the receipt's `signer`.
-# tools/sign_live_capture.py signs such receipts. Each line lists one signer:
+# `bqca-live-capture-receipt` namespace, for the receipts' `signer`. Each line
+# lists one signer:
 #
 #   <signer> namespaces="bqca-live-capture-receipt" <key type> <public key>
 #

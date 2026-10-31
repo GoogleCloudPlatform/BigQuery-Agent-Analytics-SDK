@@ -14,30 +14,37 @@
 
 """Tests for the tools of the BQCA live template sync (#559).
 
+`tools/sign_live_capture.py` captures the live template: it runs the export
+command, writes the bytes it read, and signs a capture receipt of them with a
+key that `bindings/bqca_live_capture_signers` lists. A sync has two captures,
+one before the write-back and one after it, which names the first.
 `tools/finalize_live_sync.py` records a live template verification in
-`bindings/bqca_report_template.yaml` only after `tools/validate_contracts.py
---profile bqca --live-report-textproto` passes on a dump of the live template,
-and only with a capture receipt of that dump: a JSON file that
-`tools/sign_live_capture.py` writes, with an SSH signature by a key that
-`bindings/bqca_live_capture_signers` lists, for the binding's report, for the
-`--revision` given and for the dump's exact SHA-256. The dump must also carry
-no offline-preview marker and name the report and its data source in
-`report_config.shareable.id`, `report_config.report.datasource_id`, and the
-`ds0` entry of `report_config.report.resource.datasource_alias`.
+`bindings/bqca_report_template.yaml`, and commits the receipt of the capture
+after the write-back as `bindings/bqca_live_capture_receipt.json`, only after
+`tools/validate_contracts.py --profile bqca --live-report-textproto` passes on
+that capture, both receipts are trusted for this pending sync, and the
+capture's parsed content differs from the offline preview of the one before
+it. The dump must also carry no offline-preview marker and name the report and
+its data source in `report_config.shareable.id`,
+`report_config.report.datasource_id`, and the `ds0` entry of
+`report_config.report.resource.datasource_alias`. `tools/validate_contracts.py`
+checks the committed receipt of a binding without `pending_live_sync`.
 `tools/gen_bqca_rename_map.py` lists the rename that the sync applies to the
 concepts of the live template. `tools/apply_bqca_rename_map.py` applies it to
 a dump of the live template, offline, and writes the remapped dump with the
 `# bqca-offline-preview:` header comment line; it never writes a receipt.
 
-The finalize and sign tests run the tools from a copy of
+The finalize and capture tests run the tools from a copy of
 `dashboards/looker_studio`, so they never write to the repository, and list a
-test key in the copy's signers file (the repository's lists none). A
-successful write uses a dump that `_render_dump` generates from the copy's
-manifest, with test-only provenance (`report_config.shareable.id`), and a
-receipt that the copy's tool signs with that key. The checked-in sanitized
-cuts of the 2026-10-29 dump have no `report_config.shareable` entry, so
-neither they nor any reordering or audit-inert edit of them can be written,
-even with a receipt; `--check` still previews with them.
+test key in the copy's signers file (the repository's lists none). A stand-in
+export command prints a file, as the internal export command prints the live
+report: before the write-back, the sanitized pre-sync cut with a
+`report_config.shareable` entry; after it, a dump that `_render_dump`
+generates from the copy's manifest, with test-only provenance
+(`report_config.shareable.id`). The checked-in sanitized cuts of the
+2026-10-29 dump have no `report_config.shareable` entry, so neither they nor
+any reordering or audit-inert edit of them can be written, even with a
+receipt; `--check` still previews with them.
 
 The apply tests remap the checked-in sanitized dump. Those that could write
 into a repository (the refusals and the failures) run the tool from a copy of
@@ -48,6 +55,7 @@ import collections
 import copy
 import csv
 import dataclasses
+import datetime
 import errno
 import hashlib
 import importlib.util
@@ -74,6 +82,7 @@ REMAPPED_DUMP = (
 )
 BINDING = "bindings/bqca_report_template.yaml"
 SIGNERS = "bindings/bqca_live_capture_signers"
+COMMITTED = "bindings/bqca_live_capture_receipt.json"
 LIVE = "live_template_verification"
 PENDING = "pending_live_sync"
 REPORT_ID = "42e79a1f-a979-4de8-911f-80d5a99543d5"
@@ -85,24 +94,30 @@ REPORT_ID_FIELD = "report_config.shareable.id"
 NO_REPORT_FIELD = f"the dump's {REPORT_ID_FIELD} is [], not ['{REPORT_ID}']"
 
 SSH_KEYGEN = shutil.which("ssh-keygen")
-RECEIPT_FORMAT = "bqca-live-capture-receipt/v1"
+RECEIPT_FORMAT = "bqca-live-capture-receipt/v2"
 NAMESPACE = "bqca-live-capture-receipt"
 # The signer that `tree` lists in the copy's signers file, with the `trusted`
-# key of `signing_keys`, and the revision that its receipts give.
+# key of `signing_keys`, and the revisions of the live report that the
+# captures before and after the write-back give.
 SIGNER = "test-signer"
+BEFORE_REVISION = "1830000000000"
 REVISION = "1830000000001"
-# The revision of the earlier sync that the `reopened` state records.
-EARLIER_REVISION = "1820000000000"
-NO_RECEIPT = (
-    "--receipt is not given: a write needs the capture receipt that"
-    " tools/sign_live_capture.py signs for a fresh export of the live template"
-)
+# The day that the pending sync began, in both states of `tree`.
+SINCE_DATE = "2026-10-29"
+# The revisions of the earlier sync that the `reopened` state records.
+EARLIER_BEFORE_REVISION = "1820000000000"
+EARLIER_REVISION = "1820000000001"
 NO_REVISION = (
     "--revision is not given: a write needs the revision of the live report"
     " that the dump captured, as its receipt records it"
 )
-NEEDS_RECEIPT = (
-    "a write needs --receipt, the signed capture receipt of the dump"
+NO_BEFORE = (
+    "--before is not given: a write needs the capture taken before the"
+    " write-back, whose offline preview the dump must differ from"
+)
+NEEDS_BEFORE = (
+    "a write needs --before, the capture before the write-back, and"
+    " --revision, the live revision that the dump captured"
 )
 UNTRUSTED = (
     f"the receipt is not signed by a key that {SIGNERS} lists for its signer"
@@ -112,6 +127,12 @@ OFFLINE_PREVIEW = (
     "is an offline preview from tools/apply_bqca_rename_map.py, not a dump of"
     " the synced live template"
 )
+PREVIEW_CONTENT = (
+    "has the parsed content of the offline preview that"
+    " tools/apply_bqca_rename_map.py writes for --before"
+)
+# A stand-in for the internal export command: it prints the file it is given.
+_EXPORT = "import sys; sys.stdout.buffer.write(open(sys.argv[1], 'rb').read())"
 
 # `_reopen` gives a finalized copy the state of the binding before #559: a
 # verification on 2026-10-09 and a live sync pending since 2026-10-29. The
@@ -158,6 +179,18 @@ def _snapshot(tree):
 def _live(tree):
   binding = yaml.safe_load((tree / BINDING).read_text(encoding="utf-8"))
   return binding[LIVE]
+
+
+def _today():
+  """Today in UTC, the default `verified_date`."""
+  return datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+
+
+def _now():
+  """The current UTC time, as a receipt's `signed_at` gives it."""
+  return datetime.datetime.now(datetime.timezone.utc).strftime(
+      "%Y-%m-%dT%H:%M:%SZ"
+  )
 
 
 def _reopen(tree):
@@ -227,7 +260,17 @@ def _trust(tree, key, signer=SIGNER):
     handle.write(f'{signer} namespaces="{NAMESPACE}" {_public_key(key)}\n')
 
 
-def _sign_tool(tree, *args):
+def _receipt_path(path):
+  """Return where the capture receipt of the export `path` is."""
+  return path.with_name(f"{path.name}.receipt.json")
+
+
+def _export_command(source):
+  """The stand-in export command that prints `source`."""
+  return [sys.executable, "-c", _EXPORT, str(source)]
+
+
+def _capture_tool(tree, *args):
   return subprocess.run(
       [sys.executable, str(tree / "tools/sign_live_capture.py"), *args],
       capture_output=True,
@@ -237,35 +280,61 @@ def _sign_tool(tree, *args):
   )
 
 
-def _sign(tree, dump, key, revision=REVISION, *args):
-  """Sign a receipt of `dump` with the copy's tool; return the receipt path."""
-  result = _sign_tool(
-      tree,
-      "--dump",
-      str(dump),
-      "--revision",
-      revision,
-      "--signer",
-      SIGNER,
-      "--key",
-      str(key),
-      *args,
-  )
+def _capture(
+    tree, source, out, key, revision, before=None, signer=SIGNER, extra=()
+):
+  """Capture `source` to `out` with the copy's tool and the stand-in export."""
+  args = ["--out", str(out), "--revision", revision, "--signer", signer]
+  args += ["--key", str(key), *extra]
+  if before is not None:
+    args += ["--before", str(before)]
+  return _capture_tool(tree, *args, "--", *_export_command(source))
+
+
+def _captured(tree, source, out, key, revision, before=None, signer=SIGNER):
+  """Capture `source` to `out`, which must succeed; return `out`."""
+  result = _capture(tree, source, out, key, revision, before, signer)
   assert result.returncode == 0, result.stdout + result.stderr
-  if "--out" in args:
-    return Path(args[args.index("--out") + 1])
-  return dump.with_name(f"{dump.name}.receipt.json")
+  return out
 
 
-def _receipt_bytes(**fields):
-  """Return a well-formed receipt, for REPORT_ID, REVISION and SIGNER."""
+def _pre_sync_text():
+  """The pre-sync export: the sanitized cut, naming its report as one does."""
+  return GENERIC_DUMP.read_text(encoding="utf-8").replace(
+      "report_config {\n",
+      "report_config {\n"
+      "  shareable {\n"
+      f'    id: "{REPORT_ID}"\n'
+      '    name: "BQCA - Prompt & Response Logging"\n'
+      "  }\n",
+      1,
+  )
+
+
+def _receipt_bytes(tree, before=None, **fields):
+  """Return a well-formed receipt for the copy's pending sync.
+
+  It is of a capture after the write-back that names `before` (a capture
+  path), or of one before it when `before` is None, for REVISION, SIGNER, now.
+  """
+  live = _live(tree)
   receipt = {
       "format": RECEIPT_FORMAT,
       "report_id": REPORT_ID,
       "revision": REVISION,
       "dump_sha256": "0" * 64,
-      "signed_at": "2026-10-31T00:00:00Z",
+      "signed_at": _now(),
       "signer": SIGNER,
+      "export_command_sha256": "1" * 64,
+      "manifest_sha256": live["manifest_sha256"],
+      "template_bundle_sha256": live["template_bundle_sha256"],
+      "pending_since_date": SINCE_DATE,
+      "before_dump_sha256": (
+          hashlib.sha256(before.read_bytes()).hexdigest()
+          if before is not None
+          else None
+      ),
+      "before_revision": BEFORE_REVISION if before is not None else None,
   }
   receipt.update(fields)
   return (json.dumps(receipt, indent=2) + "\n").encode("utf-8")
@@ -285,8 +354,8 @@ def _ssh_sign(data, key, namespace=NAMESPACE):
 def _write_receipt(path, data, key=None, namespace=NAMESPACE):
   """Write the receipt `data` to `path`, signed with `key` if it is given.
 
-  Unlike `_sign`, this writes any receipt for any bytes, as a forger (or a
-  signer who bypasses the tool) could.
+  Unlike `_capture`, this writes any receipt for any bytes, as a forger (or a
+  signer who bypasses the capture tool) could.
   """
   path.write_bytes(data)
   if key is not None:
@@ -296,18 +365,18 @@ def _write_receipt(path, data, key=None, namespace=NAMESPACE):
   return path
 
 
-def _receipt_for(path, key, **fields):
-  """Write a receipt of the dump at `path` next to it, signed with `key`."""
+def _receipt_for(tree, path, key, before, **fields):
+  """Write a receipt of the export `path`, naming `before`, signed by `key`."""
   digest = hashlib.sha256(path.read_bytes()).hexdigest()
   return _write_receipt(
-      path.with_name(f"{path.name}.receipt.json"),
-      _receipt_bytes(**{"dump_sha256": digest, **fields}),
+      _receipt_path(path),
+      _receipt_bytes(tree, before, **{"dump_sha256": digest, **fields}),
       key,
   )
 
 
-def _write_args(receipt, revision=REVISION):
-  return ["--receipt", str(receipt), "--revision", revision]
+def _write_args(before, revision=REVISION):
+  return ["--before", str(before), "--revision", revision]
 
 
 @pytest.fixture(params=["pending", "reopened"])
@@ -318,9 +387,10 @@ def tree(request, tmp_path, signing_keys):
   `repo/tests/fixtures` as the repository's fixtures, and its signers file
   lists the `trusted` key for SIGNER. In the `pending` state the copy keeps
   the repository binding's pending sync (re-opened once #559 is closed). In
-  the `reopened` state the copy is first finalized by its own tool, so its
-  binding carries a capture record, and then re-opened, as a later sync
-  would find it. The test fails if the repository binding changes.
+  the `reopened` state the copy is first finalized by its own tools from two
+  captures, so its binding carries a capture record and its committed
+  receipt, and then re-opened, as a later sync would find it. The test fails
+  if the repository's binding, signers file or committed receipt changes.
   """
   copy_root = tmp_path / "repo/dashboards/looker_studio"
   shutil.copytree(
@@ -330,27 +400,46 @@ def tree(request, tmp_path, signing_keys):
   if PENDING not in _live(copy_root):
     _reopen(copy_root)
   if request.param == "reopened":
-    earlier = tmp_path / "earlier-dump.textproto"
-    earlier.write_text(_render_dump(copy_root), encoding="utf-8")
-    receipt = _sign(
-        copy_root, earlier, signing_keys["trusted"], EARLIER_REVISION
+    earlier = tmp_path / "earlier"
+    earlier.mkdir()
+    (earlier / "live-before.textproto").write_text(
+        _pre_sync_text(), encoding="utf-8"
+    )
+    (earlier / "live-after.textproto").write_text(
+        _render_dump(copy_root), encoding="utf-8"
+    )
+    before = _captured(
+        copy_root,
+        earlier / "live-before.textproto",
+        earlier / "before.textproto",
+        signing_keys["trusted"],
+        EARLIER_BEFORE_REVISION,
+    )
+    after = _captured(
+        copy_root,
+        earlier / "live-after.textproto",
+        earlier / "after.textproto",
+        signing_keys["trusted"],
+        EARLIER_REVISION,
+        before,
     )
     result = _finalize(
-        copy_root,
-        "--dump",
-        str(earlier),
-        *_write_args(receipt, EARLIER_REVISION),
-        "--verified-date",
-        _since_date(copy_root),
+        copy_root, "--dump", str(after), *_write_args(before, EARLIER_REVISION)
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    assert (copy_root / COMMITTED).is_file()
     _reopen(copy_root)
     assert _live(copy_root)["captured_by"] == SIGNER
-  repository_binding = (DASHBOARD / BINDING).read_bytes()
-  repository_signers = (DASHBOARD / SIGNERS).read_bytes()
+  assert _live(copy_root)[PENDING]["since_date"] == SINCE_DATE
+  repository = {
+      relative: (DASHBOARD / relative).read_bytes()
+      for relative in (BINDING, SIGNERS)
+  }
+  assert not (DASHBOARD / COMMITTED).exists()
   yield copy_root
-  assert (DASHBOARD / BINDING).read_bytes() == repository_binding
-  assert (DASHBOARD / SIGNERS).read_bytes() == repository_signers
+  for relative, data in repository.items():
+    assert (DASHBOARD / relative).read_bytes() == data, relative
+  assert not (DASHBOARD / COMMITTED).exists()
 
 
 @pytest.fixture
@@ -484,18 +573,46 @@ def _render_dump(
 
 
 @pytest.fixture
-def dump(tree, tmp_path):
-  """A generated dump of the synced live template, outside any fixtures."""
-  path = tmp_path / "dumps/report.textproto"
-  path.parent.mkdir()
-  path.write_text(_render_dump(tree), encoding="utf-8")
-  return path
+def before(tree, tmp_path, trusted_key):
+  """The capture before the write-back: the pre-sync export, captured."""
+  live = tmp_path / "live"
+  live.mkdir()
+  (live / "before.textproto").write_text(_pre_sync_text(), encoding="utf-8")
+  captures = tmp_path / "captures"
+  captures.mkdir()
+  return _captured(
+      tree,
+      live / "before.textproto",
+      captures / "before.textproto",
+      trusted_key,
+      BEFORE_REVISION,
+  )
 
 
 @pytest.fixture
-def receipt(tree, dump, trusted_key):
-  """The receipt that the copy's tool signs of `dump` with the trusted key."""
-  return _sign(tree, dump, trusted_key)
+def dump(tree, tmp_path, before, trusted_key):
+  """The capture after the write-back, naming `before`, outside any fixtures.
+
+  The export is a dump of the synced live template that `_render_dump`
+  generates; its parsed content differs from the offline preview of
+  `before`.
+  """
+  source = tmp_path / "live/after.textproto"
+  source.write_text(_render_dump(tree), encoding="utf-8")
+  return _captured(
+      tree,
+      source,
+      tmp_path / "captures/report.textproto",
+      trusted_key,
+      REVISION,
+      before,
+  )
+
+
+@pytest.fixture
+def receipt(dump):
+  """The capture receipt of `dump`."""
+  return _receipt_path(dump)
 
 
 def _finalize(tree, *args):
@@ -524,7 +641,7 @@ def _audit(tree, path):
 
 
 def _since_date(tree):
-  """A valid `--verified-date`: the day the pending sync started."""
+  """The day the pending sync started."""
   return _live(tree)[PENDING]["since_date"]
 
 
@@ -580,26 +697,28 @@ def _without_record(lines):
 
 
 def test_finalize_records_the_live_verification_after_a_clean_audit(
-    tree, dump, receipt
+    tree, dump, before, receipt
 ):
-  """A dump that passes the audit, with its receipt, finalizes the binding.
+  """Two trusted captures and a clean audit finalize the binding, and only that.
 
   `verified_date` and both verified digests change, the revision, the
   SHA-256 of the dump and of its receipt, and the receipt's signer are
   recorded, `pending_live_sync` goes, and every other line of the binding,
-  comments included, is kept. The binding keeps its permissions, and no
-  staged file is left behind.
+  comments included, is kept. The dump's receipt and signature are committed
+  next to the binding, byte for byte. The binding keeps its permissions, no
+  staged file is left behind, and the copy passes the contract validator,
+  which checks the committed receipt.
   """
-  date = _since_date(tree)
+  date = _today()
   dump_sha256 = hashlib.sha256(dump.read_bytes()).hexdigest()
   receipt_sha256 = hashlib.sha256(receipt.read_bytes()).hexdigest()
   before_text = (tree / BINDING).read_text(encoding="utf-8")
-  before = yaml.safe_load(before_text)
+  before_binding = yaml.safe_load(before_text)
   before_mode = _mode(tree / BINDING)
-  bindings = sorted(path.name for path in (tree / "bindings").iterdir())
+  bindings = {path.name for path in (tree / "bindings").iterdir()}
 
   result = _finalize(
-      tree, "--dump", str(dump), *_write_args(receipt), "--verified-date", date
+      tree, "--dump", str(dump), *_write_args(before), "--verified-date", date
   )
 
   assert result.returncode == 0, result.stdout + result.stderr
@@ -607,10 +726,10 @@ def test_finalize_records_the_live_verification_after_a_clean_audit(
   assert (
       f"finalized: {BINDING} records the live verification of {date}"
       f" (revision {REVISION}, receipt signed by {SIGNER}) and has no"
-      f" {PENDING}.\n"
+      f" {PENDING}; {COMMITTED} and its signature are written.\n"
   ) in result.stdout
   after_text = (tree / BINDING).read_text(encoding="utf-8")
-  expected = copy.deepcopy(before)
+  expected = copy.deepcopy(before_binding)
   live = expected[LIVE]
   live["verified_date"] = date
   live["verified_manifest_sha256"] = live["manifest_sha256"]
@@ -622,7 +741,16 @@ def test_finalize_records_the_live_verification_after_a_clean_audit(
   del live[PENDING]
   assert yaml.safe_load(after_text) == expected
   assert _mode(tree / BINDING) == before_mode
-  assert sorted(path.name for path in (tree / "bindings").iterdir()) == bindings
+  committed = tree / COMMITTED
+  assert committed.read_bytes() == receipt.read_bytes()
+  assert (tree / f"{COMMITTED}.sig").read_bytes() == (
+      receipt.with_name(f"{receipt.name}.sig").read_bytes()
+  )
+  assert _mode(committed) == _mode(tree / f"{COMMITTED}.sig") == 0o644
+  assert {path.name for path in (tree / "bindings").iterdir()} == bindings | {
+      committed.name,
+      f"{committed.name}.sig",
+  }
 
   # The verification record of live_template_verification is exactly these
   # lines, in this order, whether the binding had a capture record before
@@ -650,7 +778,13 @@ def test_finalize_records_the_live_verification_after_a_clean_audit(
   )
 
   # The finalized copy passes the contract validator on its own.
-  check = subprocess.run(
+  check = _validate(tree)
+  assert check.returncode == 0, check.stderr
+  assert check.stdout == "ok: contracts validated (bqca)\n"
+
+
+def _validate(tree):
+  return subprocess.run(
       [
           sys.executable,
           str(tree / "tools/validate_contracts.py"),
@@ -661,8 +795,6 @@ def test_finalize_records_the_live_verification_after_a_clean_audit(
       text=True,
       check=False,
   )
-  assert check.returncode == 0, check.stderr
-  assert check.stdout == "ok: contracts validated (bqca)\n"
 
 
 @pytest.mark.parametrize(
@@ -676,34 +808,27 @@ def test_finalize_records_the_live_verification_after_a_clean_audit(
     ids=["hex-like", "sexagesimal-like", "float-like", "timestamp-and-at"],
 )
 def test_finalize_records_the_revision_and_signer_as_strings(
-    tree, dump, trusted_key, revision, signer
+    tree, tmp_path, before, trusted_key, revision, signer
 ):
   """The revision and the signer are recorded exactly, as YAML strings.
 
   Unquoted, YAML would read `0x1F`, `12:30` or `1.5` as a number.
   """
   _trust(tree, trusted_key, signer)
-  signed = _sign_tool(
+  source = tmp_path / "live/after.textproto"
+  source.write_text(_render_dump(tree), encoding="utf-8")
+  capture = _captured(
       tree,
-      "--dump",
-      str(dump),
-      "--revision",
+      source,
+      tmp_path / "captures/report.textproto",
+      trusted_key,
       revision,
-      "--signer",
+      before,
       signer,
-      "--key",
-      str(trusted_key),
   )
-  assert signed.returncode == 0, signed.stdout + signed.stderr
-  receipt = dump.with_name(f"{dump.name}.receipt.json")
 
   result = _finalize(
-      tree,
-      "--dump",
-      str(dump),
-      *_write_args(receipt, revision),
-      "--verified-date",
-      _since_date(tree),
+      tree, "--dump", str(capture), *_write_args(before, revision)
   )
 
   assert result.returncode == 0, result.stdout + result.stderr
@@ -712,40 +837,26 @@ def test_finalize_records_the_revision_and_signer_as_strings(
   assert live["captured_by"] == signer
   text = (tree / BINDING).read_text(encoding="utf-8")
   assert f"  verified_revision: {json.dumps(revision)}\n" in text
+  assert _validate(tree).returncode == 0
 
 
 @pytest.mark.parametrize(
-    "source, signed, refusal",
-    [
-        (
-            "fixture",
-            False,
-            f", but a write would refuse it: {NO_RECEIPT}; {NO_REVISION};"
-            f" {NO_REPORT_FIELD}; nothing written",
-        ),
-        (
-            "generated",
-            False,
-            f", but a write would refuse it: {NO_RECEIPT}; {NO_REVISION};"
-            " nothing written",
-        ),
-        ("generated", True, "; nothing written"),
-    ],
-    ids=["fixture", "generated-without-receipt", "generated-with-receipt"],
+    "source, arguments",
+    [("fixture", False), ("capture", False), ("capture", True)],
+    ids=["fixture", "capture-without-arguments", "capture-with-arguments"],
 )
 def test_finalize_check_prints_the_change_and_writes_nothing(
-    tree, dump, trusted_key, source, signed, refusal
+    tree, dump, before, receipt, source, arguments
 ):
   """`--check` previews the change, and says why a write would be refused.
 
-  It previews with a checked-in stand-in too, and needs no receipt; without
-  one, the preview shows placeholders for the values that a write records
-  from the receipt and `--revision`.
+  It previews with a checked-in stand-in too, which has no receipt, and needs
+  neither `--before` nor `--revision`; the preview shows placeholders for the
+  values that a write records from what is missing.
   """
   path = REMAPPED_DUMP if source == "fixture" else dump
-  receipt = _sign(tree, dump, trusted_key) if signed else None
-  date = _since_date(tree)
-  before = _snapshot(tree)
+  date = _today()
+  before_snapshot = _snapshot(tree)
 
   result = _finalize(
       tree,
@@ -754,38 +865,47 @@ def test_finalize_check_prints_the_change_and_writes_nothing(
       "--check",
       "--verified-date",
       date,
-      *(_write_args(receipt) if signed else []),
+      *(_write_args(before) if arguments else []),
   )
 
   assert result.returncode == 0, result.stdout + result.stderr
-  assert _snapshot(tree) == before
+  assert _snapshot(tree) == before_snapshot
   assert "ok: live report validated" in result.stdout
   assert f"--- a/{BINDING}\n+++ b/{BINDING}\n" in result.stdout
   assert "-  pending_live_sync:\n" in result.stdout
   assert f'+  verified_date: "{date}"\n' in result.stdout
-  digest = hashlib.sha256(path.read_bytes()).hexdigest()
-  recorded = {"verified_dump_sha256": digest}
-  if signed:
-    recorded |= {
-        "verified_revision": REVISION,
-        "capture_receipt_sha256": hashlib.sha256(
-            receipt.read_bytes()
-        ).hexdigest(),
-        "captured_by": SIGNER,
-    }
+  recorded = {
+      "verified_dump_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+      "verified_revision": REVISION if arguments else "<the --revision>",
+  }
+  if source == "fixture":
+    recorded["capture_receipt_sha256"] = (
+        "<the SHA-256 of the dump's capture receipt>"
+    )
+    recorded["captured_by"] = "<the signer of the dump's capture receipt>"
+    refusal = (
+        ", but a write would refuse it: cannot read the capture receipt"
+        f" {_receipt_path(path)}: No such file or directory; {NO_REVISION};"
+        f" {NO_BEFORE}; {NO_REPORT_FIELD}"
+    )
   else:
-    recorded |= {
-        "verified_revision": "<the --revision>",
-        "capture_receipt_sha256": "<the SHA-256 of the --receipt file>",
-        "captured_by": "<the signer of the --receipt>",
-    }
+    recorded["capture_receipt_sha256"] = hashlib.sha256(
+        receipt.read_bytes()
+    ).hexdigest()
+    recorded["captured_by"] = SIGNER
+    refusal = (
+        ""
+        if arguments
+        else f", but a write would refuse it: {NO_REVISION};" f" {NO_BEFORE}"
+    )
   # A record line that the `reopened` state already has is diff context.
   for key, value in recorded.items():
     line = re.escape(f"  {key}: {json.dumps(value)}")
     assert re.search(rf"(?m)^[+ ]{line}$", result.stdout), key
   assert (
       f"check: the live audit of {path} passed; {BINDING} would change as"
-      f" above{refusal}\n"
+      f" above, and {COMMITTED} and its signature would be written{refusal};"
+      " nothing written\n"
   ) in result.stdout
   assert "finalized:" not in result.stdout
 
@@ -800,19 +920,19 @@ def _stale_dump(tree):
 @pytest.mark.parametrize("check", [False, True], ids=["write", "check"])
 @pytest.mark.parametrize("source", ["stale", "missing"])
 def test_finalize_rejects_a_dump_that_fails_the_audit_and_writes_nothing(
-    tree, tmp_path, trusted_key, source, check
+    tree, tmp_path, before, trusted_key, source, check
 ):
   """A stale or unreadable dump leaves every file of the copy unchanged.
 
-  The stale dump identifies the live template and has a trusted receipt, but
-  one of its concepts keeps a generic name, so its audit fails. A missing
-  dump cannot be read at all.
+  The stale dump identifies the live template and is captured after the
+  write-back with a trusted receipt, but one of its concepts keeps a generic
+  name, so its audit fails. A missing dump cannot be read at all.
   """
-  path = tmp_path / "report.textproto"
-  receipt = tmp_path / "report.textproto.receipt.json"
+  path = tmp_path / "captures/report.textproto"
   if source == "stale":
-    path.write_text(_stale_dump(tree), encoding="utf-8")
-    receipt = _sign(tree, path, trusted_key)
+    stale = tmp_path / "live/stale.textproto"
+    stale.write_text(_stale_dump(tree), encoding="utf-8")
+    _captured(tree, stale, path, trusted_key, REVISION, before)
     expected = [
         "is not a qt_ column ID",
         f"not finalized: tools/validate_contracts.py exited 1 on {path};"
@@ -823,26 +943,26 @@ def test_finalize_rejects_a_dump_that_fails_the_audit_and_writes_nothing(
         f"not finalized: cannot read {path}: No such file or directory;"
         f" {BINDING} is unchanged"
     ]
-  before = _snapshot(tree)
+  before_snapshot = _snapshot(tree)
 
   result = _finalize(
       tree,
       "--dump",
       str(path),
-      *(["--check"] if check else _write_args(receipt)),
+      *(["--check"] if check else _write_args(before)),
   )
 
   assert result.returncode == 1
   for error in expected:
     assert error in result.stderr
-  assert _snapshot(tree) == before
+  assert _snapshot(tree) == before_snapshot
 
 
 @pytest.mark.parametrize(
     "snapshot_kind, replacement_kind, replaced",
     [
-        ("stale", "remapped", "after-identity-check"),
-        ("valid", "stale", "after-identity-check"),
+        ("stale", "remapped", "after-the-checks"),
+        ("valid", "stale", "after-the-checks"),
         ("valid", "remapped", "after-read"),
     ],
     ids=[
@@ -854,6 +974,7 @@ def test_finalize_rejects_a_dump_that_fails_the_audit_and_writes_nothing(
 def test_finalize_uses_only_the_snapshot_it_read_first(
     tree,
     tmp_path,
+    before,
     trusted_key,
     monkeypatch,
     snapshot_kind,
@@ -881,9 +1002,8 @@ def test_finalize_uses_only_the_snapshot_it_read_first(
   assert _audit(tree, REMAPPED_DUMP).returncode == 0
   path = tmp_path / "report.textproto"
   path.write_bytes(snapshot)
-  receipt = _receipt_for(path, trusted_key)
+  _receipt_for(tree, path, trusted_key, before)
   original = (tree / BINDING).read_bytes()
-  date = _since_date(tree)
   real_blockers, real_audit = finalize.write_blockers, finalize._audit
   real_finalize_snapshot = finalize._finalize_snapshot
   audited = []
@@ -901,15 +1021,13 @@ def test_finalize_uses_only_the_snapshot_it_read_first(
     audited.append((Path(audited_path), Path(audited_path).read_bytes()))
     return real_audit(audited_path)
 
-  if replaced == "after-identity-check":
+  if replaced == "after-the-checks":
     monkeypatch.setattr(finalize, "write_blockers", blockers_then_replace)
   else:
     monkeypatch.setattr(finalize, "_finalize_snapshot", replace_then_finalize)
   monkeypatch.setattr(finalize, "_audit", audit)
 
-  code = finalize.main(
-      ["--dump", str(path), *_write_args(receipt), "--verified-date", date]
-  )
+  code = finalize.main(["--dump", str(path), *_write_args(before)])
 
   assert path.read_bytes() == replacement
   assert audited
@@ -928,58 +1046,60 @@ def test_finalize_uses_only_the_snapshot_it_read_first(
     )
 
 
-@pytest.mark.parametrize("first", ["valid", "other-revision"])
-def test_finalize_uses_only_the_receipt_it_read_first(
-    tree, dump, trusted_key, monkeypatch, first
+@pytest.mark.parametrize(
+    "replaced",
+    ["receipt-valid-first", "receipt-other-revision-first", "before-export"],
+)
+def test_finalize_uses_only_the_captures_it_read_first(
+    tree, dump, before, trusted_key, monkeypatch, replaced
 ):
-  """The receipt and its signature are read once, like the dump.
+  """The receipts, signatures and `--before` export are read once, too.
 
-  Right after they are read, another receipt of the same dump, signed with
-  the trusted key, and its signature replace them. A valid receipt read first
-  is recorded by its own SHA-256; a receipt for another revision read first
-  is refused, although its replacement would pass.
+  Right after they are read, other files replace them. A valid receipt read
+  first is recorded by its own SHA-256 although another receipt of the same
+  dump, signed with the trusted key for another revision, replaces it; that
+  receipt read first is refused although the valid one replaces it; and the
+  `--before` export read first is the one the dump's receipt names, although
+  other bytes replace it.
   """
   finalize = _load_finalize(tree)
   digest = hashlib.sha256(dump.read_bytes()).hexdigest()
-  valid = _receipt_bytes(dump_sha256=digest)
-  other = _receipt_bytes(dump_sha256=digest, revision=EARLIER_REVISION)
+  valid = _receipt_bytes(tree, before, dump_sha256=digest)
+  other = _receipt_bytes(tree, before, dump_sha256=digest, revision="18300")
   read_first, replacement = (
-      (valid, other) if first == "valid" else (other, valid)
+      (other, valid)
+      if replaced == "receipt-other-revision-first"
+      else (valid, other)
   )
-  receipt = _write_receipt(
-      dump.with_name("report.receipt.json"), read_first, trusted_key
-  )
+  receipt = _write_receipt(_receipt_path(dump), read_first, trusted_key)
   replacement_signature = _ssh_sign(replacement, trusted_key)
   original = (tree / BINDING).read_bytes()
   real_finalize_snapshot = finalize._finalize_snapshot
 
   def replace_then_finalize(*args, **kwargs):
-    receipt.write_bytes(replacement)
-    receipt.with_name(f"{receipt.name}.sig").write_bytes(replacement_signature)
+    if replaced == "before-export":
+      before.write_bytes(_render_dump(tree).encode("utf-8"))
+    else:
+      receipt.write_bytes(replacement)
+      receipt.with_name(f"{receipt.name}.sig").write_bytes(
+          replacement_signature
+      )
     return real_finalize_snapshot(*args, **kwargs)
 
   monkeypatch.setattr(finalize, "_finalize_snapshot", replace_then_finalize)
 
-  code = finalize.main(
-      [
-          "--dump",
-          str(dump),
-          *_write_args(receipt),
-          "--verified-date",
-          _since_date(tree),
-      ]
-  )
+  code = finalize.main(["--dump", str(dump), *_write_args(before)])
 
-  assert receipt.read_bytes() == replacement
-  if first == "valid":
+  if replaced == "receipt-other-revision-first":
+    assert code == 1
+    assert (tree / BINDING).read_bytes() == original
+  else:
     assert code == 0
     assert (
         _live(tree)["capture_receipt_sha256"]
         == hashlib.sha256(valid).hexdigest()
     )
-  else:
-    assert code == 1
-    assert (tree / BINDING).read_bytes() == original
+    assert (tree / COMMITTED).read_bytes() == valid
 
 
 def _swap_id_and_name(text):
@@ -1066,61 +1186,53 @@ def _naming_the_report_in_another_field(text):
     ],
 )
 def test_finalize_refuses_a_reordered_or_audit_inert_stand_in(
-    tree, tmp_path, trusted_key, mutate
+    tree, tmp_path, before, trusted_key, mutate
 ):
   """No edit of a checked-in stand-in that keeps its fields finalizes.
 
   Each mutation of the remapped fixture, outside tests/fixtures, still passes
-  the live audit. The copy's tool will not sign a receipt for it, and even
-  with a receipt that the trusted key signed for its bytes, the write fails
-  because report_config.shareable.id does not name the report, even when
-  another field (an audit-inert note, or another `report_id` field) contains
-  the report ID; the binding stays byte-identical. `--check` still previews.
+  the live audit. The copy's capture tool will not capture it after the
+  write-back, and even with a receipt that the trusted key signed for its
+  bytes, the write fails because report_config.shareable.id does not name
+  the report, even when another field (an audit-inert note, or another
+  `report_id` field) contains the report ID; the binding stays
+  byte-identical. `--check` still previews.
   """
-  path = tmp_path / "elsewhere/report.textproto"
-  path.parent.mkdir()
-  path.write_text(
+  source = tmp_path / "live/stand_in.textproto"
+  source.write_text(
       mutate(REMAPPED_DUMP.read_text(encoding="utf-8")), encoding="utf-8"
   )
-  audit = _audit(tree, path)
+  audit = _audit(tree, source)
   assert audit.returncode == 0, audit.stderr
+  path = tmp_path / "elsewhere/report.textproto"
+  path.parent.mkdir()
   binding = (tree / BINDING).read_bytes()
-  before = _snapshot(tree)
+  before_snapshot = _snapshot(tree)
 
-  unsigned = _sign_tool(
-      tree,
-      "--dump",
-      str(path),
-      "--revision",
-      REVISION,
-      "--signer",
-      SIGNER,
-      "--key",
-      str(trusted_key),
-  )
-
-  assert unsigned.returncode == 1
-  assert f"ERROR: {NO_REPORT_FIELD}" in unsigned.stderr
-  assert sorted(path.parent.iterdir()) == [path]
-
-  receipt = _receipt_for(path, trusted_key)
-  refused = _finalize(tree, "--dump", str(path), *_write_args(receipt))
+  refused = _capture(tree, source, path, trusted_key, REVISION, before)
 
   assert refused.returncode == 1
-  assert f"not finalized: {NO_REPORT_FIELD}" in refused.stderr
-  assert f"{BINDING} is unchanged" in refused.stderr
-  assert "ok: live report validated" not in refused.stdout
+  assert f"ERROR: {NO_REPORT_FIELD}" in refused.stderr
+  assert list(path.parent.iterdir()) == []
+
+  shutil.copyfile(source, path)
+  _receipt_for(tree, path, trusted_key, before)
+  result = _finalize(tree, "--dump", str(path), *_write_args(before))
+
+  assert result.returncode == 1
+  assert f"not finalized: {NO_REPORT_FIELD}" in result.stderr
+  assert f"{BINDING} is unchanged" in result.stderr
+  assert "ok: live report validated" not in result.stdout
   assert (tree / BINDING).read_bytes() == binding
-  assert _snapshot(tree) == before
+  assert _snapshot(tree) == before_snapshot
 
   preview = _finalize(tree, "--dump", str(path), "--check")
 
   assert preview.returncode == 0, preview.stdout + preview.stderr
   assert (
-      f"a write would refuse it: {NO_RECEIPT}; {NO_REVISION};"
-      f" {NO_REPORT_FIELD}"
+      f"a write would refuse it: {NO_REVISION}; {NO_BEFORE}; {NO_REPORT_FIELD}"
   ) in preview.stdout
-  assert _snapshot(tree) == before
+  assert _snapshot(tree) == before_snapshot
 
 
 @pytest.mark.parametrize(
@@ -1195,7 +1307,7 @@ _DATASOURCE_FIELD = "report_config.report.datasource_id"
     ],
 )
 def test_finalize_refuses_a_dump_that_does_not_identify_the_live_template(
-    tree, tmp_path, trusted_key, variant, render, error
+    tree, tmp_path, before, trusted_key, variant, render, error
 ):
   """A write needs the exact report and data source IDs in their fields.
 
@@ -1206,19 +1318,19 @@ def test_finalize_refuses_a_dump_that_does_not_identify_the_live_template(
   """
   path = tmp_path / "report.textproto"
   path.write_text(_render_dump(tree, **render), encoding="utf-8")
-  receipt = _receipt_for(path, trusted_key)
-  before = _snapshot(tree)
+  _receipt_for(tree, path, trusted_key, before)
+  before_snapshot = _snapshot(tree)
 
-  result = _finalize(tree, "--dump", str(path), *_write_args(receipt))
+  result = _finalize(tree, "--dump", str(path), *_write_args(before))
 
   assert result.returncode == 1
   assert f"not finalized: {error}; {BINDING} is unchanged" in result.stderr
   assert "ok: live report validated" not in result.stdout
-  assert _snapshot(tree) == before
+  assert _snapshot(tree) == before_snapshot
 
 
 def test_finalize_refuses_a_stand_in_with_a_carriage_return_comment(
-    tree, tmp_path, trusted_key
+    tree, tmp_path, before, trusted_key
 ):
   """A standalone `\\r` after `#` cannot hide a missing report_id.
 
@@ -1236,10 +1348,10 @@ def test_finalize_refuses_a_stand_in_with_a_carriage_return_comment(
   )
   audit = _audit(tree, path)
   assert audit.returncode == 0, audit.stderr
-  receipt = _receipt_for(path, trusted_key)
-  before = _snapshot(tree)
+  _receipt_for(tree, path, trusted_key, before)
+  before_snapshot = _snapshot(tree)
 
-  refused = _finalize(tree, "--dump", str(path), *_write_args(receipt))
+  refused = _finalize(tree, "--dump", str(path), *_write_args(before))
 
   assert refused.returncode == 1
   assert (
@@ -1247,16 +1359,16 @@ def test_finalize_refuses_a_stand_in_with_a_carriage_return_comment(
       in refused.stderr
   )
   assert "ok: live report validated" not in refused.stdout
-  assert _snapshot(tree) == before
+  assert _snapshot(tree) == before_snapshot
 
 
 def test_finalize_fails_closed_when_the_dump_cannot_be_decoded_or_parsed(
-    tree, tmp_path, trusted_key, monkeypatch, capsys
+    tree, tmp_path, before, trusted_key, monkeypatch, capsys
 ):
   """Unreadable UTF-8 or broken textproto produces a write blocker."""
   finalize = _load_finalize(tree)
   binding = yaml.safe_load((tree / BINDING).read_text(encoding="utf-8"))
-  before = _snapshot(tree)
+  before_snapshot = _snapshot(tree)
 
   assert finalize.dump_identity_errors("report_config {\n", binding) == [
       "cannot read the dump as protobuf text format: unterminated message:"
@@ -1289,38 +1401,39 @@ def test_finalize_fails_closed_when_the_dump_cannot_be_decoded_or_parsed(
   ]:
     path = tmp_path / name
     path.write_bytes(payload)
-    receipt = _receipt_for(path, trusted_key)
-    code = finalize.main(["--dump", str(path), *_write_args(receipt)])
+    _receipt_for(tree, path, trusted_key, before)
+    code = finalize.main(["--dump", str(path), *_write_args(before)])
     assert code == 1
     stderr = capsys.readouterr().err
     assert expected in stderr
     assert f"{BINDING} is unchanged" in stderr
-    assert _snapshot(tree) == before
+    assert _snapshot(tree) == before_snapshot
 
 
 @pytest.mark.parametrize(
     "line_ending", ["\n", "\r\n", "\r"], ids=["lf", "crlf", "cr"]
 )
 def test_finalize_accepts_a_valid_dump_with_any_universal_newline_ending(
-    tree, tmp_path, trusted_key, line_ending
+    tree, tmp_path, before, trusted_key, line_ending
 ):
-  """A genuine dump with LF, CRLF or CR line endings (and `#` comments) finalizes."""
+  """A capture with LF, CRLF or CR line endings and `#` comments finalizes."""
   text = _render_dump(
       tree, extra_lines=["capture_metadata { # comment before brace", "  }"]
   ).replace("\n", line_ending)
-  path = tmp_path / "universal.textproto"
+  source = tmp_path / "live/universal.textproto"
   data = text.encode("utf-8")
-  path.write_bytes(data)
-  receipt = _sign(tree, path, trusted_key)
-
-  result = _finalize(
+  source.write_bytes(data)
+  path = _captured(
       tree,
-      "--dump",
-      str(path),
-      *_write_args(receipt),
-      "--verified-date",
-      _since_date(tree),
+      source,
+      tmp_path / "captures/universal.textproto",
+      trusted_key,
+      REVISION,
+      before,
   )
+  assert path.read_bytes() == data
+
+  result = _finalize(tree, "--dump", str(path), *_write_args(before))
 
   assert result.returncode == 0, result.stdout + result.stderr
   assert _live(tree)["verified_dump_sha256"] == hashlib.sha256(data).hexdigest()
@@ -1329,9 +1442,9 @@ def test_finalize_accepts_a_valid_dump_with_any_universal_newline_ending(
 @pytest.mark.parametrize(
     "args, error",
     [
-        ([], NEEDS_RECEIPT),
-        (["--revision", REVISION], NEEDS_RECEIPT),
-        (["--receipt", "report.textproto.receipt.json"], NEEDS_RECEIPT),
+        ([], NEEDS_BEFORE),
+        (["--revision", REVISION], NEEDS_BEFORE),
+        (["--before", "before.textproto"], NEEDS_BEFORE),
         (
             [
                 "--captured-from",
@@ -1341,90 +1454,86 @@ def test_finalize_accepts_a_valid_dump_with_any_universal_newline_ending(
             "unrecognized arguments: --captured-from",
         ),
         (
-            ["--receipt", "receipt.json", "--revision", "two words"],
+            [
+                "--receipt",
+                "report.textproto.receipt.json",
+                "--before",
+                "before.textproto",
+                "--revision",
+                REVISION,
+            ],
+            "unrecognized arguments: --receipt",
+        ),
+        (
+            ["--before", "before.textproto", "--revision", "two words"],
             "'two words' is not a revision",
         ),
         (
-            ["--receipt", "receipt.json", "--revision", "r" * 129],
+            ["--before", "before.textproto", "--revision", "r" * 129],
             "is not a revision",
         ),
     ],
     ids=[
         "nothing",
         "revision-only",
-        "receipt-only",
+        "before-only",
         "attestation-only",
+        "receipt-option",
         "revision-with-a-space",
         "revision-too-long",
     ],
 )
-def test_finalize_write_needs_a_receipt_and_a_revision(tree, dump, args, error):
-  """A write without a receipt and a revision is a usage error.
+def test_finalize_write_needs_a_before_capture_and_a_revision(
+    tree, dump, args, error
+):
+  """A write without `--before` and `--revision` is a usage error.
 
   A free-text `--captured-from` attestation, which round 6 took as evidence,
-  is no longer an option at all.
+  is no option at all, and the dump's receipt is found next to it, not given.
   """
-  before = _snapshot(tree)
+  before_snapshot = _snapshot(tree)
 
   result = _finalize(tree, "--dump", str(dump), *args)
 
   assert result.returncode == 2
   assert error in result.stderr
-  assert _snapshot(tree) == before
+  assert _snapshot(tree) == before_snapshot
 
 
 def test_finalize_refuses_to_record_a_checked_in_fixture(
-    tree, dump, trusted_key
+    tree, dump, before, trusted_key
 ):
   """A dump among the repository's test fixtures is not the live template.
 
   The path alone refuses a write, whatever the content and even with a
-  trusted receipt of its bytes; the copy's tool does not sign one for it,
-  and `--check` may still preview the change with it.
+  trusted receipt of its bytes; `--check` may still preview the change with
+  it.
   """
   stand_in = tree.parents[1] / "tests/fixtures/stand_in.textproto"
   stand_in.parent.mkdir(parents=True)
   shutil.copyfile(dump, stand_in)
-  before = _snapshot(tree)
+  _receipt_for(tree, stand_in, trusted_key, before)
+  before_snapshot = _snapshot(tree)
 
-  unsigned = _sign_tool(
-      tree,
-      "--dump",
-      str(stand_in),
-      "--revision",
-      REVISION,
-      "--signer",
-      SIGNER,
-      "--key",
-      str(trusted_key),
-  )
-
-  assert unsigned.returncode == 1
-  assert f"ERROR: {stand_in} is a test fixture of this repository" in (
-      unsigned.stderr
-  )
-  assert sorted(stand_in.parent.iterdir()) == [stand_in]
-
-  receipt = _receipt_for(dump, trusted_key)
-  refused = _finalize(tree, "--dump", str(stand_in), *_write_args(receipt))
+  refused = _finalize(tree, "--dump", str(stand_in), *_write_args(before))
 
   assert refused.returncode == 1
   assert (
       f"not finalized: {stand_in} is a test fixture of this repository;"
       f" {BINDING} is unchanged"
   ) in refused.stderr
-  assert _snapshot(tree) == before
+  assert _snapshot(tree) == before_snapshot
 
   preview = _finalize(tree, "--dump", str(stand_in), "--check")
 
   assert preview.returncode == 0, preview.stdout + preview.stderr
   assert "-  pending_live_sync:\n" in preview.stdout
   assert f"{stand_in} is a test fixture of this repository" in preview.stdout
-  assert _snapshot(tree) == before
+  assert _snapshot(tree) == before_snapshot
 
 
 def test_finalize_refuses_a_fixture_on_a_case_insensitive_filesystem(
-    tree, dump, trusted_key, monkeypatch, capsys
+    tree, dump, before, trusted_key, monkeypatch, capsys
 ):
   """A case-variant path into tests/fixtures is still refused by samestat."""
   finalize = _load_finalize(tree)
@@ -1432,10 +1541,10 @@ def test_finalize_refuses_a_fixture_on_a_case_insensitive_filesystem(
   stand_in = fixtures / "stand_in.textproto"
   stand_in.parent.mkdir(parents=True, exist_ok=True)
   shutil.copyfile(dump, stand_in)
-  receipt = _receipt_for(dump, trusted_key)
+  _receipt_for(tree, stand_in, trusted_key, before)
   upper = tree.parents[1] / "TESTS/FIXTURES/stand_in.textproto"
   assert not upper.is_relative_to(fixtures)
-  before = _snapshot(tree)
+  before_snapshot = _snapshot(tree)
   real_resolve = Path.resolve
   real_stat = Path.stat
   real_read_bytes = Path.read_bytes
@@ -1464,50 +1573,34 @@ def test_finalize_refuses_a_fixture_on_a_case_insensitive_filesystem(
   monkeypatch.setattr(Path, "stat", fake_stat)
   monkeypatch.setattr(Path, "read_bytes", fake_read_bytes)
 
-  code = finalize.main(["--dump", str(upper), *_write_args(receipt)])
+  code = finalize.main(["--dump", str(upper), *_write_args(before)])
 
   assert code == 1
   stderr = capsys.readouterr().err
   assert f"{upper} is a test fixture of this repository" in stderr
   assert f"{BINDING} is unchanged" in stderr
   stand_in.unlink()
-  assert _snapshot(tree) == before
+  assert _snapshot(tree) == before_snapshot
 
 
 @pytest.fixture
-def offline_preview(tmp_path):
-  """An offline preview that apply_bqca_rename_map.py writes.
+def offline_preview(tmp_path, before):
+  """The offline preview that apply_bqca_rename_map.py writes for `before`.
 
-  The pre-sync dump is the sanitized cut with a `report_config.shareable`
-  entry that names the report, as an export of the live template would. So
-  the preview identifies the live template and passes the live audit: only
-  where it came from tells it apart from a dump of the synced template.
+  `before` is the pre-sync export, which names its report as one does, so the
+  preview identifies the live template and passes the live audit; its parsed
+  content is what a capture after a faithful write-back would have, unless a
+  field of the live report changed.
   """
   work = tmp_path / "offline"
   work.mkdir()
-  pre_sync = work / "pre_sync.textproto"
-  pre_sync.write_text(
-      GENERIC_DUMP.read_text(encoding="utf-8").replace(
-          "report_config {\n",
-          "report_config {\n"
-          "  shareable {\n"
-          f'    id: "{REPORT_ID}"\n'
-          '    name: "BQCA - Prompt & Response Logging"\n'
-          "  }\n",
-          1,
-      ),
-      encoding="utf-8",
-  )
   preview = work / "preview.textproto"
-  applied = _apply("--dump", str(pre_sync), "--out", str(preview))
+  applied = _apply("--dump", str(before), "--out", str(preview))
   assert applied.returncode == 0, applied.stdout + applied.stderr
   marker = _load_apply(DASHBOARD).OFFLINE_PREVIEW_MARKER
   assert preview.read_text(encoding="utf-8").startswith(f"{marker}\n")
   # The applier writes the preview and nothing else: no receipt, no signature.
-  assert sorted(path.name for path in work.iterdir()) == [
-      "pre_sync.textproto",
-      "preview.textproto",
-  ]
+  assert [path.name for path in work.iterdir()] == ["preview.textproto"]
   return preview
 
 
@@ -1545,7 +1638,7 @@ def test_finalize_refuses_an_offline_preview_with_only_an_attestation(
   a case-sensitive marker comment, as evidence of a live capture: changing
   the marker's case or deleting it, with an attestation that named the
   report, finalized the offline preview. Each variant passes the live audit;
-  a write now needs a signed receipt, and the attestation is no option.
+  a write now needs two trusted captures, and the attestation is no option.
   """
   candidate = _offline_variant(offline_preview, variant, tmp_path)
   audit = _audit(tree, candidate)
@@ -1582,6 +1675,7 @@ def test_finalize_refuses_an_offline_preview_with_a_forged_receipt(
     tree,
     tmp_path,
     offline_preview,
+    before,
     dump,
     receipt,
     untrusted_key,
@@ -1591,16 +1685,24 @@ def test_finalize_refuses_an_offline_preview_with_a_forged_receipt(
 ):
   """No receipt that the offline path can make finalizes an offline preview.
 
-  Each forged receipt is for the variant's exact bytes, the binding's report
-  and REVISION. Without the trusted key's signature over exactly those
-  bytes, the write fails, whatever the marker says, and the binding stays
-  byte-identical.
+  Each forged receipt is for the variant's exact bytes and names `before`.
+  Without the trusted key's signature over exactly those bytes the write
+  fails, and whatever the receipt, the variant has the parsed content of the
+  offline preview of `before`; the binding stays byte-identical.
   """
   candidate = _offline_variant(offline_preview, variant, tmp_path)
   digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
-  forged = candidate.with_name(f"{candidate.name}.receipt.json")
-  data = _receipt_bytes(dump_sha256=digest)
-  if forgery == "unsigned":
+  forged = _receipt_path(candidate)
+  data = _receipt_bytes(tree, before, dump_sha256=digest)
+  invalid = (
+      f"the receipt's signature is not a valid {NAMESPACE} signature of the"
+      " receipt:"
+  )
+  if forgery == "no-receipt":
+    error = (
+        f"cannot read the capture receipt {forged}: No such file or directory"
+    )
+  elif forgery == "unsigned":
     _write_receipt(forged, data)
     error = (
         f"cannot read the receipt's signature {forged}.sig: No such file or"
@@ -1611,13 +1713,10 @@ def test_finalize_refuses_an_offline_preview_with_a_forged_receipt(
     error = UNTRUSTED
   elif forgery == "other-namespace":
     _write_receipt(forged, data, trusted_key, namespace="file")
-    error = (
-        f"the receipt's signature is not a valid {NAMESPACE} signature of the"
-        " receipt:"
-    )
-  elif forgery == "trusted-signature-of-another-receipt":
-    # The genuine receipt of the rendered dump, edited to name the preview,
-    # keeps the genuine signature, which is not a signature of the edit.
+    error = invalid
+  else:
+    # The genuine receipt of `dump`, edited to name the preview, keeps the
+    # genuine signature, which is not a signature of the edit.
     genuine = receipt.read_bytes()
     _write_receipt(
         forged,
@@ -1627,107 +1726,111 @@ def test_finalize_refuses_an_offline_preview_with_a_forged_receipt(
         ),
     )
     shutil.copyfile(f"{receipt}.sig", f"{forged}.sig")
-    error = (
-        f"the receipt's signature is not a valid {NAMESPACE} signature of the"
-        " receipt:"
-    )
+    error = invalid
   original = (tree / BINDING).read_bytes()
-  args = (
-      ["--revision", REVISION]
-      if forgery == "no-receipt"
-      else _write_args(forged)
+
+  result = _finalize(tree, "--dump", str(candidate), *_write_args(before))
+
+  assert result.returncode == 1
+  assert result.stderr.startswith("not finalized: ")
+  assert error in result.stderr
+  assert f"{candidate} {PREVIEW_CONTENT}" in result.stderr
+  assert (f"{candidate} {OFFLINE_PREVIEW}" in result.stderr) == (
+      variant in _MARKED
   )
-
-  result = _finalize(tree, "--dump", str(candidate), *args)
-
-  if forgery == "no-receipt":
-    assert result.returncode == 2
-    assert NEEDS_RECEIPT in result.stderr
-  else:
-    assert result.returncode == 1
-    assert result.stderr.startswith("not finalized: ")
-    assert error in result.stderr
-    assert (f"{candidate} {OFFLINE_PREVIEW}" in result.stderr) == (
-        variant in _MARKED
-    )
-    assert "ok: live report validated" not in result.stdout
+  assert "ok: live report validated" not in result.stdout
   assert (tree / BINDING).read_bytes() == original
 
 
-@pytest.mark.parametrize("variant", _MARKED)
-def test_finalize_refuses_a_marked_offline_preview_even_with_a_trusted_receipt(
-    tree, tmp_path, offline_preview, trusted_key, variant
+@pytest.mark.parametrize("variant", _OFFLINE_VARIANTS)
+def test_finalize_refuses_an_offline_preview_even_with_a_trusted_receipt(
+    tree, tmp_path, offline_preview, before, trusted_key, variant
 ):
-  """The marker, in any case, spacing or place, refuses even a signed receipt.
+  """Round 7: a trusted receipt of the preview, marker or none, is refused.
 
-  The receipt is what a write requires; the marker is a tripwire on top, so a
-  listed signer who signs a receipt for a marked preview by mistake (the
-  copy's tool refuses to) still cannot finalize it.
+  Round 7 finalized the preview with its marker line removed, given a
+  receipt that a listed key signed for it. Now the receipt is trusted and
+  names `before`, and still the variant has the parsed content of the
+  offline preview of `before`, comments and spacing aside, so the write
+  fails; a variant that keeps the marker in any case, spacing or place is
+  refused for it too.
   """
   candidate = _offline_variant(offline_preview, variant, tmp_path)
-  receipt = _receipt_for(candidate, trusted_key)
+  _receipt_for(tree, candidate, trusted_key, before)
   original = (tree / BINDING).read_bytes()
 
-  result = _finalize(tree, "--dump", str(candidate), *_write_args(receipt))
+  result = _finalize(tree, "--dump", str(candidate), *_write_args(before))
 
   assert result.returncode == 1
-  assert (
-      f"not finalized: {candidate} {OFFLINE_PREVIEW}; {BINDING} is unchanged"
-  ) in result.stderr
-  assert (tree / BINDING).read_bytes() == original
-
-
-@pytest.mark.parametrize("variant", _MARKED)
-def test_sign_refuses_an_offline_preview(
-    tree, tmp_path, offline_preview, trusted_key, variant
-):
-  """The copy's tool signs no receipt for an offline preview with its marker."""
-  candidate = _offline_variant(offline_preview, variant, tmp_path)
-
-  result = _sign_tool(
-      tree,
-      "--dump",
-      str(candidate),
-      "--revision",
-      REVISION,
-      "--signer",
-      SIGNER,
-      "--key",
-      str(trusted_key),
+  assert f"{candidate} {PREVIEW_CONTENT}" in result.stderr
+  assert (f"{candidate} {OFFLINE_PREVIEW}" in result.stderr) == (
+      variant in _MARKED
   )
+  assert f"{BINDING} is unchanged" in result.stderr
+  assert (tree / BINDING).read_bytes() == original
+  assert PENDING in _live(tree)
+
+
+@pytest.mark.parametrize("variant", _OFFLINE_VARIANTS)
+def test_capture_refuses_an_offline_preview(
+    tree, tmp_path, offline_preview, before, trusted_key, variant
+):
+  """The capture tool signs no receipt of the preview, marker or none.
+
+  Round 7's signing tool signed any local file; with the marker line
+  removed, it signed the preview. The capture tool only signs what an export
+  command prints, and with `--before`, it compares that with the offline
+  preview of `before`: even an "export command" that prints the stripped
+  preview gets no receipt.
+  """
+  candidate = _offline_variant(offline_preview, variant, tmp_path)
+  out = tmp_path / "captures/report.textproto"
+
+  result = _capture(tree, candidate, out, trusted_key, REVISION, before)
 
   assert result.returncode == 1
-  assert f"ERROR: {candidate} {OFFLINE_PREVIEW}\n" in result.stderr
-  assert result.stderr.endswith("not signed: nothing written\n")
-  assert not candidate.with_name(f"{candidate.name}.receipt.json").exists()
-  assert not candidate.with_name(f"{candidate.name}.receipt.json.sig").exists()
+  assert f"ERROR: {out} {PREVIEW_CONTENT}" in result.stderr
+  assert (f"ERROR: {out} {OFFLINE_PREVIEW}" in result.stderr) == (
+      variant in _MARKED
+  )
+  assert result.stderr.endswith("not captured: nothing written\n")
+  assert sorted(path.name for path in out.parent.iterdir()) == [
+      "before.textproto",
+      "before.textproto.receipt.json",
+      "before.textproto.receipt.json.sig",
+  ]
 
 
 @pytest.mark.parametrize("variant", _OFFLINE_VARIANTS)
 def test_finalize_check_previews_an_offline_preview_and_lists_what_is_missing(
-    tree, tmp_path, offline_preview, variant
+    tree, tmp_path, offline_preview, before, variant
 ):
-  """`--check` previews an offline preview and says what a write needs."""
+  """`--check` previews an offline preview and says why a write refuses it."""
   candidate = _offline_variant(offline_preview, variant, tmp_path)
-  before = _snapshot(tree)
+  before_snapshot = _snapshot(tree)
 
-  checked = _finalize(tree, "--dump", str(candidate), "--check")
+  checked = _finalize(
+      tree, "--dump", str(candidate), "--check", *_write_args(before)
+  )
 
   assert checked.returncode == 0, checked.stdout + checked.stderr
   assert "ok: live report validated" in checked.stdout
   assert "-  pending_live_sync:\n" in checked.stdout
-  reasons = [NO_RECEIPT, NO_REVISION]
+  reasons = [
+      f"cannot read the capture receipt {_receipt_path(candidate)}: No such"
+      " file or directory"
+  ]
+  reasons.append(f"{candidate} {PREVIEW_CONTENT} {before}")
   if variant in _MARKED:
     reasons.append(f"{candidate} {OFFLINE_PREVIEW}")
-  assert (
-      f"a write would refuse it: {'; '.join(reasons)}; nothing written\n"
-      in checked.stdout
-  )
-  assert _snapshot(tree) == before
+  for reason in reasons:
+    assert reason in checked.stdout
+  assert checked.stdout.endswith("; nothing written\n")
+  assert _snapshot(tree) == before_snapshot
 
 
 def test_finalize_refuses_the_marker_anywhere_in_a_dump(
-    tree, tmp_path, trusted_key
+    tree, tmp_path, before, trusted_key
 ):
   """A dump that carries the marker in a string literal is refused too."""
   marker = _load_apply(DASHBOARD).OFFLINE_PREVIEW_MARKER
@@ -1736,64 +1839,229 @@ def test_finalize_refuses_the_marker_anywhere_in_a_dump(
       _render_dump(tree, extra_lines=[f"capture_note: {json.dumps(marker)}"]),
       encoding="utf-8",
   )
-  receipt = _receipt_for(path, trusted_key)
+  _receipt_for(tree, path, trusted_key, before)
   original = (tree / BINDING).read_bytes()
 
-  result = _finalize(tree, "--dump", str(path), *_write_args(receipt))
+  result = _finalize(tree, "--dump", str(path), *_write_args(before))
 
   assert result.returncode == 1
   assert f"not finalized: {path} {OFFLINE_PREVIEW}" in result.stderr
   assert (tree / BINDING).read_bytes() == original
 
 
-@pytest.mark.parametrize("mismatch", ["report", "revision", "dump"])
-def test_finalize_refuses_a_receipt_for_another_report_revision_or_dump(
-    tree, tmp_path, dump, trusted_key, mismatch
+def test_a_listed_signer_who_edits_a_field_of_the_preview_is_the_trust_boundary(
+    tree, tmp_path, offline_preview, before, trusted_key
 ):
-  """A trusted receipt binds the report, the revision and the dump's bytes.
+  """What no check can refuse: a listed signer capturing an edited preview.
+
+  An "export command" that prints the preview with its marker removed and
+  one audit-inert field added gives content that is no longer the preview's,
+  so the capture is signed and finalized. Only the signer's honesty and the
+  review of the committed receipt (which names the signer) gate this path;
+  docs/dashboard-implementation.md says so.
+  """
+  edited = tmp_path / "edited.textproto"
+  text = offline_preview.read_text(encoding="utf-8").split("\n", 1)[1]
+  assert text.count("report_config {\n") == 1
+  edited.write_text(
+      text.replace("report_config {\n", 'report_config {\n  note: "x"\n'),
+      encoding="utf-8",
+  )
+  capture = _captured(
+      tree,
+      edited,
+      tmp_path / "captures/report.textproto",
+      trusted_key,
+      REVISION,
+      before,
+  )
+
+  result = _finalize(tree, "--dump", str(capture), *_write_args(before))
+
+  assert result.returncode == 0, result.stdout + result.stderr
+  assert _live(tree)["captured_by"] == SIGNER
+  assert _validate(tree).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        "report",
+        "revision",
+        "dump",
+        "other-sync",
+        "other-contracts",
+        "before-revision",
+        "before-dump",
+        "same-revision-as-before",
+    ],
+)
+def test_finalize_refuses_a_receipt_for_another_report_revision_dump_or_sync(
+    tree, tmp_path, dump, before, trusted_key, mismatch
+):
+  """A trusted receipt binds report, revision, dump, sync and earlier capture.
 
   Each receipt is signed with the trusted key, so only the mismatch refuses
-  it: one for another report, one that the copy's tool signed for another
-  revision of this dump, and one that it signed for another dump.
+  it: one for another report; one that the copy's tool captured for another
+  revision; one it captured for another dump; one for another pending sync
+  or other pinned contracts; one that names another revision or export as
+  the capture before the write-back; and one of the same revision as that
+  capture.
   """
   digest = hashlib.sha256(dump.read_bytes()).hexdigest()
+  live = _live(tree)
   if mismatch == "report":
     other = "00000000-0000-4000-8000-000000000559"
-    receipt = _receipt_for(dump, trusted_key, report_id=other)
+    _receipt_for(tree, dump, trusted_key, before, report_id=other)
     error = f"the receipt is for report '{other}', not '{REPORT_ID}'"
   elif mismatch == "revision":
-    receipt = _sign(tree, dump, trusted_key, EARLIER_REVISION)
-    error = (
-        f"the receipt is for revision '{EARLIER_REVISION}', not --revision"
-        f" '{REVISION}'"
+    source = tmp_path / "live/after.textproto"
+    other = _captured(
+        tree, source, tmp_path / "other.textproto", trusted_key, "18305", before
     )
-  else:
-    other_dump = tmp_path / "other.textproto"
-    other_dump.write_text(_stale_dump(tree), encoding="utf-8")
-    receipt = _sign(tree, other_dump, trusted_key)
+    for suffix in (".receipt.json", ".receipt.json.sig"):
+      shutil.copyfile(f"{other}{suffix}", f"{dump}{suffix}")
+    error = f"the receipt is for revision '18305', not --revision '{REVISION}'"
+  elif mismatch == "dump":
+    stale = tmp_path / "live/stale.textproto"
+    stale.write_text(_stale_dump(tree), encoding="utf-8")
+    other = _captured(
+        tree, stale, tmp_path / "other.textproto", trusted_key, REVISION, before
+    )
+    for suffix in (".receipt.json", ".receipt.json.sig"):
+      shutil.copyfile(f"{other}{suffix}", f"{dump}{suffix}")
     error = (
         "the receipt is for a dump with sha256"
-        f" {hashlib.sha256(other_dump.read_bytes()).hexdigest()}, not this"
-        f" dump, whose sha256 is {digest}"
+        f" {hashlib.sha256(other.read_bytes()).hexdigest()}, not this dump,"
+        f" whose sha256 is {digest}"
     )
-  before = _snapshot(tree)
+  elif mismatch == "other-sync":
+    _receipt_for(
+        tree, dump, trusted_key, before, pending_since_date="2026-10-30"
+    )
+    error = (
+        "the receipt is for the live sync pending since 2026-10-30, not the"
+        f" one pending since {_since_date(tree)}"
+    )
+  elif mismatch == "other-contracts":
+    _receipt_for(tree, dump, trusted_key, before, manifest_sha256="a" * 64)
+    error = (
+        f"the receipt is for manifest_sha256 {'a' * 64}, not the pinned"
+        f" {live['manifest_sha256']}"
+    )
+  elif mismatch == "before-revision":
+    _receipt_for(tree, dump, trusted_key, before, before_revision="18300")
+    error = (
+        "the receipt names the capture before the write-back of revision"
+        f" '18300', not that of --before, '{BEFORE_REVISION}'"
+    )
+  elif mismatch == "before-dump":
+    _receipt_for(tree, dump, trusted_key, before, before_dump_sha256="b" * 64)
+    error = (
+        "the receipt names the capture before the write-back with sha256"
+        f" {'b' * 64}, not --before, whose sha256 is"
+        f" {hashlib.sha256(before.read_bytes()).hexdigest()}"
+    )
+  else:
+    _receipt_for(tree, dump, trusted_key, before, revision=BEFORE_REVISION)
+    error = (
+        f"the dump and --before are both of revision '{BEFORE_REVISION}': the"
+        " live report has no new revision after the write-back"
+    )
+  revision = (
+      BEFORE_REVISION if mismatch == "same-revision-as-before" else REVISION
+  )
+  before_snapshot = _snapshot(tree)
 
-  refused = _finalize(tree, "--dump", str(dump), *_write_args(receipt))
+  refused = _finalize(tree, "--dump", str(dump), *_write_args(before, revision))
 
   assert refused.returncode == 1
-  assert f"not finalized: {error}; {BINDING} is unchanged" in refused.stderr
+  assert error in refused.stderr
+  assert f"{BINDING} is unchanged" in refused.stderr
   assert "ok: live report validated" not in refused.stdout
-  assert _snapshot(tree) == before
+  assert _snapshot(tree) == before_snapshot
 
   preview = _finalize(
-      tree, "--dump", str(dump), "--check", *_write_args(receipt)
+      tree, "--dump", str(dump), "--check", *_write_args(before, revision)
   )
 
   assert preview.returncode == 0, preview.stdout + preview.stderr
-  assert f"a write would refuse it: {error}; nothing written\n" in (
-      preview.stdout
+  assert error in preview.stdout
+  assert _snapshot(tree) == before_snapshot
+
+
+def _write_capture_receipts(tree, dump, before, key, before_at, dump_at):
+  """Sign both receipts by hand, at the given `signed_at` times."""
+  _write_receipt(
+      _receipt_path(before),
+      _receipt_bytes(
+          tree,
+          revision=BEFORE_REVISION,
+          dump_sha256=hashlib.sha256(before.read_bytes()).hexdigest(),
+          signed_at=before_at,
+      ),
+      key,
   )
-  assert _snapshot(tree) == before
+  _receipt_for(tree, dump, key, before, signed_at=dump_at)
+
+
+@pytest.mark.parametrize(
+    "signed_at, error",
+    [
+        (
+            "2026-10-28T23:59:59Z",
+            "the receipt was signed at 2026-10-28T23:59:59Z, before the live"
+            " sync it is for began on 2026-10-29",
+        ),
+        (
+            "2999-01-01T00:00:00Z",
+            "the receipt was signed at 2999-01-01T00:00:00Z, which is in the"
+            " future",
+        ),
+        ("an hour from now", "which is in the future"),
+        ("2026-10-29T00:00:00Z", None),
+    ],
+    ids=["before-the-sync-began", "far-future", "an-hour-ahead", "on-the-day"],
+)
+def test_finalize_refuses_a_stale_or_future_receipt(
+    tree, dump, before, trusted_key, signed_at, error
+):
+  """A receipt counts only if signed on or after the day its sync began.
+
+  Round 7 checked only the format of `signed_at`, so a receipt signed before
+  the pending sync began, or dated in the future, finalized it. The day the
+  sync began is inclusive; a receipt more than a few minutes ahead of the
+  clock is refused. Both receipts are signed by hand, the one before the
+  write-back no later than the dump's.
+  """
+  assert _since_date(tree) == SINCE_DATE
+  if signed_at == "an hour from now":
+    signed_at = (
+        datetime.datetime.now(datetime.timezone.utc)
+        + datetime.timedelta(hours=1)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+  before_at = min(signed_at, "2026-10-29T00:00:00Z")
+  _write_capture_receipts(tree, dump, before, trusted_key, before_at, signed_at)
+  before_snapshot = _snapshot(tree)
+  args = ["--dump", str(dump), *_write_args(before)]
+  args += ["--verified-date", _today()]
+
+  result = _finalize(tree, *args)
+
+  if error is None:
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert PENDING not in _live(tree)
+    return
+  assert result.returncode == 1
+  assert error in result.stderr
+  assert _snapshot(tree) == before_snapshot
+  assert PENDING in _live(tree)
+
+  preview = _finalize(tree, *args, "--check")
+
+  assert preview.returncode == 0, preview.stdout + preview.stderr
+  assert error in preview.stdout
+  assert _snapshot(tree) == before_snapshot
 
 
 def _without_signers(tree):
@@ -1812,12 +2080,15 @@ def _without_signers(tree):
         "other-namespace",
         "edited-after-signing",
         "no-signer-listed",
+        "before-untrusted",
+        "before-is-after-a-write-back",
+        "dump-is-before-a-write-back",
     ],
 )
 def test_finalize_refuses_a_receipt_it_cannot_trust(
-    tree, dump, receipt, trusted_key, untrusted_key, problem
+    tree, dump, before, receipt, trusted_key, untrusted_key, problem
 ):
-  """A write needs a receipt that a key listed for its signer signed."""
+  """A write needs receipts that keys listed for their signers signed."""
   signature = receipt.with_name(f"{receipt.name}.sig")
   digest = hashlib.sha256(dump.read_bytes()).hexdigest()
   invalid = (
@@ -1825,7 +2096,8 @@ def test_finalize_refuses_a_receipt_it_cannot_trust(
       " receipt:"
   )
   if problem == "missing-receipt":
-    receipt = receipt.with_name("missing.receipt.json")
+    signature.unlink()
+    receipt.unlink()
     error = (
         f"cannot read the capture receipt {receipt}: No such file or directory"
     )
@@ -1839,21 +2111,20 @@ def test_finalize_refuses_a_receipt_it_cannot_trust(
     signature.write_bytes(b"not a signature\n")
     error = invalid
   elif problem == "untrusted-key":
-    _write_receipt(receipt, _receipt_bytes(dump_sha256=digest), untrusted_key)
+    _receipt_for(tree, dump, untrusted_key, before)
     error = UNTRUSTED
   elif problem == "another-signer":
-    _write_receipt(
-        receipt,
-        _receipt_bytes(dump_sha256=digest, signer="another-signer"),
-        trusted_key,
-    )
+    _receipt_for(tree, dump, trusted_key, before, signer="another-signer")
     error = (
         f"the receipt is not signed by a key that {SIGNERS} lists for its"
         " signer 'another-signer'"
     )
   elif problem == "other-namespace":
     _write_receipt(
-        receipt, _receipt_bytes(dump_sha256=digest), trusted_key, "file"
+        receipt,
+        _receipt_bytes(tree, before, dump_sha256=digest),
+        trusted_key,
+        "file",
     )
     error = invalid
   elif problem == "edited-after-signing":
@@ -1862,98 +2133,159 @@ def test_finalize_refuses_a_receipt_it_cannot_trust(
         json.dumps(json.loads(receipt.read_bytes())).encode() + b"\n"
     )
     error = invalid
-  else:
+  elif problem == "no-signer-listed":
     _without_signers(tree)
     error = f"{SIGNERS} lists no signer, so it trusts no receipt"
-  before = _snapshot(tree)
+  elif problem == "before-untrusted":
+    _write_receipt(
+        _receipt_path(before),
+        _receipt_bytes(
+            tree,
+            revision=BEFORE_REVISION,
+            dump_sha256=hashlib.sha256(before.read_bytes()).hexdigest(),
+        ),
+        untrusted_key,
+    )
+    error = UNTRUSTED
+  elif problem == "dump-is-before-a-write-back":
+    # The dump's receipt names no capture before it.
+    _receipt_for(tree, dump, trusted_key, None)
+    error = (
+        "the receipt is of a capture taken before the write-back (it names no"
+        " capture before it), not after it"
+    )
+  else:
+    # The receipt of `before` claims a capture taken after a write-back.
+    _write_receipt(
+        _receipt_path(before),
+        _receipt_bytes(
+            tree,
+            dump,
+            revision=BEFORE_REVISION,
+            dump_sha256=hashlib.sha256(before.read_bytes()).hexdigest(),
+        ),
+        trusted_key,
+    )
+    error = (
+        f"--before {before} is a capture taken after a write-back, not the"
+        " capture before it"
+    )
+  before_snapshot = _snapshot(tree)
 
-  refused = _finalize(tree, "--dump", str(dump), *_write_args(receipt))
+  refused = _finalize(tree, "--dump", str(dump), *_write_args(before))
 
   assert refused.returncode == 1
-  assert f"not finalized: {error}" in refused.stderr
+  assert error in refused.stderr
+  assert refused.stderr.startswith("not finalized: ")
   assert "ok: live report validated" not in refused.stdout
-  assert _snapshot(tree) == before
+  assert _snapshot(tree) == before_snapshot
 
 
-_REVISION_LINE = f'  "revision": "{REVISION}",\n'
-_REPEATED_REVISION = _receipt_bytes().replace(
-    _REVISION_LINE.encode(),
-    f'{_REVISION_LINE}  "revision": "{EARLIER_REVISION}",\n'.encode(),
-)
+_MALFORMED = [
+    ("not-utf8", lambda tree, before: b"\xff\xfe{}\n", "it is not UTF-8 text"),
+    ("empty", lambda tree, before: b"", "it is not JSON"),
+    ("not-an-object", lambda tree, before: b"[]\n", "it is not a JSON object"),
+    (
+        "missing-fields",
+        lambda tree, before: b'{"format": "x"}\n',
+        "its fields are ['format'], not",
+    ),
+    (
+        "extra-field",
+        lambda tree, before: _receipt_bytes(tree, before, note="extra"),
+        "its fields are ['before_dump_sha256', 'before_revision',",
+    ),
+    (
+        "repeated-field",
+        lambda tree, before: _receipt_bytes(tree, before).replace(
+            f'  "revision": "{REVISION}",\n'.encode(),
+            f'  "revision": "{REVISION}",\n  "revision": "18300",\n'.encode(),
+        ),
+        "it gives revision more than once",
+    ),
+    (
+        "v1-format",
+        lambda tree, before: _receipt_bytes(
+            tree, before, format="bqca-live-capture-receipt/v1"
+        ),
+        "its format 'bqca-live-capture-receipt/v1' is not"
+        f" '{RECEIPT_FORMAT}'",
+    ),
+    (
+        "bad-digest",
+        lambda tree, before: _receipt_bytes(tree, before, dump_sha256="ABC"),
+        "its dump_sha256 'ABC' is not a SHA-256 hex digest",
+    ),
+    (
+        "number-revision",
+        lambda tree, before: _receipt_bytes(tree, before, revision=18300),
+        "its revision 18300 is not a revision",
+    ),
+    (
+        "pattern-signer",
+        lambda tree, before: _receipt_bytes(tree, before, signer="*"),
+        "its signer '*' is not a signer",
+    ),
+    (
+        "bad-time",
+        lambda tree, before: _receipt_bytes(
+            tree, before, signed_at="2026-13-01T00:00:00Z"
+        ),
+        "its signed_at '2026-13-01T00:00:00Z' is not a valid date or time",
+    ),
+    (
+        "bad-since-date",
+        lambda tree, before: _receipt_bytes(
+            tree, before, pending_since_date="2026-02-30"
+        ),
+        "its pending_since_date '2026-02-30' is not a valid date or time",
+    ),
+    (
+        "half-null-before",
+        lambda tree, before: _receipt_bytes(tree, before, before_revision=None),
+        "it gives one of before_dump_sha256 and before_revision as null, not"
+        " both",
+    ),
+    (
+        "no-export-command",
+        lambda tree, before: _receipt_bytes(
+            tree, before, export_command_sha256=None
+        ),
+        "its export_command_sha256 None is not a SHA-256 hex digest",
+    ),
+]
 
 
 @pytest.mark.parametrize(
-    "data, reason",
-    [
-        (b"\xff\xfe{}\n", "it is not UTF-8 text"),
-        (b"", "it is not JSON"),
-        (b"[]\n", "it is not a JSON object"),
-        (b'{"format": "x"}\n', "its fields are ['format'], not"),
-        (
-            _receipt_bytes(note="extra"),
-            "its fields are ['dump_sha256', 'format', 'note',",
-        ),
-        (_REPEATED_REVISION, "it gives revision more than once"),
-        (
-            _receipt_bytes(format="bqca-live-capture-receipt/v2"),
-            "its format 'bqca-live-capture-receipt/v2' is not"
-            f" '{RECEIPT_FORMAT}'",
-        ),
-        (
-            _receipt_bytes(dump_sha256="ABC"),
-            "its dump_sha256 'ABC' is not a SHA-256 hex digest",
-        ),
-        (
-            _receipt_bytes(revision=1830000000001),
-            "its revision 1830000000001 is not a revision",
-        ),
-        (_receipt_bytes(signer="*"), "its signer '*' is not a signer"),
-        (
-            _receipt_bytes(signed_at="2026-13-01T00:00:00Z"),
-            "its signed_at '2026-13-01T00:00:00Z' is not a UTC time",
-        ),
-    ],
-    ids=[
-        "not-utf8",
-        "empty",
-        "not-an-object",
-        "missing-fields",
-        "extra-field",
-        "repeated-field",
-        "other-format",
-        "bad-digest",
-        "number-revision",
-        "pattern-signer",
-        "bad-time",
-    ],
+    "make, reason",
+    [(make, reason) for _, make, reason in _MALFORMED],
+    ids=[name for name, _, _ in _MALFORMED],
 )
 def test_finalize_refuses_a_malformed_receipt(
-    tree, dump, trusted_key, data, reason
+    tree, dump, before, trusted_key, make, reason
 ):
-  """A receipt that is not exactly a v1 receipt is refused, even if signed."""
-  receipt = _write_receipt(
-      dump.with_name("report.receipt.json"), data, trusted_key
-  )
-  before = _snapshot(tree)
+  """A receipt that is not exactly a v2 receipt is refused, even if signed."""
+  receipt = _write_receipt(_receipt_path(dump), make(tree, before), trusted_key)
+  before_snapshot = _snapshot(tree)
 
-  refused = _finalize(tree, "--dump", str(dump), *_write_args(receipt))
+  refused = _finalize(tree, "--dump", str(dump), *_write_args(before))
 
   assert refused.returncode == 1
   assert (
       f"not finalized: {receipt} is not a {RECEIPT_FORMAT} capture receipt:"
       f" {reason}"
   ) in refused.stderr
-  assert _snapshot(tree) == before
+  assert _snapshot(tree) == before_snapshot
 
 
 def test_finalize_refuses_a_receipt_without_ssh_keygen(
-    tree, dump, receipt, monkeypatch, capsys
+    tree, dump, before, monkeypatch, capsys
 ):
   finalize = _load_finalize(tree)
   original = (tree / BINDING).read_bytes()
-  monkeypatch.setattr(finalize.shutil, "which", lambda name: None)
+  monkeypatch.setattr(shutil, "which", lambda name: None)
 
-  code = finalize.main(["--dump", str(dump), *_write_args(receipt)])
+  code = finalize.main(["--dump", str(dump), *_write_args(before)])
 
   assert code == 1
   assert (
@@ -1967,64 +2299,59 @@ def test_finalize_refuses_a_receipt_without_ssh_keygen(
     "date, code, error",
     [
         ("2026-10-28", 1, "is before pending_live_sync.since_date"),
+        ("2026-10-29", 1, "is before the dump's receipt was signed"),
         ("2999-01-01", 1, "--verified-date 2999-01-01 is in the future"),
         ("2026-13-01", 2, "'2026-13-01' is not a YYYY-MM-DD date"),
         ("20261030", 2, "'20261030' is not a YYYY-MM-DD date"),
     ],
 )
 def test_finalize_rejects_a_verified_date_it_cannot_record(
-    tree, dump, receipt, date, code, error
+    tree, dump, before, date, code, error
 ):
-  before = _snapshot(tree)
+  """`verified_date` is not before the pending sync, nor before the capture."""
+  before_snapshot = _snapshot(tree)
 
   result = _finalize(
       tree,
       "--dump",
       str(dump),
-      *_write_args(receipt),
+      *_write_args(before),
       "--verified-date",
       date,
   )
 
   assert result.returncode == code
   assert error in result.stderr
-  assert _snapshot(tree) == before
+  assert _snapshot(tree) == before_snapshot
 
 
 def test_finalize_is_idempotent_and_can_record_a_later_sync(
-    tree, dump, receipt, trusted_key
+    tree, tmp_path, dump, before, trusted_key
 ):
-  date = _since_date(tree)
-  first = _finalize(
-      tree, "--dump", str(dump), *_write_args(receipt), "--verified-date", date
-  )
+  first = _finalize(tree, "--dump", str(dump), *_write_args(before))
   assert first.returncode == 0, first.stdout + first.stderr
   finalized = _snapshot(tree)
 
-  again = _finalize(tree, "--dump", str(dump), *_write_args(receipt))
+  again = _finalize(tree, "--dump", str(dump), *_write_args(before))
 
   assert again.returncode == 0, again.stdout + again.stderr
   assert f"nothing to finalize: {BINDING} has no" in again.stdout
   assert _snapshot(tree) == finalized
 
-  # A later sync replaces the capture record instead of adding another.
+  # A later sync replaces the capture record and the committed receipt
+  # instead of adding others.
   _reopen(tree)
   later_revision = "1840000000000"
-  later = _sign(
+  later = _captured(
       tree,
-      dump,
+      tmp_path / "live/after.textproto",
+      tmp_path / "captures/later.textproto",
       trusted_key,
       later_revision,
-      "--out",
-      str(dump.with_name("later.receipt.json")),
+      before,
   )
   result = _finalize(
-      tree,
-      "--dump",
-      str(dump),
-      *_write_args(later, later_revision),
-      "--verified-date",
-      date,
+      tree, "--dump", str(later), *_write_args(before, later_revision)
   )
 
   assert result.returncode == 0, result.stdout + result.stderr
@@ -2035,10 +2362,12 @@ def test_finalize_is_idempotent_and_can_record_a_later_sync(
       live["template_bundle_sha256"]
   )
   assert live["verified_revision"] == later_revision
+  later_receipt = _receipt_path(later).read_bytes()
   assert (
       live["capture_receipt_sha256"]
-      == hashlib.sha256(later.read_bytes()).hexdigest()
+      == hashlib.sha256(later_receipt).hexdigest()
   )
+  assert (tree / COMMITTED).read_bytes() == later_receipt
   text = (tree / BINDING).read_text(encoding="utf-8")
   for key in (
       "verified_revision",
@@ -2047,31 +2376,42 @@ def test_finalize_is_idempotent_and_can_record_a_later_sync(
       "captured_by",
   ):
     assert text.count(f"\n  {key}: ") == 1, key
+  assert _validate(tree).returncode == 0
+
+
+def _committed_files(tree):
+  """The bytes of the binding and the committed receipt files, if any."""
+  return {
+      relative: (tree / relative).read_bytes()
+      if (tree / relative).exists()
+      else None
+      for relative in (BINDING, COMMITTED, f"{COMMITTED}.sig")
+  }
 
 
 def test_finalize_restores_the_binding_when_the_audit_fails_after_the_write(
-    tree, dump, receipt, monkeypatch, capsys
+    tree, dump, before, monkeypatch, capsys
 ):
   finalize = _load_finalize(tree)
-  original = (tree / BINDING).read_bytes()
+  original = _committed_files(tree)
   calls = []
 
   def audit(path):
-    calls.append((path, (tree / BINDING).read_bytes() == original))
+    calls.append((path, (tree / BINDING).read_bytes() == original[BINDING]))
     return 0 if len(calls) == 1 else 1
 
   monkeypatch.setattr(finalize, "_audit", audit)
 
-  assert finalize.main(["--dump", str(dump), *_write_args(receipt)]) == 1
+  assert finalize.main(["--dump", str(dump), *_write_args(before)]) == 1
   # Both audits read the same private copy of the dump; the second ran on the
-  # written binding, which is then restored.
+  # written binding, which is then restored with the committed receipt.
   (audited, before_write), (audited_again, after_write) = calls
   assert audited == audited_again and audited.resolve() != dump.resolve()
   assert (before_write, after_write) == (True, False)
-  assert (tree / BINDING).read_bytes() == original
+  assert _committed_files(tree) == original
   assert (
       "not finalized: tools/validate_contracts.py exited 1 after the write,"
-      f" so {BINDING} was restored"
+      f" so {BINDING} and {COMMITTED} were restored"
   ) in capsys.readouterr().err
 
 
@@ -2080,22 +2420,23 @@ def test_finalize_restores_the_binding_when_the_audit_fails_after_the_write(
     ["audit-launch-error", "audit-interrupted", "write-interrupted"],
 )
 def test_finalize_restores_the_binding_after_an_error_or_interrupt(
-    tree, dump, receipt, monkeypatch, capsys, failure
+    tree, dump, before, monkeypatch, capsys, failure
 ):
   """An exception or interrupt during the write or post-write audit rolls back.
 
   The post-write audit fails to launch (OSError) or is interrupted, or the
   write is interrupted right after the new binding replaced the old one.
-  Each time the original bytes come back, and no staged file is left.
+  Each time the original bytes of the binding and of the committed receipt
+  come back (a receipt that was not there is removed), and no staged file is
+  left.
   """
   finalize = _load_finalize(tree)
-  original = (tree / BINDING).read_bytes()
+  original = _committed_files(tree)
   bindings = sorted(path.name for path in (tree / "bindings").iterdir())
   launches = []
   real_run = subprocess.run
 
   def run(command, *args, **kwargs):
-    # Only the validator's launches count; ssh-keygen's run as they are.
     if any(str(part).endswith("validate_contracts.py") for part in command):
       launches.append(command)
       if len(launches) == 2:
@@ -2108,32 +2449,40 @@ def test_finalize_restores_the_binding_after_an_error_or_interrupt(
   real_replace_file = finalize._replace_file
 
   def replace_file(path, data):
-    writes.append(data)
+    writes.append((path, data))
     real_replace_file(path, data)
-    if len(writes) == 1:
-      assert (tree / BINDING).read_bytes() != original
+    if path == tree / BINDING and len(writes) == 3:
+      assert (tree / BINDING).read_bytes() != original[BINDING]
       raise KeyboardInterrupt
 
   if failure == "write-interrupted":
     monkeypatch.setattr(finalize, "_replace_file", replace_file)
   else:
     monkeypatch.setattr(finalize, "subprocess", types.SimpleNamespace(run=run))
-  argv = ["--dump", str(dump), *_write_args(receipt)]
+  argv = ["--dump", str(dump), *_write_args(before)]
 
   if failure == "audit-launch-error":
     assert finalize.main(argv) == 1
     assert (
         "not finalized: OSError: cannot launch the validator after the write,"
-        f" so {BINDING} was restored"
+        f" so {BINDING} and {COMMITTED} were restored"
     ) in capsys.readouterr().err
   else:
     with pytest.raises(KeyboardInterrupt):
       finalize.main(argv)
-    assert f"interrupted: {BINDING} was restored" in capsys.readouterr().err
-  assert (tree / BINDING).read_bytes() == original
+    assert (
+        f"interrupted: {BINDING} and {COMMITTED} were restored"
+        in capsys.readouterr().err
+    )
+  assert _committed_files(tree) == original
   assert sorted(path.name for path in (tree / "bindings").iterdir()) == bindings
   if failure == "write-interrupted":
-    assert writes[1] == original
+    assert [path for path, _ in writes[:3]] == [
+        tree / COMMITTED,
+        tree / f"{COMMITTED}.sig",
+        tree / BINDING,
+    ]
+    assert writes[3] == (tree / BINDING, original[BINDING])
   else:
     assert len(launches) == 2
 
@@ -2173,6 +2522,13 @@ def test_replace_file_keeps_the_target_until_the_staged_copy_is_complete(
   assert destination == target
   assert staged.parent == target.parent and staged != target
   assert sorted(path.name for path in target.parent.iterdir()) == bindings
+
+  # A new file, such as the first committed receipt, gets mode 0644.
+  created = target.parent / "created.json"
+  finalize._replace_file(created, b"created\n")
+  assert created.read_bytes() == b"created\n"
+  assert _mode(created) == 0o644
+  created.unlink()
 
 
 # A capture record for `finalized_binding_text`.
@@ -2245,9 +2601,9 @@ def test_finalized_binding_text_refuses_a_binding_it_cannot_edit_exactly(
     finalize.finalized_binding_text(edited, "2026-10-30", record)
 
 
-def _load_sign(tree):
+def _load_capture(tree):
   spec = importlib.util.spec_from_file_location(
-      "live_sync_sign", tree / "tools/sign_live_capture.py"
+      "live_sync_capture", tree / "tools/sign_live_capture.py"
   )
   assert spec is not None and spec.loader is not None
   module = importlib.util.module_from_spec(spec)
@@ -2255,190 +2611,280 @@ def _load_sign(tree):
   return module
 
 
-def test_sign_writes_a_receipt_that_ssh_keygen_verifies(
-    tree, dump, trusted_key
+def test_capture_writes_the_export_and_a_receipt_that_ssh_keygen_verifies(
+    tree, tmp_path, trusted_key
 ):
-  """The tool writes the v1 receipt of the dump's bytes and its signature.
+  """The tool writes the bytes the export command printed, and their receipt.
 
-  Anyone can check the signature with ssh-keygen and the signers file;
-  `test_finalize_records_the_live_verification_after_a_clean_audit` checks
-  that finalize accepts it.
+  Before the write-back the receipt names no earlier capture; after it, it
+  names the `--before` capture. Anyone can check the signatures with
+  ssh-keygen and the signers file; the receipts carry the binding's pinned
+  digests and pending sync, and only a digest of the export command.
   """
-  dump_data = dump.read_bytes()
-  digest = hashlib.sha256(dump_data).hexdigest()
-
-  result = _sign_tool(
-      tree,
-      "--dump",
-      str(dump),
-      "--revision",
-      REVISION,
-      "--signer",
-      SIGNER,
-      "--key",
-      str(trusted_key),
+  live = _live(tree)
+  sources = tmp_path / "live"
+  sources.mkdir()
+  (sources / "before.textproto").write_text(_pre_sync_text(), encoding="utf-8")
+  (sources / "after.textproto").write_text(_render_dump(tree), encoding="utf-8")
+  captures = tmp_path / "captures"
+  captures.mkdir()
+  results = {}
+  for name, revision, before in (
+      ("before", BEFORE_REVISION, None),
+      ("after", REVISION, captures / "before.textproto"),
+  ):
+    out = captures / f"{name}.textproto"
+    results[name] = _capture(
+        tree, sources / f"{name}.textproto", out, trusted_key, revision, before
+    )
+    assert results[name].returncode == 0, (
+        results[name].stdout + results[name].stderr
+    )
+    export = (sources / f"{name}.textproto").read_bytes()
+    assert out.read_bytes() == export
+    assert _mode(out) == 0o600
+    receipt = _receipt_path(out)
+    signature = receipt.with_name(f"{receipt.name}.sig")
+    data = receipt.read_bytes()
+    fields = json.loads(data)
+    assert list(fields) == [
+        "format",
+        "report_id",
+        "revision",
+        "dump_sha256",
+        "signed_at",
+        "signer",
+        "export_command_sha256",
+        "manifest_sha256",
+        "template_bundle_sha256",
+        "pending_since_date",
+        "before_dump_sha256",
+        "before_revision",
+    ]
+    command = _export_command(sources / f"{name}.textproto")
+    assert data == _receipt_bytes(
+        tree,
+        before,
+        revision=revision,
+        dump_sha256=hashlib.sha256(export).hexdigest(),
+        signed_at=fields["signed_at"],
+        export_command_sha256=hashlib.sha256(
+            json.dumps(command).encode()
+        ).hexdigest(),
+        before_revision=BEFORE_REVISION if before is not None else None,
+    )
+    assert fields["manifest_sha256"] == live["manifest_sha256"]
+    assert fields["pending_since_date"] == live[PENDING]["since_date"]
+    assert str(sources) not in data.decode()
+    assert signature.read_bytes().startswith(b"-----BEGIN SSH SIGNATURE-----\n")
+    assert _mode(receipt) == _mode(signature) == 0o644
+    verified = subprocess.run(
+        [SSH_KEYGEN, "-Y", "verify", "-f", str(tree / SIGNERS), "-I", SIGNER]
+        + ["-n", NAMESPACE, "-s", str(signature)],
+        input=data,
+        capture_output=True,
+        check=False,
+    )
+    assert verified.returncode == 0, verified.stderr
+    lines = results[name].stdout.splitlines()
+    assert lines[0] == (
+        f"export: {len(export)} bytes, sha256"
+        f" {hashlib.sha256(export).hexdigest()}"
+    )
+    assert lines[1] == (
+        f"captured: {out} (mode 600), {receipt} and {signature}: revision"
+        f" {revision}, signed by {SIGNER} at {fields['signed_at']}"
+    )
+  assert results["after"].stdout.splitlines()[2] == (
+      f"next: python3 {tree / 'tools/finalize_live_sync.py'} --dump"
+      f" {captures / 'after.textproto'} --before"
+      f" {captures / 'before.textproto'} --revision {REVISION} --check"
   )
-
-  assert result.returncode == 0, result.stdout + result.stderr
-  receipt = dump.with_name(f"{dump.name}.receipt.json")
-  signature = receipt.with_name(f"{receipt.name}.sig")
-  data = receipt.read_bytes()
-  fields = json.loads(data)
-  assert list(fields) == [
-      "format",
-      "report_id",
-      "revision",
-      "dump_sha256",
-      "signed_at",
-      "signer",
-  ]
-  assert re.fullmatch(
-      r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", fields["signed_at"]
-  )
-  assert data == _receipt_bytes(
-      dump_sha256=digest, signed_at=fields["signed_at"]
-  )
-  assert signature.read_bytes().startswith(b"-----BEGIN SSH SIGNATURE-----\n")
-  assert _mode(receipt) == _mode(signature) == 0o644
-  assert sorted(dump.parent.iterdir()) == sorted([dump, receipt, signature])
-  verified = subprocess.run(
-      [SSH_KEYGEN, "-Y", "verify", "-f", str(tree / SIGNERS), "-I", SIGNER]
-      + ["-n", NAMESPACE, "-s", str(signature)],
-      input=data,
-      capture_output=True,
-      check=False,
-  )
-  assert verified.returncode == 0, verified.stderr
-  assert result.stdout.splitlines() == [
-      f"snapshot of {dump}: {len(dump_data)} bytes, sha256 {digest}",
-      f"receipt: {receipt} ({len(data)} bytes, sha256"
-      f" {hashlib.sha256(data).hexdigest()}): revision {REVISION}, signed by"
-      f" {SIGNER} at {fields['signed_at']}",
-      f"signature: {signature}",
-      f"next: python3 tools/finalize_live_sync.py --dump {dump} --receipt"
-      f" {receipt} --revision {REVISION} --check",
-  ]
 
 
 @pytest.mark.parametrize(
-    "problem, payload, error",
+    "problem",
     [
-        (
-            "no-report-field",
-            REMAPPED_DUMP.read_bytes(),
-            NO_REPORT_FIELD,
-        ),
-        ("not-utf8", b"report_config {\n\xff}\n", "as UTF-8 text:"),
-        (
-            "not-textproto",
-            b"report_config {\n",
-            "cannot read the dump as protobuf text format",
-        ),
+        "no-report-field-before",
+        "no-report-field-after",
+        "other-data-source-after",
+        "not-utf8",
+        "not-textproto",
+        "same-bytes-as-before",
     ],
-    ids=["no-report-field", "not-utf8", "not-textproto"],
 )
-def test_sign_refuses_a_dump_that_finalize_refuses(
-    tree, tmp_path, trusted_key, problem, payload, error
+def test_capture_refuses_an_export_that_finalize_refuses(
+    tree, tmp_path, before, trusted_key, problem
 ):
-  path = tmp_path / "work" / "report.textproto"
-  path.parent.mkdir()
-  path.write_bytes(payload)
+  """An export that is not a dump of the live template gets no receipt.
 
-  result = _sign_tool(
+  Before the write-back, the report-level data source is still the one the
+  sync repoints, so only the report ID must identify the template; after it,
+  the data sources must be the binding's too.
+  """
+  source = tmp_path / "live/export.textproto"
+  after = problem != "no-report-field-before"
+  payload, error = {
+      "no-report-field-before": (
+          GENERIC_DUMP.read_bytes(),
+          NO_REPORT_FIELD,
+      ),
+      "no-report-field-after": (REMAPPED_DUMP.read_bytes(), NO_REPORT_FIELD),
+      "other-data-source-after": (
+          _render_dump(tree, report_datasource_id=STALE_DATASOURCE_ID).encode(),
+          f"the dump's report_config.report.datasource_id is"
+          f" ['{STALE_DATASOURCE_ID}']",
+      ),
+      "not-utf8": (b"report_config {\n\xff}\n", "as UTF-8 text:"),
+      "not-textproto": (
+          b"report_config {\n",
+          "cannot read the dump as protobuf text format",
+      ),
+      "same-bytes-as-before": (
+          before.read_bytes(),
+          "the export is byte for byte the capture before the write-back",
+      ),
+  }[problem]
+  source.write_bytes(payload)
+  out = tmp_path / "out/export.textproto"
+  out.parent.mkdir()
+
+  result = _capture(
       tree,
-      "--dump",
-      str(path),
-      "--revision",
+      source,
+      out,
+      trusted_key,
       REVISION,
-      "--signer",
-      SIGNER,
-      "--key",
-      str(trusted_key),
+      before if after else None,
   )
 
   assert result.returncode == 1
   assert error in result.stderr
-  assert result.stderr.endswith("not signed: nothing written\n")
-  assert sorted(path.parent.iterdir()) == [path]
+  assert result.stderr.endswith("not captured: nothing written\n")
+  assert list(out.parent.iterdir()) == []
 
 
-def test_sign_writes_nothing_for_a_key_that_is_not_listed(
-    tree, dump, untrusted_key
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "out-inside-the-repository",
+        "out-exists",
+        "no-pending-sync",
+        "before-without-receipt",
+        "before-is-after-a-write-back",
+        "same-revision-as-before",
+        "export-fails",
+        "export-prints-nothing",
+        "export-not-found",
+    ],
+)
+def test_capture_writes_nothing_when_it_cannot_capture(
+    tree, tmp_path, dump, before, trusted_key, problem
+):
+  source = tmp_path / "live/after.textproto"
+  out = tmp_path / "out/report.textproto"
+  out.parent.mkdir()
+  revision, use_before, command = REVISION, before, _export_command(source)
+  if problem == "out-inside-the-repository":
+    out = tree / "report.textproto"
+    error = f"{out} is inside this repository"
+  elif problem == "out-exists":
+    out.write_bytes(b"earlier")
+    error = f"{out} exists; --force replaces it"
+  elif problem == "no-pending-sync":
+    finalized = _finalize(tree, "--dump", str(dump), *_write_args(before))
+    assert finalized.returncode == 0, finalized.stdout + finalized.stderr
+    error = f"{BINDING} has no {PENDING}.since_date"
+  elif problem == "before-without-receipt":
+    _receipt_path(before).unlink()
+    error = f"cannot read the capture receipt {_receipt_path(before)}"
+  elif problem == "before-is-after-a-write-back":
+    use_before = dump
+    error = f"--before {dump} is a capture taken after a write-back"
+  elif problem == "same-revision-as-before":
+    revision = BEFORE_REVISION
+    error = f"--revision {BEFORE_REVISION} is the revision of --before"
+  elif problem == "export-fails":
+    command = [sys.executable, "-c", "raise SystemExit(3)"]
+    error = "the export command exited 3"
+  elif problem == "export-prints-nothing":
+    command = [sys.executable, "-c", "pass"]
+    error = "the export command wrote nothing to standard output"
+  else:
+    command = [str(tmp_path / "no-such-export-command")]
+    error = "cannot run the export command:"
+  files = sorted(out.parent.iterdir())
+  args = ["--out", str(out), "--revision", revision, "--signer", SIGNER]
+  args += ["--key", str(trusted_key), "--before", str(use_before)]
+
+  result = _capture_tool(tree, *args, "--", *command)
+
+  assert result.returncode == 1
+  assert error in result.stderr
+  assert result.stderr.endswith("not captured: nothing written\n")
+  assert sorted(out.parent.iterdir()) == files
+
+
+def test_capture_writes_nothing_for_a_key_that_is_not_listed(
+    tree, tmp_path, untrusted_key
 ):
   """A receipt that finalize would not trust is not written.
 
   The error says which line would list the key.
   """
-  result = _sign_tool(
-      tree,
-      "--dump",
-      str(dump),
-      "--revision",
-      REVISION,
-      "--signer",
-      SIGNER,
-      "--key",
-      str(untrusted_key),
-  )
+  source = tmp_path / "before.textproto"
+  source.write_text(_pre_sync_text(), encoding="utf-8")
+  out = tmp_path / "out/before.textproto"
+  out.parent.mkdir()
+
+  result = _capture(tree, source, out, untrusted_key, BEFORE_REVISION)
 
   assert result.returncode == 1
   assert f"ERROR: {UNTRUSTED}\n" in result.stderr
   assert (
       f"ERROR: to trust the key, list it in {SIGNERS} in a reviewed change,"
-      f' then sign again: {SIGNER} namespaces="{NAMESPACE}"'
+      f' then capture again: {SIGNER} namespaces="{NAMESPACE}"'
       f" {_public_key(untrusted_key)}\n"
   ) in result.stderr
-  assert result.stderr.endswith("not signed: nothing written\n")
-  assert sorted(dump.parent.iterdir()) == [dump]
+  assert result.stderr.endswith("not captured: nothing written\n")
+  assert list(out.parent.iterdir()) == []
 
 
-def test_sign_writes_nothing_when_ssh_keygen_cannot_sign(tree, dump, tmp_path):
-  result = _sign_tool(
-      tree,
-      "--dump",
-      str(dump),
-      "--revision",
-      REVISION,
-      "--signer",
-      SIGNER,
-      "--key",
-      str(tmp_path / "no-such-key"),
+def test_capture_writes_nothing_when_ssh_keygen_cannot_sign(tree, tmp_path):
+  source = tmp_path / "before.textproto"
+  source.write_text(_pre_sync_text(), encoding="utf-8")
+  out = tmp_path / "out/before.textproto"
+  out.parent.mkdir()
+
+  result = _capture(
+      tree, source, out, tmp_path / "no-such-key", BEFORE_REVISION
   )
 
   assert result.returncode == 1
   assert "ERROR: cannot sign the receipt: ssh-keygen -Y sign exited" in (
       result.stderr
   )
-  assert sorted(dump.parent.iterdir()) == [dump]
+  assert list(out.parent.iterdir()) == []
 
 
-def test_sign_replaces_a_receipt_only_with_force(tree, dump, trusted_key):
-  receipt = _sign(tree, dump, trusted_key)
-  signature = receipt.with_name(f"{receipt.name}.sig")
-  data, signed = receipt.read_bytes(), signature.read_bytes()
-  args = [
-      "--dump",
-      str(dump),
-      "--revision",
-      EARLIER_REVISION,
-      "--signer",
-      SIGNER,
-      "--key",
-      str(trusted_key),
-  ]
+def test_capture_replaces_a_capture_only_with_force(tree, before, trusted_key):
+  source = before.parent.parent / "live/before.textproto"
+  receipt = _receipt_path(before)
+  data = receipt.read_bytes()
 
-  again = _sign_tool(tree, *args)
+  again = _capture(tree, source, before, trusted_key, "1830000000002")
 
   assert again.returncode == 1
-  assert f"ERROR: {receipt} exists; --force replaces it\n" in again.stderr
-  assert f"ERROR: {signature} exists; --force replaces it\n" in again.stderr
-  assert (receipt.read_bytes(), signature.read_bytes()) == (data, signed)
+  for path in (before, receipt, receipt.with_name(f"{receipt.name}.sig")):
+    assert f"ERROR: {path} exists; --force replaces it\n" in again.stderr
+  assert receipt.read_bytes() == data
 
-  forced = _sign_tool(tree, *args, "--force")
+  forced = _capture(
+      tree, source, before, trusted_key, "1830000000002", extra=["--force"]
+  )
 
   assert forced.returncode == 0, forced.stdout + forced.stderr
-  assert json.loads(receipt.read_bytes())["revision"] == EARLIER_REVISION
-  assert sorted(dump.parent.iterdir()) == sorted([dump, receipt, signature])
+  assert json.loads(receipt.read_bytes())["revision"] == "1830000000002"
 
 
 @pytest.mark.parametrize(
@@ -2446,31 +2892,215 @@ def test_sign_replaces_a_receipt_only_with_force(tree, dump, trusted_key):
     [
         (
             [],
-            "the following arguments are required: --dump, --revision,"
+            "the following arguments are required: --out, --revision,"
             " --signer, --key",
         ),
         (
-            ["--revision", "two words", "--signer", SIGNER],
+            ["--revision", REVISION, "--signer", SIGNER],
+            "give the export command",
+        ),
+        (
+            ["--revision", "two words", "--signer", SIGNER, "--", "x"],
             "'two words' is not a revision",
         ),
-        (["--revision", REVISION, "--signer", "*"], "'*' is not a signer"),
         (
-            ["--revision", REVISION, "--signer", "one,two"],
+            ["--revision", REVISION, "--signer", "*", "--", "x"],
+            "'*' is not a signer",
+        ),
+        (
+            ["--revision", REVISION, "--signer", "one,two", "--", "x"],
             "'one,two' is not a signer",
         ),
+        (
+            ["--dump", "d", "--revision", REVISION, "--signer", SIGNER],
+            "unrecognized arguments: --dump",
+        ),
     ],
-    ids=["nothing", "bad-revision", "pattern-signer", "two-signers"],
+    ids=[
+        "nothing",
+        "no-export-command",
+        "bad-revision",
+        "pattern-signer",
+        "two-signers",
+        "a-dump-file",
+    ],
 )
-def test_sign_exits_2_on_bad_arguments(tree, capsys, args, error):
-  sign = _load_sign(tree)
+def test_capture_exits_2_on_bad_arguments(tree, capsys, args, error):
+  """The tool signs only what an export command prints, never a dump file."""
+  capture = _load_capture(tree)
   if args:
-    args = ["--dump", "dump.textproto", "--key", "key", *args]
+    args = ["--out", "export.textproto", "--key", "key", *args]
 
   with pytest.raises(SystemExit) as exit_info:
-    sign.main(args)
+    capture.main(args)
 
   assert exit_info.value.code == 2
   assert error in capsys.readouterr().err
+
+
+def _hand_finalize(tree):
+  """Mark the copy's live sync done by hand, as finalize would not.
+
+  Re-pins both verified digests and deletes `pending_live_sync`, keeping the
+  rest of `live_template_verification` (in the `reopened` state, the capture
+  record and committed receipt of the earlier sync).
+  """
+  path = tree / BINDING
+  binding = yaml.safe_load(path.read_text(encoding="utf-8"))
+  live = binding[LIVE]
+  text = path.read_text(encoding="utf-8")
+  for key, pinned in (
+      ("verified_manifest_sha256", live["manifest_sha256"]),
+      ("verified_template_bundle_sha256", live["template_bundle_sha256"]),
+  ):
+    text, count = re.subn(
+        rf"(?m)^  {key}: .*$", f"  {key}: {pinned}", text, count=1
+    )
+    assert count == 1, key
+  start = text.index(f"\n  {PENDING}:\n") + 1
+  end = start + len(f"  {PENDING}:\n")
+  while text[end:].startswith("    "):
+    end = text.index("\n", end) + 1
+  path.write_text(text[:start] + text[end:], encoding="utf-8")
+  assert PENDING not in _live(tree)
+
+
+def test_validate_contracts_refuses_a_live_sync_recorded_by_hand(tree):
+  """Re-pinning the digests and deleting pending_live_sync is not a sync.
+
+  Without a capture of the synced template, the committed receipt is missing
+  (`pending`) or is the earlier sync's, signed after the stale
+  `verified_date` that the hand edit leaves (`reopened`).
+  """
+  assert _validate(tree).returncode == 0
+  _hand_finalize(tree)
+
+  result = _validate(tree)
+
+  assert result.returncode == 1
+  if (tree / COMMITTED).exists():
+    expected = (
+        f"bqca live_template_verification.verified_date"
+        f" '{REOPENED_VERIFIED_DATE}' is before {COMMITTED} was signed at"
+    )
+  else:
+    expected = (
+        "bqca live_template_verification has no pending_live_sync, so it"
+        " needs the capture receipt that finalized it: cannot read"
+        f" {COMMITTED}: No such file or directory"
+    )
+  assert expected in result.stderr
+
+
+def _set_record(tree, key, value):
+  """Set one line of the capture record of the copy's binding."""
+  path = tree / BINDING
+  text, count = re.subn(
+      rf"(?m)^  {key}: .*$",
+      f"  {key}: {json.dumps(value)}",
+      path.read_text(encoding="utf-8"),
+      count=1,
+  )
+  assert count == 1, key
+  path.write_text(text, encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        "verified_dump_sha256",
+        "verified_revision",
+        "capture_receipt_sha256",
+        "captured_by",
+        "verified_date",
+        "receipt-bytes",
+        "receipt-removed",
+        "signature-removed",
+        "signer-removed",
+        "receipt-before-the-write-back",
+        "receipt-for-other-contracts",
+    ],
+)
+def test_validate_contracts_checks_the_committed_receipt_of_a_finalized_binding(
+    tree, dump, before, receipt, trusted_key, edit
+):
+  """Only a binding and receipt that finalize wrote together validate.
+
+  After finalize, the copy validates. Each edit of the record, the committed
+  receipt, its signature or the signers file then fails the validator; an
+  edit that re-signs another receipt with the trusted key fails on what the
+  receipt says.
+  """
+  finalized = _finalize(tree, "--dump", str(dump), *_write_args(before))
+  assert finalized.returncode == 0, finalized.stdout + finalized.stderr
+  assert _validate(tree).returncode == 0
+  committed = tree / COMMITTED
+  prefix = "bqca live_template_verification"
+  live = _live(tree)
+  if edit in (
+      "verified_dump_sha256",
+      "capture_receipt_sha256",
+      "verified_revision",
+      "captured_by",
+  ):
+    value = "c" * 64 if edit.endswith("sha256") else "someone-else"
+    _set_record(tree, edit, value)
+    expected = f"{prefix}.{edit} {value!r} is not {live[edit]!r}"
+  elif edit == "verified_date":
+    _set_record(tree, edit, SINCE_DATE)
+    expected = (
+        f"{prefix}.verified_date '{SINCE_DATE}' is before {COMMITTED} was"
+        " signed at"
+    )
+  elif edit == "receipt-bytes":
+    committed.write_bytes(
+        json.dumps(json.loads(committed.read_bytes())).encode() + b"\n"
+    )
+    expected = (
+        f"{prefix}: {COMMITTED}: the receipt's signature is not a valid"
+        f" {NAMESPACE} signature of the receipt:"
+    )
+  elif edit == "receipt-removed":
+    committed.unlink()
+    expected = f"cannot read {COMMITTED}: No such file or directory"
+  elif edit == "signature-removed":
+    (tree / f"{COMMITTED}.sig").unlink()
+    expected = f"cannot read {COMMITTED}.sig: No such file or directory"
+  elif edit == "signer-removed":
+    _without_signers(tree)
+    expected = f"{SIGNERS} lists no signer, so it trusts no receipt"
+  else:
+    # A receipt signed with the trusted key, and a record that matches it:
+    # only what the receipt says can fail.
+    if edit == "receipt-before-the-write-back":
+      data = _receipt_bytes(
+          tree, revision=BEFORE_REVISION, dump_sha256="d" * 64
+      )
+      expected = (
+          f"{prefix}: {COMMITTED} is the receipt of a capture taken before the"
+          " write-back, not after it"
+      )
+    else:
+      data = _receipt_bytes(
+          tree, before, dump_sha256="d" * 64, manifest_sha256="e" * 64
+      )
+      expected = (
+          f"{prefix}: {COMMITTED} is for manifest_sha256 {'e' * 64}, not the"
+          f" pinned {live['manifest_sha256']}"
+      )
+    _write_receipt(committed, data, trusted_key)
+    fields = json.loads(data)
+    for key, value in (
+        ("verified_revision", fields["revision"]),
+        ("verified_dump_sha256", fields["dump_sha256"]),
+        ("capture_receipt_sha256", hashlib.sha256(data).hexdigest()),
+    ):
+      _set_record(tree, key, value)
+
+  result = _validate(tree)
+
+  assert result.returncode == 1
+  assert expected in result.stderr
 
 
 RENAME_MAP_HEADER = [

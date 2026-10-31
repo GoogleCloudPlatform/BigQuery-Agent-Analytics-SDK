@@ -17,8 +17,11 @@ import hashlib
 import json
 import pathlib
 import re
+import shutil
 import sqlite3
+import subprocess
 import sys
+import tempfile
 from typing import Any
 
 import yaml
@@ -1698,6 +1701,342 @@ def _bqca_pending_live_sync_errors(live: dict[str, Any]) -> list[str]:
   return errors
 
 
+# A BQCA capture receipt: what a maintainer with access to the live template
+# signs for an export of it, right as `tools/sign_live_capture.py` runs the
+# export. It is a JSON object with exactly BQCA_CAPTURE_RECEIPT_FIELDS, signed
+# byte for byte: its signature (`<receipt>.sig`) is an OpenSSH signature in
+# BQCA_CAPTURE_NAMESPACE by a key that BQCA_CAPTURE_SIGNERS_PATH lists for the
+# receipt's `signer`. `tools/finalize_live_sync.py` commits the receipt of the
+# export that verified the live template as BQCA_CAPTURE_RECEIPT_PATH, and a
+# binding without `pending_live_sync` must carry it.
+BQCA_CAPTURE_SIGNERS_PATH = "bindings/bqca_live_capture_signers"
+BQCA_CAPTURE_RECEIPT_PATH = "bindings/bqca_live_capture_receipt.json"
+BQCA_CAPTURE_RECEIPT_FORMAT = "bqca-live-capture-receipt/v2"
+BQCA_CAPTURE_NAMESPACE = "bqca-live-capture-receipt"
+BQCA_CAPTURE_RECEIPT_FIELDS = (
+    "format",
+    "report_id",
+    "revision",
+    "dump_sha256",
+    "signed_at",
+    "signer",
+    "export_command_sha256",
+    "manifest_sha256",
+    "template_bundle_sha256",
+    "pending_since_date",
+    "before_dump_sha256",
+    "before_revision",
+)
+# A capture taken after the write-back names, in these fields, the capture
+# taken before it; a capture taken before the write-back gives both as null.
+BQCA_CAPTURE_BEFORE_FIELDS = ("before_dump_sha256", "before_revision")
+# How far a receipt's `signed_at` may be ahead of the clock that checks it.
+BQCA_CAPTURE_CLOCK_SKEW = datetime.timedelta(minutes=5)
+BQCA_CAPTURE_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+_BQCA_CAPTURE_TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+# A report ID or revision is a plain token, the same in a receipt, on a
+# command line and in the binding. A signer is also a literal principal of
+# the signers file, never a pattern (`*`, `?`, `!`, `,`).
+BQCA_CAPTURE_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}")
+BQCA_CAPTURE_SIGNER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}")
+
+
+def bqca_capture_signature_path(receipt: pathlib.Path) -> pathlib.Path:
+  """Return where the signature of the capture receipt `receipt` is."""
+  return receipt.with_name(f"{receipt.name}.sig")
+
+
+def bqca_capture_time(signed_at: str) -> datetime.datetime:
+  """Return the UTC time that a receipt's `signed_at` gives."""
+  return datetime.datetime.strptime(
+      signed_at, BQCA_CAPTURE_TIME_FORMAT
+  ).replace(tzinfo=datetime.timezone.utc)
+
+
+def parse_bqca_capture_receipt(data: bytes) -> dict[str, Any]:
+  """Return the fields of the capture receipt `data`.
+
+  Raises:
+    ValueError: `data` is not a BQCA_CAPTURE_RECEIPT_FORMAT receipt: a UTF-8
+      JSON object that gives each of BQCA_CAPTURE_RECEIPT_FIELDS, and nothing
+      else, once, in its form (the BQCA_CAPTURE_BEFORE_FIELDS both null or
+      both given).
+  """
+  try:
+    text = data.decode("utf-8")
+  except UnicodeDecodeError as exc:
+    raise ValueError(f"it is not UTF-8 text: {exc}") from exc
+
+  def unique(pairs: list) -> dict:
+    names = [name for name, _ in pairs]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+      raise ValueError(f"it gives {', '.join(repeated)} more than once")
+    return dict(pairs)
+
+  try:
+    receipt = json.loads(text, object_pairs_hook=unique)
+  except json.JSONDecodeError as exc:
+    raise ValueError(f"it is not JSON: {exc}") from exc
+  if not isinstance(receipt, dict):
+    raise ValueError("it is not a JSON object")
+  if sorted(receipt) != sorted(BQCA_CAPTURE_RECEIPT_FIELDS):
+    raise ValueError(
+        f"its fields are {sorted(receipt)}, not"
+        f" {sorted(BQCA_CAPTURE_RECEIPT_FIELDS)}"
+    )
+  digest = (_SHA256_HEX_RE, "a SHA-256 hex digest")
+  forms = {
+      "format": (
+          re.compile(re.escape(BQCA_CAPTURE_RECEIPT_FORMAT)),
+          repr(BQCA_CAPTURE_RECEIPT_FORMAT),
+      ),
+      "report_id": (BQCA_CAPTURE_TOKEN_RE, "a report ID"),
+      "revision": (BQCA_CAPTURE_TOKEN_RE, "a revision"),
+      "dump_sha256": digest,
+      "signed_at": (_BQCA_CAPTURE_TIME_RE, "a UTC time, YYYY-MM-DDTHH:MM:SSZ"),
+      "signer": (BQCA_CAPTURE_SIGNER_RE, "a signer"),
+      "export_command_sha256": digest,
+      "manifest_sha256": digest,
+      "template_bundle_sha256": digest,
+      "pending_since_date": (_ISO_DATE_RE, "a YYYY-MM-DD date"),
+      "before_dump_sha256": digest,
+      "before_revision": (BQCA_CAPTURE_TOKEN_RE, "a revision"),
+  }
+  nulls = [receipt[name] is None for name in BQCA_CAPTURE_BEFORE_FIELDS]
+  if any(nulls) and not all(nulls):
+    raise ValueError(
+        f"it gives one of {' and '.join(BQCA_CAPTURE_BEFORE_FIELDS)} as null,"
+        " not both"
+    )
+  for name, (form, described) in forms.items():
+    value = receipt[name]
+    if value is None and name in BQCA_CAPTURE_BEFORE_FIELDS:
+      continue
+    if not isinstance(value, str) or not form.fullmatch(value):
+      raise ValueError(f"its {name} {value!r} is not {described}")
+  for name, read in (
+      ("signed_at", bqca_capture_time),
+      ("pending_since_date", datetime.date.fromisoformat),
+  ):
+    try:
+      read(receipt[name])
+    except ValueError as exc:
+      raise ValueError(
+          f"its {name} {receipt[name]!r} is not a valid date or time: {exc}"
+      ) from exc
+  return receipt
+
+
+def bqca_capture_signature_error(
+    data: bytes, signature: bytes, signer: str, signers: bytes
+) -> str | None:
+  """Return why `signature` is not a trusted signature of the receipt `data`.
+
+  Runs `ssh-keygen -Y verify` in BQCA_CAPTURE_NAMESPACE for the identity
+  `signer`, on private copies of `signature` and of `signers`, the bytes of
+  BQCA_CAPTURE_SIGNERS_PATH. Returns None if the signature verifies.
+  """
+  ssh_keygen = shutil.which("ssh-keygen")
+  if ssh_keygen is None:
+    return (
+        "cannot verify the receipt's signature: ssh-keygen (OpenSSH 8.2 or"
+        " later) is not on PATH"
+    )
+  if not any(
+      line.strip() and not line.lstrip().startswith(b"#")
+      for line in signers.splitlines()
+  ):
+    return (
+        f"{BQCA_CAPTURE_SIGNERS_PATH} lists no signer, so it trusts no receipt"
+    )
+  with tempfile.TemporaryDirectory(prefix="bqca_capture_signature_") as private:
+    signers_copy = pathlib.Path(private) / "allowed_signers"
+    signature_copy = pathlib.Path(private) / "receipt.sig"
+    signers_copy.write_bytes(signers)
+    signature_copy.write_bytes(signature)
+    verified = subprocess.run(
+        [
+            ssh_keygen,
+            "-Y",
+            "verify",
+            "-f",
+            str(signers_copy),
+            "-I",
+            signer,
+            "-n",
+            BQCA_CAPTURE_NAMESPACE,
+            "-s",
+            str(signature_copy),
+        ],
+        input=data,
+        capture_output=True,
+        check=False,
+    )
+    if verified.returncode == 0:
+      return None
+    # The signature is valid, but the signers file does not trust its key for
+    # this signer (ssh-keygen may say why: a malformed line, an expired key, a
+    # key restricted to other namespaces); or it is not a valid receipt
+    # signature at all.
+    details = [
+        line.strip().replace(str(signers_copy), BQCA_CAPTURE_SIGNERS_PATH)
+        for line in verified.stderr.decode("utf-8", "replace").splitlines()
+        if line.strip() and line.strip() != "Could not verify signature."
+    ]
+    valid = subprocess.run(
+        [
+            ssh_keygen,
+            "-Y",
+            "check-novalidate",
+            "-n",
+            BQCA_CAPTURE_NAMESPACE,
+            "-s",
+            str(signature_copy),
+        ],
+        input=data,
+        capture_output=True,
+        check=False,
+    )
+  if valid.returncode == 0:
+    detail = f" ({'; '.join(details)})" if details else ""
+    return (
+        "the receipt is not signed by a key that"
+        f" {BQCA_CAPTURE_SIGNERS_PATH} lists for its signer {signer!r}{detail}"
+    )
+  reason = next(
+      (
+          line.strip()
+          for line in valid.stderr.decode("utf-8", "replace").splitlines()
+          if line.strip()
+      ),
+      f"ssh-keygen exited {valid.returncode}",
+  )
+  return (
+      f"the receipt's signature is not a valid {BQCA_CAPTURE_NAMESPACE}"
+      f" signature of the receipt: {reason}"
+  )
+
+
+def bqca_capture_time_errors(
+    receipt: dict[str, Any], now: datetime.datetime, subject: str
+) -> list[str]:
+  """Return why the receipt `receipt`, named `subject`, is stale or early.
+
+  A capture of the live template for a pending sync is signed on or after the
+  day the sync began (`pending_since_date`, inclusive, in UTC) and not after
+  `now`, give or take BQCA_CAPTURE_CLOCK_SKEW.
+  """
+  errors = []
+  signed = bqca_capture_time(receipt["signed_at"])
+  since = datetime.date.fromisoformat(receipt["pending_since_date"])
+  if signed.date() < since:
+    errors.append(
+        f"{subject} was signed at {receipt['signed_at']}, before the live sync"
+        f" it is for began on {receipt['pending_since_date']}"
+    )
+  if signed > now + BQCA_CAPTURE_CLOCK_SKEW:
+    errors.append(
+        f"{subject} was signed at {receipt['signed_at']}, which is in the"
+        " future"
+    )
+  return errors
+
+
+def _bqca_committed_capture_errors(
+    root: pathlib.Path, binding: dict[str, Any], live: dict[str, Any]
+) -> list[str]:
+  """Check the capture receipt that a binding without a pending sync records.
+
+  Without `pending_live_sync`, `live_template_verification` records a live
+  sync, so BQCA_CAPTURE_RECEIPT_PATH must be the receipt of the export that
+  verified it, and the signers file must trust its signature. The receipt
+  must be of a capture taken after the write-back, for the binding's report
+  and its pinned manifest and bundle digests, and signed on or after the day
+  its sync began and not in the future. `verified_revision`,
+  `verified_dump_sha256`, `capture_receipt_sha256` and `captured_by` must be
+  the receipt's, and `verified_date` must not be before the receipt was
+  signed. Only `tools/finalize_live_sync.py` writes all of that together.
+  """
+  prefix = "bqca live_template_verification"
+  where = BQCA_CAPTURE_RECEIPT_PATH
+  path = root / where
+  contents = {}
+  for name, source in (
+      ("receipt", path),
+      ("signature", bqca_capture_signature_path(path)),
+      ("signers", root / BQCA_CAPTURE_SIGNERS_PATH),
+  ):
+    try:
+      contents[name] = source.read_bytes()
+    except OSError as exc:
+      return [
+          f"{prefix} has no pending_live_sync, so it needs the capture receipt"
+          f" that finalized it: cannot read {source.relative_to(root)}:"
+          f" {exc.strerror or exc}"
+      ]
+  data = contents["receipt"]
+  try:
+    receipt = parse_bqca_capture_receipt(data)
+  except ValueError as exc:
+    return [
+        f"{prefix}: {where} is not a {BQCA_CAPTURE_RECEIPT_FORMAT} capture"
+        f" receipt: {exc}"
+    ]
+  errors = []
+  error = bqca_capture_signature_error(
+      data, contents["signature"], receipt["signer"], contents["signers"]
+  )
+  if error is not None:
+    errors.append(f"{prefix}: {where}: {error}")
+  if receipt["before_dump_sha256"] is None:
+    errors.append(
+        f"{prefix}: {where} is the receipt of a capture taken before the"
+        " write-back, not after it"
+    )
+  if receipt["report_id"] != binding.get("report_id"):
+    errors.append(
+        f"{prefix}: {where} is for report {receipt['report_id']!r}, not"
+        f" {binding.get('report_id')!r}"
+    )
+  for key in ("manifest_sha256", "template_bundle_sha256"):
+    if receipt[key] != live.get(key):
+      errors.append(
+          f"{prefix}: {where} is for {key} {receipt[key]}, not the pinned"
+          f" {live.get(key)}"
+      )
+  recorded = {
+      "verified_revision": receipt["revision"],
+      "verified_dump_sha256": receipt["dump_sha256"],
+      "capture_receipt_sha256": hashlib.sha256(data).hexdigest(),
+      "captured_by": receipt["signer"],
+  }
+  for key, expected in recorded.items():
+    if live.get(key) != expected:
+      errors.append(
+          f"{prefix}.{key} {live.get(key)!r} is not {expected!r}, which {where}"
+          " gives"
+      )
+  errors += bqca_capture_time_errors(
+      receipt,
+      datetime.datetime.now(datetime.timezone.utc),
+      f"{prefix}: {where}",
+  )
+  verified_date = live.get("verified_date")
+  if isinstance(verified_date, str) and _ISO_DATE_RE.fullmatch(verified_date):
+    try:
+      verified = datetime.date.fromisoformat(verified_date)
+    except ValueError:
+      verified = None
+    signed = bqca_capture_time(receipt["signed_at"]).date()
+    if verified is not None and verified < signed:
+      errors.append(
+          f"{prefix}.verified_date {verified_date!r} is before {where} was"
+          f" signed at {receipt['signed_at']}"
+      )
+  return errors
+
+
 def validate_bqca(
     root: pathlib.Path = ROOT,
     *,
@@ -2267,6 +2606,15 @@ def validate_bqca(
         f" expected {bundle_sha}, got {live.get('template_bundle_sha256')}"
     )
   errors.extend(_bqca_pending_live_sync_errors(live))
+  # A binding that records a live sync must carry the receipt of its capture.
+  if (
+      isinstance(live, dict)
+      and "pending_live_sync" not in live
+      and live.get("manifest_sha256") == live.get("verified_manifest_sha256")
+      and live.get("template_bundle_sha256")
+      == live.get("verified_template_bundle_sha256")
+  ):
+    errors.extend(_bqca_committed_capture_errors(root, binding, live))
 
   # 5. Semantic SQL invariants (M03, M04, M07, M14, M15, M16, R4-1..R4-3, R4-N2) & behavioral oracle
   sql_norm = " ".join(_strip_sql_comments(sql_text).split())

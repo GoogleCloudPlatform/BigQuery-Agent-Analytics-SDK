@@ -2725,6 +2725,15 @@ def test_bqca_derive_report_column_ids_lengthens_only_colliding_ids():
 
 _BQCA_DROP = object()
 BQCA_LIVE_PENDING = "bqca live_template_verification.pending_live_sync"
+# A binding without `pending_live_sync` records a live sync, so it needs the
+# capture receipt that tools/finalize_live_sync.py commits with it; a hand
+# edit that only re-pins the verified digests and deletes the pending record
+# has none.
+BQCA_LIVE_NO_RECEIPT = (
+    "bqca live_template_verification has no pending_live_sync, so it needs"
+    " the capture receipt that finalized it: cannot read"
+    " bindings/bqca_live_capture_receipt.json: No such file or directory"
+)
 BQCA_LIVE_SYNCED = (
     (("verified_manifest_sha256",), lambda live: live["manifest_sha256"]),
     (
@@ -2823,7 +2832,7 @@ BQCA_PENDING_LIVE_SYNC_CASES = [
         _bqca_live_edit(
             *BQCA_LIVE_SYNCED, (("pending_live_sync",), _BQCA_DROP)
         ),
-        [],
+        [BQCA_LIVE_NO_RECEIPT],
         id="removed_after_the_sync",
     ),
     *(
@@ -2893,7 +2902,8 @@ BQCA_PENDING_LIVE_SYNC_CASES = [
         ),
         [
             "bqca live_template_verification.verified_date '2026-02-30' is not"
-            " a quoted YYYY-MM-DD date"
+            " a quoted YYYY-MM-DD date",
+            BQCA_LIVE_NO_RECEIPT,
         ],
         id="verified_date_invalid_after_sync",
     ),
@@ -2916,7 +2926,7 @@ BQCA_PENDING_LIVE_SYNC_CASES = [
                 ).isoformat(),
             ),
         ),
-        [],
+        [BQCA_LIVE_NO_RECEIPT],
         id="verified_date_today",
     ),
     pytest.param(
@@ -2987,7 +2997,10 @@ def test_validate_contracts_requires_a_pending_live_sync_record(edit, expected):
   While the pinned manifest or bundle digest differs from the one the live
   template was verified against, `pending_live_sync` must give a reason, a
   quoted since-date, the tracking issue of this repository, and the required
-  actions; once both match again it must be removed.
+  actions; once both match again it must be removed, and then the binding
+  needs the committed capture receipt of the sync, which no hand edit of the
+  binding writes (tests/test_looker_studio_live_sync.py checks the receipt of
+  a finalized binding).
   """
   validator = _load_dashboard_module("validate_contracts")
   binding = yaml.safe_load(
