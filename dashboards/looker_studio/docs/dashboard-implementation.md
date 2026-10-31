@@ -383,9 +383,14 @@ python3 tools/validate_contracts.py --live-report-textproto /path/to/report.txt
 
 Looker Studio does not expose a public API for exporting a report's raw
 textproto configuration; maintainers with read access to the template report
-export the dump with internal inspection tooling and strip non-contract fields,
-while anyone can run `--live-report-textproto` on the checked-in sanitized
-fixtures described below.
+export the dump with internal inspection tooling. The checked-in sanitized
+fixtures under `tests/fixtures/` strip non-contract fields for public audit
+reproducibility, whereas a private live dump passed to
+`tools/finalize_live_sync.py` must retain its identity fields
+(`report_config.shareable.id`, `report_config.report.datasource_id`, and the
+`ds0` entry of `report_config.report.resource.datasource_alias`). Anyone can
+run `--live-report-textproto` on the checked-in sanitized fixtures described
+below.
 
 The command exits 1 and prints one error for each of these defects:
 
@@ -468,11 +473,14 @@ that ID, renames each dimension or metric `concept_names` entry and each
 `sort_column` of the same component that refers to the concept, and sets
 `report_config.report.datasource_id` to the `datasource_id` of
 `bindings/bqca_report_template.yaml`. Every other byte, comments and spacing
-included, is kept: each edit replaces one quoted literal in place. The live
-names repeat across components, so a rename is keyed by the component and the
-old name, never by the name alone. The data source IDs of the components and of
-the `ds0` alias are not edited; the audit refuses a dump where one of them
-names another data source, and nothing is written for it.
+included, is kept: each edit replaces one quoted literal in place, and the tool
+prepends `# bqca-offline-preview: written by tools/apply_bqca_rename_map.py;
+not a dump of a synced live template.` as the first line (after any UTF-8 byte
+order mark) so `tools/finalize_live_sync.py` refuses the preview in write mode.
+The live names repeat across components, so a rename is keyed by the component
+and the old name, never by the name alone. The data source IDs of the
+components and of the `ds0` alias are not edited; the audit refuses a dump
+where one of them names another data source, and nothing is written for it.
 
 ```bash
 python3 tools/apply_bqca_rename_map.py --dump <dump> --check
@@ -497,17 +505,21 @@ The tool reads the dump once. Every check reads a private, read-only copy of
 those bytes, never the path again, so a file that replaces the dump while the
 tool runs cannot be mixed in, and the file written is the bytes that passed. It
 is written with mode 0600, atomically. The tool refuses an `--out` inside this
-repository by its path, its directory, or the place a link leads to (a dump of
-the live template does not belong in it), an `--out` that is the dump, and an
-`--out` that exists, unless `--force` replaces it. `--check` runs every check,
-says whether a write would be refused and why, and writes nothing; it needs no
-`--out`. The tool exits 0 when it wrote the remapped dump, and with `--check`
-when every check passed, even if a write would be refused; 1 when it rejected
-the dump or the map, a check failed, or the write was refused; and 2 on bad
-arguments.
+repository by its path, its directory, or the place a link leads to (checked
+both by path prefix and by `os.path.samestat` so a case-insensitive spelling
+cannot bypass it; a dump of the live template does not belong in the
+repository), an `--out` that is the dump, and an `--out` that exists, unless
+`--force` replaces it. `--check` runs every check, says whether a write would
+be refused and why, and writes nothing; it needs no `--out`. The tool exits 0
+when it wrote the remapped dump, and with `--check` when every check passed,
+even if a write would be refused; 1 when it rejected the dump or the map, a
+check failed, or the write was refused; and 2 on bad arguments.
 
 A dump that already carries the new IDs maps to itself, and the tool writes a
-copy. Applied to the sanitized cut above, the tool writes the cut's own header
+copy (adding the `# bqca-offline-preview:` header comment line once if it is
+not already present, so applying the tool a second time to an already-marked
+preview maps it to itself byte for byte). Applied to the sanitized cut above,
+the tool writes the `# bqca-offline-preview:` line, the cut's own header
 comments, since it keeps every comment and the twin has others, and from the
 first line that is not a comment on, the checked-in twin byte for byte;
 `tests/test_looker_studio_live_sync.py` pins that. The result previews the
@@ -546,14 +558,20 @@ of the live template:
 
 - a one-line `--captured-from` attestation of how the dump was captured,
   which names the binding's `report_id`
-  (`42e79a1f-a979-4de8-911f-80d5a99543d5`);
+  (`42e79a1f-a979-4de8-911f-80d5a99543d5`) and does not describe an offline
+  preview;
+- a dump that decodes as UTF-8 and parses as protobuf text format (with
+  universal-newline normalization matching `tools/validate_contracts.py`), and
+  carries no `# bqca-offline-preview:` comment marker from
+  `tools/apply_bqca_rename_map.py`;
 - the identity fields of the dump, each with exactly one value equal to the
   binding's: `report_config.shareable.id` is the `report_id`, and
   `report_config.report.datasource_id` and the `ds0` entry of
   `report_config.report.resource.datasource_alias` are the `datasource_id`
   (`70e5ac1e-65bb-4c89-a9df-fa9990cb6029`); the report ID in any other field,
   inside a longer value, or in a comment does not count;
-- a dump that is not under `tests/fixtures/`.
+- a dump that is not under `tests/fixtures/` (checked both by path prefix and
+  by `os.path.samestat`).
 
 The checked-in fixtures have no `report_config.shareable` entry, so a write
 refuses them, copies of them anywhere, and any reordering or audit-inert edit

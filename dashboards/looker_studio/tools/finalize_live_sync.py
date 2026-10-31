@@ -26,14 +26,19 @@ in.
 A write fails closed unless the dump carries positive evidence that it is a
 dump of the live template:
 
-* ``--captured-from`` attests how the dump was captured, and names the
-  binding's ``report_id``;
+* ``--captured-from`` attests how the dump was captured, names the binding's
+  ``report_id``, and does not describe an offline preview;
+* the dump can be decoded as UTF-8 and parsed as protobuf text format (with
+  universal-newline normalization matching ``tools/validate_contracts.py``),
+  and does not carry the ``# bqca-offline-preview:`` comment marker written by
+  ``tools/apply_bqca_rename_map.py``;
 * the dump's ``report_config.shareable.id`` is exactly that ``report_id``,
   and its ``report_config.report.datasource_id`` and ``ds0`` data source
   alias are exactly the binding's ``datasource_id`` (``REPORT_ID_FIELD``,
   ``REPORT_DATASOURCE_FIELD``, ``ALIAS_FIELD``); the ID in any other field,
   inside a longer value, or in a comment does not count;
-* the dump is not under this repository's ``tests/fixtures``.
+* the dump is not under this repository's ``tests/fixtures`` (checked by path
+  and by ``os.path.samestat`` so a case-insensitive spelling cannot bypass it).
 
 The checked-in fixtures have no ``report_config.shareable`` entry, so neither
 they nor a reordered or otherwise audit-inert edit of them can be written,
@@ -59,6 +64,7 @@ import difflib
 import functools
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -98,6 +104,16 @@ MAX_ATTESTATION_LENGTH = 500
 REPORT_ID_FIELD = ("report_config", "shareable", "id")
 REPORT_DATASOURCE_FIELD = ("report_config", "report", "datasource_id")
 ALIAS_FIELD = ("report_config", "report", "resource", "datasource_alias")
+OFFLINE_PREVIEW_MARKER = (
+    "# bqca-offline-preview: written by tools/apply_bqca_rename_map.py;"
+    " not a dump of a synced live template."
+)
+_NON_LIVE_ATTESTATION_RE = re.compile(
+    r"\b(?:offline|preview|remapped\s+twin|apply_bqca_rename_map(?:\.py)?|"
+    r"no\s+live\s+(?:sync|capture|export|dump)|"
+    r"not\s+(?:a\s+|from\s+a\s+)?(?:live|synced))\b",
+    re.IGNORECASE,
+)
 NEXT_STEPS = """\
 In the same change:
   - remove the #559 known-issue notes: #bqca-column-id-note in
@@ -359,21 +375,70 @@ def _scalar_paths(
       yield (*path, name), value
 
 
-def dump_identity_errors(text: str, binding: dict) -> list[str] | None:
-  """Return why a dump does not identify the live template, or None.
+def _decode_snapshot(snapshot: bytes) -> str:
+  """Decode `snapshot` as UTF-8 with universal newlines, like `read_text`."""
+  return io.TextIOWrapper(
+      io.BytesIO(snapshot), encoding="utf-8", newline=None
+  ).read()
+
+
+def _has_offline_preview_marker(text: str) -> bool:
+  """Return whether `text` carries the offline-preview comment marker."""
+  normalized = (
+      text.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+  )
+  token_re = _load_validator()._TEXTPROTO_TOKEN_RE
+  pos = 0
+  while pos < len(normalized):
+    match = token_re.match(normalized, pos)
+    if match is None:
+      return "bqca-offline-preview:" in normalized[pos:]
+    if match.lastgroup == "skip" and "bqca-offline-preview:" in match.group():
+      return True
+    pos = match.end()
+  return False
+
+
+def _inside_directory(path: pathlib.Path, directory: pathlib.Path) -> bool:
+  """Return whether `path` is inside `directory`, even when case differs."""
+  root = directory.resolve()
+  places = (
+      path.resolve(),
+      pathlib.Path(os.path.abspath(path)),
+      path.parent.resolve(),
+  )
+  if any(place.is_relative_to(root) for place in places):
+    return True
+  try:
+    root_stat = root.stat()
+  except OSError:
+    return False
+  for place in places:
+    for ancestor in (place, *place.parents):
+      try:
+        if os.path.samestat(ancestor.stat(), root_stat):
+          return True
+      except OSError:
+        continue
+  return False
+
+
+def dump_identity_errors(text: str, binding: dict) -> list[str]:
+  """Return why a dump does not identify the live template.
 
   Each identity field must hold exactly one value, equal to the binding's:
   REPORT_ID_FIELD its `report_id`, REPORT_DATASOURCE_FIELD its
   `datasource_id`, and the `datasource_id` of the ALIAS_FIELD entry for its
   `data_source_alias` that same data source. A value elsewhere, or one that
   only contains the ID, does not count; when the dump has the report ID in
-  other fields, the error names them. Returns None for a dump that cannot be
-  read, which the live audit rejects with its own error.
+  other fields, the error names them. A dump that cannot be read as protobuf
+  text format fails closed with its parse error.
   """
+  normalized = text.replace("\r\n", "\n").replace("\r", "\n")
   try:
-    report = _load_validator().parse_report_textproto(text)
-  except ValueError:
-    return None
+    report = _load_validator().parse_report_textproto(normalized)
+  except ValueError as exc:
+    return [f"cannot read the dump as protobuf text format: {exc}"]
   errors = []
   report_id = binding.get("report_id")
   report_ids = _values_at(report, REPORT_ID_FIELD)
@@ -421,24 +486,38 @@ def write_blockers(
   """Return why a write would be refused (empty if it would not).
 
   A write needs positive evidence that the dump is a dump of the live
-  template: an attestation that names the report, a dump path `dump` that is
-  not a test fixture of this repository, and dump bytes `snapshot` that
-  identify the report (`dump_identity_errors`).
+  template: an attestation that names the report and does not describe an
+  offline preview, a dump path `dump` that is not a test fixture of this
+  repository, and dump bytes `snapshot` that are not an offline preview from
+  `tools/apply_bqca_rename_map.py` and that identify the report
+  (`dump_identity_errors`).
   """
   blockers = []
   report_id = str(binding.get("report_id"))
   if captured_from is None:
     blockers.append("--captured-from is not given")
-  elif report_id not in captured_from:
-    blockers.append(f"--captured-from does not name report {report_id}")
+  else:
+    if report_id not in captured_from:
+      blockers.append(f"--captured-from does not name report {report_id}")
+    if _NON_LIVE_ATTESTATION_RE.search(captured_from):
+      blockers.append(
+          "--captured-from describes an offline preview, not a dump of the"
+          " synced live template"
+      )
   fixtures = REPOSITORY_ROOT / FIXTURES_PATH
-  if dump.resolve().is_relative_to(fixtures.resolve()):
+  if _inside_directory(dump, fixtures):
     blockers.append(f"{dump} is a test fixture of this repository")
   try:
-    text = snapshot.decode("utf-8")
-  except UnicodeDecodeError:
+    text = _decode_snapshot(snapshot)
+  except UnicodeDecodeError as exc:
+    blockers.append(f"cannot read {dump} as UTF-8 text: {exc}")
     return blockers
-  return blockers + (dump_identity_errors(text, binding) or [])
+  if _has_offline_preview_marker(text):
+    blockers.append(
+        f"{dump} is an offline preview from tools/apply_bqca_rename_map.py,"
+        " not a dump of the synced live template"
+    )
+  return blockers + dump_identity_errors(text, binding)
 
 
 def _replace_file(path: pathlib.Path, data: bytes) -> None:

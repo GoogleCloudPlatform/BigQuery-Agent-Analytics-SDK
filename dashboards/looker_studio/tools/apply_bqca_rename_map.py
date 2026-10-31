@@ -17,11 +17,13 @@ before the live template is touched. In the dump it:
   ``bindings/bqca_report_template.yaml``, when it is another value.
 
 Every other byte of the dump, comments and spacing included, is kept: each edit
-replaces one quoted scalar literal in place. The live names repeat across
-components, so a rename is keyed by the component and the old name, never by
-the name alone. The map is the one ``gen_bqca_rename_map.py`` derives from the
-dump and the manifest. ``--map`` also reads a CSV written by that tool, and
-fails, writing nothing, unless it matches the derived map exactly.
+replaces one quoted scalar literal in place, and the tool prepends a
+``# bqca-offline-preview:`` comment line so ``tools/finalize_live_sync.py``
+refuses the preview in write mode. The live names repeat across components, so
+a rename is keyed by the component and the old name, never by the name alone.
+The map is the one ``gen_bqca_rename_map.py`` derives from the dump and the
+manifest. ``--map`` also reads a CSV written by that tool, and fails, writing
+nothing, unless it matches the derived map exactly.
 
 Before the tool writes anything, it checks the result four ways:
 
@@ -42,9 +44,10 @@ exists without ``--force``. ``--check`` runs every check and prints the plan
 without writing.
 
 A dump that already carries the new IDs maps to itself, so the tool writes a
-copy. The twin previews the sync; it is not a dump of a synced template. After
-the rename is applied to the live template, take a new dump of it for
-``tools/finalize_live_sync.py``.
+copy (adding the ``# bqca-offline-preview:`` header comment line once if it is
+not already present). The twin previews the sync; it is not a dump of a synced
+template. After the rename is applied to the live template, take a new dump of
+it for ``tools/finalize_live_sync.py``.
 
 Exits 0 when the remapped dump is written, and with ``--check`` when every check
 passes, whether or not a write to ``--out`` would be refused; the output says
@@ -86,6 +89,10 @@ NOT_A_DUMP_OF_A_SYNCED_TEMPLATE = (
     "the remapped dump previews the sync; it is not a dump of a synced"
     " template. After the rename is applied to the live template, take a new"
     " dump of it for tools/finalize_live_sync.py."
+)
+OFFLINE_PREVIEW_MARKER = (
+    "# bqca-offline-preview: written by tools/apply_bqca_rename_map.py;"
+    " not a dump of a synced live template."
 )
 
 
@@ -569,23 +576,45 @@ def map_drift(rows: list[dict], text: str) -> list[str]:
   return errors
 
 
+def _with_offline_preview_marker(body: str) -> str:
+  """Return `body` with `OFFLINE_PREVIEW_MARKER` as its first line."""
+  if body.startswith(
+      (f"{OFFLINE_PREVIEW_MARKER}\n", f"{OFFLINE_PREVIEW_MARKER}\r\n")
+  ):
+    return body
+  newline = "\r\n" if "\r\n" in body else "\n"
+  return f"{OFFLINE_PREVIEW_MARKER}{newline}{body}"
+
+
 def _inside_repository(out: pathlib.Path) -> bool:
   """Return whether a write to `out` would put a file in this repository.
 
   The write replaces the entry `out` and never follows it, so the file lands in
   the directory of `out`, reached through the links of its path. `out` is also
   refused if its path, as it is spelled, is in the repository, wherever a link
-  on it leads, since the link can be changed, or if it resolves into it.
+  on it leads, since the link can be changed, or if it resolves into it, even
+  when a case-insensitive filesystem preserves another letter case.
   """
   root = REPOSITORY_ROOT.resolve()
-  return any(
-      place.is_relative_to(root)
-      for place in (
-          out.resolve(),
-          pathlib.Path(os.path.abspath(out)),
-          out.parent.resolve(),
-      )
+  places = (
+      out.resolve(),
+      pathlib.Path(os.path.abspath(out)),
+      out.parent.resolve(),
   )
+  if any(place.is_relative_to(root) for place in places):
+    return True
+  try:
+    root_stat = root.stat()
+  except OSError:
+    return False
+  for place in places:
+    for ancestor in (place, *place.parents):
+      try:
+        if os.path.samestat(ancestor.stat(), root_stat):
+          return True
+      except OSError:
+        continue
+  return False
 
 
 def write_blockers(
@@ -801,7 +830,10 @@ def _remap_snapshot(
   # The edits, and the remapped dump they make.
   try:
     root = read_textproto(body)
-    if _plain(root) != validator.parse_report_textproto(body):
+    universal_body = copy.read_text(encoding="utf-8").removeprefix("\ufeff")
+    if _plain(root) != validator.parse_report_textproto(body) or _plain(
+        root
+    ) != validator.parse_report_textproto(universal_body):
       raise ValueError(
           f"the dump reads differently here than in {VALIDATOR_PATH}"
       )
@@ -809,7 +841,9 @@ def _remap_snapshot(
     remapped_body = apply_edits(body, edits)
   except ValueError as exc:
     return _fail([str(exc)])
-  remapped = (head + remapped_body).encode("utf-8")
+  remapped = (head + _with_offline_preview_marker(remapped_body)).encode(
+      "utf-8"
+  )
   counts = collections.Counter(edit.kind for edit in edits)
   lines = sum(
       old != new

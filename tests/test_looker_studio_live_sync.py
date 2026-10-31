@@ -18,18 +18,23 @@
 `bindings/bqca_report_template.yaml` only after `tools/validate_contracts.py
 --profile bqca --live-report-textproto` passes on a dump of the live template,
 and only with positive evidence that the dump is one: a `--captured-from`
-attestation that names the report, and a dump that names the report in a
-field. `tools/gen_bqca_rename_map.py` lists the rename that the sync applies
-to the concepts of the live template. `tools/apply_bqca_rename_map.py` applies
-it to a dump of the live template, offline, and writes the remapped dump.
+attestation that names the report (and does not describe an offline preview),
+and a dump that carries no `# bqca-offline-preview:` marker and names the
+report and its data source in `report_config.shareable.id`,
+`report_config.report.datasource_id`, and the `ds0` entry of
+`report_config.report.resource.datasource_alias`.
+`tools/gen_bqca_rename_map.py` lists the rename that the sync applies to the
+concepts of the live template. `tools/apply_bqca_rename_map.py` applies it to
+a dump of the live template, offline, and writes the remapped dump with the
+`# bqca-offline-preview:` header comment line.
 
 The finalize tests run the tool from a copy of `dashboards/looker_studio`, so
 they never write to the repository. A successful write uses a dump that
 `_render_dump` generates from the copy's manifest, with test-only provenance:
-a `report_id` field and the ATTESTATION. The checked-in sanitized cuts of the
-2026-10-29 dump name the report in no field, so neither they nor any
-reordering or audit-inert edit of them can be written; `--check` still
-previews with them.
+`report_config.shareable.id` and the ATTESTATION. The checked-in sanitized
+cuts of the 2026-10-29 dump have no `report_config.shareable` entry, so
+neither they nor any reordering or audit-inert edit of them can be written;
+`--check` still previews with them.
 
 The apply tests remap the checked-in sanitized dump. Those that could write
 into a repository (the refusals and the failures) run the tool from a copy of
@@ -850,7 +855,7 @@ def test_checked_in_stand_ins_name_the_report_in_no_field(tree, fixture):
 
   errors = finalize.dump_identity_errors(text, binding)
 
-  assert errors is not None and errors[0] == NO_REPORT_FIELD
+  assert errors and errors[0] == NO_REPORT_FIELD
 
 
 _DATASOURCE_FIELD = "report_config.report.datasource_id"
@@ -922,6 +927,112 @@ def test_finalize_refuses_a_dump_that_does_not_identify_the_live_template(
   assert _snapshot(tree) == before
 
 
+def test_finalize_refuses_a_stand_in_with_a_carriage_return_comment(
+    tree, tmp_path
+):
+  """A standalone `\\r` after `#` cannot hide a missing report_id from write_blockers.
+
+  `validate_contracts.py` reads the dump with `Path.read_text`, which
+  normalizes `\\r` to `\\n`, so `capture_metadata { # comment\\r}\\n` closes its
+  message and passes the audit. `finalize_live_sync.py` must decode with the
+  same universal newlines and fail closed when `report_config.shareable.id` is
+  missing.
+  """
+  path = tmp_path / "elsewhere/report.textproto"
+  path.parent.mkdir()
+  path.write_bytes(
+      b"capture_metadata { # carriage-return comment\r}\n"
+      + REMAPPED_DUMP.read_bytes()
+  )
+  audit = _audit(tree, path)
+  assert audit.returncode == 0, audit.stderr
+  before = _snapshot(tree)
+
+  refused = _finalize(tree, "--dump", str(path), "--captured-from", ATTESTATION)
+
+  assert refused.returncode == 1
+  assert (
+      f"not finalized: {NO_REPORT_FIELD}; {BINDING} is unchanged"
+      in refused.stderr
+  )
+  assert "ok: live report validated" not in refused.stdout
+  assert _snapshot(tree) == before
+
+
+def test_finalize_fails_closed_when_the_dump_cannot_be_decoded_or_parsed(
+    tree, tmp_path, monkeypatch, capsys
+):
+  """Unreadable UTF-8 or broken textproto produces a blocker in write_blockers."""
+  finalize = _load_finalize(tree)
+  binding = yaml.safe_load((tree / BINDING).read_text(encoding="utf-8"))
+  before = _snapshot(tree)
+
+  assert finalize.dump_identity_errors("report_config {\n", binding) == [
+      "cannot read the dump as protobuf text format: unterminated message:"
+      " missing '}'"
+  ]
+  assert (
+      finalize.dump_identity_errors(
+          "capture_metadata { # comment\r}\n" + _render_dump(tree), binding
+      )
+      == []
+  )
+  assert finalize.dump_identity_errors(
+      "capture_metadata { # comment\r}\n"
+      + REMAPPED_DUMP.read_text(encoding="utf-8"),
+      binding,
+  ) == [NO_REPORT_FIELD]
+
+  # Even if the validator subprocess returned 0, write_blockers refuses
+  # non-UTF-8 bytes and malformed textproto before any audit or write runs.
+  monkeypatch.setattr(finalize, "_audit", lambda audited_path: 0)
+  for name, payload, expected in [
+      ("bad_utf8.textproto", b"report_config {\n\xff}\n", "as UTF-8 text:"),
+      (
+          "broken.textproto",
+          b"report_config {\n  shareable {\n",
+          "cannot read the dump as protobuf text format: unterminated message:"
+          " missing '}'",
+      ),
+  ]:
+    path = tmp_path / name
+    path.write_bytes(payload)
+    code = finalize.main(["--dump", str(path), "--captured-from", ATTESTATION])
+    assert code == 1
+    stderr = capsys.readouterr().err
+    assert expected in stderr
+    assert f"{BINDING} is unchanged" in stderr
+    assert _snapshot(tree) == before
+
+
+@pytest.mark.parametrize(
+    "line_ending", ["\n", "\r\n", "\r"], ids=["lf", "crlf", "cr"]
+)
+def test_finalize_accepts_a_valid_dump_with_any_universal_newline_ending(
+    tree, tmp_path, line_ending
+):
+  """A genuine dump with LF, CRLF or CR line endings (and `#` comments) finalizes."""
+  text = _render_dump(
+      tree, extra_lines=["capture_metadata { # comment before brace", "  }"]
+  ).replace("\n", line_ending)
+  path = tmp_path / "universal.textproto"
+  data = text.encode("utf-8")
+  path.write_bytes(data)
+
+  result = _finalize(
+      tree,
+      "--dump",
+      str(path),
+      "--captured-from",
+      ATTESTATION,
+      "--verified-date",
+      _since_date(tree),
+  )
+
+  assert result.returncode == 0, result.stdout + result.stderr
+  assert _live(tree)["verified_dump_sha256"] == hashlib.sha256(data).hexdigest()
+
+
 @pytest.mark.parametrize(
     "args, code, error",
     [
@@ -985,6 +1096,177 @@ def test_finalize_refuses_to_record_a_checked_in_fixture(tree, dump):
   assert "-  pending_live_sync:\n" in preview.stdout
   assert f"{stand_in} is a test fixture of this repository" in preview.stdout
   assert _snapshot(tree) == before
+
+
+def test_finalize_refuses_a_fixture_on_a_case_insensitive_filesystem(
+    tree, dump, monkeypatch, capsys
+):
+  """A case-variant path into tests/fixtures is still refused by samestat."""
+  finalize = _load_finalize(tree)
+  fixtures = (tree.parents[1] / "tests/fixtures").resolve()
+  stand_in = fixtures / "stand_in.textproto"
+  stand_in.parent.mkdir(parents=True, exist_ok=True)
+  shutil.copyfile(dump, stand_in)
+  upper = tree.parents[1] / "TESTS/FIXTURES/stand_in.textproto"
+  assert not upper.is_relative_to(fixtures)
+  before = _snapshot(tree)
+  real_resolve = Path.resolve
+  real_stat = Path.stat
+  real_read_bytes = Path.read_bytes
+
+  def map_case(path):
+    text = str(path)
+    target = str(tree.parents[1] / "TESTS/FIXTURES")
+    if text == target or text.startswith(target + os.sep):
+      return Path(str(fixtures) + text[len(target) :])
+    return None
+
+  def fake_resolve(self, *args, **kwargs):
+    if map_case(self) is not None:
+      return Path(os.path.abspath(self))
+    return real_resolve(self, *args, **kwargs)
+
+  def fake_stat(self, *args, **kwargs):
+    mapped = map_case(self)
+    return real_stat(mapped if mapped is not None else self, *args, **kwargs)
+
+  def fake_read_bytes(self):
+    mapped = map_case(self)
+    return real_read_bytes(mapped if mapped is not None else self)
+
+  monkeypatch.setattr(Path, "resolve", fake_resolve)
+  monkeypatch.setattr(Path, "stat", fake_stat)
+  monkeypatch.setattr(Path, "read_bytes", fake_read_bytes)
+
+  code = finalize.main(["--dump", str(upper), "--captured-from", ATTESTATION])
+
+  assert code == 1
+  stderr = capsys.readouterr().err
+  assert f"{upper} is a test fixture of this repository" in stderr
+  assert f"{BINDING} is unchanged" in stderr
+  stand_in.unlink()
+  assert _snapshot(tree) == before
+
+
+def test_finalize_refuses_an_offline_preview_from_apply_bqca_rename_map(
+    tree, tmp_path
+):
+  """An offline preview from apply_bqca_rename_map.py previews in --check but never finalizes."""
+  pre_sync = tmp_path / "pre_sync.textproto"
+  pre_sync.write_text(
+      GENERIC_DUMP.read_text(encoding="utf-8").replace(
+          "report_config {\n",
+          "report_config {\n"
+          "  shareable {\n"
+          f'    id: "{REPORT_ID}"\n'
+          '    name: "BQCA - Prompt & Response Logging"\n'
+          "  }\n",
+          1,
+      ),
+      encoding="utf-8",
+  )
+  preview = tmp_path / "preview.textproto"
+  applied = _apply("--dump", str(pre_sync), "--out", str(preview))
+  assert applied.returncode == 0, applied.stdout + applied.stderr
+  marker = _load_apply(DASHBOARD).OFFLINE_PREVIEW_MARKER
+  assert preview.read_text(encoding="utf-8").startswith(f"{marker}\n")
+  before = _snapshot(tree)
+
+  # Step 3 of the sync workflow: `--check` audits the offline preview, shows the
+  # diff, and notes that a write would refuse the offline preview.
+  checked = _finalize(tree, "--dump", str(preview), "--check")
+  assert checked.returncode == 0, checked.stdout + checked.stderr
+  assert "ok: live report validated" in checked.stdout
+  assert (
+      f"{preview} is an offline preview from tools/apply_bqca_rename_map.py,"
+      " not a dump of the synced live template"
+  ) in checked.stdout
+  assert _snapshot(tree) == before
+
+  # Write mode refuses both the offline-preview marker in the file and an
+  # attestation that describes an offline preview.
+  offline_attestation = f"offline remapped preview of {REPORT_ID}; no live sync"
+  both_refused = _finalize(
+      tree,
+      "--dump",
+      str(preview),
+      "--captured-from",
+      offline_attestation,
+  )
+  assert both_refused.returncode == 1
+  assert (
+      "--captured-from describes an offline preview, not a dump of the synced"
+      " live template"
+  ) in both_refused.stderr
+  assert (
+      f"{preview} is an offline preview from tools/apply_bqca_rename_map.py,"
+      " not a dump of the synced live template"
+  ) in both_refused.stderr
+  assert _snapshot(tree) == before
+
+  # Even with a live-looking attestation (or with the marker comment moved to
+  # the end of the file), the marker in the dump refuses the write.
+  for candidate in (
+      preview,
+      tmp_path / "moved_marker.textproto",
+  ):
+    if candidate != preview:
+      body_without_marker = preview.read_text(encoding="utf-8").removeprefix(
+          f"{marker}\n"
+      )
+      candidate.write_text(f"{body_without_marker}{marker}\n", encoding="utf-8")
+    marker_refused = _finalize(
+        tree, "--dump", str(candidate), "--captured-from", ATTESTATION
+    )
+    assert marker_refused.returncode == 1
+    assert (
+        f"{candidate} is an offline preview from"
+        " tools/apply_bqca_rename_map.py, not a dump of the synced live"
+        " template"
+    ) in marker_refused.stderr
+    assert _snapshot(tree) == before
+
+  # Even if someone strips the marker line from the file, an honest offline
+  # preview attestation is still refused on its own.
+  stripped = tmp_path / "stripped.textproto"
+  stripped.write_text(
+      preview.read_text(encoding="utf-8").removeprefix(f"{marker}\n"),
+      encoding="utf-8",
+  )
+  attestation_refused = _finalize(
+      tree,
+      "--dump",
+      str(stripped),
+      "--captured-from",
+      offline_attestation,
+  )
+  assert attestation_refused.returncode == 1
+  assert (
+      "--captured-from describes an offline preview, not a dump of the synced"
+      " live template"
+  ) in attestation_refused.stderr
+  assert _snapshot(tree) == before
+
+  # A `# bqca-offline-preview:` substring inside a quoted string literal is not
+  # a comment marker and does not block a genuine live dump.
+  quoted_literal = tmp_path / "quoted_literal.textproto"
+  quoted_literal.write_text(
+      _render_dump(
+          tree,
+          extra_lines=[f'capture_note: "{marker}"'],
+      ),
+      encoding="utf-8",
+  )
+  accepted = _finalize(
+      tree,
+      "--dump",
+      str(quoted_literal),
+      "--captured-from",
+      ATTESTATION,
+      "--verified-date",
+      _since_date(tree),
+  )
+  assert accepted.returncode == 0, accepted.stdout + accepted.stderr
 
 
 @pytest.mark.parametrize(
@@ -1658,12 +1940,14 @@ def _header_and_body(data):
 def _remapped_sanitized_dump():
   """Return the bytes that the tool writes for the sanitized dump.
 
-  The tool keeps every comment, and the sanitized dump and its remapped twin
-  have different ones. So the result is the sanitized dump's header and, from
-  its first line that is not a comment on, the twin.
+  The tool prepends OFFLINE_PREVIEW_MARKER and keeps every comment, and the
+  sanitized dump and its remapped twin have different ones. So the result is
+  the marker line, the sanitized dump's header and, from its first line that
+  is not a comment on, the twin.
   """
+  marker = f"{_load_apply(DASHBOARD).OFFLINE_PREVIEW_MARKER}\n".encode("utf-8")
   header = _header_and_body(GENERIC_DUMP.read_bytes())[0]
-  return header + _header_and_body(REMAPPED_DUMP.read_bytes())[1]
+  return marker + header + _header_and_body(REMAPPED_DUMP.read_bytes())[1]
 
 
 @pytest.fixture
@@ -1697,22 +1981,27 @@ def test_apply_renames_the_sanitized_dump_into_its_remapped_twin(tmp_path):
   assert result.stderr == ""
   written = out.read_bytes()
   assert _mode(out) == 0o600
-  # The comments are kept, so the output has the sanitized dump's, not the
-  # twin's. From its first line that is not a comment on, it is the twin, byte
-  # for byte.
+  # The comments are kept, so the output has the offline-preview marker and the
+  # sanitized dump's comments, not the twin's. From its first line that is not
+  # a comment on, it is the twin, byte for byte.
+  marker = f"{_load_apply(DASHBOARD).OFFLINE_PREVIEW_MARKER}\n".encode("utf-8")
   assert written != REMAPPED_DUMP.read_bytes()
+  assert written.startswith(marker)
   header, body = _header_and_body(written)
-  assert header == _header_and_body(GENERIC_DUMP.read_bytes())[0]
+  assert header == marker + _header_and_body(GENERIC_DUMP.read_bytes())[0]
   assert body == _header_and_body(REMAPPED_DUMP.read_bytes())[1]
   assert written == _remapped_sanitized_dump()
-  # 209 lines change, one literal each: the 65 concept names and ids, the 65
-  # `concept_names` (23 dimensions, 42 metrics), the 13 `sort_column`s and the
-  # report-level `datasource_id`.
+  # After the prepended marker line, 209 lines change, one literal each: the 65
+  # concept names and ids, the 65 `concept_names` (23 dimensions, 42 metrics),
+  # the 13 `sort_column`s and the report-level `datasource_id`.
   before = GENERIC_DUMP.read_text(encoding="utf-8").splitlines()
   after = written.decode("utf-8").splitlines()
-  assert len(after) == len(before)
+  assert after[0] == _load_apply(DASHBOARD).OFFLINE_PREVIEW_MARKER
+  assert len(after[1:]) == len(before)
   assert collections.Counter(
-      new.split(":")[0].strip() for old, new in zip(before, after) if old != new
+      new.split(":")[0].strip()
+      for old, new in zip(before, after[1:])
+      if old != new
   ) == {
       "name": 65,
       "id": 65,
@@ -1757,13 +2046,19 @@ def test_apply_renames_the_sanitized_dump_into_its_remapped_twin(tmp_path):
 
 def test_apply_maps_a_dump_that_has_the_new_ids_to_itself(tmp_path):
   out = tmp_path / "remapped.textproto"
+  marker = f"{_load_apply(DASHBOARD).OFFLINE_PREVIEW_MARKER}\n".encode("utf-8")
 
   result = _apply("--dump", str(REMAPPED_DUMP), "--out", str(out))
 
   assert result.returncode == 0, result.stdout + result.stderr
-  assert out.read_bytes() == REMAPPED_DUMP.read_bytes()
+  assert out.read_bytes() == marker + REMAPPED_DUMP.read_bytes()
   assert "edits: none; the dump already carries every new ID" in result.stdout
   assert f"report datasource_id: already '{DATASOURCE_ID}'" in result.stdout
+
+  again = tmp_path / "remapped_again.textproto"
+  second = _apply("--dump", str(out), "--out", str(again))
+  assert second.returncode == 0, second.stdout + second.stderr
+  assert again.read_bytes() == out.read_bytes()
 
 
 def test_apply_accepts_the_map_that_gen_bqca_rename_map_writes(tmp_path):
@@ -1834,6 +2129,70 @@ def test_apply_refuses_an_out_inside_the_repository(
   assert code == 1
   assert "is inside this repository" in capsys.readouterr().err
   assert not inside.exists()
+  assert _snapshot(repository) == before
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["root", "subdir"])
+def test_apply_refuses_an_out_inside_the_repository_on_a_case_insensitive_filesystem(
+    apply_tree, work, monkeypatch, capsys, nested
+):
+  """A case-variant spelling of the repository root is still refused by samestat."""
+  apply = _load_apply(apply_tree)
+  repository = apply_tree.parent.parent.resolve()
+  if nested:
+    (repository / "sub").mkdir()
+  upper_repo = repository.parent / "REPO"
+  out = (
+      (upper_repo / "sub/report.textproto")
+      if nested
+      else (upper_repo / "report.textproto")
+  )
+  assert not out.is_relative_to(repository)
+  before = _snapshot(repository)
+  real_resolve = Path.resolve
+  real_stat = Path.stat
+  real_is_dir = Path.is_dir
+
+  def map_case(path):
+    text = str(path)
+    target = str(upper_repo)
+    if text == target or text.startswith(target + os.sep):
+      return Path(str(repository) + text[len(target) :])
+    return None
+
+  def fake_resolve(self, *args, **kwargs):
+    if map_case(self) is not None:
+      return Path(os.path.abspath(self))
+    return real_resolve(self, *args, **kwargs)
+
+  def fake_stat(self, *args, **kwargs):
+    mapped = map_case(self)
+    return real_stat(mapped if mapped is not None else self, *args, **kwargs)
+
+  def fake_is_dir(self):
+    mapped = map_case(self)
+    return real_is_dir(mapped if mapped is not None else self)
+
+  monkeypatch.setattr(Path, "resolve", fake_resolve)
+  monkeypatch.setattr(Path, "stat", fake_stat)
+  monkeypatch.setattr(Path, "is_dir", fake_is_dir)
+
+  code = apply.main(["--dump", str(GENERIC_DUMP), "--out", str(out), "--force"])
+
+  assert code == 1
+  assert f"ERROR: {out} is inside this repository" in capsys.readouterr().err
+  assert _snapshot(repository) == before
+
+  check_code = apply.main(
+      ["--dump", str(GENERIC_DUMP), "--out", str(out), "--check"]
+  )
+  assert check_code == 0
+  stdout = capsys.readouterr().out
+  assert (
+      f"check: every check passed, but a write would refuse it: {out} is"
+      " inside this repository, which must not hold a dump of the live"
+      " template; nothing written"
+  ) in stdout
   assert _snapshot(repository) == before
 
 
@@ -2271,6 +2630,11 @@ _NOT_ONE_QUOTED_STRING = (
             lambda text: text.rstrip("\n").removesuffix("}"),
             "cannot read the dump: unterminated message: missing '}'",
         ),
+        (
+            lambda text: '# comment\rcapture_note: "hidden"\n' + text,
+            "the dump reads differently here than in"
+            " tools/validate_contracts.py",
+        ),
     ],
     ids=[
         "dangling-reference",
@@ -2289,6 +2653,7 @@ _NOT_ONE_QUOTED_STRING = (
         "unquoted-report-datasource-id",
         "closing-brace-too-many",
         "closing-brace-missing",
+        "carriage-return-comment-divergence",
     ],
 )
 def test_apply_refuses_a_dump_it_cannot_remap_one_to_one(
@@ -2296,8 +2661,8 @@ def test_apply_refuses_a_dump_it_cannot_remap_one_to_one(
 ):
   apply = _load_apply(apply_tree)
   dump, out = work / "dump.textproto", work / "out.textproto"
-  dump.write_text(
-      mutate(GENERIC_DUMP.read_text(encoding="utf-8")), encoding="utf-8"
+  dump.write_bytes(
+      mutate(GENERIC_DUMP.read_text(encoding="utf-8")).encode("utf-8")
   )
 
   code = apply.main(["--dump", str(dump), "--out", str(out)])
@@ -2386,15 +2751,28 @@ def test_apply_keeps_every_byte_that_it_does_not_edit(apply_tree, work):
   code = apply.main(["--dump", str(dump), "--out", str(out)])
 
   assert code == 0
-  remapped = _remapped_sanitized_dump().decode("utf-8")
+  remapped = (
+      _remapped_sanitized_dump()
+      .decode("utf-8")
+      .removeprefix(f"{apply.OFFLINE_PREVIEW_MARKER}\n")
+  )
   first = re.search(r'name: "(qt_[a-z0-9]+)"', remapped)
   assert first is not None
-  expected = _noisy(
+  noisy_remapped = _noisy(
       remapped.replace(first.group(), f"name: '{first.group(1)}'", 1)
+  )
+  expected = (
+      "\ufeff"
+      + f"{apply.OFFLINE_PREVIEW_MARKER}\r\n"
+      + noisy_remapped.removeprefix("\ufeff")
   ).encode("utf-8")
   written = out.read_bytes()
   assert written == expected
-  assert written.startswith("\ufeff# caf\u00e9 \U0001f600".encode("utf-8"))
+  assert written.startswith(
+      f"\ufeff{apply.OFFLINE_PREVIEW_MARKER}\r\n# caf\u00e9 \U0001f600".encode(
+          "utf-8"
+      )
+  )
   assert written.count(b"\n") == written.count(b"\r\n")
   assert dump.read_bytes() == noisy
 
