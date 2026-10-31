@@ -2651,6 +2651,172 @@ def test_validate_contracts_rejects_generic_or_repeated_column_ids():
   )
 
 
+def _bqca_validate_repinned(edit):
+  """Validate the BQCA contracts with `edit` applied to manifest and bundle.
+
+  The binding's manifest and bundle digests are re-pinned to the edited
+  copies, so only the checks of their content can fail.
+  """
+  validator = _load_dashboard_module("validate_contracts")
+  # A JSON round trip gives the manifest's top-level components list its own
+  # copies of the page components, as the bundle's are.
+  manifest = json.loads(
+      json.dumps(
+          yaml.safe_load(
+              (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text()
+          )
+      )
+  )
+  bundle = json.loads(
+      (DASHBOARD / "spec/bqca_dashboard_template.json").read_text()
+  )
+  binding = yaml.safe_load(
+      (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+  )
+  edit(manifest)
+  edit(bundle)
+  live = binding["live_template_verification"]
+  live["manifest_sha256"] = hashlib.sha256(
+      yaml.safe_dump(manifest, sort_keys=False).encode("utf-8")
+  ).hexdigest()
+  live["template_bundle_sha256"] = hashlib.sha256(
+      (json.dumps(bundle, indent=2) + "\n").encode("utf-8")
+  ).hexdigest()
+  return validator.validate_bqca(
+      manifest_override=manifest,
+      bundle_override=bundle,
+      binding_override=binding,
+  )
+
+
+def _bqca_spec_block_edit(component, key, block):
+  """Return an edit that sets `spec[key]` in every copy of `component`.
+
+  A callable `block` is called with the component to get the block.
+  """
+
+  def edit(document):
+    for comp in _bqca_page_components(document) + document["components"]:
+      if comp["id"] == component:
+        value = block(comp) if callable(block) else block
+        comp["spec"][key] = json.loads(json.dumps(value))
+
+  return edit
+
+
+# One case per block that a component's embedded spec must not hold: an edit
+# of the manifest and bundle that adds it, and the exact errors it must produce.
+BQCA_EXTRA_SPEC_BLOCK_CASES = [
+    pytest.param(lambda document: None, [], id="unchanged"),
+    pytest.param(
+        # kpi_input_tokens' own column ID, in a block of another kind.
+        _bqca_spec_block_edit(
+            "kpi_total_tokens",
+            "barChart",
+            {
+                "dataset": {
+                    "datasourceId": BQCA_DATASOURCE_ID,
+                    "columns": [
+                        {
+                            "id": "qt_c90b69a4",
+                            "fieldName": "_input_tokens_",
+                            "aggregation": "SUM",
+                        }
+                    ],
+                },
+                "fields": {"metricSeries": {"metricIds": ["qt_c90b69a4"]}},
+            },
+        ),
+        [
+            "component kpi_total_tokens spec.barChart is not id, fixedLayout,"
+            " or the spec.scorecard block that chart_type 'SCORECARD' reads"
+        ],
+        id="another_kind_repeating_another_components_column_id",
+    ),
+    pytest.param(
+        # The legacy generic IDs, in a block of another kind.
+        _bqca_spec_block_edit(
+            "kpi_total_tokens",
+            "table",
+            {
+                "dataset": {
+                    "datasourceId": BQCA_DATASOURCE_ID,
+                    "columns": [
+                        {"id": "dim", "fieldName": "_data_agent_id_"},
+                        {
+                            "id": "met",
+                            "fieldName": "_total_tokens_",
+                            "aggregation": "SUM",
+                        },
+                    ],
+                },
+                "fields": {"dimensionIds": ["dim"], "metricIds": ["met"]},
+            },
+        ),
+        [
+            "component kpi_total_tokens spec.table is not id, fixedLayout, or"
+            " the spec.scorecard block that chart_type 'SCORECARD' reads"
+        ],
+        id="another_kind_with_generic_column_ids",
+    ),
+    pytest.param(
+        # The block of a kind the chart had before, repeating its column IDs.
+        _bqca_spec_block_edit(
+            "chart_tokens_by_agent",
+            "lineChart",
+            lambda comp: comp["spec"]["barChart"],
+        ),
+        [
+            "component chart_tokens_by_agent spec.lineChart is not id,"
+            " fixedLayout, or the spec.barChart block that chart_type"
+            " 'bar_chart' reads"
+        ],
+        id="stale_block_of_a_former_kind",
+    ),
+    pytest.param(
+        # A kind that no BQCA chart_type maps to.
+        _bqca_spec_block_edit(
+            "chart_tokens_by_agent",
+            "timeSeries",
+            {
+                "dataset": {
+                    "datasourceId": BQCA_DATASOURCE_ID,
+                    "columns": [
+                        {
+                            "id": "met",
+                            "fieldName": "_total_tokens_",
+                            "aggregation": "SUM",
+                        }
+                    ],
+                },
+                "fields": {"metricIds": ["met"]},
+            },
+        ),
+        [
+            "component chart_tokens_by_agent spec.timeSeries is not id,"
+            " fixedLayout, or the spec.barChart block that chart_type"
+            " 'bar_chart' reads"
+        ],
+        id="kind_no_chart_type_reads",
+    ),
+]
+
+
+@pytest.mark.parametrize("edit, expected", BQCA_EXTRA_SPEC_BLOCK_CASES)
+def test_validate_contracts_rejects_spec_blocks_the_chart_type_does_not_read(
+    edit, expected
+):
+  """#check-can-fail: a component's spec holds no block its kind does not read.
+
+  The column-ID checks read `spec.<kind>` alone, the block of the component's
+  `chart_type`, so any other block of its spec must be rejected rather than
+  left unchecked. Each case adds one, with a repeated, stale, or generic
+  column ID, to the manifest and the bundle and re-pins both digests, so only
+  that check can catch it.
+  """
+  assert _bqca_validate_repinned(edit) == expected
+
+
 def test_bqca_derive_report_column_ids_lengthens_only_colliding_ids():
   """Two slots that share 8 hex digits both get longer IDs, up to 10 digits.
 

@@ -540,6 +540,15 @@ def _validate_component_embedded_spec(
         f" chart_type {chart_type!r}"
     )
     return errors
+  # The column-ID checks read `spec.<kind>` alone, so a column in any other
+  # block of the spec would escape them.
+  for key in spec:
+    if key not in ("id", "fixedLayout", spec_kind):
+      errors.append(
+          f"component {comp_id} spec{_format_key_path((str(key),))} is not id,"
+          f" fixedLayout, or the spec.{spec_kind} block that chart_type"
+          f" {chart_type!r} reads"
+      )
 
   inner = spec[spec_kind]
   dataset = inner.get("dataset")
