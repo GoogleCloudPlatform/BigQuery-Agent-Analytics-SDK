@@ -18,12 +18,11 @@ before the live template is touched. In the dump it:
 
 Every other byte of the dump, comments and spacing included, is kept: each edit
 replaces one quoted scalar literal in place, and the tool prepends a
-``# bqca-offline-preview:`` comment line so ``tools/finalize_live_sync.py``
-refuses the preview in write mode. The live names repeat across components, so
-a rename is keyed by the component and the old name, never by the name alone.
-The map is the one ``gen_bqca_rename_map.py`` derives from the dump and the
-manifest. ``--map`` also reads a CSV written by that tool, and fails, writing
-nothing, unless it matches the derived map exactly.
+``# bqca-offline-preview:`` comment line. The live names repeat across
+components, so a rename is keyed by the component and the old name, never by
+the name alone. The map is the one ``gen_bqca_rename_map.py`` derives from the
+dump and the manifest. ``--map`` also reads a CSV written by that tool, and
+fails, writing nothing, unless it matches the derived map exactly.
 
 Before the tool writes anything, it checks the result four ways:
 
@@ -46,8 +45,12 @@ without writing.
 A dump that already carries the new IDs maps to itself, so the tool writes a
 copy (adding the ``# bqca-offline-preview:`` header comment line once if it is
 not already present). The twin previews the sync; it is not a dump of a synced
-template. After the rename is applied to the live template, take a new dump of
-it for ``tools/finalize_live_sync.py``.
+template, and it can never finalize the binding:
+``tools/finalize_live_sync.py`` writes only with a capture receipt that a
+listed signer signed for a fresh export of the live template
+(``tools/sign_live_capture.py``). This tool never writes or reads a receipt, so
+editing or removing the marker does not make the twin one. After the rename is
+applied to the live template, export it again, and sign that export's receipt.
 
 Exits 0 when the remapped dump is written, and with ``--check`` when every check
 passes, whether or not a write to ``--out`` would be refused; the output says
@@ -87,8 +90,9 @@ KINDS = ("name", "id", "dimension", "metric", "sort", "datasource_id")
 MAX_ERRORS = 20
 NOT_A_DUMP_OF_A_SYNCED_TEMPLATE = (
     "the remapped dump previews the sync; it is not a dump of a synced"
-    " template. After the rename is applied to the live template, take a new"
-    " dump of it for tools/finalize_live_sync.py."
+    " template, and tools/finalize_live_sync.py never records it. After the"
+    " rename is applied to the live template, export it again and sign that"
+    " export's capture receipt with tools/sign_live_capture.py."
 )
 OFFLINE_PREVIEW_MARKER = (
     "# bqca-offline-preview: written by tools/apply_bqca_rename_map.py;"
