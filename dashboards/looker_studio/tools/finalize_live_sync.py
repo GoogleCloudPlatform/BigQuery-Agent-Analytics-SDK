@@ -17,8 +17,9 @@ DUMP``. Only if it exits 0 does this record the verification in
 It also commits the dump's capture receipt and signature as
 ``bindings/bqca_live_capture_receipt.json`` and
 ``bindings/bqca_live_capture_receipt.json.sig``, which
-``tools/validate_contracts.py`` requires, and checks, of any binding without
-``pending_live_sync``.
+``tools/validate_contracts.py`` requires, and checks, of any binding that
+records a live sync. ``sync_generation`` is not changed: the receipts must be
+for the binding's.
 
 Every other line of the binding, comments included, is kept. The edit must
 parse to exactly that change. The new files replace the old ones atomically,
@@ -41,11 +42,12 @@ A write fails closed unless:
 * ``ssh-keygen -Y verify`` verifies both receipts' signatures in the
   ``bqca-live-capture-receipt`` namespace, made by keys that
   ``bindings/bqca_live_capture_signers`` lists for their signers;
-* both receipts are well-formed ``bqca-live-capture-receipt/v2`` receipts of
+* both receipts are well-formed ``bqca-live-capture-receipt/v3`` receipts of
   the exports' exact bytes, for the binding's ``report_id``, its pinned
-  manifest and bundle digests, and its pending sync, signed on or after the
-  day that sync began (``pending_live_sync.since_date``) and not in the
-  future; the dump's receipt is for ``--revision``;
+  manifest and bundle digests, its pending sync and its ``sync_generation``,
+  signed on or after the day that sync began
+  (``pending_live_sync.since_date``) and not in the future; the dump's
+  receipt is for ``--revision``;
 * the dump's receipt names the ``--before`` capture (its SHA-256 and
   revision), the dump is of another revision, and the ``--before`` receipt is
   of a capture taken before any write-back;
@@ -646,8 +648,9 @@ def receipt_blockers(
   The receipt, named `subject` in the reasons, must be read and well-formed,
   its signature must verify against `signers` (the bytes of the signers
   file), and it must be for the binding's report, its pinned manifest and
-  bundle digests and its pending sync, signed on or after the day that sync
-  began and not in the future, and for the bytes of the export named
+  bundle digests, its pending sync and its `sync_generation`, signed on or
+  after the day that sync began and not in the future, and for the bytes of
+  the export named
   `export`, whose SHA-256 is `export_sha256` (unknown when None).
   """
   validator = _load_validator()
@@ -686,6 +689,11 @@ def receipt_blockers(
     blockers.append(
         f"{subject} is for the live sync pending since"
         f" {fields['pending_since_date']}, not the one pending since {since}"
+    )
+  if fields["sync_generation"] != live.get("sync_generation"):
+    blockers.append(
+        f"{subject} is for sync generation {fields['sync_generation']}, not"
+        f" the binding's {live.get('sync_generation')!r}"
     )
   blockers += validator.bqca_capture_time_errors(fields, now, subject)
   if export_sha256 is not None and fields["dump_sha256"] != export_sha256:

@@ -1855,6 +1855,7 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
   evidence = dict(bqca["live_template_verification"])
   pending = evidence.pop("pending_live_sync")
   assert evidence == {
+      "sync_generation": 1,
       "verified_date": "2026-10-09",
       "repository_sql_sha256": digest,
       "pages_sha256": pages_digest,
@@ -2904,6 +2905,30 @@ BQCA_PENDING_LIVE_SYNC_CASES = [
         [f"{BQCA_LIVE_PENDING} must be a mapping"],
         id="not_a_mapping",
     ),
+    *(
+        pytest.param(
+            _bqca_live_edit((("sync_generation",), value)),
+            [
+                "bqca live_template_verification.sync_generation"
+                f" {None if value is _BQCA_DROP else value!r} is not an"
+                " integer of at least 1"
+            ],
+            id=f"sync_generation_{case_id}",
+        )
+        for case_id, value in (
+            ("missing", _BQCA_DROP),
+            ("zero", 0),
+            ("negative", -1),
+            ("string", "1"),
+            ("bool", True),
+            ("float", 1.0),
+        )
+    ),
+    pytest.param(
+        _bqca_live_edit((("sync_generation",), 7)),
+        [],
+        id="sync_generation_later",
+    ),
     *_bqca_pending_cases(
         "reason",
         "must be a non-empty string",
@@ -3052,6 +3077,75 @@ def test_validate_contracts_requires_a_pending_live_sync_record(edit, expected):
   )
   edit(binding["live_template_verification"])
   assert validator.validate_bqca(binding_override=binding) == expected
+
+
+def _bqca_generation_binding(generation, pending):
+  """A binding whose live sync is at `generation`, pending or finalized."""
+  live = {}
+  if generation is not None:
+    live["sync_generation"] = generation
+  if pending:
+    live["pending_live_sync"] = {"since_date": "2026-10-29"}
+  return {"live_template_verification": live}
+
+
+@pytest.mark.parametrize(
+    "previous, current, error",
+    [
+        ((None, True), (1, True), None),
+        ((1, True), (1, True), None),
+        ((1, True), (1, False), None),
+        ((1, True), (2, True), None),
+        ((1, False), (2, True), None),
+        ((1, False), (1, False), None),
+        (
+            (2, True),
+            (1, False),
+            "sync_generation 1 is less than 2, the previous binding's: it only"
+            " moves forward",
+        ),
+        (
+            (1, False),
+            (1, True),
+            "sync_generation is still 1, the previous binding's, although the"
+            " live sync is pending again: a reopened sync takes the next"
+            " generation",
+        ),
+        (
+            ("one", True),
+            (1, True),
+            "sync_generation of the previous binding, 'one', is not an"
+            " integer of at least 1",
+        ),
+    ],
+    ids=[
+        "first-generation",
+        "still-pending",
+        "finalized",
+        "reopened-while-pending",
+        "reopened",
+        "unchanged-after-the-sync",
+        "moved-back",
+        "reopened-without-a-new-generation",
+        "previous-not-an-integer",
+    ],
+)
+def test_validate_contracts_checks_that_the_sync_generation_moves_forward(
+    previous, current, error
+):
+  """#check-can-fail: `--previous-binding` keeps a receipt to its own sync.
+
+  The generation never goes down, and a sync that was not pending before
+  and is pending again takes a new one, so a binding cannot go back to a
+  generation whose committed receipt it still holds.
+  """
+  validator = _load_dashboard_module("validate_contracts")
+  errors = validator.bqca_sync_generation_progress_errors(
+      _bqca_generation_binding(*current), _bqca_generation_binding(*previous)
+  )
+  assert errors == (
+      [] if error is None else [f"bqca live_template_verification.{error}"]
+  )
 
 
 BQCA_CONTRACT_FILES = (

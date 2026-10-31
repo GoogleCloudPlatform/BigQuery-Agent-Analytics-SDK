@@ -94,7 +94,7 @@ REPORT_ID_FIELD = "report_config.shareable.id"
 NO_REPORT_FIELD = f"the dump's {REPORT_ID_FIELD} is [], not ['{REPORT_ID}']"
 
 SSH_KEYGEN = shutil.which("ssh-keygen")
-RECEIPT_FORMAT = "bqca-live-capture-receipt/v2"
+RECEIPT_FORMAT = "bqca-live-capture-receipt/v3"
 NAMESPACE = "bqca-live-capture-receipt"
 # The signer that `tree` lists in the copy's signers file, with the `trusted`
 # key of `signing_keys`, and the revisions of the live report that the
@@ -193,12 +193,13 @@ def _now():
   )
 
 
-def _reopen(tree):
+def _reopen(tree, since=SINCE_DATE, verified_date=REOPENED_VERIFIED_DATE):
   """Re-open the live sync of a finalized copy.
 
-  Sets its `verified_date` back to REOPENED_VERIFIED_DATE and its verified
-  digests to placeholders, so that the validator requires a
-  `pending_live_sync` record, and inserts one.
+  Sets its `verified_date` back to `verified_date` and its verified digests
+  to placeholders, so that the validator requires a `pending_live_sync`
+  record, inserts one pending since `since`, and moves `sync_generation` to
+  the next generation, as a reopened sync takes.
   """
   path = tree / BINDING
   text = path.read_text(encoding="utf-8")
@@ -206,7 +207,14 @@ def _reopen(tree):
   head, block = text.split(f"\n{LIVE}:\n")
   block, count = re.subn(
       r"(?m)^  verified_date: .*$",
-      f'  verified_date: "{REOPENED_VERIFIED_DATE}"',
+      f'  verified_date: "{verified_date}"',
+      block,
+      count=1,
+  )
+  assert count == 1
+  block, count = re.subn(
+      r"(?m)^  sync_generation: (\d+)$",
+      lambda match: f"  sync_generation: {int(match.group(1)) + 1}",
       block,
       count=1,
   )
@@ -219,7 +227,8 @@ def _reopen(tree):
     assert count == 1, key
   anchor = re.search(r"(?m)^  verified_template_bundle_sha256: .*\n", block)
   assert anchor is not None
-  block = block[: anchor.end()] + _REOPENED_PENDING + block[anchor.end() :]
+  pending = _REOPENED_PENDING.replace(SINCE_DATE, since)
+  block = block[: anchor.end()] + pending + block[anchor.end() :]
   path.write_text(f"{head}\n{LIVE}:\n{block}", encoding="utf-8")
 
 
@@ -329,6 +338,7 @@ def _receipt_bytes(tree, before=None, **fields):
       "manifest_sha256": live["manifest_sha256"],
       "template_bundle_sha256": live["template_bundle_sha256"],
       "pending_since_date": SINCE_DATE,
+      "sync_generation": live["sync_generation"],
       "before_dump_sha256": (
           hashlib.sha256(before.read_bytes()).hexdigest()
           if before is not None
@@ -783,13 +793,14 @@ def test_finalize_records_the_live_verification_after_a_clean_audit(
   assert check.stdout == "ok: contracts validated (bqca)\n"
 
 
-def _validate(tree):
+def _validate(tree, *args):
   return subprocess.run(
       [
           sys.executable,
           str(tree / "tools/validate_contracts.py"),
           "--profile",
           "bqca",
+          *args,
       ],
       capture_output=True,
       text=True,
@@ -1945,6 +1956,7 @@ def test_a_listed_signer_who_edits_a_field_of_the_preview_is_the_trust_boundary(
         "before-revision",
         "before-dump",
         "same-revision-as-before",
+        "other-generation",
     ],
 )
 def test_finalize_refuses_a_receipt_for_another_report_revision_dump_or_sync(
@@ -2013,11 +2025,18 @@ def test_finalize_refuses_a_receipt_for_another_report_revision_dump_or_sync(
         f" {'b' * 64}, not --before, whose sha256 is"
         f" {hashlib.sha256(before.read_bytes()).hexdigest()}"
     )
-  else:
+  elif mismatch == "same-revision-as-before":
     _receipt_for(tree, dump, trusted_key, before, revision=BEFORE_REVISION)
     error = (
         f"the dump and --before are both of revision '{BEFORE_REVISION}': the"
         " live report has no new revision after the write-back"
+    )
+  if mismatch == "other-generation":
+    generation = live["sync_generation"] + 1
+    _receipt_for(tree, dump, trusted_key, before, sync_generation=generation)
+    error = (
+        f"the receipt is for sync generation {generation}, not the binding's"
+        f" {live['sync_generation']}"
     )
   revision = (
       BEFORE_REVISION if mismatch == "same-revision-as-before" else REVISION
@@ -2255,12 +2274,22 @@ _MALFORMED = [
         "it gives revision more than once",
     ),
     (
-        "v1-format",
+        "v2-format",
         lambda tree, before: _receipt_bytes(
-            tree, before, format="bqca-live-capture-receipt/v1"
+            tree, before, format="bqca-live-capture-receipt/v2"
         ),
-        "its format 'bqca-live-capture-receipt/v1' is not"
+        "its format 'bqca-live-capture-receipt/v2' is not"
         f" '{RECEIPT_FORMAT}'",
+    ),
+    (
+        "generation-zero",
+        lambda tree, before: _receipt_bytes(tree, before, sync_generation=0),
+        "its sync_generation 0 is not an integer of at least 1",
+    ),
+    (
+        "generation-string",
+        lambda tree, before: _receipt_bytes(tree, before, sync_generation="1"),
+        "its sync_generation '1' is not an integer of at least 1",
     ),
     (
         "bad-digest",
@@ -2390,8 +2419,23 @@ def test_finalize_is_idempotent_and_can_record_a_later_sync(
   assert _snapshot(tree) == finalized
 
   # A later sync replaces the capture record and the committed receipt
-  # instead of adding others.
+  # instead of adding others. It is the next generation, so the capture
+  # before its write-back is new too: the earlier one is refused.
+  generation = _live(tree)["sync_generation"]
   _reopen(tree)
+  stale = _finalize(tree, "--dump", str(dump), *_write_args(before))
+  assert stale.returncode == 1
+  assert (
+      f"the receipt of --before is for sync generation {generation}, not the"
+      f" binding's {generation + 1}"
+  ) in stale.stderr
+  later_before = _captured(
+      tree,
+      tmp_path / "live/before.textproto",
+      tmp_path / "captures/later-before.textproto",
+      trusted_key,
+      "1839999999999",
+  )
   later_revision = "1840000000000"
   later = _captured(
       tree,
@@ -2399,10 +2443,10 @@ def test_finalize_is_idempotent_and_can_record_a_later_sync(
       tmp_path / "captures/later.textproto",
       trusted_key,
       later_revision,
-      before,
+      later_before,
   )
   result = _finalize(
-      tree, "--dump", str(later), *_write_args(before, later_revision)
+      tree, "--dump", str(later), *_write_args(later_before, later_revision)
   )
 
   assert result.returncode == 0, result.stdout + result.stderr
@@ -2413,6 +2457,7 @@ def test_finalize_is_idempotent_and_can_record_a_later_sync(
       live["template_bundle_sha256"]
   )
   assert live["verified_revision"] == later_revision
+  assert live["sync_generation"] == generation + 1
   later_receipt = _receipt_path(later).read_bytes()
   assert (
       live["capture_receipt_sha256"]
@@ -2709,6 +2754,7 @@ def test_capture_writes_the_export_and_a_receipt_that_ssh_keygen_verifies(
         "manifest_sha256",
         "template_bundle_sha256",
         "pending_since_date",
+        "sync_generation",
         "before_dump_sha256",
         "before_revision",
     ]
@@ -2824,6 +2870,7 @@ def test_capture_refuses_an_export_that_finalize_refuses(
         "before-without-receipt",
         "before-is-after-a-write-back",
         "same-revision-as-before",
+        "no-sync-generation",
         "export-fails",
         "export-prints-nothing",
         "export-not-found",
@@ -2855,6 +2902,17 @@ def test_capture_writes_nothing_when_it_cannot_capture(
   elif problem == "same-revision-as-before":
     revision = BEFORE_REVISION
     error = f"--revision {BEFORE_REVISION} is the revision of --before"
+  elif problem == "no-sync-generation":
+    path = tree / BINDING
+    text, count = re.subn(
+        r"(?m)^  sync_generation: \d+\n", "", path.read_text(encoding="utf-8")
+    )
+    assert count == 1
+    path.write_text(text, encoding="utf-8")
+    error = (
+        f"{BINDING} has no {LIVE}.sync_generation that is an integer of at"
+        " least 1"
+    )
   elif problem == "export-fails":
     command = [sys.executable, "-c", "raise SystemExit(3)"]
     error = "the export command exited 3"
@@ -2918,24 +2976,112 @@ def test_capture_writes_nothing_when_ssh_keygen_cannot_sign(tree, tmp_path):
   assert list(out.parent.iterdir()) == []
 
 
-def test_capture_replaces_a_capture_only_with_force(tree, before, trusted_key):
+def _capture_files(capture):
+  """The three files of the capture `capture`: export, signature, receipt."""
+  receipt = _receipt_path(capture)
+  return [capture, receipt.with_name(f"{receipt.name}.sig"), receipt]
+
+
+def _bytes_and_modes(paths):
+  return {path: (path.read_bytes(), _mode(path)) for path in paths}
+
+
+@pytest.mark.parametrize("step", ["stage", "place"])
+@pytest.mark.parametrize("failing", [1, 2], ids=["2nd-write", "3rd-write"])
+def test_capture_replaces_a_capture_only_with_force(
+    tree, before, trusted_key, monkeypatch, capsys, failing, step
+):
+  """A capture replaces an earlier one only with --force, and then whole.
+
+  Without --force nothing is replaced. With it, a disk that fills up on the
+  second or third of the three files (the signature or the receipt), as the
+  file is staged or as it takes its place, leaves every earlier file as it
+  was, bytes and mode, and no stray file next to them; then, with room, all
+  three are replaced.
+  """
   source = before.parent.parent / "live/before.textproto"
-  receipt = _receipt_path(before)
-  data = receipt.read_bytes()
+  files = _capture_files(before)
+  # Unusual modes, so that a file put back is seen to keep its own.
+  for path, mode in zip(files, (0o400, 0o640, 0o604)):
+    path.chmod(mode)
+  original = _bytes_and_modes(files)
+  listing = sorted(before.parent.iterdir())
 
   again = _capture(tree, source, before, trusted_key, "1830000000002")
 
   assert again.returncode == 1
-  for path in (before, receipt, receipt.with_name(f"{receipt.name}.sig")):
+  for path in files:
     assert f"ERROR: {path} exists; --force replaces it\n" in again.stderr
-  assert receipt.read_bytes() == data
+  assert _bytes_and_modes(files) == original
+
+  capture = _load_capture(tree)
+  target = files[failing]
+  real = getattr(capture, f"_{step}")
+
+  def fail_on_target(*args):
+    destination = args[0] if step == "stage" else args[1]
+    if destination == target:
+      raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+    return real(*args)
+
+  monkeypatch.setattr(capture, f"_{step}", fail_on_target)
+  monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+  args = ["--out", str(before), "--revision", "1830000000002"]
+  args += ["--signer", SIGNER, "--key", str(trusted_key), "--force"]
+
+  code = capture.main([*args, "--", *_export_command(source)])
+
+  assert code == 1
+  stderr = capsys.readouterr().err
+  assert f"ERROR: cannot write {target}: {os.strerror(errno.ENOSPC)}\n" in (
+      stderr
+  )
+  assert stderr.endswith("not captured: nothing written\n")
+  assert _bytes_and_modes(files) == original
+  assert sorted(before.parent.iterdir()) == listing
 
   forced = _capture(
       tree, source, before, trusted_key, "1830000000002", extra=["--force"]
   )
 
   assert forced.returncode == 0, forced.stdout + forced.stderr
-  assert json.loads(receipt.read_bytes())["revision"] == "1830000000002"
+  assert json.loads(files[2].read_bytes())["revision"] == "1830000000002"
+  assert [_mode(path) for path in files] == [0o600, 0o644, 0o644]
+  assert sorted(before.parent.iterdir()) == listing
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "chflags") or not hasattr(stat, "UF_IMMUTABLE"),
+    reason="needs a filesystem with an immutable flag",
+)
+def test_capture_puts_an_earlier_capture_back_when_a_file_cannot_be_replaced(
+    tree, before, trusted_key
+):
+  """Natively: an immutable receipt keeps the earlier capture whole.
+
+  The export and signature of the --force capture take their places, the
+  receipt cannot, and the earlier export and signature are put back.
+  """
+  source = before.parent.parent / "live/before.textproto"
+  files = _capture_files(before)
+  original = _bytes_and_modes(files)
+  listing = sorted(before.parent.iterdir())
+  try:
+    os.chflags(files[2], stat.UF_IMMUTABLE)
+  except OSError as exc:
+    pytest.skip(f"cannot make a file immutable here: {exc}")
+  try:
+    result = _capture(
+        tree, source, before, trusted_key, "1830000000002", extra=["--force"]
+    )
+  finally:
+    os.chflags(files[2], 0)
+
+  assert result.returncode == 1
+  assert f"ERROR: cannot write {files[2]}:" in result.stderr
+  assert result.stderr.endswith("not captured: nothing written\n")
+  assert _bytes_and_modes(files) == original
+  assert sorted(before.parent.iterdir()) == listing
 
 
 @pytest.mark.parametrize(
@@ -3043,6 +3189,122 @@ def test_validate_contracts_refuses_a_live_sync_recorded_by_hand(tree):
   assert expected in result.stderr
 
 
+def _set_generation(tree, generation):
+  """Set the `sync_generation` of the copy's binding."""
+  path = tree / BINDING
+  text, count = re.subn(
+      r"(?m)^  sync_generation: \d+$",
+      f"  sync_generation: {generation}",
+      path.read_text(encoding="utf-8"),
+      count=1,
+  )
+  assert count == 1
+  path.write_text(text, encoding="utf-8")
+
+
+def test_a_receipt_of_one_sync_does_not_record_a_reopened_one(
+    tree, tmp_path, dump, before, trusted_key
+):
+  """Round 9: a committed receipt cannot be replayed after a reopen.
+
+  The October 29 pair finalizes the binding. The sync is then reopened on
+  October 30, which moves `sync_generation` on, keeping `verified_date`.
+  Finalizing with the old pair is refused, and so is a hand edit that drops
+  the pending record, re-pins the digests, moves `verified_date` to October
+  30 and keeps the old committed receipt: that receipt is for the earlier
+  generation. A hand edit that also moves `sync_generation` back passes the
+  binding's own checks but not the check against the previous binding,
+  which CI runs. A new pair for the reopened sync finalizes and passes both.
+  """
+  _write_capture_receipts(
+      tree,
+      dump,
+      before,
+      trusted_key,
+      "2026-10-29T00:00:00Z",
+      "2026-10-29T00:00:01Z",
+  )
+  first = _finalize(
+      tree,
+      "--dump",
+      str(dump),
+      *_write_args(before),
+      "--verified-date",
+      "2026-10-29",
+  )
+  assert first.returncode == 0, first.stdout + first.stderr
+  generation = _live(tree)["sync_generation"]
+  old = {
+      path: path.read_bytes()
+      for path in (tree / COMMITTED, tree / f"{COMMITTED}.sig")
+  }
+  _reopen(tree, since="2026-10-30", verified_date="2026-10-29")
+  assert _live(tree)["sync_generation"] == generation + 1
+  reopened = tmp_path / "reopened-binding.yaml"
+  shutil.copyfile(tree / BINDING, reopened)
+  assert _validate(tree).returncode == 0
+
+  again = _finalize(tree, "--dump", str(dump), *_write_args(before))
+
+  assert again.returncode == 1
+  assert (
+      f"the receipt is for sync generation {generation}, not the binding's"
+      f" {generation + 1}"
+  ) in again.stderr
+  assert (tree / BINDING).read_bytes() == reopened.read_bytes()
+
+  _hand_finalize(tree)
+  _set_record(tree, "verified_date", "2026-10-30")
+  assert {path: path.read_bytes() for path in old} == old
+
+  replayed = _validate(tree)
+
+  assert replayed.returncode == 1
+  assert (
+      f"{COMMITTED} is for sync generation {generation}, not the binding's"
+      f" {generation + 1}: it is the receipt of another sync"
+  ) in replayed.stderr
+
+  _set_generation(tree, generation)
+  assert _validate(tree).returncode == 0
+
+  progressed = _validate(tree, "--previous-binding", str(reopened))
+
+  assert progressed.returncode == 1
+  assert (
+      f"bqca live_template_verification.sync_generation {generation} is less"
+      f" than {generation + 1}, the previous binding's: it only moves forward"
+  ) in progressed.stderr
+
+  # A new pair, captured for the reopened sync, finalizes and validates.
+  shutil.copyfile(reopened, tree / BINDING)
+  live_sources = tmp_path / "live"
+  new_before = _captured(
+      tree,
+      live_sources / "before.textproto",
+      tmp_path / "captures/before-reopened.textproto",
+      trusted_key,
+      "1840000000000",
+  )
+  new_dump = _captured(
+      tree,
+      live_sources / "after.textproto",
+      tmp_path / "captures/report-reopened.textproto",
+      trusted_key,
+      "1840000000001",
+      new_before,
+  )
+
+  result = _finalize(
+      tree, "--dump", str(new_dump), *_write_args(new_before, "1840000000001")
+  )
+
+  assert result.returncode == 0, result.stdout + result.stderr
+  assert _live(tree)["sync_generation"] == generation + 1
+  assert _validate(tree).returncode == 0
+  assert _validate(tree, "--previous-binding", str(reopened)).returncode == 0
+
+
 # How a hand edit can leave `pending_live_sync` once the digests are
 # re-pinned: gone, or present with a null, empty or wrong-typed value.
 _PENDING_SPELLINGS = {
@@ -3126,6 +3388,7 @@ def _set_record(tree, key, value):
         "signer-removed",
         "receipt-before-the-write-back",
         "receipt-for-other-contracts",
+        "receipt-for-another-generation",
     ],
 )
 def test_validate_contracts_checks_the_committed_receipt_of_a_finalized_binding(
@@ -3187,13 +3450,23 @@ def test_validate_contracts_checks_the_committed_receipt_of_a_finalized_binding(
           f"{prefix}: {COMMITTED} is the receipt of a capture taken before the"
           " write-back, not after it"
       )
-    else:
+    elif edit == "receipt-for-other-contracts":
       data = _receipt_bytes(
           tree, before, dump_sha256="d" * 64, manifest_sha256="e" * 64
       )
       expected = (
           f"{prefix}: {COMMITTED} is for manifest_sha256 {'e' * 64}, not the"
           f" pinned {live['manifest_sha256']}"
+      )
+    else:
+      generation = live["sync_generation"] + 1
+      data = _receipt_bytes(
+          tree, before, dump_sha256="d" * 64, sync_generation=generation
+      )
+      expected = (
+          f"{prefix}: {COMMITTED} is for sync generation {generation}, not the"
+          f" binding's {live['sync_generation']}: it is the receipt of another"
+          " sync"
       )
     _write_receipt(committed, data, trusted_key)
     fields = json.loads(data)

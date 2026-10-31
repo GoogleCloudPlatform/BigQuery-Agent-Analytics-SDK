@@ -9,16 +9,19 @@ output, and keeps exactly the bytes it reads from that pipe: it writes them to
 ``--out`` (mode 0600, outside this repository), with a capture receipt of
 those bytes (``<out>.receipt.json``) and its SSH signature
 (``<out>.receipt.json.sig``). It never signs bytes that it reads from a file.
+It writes the three files all or none: with ``--force``, a capture that fails
+to replace an earlier one puts the earlier files back, bytes and modes.
 
-The receipt, a ``bqca-live-capture-receipt/v2`` JSON object, gives:
+The receipt, a ``bqca-live-capture-receipt/v3`` JSON object, gives:
 
 * ``report_id``, ``revision`` (``--revision``), ``dump_sha256`` (of the bytes
   read), ``signed_at`` (UTC) and ``signer`` (``--signer``);
 * ``export_command_sha256``: the SHA-256 of the export command as a JSON
   list, so that no internal command, path or token is published with it;
-* ``manifest_sha256``, ``template_bundle_sha256`` and ``pending_since_date``:
-  the binding's pinned digests and the day its pending sync began, so the
-  receipt is for this sync only;
+* ``manifest_sha256``, ``template_bundle_sha256``, ``pending_since_date`` and
+  ``sync_generation``: the binding's pinned digests, the day its pending sync
+  began, and the generation of that sync, so the receipt is for this sync
+  only;
 * ``before_dump_sha256`` and ``before_revision``: the ``--before`` capture,
   or null for a capture taken before the write-back.
 
@@ -158,7 +161,9 @@ def write_blockers(out: pathlib.Path, force: bool) -> list[str]:
         " live template"
     )
   for path in (out, receipt, validator.bqca_capture_signature_path(receipt)):
-    if path.is_dir():
+    if path.is_symlink():
+      blockers.append(f"{path} is a symbolic link")
+    elif path.is_dir():
       blockers.append(f"{path} is a directory")
     elif os.path.lexists(path) and not force:
       blockers.append(f"{path} exists; --force replaces it")
@@ -169,13 +174,20 @@ def write_blockers(out: pathlib.Path, force: bool) -> list[str]:
   return blockers
 
 
-def _write(path: pathlib.Path, data: bytes, mode: int, force: bool) -> None:
-  """Write `data` to `path` with `mode`, atomically.
+class CaptureWriteError(Exception):
+  """The capture was not written.
 
-  The data is written and synced to a staged file next to `path`, which then
-  takes its place: with `os.replace` for `force`, else with `os.link`, which
-  fails if `path` exists. On any failure the staged file is removed.
+  `problems` lists the files that could not be put back as they were, if
+  any; each keeps its original next to it, as a `.backup` file.
   """
+
+  def __init__(self, message: str, problems: list[str]):
+    super().__init__(message)
+    self.problems = problems
+
+
+def _stage(path: pathlib.Path, data: bytes, mode: int) -> pathlib.Path:
+  """Write and sync `data`, with `mode`, to a new staged file next to `path`."""
   descriptor, staged = tempfile.mkstemp(
       dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
   )
@@ -185,12 +197,100 @@ def _write(path: pathlib.Path, data: bytes, mode: int, force: bool) -> None:
       handle.flush()
       os.fsync(handle.fileno())
     os.chmod(staged, mode)
-    if force:
-      os.replace(staged, path)
-    else:
-      os.link(staged, path)
-  finally:
+  except BaseException:
     pathlib.Path(staged).unlink(missing_ok=True)
+    raise
+  return pathlib.Path(staged)
+
+
+def _back_up(path: pathlib.Path) -> pathlib.Path:
+  """Copy the file at `path`, its bytes and mode, to a new file next to it."""
+  descriptor, backup = tempfile.mkstemp(
+      dir=path.parent, prefix=f".{path.name}.", suffix=".backup"
+  )
+  os.close(descriptor)
+  try:
+    shutil.copyfile(path, backup)
+    os.chmod(backup, stat.S_IMODE(path.stat().st_mode))
+  except BaseException:
+    pathlib.Path(backup).unlink(missing_ok=True)
+    raise
+  return pathlib.Path(backup)
+
+
+def _place(staged: pathlib.Path, path: pathlib.Path, force: bool) -> None:
+  """Put the staged file at `path`: replace it for `force`, else link it.
+
+  `os.link` fails if `path` exists, so without `force` a file created
+  meanwhile is never overwritten.
+  """
+  if force:
+    os.replace(staged, path)
+  else:
+    os.link(staged, path)
+
+
+def _install(files: list[tuple[pathlib.Path, bytes, int]], force: bool) -> None:
+  """Write every one of `files`, `(path, data, mode)`, or none of them.
+
+  Each file is first staged next to its path. With `force`, every path that
+  exists is then backed up next to itself (`_back_up`), and only then do the
+  staged files take their places, one at a time. If anything fails or is
+  interrupted, each path already replaced gets its backup back, byte for
+  byte and with its mode, and each path that did not exist before is
+  removed. Staged files and backups are removed in the end, except the
+  backup of a path that could not be put back.
+
+  Raises:
+    CaptureWriteError: The files were not written.
+  """
+  staged: dict[pathlib.Path, pathlib.Path] = {}
+  backups: dict[pathlib.Path, pathlib.Path] = {}
+  placed: list[pathlib.Path] = []
+  current = files[0][0]
+  try:
+    for path, data, mode in files:
+      current = path
+      staged[path] = _stage(path, data, mode)
+    if force:
+      for path, _, _ in files:
+        current = path
+        if os.path.lexists(path):
+          backups[path] = _back_up(path)
+    for path, _, _ in files:
+      current = path
+      _place(staged[path], path, force)
+      placed.append(path)
+  except BaseException as exc:
+    problems = []
+    for path in reversed(placed):
+      try:
+        if path in backups:
+          os.replace(backups.pop(path), path)
+        else:
+          path.unlink(missing_ok=True)
+      except OSError as error:
+        problems.append(
+            f"cannot put back {path}: {error.strerror or error}"
+            + (
+                f"; its original is {backups.pop(path)}"
+                if path in backups
+                else ""
+            )
+        )
+    for leftover in [*staged.values(), *backups.values()]:
+      leftover.unlink(missing_ok=True)
+    if not isinstance(exc, Exception):
+      for problem in problems:
+        print(f"ERROR: {problem}", file=sys.stderr)
+      raise
+    reason = getattr(exc, "strerror", None) or exc
+    raise CaptureWriteError(
+        f"cannot write {current}: {reason}", problems
+    ) from exc
+  # After `os.link`, the staged names remain; the backups are not needed.
+  for leftover in [*staged.values(), *backups.values()]:
+    leftover.unlink(missing_ok=True)
 
 
 def _fail(errors: list[str]) -> int:
@@ -287,6 +387,14 @@ def main(argv: list[str] | None = None) -> int:
             " there is no live sync to capture"
         ]
     )
+  generation = validator.bqca_sync_generation(live)
+  if generation is None:
+    return _fail(
+        [
+            f"{BINDING_PATH} has no {finalize.LIVE_KEY}.sync_generation that"
+            " is an integer of at least 1"
+        ]
+    )
   blockers = write_blockers(args.out, args.force)
   try:
     signers = (ROOT / validator.BQCA_CAPTURE_SIGNERS_PATH).read_bytes()
@@ -364,6 +472,7 @@ def main(argv: list[str] | None = None) -> int:
           "manifest_sha256": live.get("manifest_sha256"),
           "template_bundle_sha256": live.get("template_bundle_sha256"),
           "pending_since_date": since,
+          "sync_generation": generation,
           "before_dump_sha256": (
               hashlib.sha256(before.data).hexdigest()
               if before is not None and before.data is not None
@@ -400,19 +509,28 @@ def main(argv: list[str] | None = None) -> int:
   receipt_file = finalize.receipt_path(args.out)
   signature_file = validator.bqca_capture_signature_path(receipt_file)
   shared = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
-  written: list[pathlib.Path] = []
-  for path, data, mode in (
-      (args.out, export, stat.S_IRUSR | stat.S_IWUSR),
-      (signature_file, signature, shared),
-      (receipt_file, receipt, shared),
-  ):
-    try:
-      _write(path, data, mode, args.force)
-    except OSError as exc:
-      for done in written:
-        done.unlink(missing_ok=True)
-      return _fail([f"cannot write {path}: {exc.strerror or exc}"])
-    written.append(path)
+  # All three files or none: a failed --force capture leaves an earlier
+  # capture as it was.
+  try:
+    _install(
+        [
+            (args.out, export, stat.S_IRUSR | stat.S_IWUSR),
+            (signature_file, signature, shared),
+            (receipt_file, receipt, shared),
+        ],
+        args.force,
+    )
+  except CaptureWriteError as exc:
+    if not exc.problems:
+      return _fail([str(exc)])
+    for error in [str(exc), *exc.problems]:
+      print(f"ERROR: {error}", file=sys.stderr)
+    print(
+        "not captured: the files above could not all be put back as they"
+        " were",
+        file=sys.stderr,
+    )
+    return 1
   print(
       f"captured: {args.out} (mode 600), {receipt_file} and {signature_file}:"
       f" revision {args.revision}, signed by {args.signer} at"

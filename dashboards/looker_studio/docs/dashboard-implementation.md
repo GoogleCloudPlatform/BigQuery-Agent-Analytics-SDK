@@ -575,7 +575,7 @@ A capture receipt is a JSON object with exactly these fields, each once
 
 | Field | Value |
 |---|---|
-| `format` | `bqca-live-capture-receipt/v2` |
+| `format` | `bqca-live-capture-receipt/v3` |
 | `report_id` | the `report_id` of `bindings/bqca_report_template.yaml` |
 | `revision` | the revision of the live report that the export captured, as the export tooling or the report's version history shows it: 1 to 128 letters, digits, `.`, `_`, `:`, `+`, or `-` |
 | `dump_sha256` | the SHA-256 of the exported bytes |
@@ -584,6 +584,7 @@ A capture receipt is a JSON object with exactly these fields, each once
 | `export_command_sha256` | the SHA-256 of the export command as a JSON list, so that no internal command, path, or token is published |
 | `manifest_sha256`, `template_bundle_sha256` | the binding's pinned digests when the export was captured |
 | `pending_since_date` | the `since_date` of the binding's `pending_live_sync` when the export was captured |
+| `sync_generation` | the binding's `live_template_verification.sync_generation` when the export was captured: the generation of the sync it is for |
 | `before_dump_sha256`, `before_revision` | for the capture after the write-back, the SHA-256 and revision of the `--before` capture; `null` for the capture before it |
 
 Its signature, `<receipt>.sig`, is an OpenSSH signature (`ssh-keygen -Y
@@ -604,7 +605,10 @@ trusted receipt of a capture before any write-back for the same pending sync,
 export's parsed content (comments, spacing, and the order of fields and
 repeated values aside) differs from that of the offline preview of the
 `--before` export. It refuses an existing capture
-unless `--force`.
+unless `--force`, and writes the three files all or none: if one of them
+cannot be written, as with a full disk or a file that cannot be replaced,
+every earlier file is put back, bytes and mode, and any file that was not
+there is removed.
 
 `bindings/bqca_live_capture_signers` lists the trusted keys in the OpenSSH
 allowed signers format (see `ssh-keygen(1)`), one line per maintainer who
@@ -654,7 +658,7 @@ A write fails closed, exiting 1 and leaving every file unchanged, unless:
 - `ssh-keygen -Y verify` verifies both receipts' signatures in the
   `bqca-live-capture-receipt` namespace, made by keys that
   `bindings/bqca_live_capture_signers` lists for their signers;
-- both receipts are exactly v2 receipts of the exports' bytes (a receipt or
+- both receipts are exactly v3 receipts of the exports' bytes (a receipt or
   signature that cannot be read, other or repeated fields, and malformed
   values are refused), for the binding's `report_id`, its pinned manifest and
   bundle digests, and its pending sync (`pending_since_date`), signed on or
@@ -701,7 +705,13 @@ capture tool and finalize refuse it: nothing then tells it apart from the
 preview. Report that on the
 tracking issue instead of editing the export.
 
-##### The committed receipt
+##### The committed receipt and the sync generation
+
+`live_template_verification.sync_generation` numbers the live syncs of the
+template. It is 1 for the sync that #559 tracks; whoever reopens a finalized
+sync (adds `pending_live_sync` again) also sets it to the next generation, and
+it stays when finalize records the sync. Both capture receipts carry the
+generation, and finalize writes only with receipts for the binding's.
 
 `tools/validate_contracts.py` checks every binding whose verified digests
 equal the pinned ones. Such a binding records a live sync: it must have no
@@ -709,14 +719,40 @@ equal the pinned ones. Such a binding records a live sync: it must have no
 pending record still counts, and fails), and it needs
 `bindings/bqca_live_capture_receipt.json` and its signature, which must verify
 against `bindings/bqca_live_capture_signers`, and the receipt must be of a
-capture after a write-back, for the binding's report and pinned digests,
-signed on or after its `pending_since_date` and not in the future.
-`verified_revision`, `verified_dump_sha256`, `capture_receipt_sha256`, and
-`captured_by` must be the receipt's, and `verified_date` must not be before
-the receipt was signed. So a hand edit that re-pins the verified digests and
-deletes `pending_live_sync`, or sets it to null or an empty value, fails
-validation; only a binding that finalize wrote with its receipt passes. While
-the digests differ, `pending_live_sync` must be a well-formed pending record.
+capture after a write-back, for the binding's report, pinned digests, and
+`sync_generation`, signed on or after its `pending_since_date` and not in the
+future. `verified_revision`, `verified_dump_sha256`, `capture_receipt_sha256`,
+and `captured_by` must be the receipt's, and `verified_date` must not be
+before the receipt was signed. While the digests differ, `pending_live_sync`
+must be a well-formed pending record, and `sync_generation` must always be an
+integer of at least 1.
+
+So a hand edit that re-pins the verified digests and deletes
+`pending_live_sync`, or sets it to null or an empty value, fails unless the
+committed receipt is a valid one for the same generation. After a reopen, the
+receipt of the earlier sync is for the earlier generation and fails. That
+leaves one way back: moving `sync_generation` back to the earlier generation as
+well, which a check of the binding alone cannot tell from the earlier,
+finalized binding. `--previous-binding PATH` checks that `sync_generation`
+only moves forward from the binding at `PATH`, and that a sync that was not
+pending there and is pending here took a greater one. CI runs it against the
+binding on the base branch (or before the push):
+
+```bash
+git show origin/main:dashboards/looker_studio/bindings/bqca_report_template.yaml \
+    > previous-binding.yaml
+python3 tools/validate_contracts.py --profile bqca \
+    --previous-binding previous-binding.yaml
+```
+
+What validation guarantees, then: a binding without `pending_live_sync` passes
+only with a committed receipt that a listed signer signed for a capture after
+a write-back, for the binding's report, pinned digests, and own generation,
+with the capture record copied from it, and with that generation not moved
+back (when `--previous-binding` runs, as in CI). The validator cannot see the
+export itself, which stays private, so it cannot re-run the live audit or the
+offline-preview comparison: finalize runs those before it writes, and review
+of the change is what shows that finalize, not a hand edit, wrote the binding.
 
 ##### The trust boundary
 

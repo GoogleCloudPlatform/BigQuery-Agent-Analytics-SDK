@@ -1597,12 +1597,18 @@ def _bqca_pending_live_sync_errors(live: dict[str, Any]) -> list[str]:
   (YYYY-MM-DD, not before `verified_date` and not in the future), the
   `tracking_issue` URL of an issue of this repository and a non-empty list of
   `required_actions`; any other value (null, empty or of another type) is an
-  error. Once both digests equal the verified ones again, `pending_live_sync`
-  must be removed, whatever its value, and `_bqca_committed_capture_errors`
-  checks the record of the sync.
+  error. Once both digests equal the verified ones again,
+  `pending_live_sync` must be removed, whatever its value, and
+  `_bqca_committed_capture_errors` checks the record of the sync.
+  `sync_generation` must be an integer of at least 1, always.
   """
   prefix = "bqca live_template_verification"
   errors: list[str] = []
+  if bqca_sync_generation(live) is None:
+    errors.append(
+        f"{prefix}.sync_generation {live.get('sync_generation')!r} is not an"
+        " integer of at least 1"
+    )
   today = max(
       datetime.date.today(),
       datetime.datetime.now(datetime.timezone.utc).date(),
@@ -1715,7 +1721,7 @@ def _bqca_pending_live_sync_errors(live: dict[str, Any]) -> list[str]:
 # binding without `pending_live_sync` must carry it.
 BQCA_CAPTURE_SIGNERS_PATH = "bindings/bqca_live_capture_signers"
 BQCA_CAPTURE_RECEIPT_PATH = "bindings/bqca_live_capture_receipt.json"
-BQCA_CAPTURE_RECEIPT_FORMAT = "bqca-live-capture-receipt/v2"
+BQCA_CAPTURE_RECEIPT_FORMAT = "bqca-live-capture-receipt/v3"
 BQCA_CAPTURE_NAMESPACE = "bqca-live-capture-receipt"
 BQCA_CAPTURE_RECEIPT_FIELDS = (
     "format",
@@ -1728,6 +1734,7 @@ BQCA_CAPTURE_RECEIPT_FIELDS = (
     "manifest_sha256",
     "template_bundle_sha256",
     "pending_since_date",
+    "sync_generation",
     "before_dump_sha256",
     "before_revision",
 )
@@ -1743,6 +1750,21 @@ _BQCA_CAPTURE_TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 # the signers file, never a pattern (`*`, `?`, `!`, `,`).
 BQCA_CAPTURE_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}")
 BQCA_CAPTURE_SIGNER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}")
+
+
+def bqca_sync_generation(live: Any) -> int | None:
+  """Return the `sync_generation` of `live_template_verification`, or None.
+
+  It numbers the live syncs of the template: 1 for the first that the
+  binding records as pending, and one more each time a sync is reopened. It
+  stays when a sync is finalized, and capture receipts carry it, so the
+  receipt of one sync cannot record another. None unless it is an integer of
+  at least 1 (not a bool).
+  """
+  value = live.get("sync_generation") if isinstance(live, dict) else None
+  if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+    return None
+  return value
 
 
 def bqca_capture_signature_path(receipt: pathlib.Path) -> pathlib.Path:
@@ -1807,6 +1829,11 @@ def parse_bqca_capture_receipt(data: bytes) -> dict[str, Any]:
       "before_dump_sha256": digest,
       "before_revision": (BQCA_CAPTURE_TOKEN_RE, "a revision"),
   }
+  generation = receipt["sync_generation"]
+  if bqca_sync_generation({"sync_generation": generation}) is None:
+    raise ValueError(
+        f"its sync_generation {generation!r} is not an integer of at least 1"
+    )
   nulls = [receipt[name] is None for name in BQCA_CAPTURE_BEFORE_FIELDS]
   if any(nulls) and not all(nulls):
     raise ValueError(
@@ -2004,6 +2031,12 @@ def _bqca_committed_capture_errors(
         f"{prefix}: {where} is for report {receipt['report_id']!r}, not"
         f" {binding.get('report_id')!r}"
     )
+  if receipt["sync_generation"] != live.get("sync_generation"):
+    errors.append(
+        f"{prefix}: {where} is for sync generation"
+        f" {receipt['sync_generation']}, not the binding's"
+        f" {live.get('sync_generation')!r}: it is the receipt of another sync"
+    )
   for key in ("manifest_sha256", "template_bundle_sha256"):
     if receipt[key] != live.get(key):
       errors.append(
@@ -2040,6 +2073,54 @@ def _bqca_committed_capture_errors(
           f" signed at {receipt['signed_at']}"
       )
   return errors
+
+
+def bqca_sync_generation_progress_errors(
+    binding: dict[str, Any], previous: dict[str, Any]
+) -> list[str]:
+  """Check how `sync_generation` moved from the `previous` binding.
+
+  It never goes down, and a sync that `previous` did not have pending (it
+  was finalized, or there was none) and that `binding` has pending again
+  takes a greater one: so a binding cannot go back to a generation whose
+  committed receipt it still holds. A previous binding without one counts as
+  generation 0.
+  """
+  prefix = "bqca live_template_verification.sync_generation"
+  live = binding.get("live_template_verification")
+  before = (
+      previous.get("live_template_verification")
+      if isinstance(previous, dict)
+      else None
+  )
+  current = bqca_sync_generation(live)
+  if current is None:
+    # The binding's own check says why.
+    return []
+  if isinstance(before, dict) and "sync_generation" in before:
+    earlier = bqca_sync_generation(before)
+    if earlier is None:
+      return [
+          f"{prefix} of the previous binding,"
+          f" {before.get('sync_generation')!r}, is not an integer of at least"
+          " 1"
+      ]
+  else:
+    earlier = 0
+  if current < earlier:
+    return [
+        f"{prefix} {current} is less than {earlier}, the previous binding's:"
+        " it only moves forward"
+    ]
+  reopened = isinstance(live, dict) and "pending_live_sync" in live
+  was_pending = isinstance(before, dict) and "pending_live_sync" in before
+  if reopened and not was_pending and current == earlier:
+    return [
+        f"{prefix} is still {current}, the previous binding's, although the"
+        " live sync is pending again: a reopened sync takes the next"
+        " generation"
+    ]
+  return []
 
 
 def validate_bqca(
@@ -3413,6 +3494,16 @@ def main(argv: list[str] | None = None) -> int:
       help="dashboard profile to validate (default: all)",
   )
   parser.add_argument(
+      "--previous-binding",
+      type=pathlib.Path,
+      metavar="PATH",
+      help=(
+          "also check that the BQCA binding's live_template_verification"
+          " sync_generation only moves forward from the binding at PATH, such"
+          " as the one on the base branch"
+      ),
+  )
+  parser.add_argument(
       "--live-report-textproto",
       type=pathlib.Path,
       metavar="PATH",
@@ -3424,6 +3515,8 @@ def main(argv: list[str] | None = None) -> int:
   args = parser.parse_args(argv)
   if args.live_report_textproto is not None and args.profile == "adk":
     parser.error("--live-report-textproto needs --profile bqca or all")
+  if args.previous_binding is not None and args.profile == "adk":
+    parser.error("--previous-binding needs --profile bqca or all")
   errors: list[str] = []
   if args.profile in ("adk", "all"):
     errors.extend(validate_adk(ROOT))
@@ -3431,6 +3524,20 @@ def main(argv: list[str] | None = None) -> int:
     errors.extend(validate_bqca(ROOT))
   if args.live_report_textproto is not None:
     errors.extend(validate_live_report_textproto(args.live_report_textproto))
+  if args.previous_binding is not None:
+    try:
+      previous = yaml.safe_load(
+          args.previous_binding.read_text(encoding="utf-8")
+      )
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+      errors.append(f"cannot read --previous-binding: {exc}")
+    else:
+      errors.extend(
+          bqca_sync_generation_progress_errors(
+              _load_yaml(ROOT / "bindings/bqca_report_template.yaml"),
+              previous if isinstance(previous, dict) else {},
+          )
+      )
   if errors:
     for err in errors:
       print(f"ERROR: {err}", file=sys.stderr)
