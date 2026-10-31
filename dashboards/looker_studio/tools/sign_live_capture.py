@@ -36,8 +36,9 @@ nothing is written either unless the ``--before`` capture is a trusted capture
 taken before the write-back for this sync, the export is of another revision,
 and its parsed content differs from that of the offline preview that
 ``tools/apply_bqca_rename_map.py`` writes for the ``--before`` export
-(comments and spacing aside): an export that matches the preview in every
-field does not show that the live report was written.
+(comments, spacing and the order of fields and repeated values aside): an
+export that holds the preview's fields and values, and no others, does not
+show that the live report was written.
 
 No tool can tell what the export command fetched. A signer who runs a command
 that prints an edited file instead of fetching the live report makes a false

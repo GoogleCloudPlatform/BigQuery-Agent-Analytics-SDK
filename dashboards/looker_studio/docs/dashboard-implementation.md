@@ -479,7 +479,8 @@ not a dump of a synced live template.` as the first line (after any UTF-8 byte
 order mark). The tool never writes or reads a capture receipt (below). The
 capture tool and `tools/finalize_live_sync.py` refuse its output as the
 capture after the write-back whatever its marker, comments, or spacing say:
-they compare that capture's parsed content with the preview's.
+they compare that capture's parsed content with the preview's, ignoring the
+order of fields and of repeated values.
 The live names repeat across components, so a rename is keyed by the component
 and the old name, never by the name alone. The data source IDs of the
 components and of the `ds0` alias are not edited; the audit refuses a dump
@@ -566,8 +567,8 @@ Nothing in a dump proves where it came from, and the offline preview from
 capture of the synced template (the audit compares that content with the
 manifest). A marker comment cannot tell them apart either: changing its letter
 case or deleting it is a one-line edit. So a write needs evidence from outside
-the dump, and the capture after the write-back must differ, in some field, from
-the offline preview of the capture before it.
+the dump, and the capture after the write-back must differ, in some field
+value, from the offline preview of the capture before it.
 
 A capture receipt is a JSON object with exactly these fields, each once
 (`tools/sign_live_capture.py` writes them in this order):
@@ -600,8 +601,9 @@ lists the key for `--signer` (that error prints the line that would list it).
 With `--before`, it also writes nothing unless the `--before` capture has a
 trusted receipt of a capture before any write-back for the same pending sync,
 `--revision` differs from that capture's, the export differs from it, and the
-export's parsed content (comments and spacing aside) differs from that of the
-offline preview of the `--before` export. It refuses an existing capture
+export's parsed content (comments, spacing, and the order of fields and
+repeated values aside) differs from that of the offline preview of the
+`--before` export. It refuses an existing capture
 unless `--force`.
 
 `bindings/bqca_live_capture_signers` lists the trusted keys in the OpenSSH
@@ -664,8 +666,10 @@ A write fails closed, exiting 1 and leaving every file unchanged, unless:
   different revisions;
 - the dump's parsed content differs from that of the offline preview that
   `tools/apply_bqca_rename_map.py` writes for the `--before` export
-  (`preview_tree`): comments, spacing, and the marker aside, some field of the
-  live report changed after the write-back;
+  (`preview_tree`), compared as the multiset of its fields and values
+  (`canonical_content`): comments, spacing, quoting, the marker, and the order
+  of fields and repeated values aside, the live report gained, lost, or
+  changed a field value after the write-back;
 - the export decodes as UTF-8, parses as protobuf text format (with
   universal-newline normalization matching `tools/validate_contracts.py`), and
   its identity fields each have exactly one value equal to the binding's:
@@ -690,16 +694,19 @@ refused, and writes nothing; it needs no receipt and previews with the
 checked-in fixtures and with offline previews too. It exits 0 when the audit
 passes, even if a write would be refused.
 
-If the export of the synced template has exactly the parsed content of the
-offline preview, so that no field of the live report (a revision or update
-time, for example) changed with the write-back, the capture tool and finalize
-refuse it: nothing then tells it apart from the preview. Report that on the
+If the export of the synced template has exactly the fields and values of the
+offline preview, in any order, so that no field of the live report (a
+revision or update time, for example) changed with the write-back, the
+capture tool and finalize refuse it: nothing then tells it apart from the
+preview. Report that on the
 tracking issue instead of editing the export.
 
 ##### The committed receipt
 
-`tools/validate_contracts.py` checks every binding without
-`pending_live_sync` whose verified digests equal the pinned ones: it needs
+`tools/validate_contracts.py` checks every binding whose verified digests
+equal the pinned ones. Such a binding records a live sync: it must have no
+`pending_live_sync` key at all (a null, empty, or other value that is not a
+pending record still counts, and fails), and it needs
 `bindings/bqca_live_capture_receipt.json` and its signature, which must verify
 against `bindings/bqca_live_capture_signers`, and the receipt must be of a
 capture after a write-back, for the binding's report and pinned digests,
@@ -707,23 +714,27 @@ signed on or after its `pending_since_date` and not in the future.
 `verified_revision`, `verified_dump_sha256`, `capture_receipt_sha256`, and
 `captured_by` must be the receipt's, and `verified_date` must not be before
 the receipt was signed. So a hand edit that re-pins the verified digests and
-deletes `pending_live_sync` fails validation; only a binding that finalize
-wrote with its receipt passes.
+deletes `pending_live_sync`, or sets it to null or an empty value, fails
+validation; only a binding that finalize wrote with its receipt passes. While
+the digests differ, `pending_live_sync` must be a well-formed pending record.
 
 ##### The trust boundary
 
 The tools refuse the offline preview as the capture after the write-back,
-whether its marker is kept, edited, or removed, and any edit of its comments
-or spacing; they refuse a receipt that is not trusted, not for this pending
-sync, stale, in the future, or for other bytes; and the capture tool signs
-only bytes that an export command printed. What no check can refuse is
-a listed signer who signs for content that the export command did not fetch
-from the live report: one who passes as the export command a program that
-prints a file and also edits a field of the preview, or who signs receipt bytes
-directly with `ssh-keygen`. That is a false signed statement, which the
-receipt and the binding (`captured_by`) attribute to the signer. Review of
-each change to the signers file, and of the committed receipt, is the last
-check; `tests/test_looker_studio_live_sync.py` pins this boundary.
+whether its marker is kept, edited, or removed, and any edit of its comments,
+spacing, or quoting, or reordering of its fields or repeated values; they
+refuse a receipt that is not trusted, not for this pending sync, stale, in the
+future, or for other bytes; and the capture tool signs only bytes that an
+export command printed. What no check can refuse is a listed signer who signs
+for content that the export command did not fetch from the live report: one
+who passes as the export command a program that prints a file and also edits
+a field value of the preview (writing a scalar another way, such as an enum
+by its number or an integer in hex, counts as an edit, since the tools do not
+know the report's protobuf schema), or who signs receipt bytes directly with
+`ssh-keygen`. That is a false signed statement, which the receipt and the
+binding (`captured_by`) attribute to the signer. Review of each change to the
+signers file, and of the committed receipt, is the last check;
+`tests/test_looker_studio_live_sync.py` pins this boundary.
 
 The checked-in fixtures have no `report_config.shareable` entry, so a write
 refuses them, copies of them anywhere, and any reordering or audit-inert edit

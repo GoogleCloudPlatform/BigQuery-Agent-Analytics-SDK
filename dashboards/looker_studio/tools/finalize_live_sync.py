@@ -51,8 +51,8 @@ A write fails closed unless:
   of a capture taken before any write-back;
 * the dump's parsed content differs from that of the offline preview that
   ``tools/apply_bqca_rename_map.py`` writes for the ``--before`` export:
-  comments and spacing aside, some field of the live report changed after
-  the write-back;
+  comments, spacing and the order of fields and repeated values aside, the
+  live report gained, lost or changed a field value after the write-back;
 * the dump decodes as UTF-8 and parses as protobuf text format (with
   universal-newline normalization matching ``tools/validate_contracts.py``),
   and its ``report_config.shareable.id`` is exactly that ``report_id``, and
@@ -66,13 +66,14 @@ A write fails closed unless:
   ``os.path.samestat`` so a case-insensitive spelling cannot bypass it).
 
 So the offline preview is refused, with its marker kept, edited or removed,
-and so is any edit of its comments or spacing. What no check can refuse is a
-listed signer who signs a receipt for content that the export command did
-not fetch from the live report: one who also edits a field of the preview, or
-signs receipt bytes directly with ssh-keygen. That is a false signed
-statement, which the receipt and the binding (``captured_by``) attribute to
-the signer; review of the committed receipt and of the signer list is the
-last check.
+and so is any edit of its comments, spacing or quoting or reordering of its
+fields. What no check can refuse is a listed signer who signs a receipt for
+content that the export command did not fetch from the live report: one who
+also edits a field value of the preview (writing a scalar another way, such
+as an enum by its number, counts), or signs receipt bytes directly with
+ssh-keygen. That is a false signed statement, which the receipt and the
+binding (``captured_by``) attribute to the signer; review of the committed
+receipt and of the signer list is the last check.
 
 This tool does not edit documentation or tests. See "Finalizing the live
 template sync" in ``docs/dashboard-implementation.md`` for the rest of the
@@ -695,6 +696,31 @@ def receipt_blockers(
   return fields, blockers
 
 
+def canonical_content(message: list) -> tuple:
+  """Return a parsed textproto `message` in a form that ignores field order.
+
+  Each message becomes the sorted tuple of its `(field, value)` pairs, with
+  nested messages in this form too, so neither the order of distinct fields
+  nor that of the values of a repeated field matters: two messages have the
+  same form exactly when they hold the same multiset of fields and values.
+  Comments, spacing, separators and quoting are already gone from the parsed
+  message.
+  """
+  return tuple(
+      sorted(
+          (
+              name,
+              (
+                  ("message", canonical_content(value))
+                  if isinstance(value, list)
+                  else ("scalar", value)
+              ),
+          )
+          for name, value in message
+      )
+  )
+
+
 def offline_preview_blockers(
     dump: pathlib.Path,
     snapshot: bytes,
@@ -704,11 +730,12 @@ def offline_preview_blockers(
   """Return why the dump bytes `snapshot` are the offline preview of `before`.
 
   `tools/apply_bqca_rename_map.py` writes, for the export `before_data`
-  (read from `before`), an offline preview whose parsed content
-  (`preview_tree`) has no comments or spacing. A dump with that same parsed
-  content is refused, however its comments, spacing or marker differ: a
-  capture of the live report after the write-back that matches it in every
-  field does not show that the live report was written.
+  (read from `before`), an offline preview whose parsed content is
+  `preview_tree`. A dump with the same content (`canonical_content`) is
+  refused, however its comments, spacing, quoting, marker or the order of its
+  fields and repeated values differ: a capture of the live report after the
+  write-back that holds the preview's fields and values, and no others, does
+  not show that the live report was written.
   """
   try:
     preview = _load_applier().preview_tree(before_data)
@@ -722,14 +749,14 @@ def offline_preview_blockers(
   except (UnicodeDecodeError, ValueError):
     # `dump_blockers` says why the dump cannot be read.
     return []
-  if tree != preview:
+  if canonical_content(tree) != canonical_content(preview):
     return []
   return [
       f"{dump} has the parsed content of the offline preview that"
       f" tools/apply_bqca_rename_map.py writes for --before {before}"
-      " (comments and spacing aside): no field of the live report changed"
-      " after the write-back, so it does not show that the live template was"
-      " written"
+      " (comments, spacing and the order of fields aside): no field of the"
+      " live report changed after the write-back, so it does not show that"
+      " the live template was written"
   ]
 
 
@@ -846,7 +873,7 @@ def write_blockers(
   A write needs a trusted receipt of the dump bytes `snapshot`, of a capture
   after the write-back, for the revision `revision` (`receipt_blockers`); the
   capture before the write-back that it names (`before_blockers`); dump bytes
-  whose parsed content differs from the offline preview of that capture
+  whose content differs from the offline preview of that capture
   (`offline_preview_blockers`); and dump bytes that `dump_blockers` does not
   refuse. The signers file is read once, here.
   """

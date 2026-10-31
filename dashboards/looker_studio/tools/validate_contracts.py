@@ -1596,8 +1596,10 @@ def _bqca_pending_live_sync_errors(live: dict[str, Any]) -> list[str]:
   `pending_live_sync` must give a non-empty `reason`, a quoted `since_date`
   (YYYY-MM-DD, not before `verified_date` and not in the future), the
   `tracking_issue` URL of an issue of this repository and a non-empty list of
-  `required_actions`. Once both digests equal the verified ones again,
-  `pending_live_sync` must be removed.
+  `required_actions`; any other value (null, empty or of another type) is an
+  error. Once both digests equal the verified ones again, `pending_live_sync`
+  must be removed, whatever its value, and `_bqca_committed_capture_errors`
+  checks the record of the sync.
   """
   prefix = "bqca live_template_verification"
   errors: list[str] = []
@@ -1631,15 +1633,17 @@ def _bqca_pending_live_sync_errors(live: dict[str, Any]) -> list[str]:
       )
     if live.get(pinned_key) != verified:
       differing.append(f"{pinned_key} != {verified_key}")
+  # A key that is present counts, even when its value is null or empty.
+  present = "pending_live_sync" in live
   pending = live.get("pending_live_sync")
   if not differing:
-    if pending is not None:
+    if present:
       errors.append(
           f"{prefix}.pending_live_sync must be removed: manifest_sha256 and"
           " template_bundle_sha256 equal their verified digests"
       )
     return errors
-  if pending is None:
+  if not present:
     errors.append(
         f"{prefix}.pending_live_sync is required while"
         f" {' and '.join(differing)}"
@@ -1946,11 +1950,12 @@ def bqca_capture_time_errors(
 def _bqca_committed_capture_errors(
     root: pathlib.Path, binding: dict[str, Any], live: dict[str, Any]
 ) -> list[str]:
-  """Check the capture receipt that a binding without a pending sync records.
+  """Check the capture receipt of a binding that records a live sync.
 
-  Without `pending_live_sync`, `live_template_verification` records a live
-  sync, so BQCA_CAPTURE_RECEIPT_PATH must be the receipt of the export that
-  verified it, and the signers file must trust its signature. The receipt
+  When its verified digests are the pinned ones, `live_template_verification`
+  records a live sync (and must have no `pending_live_sync`), so
+  BQCA_CAPTURE_RECEIPT_PATH must be the receipt of the export that verified
+  it, and the signers file must trust its signature. The receipt
   must be of a capture taken after the write-back, for the binding's report
   and its pinned manifest and bundle digests, and signed on or after the day
   its sync began and not in the future. `verified_revision`,
@@ -1971,9 +1976,9 @@ def _bqca_committed_capture_errors(
       contents[name] = source.read_bytes()
     except OSError as exc:
       return [
-          f"{prefix} has no pending_live_sync, so it needs the capture receipt"
-          f" that finalized it: cannot read {source.relative_to(root)}:"
-          f" {exc.strerror or exc}"
+          f"{prefix} records a live sync (its verified digests are the pinned"
+          " ones), so it needs the capture receipt that finalized it: cannot"
+          f" read {source.relative_to(root)}: {exc.strerror or exc}"
       ]
   data = contents["receipt"]
   try:
@@ -2606,10 +2611,10 @@ def validate_bqca(
         f" expected {bundle_sha}, got {live.get('template_bundle_sha256')}"
     )
   errors.extend(_bqca_pending_live_sync_errors(live))
-  # A binding that records a live sync must carry the receipt of its capture.
+  # A binding whose verified digests are the pinned ones records a live sync,
+  # so it must carry the receipt of its capture, whatever else it says.
   if (
       isinstance(live, dict)
-      and "pending_live_sync" not in live
       and live.get("manifest_sha256") == live.get("verified_manifest_sha256")
       and live.get("template_bundle_sha256")
       == live.get("verified_template_bundle_sha256")

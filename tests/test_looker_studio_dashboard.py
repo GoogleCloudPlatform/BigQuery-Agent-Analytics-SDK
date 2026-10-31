@@ -2725,14 +2725,28 @@ def test_bqca_derive_report_column_ids_lengthens_only_colliding_ids():
 
 _BQCA_DROP = object()
 BQCA_LIVE_PENDING = "bqca live_template_verification.pending_live_sync"
-# A binding without `pending_live_sync` records a live sync, so it needs the
-# capture receipt that tools/finalize_live_sync.py commits with it; a hand
-# edit that only re-pins the verified digests and deletes the pending record
-# has none.
+# A binding whose verified digests are the pinned ones records a live sync,
+# so it needs the capture receipt that tools/finalize_live_sync.py commits
+# with it; a hand edit that only re-pins the verified digests has none,
+# whatever it leaves of the pending record.
 BQCA_LIVE_NO_RECEIPT = (
-    "bqca live_template_verification has no pending_live_sync, so it needs"
-    " the capture receipt that finalized it: cannot read"
-    " bindings/bqca_live_capture_receipt.json: No such file or directory"
+    "bqca live_template_verification records a live sync (its verified"
+    " digests are the pinned ones), so it needs the capture receipt that"
+    " finalized it: cannot read bindings/bqca_live_capture_receipt.json: No"
+    " such file or directory"
+)
+BQCA_LIVE_PENDING_KEPT = (
+    f"{BQCA_LIVE_PENDING} must be removed: manifest_sha256 and"
+    " template_bundle_sha256 equal their verified digests"
+)
+# The values of a `pending_live_sync` that is present but no mapping, or an
+# empty one.
+BQCA_PENDING_NOT_A_RECORD = (
+    ("null", None),
+    ("empty_mapping", {}),
+    ("empty_list", []),
+    ("empty_string", ""),
+    ("false", False),
 )
 BQCA_LIVE_SYNCED = (
     (("verified_manifest_sha256",), lambda live: live["manifest_sha256"]),
@@ -2822,11 +2836,41 @@ BQCA_PENDING_LIVE_SYNC_CASES = [
     ),
     pytest.param(
         _bqca_live_edit(*BQCA_LIVE_SYNCED),
-        [
-            f"{BQCA_LIVE_PENDING} must be removed: manifest_sha256 and"
-            " template_bundle_sha256 equal their verified digests"
-        ],
+        [BQCA_LIVE_PENDING_KEPT, BQCA_LIVE_NO_RECEIPT],
         id="kept_after_the_sync",
+    ),
+    # Present with a null, empty or wrong-typed value, the pending record
+    # still counts: it must go, and the receipt is still required.
+    *(
+        pytest.param(
+            _bqca_live_edit(*BQCA_LIVE_SYNCED, (("pending_live_sync",), value)),
+            [BQCA_LIVE_PENDING_KEPT, BQCA_LIVE_NO_RECEIPT],
+            id=f"{case_id}_after_the_sync",
+        )
+        for case_id, value in BQCA_PENDING_NOT_A_RECORD
+    ),
+    # While the digests differ, such a value is no pending record.
+    *(
+        pytest.param(
+            _bqca_live_edit((("pending_live_sync",), value)),
+            [f"{BQCA_LIVE_PENDING} must be a mapping"],
+            id=f"{case_id}_while_pending",
+        )
+        for case_id, value in BQCA_PENDING_NOT_A_RECORD
+        if value != {}
+    ),
+    pytest.param(
+        _bqca_live_edit((("pending_live_sync",), {})),
+        [
+            f"{BQCA_LIVE_PENDING}.reason None must be a non-empty string",
+            f"{BQCA_LIVE_PENDING}.since_date None is not a quoted YYYY-MM-DD"
+            " date",
+            f"{BQCA_LIVE_PENDING}.tracking_issue None is not the URL of an"
+            " issue of this repository",
+            f"{BQCA_LIVE_PENDING}.required_actions None must be a non-empty"
+            " list of non-empty strings",
+        ],
+        id="empty_mapping_while_pending",
     ),
     pytest.param(
         _bqca_live_edit(

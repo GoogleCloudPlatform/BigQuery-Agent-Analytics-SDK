@@ -47,13 +47,13 @@ copy (adding the ``# bqca-offline-preview:`` header comment line once if it is
 not already present). The twin previews the sync; it is not a dump of a synced
 template. This tool never writes or reads a capture receipt, and
 ``tools/sign_live_capture.py`` and ``tools/finalize_live_sync.py`` refuse the
-twin, and any edit of its comments or spacing (the marker included), as the
-capture of the synced template: ``preview_tree`` gives them its parsed content,
-which they compare with that of the capture after the write-back. A listed
-signer who edits a field of the twin and signs it can still get it written;
-see "Capture receipts" in ``docs/dashboard-implementation.md``. After the
-rename is applied to the live template, capture it again with
-``tools/sign_live_capture.py``.
+twin as the capture of the synced template, and so any edit of its comments or
+spacing (the marker included) or of the order of its fields: ``preview_tree``
+gives them its parsed content, which they compare, ignoring order, with that
+of the capture after the write-back. A listed signer who edits a field value
+of the twin and signs it can still get it written; see "Capture receipts" in
+``docs/dashboard-implementation.md``. After the rename is applied to the live
+template, capture it again with ``tools/sign_live_capture.py``.
 
 Exits 0 when the remapped dump is written, and with ``--check`` when every check
 passes, whether or not a write to ``--out`` would be refused; the output says

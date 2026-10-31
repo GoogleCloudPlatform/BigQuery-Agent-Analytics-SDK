@@ -1607,7 +1607,15 @@ def offline_preview(tmp_path, before):
 # The offline preview as written, and edited so that its marker changes case
 # or spacing, moves, or is gone.
 _MARKED = ["as-written", "upper-case", "respaced", "moved-to-the-end"]
-_OFFLINE_VARIANTS = [*_MARKED, "stripped"]
+# Without the marker, as it is or with its distinct fields (one concept's
+# `id` and `name`) or its repeated values (the first two components) in
+# another order: the same fields and values, so the same protobuf content.
+_OFFLINE_VARIANTS = [
+    *_MARKED,
+    "stripped",
+    "reordered-fields",
+    "reordered-components",
+]
 
 
 def _offline_variant(preview, variant, directory):
@@ -1622,10 +1630,53 @@ def _offline_variant(preview, variant, directory):
       "respaced": data.replace(marker, b"Bqca Offline_Preview:", 1),
       "moved-to-the-end": rest + first + b"\n",
       "stripped": rest,
+      "reordered-fields": _swap_id_and_name(rest.decode()).encode(),
+      "reordered-components": (
+          _swap_first_two_components(rest.decode()).encode()
+      ),
   }[variant]
   path = directory / f"{variant}.textproto"
   path.write_bytes(payload)
   return path
+
+
+@pytest.mark.parametrize(
+    "variant", ["stripped", "reordered-fields", "reordered-components"]
+)
+def test_canonical_content_ignores_the_order_of_fields_and_repeated_values(
+    tree, tmp_path, offline_preview, variant
+):
+  """Round 8: the preview comparison does not depend on the order of fields.
+
+  Round 8 compared ordered parsed trees, so swapping one concept's adjacent
+  `id` and `name` fields gave the stripped preview other content, and it was
+  captured and finalized. Each variant here parses to another ordered tree
+  (except the stripped one) but has the preview's fields and values, and the
+  live audit passes it; a changed field value does change the content.
+  """
+  finalize = _load_finalize(tree)
+  validator = _load_validator()
+  candidate = _offline_variant(offline_preview, variant, tmp_path)
+  assert _audit(tree, candidate).returncode == 0
+  preview = validator.parse_report_textproto(
+      offline_preview.read_text(encoding="utf-8")
+  )
+  parsed = validator.parse_report_textproto(
+      candidate.read_text(encoding="utf-8")
+  )
+
+  assert (parsed == preview) == (variant == "stripped")
+  assert finalize.canonical_content(parsed) == finalize.canonical_content(
+      preview
+  )
+  edited = validator.parse_report_textproto(
+      candidate.read_text(encoding="utf-8").replace(
+          '"qt_1e5c0a97"', '"qt_1e5c0a98"', 1
+      )
+  )
+  assert finalize.canonical_content(edited) != finalize.canonical_content(
+      preview
+  )
 
 
 @pytest.mark.parametrize("variant", _OFFLINE_VARIANTS)
@@ -2985,11 +3036,67 @@ def test_validate_contracts_refuses_a_live_sync_recorded_by_hand(tree):
     )
   else:
     expected = (
-        "bqca live_template_verification has no pending_live_sync, so it"
-        " needs the capture receipt that finalized it: cannot read"
-        f" {COMMITTED}: No such file or directory"
+        "bqca live_template_verification records a live sync (its verified"
+        " digests are the pinned ones), so it needs the capture receipt that"
+        f" finalized it: cannot read {COMMITTED}: No such file or directory"
     )
   assert expected in result.stderr
+
+
+# How a hand edit can leave `pending_live_sync` once the digests are
+# re-pinned: gone, or present with a null, empty or wrong-typed value.
+_PENDING_SPELLINGS = {
+    "absent": None,
+    "null": "null",
+    "tilde": "~",
+    "no-value": "",
+    "empty-mapping": "{}",
+    "empty-list": "[]",
+    "empty-string": '""',
+    "false": "false",
+}
+
+
+@pytest.mark.parametrize("spelling", list(_PENDING_SPELLINGS))
+def test_validate_contracts_refuses_a_hand_sync_whatever_pending_says(
+    tree, spelling
+):
+  """Round 8: `pending_live_sync: null` no longer bypasses the receipt check.
+
+  With both digests re-pinned, the stale `verified_date` kept, no committed
+  receipt and the shipped signers file, which lists no signer, the binding
+  fails validation whether `pending_live_sync` is gone or present with any
+  value that is not a well-formed mapping.
+  """
+  assert _validate(tree).returncode == 0
+  _hand_finalize(tree)
+  value = _PENDING_SPELLINGS[spelling]
+  if value is not None:
+    path = tree / BINDING
+    text = path.read_text(encoding="utf-8")
+    anchor = re.search(r"(?m)^  verified_template_bundle_sha256: .*\n", text)
+    assert anchor is not None
+    line = f"  {PENDING}: {value}".rstrip() + "\n"
+    path.write_text(
+        text[: anchor.end()] + line + text[anchor.end() :], encoding="utf-8"
+    )
+    assert PENDING in _live(tree)
+  for suffix in ("", ".sig"):
+    (tree / f"{COMMITTED}{suffix}").unlink(missing_ok=True)
+  _without_signers(tree)
+
+  result = _validate(tree)
+
+  assert result.returncode == 1
+  assert (
+      "bqca live_template_verification records a live sync (its verified"
+      " digests are the pinned ones), so it needs the capture receipt that"
+      f" finalized it: cannot read {COMMITTED}: No such file or directory"
+  ) in result.stderr
+  assert (
+      f"bqca live_template_verification.{PENDING} must be removed"
+      in result.stderr
+  ) == (value is not None)
 
 
 def _set_record(tree, key, value):
