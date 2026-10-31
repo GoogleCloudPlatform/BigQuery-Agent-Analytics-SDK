@@ -65,9 +65,11 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import threading
 import types
 
 import pytest
@@ -3082,6 +3084,313 @@ def test_capture_puts_an_earlier_capture_back_when_a_file_cannot_be_replaced(
   assert result.stderr.endswith("not captured: nothing written\n")
   assert _bytes_and_modes(files) == original
   assert sorted(before.parent.iterdir()) == listing
+
+
+def _again(before, trusted_key):
+  """Arguments for a --force capture of a changed export over `before`."""
+  source = before.parent.parent / "live/again.textproto"
+  source.write_text(_pre_sync_text() + "# exported again\n", encoding="utf-8")
+  args = ["--out", str(before), "--revision", "1830000000002"]
+  args += ["--signer", SIGNER, "--key", str(trusted_key), "--force"]
+  return [*args, "--", *_export_command(source)]
+
+
+def _interrupt_at(code, event, count, seen):
+  """Return a trace function that sends this process a real SIGINT.
+
+  It sends it at the `count`th `event` ("call" or "return") of a frame of
+  `code`, and appends that frame's `path` to `seen` at each such event.
+  """
+
+  def trace(frame, what, arg):
+    if frame.f_code is not code:
+      return None
+    if what == event:
+      seen.append(frame.f_locals["path"])
+      if len(seen) == count:
+        os.kill(os.getpid(), signal.SIGINT)
+    return trace
+
+  return trace
+
+
+def _main_traced(capture, args, trace):
+  """Run the capture tool's `main(args)` in this process under `trace`.
+
+  Returns its exit code, or the KeyboardInterrupt that it let through.
+  """
+  if threading.current_thread() is not threading.main_thread():
+    pytest.skip("only the main thread receives signals")
+  previous = sys.gettrace()
+  sys.settrace(trace)
+  try:
+    return capture.main(args)
+  except KeyboardInterrupt as interrupt:
+    return interrupt
+  finally:
+    sys.settrace(previous)
+
+
+@pytest.mark.parametrize(
+    "interrupted", [0, 1, 2], ids=["export", "signature", "receipt"]
+)
+def test_capture_interrupted_after_a_file_takes_its_place_puts_all_back(
+    tree, before, trusted_key, monkeypatch, capsys, interrupted
+):
+  """A real SIGINT right after a file replaces its earlier one undoes all.
+
+  The interrupt arrives as the real `_place` returns, once the export, the
+  signature or the receipt of a --force capture of a changed export has
+  replaced the earlier one. The capture stops there and is refused; every
+  earlier file is back, bytes and mode, and no staged file or backup is
+  left.
+  """
+  files = _capture_files(before)
+  for path, mode in zip(files, (0o400, 0o640, 0o604)):
+    path.chmod(mode)
+  original = _bytes_and_modes(files)
+  listing = sorted(before.parent.iterdir())
+  capture = _load_capture(tree)
+  monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+  placed = []
+  trace = _interrupt_at(
+      capture._place.__code__, "return", interrupted + 1, placed
+  )
+
+  code = _main_traced(capture, _again(before, trusted_key), trace)
+
+  assert placed == files[: interrupted + 1]
+  assert _bytes_and_modes(files) == original
+  assert sorted(before.parent.iterdir()) == listing
+  assert code == 1
+  stderr = capsys.readouterr().err
+  assert f"ERROR: cannot write {files[interrupted]}: interrupted\n" in stderr
+  assert stderr.endswith("not captured: nothing written\n")
+
+
+def test_capture_interrupted_once_every_file_is_in_place_stands(
+    tree, before, trusted_key, monkeypatch, capsys
+):
+  """A real SIGINT once all three files are in place does not undo them."""
+  files = _capture_files(before)
+  listing = sorted(before.parent.iterdir())
+  capture = _load_capture(tree)
+  monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+  removed = []
+  trace = _interrupt_at(capture._discard.__code__, "call", 1, removed)
+
+  code = _main_traced(capture, _again(before, trusted_key), trace)
+
+  assert removed
+  assert code == 0
+  stderr = capsys.readouterr().err
+  assert (
+      "warning: interrupted once every file was in place; the capture"
+      " stands\n"
+  ) in stderr
+  assert files[0].read_bytes().endswith(b"# exported again\n")
+  assert json.loads(files[2].read_bytes())["revision"] == "1830000000002"
+  assert sorted(before.parent.iterdir()) == listing
+
+
+@pytest.mark.parametrize(
+    "failing", [0, 1, 2], ids=["export", "signature", "receipt"]
+)
+def test_capture_puts_back_a_replacement_that_reported_a_failure(
+    tree, before, trusted_key, monkeypatch, capsys, failing
+):
+  """A file that took its place although `_place` failed is put back too.
+
+  A rename can take effect and still report an error (a retried rename over
+  NFS reports ENOENT): what the path holds, not what `_place` returned,
+  decides whether its earlier file is put back.
+  """
+  files = _capture_files(before)
+  for path, mode in zip(files, (0o400, 0o640, 0o604)):
+    path.chmod(mode)
+  original = _bytes_and_modes(files)
+  listing = sorted(before.parent.iterdir())
+  capture = _load_capture(tree)
+  real = capture._place
+
+  def place(staged, path, force):
+    real(staged, path, force)
+    if path == files[failing]:
+      raise OSError(errno.ENOENT, os.strerror(errno.ENOENT))
+
+  monkeypatch.setattr(capture, "_place", place)
+  monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+
+  code = capture.main(_again(before, trusted_key))
+
+  assert code == 1
+  stderr = capsys.readouterr().err
+  assert (
+      f"ERROR: cannot write {files[failing]}: {os.strerror(errno.ENOENT)}\n"
+  ) in stderr
+  assert stderr.endswith("not captured: nothing written\n")
+  assert _bytes_and_modes(files) == original
+  assert sorted(before.parent.iterdir()) == listing
+
+
+def test_capture_interrupted_while_putting_back_still_puts_all_back(
+    tree, before, trusted_key, monkeypatch, capsys
+):
+  """A real SIGINT as the rollback starts does not stop it.
+
+  The receipt of a --force capture cannot take its place; as the signature
+  is put back, the interrupt arrives. The export is put back all the same.
+  """
+  files = _capture_files(before)
+  for path, mode in zip(files, (0o400, 0o640, 0o604)):
+    path.chmod(mode)
+  original = _bytes_and_modes(files)
+  listing = sorted(before.parent.iterdir())
+  capture = _load_capture(tree)
+  real = capture._place
+
+  def place(staged, path, force):
+    if path == files[2]:
+      raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+    real(staged, path, force)
+
+  monkeypatch.setattr(capture, "_place", place)
+  monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+  restored = []
+  trace = _interrupt_at(capture._restore.__code__, "call", 1, restored)
+
+  code = _main_traced(capture, _again(before, trusted_key), trace)
+
+  assert restored == [files[1], files[0]]
+  assert _bytes_and_modes(files) == original
+  assert sorted(before.parent.iterdir()) == listing
+  assert code == 1
+  stderr = capsys.readouterr().err
+  assert f"ERROR: cannot write {files[2]}: {os.strerror(errno.ENOSPC)}\n" in (
+      stderr
+  )
+  assert stderr.endswith("not captured: nothing written\n")
+
+
+@pytest.mark.parametrize(
+    "fault, failing, lost",
+    [
+        ("restore-fails", 2, 1),
+        ("replaced-then-gone", 2, 1),
+        ("gone-before-its-turn", 1, 2),
+    ],
+    ids=["restore-fails", "replaced-then-gone", "gone-before-its-turn"],
+)
+def test_capture_keeps_and_names_the_backup_of_a_file_it_cannot_put_back(
+    tree, before, trusted_key, monkeypatch, capsys, fault, failing, lost
+):
+  """An earlier file that cannot be put back stays in the backup named.
+
+  A file of a --force capture cannot take its place, and one earlier file is
+  not put back: its restore fails, or its path holds neither the new file nor
+  the earlier one (gone after it took its place, or before its turn). The
+  error names the backup that keeps that earlier file, which stays, bytes and
+  mode, and puts the capture back when moved to its path; every other file
+  is put back.
+  """
+  files = _capture_files(before)
+  for path, mode in zip(files, (0o400, 0o640, 0o604)):
+    path.chmod(mode)
+  original = _bytes_and_modes(files)
+  listing = sorted(before.parent.iterdir())
+  capture = _load_capture(tree)
+  real_place, real_restore = capture._place, capture._restore
+
+  def place(staged, path, force):
+    if path == files[failing]:
+      if fault != "restore-fails":
+        files[lost].unlink()
+      raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+    real_place(staged, path, force)
+
+  def restore(backup, path):
+    if fault == "restore-fails" and path == files[lost]:
+      raise OSError(errno.EIO, os.strerror(errno.EIO))
+    real_restore(backup, path)
+
+  monkeypatch.setattr(capture, "_place", place)
+  monkeypatch.setattr(capture, "_restore", restore)
+  monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+
+  code = capture.main(_again(before, trusted_key))
+
+  assert code == 1
+  stderr = capsys.readouterr().err
+  assert (
+      f"ERROR: cannot write {files[failing]}: {os.strerror(errno.ENOSPC)}\n"
+  ) in stderr
+  if fault == "restore-fails":
+    problem = f"cannot put back {files[lost]}: {os.strerror(errno.EIO)}"
+  else:
+    problem = f"cannot tell what {files[lost]} holds now"
+  kept = re.findall(
+      rf"^ERROR: {re.escape(problem)}; its original is kept at (.+)$",
+      stderr,
+      re.MULTILINE,
+  )
+  assert len(kept) == 1, stderr
+  backup = Path(kept[0])
+  assert stderr.endswith(
+      "not captured: not every file above could be put back as it was\n"
+  )
+  assert _bytes_and_modes([backup]) == {backup: original[files[lost]]}
+  others = [path for path in files if path != files[lost]]
+  assert _bytes_and_modes(others) == {path: original[path] for path in others}
+  if fault == "restore-fails":
+    assert files[lost].read_bytes() != original[files[lost]][0]
+  else:
+    assert not os.path.lexists(files[lost])
+  assert set(before.parent.iterdir()) - {files[lost]} == (
+      set(listing) - {files[lost]}
+  ) | {backup}
+
+  os.replace(backup, files[lost])
+
+  assert _bytes_and_modes(files) == original
+  assert sorted(before.parent.iterdir()) == listing
+
+
+def test_capture_in_place_warns_of_a_backup_it_cannot_remove(
+    tree, before, trusted_key, monkeypatch, capsys
+):
+  """A --force capture whose files are in place stands if backups stay."""
+  files = _capture_files(before)
+  original = _bytes_and_modes(files)
+  listing = sorted(before.parent.iterdir())
+  capture = _load_capture(tree)
+  real_discard = capture._discard
+
+  def discard(path):
+    if path.name.endswith(".backup"):
+      raise OSError(errno.EACCES, os.strerror(errno.EACCES))
+    real_discard(path)
+
+  monkeypatch.setattr(capture, "_discard", discard)
+  monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+
+  code = capture.main(_again(before, trusted_key))
+
+  assert code == 0
+  stderr = capsys.readouterr().err
+  backups = [
+      Path(backup)
+      for backup in re.findall(
+          rf"^warning: cannot remove (.+):"
+          rf" {re.escape(os.strerror(errno.EACCES))}$",
+          stderr,
+          re.MULTILINE,
+      )
+  ]
+  assert len(backups) == 3, stderr
+  assert sorted(_bytes_and_modes(backups).values()) == sorted(original.values())
+  assert files[0].read_bytes().endswith(b"# exported again\n")
+  assert json.loads(files[2].read_bytes())["revision"] == "1830000000002"
+  assert sorted(before.parent.iterdir()) == sorted([*listing, *backups])
 
 
 @pytest.mark.parametrize(

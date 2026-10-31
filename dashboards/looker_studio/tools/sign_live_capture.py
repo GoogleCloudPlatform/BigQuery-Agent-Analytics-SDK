@@ -9,8 +9,12 @@ output, and keeps exactly the bytes it reads from that pipe: it writes them to
 ``--out`` (mode 0600, outside this repository), with a capture receipt of
 those bytes (``<out>.receipt.json``) and its SSH signature
 (``<out>.receipt.json.sig``). It never signs bytes that it reads from a file.
-It writes the three files all or none: with ``--force``, a capture that fails
-to replace an earlier one puts the earlier files back, bytes and modes.
+A capture that fails or is interrupted (SIGINT) before all three files are in
+place leaves the paths as they were: with ``--force``, it puts the earlier
+files back, bytes and modes, from backups it makes first. A file that cannot
+be put back keeps its original in the ``.backup`` file next to it that the
+error names; see "Capture receipts" in ``docs/dashboard-implementation.md``,
+also for what a killed process leaves.
 
 The receipt, a ``bqca-live-capture-receipt/v3`` JSON object, gives:
 
@@ -50,10 +54,12 @@ statement, which the receipt names them for; see "Capture receipts" in
 
 Exits 0 when the capture is written; 1 when it is refused, the export command
 fails, the receipt cannot be signed or its key is not trusted, or the files
-cannot be written; 2 on bad arguments.
+cannot be written or their write is interrupted; 2 on bad arguments.
 """
 
 import argparse
+from collections.abc import Iterator
+import contextlib
 import datetime
 import functools
 import hashlib
@@ -62,6 +68,7 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -177,13 +184,52 @@ def write_blockers(out: pathlib.Path, force: bool) -> list[str]:
 class CaptureWriteError(Exception):
   """The capture was not written.
 
-  `problems` lists the files that could not be put back as they were, if
-  any; each keeps its original next to it, as a `.backup` file.
+  `problems` lists the paths that are not confirmed back as they were, if
+  any; each names the `.backup` file that keeps its original. `leftovers`
+  lists the staged files and backups that could not be removed.
   """
 
-  def __init__(self, message: str, problems: list[str]):
+  def __init__(self, message: str, problems: list[str], leftovers: list[str]):
     super().__init__(message)
     self.problems = problems
+    self.leftovers = leftovers
+
+
+@contextlib.contextmanager
+def _held_interrupts() -> Iterator[types.SimpleNamespace]:
+  """Hold SIGINT for the block: one that arrives only sets `interrupted`.
+
+  Python delivers signals in the main thread only; elsewhere there is
+  nothing to hold.
+  """
+  held = types.SimpleNamespace(interrupted=False)
+
+  def note(signum, frame):
+    held.interrupted = True
+
+  try:
+    previous = signal.signal(signal.SIGINT, note)
+  except ValueError:
+    holding = False
+  else:
+    holding = True
+  try:
+    yield held
+  finally:
+    if holding:
+      signal.signal(
+          signal.SIGINT,
+          previous if previous is not None else signal.default_int_handler,
+      )
+
+
+def _identity(path: pathlib.Path) -> tuple[int, int] | None:
+  """Return the device and inode of the entry at `path`, or None if none."""
+  try:
+    info = os.lstat(path)
+  except FileNotFoundError:
+    return None
+  return info.st_dev, info.st_ino
 
 
 def _stage(path: pathlib.Path, data: bytes, mode: int) -> pathlib.Path:
@@ -230,67 +276,167 @@ def _place(staged: pathlib.Path, path: pathlib.Path, force: bool) -> None:
     os.link(staged, path)
 
 
-def _install(files: list[tuple[pathlib.Path, bytes, int]], force: bool) -> None:
-  """Write every one of `files`, `(path, data, mode)`, or none of them.
+def _restore(backup: pathlib.Path, path: pathlib.Path) -> None:
+  """Put the backup of `path` back in its place."""
+  os.replace(backup, path)
+
+
+def _discard(path: pathlib.Path) -> None:
+  """Remove a staged file or backup that is no longer needed."""
+  path.unlink(missing_ok=True)
+
+
+class _Interrupted(Exception):
+  """SIGINT arrived while the capture was being written."""
+
+
+def _install(
+    files: list[tuple[pathlib.Path, bytes, int]], force: bool
+) -> list[str]:
+  """Write all of `files`, `(path, data, mode)`, or put every path back.
 
   Each file is first staged next to its path. With `force`, every path that
-  exists is then backed up next to itself (`_back_up`), and only then do the
-  staged files take their places, one at a time. If anything fails or is
-  interrupted, each path already replaced gets its backup back, byte for
-  byte and with its mode, and each path that did not exist before is
-  removed. Staged files and backups are removed in the end, except the
-  backup of a path that could not be put back.
+  exists is then backed up next to itself, bytes and mode (`_back_up`).
+  Only then do the staged files take their places, one at a time, each path
+  recorded before its replacement. If anything fails, or SIGINT arrives
+  before the last file is in place, `_roll_back` puts every path back as it
+  was. SIGINT is held from the first file staged to the last backup
+  removed: it only sets a flag, which is checked after each step, so it
+  never falls between a step and its record, or into the rollback. One
+  that arrives once the last file is in place does not undo the capture.
+  A process that is killed outright (SIGKILL, a crash) runs no rollback;
+  the `.backup` files next to the paths then keep the originals.
+
+  Returns:
+    What could not be cleaned up after a complete write, if anything, and
+    an interrupt that arrived once the last file was in place.
 
   Raises:
-    CaptureWriteError: The files were not written.
+    CaptureWriteError: The files were not all written. Every path is back
+      as it was, except those that its `problems` name.
   """
-  staged: dict[pathlib.Path, pathlib.Path] = {}
-  backups: dict[pathlib.Path, pathlib.Path] = {}
-  placed: list[pathlib.Path] = []
+  staged: dict[pathlib.Path, tuple[pathlib.Path, tuple[int, int] | None]] = {}
+  backups: dict[pathlib.Path, tuple[pathlib.Path, tuple[int, int] | None]] = {}
+  attempted: list[pathlib.Path] = []
   current = files[0][0]
-  try:
-    for path, data, mode in files:
-      current = path
-      staged[path] = _stage(path, data, mode)
-    if force:
+  with _held_interrupts() as held:
+
+    def check() -> None:
+      if held.interrupted:
+        raise _Interrupted
+
+    try:
+      for path, data, mode in files:
+        current = path
+        staged_path = _stage(path, data, mode)
+        # Recorded before `_identity`, so that a rollback removes it anyway.
+        staged[path] = (staged_path, None)
+        staged[path] = (staged_path, _identity(staged_path))
+        check()
+      if force:
+        for path, _, _ in files:
+          current = path
+          if os.path.lexists(path):
+            original = _identity(path)
+            backups[path] = (_back_up(path), original)
+            check()
       for path, _, _ in files:
         current = path
-        if os.path.lexists(path):
-          backups[path] = _back_up(path)
-    for path, _, _ in files:
-      current = path
-      _place(staged[path], path, force)
-      placed.append(path)
-  except BaseException as exc:
-    problems = []
-    for path in reversed(placed):
-      try:
-        if path in backups:
-          os.replace(backups.pop(path), path)
-        else:
-          path.unlink(missing_ok=True)
-      except OSError as error:
-        problems.append(
-            f"cannot put back {path}: {error.strerror or error}"
-            + (
-                f"; its original is {backups.pop(path)}"
-                if path in backups
-                else ""
-            )
-        )
-    for leftover in [*staged.values(), *backups.values()]:
-      leftover.unlink(missing_ok=True)
-    if not isinstance(exc, Exception):
-      for problem in problems:
-        print(f"ERROR: {problem}", file=sys.stderr)
-      raise
-    reason = getattr(exc, "strerror", None) or exc
-    raise CaptureWriteError(
-        f"cannot write {current}: {reason}", problems
-    ) from exc
-  # After `os.link`, the staged names remain; the backups are not needed.
-  for leftover in [*staged.values(), *backups.values()]:
-    leftover.unlink(missing_ok=True)
+        # Recorded first; `_roll_back` checks whether the replacement
+        # happened.
+        attempted.append(path)
+        _place(staged[path][0], path, force)
+        check()
+    except BaseException as exc:
+      problems, leftovers = _roll_back(attempted, staged, backups)
+      reason = (
+          "interrupted"
+          if isinstance(exc, (_Interrupted, KeyboardInterrupt))
+          else getattr(exc, "strerror", None) or exc
+      )
+      raise CaptureWriteError(
+          f"cannot write {current}: {reason}", problems, leftovers
+      ) from exc
+    # Complete: the staged names left by `os.link` and the backups can go.
+    leftovers = _discard_all(
+        [entry for entry, _ in [*staged.values(), *backups.values()]]
+    )
+    if held.interrupted:
+      leftovers.append(
+          "interrupted once every file was in place; the capture stands"
+      )
+  return leftovers
+
+
+def _discard_all(leftovers: list[pathlib.Path]) -> list[str]:
+  """Remove each of `leftovers`; return what could not be removed."""
+  problems = []
+  for leftover in leftovers:
+    try:
+      _discard(leftover)
+    except OSError as error:
+      problems.append(f"cannot remove {leftover}: {error.strerror or error}")
+  return problems
+
+
+def _roll_back(
+    attempted: list[pathlib.Path],
+    staged: dict[pathlib.Path, tuple[pathlib.Path, tuple[int, int] | None]],
+    backups: dict[pathlib.Path, tuple[pathlib.Path, tuple[int, int] | None]],
+) -> tuple[list[str], list[str]]:
+  """Put every path back as it was before `_install`.
+
+  A path holds its staged file exactly when its replacement happened, which
+  its inode shows, whatever `_place` reported. Then its backup takes its
+  place again or, if it had none, it is removed. A backup is removed only
+  once its original is back, or is still in place (same inode as when it was
+  backed up); one whose original cannot be put back or found is kept, and
+  its problem names it. Staged files are removed.
+
+  Returns:
+    The paths not confirmed back as they were, each with the backup that
+    keeps its original, and the files that could not be removed.
+  """
+  problems = []
+  kept: set[pathlib.Path] = set()
+  for path in reversed(attempted):
+    backup, _ = backups.get(path, (None, None))
+    try:
+      replaced = _identity(path) == staged[path][1]
+    except OSError:
+      replaced = False
+    if not replaced:
+      continue
+    try:
+      if backup is not None:
+        _restore(backup, path)
+        del backups[path]
+      else:
+        path.unlink()
+    except OSError as error:
+      problem = f"cannot put back {path}: {error.strerror or error}"
+      if backup is not None:
+        problem += f"; its original is kept at {backup}"
+        kept.add(path)
+      problems.append(problem)
+  for path, (backup, original) in list(backups.items()):
+    if path in kept:
+      continue
+    try:
+      intact = _identity(path) == original
+    except OSError:
+      intact = False
+    if not intact:
+      problems.append(
+          f"cannot tell what {path} holds now; its original is kept at"
+          f" {backup}"
+      )
+      del backups[path]
+  leftovers = [entry for entry, _ in staged.values()]
+  leftovers += [
+      backup for path, (backup, _) in backups.items() if path not in kept
+  ]
+  return problems, _discard_all(leftovers)
 
 
 def _fail(errors: list[str]) -> int:
@@ -509,10 +655,10 @@ def main(argv: list[str] | None = None) -> int:
   receipt_file = finalize.receipt_path(args.out)
   signature_file = validator.bqca_capture_signature_path(receipt_file)
   shared = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
-  # All three files or none: a failed --force capture leaves an earlier
-  # capture as it was.
+  # A failed or interrupted --force capture puts an earlier capture back,
+  # except what `_install` names as not confirmed back.
   try:
-    _install(
+    leftovers = _install(
         [
             (args.out, export, stat.S_IRUSR | stat.S_IWUSR),
             (signature_file, signature, shared),
@@ -521,16 +667,20 @@ def main(argv: list[str] | None = None) -> int:
         args.force,
     )
   except CaptureWriteError as exc:
-    if not exc.problems:
-      return _fail([str(exc)])
     for error in [str(exc), *exc.problems]:
       print(f"ERROR: {error}", file=sys.stderr)
-    print(
-        "not captured: the files above could not all be put back as they"
-        " were",
-        file=sys.stderr,
-    )
+    for leftover in exc.leftovers:
+      print(f"warning: {leftover}", file=sys.stderr)
+    if exc.problems:
+      print(
+          "not captured: not every file above could be put back as it was",
+          file=sys.stderr,
+      )
+    else:
+      print("not captured: nothing written", file=sys.stderr)
     return 1
+  for leftover in leftovers:
+    print(f"warning: {leftover}", file=sys.stderr)
   print(
       f"captured: {args.out} (mode 600), {receipt_file} and {signature_file}:"
       f" revision {args.revision}, signed by {args.signer} at"

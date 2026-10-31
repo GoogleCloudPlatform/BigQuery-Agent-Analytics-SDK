@@ -1983,12 +1983,16 @@ def _bqca_committed_capture_errors(
   records a live sync (and must have no `pending_live_sync`), so
   BQCA_CAPTURE_RECEIPT_PATH must be the receipt of the export that verified
   it, and the signers file must trust its signature. The receipt
-  must be of a capture taken after the write-back, for the binding's report
-  and its pinned manifest and bundle digests, and signed on or after the day
-  its sync began and not in the future. `verified_revision`,
-  `verified_dump_sha256`, `capture_receipt_sha256` and `captured_by` must be
-  the receipt's, and `verified_date` must not be before the receipt was
-  signed. Only `tools/finalize_live_sync.py` writes all of that together.
+  must be of a capture taken after the write-back, for the binding's report,
+  its pinned manifest and bundle digests and its `sync_generation`, and
+  signed on or after the day its sync began and not in the future.
+  `verified_revision`, `verified_dump_sha256`, `capture_receipt_sha256` and
+  `captured_by` must be the receipt's, and `verified_date` must not be before
+  the receipt was signed. That shows the record was copied from a trusted
+  receipt, not that `tools/finalize_live_sync.py` wrote it: a binding
+  assembled by hand from the same receipt passes too, which review must
+  rule out, and a reset generation shows only against the previous binding
+  (`bqca_sync_generation_progress_errors`).
   """
   prefix = "bqca live_template_verification"
   where = BQCA_CAPTURE_RECEIPT_PATH

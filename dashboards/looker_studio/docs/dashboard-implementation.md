@@ -605,10 +605,36 @@ trusted receipt of a capture before any write-back for the same pending sync,
 export's parsed content (comments, spacing, and the order of fields and
 repeated values aside) differs from that of the offline preview of the
 `--before` export. It refuses an existing capture
-unless `--force`, and writes the three files all or none: if one of them
-cannot be written, as with a full disk or a file that cannot be replaced,
-every earlier file is put back, bytes and mode, and any file that was not
-there is removed.
+unless `--force`.
+
+It writes the three files in steps. It stages each next to its path, then,
+with `--force`, copies each earlier file, bytes and mode, to a
+`.<name>.*.backup` file next to it, and only then puts the staged files in
+place, one at a time. If a step fails (a full disk, a file that cannot be
+replaced) or the tool is interrupted (Ctrl-C, SIGINT) before the last file is
+in place, it puts every path back as it was, each earlier file from its
+backup, removes any file that was not there, and ends with `not captured:
+nothing written`. SIGINT is held while the files are written or put back, and
+acts once the current step ends. What it does not undo:
+
+- A file it cannot put back: the error names it and the backup that keeps its
+  original (`cannot put back <path>: <reason>; its original is kept at
+  <backup>`, or `cannot tell what <path> holds now; ...` if the path holds
+  neither the new file nor its original). That backup is never removed, and
+  the output ends with `not captured: not every file above could be put back
+  as it was`; move the backup to its path by hand. A new file that cannot be
+  removed is named alone, as there was no earlier one.
+- A process that is killed outright (SIGKILL, a crash) puts nothing back: a
+  `.<name>.*.backup` file next to a capture file holds the earlier file, and
+  a `.<name>.*.tmp` file is a staged new one. The tool does not sync the
+  backups to disk before the replacements, so after a power loss a backup
+  can be incomplete.
+- An interrupt once all three files are in place: the capture stands, and
+  the tool exits 0 with `warning: interrupted once every file was in place;
+  the capture stands`.
+
+A staged file or backup that cannot be removed afterwards is named in a
+warning.
 
 `bindings/bqca_live_capture_signers` lists the trusted keys in the OpenSSH
 allowed signers format (see `ssh-keygen(1)`), one line per maintainer who
@@ -661,7 +687,8 @@ A write fails closed, exiting 1 and leaving every file unchanged, unless:
 - both receipts are exactly v3 receipts of the exports' bytes (a receipt or
   signature that cannot be read, other or repeated fields, and malformed
   values are refused), for the binding's `report_id`, its pinned manifest and
-  bundle digests, and its pending sync (`pending_since_date`), signed on or
+  bundle digests, its pending sync (`pending_since_date`), and its
+  `sync_generation`, signed on or
   after the day that sync began (inclusive, in UTC) and not in the future
   (with five minutes of clock skew); the dump's receipt is for `--revision`;
 - the dump's receipt is of a capture after a write-back that names the
