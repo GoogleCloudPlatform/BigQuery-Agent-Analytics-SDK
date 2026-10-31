@@ -85,8 +85,14 @@ block_datasource:
 # `70e5ac1e-65bb-4c89-a9df-fa9990cb6029`; `verified_date` stays 2026-10-09
 # until then. `pending_live_sync` records that sync: the validator requires it
 # while `manifest_sha256` or `template_bundle_sha256` differs from its
-# verified digest, and rejects it once both match again.
+# verified digest, and rejects it once both match again. `sync_generation`
+# numbers the live syncs: it is 1 for the sync that #559 tracks, goes up by one
+# each time a sync is reopened, and stays when a sync is finalized. Capture
+# receipts carry it, so tools/validate_contracts.py rejects a committed receipt
+# of another sync, and CI checks that it only moves forward from the binding
+# on the base branch (`--previous-binding`).
 live_template_verification:
+  sync_generation: 1
   verified_date: "2026-10-09"
   repository_sql_sha256: c915abe82c9e6d54aac6fffe78e34f90b436e852697c86747632a6c238754096
   pages_sha256: b3c14c7dfc8ed51690f7f3e0ac6d24506c31dc63038591f479c51362715a89c4
