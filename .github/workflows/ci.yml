@@ -78,20 +78,34 @@ jobs:
       # binding on the base branch (or before this push) keeps a change from
       # moving the generation back to one whose receipt it still holds. This
       # is the only check that does, so it runs in this job: Format check is
-      # a required status check, and a failure here blocks the merge.
+      # a required status check, and a failure here blocks the merge. It
+      # skips only a push with nothing before it (BEFORE empty or all zeros)
+      # and a previous commit without the binding; a merge base or a BEFORE
+      # commit that this clone cannot find fails it. tests/test_ci_workflow.py
+      # runs this script.
       - name: Check that sync_generation only moves forward
+        shell: bash
         env:
           BASE_REF: ${{ github.base_ref }}
           BEFORE: ${{ github.event.before }}
         run: |
           binding=dashboards/looker_studio/bindings/bqca_report_template.yaml
           if [ -n "$BASE_REF" ]; then
-            previous="$(git merge-base HEAD "origin/$BASE_REF")"
-          else
-            previous="$BEFORE"
-          fi
-          if [ -z "$previous" ] || ! git cat-file -e "$previous:$binding" 2>/dev/null; then
+            if ! previous="$(git merge-base HEAD "origin/$BASE_REF")"; then
+              echo "::error::cannot compare $binding with the base branch: no merge base of HEAD and origin/$BASE_REF in this clone"
+              exit 1
+            fi
+          elif [ -z "${BEFORE//0/}" ]; then
             echo "no previous $binding to compare with"
+            exit 0
+          elif git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            previous="$BEFORE"
+          else
+            echo "::error::cannot compare $binding with the commit before this push: $BEFORE is not in this clone"
+            exit 1
+          fi
+          if ! git cat-file -e "$previous:$binding" 2>/dev/null; then
+            echo "no $binding at $previous to compare with"
             exit 0
           fi
           git show "$previous:$binding" > "$RUNNER_TEMP/previous-binding.yaml"
