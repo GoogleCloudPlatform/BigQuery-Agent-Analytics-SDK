@@ -33,9 +33,12 @@ jobs:
     name: Format check
     runs-on: ubuntu-22.04
     steps:
+      # Full history: the sync_generation check below reads the binding at
+      # an earlier commit.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Reject SDLC working notes (intent.md / plan.md / spec.md)
         run: |
@@ -68,6 +71,47 @@ jobs:
             docs/codelabs/periodic_materialization.md \
             examples/context_graph/codelab/colab_notebook.ipynb
 
+      - name: Install PyYAML
+        run: pip install "pyyaml>=6.0"
+
+      # A committed receipt records one sync generation. Comparing with the
+      # binding on the base branch (or before this push) keeps a change from
+      # moving the generation back to one whose receipt it still holds. This
+      # is the only check that does, so it runs in this job: Format check is
+      # a required status check, and a failure here blocks the merge. It
+      # skips only a push with nothing before it (BEFORE empty or all zeros)
+      # and a previous commit without the binding; a merge base or a BEFORE
+      # commit that this clone cannot find fails it. tests/test_ci_workflow.py
+      # runs this script.
+      - name: Check that sync_generation only moves forward
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          binding=dashboards/looker_studio/bindings/bqca_report_template.yaml
+          if [ -n "$BASE_REF" ]; then
+            if ! previous="$(git merge-base HEAD "origin/$BASE_REF")"; then
+              echo "::error::cannot compare $binding with the base branch: no merge base of HEAD and origin/$BASE_REF in this clone"
+              exit 1
+            fi
+          elif [ -z "${BEFORE//0/}" ]; then
+            echo "no previous $binding to compare with"
+            exit 0
+          elif git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            previous="$BEFORE"
+          else
+            echo "::error::cannot compare $binding with the commit before this push: $BEFORE is not in this clone"
+            exit 1
+          fi
+          if ! git cat-file -e "$previous:$binding" 2>/dev/null; then
+            echo "no $binding at $previous to compare with"
+            exit 0
+          fi
+          git show "$previous:$binding" > "$RUNNER_TEMP/previous-binding.yaml"
+          python dashboards/looker_studio/tools/validate_contracts.py --profile bqca \
+            --previous-binding "$RUNNER_TEMP/previous-binding.yaml"
+
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-22.04
@@ -89,44 +133,6 @@ jobs:
 
       - name: Run tests
         run: pytest --tb=short -q
-
-  live-sync-generation:
-    name: BQCA live sync generation
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
-        with:
-          python-version: "3.12"
-
-      - name: Install PyYAML
-        run: pip install "pyyaml>=6.0"
-
-      # A committed receipt records one sync generation. Comparing with the
-      # binding on the base branch (or before this push) keeps a change from
-      # moving the generation back to one whose receipt it still holds.
-      - name: Check that sync_generation only moves forward
-        env:
-          BASE_REF: ${{ github.base_ref }}
-          BEFORE: ${{ github.event.before }}
-        run: |
-          binding=dashboards/looker_studio/bindings/bqca_report_template.yaml
-          if [ -n "$BASE_REF" ]; then
-            previous="$(git merge-base HEAD "origin/$BASE_REF")"
-          else
-            previous="$BEFORE"
-          fi
-          if [ -z "$previous" ] || ! git cat-file -e "$previous:$binding" 2>/dev/null; then
-            echo "no previous $binding to compare with"
-            exit 0
-          fi
-          git show "$previous:$binding" > "$RUNNER_TEMP/previous-binding.yaml"
-          python dashboards/looker_studio/tools/validate_contracts.py --profile bqca \
-            --previous-binding "$RUNNER_TEMP/previous-binding.yaml"
 
   configurator-browser-smoke:
     name: Configurator browser smoke
