@@ -361,16 +361,37 @@ its query. That makes [`queries/*.sql`](queries/README.md) the source of truth:
 ## Efficiency trial
 
 [`bqaa-dashboard-efficiency-trial.json`](bqaa-dashboard-efficiency-trial.json)
-is an experimental copy of `bqaa-dashboard.json` with its own `uid`, so you can
-import it next to the main dashboard and compare the two. It changes one thing
-in the **LLM & FinOps** row: the **LLM calls** query also returns
-`estimated_cost_usd` and `total_tokens`, and **Estimated cost** and **Total
-tokens** read that result through the `-- Dashboard --` data source. The three
-stats then cost one BigQuery job instead of two. It also limits the
-auto-refresh picker to 5m, 15m, 30m and 1h.
+is an experimental copy of `bqaa-dashboard.json` with its own `uid`, so it can
+sit next to the main dashboard. The local quick start provisions only the main
+dashboard. To open the trial, use **Dashboards → New → Import**, select this
+file, choose your BigQuery data source, and set the same six constants as in
+[step 5](#5-import-the-dashboard). Compare the two dashboards over the same
+fixed time range and filters.
 
-`scripts/check_grafana_queries_sync.py` does not cover this file. Adopting the
-change in `bqaa-dashboard.json` means updating `queries/llm_calls_total.sql`
-(which `scripts/check_streamlit_queries_sync.py` also compares against the
-Streamlit dashboard), retiring `queries/estimated_cost.sql`, and updating the
-panel maps in the sync script.
+It differs from the main dashboard in three ways:
+
+- **One query for three stats.** The **LLM calls** query also returns
+  `estimated_cost_usd` and `total_tokens`. **Estimated cost** and **Total
+  tokens** read that result through the `-- Dashboard --` data source, so the
+  three stats cost one BigQuery job instead of two.
+- **JSON-array filters.** Every Agent, User ID, Event Type and Session filter
+  is interpolated as `ARRAY<STRING>${agent:json}`, with the custom All value
+  `["___ALL___"]`. A JSON string is also a valid BigQuery string literal, so a
+  value such as `O'Brien`, or one containing backslashes, stays data.
+- **Both usage shapes.** Token sums read `content.usage` and fall back to
+  `attributes.usage_metadata`, which the direct logger
+  (`BigQueryAgentAnalyticsLogger.log_llm_response`) writes instead. `COALESCE`
+  picks one value per field, so a row that carries both is counted once. The
+  logger's rows still group under `unknown` in **Tokens by model**, because
+  the view does not expose the `attributes.model` they carry.
+
+It also limits the auto-refresh picker to 5m, 15m, 30m and 1h.
+
+`scripts/check_grafana_queries_sync.py` does not cover this file, so its
+embedded SQL is the source of truth, and
+[`tests/test_grafana_efficiency_trial.py`](../../tests/test_grafana_efficiency_trial.py)
+checks the filter encoding, the usage fallback and the panel wiring. Adopting
+the trial in `bqaa-dashboard.json` means updating `queries/*.sql` (which
+`scripts/check_streamlit_queries_sync.py` also compares against the Streamlit
+dashboard), retiring `queries/estimated_cost.sql`, and updating the panel maps
+in the sync script.
