@@ -18,10 +18,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import getpass
+import math
 import os
 import tempfile
+from typing import Callable, TypeVar
 
 from ._writer_identity import DEFAULT_WRITER_LABEL
+
+_Number = TypeVar("_Number", int, float)
 
 BQAA_EVENT_TYPES = frozenset(
     {
@@ -74,6 +78,51 @@ def _env_bool(name: str, default: bool) -> bool:
   if raw is None:
     return default
   return raw.lower() == "true"
+
+
+def _env_int(name: str, default: int) -> int:
+  return _env_number(name, default, int, "an integer")
+
+
+def _env_float(name: str, default: float) -> float:
+  return _env_number(name, default, float, "a number")
+
+
+def _env_positive_float(name: str, default: float) -> float:
+  """Like ``_env_float``, but the value must be finite and above zero.
+
+  For the drainer's timing knobs: a poll interval of 0 never advances the
+  idle clock (the drainer never exits), and NaN makes ``idle < limit``
+  false at once (it exits without draining).
+  """
+  value = _env_float(name, default)
+  if not (math.isfinite(value) and value > 0):
+    raise ValueError(f"{name} must be a positive number")
+  return value
+
+
+def _env_number(
+    name: str,
+    default: _Number,
+    cast: Callable[[str], _Number],
+    kind: str,
+) -> _Number:
+  """``cast`` of the variable, or ``cast(default)`` when it is unset.
+
+  Parses exactly as ``cast(value)`` would; only the error changes, so it
+  names the variable instead of a bare "invalid literal". The error does
+  not include the value: a mis-pasted secret would otherwise reach hook
+  stderr, the hook log and ``/bqaa-setup`` output, which users share.
+  """
+  raw = os.environ.get(name)
+  if raw is None:
+    # Cast the default too, as before: DEFAULT_STATE_TTL_HOURS is the
+    # int 24, but state_ttl_hours has always been a float.
+    return cast(default)
+  try:
+    return cast(raw)
+  except ValueError:
+    raise ValueError(f"{name} must be {kind}") from None
 
 
 @dataclass
@@ -136,34 +185,24 @@ class BQAAConfig:
         auto_create_table=_env_bool("BQAA_AUTO_CREATE_TABLE", True),
         auto_create_dataset=_env_bool("BQAA_AUTO_CREATE_DATASET", False),
         location=os.environ.get("BQAA_LOCATION") or None,
-        max_content_length=int(
-            os.environ.get("BQAA_MAX_CONTENT_LENGTH", "5000")
-        ),
+        max_content_length=_env_int("BQAA_MAX_CONTENT_LENGTH", 5000),
         log_file=os.environ.get("BQAA_LOG_FILE", DEFAULT_LOG_FILE),
         spool_dir=os.environ.get("BQAA_SPOOL_DIR", DEFAULT_SPOOL_DIR),
         state_dir=os.environ.get("BQAA_STATE_DIR", DEFAULT_STATE_DIR),
-        state_ttl_hours=float(
-            os.environ.get("BQAA_STATE_TTL_HOURS", str(DEFAULT_STATE_TTL_HOURS))
+        state_ttl_hours=_env_float(
+            "BQAA_STATE_TTL_HOURS", DEFAULT_STATE_TTL_HOURS
         ),
-        transcript_max_bytes=int(
-            os.environ.get(
-                "BQAA_TRANSCRIPT_MAX_BYTES", str(DEFAULT_TRANSCRIPT_MAX_BYTES)
-            )
+        transcript_max_bytes=_env_int(
+            "BQAA_TRANSCRIPT_MAX_BYTES", DEFAULT_TRANSCRIPT_MAX_BYTES
         ),
-        drain_idle_seconds=float(
-            os.environ.get(
-                "BQAA_DRAIN_IDLE_SECONDS", str(DEFAULT_DRAIN_IDLE_SECONDS)
-            )
+        drain_idle_seconds=_env_positive_float(
+            "BQAA_DRAIN_IDLE_SECONDS", DEFAULT_DRAIN_IDLE_SECONDS
         ),
-        drain_batch_size=int(
-            os.environ.get(
-                "BQAA_DRAIN_BATCH_SIZE", str(DEFAULT_DRAIN_BATCH_SIZE)
-            )
+        drain_batch_size=_env_int(
+            "BQAA_DRAIN_BATCH_SIZE", DEFAULT_DRAIN_BATCH_SIZE
         ),
-        drain_poll_seconds=float(
-            os.environ.get(
-                "BQAA_DRAIN_POLL_SECONDS", str(DEFAULT_DRAIN_POLL_SECONDS)
-            )
+        drain_poll_seconds=_env_positive_float(
+            "BQAA_DRAIN_POLL_SECONDS", DEFAULT_DRAIN_POLL_SECONDS
         ),
         writer_label=(
             os.environ.get("BQAA_WRITER_LABEL") or DEFAULT_WRITER_LABEL

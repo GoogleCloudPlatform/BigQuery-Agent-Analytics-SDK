@@ -232,14 +232,15 @@ former 365-day default. The same exact-query check verified that events dated
 BigQuery Conversational Analytics (BQCA) Prompt & Response Logging uses a
 separate, dedicated 7-page tool-free Looker Studio report template
 (`42e79a1f-a979-4de8-911f-80d5a99543d5`, data source alias `ds0`, embedded
-`BlockDatasource` ID `4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc`) rather than the
+`BlockDatasource` ID `70e5ac1e-65bb-4c89-a9df-fa9990cb6029`) rather than the
 8-page ADK template (`5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40`). The report is a
 copy that its owner made on 2026-10-09 of the first published BQCA template,
-whose organization allowed sharing only inside the organization. The
-`BlockDatasource` ID and the live verification evidence were recorded on that
-source report and have not been re-recorded for the copy. The owner turned on
-public link sharing for the copy on 2026-10-09; the copy check from a signed-in
-outside Google account is still pending.
+whose organization allowed sharing only inside the organization. The copy's
+`BlockDatasource` ID and its `ds0` alias were re-recorded on 2026-10-29 from
+the copy's report configuration; the live verification evidence was recorded
+on the source report and has not been re-recorded for the copy. The owner
+turned on public link sharing for the copy on 2026-10-09; the copy check from
+a signed-in outside Google account is still pending.
 
 ### Contract and manifest artifacts
 
@@ -260,7 +261,10 @@ outside Google account is still pending.
   `bindings/bqca_template_bindings.yaml` pin the report ID, `ds0` alias,
   sentinel replacement identifiers, `reviewed_template_sql.sha256`,
   `live_template_verification` (`repository_sql_sha256`, `pages_sha256`,
-  `manifest_sha256`), and `external_access_verification`.
+  `manifest_sha256`, `template_bundle_sha256`, the
+  `verified_manifest_sha256` and `verified_template_bundle_sha256` digests of
+  the last live verification, and `pending_live_sync`), and
+  `external_access_verification`.
 - **Contract validator**: `python3 tools/validate_contracts.py --profile bqca`
   verifies 1:1 parity across `spec/bqca_product_contract.yaml`,
   `spec/bqca_chart_manifest.yaml`, and `bindings/bqca_report_template.yaml`.
@@ -282,7 +286,7 @@ outside Google account is still pending.
 
 The embedded `CUSTOM_QUERY` (`sql/bqca_events_v1.template.sql`) filters `timestamp`
 using `PARSE_DATE('%Y%m%d', @DS_START_DATE)` and `PARSE_DATE('%Y%m%d', @DS_END_DATE)`.
-On the published `BlockDatasource` (`4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc`):
+On the published `BlockDatasource` (`70e5ac1e-65bb-4c89-a9df-fa9990cb6029`):
 
 1. `use_datetime_type: true` and `parameter_configuration: [DS_START_DATE, DS_END_DATE]`
    must remain enabled so Looker Studio binds the report date window instead of
@@ -291,6 +295,535 @@ On the published `BlockDatasource` (`4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc`):
    `YEAR_MONTH_DAY_SECOND`), and `_event_hour_` (`TIMESTAMP` /
    `YEAR_MONTH_DAY_HOUR`) must retain `use_native_date_time: true` across the
    41-field schema.
+
+### Report-wide unique `qt_` column IDs
+
+This repository requires every column (concept) of the BQCA manifest and
+bundle to have a `qt_` ID, `qt_` followed by 3 to 10 lowercase letters or
+digits (`^qt_[a-z0-9]{3,10}$`), that is unique across the whole report. This
+is the repository's convention, not a Looker Studio rule: Looker Studio also
+accepts generic names, and the live template
+(`42e79a1f-a979-4de8-911f-80d5a99543d5`) still reuses generic IDs across its
+34 components (`met`, `dim`, `m0`..`m3`, `d0`..`d9`). With those IDs,
+components on the same page of a report created from it with the 1-click link
+can show each other's values: for example, the Total, Input, Output, and
+Thinking Tokens scorecards can all sum `total_tokens`.
+
+The repository contracts, `spec/bqca_chart_manifest.yaml` and
+`spec/bqca_dashboard_template.json`, give each of the 65 column slots the ID
+that `bqca_derive_report_column_ids` in `tools/validate_contracts.py` derives
+from the slot's digest:
+
+```python
+sha256(f"{component_id}:{slot_index}:{field_name}".encode()).hexdigest()
+```
+
+where `component_id` is the component's `cd-...` ID, `slot_index` is the
+column's position in `spec.<kind>.dataset.columns`, and `field_name` is its
+`fieldName`. The ID is `qt_` followed by the first 8 hex digits of the digest
+(`bqca_qt_column_id`), as it is for all 65 slots today. If the digests of two
+slots share their first 8 hex digits, both IDs instead take the shortest
+prefix, 9 or 10 hex digits long, that no other digest starts with, so the IDs
+do not depend on the order of the slots. If two digests share their first 10
+hex digits (for 65 slots, a chance of about 2 in a billion), the validator
+fails and names both slots; moving one of the two columns to another position
+in its `dataset.columns` gives it a new digest (or, if neither column can move
+— for example, two single-column scorecards — extend `_QT_DERIVED_HEX_LENGTHS`
+and the upper bound of `_QT_COLUMN_ID_RE` in `tools/validate_contracts.py` and
+sync the live template). A slot's ID changes whenever
+its column moves to another position, its `fieldName` changes, or a new slot
+collides with it, and each such change needs the live sync described below.
+
+`python3 tools/validate_contracts.py --profile bqca` rejects:
+
+- a column ID that is not a `qt_` ID, or is not its slot's derived ID;
+- a column ID that repeats inside a component or anywhere in the report, or
+  that differs between `spec/bqca_chart_manifest.yaml` and
+  `spec/bqca_dashboard_template.json`;
+- a `*Id` or `*Ids` key under `spec.<kind>.fields` other than those the kind
+  reads its columns from: `primaryMetricId` for a scorecard;
+  `primaryAxis.fieldId`, `metricSeries.metricIds`, and
+  `primaryAxis.sort.sortFieldId` for a bar or line chart; `dimensionId`,
+  `metricId`, and `sort.sortFieldId` for a pie chart; and `dimensionIds`,
+  `metricIds`, and `sort.sortFieldId` for a table;
+- a reference from one of those keys to a column that its component does not
+  define, and a column that none of them references;
+- an embedded spec `sort` that is not a list;
+- a manifest top-level `components` list that is not exactly the components
+  of its pages, in page order;
+- two scorecards on one page that show the same `(field, aggregation)`.
+
+The live template keeps its legacy generic IDs, and its report-level
+`datasource_id` still names the source report's data source, until it is
+synced from these contracts
+([#559](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/559)).
+The sync must rename the 65 concepts of its 34 components to exactly the `qt_`
+IDs in `spec/bqca_chart_manifest.yaml`, keeping each concept's source field
+and aggregation and updating every `concept_names` and `sort_column` that
+refers to it, and repoint the report-level `datasource_id` to
+`70e5ac1e-65bb-4c89-a9df-fa9990cb6029`. The live audit below compares names
+exactly, so it fails on any other name. Until the sync,
+`live_template_verification` in `bindings/bqca_report_template.yaml` keeps
+`verified_date: "2026-10-09"` and the `verified_manifest_sha256` and
+`verified_template_bundle_sha256` digests of that verification, and
+`pending_live_sync` records the sync (`reason`, `since_date`,
+`tracking_issue`, and `required_actions`). The validator requires
+`pending_live_sync` while `manifest_sha256` or `template_bundle_sha256`
+differs from its verified digest, and rejects it once both match again. A
+report copied from the template before the sync can keep the generic IDs it
+was copied with, so after the sync, re-create any such report from the
+1-click link.
+
+To audit the live template itself, save a Looker Studio report textproto dump
+of it (its report configuration in protobuf text format) and run:
+
+```bash
+python3 tools/validate_contracts.py --live-report-textproto /path/to/report.txt
+```
+
+Looker Studio does not expose a public API for exporting a report's raw
+textproto configuration; maintainers with read access to the template report
+export the dump with internal inspection tooling. The checked-in sanitized
+fixtures under `tests/fixtures/` strip non-contract fields for public audit
+reproducibility, whereas a private live dump passed to
+`tools/finalize_live_sync.py` must retain its identity fields
+(`report_config.shareable.id`, `report_config.report.datasource_id`, and the
+`ds0` entry of `report_config.report.resource.datasource_alias`). Anyone can
+run `--live-report-textproto` on the checked-in sanitized fixtures described
+below.
+
+The command exits 1 and prints one error for each of these defects:
+
+- the dump cannot be read: the reader accepts the subset of protobuf text
+  format that a saved report uses (`#` comments, a leading UTF-8 byte order
+  mark, `{}` and `<>` messages, `[...]` lists after a `:`, and `,` or `;`
+  separators), and rejects `[type.googleapis.com/...]` extension or `Any`
+  field names, a message list without a `:` (`field [ {...} ]`), and messages
+  nested more than 64 levels deep;
+- a component appears twice;
+- a `concept_defs.name` is not a `qt_` ID, or its `id` is not `t0.<name>`;
+- a name repeats inside its component, or repeats the name of an earlier
+  component;
+- a `concept_names` or `sort_column` field appears under `component_property`
+  outside `dimensions.labeled_concepts.value.concept_names`,
+  `metrics.labeled_concepts.value.concept_names`, or `sort.sort_column`;
+- a chart reference (`concept_names`, `sort_column`) at one of those paths
+  names no concept of its component, or a concept is not referenced there;
+- one of the 34 manifest components is missing;
+- a manifest component's `(name, source_field_name, aggregation)` concepts are
+  not exactly the `(id, fieldName, aggregation)` columns that
+  `spec/bqca_chart_manifest.yaml` lists for it;
+- a manifest component's `dimensions` or `metrics` `labeled_concepts` entries
+  (each a single `primary` entry of `concept_names`), `sort_column`s,
+  `sort_dir`s, or `reverse_sort_order` differ, in order, from the dimension
+  IDs, metric IDs, `sortFieldId`s, `sortDir`s, or `reverseSortOrder` of its
+  `spec.<kind>.fields`;
+- a manifest component's `chart_type` is not one whose dimension, metric, and
+  sort references the audit can read, so the comparison above cannot run;
+- a manifest component's `datasource_id` or `dataset_id` is missing or is not
+  its manifest `datasource_id`;
+- a component that defines concepts is not in the manifest;
+- the report-level `datasource_id` is missing or is not the `datasource_id` in
+  `bindings/bqca_report_template.yaml`;
+- the report has no `ds0` alias, or the alias points at another data source.
+
+**Not audited by `--live-report-textproto`:** chart row limits (`limit` /
+`row`), pie-chart other-slice grouping (`includeOthers` /
+`include_total_others`), visual styling, and page layout geometry. Those stay
+governed by the offline manifest and bundle validators.
+
+`tests/fixtures/bqca_live_report_42e79a1f_sanitized.textproto` is a sanitized
+cut of a dump of the live template saved on 2026-10-29, before the sync. It
+keeps only the fields that the audit reads. Its report-level `datasource_id`, which named the
+source report's retired data source, reads
+`00000000-0000-4000-8000-000000000000`. The audit reports 209 errors on it:
+65 generic concept names, 49 repeated names, 34 components whose concepts
+differ from the manifest's columns, 34 metric `concept_names` lists, 13
+dimension `concept_names` lists, 13 `sort_column` lists, and the report-level
+`datasource_id`. Its twin,
+`tests/fixtures/bqca_live_report_42e79a1f_sanitized_remapped.textproto`,
+applies the sync's rename and repoint to the same text (the 65 concept names,
+their `id`s and every reference to them, and the report-level
+`datasource_id`) and changes nothing else, and the audit reports no errors on
+it. `tests/test_looker_studio_dashboard.py` pins both verdicts.
+
+#### Finalizing the live template sync
+
+Four tools support the sync; none of them changes the live template.
+`tools/gen_bqca_rename_map.py` lists the rename, one row per concept in page,
+component, and column order: the old name, the new `qt_` ID, the source field
+and aggregation to keep, and the chart references to update. It fails,
+writing nothing, when a concept or reference of the dump would be left out of
+the map: a component that is not in the manifest but defines concepts or
+holds references, or a reference, in any component, that names no concept of
+its own component. By default it reads the sanitized cut above and checks the
+map against its remapped twin, which must have the same components with
+concepts or references; `--dump PATH` reads a newer dump taken before the
+sync:
+
+```bash
+python3 tools/gen_bqca_rename_map.py --csv rename-map.csv --md rename-map.md
+```
+
+`tools/apply_bqca_rename_map.py` applies that rename to a dump taken before the
+sync and writes the result, the dump's remapped twin, so the sync can be
+reviewed before anyone touches the live template. In the dump it renames each
+`concept_defs` `name` to its new `qt_` ID and its `id` to `t0.` followed by
+that ID, renames each dimension or metric `concept_names` entry and each
+`sort_column` of the same component that refers to the concept, and sets
+`report_config.report.datasource_id` to the `datasource_id` of
+`bindings/bqca_report_template.yaml`. Every other byte, comments and spacing
+included, is kept: each edit replaces one quoted literal in place, and the tool
+prepends `# bqca-offline-preview: written by tools/apply_bqca_rename_map.py;
+not a dump of a synced live template.` as the first line (after any UTF-8 byte
+order mark). The tool never writes or reads a capture receipt (below). The
+capture tool and `tools/finalize_live_sync.py` refuse its output as the
+capture after the write-back whatever its marker, comments, or spacing say:
+they compare that capture's parsed content with the preview's, ignoring the
+order of fields and of repeated values.
+The live names repeat across components, so a rename is keyed by the component
+and the old name, never by the name alone. The data source IDs of the
+components and of the `ds0` alias are not edited; the audit refuses a dump
+where one of them names another data source, and nothing is written for it.
+
+```bash
+python3 tools/apply_bqca_rename_map.py --dump <dump> --check
+python3 tools/apply_bqca_rename_map.py --dump <dump> \
+    --out <path outside the repository>
+```
+
+The map is the one `gen_bqca_rename_map.py` derives from the dump and the
+manifest. `--map PATH` also reads a CSV that tool wrote, and fails, writing
+nothing, unless the CSV matches the derived map exactly. Before the tool writes
+anything, it checks the result four ways:
+
+- its tokens equal the dump's, except for the edited literals, and exactly the
+  planned scalars differ;
+- it parses to the parsed dump with the map applied, by a traversal that does
+  not use the edits;
+- `tools/gen_bqca_rename_map.py` accepts it as the remapped twin of the dump;
+- `tools/validate_contracts.py --profile bqca --live-report-textproto` exits 0
+  on it.
+
+The tool reads the dump once. Every check reads a private, read-only copy of
+those bytes, never the path again, so a file that replaces the dump while the
+tool runs cannot be mixed in, and the file written is the bytes that passed. It
+is written with mode 0600, atomically. The tool refuses an `--out` inside this
+repository by its path, its directory, or the place a link leads to (checked
+both by path prefix and by `os.path.samestat` so a case-insensitive spelling
+cannot bypass it; a dump of the live template does not belong in the
+repository), an `--out` that is the dump, and an `--out` that exists, unless
+`--force` replaces it. `--check` runs every check, says whether a write would
+be refused and why, and writes nothing; it needs no `--out`. The tool exits 0
+when it wrote the remapped dump, and with `--check` when every check passed,
+even if a write would be refused; 1 when it rejected the dump or the map, a
+check failed, or the write was refused; and 2 on bad arguments.
+
+A dump that already carries the new IDs maps to itself, and the tool writes a
+copy (adding the `# bqca-offline-preview:` header comment line once if it is
+not already present, so applying the tool a second time to an already-marked
+preview maps it to itself byte for byte). Applied to the sanitized cut above,
+the tool writes the `# bqca-offline-preview:` line, the cut's own header
+comments, since it keeps every comment and the twin has others, and from the
+first line that is not a comment on, the checked-in twin byte for byte;
+`tests/test_looker_studio_live_sync.py` pins that. The result previews the
+sync; it is not a dump of a synced template. `tools/finalize_live_sync.py`,
+below, needs two captures of the live template itself, made by
+`tools/sign_live_capture.py` before and after the write-back.
+
+##### The capture, apply, write-back, capture, finalize steps
+
+`tools/sign_live_capture.py` replaces the bare export command: it runs the
+internal export command given after `--`, which must write the report
+textproto of the live template to standard output, and keeps the bytes it
+reads from that pipe, never a file's. It writes them to `--out` (mode 0600;
+never inside the repository) with a signed capture receipt of those bytes.
+Run it before the write-back and again after it, with `--before` naming the
+first capture:
+
+```bash
+python3 tools/sign_live_capture.py --out <D0> --revision <revision before> \
+    --signer <signer> --key <SSH key file> -- <export command>
+python3 tools/apply_bqca_rename_map.py --dump <D0> --out <offline preview>
+# Write the offline preview back to the live template with the internal
+# tooling, then:
+python3 tools/sign_live_capture.py --out <D1> --before <D0> \
+    --revision <revision after> --signer <signer> --key <SSH key file> \
+    -- <export command>
+python3 tools/finalize_live_sync.py --dump <D1> --before <D0> \
+    --revision <revision after> --check
+python3 tools/finalize_live_sync.py --dump <D1> --before <D0> \
+    --revision <revision after>
+```
+
+A capture is three files: the export, `<export>.receipt.json`, and
+`<export>.receipt.json.sig`. Keep both exports privately (outside the
+repository); finalizing commits only the receipt of the second.
+
+##### Capture receipts
+
+Nothing in a dump proves where it came from, and the offline preview from
+`tools/apply_bqca_rename_map.py` has exactly the audited content of a
+capture of the synced template (the audit compares that content with the
+manifest). A marker comment cannot tell them apart either: changing its letter
+case or deleting it is a one-line edit. So a write needs evidence from outside
+the dump, and the capture after the write-back must differ, in some field
+value, from the offline preview of the capture before it.
+
+A capture receipt is a JSON object with exactly these fields, each once
+(`tools/sign_live_capture.py` writes them in this order):
+
+| Field | Value |
+|---|---|
+| `format` | `bqca-live-capture-receipt/v3` |
+| `report_id` | the `report_id` of `bindings/bqca_report_template.yaml` |
+| `revision` | the revision of the live report that the export captured, as the export tooling or the report's version history shows it: 1 to 128 letters, digits, `.`, `_`, `:`, `+`, or `-` |
+| `dump_sha256` | the SHA-256 of the exported bytes |
+| `signed_at` | when the receipt was signed, in UTC, `YYYY-MM-DDTHH:MM:SSZ` |
+| `signer` | the signer's name in `bindings/bqca_live_capture_signers` |
+| `export_command_sha256` | the SHA-256 of the export command as a JSON list, so that no internal command, path, or token is published |
+| `manifest_sha256`, `template_bundle_sha256` | the binding's pinned digests when the export was captured |
+| `pending_since_date` | the `since_date` of the binding's `pending_live_sync` when the export was captured |
+| `sync_generation` | the binding's `live_template_verification.sync_generation` when the export was captured: the generation of the sync it is for |
+| `before_dump_sha256`, `before_revision` | for the capture after the write-back, the SHA-256 and revision of the `--before` capture; `null` for the capture before it |
+
+Its signature, `<receipt>.sig`, is an OpenSSH signature (`ssh-keygen -Y
+sign`) of the receipt's exact bytes in the `bqca-live-capture-receipt`
+namespace, so no signature that the same key made for anything else (a commit,
+a file) verifies as one. `--key` is an SSH private key file, or the public key
+file of a key that ssh-agent holds; ssh-keygen asks for any passphrase.
+
+The capture tool writes nothing for an export that does not decode, parse, and
+name the live template in `report_config.shareable.id`, or that carries the
+offline-preview marker in any form; after the write-back, the report-level
+data source and the `ds0` alias must be the binding's too. It writes nothing
+unless the binding has a pending sync and `bindings/bqca_live_capture_signers`
+lists the key for `--signer` (that error prints the line that would list it).
+With `--before`, it also writes nothing unless the `--before` capture has a
+trusted receipt of a capture before any write-back for the same pending sync,
+`--revision` differs from that capture's, the export differs from it, and the
+export's parsed content (comments, spacing, and the order of fields and
+repeated values aside) differs from that of the offline preview of the
+`--before` export. It refuses an existing capture
+unless `--force`.
+
+It writes the three files in steps. It stages each next to its path, then,
+with `--force`, copies each earlier file, bytes and mode, to a
+`.<name>.*.backup` file next to it, and only then puts the staged files in
+place, one at a time. If a step fails (a full disk, a file that cannot be
+replaced) or the tool is interrupted (Ctrl-C, SIGINT) before the last file is
+in place, it puts every path back as it was, each earlier file from its
+backup, removes any file that was not there, and ends with `not captured:
+nothing written`. SIGINT is held while the files are written or put back, and
+acts once the current step ends. What it does not undo:
+
+- A file it cannot put back: the error names it and the backup that keeps its
+  original (`cannot put back <path>: <reason>; its original is kept at
+  <backup>`, or `cannot tell what <path> holds now; ...` if the path holds
+  neither the new file nor its original). That backup is never removed, and
+  the output ends with `not captured: not every file above could be put back
+  as it was`; move the backup to its path by hand. A new file that cannot be
+  removed is named alone, as there was no earlier one.
+- A process that is killed outright (SIGKILL, a crash) puts nothing back: a
+  `.<name>.*.backup` file next to a capture file holds the earlier file, and
+  a `.<name>.*.tmp` file is a staged new one. The tool does not sync the
+  backups to disk before the replacements, so after a power loss a backup
+  can be incomplete.
+- An interrupt once all three files are in place: the capture stands, and
+  the tool exits 0 with `warning: interrupted once every file was in place;
+  the capture stands`.
+
+A staged file or backup that cannot be removed afterwards is named in a
+warning.
+
+`bindings/bqca_live_capture_signers` lists the trusted keys in the OpenSSH
+allowed signers format (see `ssh-keygen(1)`), one line per maintainer who
+exports the live template with the internal report tooling:
+
+```text
+<signer> namespaces="bqca-live-capture-receipt" <key type> <public key>
+```
+
+`<signer>` is a public name, for example a GitHub username: letters, digits,
+`.`, `_`, `@`, `+`, or `-`, never a pattern. A line is added, changed, or
+removed only in a reviewed change; no command-line option or environment
+variable names another signers file. The file lists no signer yet, so no
+receipt is trusted, and no write can finalize the binding until a reviewed
+change lists one. Anyone can check a receipt by hand:
+
+```bash
+ssh-keygen -Y verify -f bindings/bqca_live_capture_signers -I <signer> \
+    -n bqca-live-capture-receipt -s <receipt>.sig < <receipt>
+shasum -a 256 <export>  # the receipt's dump_sha256
+```
+
+##### What finalizing checks and records
+
+`tools/finalize_live_sync.py` runs `tools/validate_contracts.py --profile bqca
+--live-report-textproto` on the capture after the write-back (`--dump`) and
+edits `bindings/bqca_report_template.yaml` only if it exits 0. In
+`live_template_verification` it sets `verified_date` (`--verified-date`,
+default today in UTC), copies `manifest_sha256` and `template_bundle_sha256`
+into `verified_manifest_sha256` and `verified_template_bundle_sha256`, records
+the capture (`verified_revision`, the `--revision`; `verified_dump_sha256`,
+the SHA-256 of the export; `capture_receipt_sha256`, the SHA-256 of its
+receipt; and `captured_by`, the receipt's signer), and removes
+`pending_live_sync`, keeping every other line and comment. It also commits the
+receipt and its signature as `bindings/bqca_live_capture_receipt.json` and
+`bindings/bqca_live_capture_receipt.json.sig`. The new files replace the old
+ones atomically (staged files and `os.replace`; the binding last); the tool
+audits the export again after the write and puts the original bytes of all
+three back (or removes a receipt that was new) if that audit fails, raises, or
+is interrupted. It reads each export, receipt, and signature once: the checks
+below, both audits (through a private, read-only copy of the export), and the
+recorded digests use those bytes, never the paths again. With nothing pending,
+it exits 0 and writes nothing.
+
+A write fails closed, exiting 1 and leaving every file unchanged, unless:
+
+- `ssh-keygen -Y verify` verifies both receipts' signatures in the
+  `bqca-live-capture-receipt` namespace, made by keys that
+  `bindings/bqca_live_capture_signers` lists for their signers;
+- both receipts are exactly v3 receipts of the exports' bytes (a receipt or
+  signature that cannot be read, other or repeated fields, and malformed
+  values are refused), for the binding's `report_id`, its pinned manifest and
+  bundle digests, its pending sync (`pending_since_date`), and its
+  `sync_generation`, signed on or
+  after the day that sync began (inclusive, in UTC) and not in the future
+  (with five minutes of clock skew); the dump's receipt is for `--revision`;
+- the dump's receipt is of a capture after a write-back that names the
+  `--before` capture (its SHA-256 and revision); the `--before` receipt is of
+  a capture before any write-back, signed no later; and the two are of
+  different revisions;
+- the dump's parsed content differs from that of the offline preview that
+  `tools/apply_bqca_rename_map.py` writes for the `--before` export
+  (`preview_tree`), compared as the multiset of its fields and values
+  (`canonical_content`): comments, spacing, quoting, the marker, and the order
+  of fields and repeated values aside, the live report gained, lost, or
+  changed a field value after the write-back;
+- the export decodes as UTF-8, parses as protobuf text format (with
+  universal-newline normalization matching `tools/validate_contracts.py`), and
+  its identity fields each have exactly one value equal to the binding's:
+  `report_config.shareable.id` is the `report_id`, and
+  `report_config.report.datasource_id` and the `ds0` entry of
+  `report_config.report.resource.datasource_alias` are the `datasource_id`
+  (`70e5ac1e-65bb-4c89-a9df-fa9990cb6029`); the report ID in any other field,
+  inside a longer value, or in a comment does not count;
+- the export carries no offline-preview marker of
+  `tools/apply_bqca_rename_map.py`, in any letter case or spacing, anywhere,
+  and is not under `tests/fixtures/` (checked both by path prefix and by
+  `os.path.samestat`);
+- `--verified-date` is not in the future, nor before `since_date` or the day
+  the dump's receipt was signed.
+
+A write without `--before` or `--revision` exits 2; the free-text
+`--captured-from` attestation of earlier revisions of this tool is gone, and
+the dump's receipt is always the one next to it. `--check` runs the same checks
+and the audit, prints the change as a diff (with placeholders for the values
+that only a write's arguments give), lists every reason a write would be
+refused, and writes nothing; it needs no receipt and previews with the
+checked-in fixtures and with offline previews too. It exits 0 when the audit
+passes, even if a write would be refused.
+
+If the export of the synced template has exactly the fields and values of the
+offline preview, in any order, so that no field of the live report (a
+revision or update time, for example) changed with the write-back, the
+capture tool and finalize refuse it: nothing then tells it apart from the
+preview. Report that on the
+tracking issue instead of editing the export.
+
+##### The committed receipt and the sync generation
+
+`live_template_verification.sync_generation` numbers the live syncs of the
+template. It is 1 for the sync that #559 tracks; whoever reopens a finalized
+sync (adds `pending_live_sync` again) also sets it to the next generation, and
+it stays when finalize records the sync. Both capture receipts carry the
+generation, and finalize writes only with receipts for the binding's.
+
+`tools/validate_contracts.py` checks every binding whose verified digests
+equal the pinned ones. Such a binding records a live sync: it must have no
+`pending_live_sync` key at all (a null, empty, or other value that is not a
+pending record still counts, and fails), and it needs
+`bindings/bqca_live_capture_receipt.json` and its signature, which must verify
+against `bindings/bqca_live_capture_signers`, and the receipt must be of a
+capture after a write-back, for the binding's report, pinned digests, and
+`sync_generation`, signed on or after its `pending_since_date` and not in the
+future. `verified_revision`, `verified_dump_sha256`, `capture_receipt_sha256`,
+and `captured_by` must be the receipt's, and `verified_date` must not be
+before the receipt was signed. While the digests differ, `pending_live_sync`
+must be a well-formed pending record, and `sync_generation` must always be an
+integer of at least 1.
+
+So a hand edit that re-pins the verified digests and deletes
+`pending_live_sync`, or sets it to null or an empty value, fails unless the
+committed receipt is a valid one for the same generation. After a reopen, the
+receipt of the earlier sync is for the earlier generation and fails. That
+leaves one way back: moving `sync_generation` back to the earlier generation as
+well, which a check of the binding alone cannot tell from the earlier,
+finalized binding. `--previous-binding PATH` checks that `sync_generation`
+only moves forward from the binding at `PATH`, and that a sync that was not
+pending there and is pending here took a greater one. CI runs it against the
+binding on the base branch (or before the push):
+
+```bash
+git show origin/main:dashboards/looker_studio/bindings/bqca_report_template.yaml \
+    > previous-binding.yaml
+python3 tools/validate_contracts.py --profile bqca \
+    --previous-binding previous-binding.yaml
+```
+
+What validation guarantees, then: a binding without `pending_live_sync` passes
+only with a committed receipt that a listed signer signed for a capture after
+a write-back, for the binding's report, pinned digests, and own generation,
+with the capture record copied from it, and with that generation not moved
+back (when `--previous-binding` runs, as in CI). The validator cannot see the
+export itself, which stays private, so it cannot re-run the live audit or the
+offline-preview comparison: finalize runs those before it writes, and review
+of the change is what shows that finalize, not a hand edit, wrote the binding.
+
+##### The trust boundary
+
+The tools refuse the offline preview as the capture after the write-back,
+whether its marker is kept, edited, or removed, and any edit of its comments,
+spacing, or quoting, or reordering of its fields or repeated values; they
+refuse a receipt that is not trusted, not for this pending sync, stale, in the
+future, or for other bytes; and the capture tool signs only bytes that an
+export command printed. What no check can refuse is a listed signer who signs
+for content that the export command did not fetch from the live report: one
+who passes as the export command a program that prints a file and also edits
+a field value of the preview (writing a scalar another way, such as an enum
+by its number or an integer in hex, counts as an edit, since the tools do not
+know the report's protobuf schema), or who signs receipt bytes directly with
+`ssh-keygen`. That is a false signed statement, which the receipt and the
+binding (`captured_by`) attribute to the signer. Review of each change to the
+signers file, and of the committed receipt, is the last check;
+`tests/test_looker_studio_live_sync.py` pins this boundary.
+
+The checked-in fixtures have no `report_config.shareable` entry, so a write
+refuses them, copies of them anywhere, and any reordering or audit-inert edit
+of them, including one that adds the report ID to another field, even with a
+receipt. The data source fields are those a saved report keeps and the live
+audit reads. No dump in this repository keeps the report ID (the sanitized
+cuts drop it), so `report_config.shareable.id`, the report's own entry, is
+where the tools expect it (`REPORT_ID_FIELD` in
+`tools/finalize_live_sync.py`). If a real export names the report in another
+field, a capture or write is refused with that field's path, and
+`REPORT_ID_FIELD` needs to name it; an export that does not name its report at
+all is refused.
+
+The tool does not edit documentation or tests. In the same change, commit the
+binding with `bindings/bqca_live_capture_receipt.json` and its signature,
+which it wrote (they hold no secret; both exports stay private), and the line
+that lists the signer in `bindings/bqca_live_capture_signers` if it is new;
+remove the #559 known-issue notes that `pending_live_sync.required_actions`
+lists (and run `tools/render_web_config.py`); update the comments above
+`live_template_verification`; and update the tests in
+`tests/test_looker_studio_dashboard.py` that pin the pending sync:
+`test_bqca_block_datasource_invariants_and_live_attestation_are_recorded`,
+`test_validate_contracts_requires_a_pending_live_sync_record`,
+`test_validate_contracts_rejects_generic_or_repeated_column_ids`, and
+`test_validate_contracts_cli_rejects_a_column_id_that_is_not_derived`. Then
+check the token scorecards of a report created with the 1-click link.
 
 ### Fallback paths
 

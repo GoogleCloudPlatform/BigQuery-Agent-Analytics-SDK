@@ -1457,6 +1457,27 @@ assert.equal(
   ).searchParams.get("ds.ds0.billingProjectId"),
   "billing-project-123",
 );
+// Every 1-click link keeps the template data source's fields, which the
+// report's charts bind to: `refreshFields=false` is its only refreshFields
+// parameter, for both profiles and with or without a billing project.
+for (const profile of ["adk", "bqca"]) {
+  const alias = resolveProfileConfig(profile).dataSourceAlias;
+  for (const input of [values, advanced]) {
+    const url = buildDashboardUrl({ ...input, profile });
+    const params = new URL(url).searchParams;
+    assert.deepEqual(
+      [...params.keys()].filter((key) => key.endsWith(".refreshFields")),
+      [`ds.${alias}.refreshFields`],
+      `${profile} links carry exactly one refreshFields parameter`,
+    );
+    assert.deepEqual(params.getAll(`ds.${alias}.refreshFields`), ["false"]);
+    assert.ok(
+      url.split("?")[1].split("&").includes(`ds.${alias}.refreshFields=false`),
+      url,
+    );
+    assert.ok(!url.includes("refreshFields=true"), url);
+  }
+}
 assert.throws(
   () => buildDashboardUrl({ ...values, profile: "bqca", project: "xsentinelbqaaevents" }),
   (error) => error.field === "tableId" && error.segment === "project",
@@ -1611,9 +1632,19 @@ assert.match(
 );
 assert.match(
   bqcaPageSource,
-  /<aside[^>]*class="notice notice-warning"[^>]*id="bqca-template-note"[^>]*>.*Public link sharing is on; the outside-account copy check is pending\..*<details class="advanced-bqca-options">/s,
-  "the BQCA note says public link sharing is on but the outside-account copy check is pending, and collapses advanced CLI/Streamlit options",
+  /<aside[^>]*class="notice notice-warning"[^>]*id="bqca-template-note"[^>]*>.*Public link sharing is on; the outside-account copy check is pending\..*<p id="bqca-column-id-note">.*issues\/559.*legacy generic column IDs.*<details class="advanced-bqca-options">/s,
+  "the BQCA note says public link sharing is on, warns about the #559 generic column ID sync before creating reports, and collapses advanced CLI/Streamlit options",
 );
+for (const [label, source] of [
+  ["docs/index.html", pageSource],
+  ["docs/bqca/index.html", bqcaPageSource],
+]) {
+  assert.match(
+    source,
+    /<p id="bqca-column-id-note">[\s\S]*?https:\/\/github\.com\/GoogleCloudPlatform\/BigQuery-Agent-Analytics-SDK\/issues\/559[\s\S]*?legacy generic column IDs[\s\S]*?re-create\s+any\s+report\s+created\s+before\s+the\s+sync[\s\S]*?<\/p>/,
+    `${label} includes the #559 known-issue column ID notice inside #bqca-template-note`,
+  );
+}
 const bqcaHeroLedeMatch = bqcaPageSource.match(
   /<p class="lede" data-profile-only="bqca">([\s\S]*?)<\/p>/,
 );

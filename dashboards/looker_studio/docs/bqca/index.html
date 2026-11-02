@@ -154,6 +154,19 @@
             Analytics, Latency &amp; Fast-Path ROI, Errors (BQCA 3-Condition), and
             Prompt, Response &amp; SQL Inspector (all tool-usage pages, tool-latency
             series, and tool-error charts are omitted).
+            <p id="bqca-column-id-note">
+              <strong>Known issue (<a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/559">#559</a>):</strong>
+              until the live template is synced with the repository’s unique
+              <code>qt_</code> column IDs, reports created from the 1-click link
+              keep the legacy generic column IDs, so scorecards or charts on the
+              same page can show each other’s values; re-create any report created
+              before the sync from the 1-click link after
+              <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/559">#559</a>
+              closes, or use the
+              <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/dashboards/streamlit">
+                Self-Hosted Streamlit BQCA Dashboard</a>
+              or custom SQL query below.
+            </p>
             <details class="advanced-bqca-options">
               <summary>Advanced CLI &amp; self-hosted options</summary>
               <p>
