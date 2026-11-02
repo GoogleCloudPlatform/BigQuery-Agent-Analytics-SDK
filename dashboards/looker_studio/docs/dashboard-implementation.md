@@ -1,8 +1,7 @@
 # Looker Studio implementation contract
 
 This document connects the generated parity manifest to the canonical report
-implementation. It contains no report ID, production project/dataset name, or
-result values.
+implementation. It contains no report ID, production project, or dataset name.
 
 The manifest is an immutable snapshot of the pinned community block. Current
 product behavior and intentional divergences are recorded separately in
@@ -237,10 +236,12 @@ separate, dedicated 7-page tool-free Looker Studio report template
 copy that its owner made on 2026-10-09 of the first published BQCA template,
 whose organization allowed sharing only inside the organization. The copy's
 `BlockDatasource` ID and its `ds0` alias were re-recorded on 2026-10-29 from
-the copy's report configuration; the live verification evidence was recorded
-on the source report and has not been re-recorded for the copy. The owner
-turned on public link sharing for the copy on 2026-10-09; the copy check from
-a signed-in outside Google account is still pending.
+the copy's report configuration, and on 2026-11-01 the live template's 65
+concepts and report-level `datasource_id` were synced from the repository
+contracts and verified at revision `1793504835696`
+([#559](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/559)).
+The owner turned on public link sharing for the copy on 2026-10-09; the copy
+check from a signed-in outside Google account is still pending.
 
 ### Contract and manifest artifacts
 
@@ -257,13 +258,17 @@ a signed-in outside Google account is still pending.
   with explicit `top`, `left`, `width`, `height` coordinates inside
   12-column page sections), dimensions, metrics, and the 41-field remediated
   `BlockDatasource` schema.
-- **Report template binding**: `bindings/bqca_report_template.yaml` and
-  `bindings/bqca_template_bindings.yaml` pin the report ID, `ds0` alias,
+- **Report template binding**: `bindings/bqca_report_template.yaml`,
+  `bindings/bqca_template_bindings.yaml`, and
+  `bindings/bqca_live_capture_receipt.json` (plus `.sig` and
+  `bindings/bqca_live_capture_signers`) pin the report ID, `ds0` alias,
   sentinel replacement identifiers, `reviewed_template_sql.sha256`,
-  `live_template_verification` (`repository_sql_sha256`, `pages_sha256`,
-  `manifest_sha256`, `template_bundle_sha256`, the
-  `verified_manifest_sha256` and `verified_template_bundle_sha256` digests of
-  the last live verification, and `pending_live_sync`), and
+  `live_template_verification` (`sync_generation`, `verified_date`,
+  `repository_sql_sha256`, `pages_sha256`, `manifest_sha256`,
+  `template_bundle_sha256`, `verified_manifest_sha256`,
+  `verified_template_bundle_sha256`, `verified_revision`,
+  `verified_dump_sha256`, `capture_receipt_sha256`, `captured_by`, and
+  `pending_live_sync` whenever a contract change is awaiting a live sync), and
   `external_access_verification`.
 - **Contract validator**: `python3 tools/validate_contracts.py --profile bqca`
   verifies 1:1 parity across `spec/bqca_product_contract.yaml`,
@@ -302,12 +307,13 @@ This repository requires every column (concept) of the BQCA manifest and
 bundle to have a `qt_` ID, `qt_` followed by 3 to 10 lowercase letters or
 digits (`^qt_[a-z0-9]{3,10}$`), that is unique across the whole report. This
 is the repository's convention, not a Looker Studio rule: Looker Studio also
-accepts generic names, and the live template
-(`42e79a1f-a979-4de8-911f-80d5a99543d5`) still reuses generic IDs across its
-34 components (`met`, `dim`, `m0`..`m3`, `d0`..`d9`). With those IDs,
-components on the same page of a report created from it with the 1-click link
-can show each other's values: for example, the Total, Input, Output, and
-Thinking Tokens scorecards can all sum `total_tokens`.
+accepts generic names, and before the 2026-11-01 live sync
+([#559](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/559))
+the live template (`42e79a1f-a979-4de8-911f-80d5a99543d5`) reused generic IDs
+across its 34 components (`met`, `dim`, `m0`..`m3`, `d0`..`d9`). With those
+IDs, components on the same page of a report created from it with the 1-click
+link could show each other's values: for example, the Total, Input, Output, and
+Thinking Tokens scorecards could all sum `total_tokens`.
 
 The repository contracts, `spec/bqca_chart_manifest.yaml` and
 `spec/bqca_dashboard_template.json`, give each of the 65 column slots the ID
@@ -353,26 +359,25 @@ collides with it, and each such change needs the live sync described below.
   of its pages, in page order;
 - two scorecards on one page that show the same `(field, aggregation)`.
 
-The live template keeps its legacy generic IDs, and its report-level
-`datasource_id` still names the source report's data source, until it is
-synced from these contracts
-([#559](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/559)).
-The sync must rename the 65 concepts of its 34 components to exactly the `qt_`
-IDs in `spec/bqca_chart_manifest.yaml`, keeping each concept's source field
-and aggregation and updating every `concept_names` and `sort_column` that
-refers to it, and repoint the report-level `datasource_id` to
-`70e5ac1e-65bb-4c89-a9df-fa9990cb6029`. The live audit below compares names
-exactly, so it fails on any other name. Until the sync,
-`live_template_verification` in `bindings/bqca_report_template.yaml` keeps
-`verified_date: "2026-10-09"` and the `verified_manifest_sha256` and
-`verified_template_bundle_sha256` digests of that verification, and
-`pending_live_sync` records the sync (`reason`, `since_date`,
-`tracking_issue`, and `required_actions`). The validator requires
-`pending_live_sync` while `manifest_sha256` or `template_bundle_sha256`
-differs from its verified digest, and rejects it once both match again. A
-report copied from the template before the sync can keep the generic IDs it
-was copied with, so after the sync, re-create any such report from the
-1-click link.
+On 2026-11-01 (`sync_generation: 1`, revision `1793504835696`,
+[#559](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/559)),
+the live template was synced from these contracts: all 65 concepts of its 34
+components were renamed to the exact `qt_` IDs in `spec/bqca_chart_manifest.yaml`
+(keeping each concept's source field and aggregation and updating every
+`concept_names` and `sort_column` that refers to it), and its report-level
+`datasource_id` was repointed to `70e5ac1e-65bb-4c89-a9df-fa9990cb6029`. The
+live audit below compares names exactly, so it fails on any other name. Whenever
+a contract change alters `manifest_sha256` or `template_bundle_sha256` before
+the live template is re-synced, `live_template_verification` in
+`bindings/bqca_report_template.yaml` keeps the `verified_date`,
+`verified_manifest_sha256`, and `verified_template_bundle_sha256` digests of the
+last live verification, increments `sync_generation`, and adds
+`pending_live_sync` (`reason`, `since_date`, `tracking_issue`, and
+`required_actions`). The validator requires `pending_live_sync` while
+`manifest_sha256` or `template_bundle_sha256` differs from its verified digest,
+and rejects it once both match again. A report copied from the template before
+the 2026-11-01 sync can keep the generic IDs it was copied with, so any such
+report should be re-created from the 1-click link.
 
 To audit the live template itself, save a Looker Studio report textproto dump
 of it (its report configuration in protobuf text format) and run:
@@ -638,18 +643,42 @@ warning.
 
 `bindings/bqca_live_capture_signers` lists the trusted keys in the OpenSSH
 allowed signers format (see `ssh-keygen(1)`), one line per maintainer who
-exports the live template with the internal report tooling:
+exports the live template with the internal report tooling, in exactly this
+form:
 
 ```text
 <signer> namespaces="bqca-live-capture-receipt" <key type> <public key>
 ```
 
 `<signer>` is a public name, for example a GitHub username: letters, digits,
-`.`, `_`, `@`, `+`, or `-`, never a pattern. A line is added, changed, or
-removed only in a reviewed change; no command-line option or environment
-variable names another signers file. The file lists no signer yet, so no
-receipt is trusted, and no write can finalize the binding until a reviewed
-change lists one. Anyone can check a receipt by hand:
+`.`, `_`, `@`, `+`, or `-`. ssh-keygen also reads a pattern (`*`, `?`), a
+comma-separated list, or a quoted name there, takes other options (or none)
+that widen what a line trusts, and accepts a second line for the same signer
+with another key. So the tools trust no receipt unless every line that is not
+blank or a `#` comment has one literal `<signer>`, exactly that `namespaces`
+option, a plain key type (`ssh-ed25519`, `ssh-rsa`, `ecdsa-sha2-nistp256`,
+`ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521`, `sk-ssh-ed25519@openssh.com`,
+or `sk-ecdsa-sha2-nistp256@openssh.com`; never a certificate), and a key in
+canonical base64 (whole groups of four characters, padded only where base64
+needs it) that decodes to the OpenSSH wire form of a public key of that type,
+with at most a key comment after it, and no two lines list the same
+signer in any letter case. To change a signer's key, replace that signer's
+line. A line is added, changed, or removed only in a reviewed change; no
+command-line option or environment variable names another signers file. Only
+receipts signed by a key listed in `bindings/bqca_live_capture_signers` are
+trusted (`haiyuan-eng-google` is listed for the `sync_generation: 1` capture
+of #559, with the key whose fingerprint is
+`SHA256:pum9Cf+yARVa64p0awyJRYegBJJL0AkCBKjAONAwLkY`). Before approving a
+change to a signer's line, confirm its fingerprint with that signer by another
+channel than the change itself; this prints the fingerprint of each listed
+key:
+
+```bash
+awk '!/^#/ && NF {print $3, $4}' bindings/bqca_live_capture_signers |
+    ssh-keygen -l -f -
+```
+
+Anyone can check a receipt by hand:
 
 ```bash
 ssh-keygen -Y verify -f bindings/bqca_live_capture_signers -I <signer> \
@@ -676,8 +705,27 @@ audits the export again after the write and puts the original bytes of all
 three back (or removes a receipt that was new) if that audit fails, raises, or
 is interrupted. It reads each export, receipt, and signature once: the checks
 below, both audits (through a private, read-only copy of the export), and the
-recorded digests use those bytes, never the paths again. With nothing pending,
-it exits 0 and writes nothing.
+recorded digests use those bytes, never the paths again. It refuses a binding
+without a `live_template_verification` mapping, exiting 1.
+
+With nothing pending, --check writes nothing but still runs the audit: it
+refuses an export that is not UTF-8 text or that carries the offline-preview
+marker, exiting 1; otherwise it runs the audit, which checks the binding, its
+committed receipt, and that receipt's signature and signer along with the
+export's content, and exits 1 if the audit fails. A pass reports
+`nothing to finalize`, but confirms the
+recorded sync only for the capture on record: the export whose SHA-256 is
+`verified_dump_sha256`, outside `tests/fixtures/`, whose identity fields name
+the binding's report (see below). `--check --dump <export>` needs neither
+`--before` nor `--revision` here; it exits 0 on any export that passes the
+audit and says `the capture that it records` for the capture on record, or
+`content audit only, not the capture that it records` with the reasons for any
+other export (a later export of the live template, or a fixture). A write
+still needs `--before` and `--revision`, and exits 0 only for the capture on
+record with the inputs of the write that recorded it: the receipt beside it
+that `capture_receipt_sha256` records, its `verified_revision` as
+`--revision`, and the `--before` export whose SHA-256 that receipt names. It
+exits 1 for any other export or input.
 
 A write fails closed, exiting 1 and leaving every file unchanged, unless:
 
@@ -716,14 +764,15 @@ A write fails closed, exiting 1 and leaving every file unchanged, unless:
 - `--verified-date` is not in the future, nor before `since_date` or the day
   the dump's receipt was signed.
 
-A write without `--before` or `--revision` exits 2; the free-text
-`--captured-from` attestation of earlier revisions of this tool is gone, and
-the dump's receipt is always the one next to it. `--check` runs the same checks
-and the audit, prints the change as a diff (with placeholders for the values
-that only a write's arguments give), lists every reason a write would be
-refused, and writes nothing; it needs no receipt and previews with the
-checked-in fixtures and with offline previews too. It exits 0 when the audit
-passes, even if a write would be refused.
+A write without `--before` or `--revision` exits 2 before any audit, also when
+nothing is pending; the free-text `--captured-from` attestation of earlier
+revisions of this tool is gone, and the dump's receipt is always the one next
+to it. With a sync pending, `--check` runs the same checks and the audit,
+prints the change as a diff (with placeholders for the values that only a
+write's arguments give), lists every reason a write would be refused, and
+writes nothing; it needs no receipt and previews with the checked-in fixtures
+and with offline previews too. It exits 0 when the audit passes, even if a
+write would be refused.
 
 If the export of the synced template has exactly the fields and values of the
 offline preview, in any order, so that no field of the live report (a
@@ -735,7 +784,7 @@ tracking issue instead of editing the export.
 ##### The committed receipt and the sync generation
 
 `live_template_verification.sync_generation` numbers the live syncs of the
-template. It is 1 for the sync that #559 tracks; whoever reopens a finalized
+template. It is 1 for the sync that #559 tracked; whoever reopens a finalized
 sync (adds `pending_live_sync` again) also sets it to the next generation, and
 it stays when finalize records the sync. Both capture receipts carry the
 generation, and finalize writes only with receipts for the binding's.
@@ -815,15 +864,190 @@ The tool does not edit documentation or tests. In the same change, commit the
 binding with `bindings/bqca_live_capture_receipt.json` and its signature,
 which it wrote (they hold no secret; both exports stay private), and the line
 that lists the signer in `bindings/bqca_live_capture_signers` if it is new;
-remove the #559 known-issue notes that `pending_live_sync.required_actions`
-lists (and run `tools/render_web_config.py`); update the comments above
-`live_template_verification`; and update the tests in
+remove the known-issue notes that `pending_live_sync.required_actions` listed
+(and run `tools/render_web_config.py` if `docs/index.html` changed); update the
+comments above `live_template_verification`; and update the tests in
 `tests/test_looker_studio_dashboard.py` that pin the pending sync:
 `test_bqca_block_datasource_invariants_and_live_attestation_are_recorded`,
 `test_validate_contracts_requires_a_pending_live_sync_record`,
 `test_validate_contracts_rejects_generic_or_repeated_column_ids`, and
 `test_validate_contracts_cli_rejects_a_column_id_that_is_not_derived`. Then
-check the token scorecards of a report created with the 1-click link.
+check, in a report created with the 1-click link, that every page renders and
+that each scorecard of the synced template shows its own field's value over
+the bound query and each chart and table returns the rows that BigQuery
+gives (up to its `limit`), and record the dated result (with the copy's
+report ID) in the comments above `live_template_verification`, as for the
+check below.
+
+##### Post-sync scorecard check (2026-11-01)
+
+After the `sync_generation: 1` sync (live revision `1793504835696`), the 13
+scorecards of pages 1 to 3 were checked on two fresh copies of the live
+template on 2026-11-01. On 2026-11-02, all 7 pages of the live template and of
+both copies were rendered, and all 34 components (the 21 scorecards of pages 1
+to 6 and the 13 charts and tables of pages 1 to 7) were checked against
+BigQuery. Dates are in US Pacific time.
+
+- The signed capture after the write-back gives each scorecard its own
+  concept: a `qt_` ID of its own on its own field (all 65 concepts of the
+  report are distinct).
+- On 2026-11-01, `DataStudioWebService.CreateTempReport` with the Linking API,
+  with the options of the 1-click link for the BQCA profile
+  (`ds.ds0.refreshFields=false`: `creation_type: LINKING_API`,
+  `datasource_alias: "ds0"`, `use_fresh_schema: false`, `fix_fields: false`,
+  `connector_block_config.alias: "t0"` and `use_datetime_type: true`), created
+  a fresh copy of the live template for each of two tables: the canonical
+  sentinel table (dates `20200101` to `20261231`) and a hydrated BQCA Prompt &
+  Response Logging table (13,054 rows from 2026-07-31 to 2026-10-22; dates
+  `20250101` to `20261101`). Their report IDs are in the table below. Each
+  fresh copy took the template's published `BlockDatasource` schema
+  (`_event_date_` `DATE`/`YEAR_MONTH_DAY`, `_timestamp_`
+  `TIMESTAMP`/`YEAR_MONTH_DAY_SECOND`, and `_event_hour_`
+  `TIMESTAMP`/`YEAR_MONTH_DAY_HOUR`) and its `DS_START_DATE` and
+  `DS_END_DATE` parameter configuration, and has all 65 distinct `qt_`
+  concepts. They supersede copies made earlier that day with other options
+  (`use_fresh_schema: true`, `fix_fields: true`,
+  `connector_block_config.alias: "ds0"`, and no `use_datetime_type`), on which
+  nothing below was measured.
+- `DataStudioWebService.BatchedDataV2` (`VIEW` mode) on each fresh copy
+  returned for each scorecard the exact value that BigQuery gives for its
+  field over the bound query (`sql/bqca_events_v1.template.sql`) for the same
+  table and dates. On the live template, whose `ds0` reads the sentinel table,
+  it returned the same values as on the sentinel table's fresh copy.
+- On 2026-11-02, `LegoMidtierService.RenderDashboardPdf` rendered all 7 pages
+  of each of the three reports (each rendered without errors, with
+  `contains_user_configuration_error: false`), and `BatchedDataV2` (`VIEW`
+  mode) returned all 34 components of each without an error, each equal to
+  BigQuery over the bound query.
+
+The reports, each the template or a copy that reads one table through its own
+`ds0` data source:
+
+| Report | Report ID | `ds0` data source | Table | Dates |
+| --- | --- | --- | --- | --- |
+| Live template | `42e79a1f-a979-4de8-911f-80d5a99543d5` | `70e5ac1e-65bb-4c89-a9df-fa9990cb6029` | canonical sentinel table | `20200101` to `20261231` |
+| Fresh copy | `920ba558-cc2e-44f9-bc35-96158b3ccb7e` | `9663f7a6-a609-431a-ba31-e27f345d8ea6` | canonical sentinel table | `20200101` to `20261231` |
+| Fresh copy | `35ebd06d-4d15-4ca9-ad23-0631cbb87ca3` | `180a6d04-ab80-43c0-bf59-c48f3efa90ee` | hydrated table | `20250101` to `20261101` |
+
+`LegoMidtierService.RenderDashboardPdf`, on 2026-11-02, rendered pages
+`p_539b9240`, `p_a89cfece`, `p_97efe693`, `p_edf06c14`, `p_08774fec`,
+`p_88bcf5f8`, and `p_b87a335e` of each report, in that order, into a 7-page
+PDF. The size and SHA-256 are of the saved response, which stays private:
+
+| Report ID | Rendered pages | `contains_user_configuration_error` | Response (bytes) | Response SHA-256 |
+| --- | --- | --- | --- | --- |
+| `42e79a1f-a979-4de8-911f-80d5a99543d5` | 7 | false | 257,802 | `d9a155ab8e4dba2a1c2fe1c0a7817e4238d334005405fb0935b3aa2c6b988b64` |
+| `920ba558-cc2e-44f9-bc35-96158b3ccb7e` | 7 | false | 257,802 | `25e4e659103a2dcf7a76e0a56e8094587378f47ec7f124a48ed8e2b5c03d92c8` |
+| `35ebd06d-4d15-4ca9-ad23-0631cbb87ca3` | 7 | false | 320,312 | `04572a8af8b670905a4135810907c94d194cab4599a542d066b7803ad0d91d9a` |
+
+`DataStudioWebService.BatchedDataV2` (`VIEW` mode), on 2026-11-02, took one
+request for all 34 components of each report. The sizes and SHA-256 digests
+are of the saved request and response, which stay private:
+
+| Report ID | Components | Errors | Request (bytes) | Request SHA-256 | Response (bytes) | Response SHA-256 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `42e79a1f-a979-4de8-911f-80d5a99543d5` | 34 | 0 | 42,731 | `8eda477c127df752ff32ae378a2b250646cd4d17ddec02a686fb3687b1ac9a3b` | 139,002 | `55ebbdc9fde401a242b3bea18017fb6de6066779ebe70fb68346d7eb6e4142ec` |
+| `920ba558-cc2e-44f9-bc35-96158b3ccb7e` | 34 | 0 | 42,731 | `6e8accf2a3c904a45097248a9d70345dd48add06464b47114b3be072f9e9ba57` | 137,504 | `d642044bcabffec5485a43a789cc031fa627d8608b6836c7fd58233780b3c4bf` |
+| `35ebd06d-4d15-4ca9-ad23-0631cbb87ca3` | 34 | 0 | 42,731 | `751d13762476a0711802396b1fe1071be65a62e24fa192d7a0d7039cc769cfbd` | 153,553 | `7d7caf72ad68a22ca786793bbd14e8f0b908b065abecbd2dce6b27478b683ced` |
+
+The three capture digests of the sync (each a SHA-256 of the exported
+textproto bytes; sizes before encoding):
+
+- **D0** (pre-write, revision `1793385843864`, 84,190 bytes) SHA-256
+  `90e6f259ec923c2213e99c2a1b4cda79065c13753268bec65c68b51fbd40084a`
+- **D0p** (offline preview patched export, 86,069 bytes) SHA-256
+  `b9be2dae36ecfe21b6867247aa115295622b729db4b0f24b6f6f8c87200b9e92`
+- **D1** (post-write, revision `1793504835696`, 86,045 bytes) SHA-256
+  `7d0a64974f20d0412bd56a2e6c4a410bb85f7d7ae7798f434846bcf8358c1f86`
+
+The `2026-11-01` fresh-copy run (`use_fresh_schema: false`, `fix_fields: false`)
+supersedes the earlier `use_fresh_schema: true` / template-query run described
+in the same-day completion comment on issue #559; the values above were
+measured on the fresh copies that run created, and nothing was measured on the
+earlier run. The signer of the capture receipt (`haiyuan-eng-google`) is listed
+in `bindings/bqca_live_capture_signers` with the key whose fingerprint is
+`SHA256:pum9Cf+yARVa64p0awyJRYegBJJL0AkCBKjAONAwLkY`.
+
+The successful pre-write finalizer check on the D1 capture printed this final
+line:
+
+```
+check: the live audit of /tmp/D1.textproto passed; bindings/bqca_report_template.yaml would change as above, and bindings/bqca_live_capture_receipt.json and its signature would be written; nothing written
+```
+
+The reports measured above are `42e79a1f-a979-4de8-911f-80d5a99543d5`
+(template `ds0` data source `70e5ac1e-65bb-4c89-a9df-fa9990cb6029`) and its two
+fresh copies, `920ba558-cc2e-44f9-bc35-96158b3ccb7e`
+(`9663f7a6-a609-431a-ba31-e27f345d8ea6`) and
+`35ebd06d-4d15-4ca9-ad23-0631cbb87ca3`
+(`180a6d04-ab80-43c0-bf59-c48f3efa90ee`); all three report IDs and both data
+source IDs appear in the binding's post-sync comments too.
+
+The 21 scorecards of pages 1 to 6. Observed is the value that `BatchedDataV2`
+returned; expected is the value that BigQuery returns for the scorecard's
+field and aggregation over the bound query, for the same table and dates.
+`null` is a field without values in that table and date range. Averages agree
+to within floating-point rounding and are shown to two decimal places.
+
+| Page | Page ID | ID | Scorecard | Component ID | Concept | Field, aggregation | Observed, fresh copy `920ba558` (sentinel) | Observed, live template `42e79a1f` (sentinel) | Expected, BigQuery (sentinel) | Observed, fresh copy `35ebd06d` (hydrated) | Expected, BigQuery (hydrated) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | `p_539b9240` | `kpi_total_tokens` | Total Tokens | `cd-vWRq2EdpQyI` | `qt_d779815a` | `total_tokens`, SUM | 39,146,504 | 39,146,504 | 39,146,504 | 59,097,881 | 59,097,881 |
+| 1 | `p_539b9240` | `kpi_input_tokens` | Input Tokens | `cd-gQM6-qRztkI` | `qt_c90b69a4` | `input_tokens`, SUM | 32,708,861 | 32,708,861 | 32,708,861 | 57,677,125 | 57,677,125 |
+| 1 | `p_539b9240` | `kpi_output_tokens` | Output Tokens | `cd-tGVUrOkdidM` | `qt_893d21f1` | `output_tokens`, SUM | 6,437,643 | 6,437,643 | 6,437,643 | 364,388 | 364,388 |
+| 1 | `p_539b9240` | `kpi_thoughts_tokens` | Thinking Tokens | `cd-mNCe2wVAOSU` | `qt_a6d27140` | `thoughts_tokens`, SUM | null | null | null | 1,047,032 | 1,047,032 |
+| 1 | `p_539b9240` | `kpi_cached_tokens` | Cached Tokens | `cd-q_nXnTUZkLs` | `qt_31dd80a8` | `cached_tokens`, SUM | null | null | null | 1,147,570 | 1,147,570 |
+| 2 | `p_a89cfece` | `kpi_distinct_agents` | Active Data Agents | `cd-soVsNR_PepA` | `qt_a96c5e06` | `data_agent_id`, COUNT_DISTINCT | 1 | 1 | 1 | 3 | 3 |
+| 2 | `p_a89cfece` | `kpi_total_sessions` | Total Turns | `cd-jzLBUUj5DHY` | `qt_d206edb0` | `invocation_id`, COUNT_DISTINCT | 14,100 | 14,100 | 14,100 | 2,041 | 2,041 |
+| 2 | `p_a89cfece` | `kpi_turn_completes` | Completed Turns | `cd-i7aDBnf14Bo` | `qt_f0daf8fa` | `completed_turn_id`, COUNT_DISTINCT | 14,093 | 14,093 | 14,093 | 2,039 | 2,039 |
+| 2 | `p_a89cfece` | `kpi_extracted_sql_count` | Generated SQL Queries | `cd-lGEjuCElXpw` | `qt_d4c2022b` | `extracted_sql`, COUNT | 0 | 0 | 0 | 0 | 0 |
+| 3 | `p_97efe693` | `kpi_llm_calls` | LLM Responses | `cd-ldwCpp7xYjA` | `qt_581cc2cf` | `llm_latency_ms`, COUNT | 15,604 | 15,604 | 15,604 | 2,876 | 2,876 |
+| 3 | `p_97efe693` | `kpi_llm_latency_avg` | Avg LLM Call Latency (ms) | `cd-qiFfbAM3qa0` | `qt_f4c85165` | `llm_latency_ms`, AVG | 5,941.28 | 5,941.28 | 5,941.28 | 7,429.72 | 7,429.72 |
+| 3 | `p_97efe693` | `kpi_ttft_avg` | Avg Time to First Token (ms) | `cd-vvYZt2if5WY` | `qt_1444bfec` | `ttft_ms`, AVG | 762.83 | 762.83 | 762.83 | 7,429.71 | 7,429.71 |
+| 3 | `p_97efe693` | `kpi_similar_queries` | Suggested Columns Proposed | `cd-gc3G-O-taBE` | `qt_291ed8e1` | `similar_queries_count`, SUM | null | null | null | null | null |
+| 4 | `p_edf06c14` | `kpi_distinct_personas` | Distinct Personas | `cd-oQfDfyi8Lv0` | `qt_d6385c41` | `persona`, COUNT_DISTINCT | 1 | 1 | 1 | 4 | 4 |
+| 4 | `p_edf06c14` | `kpi_distinct_users` | Distinct User IDs | `cd-uRA2-9wgZ2Y` | `qt_aeca08f6` | `user_id`, COUNT_DISTINCT | 500 | 500 | 500 | 7 | 7 |
+| 4 | `p_edf06c14` | `kpi_distinct_conversations` | Distinct Conversations | `cd-g1BkEGfLfKs` | `qt_a42e18b1` | `conversation_id`, COUNT_DISTINCT | 0 | 0 | 0 | 5 | 5 |
+| 5 | `p_08774fec` | `kpi_turn_latency_avg` | Avg End-to-End Turn Latency (ms) | `cd-vHrTArr4HTQ` | `qt_1e5c0a97` | `turn_latency_ms`, AVG | null | null | null | 26,073.58 | 26,073.58 |
+| 5 | `p_08774fec` | `kpi_llm_latency_p5` | Avg LLM Latency (ms) | `cd-siIPn3A0DhI` | `qt_235cb0ae` | `llm_latency_ms`, AVG | 5,941.28 | 5,941.28 | 5,941.28 | 7,429.72 | 7,429.72 |
+| 5 | `p_08774fec` | `kpi_total_latency_avg` | Avg Event Latency (ms) | `cd-l9SJjy2jR-o` | `qt_16a686b5` | `total_latency_ms`, AVG | 5,940.97 | 5,940.97 | 5,940.97 | 18,344.53 | 18,344.53 |
+| 6 | `p_88bcf5f8` | `kpi_total_errors` | Error Events (3-Condition) | `cd-piLo6w29Khs` | `qt_a813429f` | `error_message`, COUNT | 1 | 1 | 1 | 3 | 3 |
+| 6 | `p_88bcf5f8` | `kpi_distinct_errors` | Distinct Error Signatures | `cd-m7c2OcIbUxo` | `qt_a8ab9425` | `error_message`, COUNT_DISTINCT | 1 | 1 | 1 | 1 | 1 |
+
+The 13 charts and tables of pages 1 to 7. The request for each named its `qt_`
+concepts and sorted by its `sort_column` in its direction, as the signed
+capture has them, and each returned without an error (`OK`) from all three
+reports. Observed is the number of rows that `BatchedDataV2` returned;
+expected is the number of rows that BigQuery returns for the component's
+dimensions over the bound query, for the same table and dates. The page 7
+table returns its first 100 rows (`limit: 100` in
+`spec/bqca_chart_manifest.yaml`) of the 56,380 and 10,184 that BigQuery
+counts.
+
+| Page | Page ID | ID | Chart or table | Component ID | Type | Concepts | Sort | Status | Observed rows, fresh copy `920ba558` (sentinel) | Observed rows, live template `42e79a1f` (sentinel) | Expected rows, BigQuery (sentinel) | Observed rows, fresh copy `35ebd06d` (hydrated) | Expected rows, BigQuery (hydrated) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | `p_539b9240` | `chart_tokens_by_agent` | Token Usage by Data Agent | `cd-kctXIOqrPyQ` | `bar_chart` | `qt_47948fbd`, `qt_3fcfd7ea` | `qt_3fcfd7ea` DESC | OK | 1 | 1 | 1 | 3 | 3 |
+| 1 | `p_539b9240` | `chart_tokens_over_time` | Daily Token Usage (Input / Output / Thinking) | `cd-kM4cFH3pweE` | `bar_chart` | `qt_e7eb0560`, `qt_af86847d`, `qt_42018c0c`, `qt_0db8b52b` | `qt_e7eb0560` ASC | OK | 32 | 32 | 32 | 55 | 55 |
+| 2 | `p_a89cfece` | `chart_turns_by_agent` | Turns by Data Agent | `cd-mfKlsOmAHaM` | `bar_chart` | `qt_9fb169eb`, `qt_e056d0a6` | `qt_e056d0a6` DESC | OK | 1 | 1 | 1 | 3 | 3 |
+| 2 | `p_a89cfece` | `chart_events_by_agent` | Data Agent Volume, Latency & Errors | `cd-rVzCGnjYxo0` | `table` | `qt_d0a517af`, `qt_a7ce9b32`, `qt_d188b546`, `qt_38e443e7`, `qt_abd056f8` | `qt_a7ce9b32` DESC | OK | 1 | 1 | 1 | 3 | 3 |
+| 3 | `p_97efe693` | `chart_tokens_by_model` | Tokens by Model Version | `cd-hqCAkMPqIPw` | `bar_chart` | `qt_09afcfdb`, `qt_f8bf601a` | `qt_f8bf601a` DESC | OK | 3 | 3 | 3 | 4 | 4 |
+| 3 | `p_97efe693` | `chart_embedding_reasons` | Suggested Columns by Reason | `cd-sL-0J4IkqLU` | `bar_chart` | `qt_69a5beaa`, `qt_63d8de68` | `qt_63d8de68` DESC | OK | 1 | 1 | 1 | 1 | 1 |
+| 4 | `p_edf06c14` | `chart_turns_by_persona` | Turns by Persona | `cd-raUF_PPS3LM` | `bar_chart` | `qt_c4ad495e`, `qt_dd7d7d10` | `qt_dd7d7d10` DESC | OK | 1 | 1 | 1 | 4 | 4 |
+| 4 | `p_edf06c14` | `chart_persona_breakdown` | Persona & Data Agent Activity | `cd-rMs1c5cC9Fw` | `table` | `qt_8070d8ac`, `qt_2b3c89df`, `qt_cbce3e14`, `qt_c1b8027d`, `qt_174cfaac` | `qt_cbce3e14` DESC | OK | 1 | 1 | 1 | 4 | 4 |
+| 5 | `p_08774fec` | `chart_fast_path_pie` | Fast-Path vs Standard NL2SQL Turns | `cd-lC6BhR7QWAA` | `pie_chart` | `qt_6d704d5c`, `qt_0a6310c4` | `qt_0a6310c4` DESC | OK | 1 | 1 | 1 | 2 | 2 |
+| 5 | `p_08774fec` | `chart_latency_by_fast_path` | Avg Turn Latency: Fast-Path vs Standard NL2SQL | `cd-i2nWigxiP7g` | `bar_chart` | `qt_a286c105`, `qt_cac76a3a` | `qt_cac76a3a` DESC | OK | 1 | 1 | 1 | 2 | 2 |
+| 6 | `p_88bcf5f8` | `chart_errors_by_event_type` | Error Events by BQCA Event Type | `cd-oZj1Bbl96QQ` | `bar_chart` | `qt_8eff7d70`, `qt_79ac4183` | `qt_79ac4183` DESC | OK | 5 | 5 | 5 | 8 | 8 |
+| 6 | `p_88bcf5f8` | `chart_errors_by_agent` | Error Events by Data Agent | `cd-tSjvZNK6aLc` | `bar_chart` | `qt_3859cfd6`, `qt_891b1a3f` | `qt_891b1a3f` DESC | OK | 1 | 1 | 1 | 3 | 3 |
+| 7 | `p_b87a335e` | `tbl_prompt_response_sql` | Event-Level Prompt, Response & Extracted SQL | `cd-oUw97rpumWM` | `table` | `qt_40f9b407`, `qt_b684d2ed`, `qt_54bd6219`, `qt_7a28e588`, `qt_800b7f96`, `qt_bbf261e0`, `qt_1ada8666`, `qt_abb7920b`, `qt_a04329d9`, `qt_42c77379`, `qt_a5d93a61`, `qt_e3fa0159` | `qt_40f9b407` DESC | OK | 100 | 100 | 56,380 | 100 | 10,184 |
+
+The five token sums differ from each other on the hydrated table, and on the
+sentinel table all but the two empty ones (Thinking and Cached Tokens) do, so
+a token scorecard that showed another one's value, as copies made before the
+sync could, would not match. Generated SQL Queries (0 on both tables) and
+Suggested Columns Proposed (null on both) match BigQuery too, but their fields
+are empty in both tables, so this check shows nothing about which field they
+read; the signed capture is what shows that each has its own concept on its
+own field. Avg LLM Call Latency (page 3) and Avg LLM Latency (page 5) both
+average `llm_latency_ms`, so they show the same value.
 
 ### Fallback paths
 

@@ -10,6 +10,8 @@ enforces the BQCA nine-event allowlist (zero tool or LLM_REQUEST events).
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import collections
 from collections.abc import Iterable
 import datetime
@@ -19,6 +21,7 @@ import pathlib
 import re
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
@@ -114,12 +117,14 @@ _SPEC_REFERENCE_PATHS = {
 # the BQCA manifest and bundle to have a `qt_` ID that matches this, is unique
 # across the whole report, and is its slot's derived ID
 # (`bqca_derive_report_column_ids`). Looker Studio itself also accepts generic
-# names: the live template keeps its legacy generic IDs (`met`, `dim`, `m0`,
-# `d0`, ...), with which components on one page of a report created through
-# the 1-click link can show each other's values, until it is synced from these
-# contracts. `live_template_verification.pending_live_sync` in
-# `bindings/bqca_report_template.yaml` tracks that sync, and reports copied
-# before it must be re-created after it.
+# names: until its generation-1 sync on 2026-11-01, the live template had
+# generic IDs (`met`, `dim`, `m0`, `d0`, ...), with which components on one
+# page of a report created through the 1-click link could show each other's
+# values. Reports copied before that sync must be re-created. Whenever these
+# contracts change ahead of the live template again,
+# `live_template_verification.pending_live_sync` in
+# `bindings/bqca_report_template.yaml` records the reopened sync until
+# `tools/finalize_live_sync.py` finalizes it.
 _QT_COLUMN_ID_RE = re.compile(r"^qt_[a-z0-9]{3,10}$")
 # The digest prefix lengths, in hex digits, that a derived column ID may take.
 _QT_DERIVED_HEX_LENGTHS = (8, 9, 10)
@@ -1750,6 +1755,56 @@ _BQCA_CAPTURE_TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 # the signers file, never a pattern (`*`, `?`, `!`, `,`).
 BQCA_CAPTURE_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}")
 BQCA_CAPTURE_SIGNER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}")
+# The key types that a line of BQCA_CAPTURE_SIGNERS_PATH may list: plain
+# public keys, never certificates.
+BQCA_CAPTURE_SIGNER_KEY_TYPES = (
+    "ssh-ed25519",
+    "ssh-rsa",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "sk-ssh-ed25519@openssh.com",
+    "sk-ecdsa-sha2-nistp256@openssh.com",
+)
+_BASE64_RE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
+# The NIST curves of the ECDSA key types, by the curve name that a key blob
+# gives: the byte length of a coordinate, the prime p of the field, and the
+# coefficient b of the curve y^2 = x^3 - 3x + b (mod p).
+_ECDSA_CURVES = {
+    "nistp256": (
+        32,
+        2**256 - 2**224 + 2**192 + 2**96 - 1,
+        int(
+            "5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b",
+            16,
+        ),
+    ),
+    "nistp384": (
+        48,
+        2**384 - 2**128 - 2**96 + 2**32 - 1,
+        int(
+            "b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875a"
+            "c656398d8a2ed19d2a85c8edd3ec2aef",
+            16,
+        ),
+    ),
+    "nistp521": (
+        66,
+        2**521 - 1,
+        int(
+            "51953eb9618e1c9a1f929a21a0b68540eea2da725b99b315f3b8b489918ef109"
+            "e156193951ec7e937b1652c0bd3bb1bf073573df883d2c34f1ef451fd46b503f00",
+            16,
+        ),
+    ),
+}
+# The fewest bits of an RSA modulus, and the most bits of any integer, that
+# ssh-keygen reads in a public key.
+_RSA_MIN_MODULUS_BITS = 1024
+_SSH_MAX_MPINT_BITS = 16384
+# What a signer line may hold: printable ASCII and tabs, so that `str.split`
+# splits it into fields where ssh-keygen does (at spaces and tabs).
+_SIGNERS_LINE_RE = re.compile(r"[\t\x20-\x7e]*")
 
 
 def bqca_sync_generation(live: Any) -> int | None:
@@ -1859,27 +1914,238 @@ def parse_bqca_capture_receipt(data: bytes) -> dict[str, Any]:
   return receipt
 
 
+def _is_canonical_base64(value: str) -> bool:
+  """Return whether `value` is canonical base64, as ssh-keygen reads a key.
+
+  `_BASE64_RE` alone accepts `A`, `A=`, `AA`, `AAAAA` and `AB==`, but ssh-keygen
+  refuses them: it takes whole groups of four characters, padded with `=`, and
+  the bits after the last byte must be zero. So `value` must match
+  `_BASE64_RE`, be whole groups of four, decode strictly, and encode back to
+  itself: `AB==` decodes to the same byte as `AA==`, so only that last check
+  refuses it.
+  """
+  if not (_BASE64_RE.fullmatch(value) and len(value) % 4 == 0):
+    return False
+  try:
+    decoded = base64.b64decode(value, validate=True)
+  except (binascii.Error, ValueError):
+    return False
+  return base64.b64encode(decoded).decode("ascii") == value
+
+
+def _read_ssh_bytes(buf: bytes, offset: int) -> tuple[bytes, int] | None:
+  """Return the wire string of `buf` at `offset`, and the offset after it.
+
+  An OpenSSH wire string is a 4-byte big-endian length, then that many bytes.
+  None if `buf` ends before the string does.
+  """
+  if len(buf) - offset < 4:
+    return None
+  (length,) = struct.unpack(">I", buf[offset : offset + 4])
+  start = offset + 4
+  if len(buf) - start < length:
+    return None
+  return buf[start : start + length], start + length
+
+
+def _ssh_mpint(value: bytes) -> int | None:
+  """Return the integer of the OpenSSH mpint `value`, or None.
+
+  None if ssh-keygen refuses it: negative (its first bit is set), or longer
+  than _SSH_MAX_MPINT_BITS (with one leading zero byte at most).
+  """
+  if value and value[0] & 0x80:
+    return None
+  if len(value) > _SSH_MAX_MPINT_BITS // 8 + 1:
+    return None
+  number = int.from_bytes(value, "big")
+  return number if number.bit_length() <= _SSH_MAX_MPINT_BITS else None
+
+
+def _is_ecdsa_point(curve: str, point: bytes) -> bool:
+  """Return whether `point` is a public point on the NIST curve `curve`.
+
+  ssh-keygen reads only an uncompressed point: the byte 0x04, then x and y,
+  each the coordinate length of `curve`, both below its prime p, and on it.
+  """
+  size, prime, b = _ECDSA_CURVES[curve]
+  if len(point) != 1 + 2 * size or point[0] != 0x04:
+    return False
+  x = int.from_bytes(point[1 : 1 + size], "big")
+  y = int.from_bytes(point[1 + size :], "big")
+  return x < prime and y < prime and (y * y - x**3 + 3 * x - b) % prime == 0
+
+
+def _is_valid_ssh_public_key_blob(key_type: str, blob: bytes) -> bool:
+  """Return whether `blob` is the OpenSSH wire form of a `key_type` key.
+
+  `blob` is the decoded key of a signers line. ssh-keygen reads a key only on
+  the line of the signer that it verifies, so this checks the key of every
+  line: canonical base64 such as `AAAA` decodes to bytes that are no key. A
+  key blob is wire strings, and nothing after them: the key type, which must
+  be `key_type`, then the fields of that type, which must be what ssh-keygen
+  reads (RFC 4253, RFC 5656, RFC 8709, and OpenSSH's PROTOCOL.u2f):
+
+  - `ssh-ed25519`: a 32-byte key.
+  - `ssh-rsa`: the exponent e and modulus n, non-negative mpints, e not 0
+    and n of 1024 to 16384 bits.
+  - `ecdsa-sha2-<curve>`: the curve name, then a point on that curve (see
+    `_is_ecdsa_point`).
+  - `sk-ssh-ed25519@openssh.com` and `sk-ecdsa-sha2-nistp256@openssh.com`:
+    the fields of `ssh-ed25519` and of `ecdsa-sha2-nistp256`, then the
+    application of the security key, which is not empty and holds no NUL.
+
+  Two forms that ssh-keygen reads are refused as no signer's key: an RSA
+  exponent of 0 and an empty application.
+  """
+  fields = []
+  offset = 0
+  while offset < len(blob):
+    read = _read_ssh_bytes(blob, offset)
+    if read is None:
+      return False
+    field, offset = read
+    fields.append(field)
+  if not fields or fields[0] != key_type.encode("ascii"):
+    return False
+  rest = fields[1:]
+  if key_type.startswith("sk-"):
+    if not rest:
+      return False
+    *rest, application = rest
+    if not application or b"\0" in application:
+      return False
+  name = key_type.removeprefix("sk-").removesuffix("@openssh.com")
+  if name == "ssh-ed25519":
+    return len(rest) == 1 and len(rest[0]) == 32
+  if name == "ssh-rsa":
+    if len(rest) != 2:
+      return False
+    exponent, modulus = (_ssh_mpint(value) for value in rest)
+    return (
+        exponent is not None
+        and exponent > 0
+        and modulus is not None
+        and modulus.bit_length() >= _RSA_MIN_MODULUS_BITS
+    )
+  if not name.startswith("ecdsa-sha2-"):
+    return False
+  curve = name.removeprefix("ecdsa-sha2-")
+  return (
+      curve in _ECDSA_CURVES
+      and len(rest) == 2
+      and rest[0] == curve.encode("ascii")
+      and _is_ecdsa_point(curve, rest[1])
+  )
+
+
+def bqca_capture_signers_error(signers: bytes) -> str | None:
+  """Return why the signers file `signers` trusts no receipt, or None.
+
+  `signers` is the bytes of BQCA_CAPTURE_SIGNERS_PATH, which `ssh-keygen -Y
+  verify` reads as an allowed signers file. ssh-keygen reads the principal
+  field of a line as a list of patterns (`*`, `?`, `!`, `,`) and takes
+  options that widen the namespaces or the keys that a line trusts, so one
+  line could trust a key for every signer's receipts, and a second line for a
+  listed signer could trust another key in that signer's name. So each line
+  must be blank, a comment (`#` after any spaces or tabs), or exactly
+
+    <signer> namespaces="bqca-live-capture-receipt" <key type> <public key>
+
+  optionally followed by a key comment: one literal principal that
+  BQCA_CAPTURE_SIGNER_RE matches (not quoted), that option and no other, one
+  of BQCA_CAPTURE_SIGNER_KEY_TYPES and a canonical base64 key (see
+  `_is_canonical_base64`) that decodes to the OpenSSH wire form of a key of
+  that type (see `_is_valid_ssh_public_key_blob`): ssh-keygen reads the key
+  of only the line that it verifies, so a key that it refuses on another
+  line would pass it unread. A signer line holds only printable ASCII and
+  tabs, so its fields are the ones that ssh-keygen reads. No principal is
+  listed twice, in any letter case, and at least one is listed. The file must
+  be UTF-8 text; like ssh-keygen, this splits it into lines at each line
+  feed, and drops a carriage return that ends a line.
+  """
+  try:
+    text = signers.decode("utf-8")
+  except UnicodeDecodeError as exc:
+    return (
+        f"{BQCA_CAPTURE_SIGNERS_PATH} is not UTF-8 text ({exc}), so it trusts"
+        " no receipt"
+    )
+  option = f'namespaces="{BQCA_CAPTURE_NAMESPACE}"'
+  listed: dict[str, int] = {}
+  for number, line in enumerate(text.split("\n"), start=1):
+    line = line.removesuffix("\r")
+    content = line.strip(" \t\r")
+    if not content or content.startswith("#"):
+      continue
+    fields = line.split()
+    principal = fields[0].lower() if fields else ""
+    if not _SIGNERS_LINE_RE.fullmatch(line):
+      problem = "it holds a character that is not printable ASCII or a tab"
+    elif not BQCA_CAPTURE_SIGNER_RE.fullmatch(fields[0]):
+      problem = (
+          f"its principal {fields[0]!r} is not the literal name of one signer"
+          " (a pattern, a list or a quoted name is refused)"
+      )
+    elif len(fields) > 1 and fields[1] in BQCA_CAPTURE_SIGNER_KEY_TYPES:
+      problem = f"it has no options, not {option}"
+    elif len(fields) < 4:
+      problem = "it does not have the signer, option, key type and key fields"
+    elif fields[1] != option:
+      problem = f"its options {fields[1]!r} are not exactly {option}"
+    elif fields[2] not in BQCA_CAPTURE_SIGNER_KEY_TYPES:
+      problem = (
+          f"its key type {fields[2]!r} is not one of"
+          f" {', '.join(BQCA_CAPTURE_SIGNER_KEY_TYPES)}"
+      )
+    elif not _is_canonical_base64(fields[3]):
+      problem = "its public key is not canonical base64"
+    elif not _is_valid_ssh_public_key_blob(
+        fields[2], base64.b64decode(fields[3])
+    ):
+      problem = (
+          "its public key is canonical base64 but not the OpenSSH wire form"
+          f" of a valid {fields[2]} key"
+      )
+    elif principal in listed:
+      problem = (
+          f"it lists the signer {fields[0]!r} again (line"
+          f" {listed[principal]} lists it, ignoring letter case)"
+      )
+    else:
+      listed[principal] = number
+      continue
+    return (
+        f"{BQCA_CAPTURE_SIGNERS_PATH} line {number}: {problem}; each signer is"
+        f" listed once, as '<signer> {option} <key type> <public key>', so the"
+        " file trusts no receipt"
+    )
+  if not listed:
+    return (
+        f"{BQCA_CAPTURE_SIGNERS_PATH} lists no signer, so it trusts no receipt"
+    )
+  return None
+
+
 def bqca_capture_signature_error(
     data: bytes, signature: bytes, signer: str, signers: bytes
 ) -> str | None:
   """Return why `signature` is not a trusted signature of the receipt `data`.
 
-  Runs `ssh-keygen -Y verify` in BQCA_CAPTURE_NAMESPACE for the identity
-  `signer`, on private copies of `signature` and of `signers`, the bytes of
-  BQCA_CAPTURE_SIGNERS_PATH. Returns None if the signature verifies.
+  Checks `signers`, the bytes of BQCA_CAPTURE_SIGNERS_PATH, with
+  `bqca_capture_signers_error` (which needs no OpenSSH), then runs
+  `ssh-keygen -Y verify` in BQCA_CAPTURE_NAMESPACE for the identity
+  `signer`, on private copies of `signature` and of `signers`. Returns None
+  if the signature verifies.
   """
+  error = bqca_capture_signers_error(signers)
+  if error is not None:
+    return error
   ssh_keygen = shutil.which("ssh-keygen")
   if ssh_keygen is None:
     return (
         "cannot verify the receipt's signature: ssh-keygen (OpenSSH 8.2 or"
         " later) is not on PATH"
-    )
-  if not any(
-      line.strip() and not line.lstrip().startswith(b"#")
-      for line in signers.splitlines()
-  ):
-    return (
-        f"{BQCA_CAPTURE_SIGNERS_PATH} lists no signer, so it trusts no receipt"
     )
   with tempfile.TemporaryDirectory(prefix="bqca_capture_signature_") as private:
     signers_copy = pathlib.Path(private) / "allowed_signers"
@@ -2675,7 +2941,15 @@ def validate_bqca(
         "bqca dashboard_template_bundle datasource.sql_sha256 mismatch"
     )
 
-  live = binding.get("live_template_verification", {})
+  live = binding.get("live_template_verification")
+  if not isinstance(live, dict):
+    errors.append(
+        "bqca live_template_verification is missing"
+        if "live_template_verification" not in binding
+        else "bqca live_template_verification is a"
+        f" {type(live).__name__}, not a mapping"
+    )
+    live = {}
   if binding.get("reviewed_template_sql", {}).get("sha256") != sql_sha:
     errors.append("bqca reviewed_template_sql.sha256 mismatch")
   if live.get("repository_sql_sha256") != sql_sha:

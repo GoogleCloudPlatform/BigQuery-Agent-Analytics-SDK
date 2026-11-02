@@ -36,7 +36,7 @@ a dump of the live template, offline, and writes the remapped dump with the
 
 The finalize and capture tests run the tools from a copy of
 `dashboards/looker_studio`, so they never write to the repository, and list a
-test key in the copy's signers file (the repository's lists none). A stand-in
+test key in the copy's signers file. A stand-in
 export command prints a file, as the internal export command prints the live
 report: before the write-back, the sanitized pre-sync cut with a
 `report_config.shareable` entry; after it, a dump that `_render_dump`
@@ -51,6 +51,7 @@ into a repository (the refusals and the failures) run the tool from a copy of
 `dashboards/looker_studio` too, and every output goes to `tmp_path`.
 """
 
+import base64
 import collections
 import copy
 import csv
@@ -67,6 +68,7 @@ import re
 import shutil
 import signal
 import stat
+import struct
 import subprocess
 import sys
 import threading
@@ -243,19 +245,30 @@ def _ssh_environment():
 
 @pytest.fixture(scope="session")
 def signing_keys(tmp_path_factory):
-  """Two passphrase-less ed25519 key files, by name: trusted and untrusted."""
+  """Two passphrase-less ed25519 key files, by name: trusted and untrusted.
+
+  A test that needs ssh-keygen but none of these keys lists the fixture in
+  `usefixtures`, so that it is skipped where ssh-keygen is not installed, or
+  refuses to start because the current user ID has no account entry (as in
+  some containers).
+  """
   if SSH_KEYGEN is None:
     pytest.skip("ssh-keygen (OpenSSH) is not installed")
   directory = tmp_path_factory.mktemp("keys")
   keys = {}
   for name in ("trusted", "untrusted"):
     keys[name] = directory / name
-    subprocess.run(
+    made = subprocess.run(
         [SSH_KEYGEN, "-q", "-t", "ed25519", "-N", "", "-C", name, "-f"]
         + [str(keys[name])],
-        check=True,
+        capture_output=True,
+        check=False,
         env=_ssh_environment(),
     )
+    error = made.stderr.decode("utf-8", "replace").strip()
+    if b"No user exists for uid" in made.stderr:
+      pytest.skip(f"ssh-keygen cannot start: {error}")
+    assert made.returncode == 0, error
   return keys
 
 
@@ -445,13 +458,11 @@ def tree(request, tmp_path, signing_keys):
   assert _live(copy_root)[PENDING]["since_date"] == SINCE_DATE
   repository = {
       relative: (DASHBOARD / relative).read_bytes()
-      for relative in (BINDING, SIGNERS)
+      for relative in (BINDING, SIGNERS, COMMITTED, f"{COMMITTED}.sig")
   }
-  assert not (DASHBOARD / COMMITTED).exists()
   yield copy_root
   for relative, data in repository.items():
     assert (DASHBOARD / relative).read_bytes() == data, relative
-  assert not (DASHBOARD / COMMITTED).exists()
 
 
 @pytest.fixture
@@ -825,9 +836,11 @@ def test_finalize_records_the_revision_and_signer_as_strings(
 ):
   """The revision and the signer are recorded exactly, as YAML strings.
 
-  Unquoted, YAML would read `0x1F`, `12:30` or `1.5` as a number.
+  Unquoted, YAML would read `0x1F`, `12:30` or `1.5` as a number. The copy's
+  signers file lists SIGNER already, and lists each signer once.
   """
-  _trust(tree, trusted_key, signer)
+  if signer != SIGNER:
+    _trust(tree, trusted_key, signer)
   source = tmp_path / "live/after.textproto"
   source.write_text(_render_dump(tree), encoding="utf-8")
   capture = _captured(
@@ -2137,8 +2150,15 @@ def test_finalize_refuses_a_stale_or_future_receipt(
 
 
 def _without_signers(tree):
-  """Give the copy the repository's signers file, which lists no signer."""
-  shutil.copyfile(DASHBOARD / SIGNERS, tree / SIGNERS)
+  """Give the copy a signers file that lists no signer."""
+  lines = [
+      line
+      for line in (DASHBOARD / SIGNERS)
+      .read_text(encoding="utf-8")
+      .splitlines(True)
+      if not line.strip() or line.lstrip().startswith("#")
+  ]
+  (tree / SIGNERS).write_text("".join(lines), encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -2417,7 +2437,11 @@ def test_finalize_is_idempotent_and_can_record_a_later_sync(
   again = _finalize(tree, "--dump", str(dump), *_write_args(before))
 
   assert again.returncode == 0, again.stdout + again.stderr
-  assert f"nothing to finalize: {BINDING} has no" in again.stdout
+  assert (
+      f"nothing to finalize: {BINDING} has no {LIVE}.{PENDING}, and the live"
+      f" audit of {dump}, the capture that it records, passed; it is"
+      " unchanged"
+  ) in again.stdout
   assert _snapshot(tree) == finalized
 
   # A later sync replaces the capture record and the committed receipt
@@ -3635,7 +3659,7 @@ def test_validate_contracts_refuses_a_hand_sync_whatever_pending_says(
   """Round 8: `pending_live_sync: null` no longer bypasses the receipt check.
 
   With both digests re-pinned, the stale `verified_date` kept, no committed
-  receipt and the shipped signers file, which lists no signer, the binding
+  receipt and no signer listed in the copy's signers file, the binding
   fails validation whether `pending_live_sync` is gone or present with any
   value that is not a well-formed mapping.
   """
@@ -3683,6 +3707,63 @@ def _set_record(tree, key, value):
   path.write_text(text, encoding="utf-8")
 
 
+def _record_receipt(tree, data):
+  """Set the capture record of the copy's binding to that of receipt `data`."""
+  fields = json.loads(data)
+  for key, value in (
+      ("verified_revision", fields["revision"]),
+      ("verified_dump_sha256", fields["dump_sha256"]),
+      ("capture_receipt_sha256", hashlib.sha256(data).hexdigest()),
+  ):
+    _set_record(tree, key, value)
+
+
+def _set_live_block(tree, value):
+  """Replace the live_template_verification block of the copy's binding.
+
+  With `value` None the block goes; otherwise the key keeps its line, with
+  the flow-style YAML `value` in place of the mapping.
+  """
+  path = tree / BINDING
+  head, block = path.read_text(encoding="utf-8").split(f"\n{LIVE}:\n")
+  end = re.search(r"(?m)^(?=[^ \n])", block)
+  rest = block[end.start() :] if end is not None else ""
+  line = "" if value is None else f"{LIVE}: {value}\n"
+  path.write_text(f"{head}\n{line}{rest}", encoding="utf-8")
+  assert (LIVE in yaml.safe_load(path.read_text(encoding="utf-8"))) == (
+      value is not None
+  )
+
+
+def _ssh_keygen_verifies(tree, path, signer=SIGNER):
+  """Whether `ssh-keygen -Y verify` alone accepts the receipt at `path`.
+
+  It checks the receipt's signature for `signer` against the copy's signers
+  file, as the tools do after they check that file's lines.
+  """
+  return (
+      subprocess.run(
+          [SSH_KEYGEN, "-Y", "verify", "-f", str(tree / SIGNERS), "-I"]
+          + [signer, "-n", NAMESPACE, "-s", f"{path}.sig"],
+          input=path.read_bytes(),
+          capture_output=True,
+          check=False,
+          env=_ssh_environment(),
+      ).returncode
+      == 0
+  )
+
+
+def _signer_lines(tree, signer):
+  """The numbers of the lines of the copy's signers file that list `signer`."""
+  lines = (tree / SIGNERS).read_text(encoding="utf-8").split("\n")
+  return [
+      number
+      for number, line in enumerate(lines, start=1)
+      if line.split()[:1] == [signer]
+  ]
+
+
 @pytest.mark.parametrize(
     "edit",
     [
@@ -3690,6 +3771,7 @@ def _set_record(tree, key, value):
         "verified_revision",
         "capture_receipt_sha256",
         "captured_by",
+        "captured_by-removed",
         "verified_date",
         "receipt-bytes",
         "receipt-removed",
@@ -3698,17 +3780,29 @@ def _set_record(tree, key, value):
         "receipt-before-the-write-back",
         "receipt-for-other-contracts",
         "receipt-for-another-generation",
+        "receipt-of-a-key-for-any-signer",
+        "receipt-of-a-second-key-for-the-signer",
+        "record-removed",
+        "record-not-a-mapping",
     ],
 )
 def test_validate_contracts_checks_the_committed_receipt_of_a_finalized_binding(
-    tree, dump, before, receipt, trusted_key, edit
+    tree, dump, before, receipt, trusted_key, untrusted_key, edit
 ):
   """Only a binding and receipt that finalize wrote together validate.
 
   After finalize, the copy validates. Each edit of the record, the committed
   receipt, its signature or the signers file then fails the validator; an
   edit that re-signs another receipt with the trusted key fails on what the
-  receipt says.
+  receipt says, and one that signs it with another key fails on the line of
+  the signers file that trusts that key for any signer, or for a signer that
+  the file lists already, though ssh-keygen alone accepts it.
+
+  Finalizing again with the same captures, without re-opening the sync,
+  fails too, in a write and with --check, and writes nothing: with nothing
+  pending, finalize still audits the binding, its committed receipt and that
+  receipt's signature and signer, and refuses a binding without a
+  live_template_verification mapping before any audit.
   """
   finalized = _finalize(tree, "--dump", str(dump), *_write_args(before))
   assert finalized.returncode == 0, finalized.stdout + finalized.stderr
@@ -3716,6 +3810,7 @@ def test_validate_contracts_checks_the_committed_receipt_of_a_finalized_binding(
   committed = tree / COMMITTED
   prefix = "bqca live_template_verification"
   live = _live(tree)
+  refusal = None
   if edit in (
       "verified_dump_sha256",
       "capture_receipt_sha256",
@@ -3725,6 +3820,23 @@ def test_validate_contracts_checks_the_committed_receipt_of_a_finalized_binding(
     value = "c" * 64 if edit.endswith("sha256") else "someone-else"
     _set_record(tree, edit, value)
     expected = f"{prefix}.{edit} {value!r} is not {live[edit]!r}"
+  elif edit == "captured_by-removed":
+    path = tree / BINDING
+    text, count = re.subn(
+        r"(?m)^  captured_by: .*\n", "", path.read_text(encoding="utf-8")
+    )
+    assert count == 1
+    path.write_text(text, encoding="utf-8")
+    expected = f"{prefix}.captured_by None is not {SIGNER!r}"
+  elif edit in ("record-removed", "record-not-a-mapping"):
+    value = None if edit == "record-removed" else "[]"
+    _set_live_block(tree, value)
+    state = "is missing" if value is None else "is a list, not a mapping"
+    expected = f"{prefix} {state}"
+    refusal = (
+        f"not finalized: {LIVE} in {BINDING} {state}, so it records no live"
+        f" sync to finalize or check; {BINDING} is unchanged"
+    )
   elif edit == "verified_date":
     _set_record(tree, edit, SINCE_DATE)
     expected = (
@@ -3749,8 +3861,10 @@ def test_validate_contracts_checks_the_committed_receipt_of_a_finalized_binding(
     _without_signers(tree)
     expected = f"{SIGNERS} lists no signer, so it trusts no receipt"
   else:
-    # A receipt signed with the trusted key, and a record that matches it:
-    # only what the receipt says can fail.
+    # A receipt signed with a key that the signers file lists, and a record
+    # that matches it: only what the receipt says, or the line that lists
+    # the key, can fail.
+    key = trusted_key
     if edit == "receipt-before-the-write-back":
       data = _receipt_bytes(
           tree, revision=BEFORE_REVISION, dump_sha256="d" * 64
@@ -3767,7 +3881,7 @@ def test_validate_contracts_checks_the_committed_receipt_of_a_finalized_binding(
           f"{prefix}: {COMMITTED} is for manifest_sha256 {'e' * 64}, not the"
           f" pinned {live['manifest_sha256']}"
       )
-    else:
+    elif edit == "receipt-for-another-generation":
       generation = live["sync_generation"] + 1
       data = _receipt_bytes(
           tree, before, dump_sha256="d" * 64, sync_generation=generation
@@ -3777,19 +3891,1095 @@ def test_validate_contracts_checks_the_committed_receipt_of_a_finalized_binding(
           f" binding's {live['sync_generation']}: it is the receipt of another"
           " sync"
       )
-    _write_receipt(committed, data, trusted_key)
-    fields = json.loads(data)
-    for key, value in (
-        ("verified_revision", fields["revision"]),
-        ("verified_dump_sha256", fields["dump_sha256"]),
-        ("capture_receipt_sha256", hashlib.sha256(data).hexdigest()),
-    ):
-      _set_record(tree, key, value)
+    else:
+      # Another key, which a new line trusts for any signer, or for SIGNER,
+      # whom the file lists already with the trusted key.
+      key = untrusted_key
+      data = _receipt_bytes(tree, before, dump_sha256="d" * 64)
+      [listed] = _signer_lines(tree, SIGNER)
+      principal = "*" if edit == "receipt-of-a-key-for-any-signer" else SIGNER
+      _trust(tree, untrusted_key, principal)
+      number = len((tree / SIGNERS).read_text(encoding="utf-8").splitlines())
+      problem = (
+          "its principal '*' is not the literal name of one signer (a"
+          " pattern, a list or a quoted name is refused)"
+          if principal == "*"
+          else f"it lists the signer {SIGNER!r} again (line {listed} lists"
+          " it, ignoring letter case)"
+      )
+      expected = f"{prefix}: {COMMITTED}: {SIGNERS} line {number}: {problem}"
+    _write_receipt(committed, data, key)
+    _record_receipt(tree, data)
+    if key == untrusted_key:
+      assert _ssh_keygen_verifies(tree, committed)
 
   result = _validate(tree)
 
   assert result.returncode == 1
   assert expected in result.stderr
+
+  edited = _snapshot(tree)
+  for args in (_write_args(before), ["--check"]):
+    again = _finalize(tree, "--dump", str(dump), *args)
+
+    assert again.returncode == 1, again.stdout + again.stderr
+    assert "nothing to finalize" not in again.stdout
+    if refusal is not None:
+      assert refusal in again.stderr
+      assert "ERROR: " not in again.stderr
+    else:
+      assert expected in again.stderr
+      assert (
+          f"not finalized: {BINDING} has no {LIVE}.{PENDING}, but"
+          f" tools/validate_contracts.py exited 1 on {dump}, so the live sync"
+          f" that it records is not confirmed; {BINDING} is unchanged"
+      ) in again.stderr
+    assert _snapshot(tree) == edited
+
+
+@pytest.mark.usefixtures("signing_keys")
+@pytest.mark.parametrize(
+    "fixture, errors",
+    [(GENERIC_DUMP, 209), (REMAPPED_DUMP, 0)],
+    ids=["sanitized", "remapped"],
+)
+def test_finalize_check_audits_a_finalized_binding_with_the_dump(
+    tmp_path, fixture, errors
+):
+  """With nothing pending, --check passes only if the live audit passes.
+
+  The repository's binding is finalized. The sanitized cut of the template
+  before its sync has generic column IDs, so the live audit lists its 209
+  errors and --check exits 1. Its remapped twin passes the audit, but it is
+  not the capture that the binding records, so --check reports nothing to
+  finalize from a content audit only and says why, and a write with it is
+  refused. None of them writes anything.
+  """
+  copy_root = tmp_path / "repo/dashboards/looker_studio"
+  shutil.copytree(
+      DASHBOARD, copy_root, ignore=shutil.ignore_patterns("__pycache__")
+  )
+  live = _live(copy_root)
+  assert PENDING not in live
+  before_snapshot = _snapshot(copy_root)
+
+  result = _finalize(copy_root, "--check", "--dump", str(fixture))
+
+  assert result.returncode == (1 if errors else 0), (
+      result.stdout + result.stderr
+  )
+  audit_errors = [
+      line
+      for line in result.stderr.splitlines()
+      if line.startswith("ERROR: live report ")
+  ]
+  assert len(audit_errors) == errors
+  refused = (
+      f"not finalized: {BINDING} has no {LIVE}.{PENDING}, but"
+      f" tools/validate_contracts.py exited 1 on {fixture}, so the live sync"
+      f" that it records is not confirmed; {BINDING} is unchanged"
+  )
+  digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
+  not_recorded = (
+      f"{fixture} has sha256 {digest}, not {LIVE}.verified_dump_sha256"
+      f" {live['verified_dump_sha256']}; {NO_REPORT_FIELD}"
+  )
+  audited = (
+      f"nothing to finalize: {BINDING} has no {LIVE}.{PENDING}, and the live"
+      f" audit of {fixture} passed (content audit only, not the capture that"
+      f" it records: {not_recorded}); it is unchanged"
+  )
+  assert (refused in result.stderr) == bool(errors)
+  assert (audited in result.stdout) == (not errors)
+  assert f"audit of {fixture} passed; it is unchanged" not in result.stdout
+  assert "the capture that it records, passed" not in result.stdout
+  assert _snapshot(copy_root) == before_snapshot
+  if errors:
+    return
+
+  # A write needs the capture on record and the inputs that recorded it.
+  write = _finalize(
+      copy_root,
+      "--dump",
+      str(fixture),
+      *_write_args(GENERIC_DUMP, live["verified_revision"]),
+  )
+
+  assert write.returncode == 1, write.stdout + write.stderr
+  assert "nothing to finalize" not in write.stdout
+  assert (
+      f"not finalized: {BINDING} has no {LIVE}.{PENDING}, and the live audit"
+      f" of {fixture} passed, but a write needs the capture that it records:"
+      f" {not_recorded}; cannot read the capture receipt"
+      f" {fixture}.receipt.json: No such file or directory; {BINDING} is"
+      " unchanged"
+  ) in write.stderr
+  assert _snapshot(copy_root) == before_snapshot
+
+
+def test_finalize_refuses_an_offline_preview_with_nothing_pending(tmp_path):
+  """With nothing pending, an offline preview is refused before the audit.
+
+  The repository's binding is finalized. The offline preview of the sanitized
+  cut (the bytes that tools/apply_bqca_rename_map.py writes for it, which
+  `_remapped_sanitized_dump` gives without running the tool's audit) is no
+  dump of the live template, so --check and a write both refuse it without
+  running the audit, and write nothing. Neither needs OpenSSH.
+  """
+  copy_root = tmp_path / "repo/dashboards/looker_studio"
+  shutil.copytree(
+      DASHBOARD, copy_root, ignore=shutil.ignore_patterns("__pycache__")
+  )
+  assert PENDING not in _live(copy_root)
+  work = tmp_path / "offline"
+  work.mkdir()
+  preview = work / "preview.textproto"
+  preview.write_bytes(_remapped_sanitized_dump())
+  before_snapshot = _snapshot(copy_root)
+
+  for args in (["--check"], ["--before", str(GENERIC_DUMP), "--revision", "1"]):
+    result = _finalize(copy_root, "--dump", str(preview), *args)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert (
+        f"not finalized: {preview} {OFFLINE_PREVIEW}; {BINDING} is unchanged"
+    ) in result.stderr
+    assert "nothing to finalize" not in result.stdout
+    assert "contracts validated" not in result.stdout
+    assert _snapshot(copy_root) == before_snapshot
+
+
+def test_finalize_with_nothing_pending_confirms_only_the_capture_on_record(
+    tree, tmp_path, dump, receipt, before, offline_preview
+):
+  """With nothing pending, a pass confirms the capture on record only.
+
+  Once the copy is finalized, its binding records the capture that it was
+  finalized from. Another dump that passes the live audit (the capture with a
+  comment added) gets a content audit only from --check, which says why, and
+  a write with it is refused, as is a write with the capture on record but
+  another receipt, revision or capture before the write-back. The capture's
+  bytes without their receipt are the capture on record for --check, but not
+  for a write. An offline preview, which passes the live audit, and bytes
+  that are not UTF-8 are refused in both modes before the audit. None of
+  them writes anything.
+  """
+  first = _finalize(tree, "--dump", str(dump), *_write_args(before))
+  assert first.returncode == 0, first.stdout + first.stderr
+  finalized = _snapshot(tree)
+  live = _live(tree)
+  others = tmp_path / "others"
+  others.mkdir()
+
+  def copied(name, data, receipt_data=None):
+    """Write `data` to `name`, with `receipt_data` and dump's signature."""
+    path = others / name
+    path.write_bytes(data)
+    if receipt_data is not None:
+      copy = _receipt_path(path)
+      copy.write_bytes(receipt_data)
+      signature = receipt.with_name(f"{receipt.name}.sig").read_bytes()
+      copy.with_name(f"{copy.name}.sig").write_bytes(signature)
+    return path
+
+  def not_recorded(path):
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return (
+        f"{path} has sha256 {digest}, not {LIVE}.verified_dump_sha256"
+        f" {live['verified_dump_sha256']}"
+    )
+
+  def no_receipt(path):
+    return (
+        f"cannot read the capture receipt {_receipt_path(path)}: No such file"
+        " or directory"
+    )
+
+  def passed(path, reasons=None):
+    if reasons is None:
+      return (
+          f"nothing to finalize: {BINDING} has no {LIVE}.{PENDING}, and the"
+          f" live audit of {path}, the capture that it records, passed; it is"
+          " unchanged"
+      )
+    return (
+        f"nothing to finalize: {BINDING} has no {LIVE}.{PENDING}, and the live"
+        f" audit of {path} passed (content audit only, not the capture that"
+        f" it records: {reasons}); it is unchanged"
+    )
+
+  def needs_record(path, *reasons):
+    return (
+        f"not finalized: {BINDING} has no {LIVE}.{PENDING}, and the live audit"
+        f" of {path} passed, but a write needs the capture that it records:"
+        f" {'; '.join(reasons)}; {BINDING} is unchanged"
+    )
+
+  data = dump.read_bytes()
+  commented = copied("commented.textproto", data + b"# a comment\n")
+  bare = copied("bare.textproto", data)
+  relabeled = copied("relabeled.textproto", data, receipt.read_bytes() + b"\n")
+  relabeled_receipt = _receipt_path(relabeled).read_bytes()
+  wrong_receipt = (
+      f"the receipt {_receipt_path(relabeled)} has sha256"
+      f" {hashlib.sha256(relabeled_receipt).hexdigest()}, not"
+      f" {LIVE}.capture_receipt_sha256 {live['capture_receipt_sha256']}"
+  )
+  later = "1830000000002"
+  wrong_revision = (
+      f"--revision '{later}' is not {LIVE}.verified_revision '{REVISION}'"
+  )
+  wrong_before = (
+      f"--before {dump} has sha256 {hashlib.sha256(data).hexdigest()}, not"
+      " the before_dump_sha256 of the receipt,"
+      f" {hashlib.sha256(before.read_bytes()).hexdigest()}"
+  )
+  cases = [
+      # The dump, the arguments, the exit code and what it prints.
+      (commented, ["--check"], 0, passed(commented, not_recorded(commented))),
+      (
+          commented,
+          _write_args(before),
+          1,
+          needs_record(
+              commented, not_recorded(commented), no_receipt(commented)
+          ),
+      ),
+      (bare, ["--check"], 0, passed(bare)),
+      (bare, _write_args(before), 1, needs_record(bare, no_receipt(bare))),
+      (
+          relabeled,
+          _write_args(before),
+          1,
+          needs_record(relabeled, wrong_receipt),
+      ),
+      (dump, _write_args(before, later), 1, needs_record(dump, wrong_revision)),
+      (dump, _write_args(dump), 1, needs_record(dump, wrong_before)),
+      # The capture on record, with the inputs that recorded it, still passes.
+      (dump, _write_args(before), 0, passed(dump)),
+  ]
+  for path, args, code, expected in cases:
+    result = _finalize(tree, "--dump", str(path), *args)
+
+    output = result.stdout + result.stderr
+    assert result.returncode == code, (path, args, output)
+    assert expected in (result.stderr if code else result.stdout), (
+        path,
+        args,
+        output,
+    )
+    assert "contracts validated" in result.stdout, (path, args, output)
+    if code:
+      assert "nothing to finalize" not in result.stdout, (path, args, output)
+    assert _snapshot(tree) == finalized
+
+  # Bytes that are no dump of the live template are refused before the
+  # audit, in both modes, even an offline preview that passes it.
+  assert _audit(tree, offline_preview).returncode == 0
+  latin_1 = copied("latin-1.textproto", data + b"# caf\xe9\n")
+  for path, refusal in (
+      (offline_preview, f"{offline_preview} {OFFLINE_PREVIEW}"),
+      (latin_1, f"cannot read {latin_1} as UTF-8 text: "),
+  ):
+    for args in (["--check"], _write_args(before)):
+      result = _finalize(tree, "--dump", str(path), *args)
+
+      output = result.stdout + result.stderr
+      assert result.returncode == 1, (path, args, output)
+      assert f"not finalized: {refusal}" in result.stderr, (path, args, output)
+      assert f"; {BINDING} is unchanged" in result.stderr
+      assert "nothing to finalize" not in result.stdout
+      assert "contracts validated" not in result.stdout
+      assert "ERROR: " not in result.stderr
+      assert _snapshot(tree) == finalized
+
+
+_PATTERN_PRINCIPAL = (
+    "its principal {principal!r} is not the literal name of one signer (a"
+    " pattern, a list or a quoted name is refused)"
+)
+_STRICT_OPTION = f'namespaces="{NAMESPACE}"'
+
+
+@pytest.mark.parametrize(
+    "line, problem",
+    [
+        pytest.param(
+            f"* {_STRICT_OPTION} {{key}}",
+            _PATTERN_PRINCIPAL.format(principal="*"),
+            id="any-signer",
+        ),
+        pytest.param(
+            f"test-* {_STRICT_OPTION} {{key}}",
+            _PATTERN_PRINCIPAL.format(principal="test-*"),
+            id="signer-pattern",
+        ),
+        pytest.param(
+            f"test-signe? {_STRICT_OPTION} {{key}}",
+            _PATTERN_PRINCIPAL.format(principal="test-signe?"),
+            id="one-character-pattern",
+        ),
+        pytest.param(
+            f"nobody,{SIGNER} {_STRICT_OPTION} {{key}}",
+            _PATTERN_PRINCIPAL.format(principal=f"nobody,{SIGNER}"),
+            id="signer-list",
+        ),
+        pytest.param(
+            f'"{SIGNER}" {_STRICT_OPTION} {{key}}',
+            _PATTERN_PRINCIPAL.format(principal=f'"{SIGNER}"'),
+            id="quoted-signer",
+        ),
+        pytest.param(
+            f'{SIGNER} namespaces="*" {{key}}',
+            f"its options 'namespaces=\"*\"' are not exactly {_STRICT_OPTION}",
+            id="any-namespace",
+        ),
+        pytest.param(
+            f'{SIGNER} valid-after="20200101",{_STRICT_OPTION} {{key}}',
+            f"its options 'valid-after=\"20200101\",{_STRICT_OPTION}' are not"
+            f" exactly {_STRICT_OPTION}",
+            id="validity-option",
+        ),
+        pytest.param(
+            f"{SIGNER} {{key}}",
+            f"it has no options, not {_STRICT_OPTION}",
+            id="no-options",
+        ),
+        pytest.param(
+            f"{SIGNER} {_STRICT_OPTION} {{key}}",
+            f"it lists the signer {SIGNER!r} again (line {{listed}} lists it,"
+            " ignoring letter case)",
+            id="signer-listed-twice",
+        ),
+    ],
+)
+def test_finalize_refuses_a_signers_line_that_widens_what_it_trusts(
+    tree, dump, before, untrusted_key, line, problem
+):
+  """A receipt that ssh-keygen accepts through a widened line is refused.
+
+  The dump's receipt is signed with the untrusted key, and a new line of the
+  signers file trusts that key for SIGNER through a principal pattern, a
+  list or a quoted name, any namespace, an extra option, no options, or a
+  second line for SIGNER, whom the file lists already with the trusted key.
+  ssh-keygen alone accepts the receipt with each of them; the tools trust no
+  receipt from such a file, so finalize refuses and writes nothing.
+  """
+  [listed] = _signer_lines(tree, SIGNER)
+  _receipt_for(tree, dump, untrusted_key, before)
+  with (tree / SIGNERS).open("a", encoding="utf-8") as handle:
+    handle.write(line.format(key=_public_key(untrusted_key)) + "\n")
+  number = len((tree / SIGNERS).read_text(encoding="utf-8").splitlines())
+  assert _ssh_keygen_verifies(tree, _receipt_path(dump))
+  before_snapshot = _snapshot(tree)
+
+  result = _finalize(tree, "--dump", str(dump), *_write_args(before))
+
+  assert result.returncode == 1, result.stdout + result.stderr
+  assert (
+      f"{SIGNERS} line {number}: {problem.format(listed=listed)}; each signer"
+      f" is listed once, as '<signer> {_STRICT_OPTION} <key type> <public"
+      " key>', so the file trusts no receipt"
+  ) in result.stderr
+  assert _snapshot(tree) == before_snapshot
+
+
+# A key that the parser of the signers file reads: it checks that the key is
+# canonical base64 and the OpenSSH wire form of a key of its type (this one is
+# the key blob of an ed25519 key of 32 arbitrary bytes), and ssh-keygen checks
+# the signature that the key verifies.
+_PARSER_KEY = (
+    "ssh-ed25519"
+    " AAAAC3NzaC1lZDI1NTE5AAAAIFBhcnNlclRlc3RLZXkwMTIzNDU2Nzg5YWJjZGVmMDEy"
+)
+_SIGNERS_FORM = (
+    f"each signer is listed once, as '<signer> {_STRICT_OPTION} <key type>"
+    " <public key>', so the file trusts no receipt"
+)
+_NOT_CANONICAL = "its public key is not canonical base64"
+_NOT_A_KEY = (
+    "its public key is canonical base64 but not the OpenSSH wire form of a"
+    " valid {key_type} key"
+)
+# Public keys that ssh-keygen refuses as `invalid key` on the line of the
+# signer that it verifies, and that a base64 shape alone accepts: `A`, `AA`,
+# `AAA` and `AAAAA` are not whole groups of four characters, `A=` is padded
+# wrongly, `AB==` has bits after its last byte that are not zero, and the
+# canonical key of _PARSER_KEY with one more `=` has padding it does not need.
+_NON_CANONICAL_KEYS = {
+    "one-character": "A",
+    "one-character-padded": "A=",
+    "two-characters": "AA",
+    "three-characters": "AAA",
+    "five-characters": "AAAAA",
+    "bits-after-the-last-byte": "AB==",
+    "extra-padding": f"{_PARSER_KEY.split()[1]}=",
+}
+# Public keys that are not base64 at all: a character outside its alphabet,
+# and padding before the end.
+_NOT_BASE64_KEYS = {
+    "characters-outside-base64": "not-base64*",
+    "padding-before-the-end": "AAA=A===",
+}
+
+
+def _key_blob(*fields):
+  """Return the base64 key whose blob is the OpenSSH wire strings `fields`."""
+  blob = b"".join(struct.pack(">I", len(field)) + field for field in fields)
+  return base64.b64encode(blob).decode("ascii")
+
+
+def _key_fields(key):
+  """Return the OpenSSH wire strings of the blob of the base64 key `key`."""
+  blob = base64.b64decode(key)
+  fields = []
+  while blob:
+    (length,) = struct.unpack(">I", blob[:4])
+    fields.append(blob[4 : 4 + length])
+    blob = blob[4 + length :]
+  return fields
+
+
+# The key of the committed signers file's first signer.
+_COMMITTED_KEY = next(
+    line.split()[3]
+    for line in (DASHBOARD / SIGNERS).read_text(encoding="utf-8").splitlines()
+    if line.strip() and not line.lstrip().startswith("#")
+)
+# Public keys that ssh-keygen generated for these tests, one on each NIST
+# curve; their private keys were not kept.
+_ECDSA_KEYS = {
+    "nistp256": (
+        "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBKoyEI3pfOWGWd4f"
+        "MeXMlAyg4NT76LBtvwQn61dslMETcZPvW/iRSTDETDKYzulOTgr+S2kcJZi6dzPFaWRd"
+        "RCc="
+    ),
+    "nistp384": (
+        "AAAAE2VjZHNhLXNoYTItbmlzdHAzODQAAAAIbmlzdHAzODQAAABhBN29NdVzxqXTXyN7"
+        "KsViAX+DbiMVnYlpmaX8CgE7sT2kHAR/mNDBe7YmhDIX3Lm2jWlCiN0vOcUaLNNqmRt0"
+        "E9yXJ7Jthye099m8x5ehTn9/XJHa+EIlQ68DxTVM94usuw=="
+    ),
+    "nistp521": (
+        "AAAAE2VjZHNhLXNoYTItbmlzdHA1MjEAAAAIbmlzdHA1MjEAAACFBACwC5tAcTI3cRxg"
+        "G4qhNlnBqwubxKnFX/9US40pbBU/UFhCPAz3kFbP8aneF26J2jJx+AEHUYHYMzvGIG3y"
+        "iUSpagGLAMtsJlQ+x50At9LI3brq5bgKNEc7mieQYtwf8eB36XE0M4A/58JtFUVpiy9c"
+        "6uKuaVB67ZMSS1ye89j4cRweSA=="
+    ),
+}
+_ED25519_KEY = _key_fields(_PARSER_KEY.split()[1])[1]
+_P256_POINT = _key_fields(_ECDSA_KEYS["nistp256"])[2]
+_RSA_EXPONENT = bytes([1, 0, 1])
+# A modulus of 1024 bits, the fewest that ssh-keygen reads: its first bit is
+# set, so its mpint starts with a zero byte.
+_RSA_MODULUS = bytes(1) + (2**1023 + 1).to_bytes(128, "big")
+_SK_ED25519 = "sk-ssh-ed25519@openssh.com"
+_SK_ECDSA = "sk-ecdsa-sha2-nistp256@openssh.com"
+_SK_APPLICATION = b"ssh:"
+# A key of each key type that a signers line may list, in the form that
+# ssh-keygen reads: the security-key types are an ed25519 key and a nistp256
+# point with the application of a security key.
+_SIGNER_KEYS = {
+    "ssh-ed25519": _PARSER_KEY,
+    "ssh-rsa": "ssh-rsa " + _key_blob(b"ssh-rsa", _RSA_EXPONENT, _RSA_MODULUS),
+    **{
+        f"ecdsa-sha2-{curve}": f"ecdsa-sha2-{curve} {key}"
+        for curve, key in _ECDSA_KEYS.items()
+    },
+    _SK_ED25519: _SK_ED25519
+    + " "
+    + _key_blob(_SK_ED25519.encode(), _ED25519_KEY, _SK_APPLICATION),
+    _SK_ECDSA: _SK_ECDSA
+    + " "
+    + _key_blob(_SK_ECDSA.encode(), b"nistp256", _P256_POINT, _SK_APPLICATION),
+}
+# Canonical base64 keys that ssh-keygen refuses as `invalid key` on the line
+# of the signer that it verifies: their blobs are not the OpenSSH wire form of
+# a key of the line's key type. Three zero bytes, one zero byte, the committed
+# key cut to 64 characters, an RSA key on an ssh-ed25519 line, a 31-byte
+# ed25519 key, a field after the key, a 1023-bit or a negative RSA modulus, a
+# compressed or an off-curve ECDSA point, a nistp256 point on a nistp384 line,
+# and a security key without its application.
+_NOT_SIGNER_KEYS = {
+    "three-zero-bytes": "ssh-ed25519 AAAA",
+    "one-zero-byte": "ssh-ed25519 AA==",
+    "committed-key-cut-to-64-characters": f"ssh-ed25519 {_COMMITTED_KEY[:64]}",
+    "rsa-key-on-an-ed25519-line": (
+        "ssh-ed25519 " + _key_blob(b"ssh-rsa", _RSA_EXPONENT, _RSA_MODULUS)
+    ),
+    "ed25519-key-of-31-bytes": (
+        "ssh-ed25519 " + _key_blob(b"ssh-ed25519", _ED25519_KEY[:31])
+    ),
+    "field-after-the-key": (
+        "ssh-ed25519 " + _key_blob(b"ssh-ed25519", _ED25519_KEY, b"")
+    ),
+    "rsa-modulus-of-1023-bits": "ssh-rsa "
+    + _key_blob(b"ssh-rsa", _RSA_EXPONENT, (2**1022 + 1).to_bytes(128, "big")),
+    "negative-rsa-modulus": (
+        "ssh-rsa " + _key_blob(b"ssh-rsa", _RSA_EXPONENT, _RSA_MODULUS[1:])
+    ),
+    "compressed-ecdsa-point": "ecdsa-sha2-nistp256 "
+    + _key_blob(
+        b"ecdsa-sha2-nistp256",
+        b"nistp256",
+        bytes([2 + _P256_POINT[-1] % 2]) + _P256_POINT[1:33],
+    ),
+    "ecdsa-point-off-the-curve": "ecdsa-sha2-nistp256 "
+    + _key_blob(
+        b"ecdsa-sha2-nistp256",
+        b"nistp256",
+        _P256_POINT[:-1] + bytes([_P256_POINT[-1] ^ 1]),
+    ),
+    "nistp256-point-on-a-nistp384-line": "ecdsa-sha2-nistp384 "
+    + _key_blob(b"ecdsa-sha2-nistp384", b"nistp256", _P256_POINT),
+    "security-key-without-application": (
+        f"{_SK_ED25519} {_key_blob(_SK_ED25519.encode(), _ED25519_KEY)}"
+    ),
+}
+# Keys that ssh-keygen reads but that can be no signer's key, which the parser
+# refuses too: an RSA exponent of 0 and a security key's empty application.
+_DEGENERATE_SIGNER_KEYS = {
+    "rsa-exponent-of-zero": (
+        "ssh-rsa " + _key_blob(b"ssh-rsa", b"", _RSA_MODULUS)
+    ),
+    "empty-security-key-application": _SK_ED25519
+    + " "
+    + _key_blob(_SK_ED25519.encode(), _ED25519_KEY, b""),
+}
+# Every key above that a signers line may not list, by name: the key type and
+# key that follow the option, and the problem that names the line.
+_REFUSED_SIGNER_KEYS = {
+    **{
+        name: (f"ssh-ed25519 {key}", _NOT_CANONICAL)
+        for name, key in {**_NON_CANONICAL_KEYS, **_NOT_BASE64_KEYS}.items()
+    },
+    **{
+        name: (key, _NOT_A_KEY.format(key_type=key.split()[0]))
+        for name, key in {
+            **_NOT_SIGNER_KEYS,
+            **_DEGENERATE_SIGNER_KEYS,
+        }.items()
+    },
+}
+
+
+@pytest.mark.parametrize(
+    "signers, error",
+    [
+        pytest.param(
+            f"{SIGNER} {_STRICT_OPTION} {_PARSER_KEY}\n", None, id="one"
+        ),
+        pytest.param(
+            "# Signers.\n\n  # An indented comment.\r\n"
+            f"{SIGNER} {_STRICT_OPTION} {_PARSER_KEY} a key comment\r\n"
+            f"\tmaintainer@example.com\t{_STRICT_OPTION}\t{_PARSER_KEY}",
+            None,
+            id="comments-crlf-tabs-and-key-comments",
+        ),
+        pytest.param(
+            f'{SIGNER} namespaces="other" {_PARSER_KEY}\n',
+            f"{SIGNERS} line 1: its options 'namespaces=\"other\"' are not"
+            f" exactly {_STRICT_OPTION}; {_SIGNERS_FORM}",
+            id="other-namespace",
+        ),
+        pytest.param(
+            f'{SIGNER} NAMESPACES="{NAMESPACE}" {_PARSER_KEY}\n',
+            f"{SIGNERS} line 1: its options 'NAMESPACES=\"{NAMESPACE}\"' are"
+            f" not exactly {_STRICT_OPTION}; {_SIGNERS_FORM}",
+            id="option-in-capitals",
+        ),
+        pytest.param(
+            f"{SIGNER} cert-authority,{_STRICT_OPTION} {_PARSER_KEY}\n",
+            f"{SIGNERS} line 1: its options 'cert-authority,{_STRICT_OPTION}'"
+            f" are not exactly {_STRICT_OPTION}; {_SIGNERS_FORM}",
+            id="certificate-authority",
+        ),
+        pytest.param(
+            f"{SIGNER} {_STRICT_OPTION} ssh-ed25519-cert-v01@openssh.com AAAA\n",
+            f"{SIGNERS} line 1: its key type 'ssh-ed25519-cert-v01@openssh.com'"
+            " is not one of ssh-ed25519, ssh-rsa, ecdsa-sha2-nistp256,"
+            " ecdsa-sha2-nistp384, ecdsa-sha2-nistp521,"
+            " sk-ssh-ed25519@openssh.com, sk-ecdsa-sha2-nistp256@openssh.com;"
+            f" {_SIGNERS_FORM}",
+            id="certificate-key",
+        ),
+        pytest.param(
+            f"{SIGNER} {_STRICT_OPTION} ssh-ed25519 not-base64!\n",
+            f"{SIGNERS} line 1: {_NOT_CANONICAL}; {_SIGNERS_FORM}",
+            id="key-not-base64",
+        ),
+        *[
+            pytest.param(
+                f"{SIGNER} {_STRICT_OPTION} ssh-ed25519 {key}\n",
+                f"{SIGNERS} line 1: {_NOT_CANONICAL}; {_SIGNERS_FORM}",
+                id=f"key-{name}",
+            )
+            for name, key in _NON_CANONICAL_KEYS.items()
+        ],
+        *[
+            pytest.param(
+                f"{SIGNER} {_STRICT_OPTION} {key}\n",
+                None,
+                id=f"key-type-{key_type}",
+            )
+            for key_type, key in _SIGNER_KEYS.items()
+        ],
+        *[
+            pytest.param(
+                f"{SIGNER} {_STRICT_OPTION} {_PARSER_KEY}\n"
+                f"other-user {_STRICT_OPTION} {key}\n",
+                f"{SIGNERS} line 2: {problem}; {_SIGNERS_FORM}",
+                id=f"second-signer-{name}",
+            )
+            for name, (key, problem) in _REFUSED_SIGNER_KEYS.items()
+        ],
+        pytest.param(
+            f"{SIGNER} {_STRICT_OPTION} {_PARSER_KEY}\n"
+            f"other-user {_STRICT_OPTION} ssh-ed25519 AAAA\textra\n",
+            f"{SIGNERS} line 2: {_NOT_A_KEY.format(key_type='ssh-ed25519')};"
+            f" {_SIGNERS_FORM}",
+            id="second-signer-three-zero-bytes-then-a-tab",
+        ),
+        pytest.param(
+            f"{SIGNER} {_STRICT_OPTION} ssh-ed25519\n",
+            f"{SIGNERS} line 1: it does not have the signer, option, key type"
+            f" and key fields; {_SIGNERS_FORM}",
+            id="no-key",
+        ),
+        pytest.param(
+            f"# Signers.\n{SIGNER} {_STRICT_OPTION} {_PARSER_KEY}\n"
+            f"Test-Signer {_STRICT_OPTION} {_PARSER_KEY}\n",
+            f"{SIGNERS} line 3: it lists the signer 'Test-Signer' again (line 2"
+            f" lists it, ignoring letter case); {_SIGNERS_FORM}",
+            id="signer-again-in-other-capitals",
+        ),
+        pytest.param(
+            f"{SIGNER}\u00a0{_STRICT_OPTION} {_PARSER_KEY}\n",
+            f"{SIGNERS} line 1: it holds a character that is not printable"
+            f" ASCII or a tab; {_SIGNERS_FORM}",
+            id="no-break-space",
+        ),
+        pytest.param(
+            "# No signer.\n\n",
+            f"{SIGNERS} lists no signer, so it trusts no receipt",
+            id="no-signer",
+        ),
+    ],
+)
+def test_signers_file_lists_each_signer_once_in_one_strict_form(signers, error):
+  """Only literal, once-listed signers with exactly the namespace option pass.
+
+  Blank lines, comments, carriage returns before line feeds, tabs between
+  fields and key comments are allowed, and a key of each key type passes;
+  any other option or option spelling, a certificate key type, a key that is
+  not canonical base64 (not whole groups of four characters, padded wrongly,
+  or with bits after its last byte) or whose blob is not the OpenSSH wire
+  form of a key of its type (on the line of a second signer, which
+  ssh-keygen never reads while it verifies for the first; a tab ends the key
+  field, as ssh-keygen splits it), a missing field, a signer listed again in
+  other capitals, a character that ssh-keygen would not split at, or a file
+  with no signer is refused.
+  """
+  validator = _load_validator()
+
+  assert validator.bqca_capture_signers_error(signers.encode("utf-8")) == error
+
+
+def test_the_signer_keys_are_one_of_each_key_type():
+  """_SIGNER_KEYS gives one key of each key type that a signer may list."""
+  validator = _load_validator()
+
+  assert list(_SIGNER_KEYS) == list(validator.BQCA_CAPTURE_SIGNER_KEY_TYPES)
+  assert [key.split()[0] for key in _SIGNER_KEYS.values()] == list(_SIGNER_KEYS)
+
+
+def test_signers_file_must_be_utf_8():
+  error = _load_validator().bqca_capture_signers_error(
+      f"{SIGNER} \xff\n".encode("latin-1")
+  )
+
+  assert error is not None
+  assert error.startswith(f"{SIGNERS} is not UTF-8 text (")
+  assert error.endswith("), so it trusts no receipt")
+
+
+@pytest.mark.parametrize(
+    "key, problem",
+    list(_REFUSED_SIGNER_KEYS.values()),
+    ids=list(_REFUSED_SIGNER_KEYS),
+)
+def test_a_signers_key_that_ssh_keygen_refuses_stops_the_check_before_it_runs(
+    monkeypatch, key, problem
+):
+  """A signers file with such a key is refused before ssh-keygen runs.
+
+  The first line lists SIGNER, as the committed file lists its signer; the
+  second lists another principal with a key that ssh-keygen refuses but never
+  reads while it verifies for SIGNER, so only the parser of the file can stop
+  it. `shutil.which` finds an ssh-keygen and `subprocess.run` is a spy, so the
+  test needs no OpenSSH and fails if the check gets as far as running it.
+  """
+  validator = _load_validator()
+  runs = []
+
+  def spy(*args, **kwargs):
+    runs.append((args, kwargs))
+    raise AssertionError("ssh-keygen ran on a signers file that is refused")
+
+  monkeypatch.setattr(validator, "subprocess", types.SimpleNamespace(run=spy))
+  monkeypatch.setattr(
+      validator, "shutil", types.SimpleNamespace(which=lambda name: name)
+  )
+  signers = (
+      f"{SIGNER} {_STRICT_OPTION} {_PARSER_KEY}\n"
+      f"other-signer {_STRICT_OPTION} {key}\n"
+  ).encode("utf-8")
+
+  error = validator.bqca_capture_signature_error(
+      b"receipt", b"signature", SIGNER, signers
+  )
+
+  assert error == f"{SIGNERS} line 2: {problem}; {_SIGNERS_FORM}"
+  assert not runs
+
+
+def test_a_refused_signers_key_is_named_where_ssh_keygen_is_not_installed(
+    monkeypatch,
+):
+  """The signers file is checked before the check looks for ssh-keygen.
+
+  Without OpenSSH, a signature cannot be verified, but a line that lists a
+  key that no ssh-keygen reads is still named, not hidden behind the missing
+  ssh-keygen; a signers file that passes gets the missing ssh-keygen.
+  """
+  validator = _load_validator()
+  monkeypatch.setattr(
+      validator, "shutil", types.SimpleNamespace(which=lambda name: None)
+  )
+  key, problem = _REFUSED_SIGNER_KEYS["three-zero-bytes"]
+  strict = f"{SIGNER} {_STRICT_OPTION} {_PARSER_KEY}\n"
+
+  refused = validator.bqca_capture_signature_error(
+      b"receipt",
+      b"signature",
+      SIGNER,
+      f"{strict}other-signer {_STRICT_OPTION} {key}\n".encode("utf-8"),
+  )
+  missing = validator.bqca_capture_signature_error(
+      b"receipt", b"signature", SIGNER, strict.encode("utf-8")
+  )
+
+  assert refused == f"{SIGNERS} line 2: {problem}; {_SIGNERS_FORM}"
+  assert missing == (
+      "cannot verify the receipt's signature: ssh-keygen (OpenSSH 8.2 or"
+      " later) is not on PATH"
+  )
+
+
+@pytest.mark.usefixtures("signing_keys")
+def test_the_signers_key_check_reads_the_keys_that_ssh_keygen_reads(tmp_path):
+  """A signer's key passes the parser exactly when `ssh-keygen -l` reads it.
+
+  The keys are _SIGNER_KEYS, _NOT_SIGNER_KEYS, and keys that ssh-keygen
+  generates of each key type that needs no security key, whole, cut short by
+  a byte, and with a field after them. ssh-keygen prints the fingerprint of
+  each key that the parser passes and refuses each that it refuses.
+  """
+  validator = _load_validator()
+  keys = {**_SIGNER_KEYS, **_NOT_SIGNER_KEYS}
+  valid = set(_SIGNER_KEYS)
+  for kind, bits in (
+      ("ed25519", None),
+      ("rsa", "1024"),
+      ("rsa", "3072"),
+      ("ecdsa", "256"),
+      ("ecdsa", "384"),
+      ("ecdsa", "521"),
+  ):
+    name = f"generated-{kind}{bits or ''}"
+    path = tmp_path / name
+    subprocess.run(
+        [SSH_KEYGEN, "-q", "-t", kind, *(["-b", bits] if bits else [])]
+        + ["-N", "", "-C", name, "-f", str(path)],
+        check=True,
+        env=_ssh_environment(),
+    )
+    key_type, key = _public_key(path).split()
+    blob = base64.b64decode(key)
+    keys[name] = f"{key_type} {key}"
+    valid.add(name)
+    for variant, cut in (
+        ("cut-short", blob[:-1]),
+        ("and-a-field", blob + struct.pack(">I", 0)),
+    ):
+      keys[f"{name}-{variant}"] = (
+          f"{key_type} {base64.b64encode(cut).decode('ascii')}"
+      )
+  public = tmp_path / "key.pub"
+  parsed = {}
+  read = {}
+  for name, line in keys.items():
+    key_type, key = line.split()
+    parsed[name] = validator._is_valid_ssh_public_key_blob(
+        key_type, base64.b64decode(key)
+    )
+    public.write_text(f"{line}\n", encoding="utf-8")
+    read[name] = (
+        subprocess.run(
+            [SSH_KEYGEN, "-l", "-f", str(public)],
+            capture_output=True,
+            check=False,
+            env=_ssh_environment(),
+        ).returncode
+        == 0
+    )
+
+  assert parsed == {name: name in valid for name in keys}
+  assert read == parsed
+
+
+@pytest.mark.parametrize(
+    "key, problem",
+    [
+        _REFUSED_SIGNER_KEYS[name]
+        for name in (*_NON_CANONICAL_KEYS, "three-zero-bytes")
+    ],
+    ids=[*_NON_CANONICAL_KEYS, "three-zero-bytes"],
+)
+@pytest.mark.usefixtures("signing_keys")
+def test_a_signers_key_that_ssh_keygen_refuses_fails_validate_and_finalize(
+    tmp_path, key, problem
+):
+  """A second signer's key that ssh-keygen refuses fails every audit.
+
+  The repository's binding is finalized, and its committed receipt is signed
+  by its signer, whom the signers file lists with a valid key: the copy
+  validates. A new line then lists another principal, SIGNER, with a key that
+  ssh-keygen refuses but never reads while it verifies the receipt for the
+  committed signer, so ssh-keygen alone still accepts the receipt: a key that
+  is not canonical base64, or `AAAA`, which is but decodes to three zero
+  bytes. The validator and finalize, with --check and in a write, refuse the
+  file, name its line, and write nothing.
+  """
+  copy_root = tmp_path / "repo/dashboards/looker_studio"
+  shutil.copytree(
+      DASHBOARD, copy_root, ignore=shutil.ignore_patterns("__pycache__")
+  )
+  assert PENDING not in _live(copy_root)
+  control = _validate(copy_root)
+  assert control.returncode == 0, control.stdout + control.stderr
+  with (copy_root / SIGNERS).open("a", encoding="utf-8") as handle:
+    handle.write(f"{SIGNER} {_STRICT_OPTION} {key}\n")
+  number = len((copy_root / SIGNERS).read_text(encoding="utf-8").splitlines())
+  error = f"{SIGNERS} line {number}: {problem}; {_SIGNERS_FORM}"
+  edited = _snapshot(copy_root)
+
+  result = _validate(copy_root)
+
+  assert result.returncode == 1, result.stdout + result.stderr
+  assert f"bqca live_template_verification: {COMMITTED}: {error}" in (
+      result.stderr
+  )
+  for args in (["--check"], _write_args(GENERIC_DUMP)):
+    again = _finalize(copy_root, *args, "--dump", str(REMAPPED_DUMP))
+
+    assert again.returncode == 1, again.stdout + again.stderr
+    assert "nothing to finalize" not in again.stdout
+    assert error in again.stderr
+    assert (
+        f"not finalized: {BINDING} has no {LIVE}.{PENDING}, but"
+        f" tools/validate_contracts.py exited 1 on {REMAPPED_DUMP}, so the"
+        f" live sync that it records is not confirmed; {BINDING} is unchanged"
+    ) in again.stderr
+    assert _snapshot(copy_root) == edited
+
+
+def test_the_committed_signers_file_is_strict():
+  signers = (DASHBOARD / SIGNERS).read_bytes()
+
+  assert _load_validator().bqca_capture_signers_error(signers) is None
+
+
+@pytest.mark.usefixtures("signing_keys")
+def test_the_committed_signers_file_trusts_the_committed_receipt():
+  validator = _load_validator()
+  signers = (DASHBOARD / SIGNERS).read_bytes()
+  data = (DASHBOARD / COMMITTED).read_bytes()
+  signer = validator.parse_bqca_capture_receipt(data)["signer"]
+
+  assert (
+      validator.bqca_capture_signature_error(
+          data, (DASHBOARD / f"{COMMITTED}.sig").read_bytes(), signer, signers
+      )
+      is None
+  )
+
+
+def test_finalize_next_steps_fit_any_later_sync():
+  """The steps that finalize prints after a write name no one sync's notes.
+
+  A later sync removes the notes that its own pending record listed, and
+  records its dated scorecard check; neither tool, the implementation
+  guide nor the dashboard tests keep the wording of the sync that #559
+  tracked.
+  """
+  steps = " ".join(_load_finalize(DASHBOARD).NEXT_STEPS.split())
+
+  for fragment in (
+      "remove the known-issue notes that pending_live_sync.required_actions"
+      " listed before this tool removed it",
+      "create a report with the 1-click link, check that every page renders,"
+      " that each scorecard shows its own field's value over the bound query"
+      " (the Total, Input, Output and Thinking Tokens scorecards each the sum"
+      " of their own field) and that each chart and table returns the rows"
+      " that BigQuery gives (up to its limit), and record the dated result,"
+      " with the report ID of that copy, in the comments above"
+      " live_template_verification",
+  ):
+    assert fragment in steps
+  for path in (
+      DASHBOARD / "tools/finalize_live_sync.py",
+      DASHBOARD / "tools/validate_contracts.py",
+      DASHBOARD / "docs/dashboard-implementation.md",
+      ROOT / "tests/test_looker_studio_dashboard.py",
+  ):
+    relative = path.relative_to(ROOT)
+    text = " ".join(path.read_text(encoding="utf-8").split())
+    for phrase in (
+        "keeps its legacy generic IDs",
+        "keeps its legacy generic column IDs",
+        "stays 2026-10-09 until then",
+        "tracks that sync",
+        "remove the #559 known-issue notes",
+        "#bqca-column-id-note",
+    ):
+      assert phrase not in text, f"{relative} still says {phrase!r}"
+
+
+def test_post_sync_scorecard_check_is_documented_with_distinct_token_values():
+  """The post-sync check is recorded on fresh copies, for every component.
+
+  The 1-click link gives each user a copy of the template, with a report ID
+  and a `ds0` data source of its own, so a check of the template alone
+  cannot show what users get. The guide's record of the check names each
+  fresh copy that it measured, apart from the template and from every data
+  source, as the binding's comments do; covers each scorecard of pages 1 to 6
+  and each chart and table of pages 1 to 7, in tables that give the values a
+  fresh copy returned (observed) and those that BigQuery gives (expected)
+  columns of their own; and shows the five token scorecards with five
+  values on the hydrated table, each the one that BigQuery gives.
+  """
+  binding_text = (DASHBOARD / BINDING).read_text(encoding="utf-8")
+  binding = yaml.safe_load(binding_text)
+  manifest = yaml.safe_load(
+      (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text(encoding="utf-8")
+  )
+  guide = (DASHBOARD / "docs/dashboard-implementation.md").read_text(
+      encoding="utf-8"
+  )
+  _, found, tail = guide.partition("Post-sync scorecard check (2026-11-01)")
+  assert found, "the guide records no post-sync scorecard check"
+  section = re.split(r"(?m)^#{1,6} ", tail, maxsplit=1)[0]
+  head = binding_text.partition("\nlive_template_verification:\n")[0]
+  comments = " ".join(
+      line.lstrip("#").strip()
+      for line in head.splitlines()
+      if line.startswith("#")
+  )
+  tables = []
+  for block in re.findall(r"(?m)(?:^\|.*\n?)+", section):
+    header, _, *body = [
+        [cell.strip() for cell in line.strip().strip("|").split("|")]
+        for line in block.strip().splitlines()
+    ]
+    tables.append((header, body))
+
+  def table(*first):
+    (found,) = [
+        (header, body)
+        for header, body in tables
+        if tuple(header[: len(first)]) == first
+    ]
+    return found
+
+  def quoted(cell):
+    return re.findall(r"`([^`]+)`", cell)
+
+  _, reports = table("Report", "Report ID", "`ds0` data source")
+  data_sources = {binding["datasource_id"]}
+  copies = {}
+  for row in reports:
+    (report,), (source,) = quoted(row[1]), quoted(row[2])
+    data_sources.add(source)
+    if row[0] == "Fresh copy":
+      copies[report] = (source, row[3])
+  assert sorted(name for _, name in copies.values()) == [
+      "canonical sentinel table",
+      "hydrated table",
+  ]
+  assert len({source for source, _ in copies.values()}) == 2
+  for report, (source, _) in copies.items():
+    assert re.fullmatch(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", report)
+    assert report != binding["report_id"] and report not in data_sources
+    assert source != binding["datasource_id"]
+    for text in (section, comments):
+      assert f"`{report}`" in text and f"`{source}`" in text
+
+  scorecard_header, scorecards = table("Page", "Page ID", "ID", "Scorecard")
+  chart_header, charts = table("Page", "Page ID", "ID", "Chart or table")
+  for rows, category, pages in (
+      (scorecards, "scorecard", manifest["pages"][:6]),
+      (charts, "chart", manifest["pages"]),
+  ):
+    assert [quoted(row[2]) for row in rows] == [
+        [component["id"]]
+        for component in manifest["components"]
+        if component["category"] == category
+    ]
+    assert {row[1] for row in rows} == {f"`{page['id']}`" for page in pages}
+  rows = {quoted(row[2])[0]: row for row in scorecards + charts}
+  for component in manifest["components"]:
+    row = rows[component["id"]]
+    concepts = row[5] if component["category"] == "scorecard" else row[6]
+    assert (quoted(row[1]), quoted(row[4]), quoted(concepts)) == (
+        [component["page_id"]],
+        [component["component_id"]],
+        [column["id"] for column in _spec_columns(component)],
+    ), row
+
+  for header in (scorecard_header, chart_header):
+    for kind in ("sentinel", "hydrated"):
+      observed = [
+          cell
+          for cell in header
+          if cell.startswith("Observed") and cell.endswith(f"({kind})")
+      ]
+      expected = [
+          cell
+          for cell in header
+          if cell.startswith("Expected") and cell.endswith(f"({kind})")
+      ]
+      (report,) = [
+          report for report, (_, name) in copies.items() if kind in name
+      ]
+      assert any(f"fresh copy `{report[:8]}`" in cell for cell in observed)
+      assert len(expected) == 1, header
+      assert not any("Expected" in cell for cell in observed), header
+      assert "Observed" not in expected[0], header
+
+  (hydrated,) = [
+      report for report, (_, name) in copies.items() if "hydrated" in name
+  ]
+  observed = scorecard_header.index(
+      f"Observed, fresh copy `{hydrated[:8]}` (hydrated)"
+  )
+  expected = scorecard_header.index("Expected, BigQuery (hydrated)")
+  tokens = [
+      rows[f"kpi_{name}_tokens"]
+      for name in ("total", "input", "output", "thoughts", "cached")
+  ]
+  values = [row[observed] for row in tokens]
+  assert values == [row[expected] for row in tokens]
+  assert len(set(values)) == 5 and "null" not in values, values
 
 
 RENAME_MAP_HEADER = [
@@ -4199,6 +5389,12 @@ def _load_apply(tree):
 
 
 def _apply(*args):
+  """Run tools/apply_bqca_rename_map.py with `args`.
+
+  The tool audits what it writes with tools/validate_contracts.py, which
+  verifies the signature of the binding's capture receipt with ssh-keygen. So
+  a test that gets as far as that audit lists `signing_keys`.
+  """
   return subprocess.run(
       [sys.executable, str(APPLY_TOOL), *args],
       capture_output=True,
@@ -4251,6 +5447,7 @@ def work(tmp_path):
   return path
 
 
+@pytest.mark.usefixtures("signing_keys")
 def test_apply_renames_the_sanitized_dump_into_its_remapped_twin(tmp_path):
   out = tmp_path / "remapped.textproto"
 
@@ -4324,6 +5521,7 @@ def test_apply_renames_the_sanitized_dump_into_its_remapped_twin(tmp_path):
   assert [path.name for path in tmp_path.iterdir()] == ["remapped.textproto"]
 
 
+@pytest.mark.usefixtures("signing_keys")
 def test_apply_maps_a_dump_that_has_the_new_ids_to_itself(tmp_path):
   out = tmp_path / "remapped.textproto"
   marker = f"{_load_apply(DASHBOARD).OFFLINE_PREVIEW_MARKER}\n".encode("utf-8")
@@ -4341,6 +5539,7 @@ def test_apply_maps_a_dump_that_has_the_new_ids_to_itself(tmp_path):
   assert again.read_bytes() == out.read_bytes()
 
 
+@pytest.mark.usefixtures("signing_keys")
 def test_apply_accepts_the_map_that_gen_bqca_rename_map_writes(tmp_path):
   map_csv = tmp_path / "rename-map.csv"
   assert _rename_map("--csv", str(map_csv)).returncode == 0
@@ -4359,6 +5558,7 @@ def test_apply_accepts_the_map_that_gen_bqca_rename_map_writes(tmp_path):
 
 
 @pytest.mark.parametrize("target", ["none", "new", "existing"])
+@pytest.mark.usefixtures("signing_keys")
 def test_apply_check_runs_every_check_and_writes_nothing(tmp_path, target):
   out = tmp_path / "remapped.textproto"
   args = ["--dump", str(GENERIC_DUMP), "--check"]
@@ -4413,6 +5613,7 @@ def test_apply_refuses_an_out_inside_the_repository(
 
 
 @pytest.mark.parametrize("nested", [False, True], ids=["root", "subdir"])
+@pytest.mark.usefixtures("signing_keys")
 def test_apply_refuses_an_out_inside_the_repository_on_a_case_insensitive_filesystem(
     apply_tree, work, monkeypatch, capsys, nested
 ):
@@ -4565,6 +5766,7 @@ def test_apply_refuses_an_out_that_is_the_dump(
   )
 
 
+@pytest.mark.usefixtures("signing_keys")
 def test_apply_replaces_an_existing_out_only_with_force(
     apply_tree, work, capsys
 ):
@@ -4604,6 +5806,7 @@ def test_apply_refuses_an_out_it_cannot_create(apply_tree, work, capsys):
   assert [path.name for path in work.iterdir()] == ["directory"]
 
 
+@pytest.mark.usefixtures("signing_keys")
 def test_apply_refuses_an_out_below_a_missing_directory_and_dot_dot(work):
   # `missing/..` folds into `work`, which exists, but a write opens the path as
   # it is spelled, and fails. So the write and the check must agree.
@@ -5021,6 +6224,7 @@ def _noisy(text):
   return (_NOISE + text).replace("\n", "\r\n")
 
 
+@pytest.mark.usefixtures("signing_keys")
 def test_apply_keeps_every_byte_that_it_does_not_edit(apply_tree, work):
   apply = _load_apply(apply_tree)
   generic = GENERIC_DUMP.read_text(encoding="utf-8")
@@ -5154,6 +6358,7 @@ def test_apply_prints_the_errors_of_the_audit(
   assert len(audited) == 1 and not audited[0].exists()
 
 
+@pytest.mark.usefixtures("signing_keys")
 def test_apply_checks_and_writes_the_bytes_that_it_read(
     apply_tree, work, monkeypatch
 ):
