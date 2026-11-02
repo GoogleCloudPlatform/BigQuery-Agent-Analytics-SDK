@@ -43,6 +43,7 @@ from ._utils import ensure_private_dir
 from ._utils import hex_id
 from ._utils import iso_timestamp
 from ._utils import log_to_file
+from ._utils import PYTHON_C_RUN_MODULE
 from ._utils import truncate
 from ._writer_identity import __version__ as WRITER_VERSION
 from ._writer_identity import WRITER_PLUGIN_NAME
@@ -98,10 +99,13 @@ def _ensure_drainer(config: BQAAConfig) -> None:
   the lock for its entire lifetime. If we cannot take the lock, a drainer is
   already running and will pick up our spool file.
 
-  Spawned via ``python -m bigquery_agent_analytics_tracing.drain``. For
-  vendored plugin installs (no wheel on ``BQAA_PYTHON``), set
-  ``PYTHONPATH`` to the vendored package root before the hook fires, or use
-  a plugin-side wrapper script that performs the ``sys.path`` insert.
+  Runs ``bigquery_agent_analytics_tracing.drain`` like ``python -m``,
+  but without the working directory on ``sys.path`` (see
+  ``PYTHON_C_RUN_MODULE``): it is the hook's, usually a checked-out
+  repository. For vendored plugin installs (no wheel on ``BQAA_PYTHON``),
+  set ``PYTHONPATH`` to the vendored package root before the hook fires,
+  or use a plugin-side wrapper script that performs the ``sys.path``
+  insert.
   """
   with ensure_private_dir(config.spool_dir) as spool:
     fd = spool.open(".drainer.pid", os.O_CREAT | os.O_RDWR)
@@ -117,7 +121,12 @@ def _ensure_drainer(config: BQAAConfig) -> None:
   python_bin = os.environ.get("BQAA_PYTHON") or sys.executable or "python3"
   try:
     subprocess.Popen(
-        [python_bin, "-m", "bigquery_agent_analytics_tracing.drain"],
+        [
+            python_bin,
+            "-c",
+            PYTHON_C_RUN_MODULE,
+            "bigquery_agent_analytics_tracing.drain",
+        ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

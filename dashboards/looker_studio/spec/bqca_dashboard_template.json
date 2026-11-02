@@ -3,7 +3,7 @@
   "profile": "bqca",
   "surface": "bqca_prompt_response_logging_looker_studio",
   "report_id": "42e79a1f-a979-4de8-911f-80d5a99543d5",
-  "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+  "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
   "data_source_alias": "ds0",
   "title": "BigQuery Conversational Analytics (BQCA) \u2014 Prompt & Response Logging",
   "dashboard_url": "https://lookerstudio.google.com/reporting/42e79a1f-a979-4de8-911f-80d5a99543d5",
@@ -14,7 +14,7 @@
   "chart_count": 13,
   "total_component_count": 34,
   "datasource": {
-    "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+    "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
     "data_source_alias": "ds0",
     "display_name": "BQCA Prompt & Response Logs (Template)",
     "connector_type": "BIGQUERY_CUSTOM_QUERY",
@@ -376,7 +376,7 @@
           "chart_type": "SCORECARD",
           "label": "Total Tokens",
           "title": "Total Tokens",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "total_tokens",
           "aggregation": "SUM",
@@ -414,10 +414,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_d779815a",
                     "fieldName": "_total_tokens_",
                     "displayName": "Total Tokens",
                     "aggregation": "SUM"
@@ -425,7 +425,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_d779815a"
               },
               "title": {
                 "showTitle": false,
@@ -445,7 +445,7 @@
           "chart_type": "SCORECARD",
           "label": "Input Tokens",
           "title": "Input Tokens",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "input_tokens",
           "aggregation": "SUM",
@@ -483,10 +483,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_c90b69a4",
                     "fieldName": "_input_tokens_",
                     "displayName": "Input Tokens",
                     "aggregation": "SUM"
@@ -494,7 +494,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_c90b69a4"
               },
               "title": {
                 "showTitle": false,
@@ -514,7 +514,7 @@
           "chart_type": "SCORECARD",
           "label": "Output Tokens",
           "title": "Output Tokens",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "output_tokens",
           "aggregation": "SUM",
@@ -552,10 +552,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_893d21f1",
                     "fieldName": "_output_tokens_",
                     "displayName": "Output Tokens",
                     "aggregation": "SUM"
@@ -563,7 +563,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_893d21f1"
               },
               "title": {
                 "showTitle": false,
@@ -583,7 +583,7 @@
           "chart_type": "SCORECARD",
           "label": "Thinking Tokens",
           "title": "Thinking Tokens",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "thoughts_tokens",
           "aggregation": "SUM",
@@ -621,10 +621,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_a6d27140",
                     "fieldName": "_thoughts_tokens_",
                     "displayName": "Thinking Tokens",
                     "aggregation": "SUM"
@@ -632,7 +632,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_a6d27140"
               },
               "title": {
                 "showTitle": false,
@@ -652,7 +652,7 @@
           "chart_type": "SCORECARD",
           "label": "Cached Tokens",
           "title": "Cached Tokens",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "cached_tokens",
           "aggregation": "SUM",
@@ -690,10 +690,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_31dd80a8",
                     "fieldName": "_cached_tokens_",
                     "displayName": "Cached Tokens",
                     "aggregation": "SUM"
@@ -701,7 +701,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_31dd80a8"
               },
               "title": {
                 "showTitle": false,
@@ -720,7 +720,7 @@
           "component_type": "simple-barchart",
           "chart_type": "bar_chart",
           "title": "Token Usage by Data Agent",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "dimensions": [
             "data_agent_id"
@@ -755,15 +755,15 @@
             },
             "barChart": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "dim",
+                    "id": "qt_47948fbd",
                     "fieldName": "_data_agent_id_",
                     "displayName": "Data Agent"
                   },
                   {
-                    "id": "m0",
+                    "id": "qt_3fcfd7ea",
                     "fieldName": "_total_tokens_",
                     "displayName": "Total Tokens",
                     "aggregation": "SUM"
@@ -772,11 +772,11 @@
               },
               "fields": {
                 "primaryAxis": {
-                  "fieldId": "dim",
+                  "fieldId": "qt_47948fbd",
                   "sort": [
                     {
                       "sortDir": "DESC",
-                      "sortFieldId": "m0"
+                      "sortFieldId": "qt_3fcfd7ea"
                     }
                   ],
                   "limit": 15,
@@ -785,7 +785,7 @@
                 },
                 "metricSeries": {
                   "metricIds": [
-                    "m0"
+                    "qt_3fcfd7ea"
                   ]
                 }
               },
@@ -809,7 +809,7 @@
           "component_type": "simple-barchart",
           "chart_type": "bar_chart",
           "title": "Daily Token Usage (Input / Output / Thinking)",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "dimensions": [
             "event_date"
@@ -848,27 +848,27 @@
             },
             "barChart": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "dim",
+                    "id": "qt_e7eb0560",
                     "fieldName": "_event_date_",
                     "displayName": "Event Date"
                   },
                   {
-                    "id": "m0",
+                    "id": "qt_af86847d",
                     "fieldName": "_input_tokens_",
                     "displayName": "Input Tokens",
                     "aggregation": "SUM"
                   },
                   {
-                    "id": "m1",
+                    "id": "qt_42018c0c",
                     "fieldName": "_output_tokens_",
                     "displayName": "Output Tokens",
                     "aggregation": "SUM"
                   },
                   {
-                    "id": "m2",
+                    "id": "qt_0db8b52b",
                     "fieldName": "_thoughts_tokens_",
                     "displayName": "Thinking Tokens",
                     "aggregation": "SUM"
@@ -877,11 +877,11 @@
               },
               "fields": {
                 "primaryAxis": {
-                  "fieldId": "dim",
+                  "fieldId": "qt_e7eb0560",
                   "sort": [
                     {
                       "sortDir": "ASC",
-                      "sortFieldId": "dim"
+                      "sortFieldId": "qt_e7eb0560"
                     }
                   ],
                   "limit": 90,
@@ -890,9 +890,9 @@
                 },
                 "metricSeries": {
                   "metricIds": [
-                    "m0",
-                    "m1",
-                    "m2"
+                    "qt_af86847d",
+                    "qt_42018c0c",
+                    "qt_0db8b52b"
                   ]
                 }
               },
@@ -947,7 +947,7 @@
           "chart_type": "SCORECARD",
           "label": "Active Data Agents",
           "title": "Active Data Agents",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "data_agent_id",
           "aggregation": "COUNT_DISTINCT",
@@ -985,10 +985,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_a96c5e06",
                     "fieldName": "_data_agent_id_",
                     "displayName": "Active Data Agents",
                     "aggregation": "COUNT_DISTINCT"
@@ -996,7 +996,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_a96c5e06"
               },
               "title": {
                 "showTitle": false,
@@ -1016,7 +1016,7 @@
           "chart_type": "SCORECARD",
           "label": "Total Turns",
           "title": "Total Turns",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "invocation_id",
           "aggregation": "COUNT_DISTINCT",
@@ -1054,10 +1054,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_d206edb0",
                     "fieldName": "_invocation_id_",
                     "displayName": "Total Turns",
                     "aggregation": "COUNT_DISTINCT"
@@ -1065,7 +1065,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_d206edb0"
               },
               "title": {
                 "showTitle": false,
@@ -1085,7 +1085,7 @@
           "chart_type": "SCORECARD",
           "label": "Completed Turns",
           "title": "Completed Turns",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "completed_turn_id",
           "aggregation": "COUNT_DISTINCT",
@@ -1123,10 +1123,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_f0daf8fa",
                     "fieldName": "_completed_turn_id_",
                     "displayName": "Completed Turns",
                     "aggregation": "COUNT_DISTINCT"
@@ -1134,7 +1134,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_f0daf8fa"
               },
               "title": {
                 "showTitle": false,
@@ -1154,7 +1154,7 @@
           "chart_type": "SCORECARD",
           "label": "Generated SQL Queries",
           "title": "Generated SQL Queries",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "extracted_sql",
           "aggregation": "COUNT",
@@ -1192,10 +1192,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_d4c2022b",
                     "fieldName": "_extracted_sql_",
                     "displayName": "Generated SQL Queries",
                     "aggregation": "COUNT"
@@ -1203,7 +1203,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_d4c2022b"
               },
               "title": {
                 "showTitle": false,
@@ -1222,7 +1222,7 @@
           "component_type": "simple-barchart",
           "chart_type": "bar_chart",
           "title": "Turns by Data Agent",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "dimensions": [
             "data_agent_id"
@@ -1257,15 +1257,15 @@
             },
             "barChart": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "dim",
+                    "id": "qt_9fb169eb",
                     "fieldName": "_data_agent_id_",
                     "displayName": "Data Agent"
                   },
                   {
-                    "id": "m0",
+                    "id": "qt_e056d0a6",
                     "fieldName": "_invocation_id_",
                     "displayName": "Turns",
                     "aggregation": "COUNT_DISTINCT"
@@ -1274,11 +1274,11 @@
               },
               "fields": {
                 "primaryAxis": {
-                  "fieldId": "dim",
+                  "fieldId": "qt_9fb169eb",
                   "sort": [
                     {
                       "sortDir": "DESC",
-                      "sortFieldId": "m0"
+                      "sortFieldId": "qt_e056d0a6"
                     }
                   ],
                   "limit": 15,
@@ -1287,7 +1287,7 @@
                 },
                 "metricSeries": {
                   "metricIds": [
-                    "m0"
+                    "qt_e056d0a6"
                   ]
                 }
               },
@@ -1311,7 +1311,7 @@
           "component_type": "simple-table",
           "chart_type": "table",
           "title": "Data Agent Volume, Latency & Errors",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "dimensions": [
             "data_agent_id"
@@ -1352,33 +1352,33 @@
             },
             "table": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "d0",
+                    "id": "qt_d0a517af",
                     "fieldName": "_data_agent_id_",
                     "displayName": "Data Agent"
                   },
                   {
-                    "id": "m0",
+                    "id": "qt_a7ce9b32",
                     "fieldName": "_invocation_id_",
                     "displayName": "Turns",
                     "aggregation": "COUNT_DISTINCT"
                   },
                   {
-                    "id": "m1",
+                    "id": "qt_d188b546",
                     "fieldName": "_turn_latency_ms_",
                     "displayName": "Avg Turn Latency (ms)",
                     "aggregation": "AVG"
                   },
                   {
-                    "id": "m2",
+                    "id": "qt_38e443e7",
                     "fieldName": "_total_tokens_",
                     "displayName": "Total Tokens",
                     "aggregation": "SUM"
                   },
                   {
-                    "id": "m3",
+                    "id": "qt_abd056f8",
                     "fieldName": "_error_message_",
                     "displayName": "Error Events",
                     "aggregation": "COUNT"
@@ -1387,18 +1387,18 @@
               },
               "fields": {
                 "dimensionIds": [
-                  "d0"
+                  "qt_d0a517af"
                 ],
                 "metricIds": [
-                  "m0",
-                  "m1",
-                  "m2",
-                  "m3"
+                  "qt_a7ce9b32",
+                  "qt_d188b546",
+                  "qt_38e443e7",
+                  "qt_abd056f8"
                 ],
                 "sort": [
                   {
                     "sortDir": "DESC",
-                    "sortFieldId": "m0"
+                    "sortFieldId": "qt_a7ce9b32"
                   }
                 ],
                 "limit": 100
@@ -1461,7 +1461,7 @@
           "chart_type": "SCORECARD",
           "label": "LLM Responses",
           "title": "LLM Responses",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "llm_latency_ms",
           "aggregation": "COUNT",
@@ -1499,10 +1499,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_581cc2cf",
                     "fieldName": "_llm_latency_ms_",
                     "displayName": "LLM Responses",
                     "aggregation": "COUNT"
@@ -1510,7 +1510,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_581cc2cf"
               },
               "title": {
                 "showTitle": false,
@@ -1530,7 +1530,7 @@
           "chart_type": "SCORECARD",
           "label": "Avg LLM Call Latency (ms)",
           "title": "Avg LLM Call Latency (ms)",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "llm_latency_ms",
           "aggregation": "AVG",
@@ -1568,10 +1568,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_f4c85165",
                     "fieldName": "_llm_latency_ms_",
                     "displayName": "Avg LLM Call Latency (ms)",
                     "aggregation": "AVG"
@@ -1579,7 +1579,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_f4c85165"
               },
               "title": {
                 "showTitle": false,
@@ -1599,7 +1599,7 @@
           "chart_type": "SCORECARD",
           "label": "Avg Time to First Token (ms)",
           "title": "Avg Time to First Token (ms)",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "ttft_ms",
           "aggregation": "AVG",
@@ -1637,10 +1637,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_1444bfec",
                     "fieldName": "_ttft_ms_",
                     "displayName": "Avg Time to First Token (ms)",
                     "aggregation": "AVG"
@@ -1648,7 +1648,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_1444bfec"
               },
               "title": {
                 "showTitle": false,
@@ -1668,7 +1668,7 @@
           "chart_type": "SCORECARD",
           "label": "Suggested Columns Proposed",
           "title": "Suggested Columns Proposed",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "similar_queries_count",
           "aggregation": "SUM",
@@ -1706,10 +1706,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_291ed8e1",
                     "fieldName": "_similar_queries_count_",
                     "displayName": "Suggested Columns Proposed",
                     "aggregation": "SUM"
@@ -1717,7 +1717,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_291ed8e1"
               },
               "title": {
                 "showTitle": false,
@@ -1736,7 +1736,7 @@
           "component_type": "simple-barchart",
           "chart_type": "bar_chart",
           "title": "Tokens by Model Version",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "dimensions": [
             "model_version"
@@ -1771,15 +1771,15 @@
             },
             "barChart": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "dim",
+                    "id": "qt_09afcfdb",
                     "fieldName": "_model_version_",
                     "displayName": "Model Version"
                   },
                   {
-                    "id": "m0",
+                    "id": "qt_f8bf601a",
                     "fieldName": "_total_tokens_",
                     "displayName": "Total Tokens",
                     "aggregation": "SUM"
@@ -1788,11 +1788,11 @@
               },
               "fields": {
                 "primaryAxis": {
-                  "fieldId": "dim",
+                  "fieldId": "qt_09afcfdb",
                   "sort": [
                     {
                       "sortDir": "DESC",
-                      "sortFieldId": "m0"
+                      "sortFieldId": "qt_f8bf601a"
                     }
                   ],
                   "limit": 15,
@@ -1801,7 +1801,7 @@
                 },
                 "metricSeries": {
                   "metricIds": [
-                    "m0"
+                    "qt_f8bf601a"
                   ]
                 }
               },
@@ -1825,7 +1825,7 @@
           "component_type": "simple-barchart",
           "chart_type": "bar_chart",
           "title": "Suggested Columns by Reason",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "dimensions": [
             "embedding_suggestion_reason"
@@ -1860,15 +1860,15 @@
             },
             "barChart": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "dim",
+                    "id": "qt_69a5beaa",
                     "fieldName": "_embedding_suggestion_reason_",
                     "displayName": "Suggestion Reason"
                   },
                   {
-                    "id": "m0",
+                    "id": "qt_63d8de68",
                     "fieldName": "_similar_queries_count_",
                     "displayName": "Suggested Columns",
                     "aggregation": "SUM"
@@ -1877,11 +1877,11 @@
               },
               "fields": {
                 "primaryAxis": {
-                  "fieldId": "dim",
+                  "fieldId": "qt_69a5beaa",
                   "sort": [
                     {
                       "sortDir": "DESC",
-                      "sortFieldId": "m0"
+                      "sortFieldId": "qt_63d8de68"
                     }
                   ],
                   "limit": 15,
@@ -1890,7 +1890,7 @@
                 },
                 "metricSeries": {
                   "metricIds": [
-                    "m0"
+                    "qt_63d8de68"
                   ]
                 }
               },
@@ -1943,7 +1943,7 @@
           "chart_type": "SCORECARD",
           "label": "Distinct Personas",
           "title": "Distinct Personas",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "persona",
           "aggregation": "COUNT_DISTINCT",
@@ -1981,10 +1981,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_d6385c41",
                     "fieldName": "_persona_",
                     "displayName": "Distinct Personas",
                     "aggregation": "COUNT_DISTINCT"
@@ -1992,7 +1992,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_d6385c41"
               },
               "title": {
                 "showTitle": false,
@@ -2012,7 +2012,7 @@
           "chart_type": "SCORECARD",
           "label": "Distinct User IDs",
           "title": "Distinct User IDs",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "user_id",
           "aggregation": "COUNT_DISTINCT",
@@ -2050,10 +2050,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_aeca08f6",
                     "fieldName": "_user_id_",
                     "displayName": "Distinct User IDs",
                     "aggregation": "COUNT_DISTINCT"
@@ -2061,7 +2061,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_aeca08f6"
               },
               "title": {
                 "showTitle": false,
@@ -2081,7 +2081,7 @@
           "chart_type": "SCORECARD",
           "label": "Distinct Conversations",
           "title": "Distinct Conversations",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "conversation_id",
           "aggregation": "COUNT_DISTINCT",
@@ -2119,10 +2119,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_a42e18b1",
                     "fieldName": "_conversation_id_",
                     "displayName": "Distinct Conversations",
                     "aggregation": "COUNT_DISTINCT"
@@ -2130,7 +2130,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_a42e18b1"
               },
               "title": {
                 "showTitle": false,
@@ -2149,7 +2149,7 @@
           "component_type": "simple-barchart",
           "chart_type": "bar_chart",
           "title": "Turns by Persona",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "dimensions": [
             "persona"
@@ -2184,15 +2184,15 @@
             },
             "barChart": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "dim",
+                    "id": "qt_c4ad495e",
                     "fieldName": "_persona_",
                     "displayName": "Persona"
                   },
                   {
-                    "id": "m0",
+                    "id": "qt_dd7d7d10",
                     "fieldName": "_invocation_id_",
                     "displayName": "Turns",
                     "aggregation": "COUNT_DISTINCT"
@@ -2201,11 +2201,11 @@
               },
               "fields": {
                 "primaryAxis": {
-                  "fieldId": "dim",
+                  "fieldId": "qt_c4ad495e",
                   "sort": [
                     {
                       "sortDir": "DESC",
-                      "sortFieldId": "m0"
+                      "sortFieldId": "qt_dd7d7d10"
                     }
                   ],
                   "limit": 15,
@@ -2214,7 +2214,7 @@
                 },
                 "metricSeries": {
                   "metricIds": [
-                    "m0"
+                    "qt_dd7d7d10"
                   ]
                 }
               },
@@ -2238,7 +2238,7 @@
           "component_type": "simple-table",
           "chart_type": "table",
           "title": "Persona & Data Agent Activity",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "dimensions": [
             "persona",
@@ -2279,32 +2279,32 @@
             },
             "table": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "d0",
+                    "id": "qt_8070d8ac",
                     "fieldName": "_persona_",
                     "displayName": "Persona"
                   },
                   {
-                    "id": "d1",
+                    "id": "qt_2b3c89df",
                     "fieldName": "_data_agent_id_",
                     "displayName": "Data Agent"
                   },
                   {
-                    "id": "m0",
+                    "id": "qt_cbce3e14",
                     "fieldName": "_invocation_id_",
                     "displayName": "Turns",
                     "aggregation": "COUNT_DISTINCT"
                   },
                   {
-                    "id": "m1",
+                    "id": "qt_c1b8027d",
                     "fieldName": "_total_tokens_",
                     "displayName": "Total Tokens",
                     "aggregation": "SUM"
                   },
                   {
-                    "id": "m2",
+                    "id": "qt_174cfaac",
                     "fieldName": "_turn_latency_ms_",
                     "displayName": "Avg Turn Latency (ms)",
                     "aggregation": "AVG"
@@ -2313,18 +2313,18 @@
               },
               "fields": {
                 "dimensionIds": [
-                  "d0",
-                  "d1"
+                  "qt_8070d8ac",
+                  "qt_2b3c89df"
                 ],
                 "metricIds": [
-                  "m0",
-                  "m1",
-                  "m2"
+                  "qt_cbce3e14",
+                  "qt_c1b8027d",
+                  "qt_174cfaac"
                 ],
                 "sort": [
                   {
                     "sortDir": "DESC",
-                    "sortFieldId": "m0"
+                    "sortFieldId": "qt_cbce3e14"
                   }
                 ],
                 "limit": 100
@@ -2385,7 +2385,7 @@
           "chart_type": "SCORECARD",
           "label": "Avg End-to-End Turn Latency (ms)",
           "title": "Avg End-to-End Turn Latency (ms)",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "turn_latency_ms",
           "aggregation": "AVG",
@@ -2423,10 +2423,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_1e5c0a97",
                     "fieldName": "_turn_latency_ms_",
                     "displayName": "Avg End-to-End Turn Latency (ms)",
                     "aggregation": "AVG"
@@ -2434,7 +2434,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_1e5c0a97"
               },
               "title": {
                 "showTitle": false,
@@ -2454,7 +2454,7 @@
           "chart_type": "SCORECARD",
           "label": "Avg LLM Latency (ms)",
           "title": "Avg LLM Latency (ms)",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "llm_latency_ms",
           "aggregation": "AVG",
@@ -2492,10 +2492,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_235cb0ae",
                     "fieldName": "_llm_latency_ms_",
                     "displayName": "Avg LLM Latency (ms)",
                     "aggregation": "AVG"
@@ -2503,7 +2503,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_235cb0ae"
               },
               "title": {
                 "showTitle": false,
@@ -2523,7 +2523,7 @@
           "chart_type": "SCORECARD",
           "label": "Avg Event Latency (ms)",
           "title": "Avg Event Latency (ms)",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "total_latency_ms",
           "aggregation": "AVG",
@@ -2561,10 +2561,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_16a686b5",
                     "fieldName": "_total_latency_ms_",
                     "displayName": "Avg Event Latency (ms)",
                     "aggregation": "AVG"
@@ -2572,7 +2572,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_16a686b5"
               },
               "title": {
                 "showTitle": false,
@@ -2591,7 +2591,7 @@
           "component_type": "simple-piechart",
           "chart_type": "pie_chart",
           "title": "Fast-Path vs Standard NL2SQL Turns",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "dimensions": [
             "fast_path_label"
@@ -2626,15 +2626,15 @@
             },
             "pieChart": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "dim",
+                    "id": "qt_6d704d5c",
                     "fieldName": "_fast_path_label_",
                     "displayName": "Execution Path"
                   },
                   {
-                    "id": "met",
+                    "id": "qt_0a6310c4",
                     "fieldName": "_invocation_id_",
                     "displayName": "Turns",
                     "aggregation": "COUNT_DISTINCT"
@@ -2642,12 +2642,12 @@
                 ]
               },
               "fields": {
-                "dimensionId": "dim",
-                "metricId": "met",
+                "dimensionId": "qt_6d704d5c",
+                "metricId": "qt_0a6310c4",
                 "sort": [
                   {
                     "sortDir": "DESC",
-                    "sortFieldId": "met"
+                    "sortFieldId": "qt_0a6310c4"
                   }
                 ],
                 "limit": 10,
@@ -2671,7 +2671,7 @@
           "component_type": "simple-barchart",
           "chart_type": "bar_chart",
           "title": "Avg Turn Latency: Fast-Path vs Standard NL2SQL",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "dimensions": [
             "fast_path_label"
@@ -2706,15 +2706,15 @@
             },
             "barChart": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "dim",
+                    "id": "qt_a286c105",
                     "fieldName": "_fast_path_label_",
                     "displayName": "Execution Path"
                   },
                   {
-                    "id": "m0",
+                    "id": "qt_cac76a3a",
                     "fieldName": "_turn_latency_ms_",
                     "displayName": "Avg Turn Latency (ms)",
                     "aggregation": "AVG"
@@ -2723,11 +2723,11 @@
               },
               "fields": {
                 "primaryAxis": {
-                  "fieldId": "dim",
+                  "fieldId": "qt_a286c105",
                   "sort": [
                     {
                       "sortDir": "DESC",
-                      "sortFieldId": "m0"
+                      "sortFieldId": "qt_cac76a3a"
                     }
                   ],
                   "limit": 15,
@@ -2736,7 +2736,7 @@
                 },
                 "metricSeries": {
                   "metricIds": [
-                    "m0"
+                    "qt_cac76a3a"
                   ]
                 }
               },
@@ -2787,7 +2787,7 @@
           "chart_type": "SCORECARD",
           "label": "Error Events (3-Condition)",
           "title": "Error Events (3-Condition)",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "error_message",
           "aggregation": "COUNT",
@@ -2825,10 +2825,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_a813429f",
                     "fieldName": "_error_message_",
                     "displayName": "Error Events (3-Condition)",
                     "aggregation": "COUNT"
@@ -2836,7 +2836,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_a813429f"
               },
               "title": {
                 "showTitle": false,
@@ -2856,7 +2856,7 @@
           "chart_type": "SCORECARD",
           "label": "Distinct Error Signatures",
           "title": "Distinct Error Signatures",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "field": "error_message",
           "aggregation": "COUNT_DISTINCT",
@@ -2894,10 +2894,10 @@
             },
             "scorecard": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "met",
+                    "id": "qt_a8ab9425",
                     "fieldName": "_error_message_",
                     "displayName": "Distinct Error Signatures",
                     "aggregation": "COUNT_DISTINCT"
@@ -2905,7 +2905,7 @@
                 ]
               },
               "fields": {
-                "primaryMetricId": "met"
+                "primaryMetricId": "qt_a8ab9425"
               },
               "title": {
                 "showTitle": false,
@@ -2924,7 +2924,7 @@
           "component_type": "simple-barchart",
           "chart_type": "bar_chart",
           "title": "Error Events by BQCA Event Type",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "dimensions": [
             "event_type"
@@ -2959,15 +2959,15 @@
             },
             "barChart": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "dim",
+                    "id": "qt_8eff7d70",
                     "fieldName": "_event_type_",
                     "displayName": "Event Type"
                   },
                   {
-                    "id": "m0",
+                    "id": "qt_79ac4183",
                     "fieldName": "_error_message_",
                     "displayName": "Error Events",
                     "aggregation": "COUNT"
@@ -2976,11 +2976,11 @@
               },
               "fields": {
                 "primaryAxis": {
-                  "fieldId": "dim",
+                  "fieldId": "qt_8eff7d70",
                   "sort": [
                     {
                       "sortDir": "DESC",
-                      "sortFieldId": "m0"
+                      "sortFieldId": "qt_79ac4183"
                     }
                   ],
                   "limit": 15,
@@ -2989,7 +2989,7 @@
                 },
                 "metricSeries": {
                   "metricIds": [
-                    "m0"
+                    "qt_79ac4183"
                   ]
                 }
               },
@@ -3013,7 +3013,7 @@
           "component_type": "simple-barchart",
           "chart_type": "bar_chart",
           "title": "Error Events by Data Agent",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "dimensions": [
             "data_agent_id"
@@ -3048,15 +3048,15 @@
             },
             "barChart": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "dim",
+                    "id": "qt_3859cfd6",
                     "fieldName": "_data_agent_id_",
                     "displayName": "Data Agent"
                   },
                   {
-                    "id": "m0",
+                    "id": "qt_891b1a3f",
                     "fieldName": "_error_message_",
                     "displayName": "Error Events",
                     "aggregation": "COUNT"
@@ -3065,11 +3065,11 @@
               },
               "fields": {
                 "primaryAxis": {
-                  "fieldId": "dim",
+                  "fieldId": "qt_3859cfd6",
                   "sort": [
                     {
                       "sortDir": "DESC",
-                      "sortFieldId": "m0"
+                      "sortFieldId": "qt_891b1a3f"
                     }
                   ],
                   "limit": 15,
@@ -3078,7 +3078,7 @@
                 },
                 "metricSeries": {
                   "metricIds": [
-                    "m0"
+                    "qt_891b1a3f"
                   ]
                 }
               },
@@ -3122,7 +3122,7 @@
           "component_type": "simple-table",
           "chart_type": "table",
           "title": "Event-Level Prompt, Response & Extracted SQL",
-          "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+          "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
           "data_source_alias": "ds0",
           "dimensions": [
             "event_date",
@@ -3177,66 +3177,66 @@
             },
             "table": {
               "dataset": {
-                "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+                "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
                 "columns": [
                   {
-                    "id": "d0",
+                    "id": "qt_40f9b407",
                     "fieldName": "_event_date_",
                     "displayName": "Event Date"
                   },
                   {
-                    "id": "d1",
+                    "id": "qt_b684d2ed",
                     "fieldName": "_session_id_",
                     "displayName": "Session ID"
                   },
                   {
-                    "id": "d2",
+                    "id": "qt_54bd6219",
                     "fieldName": "_data_agent_id_",
                     "displayName": "Data Agent"
                   },
                   {
-                    "id": "d3",
+                    "id": "qt_7a28e588",
                     "fieldName": "_persona_",
                     "displayName": "Persona"
                   },
                   {
-                    "id": "d4",
+                    "id": "qt_800b7f96",
                     "fieldName": "_event_type_",
                     "displayName": "Event Type"
                   },
                   {
-                    "id": "d5",
+                    "id": "qt_bbf261e0",
                     "fieldName": "_fast_path_label_",
                     "displayName": "Path"
                   },
                   {
-                    "id": "d6",
+                    "id": "qt_1ada8666",
                     "fieldName": "_user_prompt_text_",
                     "displayName": "User Prompt"
                   },
                   {
-                    "id": "d7",
+                    "id": "qt_abb7920b",
                     "fieldName": "_extracted_sql_",
                     "displayName": "Extracted SQL"
                   },
                   {
-                    "id": "d8",
+                    "id": "qt_a04329d9",
                     "fieldName": "_summary_text_",
                     "displayName": "Response Summary"
                   },
                   {
-                    "id": "d9",
+                    "id": "qt_42c77379",
                     "fieldName": "_error_message_",
                     "displayName": "Error Message"
                   },
                   {
-                    "id": "m0",
+                    "id": "qt_a5d93a61",
                     "fieldName": "_total_latency_ms_",
                     "displayName": "Latency (ms)",
                     "aggregation": "AVG"
                   },
                   {
-                    "id": "m1",
+                    "id": "qt_e3fa0159",
                     "fieldName": "_total_tokens_",
                     "displayName": "Tokens",
                     "aggregation": "SUM"
@@ -3245,25 +3245,25 @@
               },
               "fields": {
                 "dimensionIds": [
-                  "d0",
-                  "d1",
-                  "d2",
-                  "d3",
-                  "d4",
-                  "d5",
-                  "d6",
-                  "d7",
-                  "d8",
-                  "d9"
+                  "qt_40f9b407",
+                  "qt_b684d2ed",
+                  "qt_54bd6219",
+                  "qt_7a28e588",
+                  "qt_800b7f96",
+                  "qt_bbf261e0",
+                  "qt_1ada8666",
+                  "qt_abb7920b",
+                  "qt_a04329d9",
+                  "qt_42c77379"
                 ],
                 "metricIds": [
-                  "m0",
-                  "m1"
+                  "qt_a5d93a61",
+                  "qt_e3fa0159"
                 ],
                 "sort": [
                   {
                     "sortDir": "DESC",
-                    "sortFieldId": "d0"
+                    "sortFieldId": "qt_40f9b407"
                   }
                 ],
                 "limit": 100
@@ -3307,7 +3307,7 @@
       "chart_type": "SCORECARD",
       "label": "Total Tokens",
       "title": "Total Tokens",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "total_tokens",
       "aggregation": "SUM",
@@ -3345,10 +3345,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_d779815a",
                 "fieldName": "_total_tokens_",
                 "displayName": "Total Tokens",
                 "aggregation": "SUM"
@@ -3356,7 +3356,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_d779815a"
           },
           "title": {
             "showTitle": false,
@@ -3376,7 +3376,7 @@
       "chart_type": "SCORECARD",
       "label": "Input Tokens",
       "title": "Input Tokens",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "input_tokens",
       "aggregation": "SUM",
@@ -3414,10 +3414,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_c90b69a4",
                 "fieldName": "_input_tokens_",
                 "displayName": "Input Tokens",
                 "aggregation": "SUM"
@@ -3425,7 +3425,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_c90b69a4"
           },
           "title": {
             "showTitle": false,
@@ -3445,7 +3445,7 @@
       "chart_type": "SCORECARD",
       "label": "Output Tokens",
       "title": "Output Tokens",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "output_tokens",
       "aggregation": "SUM",
@@ -3483,10 +3483,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_893d21f1",
                 "fieldName": "_output_tokens_",
                 "displayName": "Output Tokens",
                 "aggregation": "SUM"
@@ -3494,7 +3494,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_893d21f1"
           },
           "title": {
             "showTitle": false,
@@ -3514,7 +3514,7 @@
       "chart_type": "SCORECARD",
       "label": "Thinking Tokens",
       "title": "Thinking Tokens",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "thoughts_tokens",
       "aggregation": "SUM",
@@ -3552,10 +3552,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_a6d27140",
                 "fieldName": "_thoughts_tokens_",
                 "displayName": "Thinking Tokens",
                 "aggregation": "SUM"
@@ -3563,7 +3563,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_a6d27140"
           },
           "title": {
             "showTitle": false,
@@ -3583,7 +3583,7 @@
       "chart_type": "SCORECARD",
       "label": "Cached Tokens",
       "title": "Cached Tokens",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "cached_tokens",
       "aggregation": "SUM",
@@ -3621,10 +3621,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_31dd80a8",
                 "fieldName": "_cached_tokens_",
                 "displayName": "Cached Tokens",
                 "aggregation": "SUM"
@@ -3632,7 +3632,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_31dd80a8"
           },
           "title": {
             "showTitle": false,
@@ -3651,7 +3651,7 @@
       "component_type": "simple-barchart",
       "chart_type": "bar_chart",
       "title": "Token Usage by Data Agent",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "dimensions": [
         "data_agent_id"
@@ -3686,15 +3686,15 @@
         },
         "barChart": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "dim",
+                "id": "qt_47948fbd",
                 "fieldName": "_data_agent_id_",
                 "displayName": "Data Agent"
               },
               {
-                "id": "m0",
+                "id": "qt_3fcfd7ea",
                 "fieldName": "_total_tokens_",
                 "displayName": "Total Tokens",
                 "aggregation": "SUM"
@@ -3703,11 +3703,11 @@
           },
           "fields": {
             "primaryAxis": {
-              "fieldId": "dim",
+              "fieldId": "qt_47948fbd",
               "sort": [
                 {
                   "sortDir": "DESC",
-                  "sortFieldId": "m0"
+                  "sortFieldId": "qt_3fcfd7ea"
                 }
               ],
               "limit": 15,
@@ -3716,7 +3716,7 @@
             },
             "metricSeries": {
               "metricIds": [
-                "m0"
+                "qt_3fcfd7ea"
               ]
             }
           },
@@ -3740,7 +3740,7 @@
       "component_type": "simple-barchart",
       "chart_type": "bar_chart",
       "title": "Daily Token Usage (Input / Output / Thinking)",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "dimensions": [
         "event_date"
@@ -3779,27 +3779,27 @@
         },
         "barChart": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "dim",
+                "id": "qt_e7eb0560",
                 "fieldName": "_event_date_",
                 "displayName": "Event Date"
               },
               {
-                "id": "m0",
+                "id": "qt_af86847d",
                 "fieldName": "_input_tokens_",
                 "displayName": "Input Tokens",
                 "aggregation": "SUM"
               },
               {
-                "id": "m1",
+                "id": "qt_42018c0c",
                 "fieldName": "_output_tokens_",
                 "displayName": "Output Tokens",
                 "aggregation": "SUM"
               },
               {
-                "id": "m2",
+                "id": "qt_0db8b52b",
                 "fieldName": "_thoughts_tokens_",
                 "displayName": "Thinking Tokens",
                 "aggregation": "SUM"
@@ -3808,11 +3808,11 @@
           },
           "fields": {
             "primaryAxis": {
-              "fieldId": "dim",
+              "fieldId": "qt_e7eb0560",
               "sort": [
                 {
                   "sortDir": "ASC",
-                  "sortFieldId": "dim"
+                  "sortFieldId": "qt_e7eb0560"
                 }
               ],
               "limit": 90,
@@ -3821,9 +3821,9 @@
             },
             "metricSeries": {
               "metricIds": [
-                "m0",
-                "m1",
-                "m2"
+                "qt_af86847d",
+                "qt_42018c0c",
+                "qt_0db8b52b"
               ]
             }
           },
@@ -3848,7 +3848,7 @@
       "chart_type": "SCORECARD",
       "label": "Active Data Agents",
       "title": "Active Data Agents",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "data_agent_id",
       "aggregation": "COUNT_DISTINCT",
@@ -3886,10 +3886,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_a96c5e06",
                 "fieldName": "_data_agent_id_",
                 "displayName": "Active Data Agents",
                 "aggregation": "COUNT_DISTINCT"
@@ -3897,7 +3897,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_a96c5e06"
           },
           "title": {
             "showTitle": false,
@@ -3917,7 +3917,7 @@
       "chart_type": "SCORECARD",
       "label": "Total Turns",
       "title": "Total Turns",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "invocation_id",
       "aggregation": "COUNT_DISTINCT",
@@ -3955,10 +3955,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_d206edb0",
                 "fieldName": "_invocation_id_",
                 "displayName": "Total Turns",
                 "aggregation": "COUNT_DISTINCT"
@@ -3966,7 +3966,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_d206edb0"
           },
           "title": {
             "showTitle": false,
@@ -3986,7 +3986,7 @@
       "chart_type": "SCORECARD",
       "label": "Completed Turns",
       "title": "Completed Turns",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "completed_turn_id",
       "aggregation": "COUNT_DISTINCT",
@@ -4024,10 +4024,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_f0daf8fa",
                 "fieldName": "_completed_turn_id_",
                 "displayName": "Completed Turns",
                 "aggregation": "COUNT_DISTINCT"
@@ -4035,7 +4035,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_f0daf8fa"
           },
           "title": {
             "showTitle": false,
@@ -4055,7 +4055,7 @@
       "chart_type": "SCORECARD",
       "label": "Generated SQL Queries",
       "title": "Generated SQL Queries",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "extracted_sql",
       "aggregation": "COUNT",
@@ -4093,10 +4093,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_d4c2022b",
                 "fieldName": "_extracted_sql_",
                 "displayName": "Generated SQL Queries",
                 "aggregation": "COUNT"
@@ -4104,7 +4104,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_d4c2022b"
           },
           "title": {
             "showTitle": false,
@@ -4123,7 +4123,7 @@
       "component_type": "simple-barchart",
       "chart_type": "bar_chart",
       "title": "Turns by Data Agent",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "dimensions": [
         "data_agent_id"
@@ -4158,15 +4158,15 @@
         },
         "barChart": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "dim",
+                "id": "qt_9fb169eb",
                 "fieldName": "_data_agent_id_",
                 "displayName": "Data Agent"
               },
               {
-                "id": "m0",
+                "id": "qt_e056d0a6",
                 "fieldName": "_invocation_id_",
                 "displayName": "Turns",
                 "aggregation": "COUNT_DISTINCT"
@@ -4175,11 +4175,11 @@
           },
           "fields": {
             "primaryAxis": {
-              "fieldId": "dim",
+              "fieldId": "qt_9fb169eb",
               "sort": [
                 {
                   "sortDir": "DESC",
-                  "sortFieldId": "m0"
+                  "sortFieldId": "qt_e056d0a6"
                 }
               ],
               "limit": 15,
@@ -4188,7 +4188,7 @@
             },
             "metricSeries": {
               "metricIds": [
-                "m0"
+                "qt_e056d0a6"
               ]
             }
           },
@@ -4212,7 +4212,7 @@
       "component_type": "simple-table",
       "chart_type": "table",
       "title": "Data Agent Volume, Latency & Errors",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "dimensions": [
         "data_agent_id"
@@ -4253,33 +4253,33 @@
         },
         "table": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "d0",
+                "id": "qt_d0a517af",
                 "fieldName": "_data_agent_id_",
                 "displayName": "Data Agent"
               },
               {
-                "id": "m0",
+                "id": "qt_a7ce9b32",
                 "fieldName": "_invocation_id_",
                 "displayName": "Turns",
                 "aggregation": "COUNT_DISTINCT"
               },
               {
-                "id": "m1",
+                "id": "qt_d188b546",
                 "fieldName": "_turn_latency_ms_",
                 "displayName": "Avg Turn Latency (ms)",
                 "aggregation": "AVG"
               },
               {
-                "id": "m2",
+                "id": "qt_38e443e7",
                 "fieldName": "_total_tokens_",
                 "displayName": "Total Tokens",
                 "aggregation": "SUM"
               },
               {
-                "id": "m3",
+                "id": "qt_abd056f8",
                 "fieldName": "_error_message_",
                 "displayName": "Error Events",
                 "aggregation": "COUNT"
@@ -4288,18 +4288,18 @@
           },
           "fields": {
             "dimensionIds": [
-              "d0"
+              "qt_d0a517af"
             ],
             "metricIds": [
-              "m0",
-              "m1",
-              "m2",
-              "m3"
+              "qt_a7ce9b32",
+              "qt_d188b546",
+              "qt_38e443e7",
+              "qt_abd056f8"
             ],
             "sort": [
               {
                 "sortDir": "DESC",
-                "sortFieldId": "m0"
+                "sortFieldId": "qt_a7ce9b32"
               }
             ],
             "limit": 100
@@ -4332,7 +4332,7 @@
       "chart_type": "SCORECARD",
       "label": "LLM Responses",
       "title": "LLM Responses",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "llm_latency_ms",
       "aggregation": "COUNT",
@@ -4370,10 +4370,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_581cc2cf",
                 "fieldName": "_llm_latency_ms_",
                 "displayName": "LLM Responses",
                 "aggregation": "COUNT"
@@ -4381,7 +4381,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_581cc2cf"
           },
           "title": {
             "showTitle": false,
@@ -4401,7 +4401,7 @@
       "chart_type": "SCORECARD",
       "label": "Avg LLM Call Latency (ms)",
       "title": "Avg LLM Call Latency (ms)",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "llm_latency_ms",
       "aggregation": "AVG",
@@ -4439,10 +4439,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_f4c85165",
                 "fieldName": "_llm_latency_ms_",
                 "displayName": "Avg LLM Call Latency (ms)",
                 "aggregation": "AVG"
@@ -4450,7 +4450,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_f4c85165"
           },
           "title": {
             "showTitle": false,
@@ -4470,7 +4470,7 @@
       "chart_type": "SCORECARD",
       "label": "Avg Time to First Token (ms)",
       "title": "Avg Time to First Token (ms)",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "ttft_ms",
       "aggregation": "AVG",
@@ -4508,10 +4508,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_1444bfec",
                 "fieldName": "_ttft_ms_",
                 "displayName": "Avg Time to First Token (ms)",
                 "aggregation": "AVG"
@@ -4519,7 +4519,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_1444bfec"
           },
           "title": {
             "showTitle": false,
@@ -4539,7 +4539,7 @@
       "chart_type": "SCORECARD",
       "label": "Suggested Columns Proposed",
       "title": "Suggested Columns Proposed",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "similar_queries_count",
       "aggregation": "SUM",
@@ -4577,10 +4577,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_291ed8e1",
                 "fieldName": "_similar_queries_count_",
                 "displayName": "Suggested Columns Proposed",
                 "aggregation": "SUM"
@@ -4588,7 +4588,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_291ed8e1"
           },
           "title": {
             "showTitle": false,
@@ -4607,7 +4607,7 @@
       "component_type": "simple-barchart",
       "chart_type": "bar_chart",
       "title": "Tokens by Model Version",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "dimensions": [
         "model_version"
@@ -4642,15 +4642,15 @@
         },
         "barChart": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "dim",
+                "id": "qt_09afcfdb",
                 "fieldName": "_model_version_",
                 "displayName": "Model Version"
               },
               {
-                "id": "m0",
+                "id": "qt_f8bf601a",
                 "fieldName": "_total_tokens_",
                 "displayName": "Total Tokens",
                 "aggregation": "SUM"
@@ -4659,11 +4659,11 @@
           },
           "fields": {
             "primaryAxis": {
-              "fieldId": "dim",
+              "fieldId": "qt_09afcfdb",
               "sort": [
                 {
                   "sortDir": "DESC",
-                  "sortFieldId": "m0"
+                  "sortFieldId": "qt_f8bf601a"
                 }
               ],
               "limit": 15,
@@ -4672,7 +4672,7 @@
             },
             "metricSeries": {
               "metricIds": [
-                "m0"
+                "qt_f8bf601a"
               ]
             }
           },
@@ -4696,7 +4696,7 @@
       "component_type": "simple-barchart",
       "chart_type": "bar_chart",
       "title": "Suggested Columns by Reason",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "dimensions": [
         "embedding_suggestion_reason"
@@ -4731,15 +4731,15 @@
         },
         "barChart": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "dim",
+                "id": "qt_69a5beaa",
                 "fieldName": "_embedding_suggestion_reason_",
                 "displayName": "Suggestion Reason"
               },
               {
-                "id": "m0",
+                "id": "qt_63d8de68",
                 "fieldName": "_similar_queries_count_",
                 "displayName": "Suggested Columns",
                 "aggregation": "SUM"
@@ -4748,11 +4748,11 @@
           },
           "fields": {
             "primaryAxis": {
-              "fieldId": "dim",
+              "fieldId": "qt_69a5beaa",
               "sort": [
                 {
                   "sortDir": "DESC",
-                  "sortFieldId": "m0"
+                  "sortFieldId": "qt_63d8de68"
                 }
               ],
               "limit": 15,
@@ -4761,7 +4761,7 @@
             },
             "metricSeries": {
               "metricIds": [
-                "m0"
+                "qt_63d8de68"
               ]
             }
           },
@@ -4786,7 +4786,7 @@
       "chart_type": "SCORECARD",
       "label": "Distinct Personas",
       "title": "Distinct Personas",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "persona",
       "aggregation": "COUNT_DISTINCT",
@@ -4824,10 +4824,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_d6385c41",
                 "fieldName": "_persona_",
                 "displayName": "Distinct Personas",
                 "aggregation": "COUNT_DISTINCT"
@@ -4835,7 +4835,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_d6385c41"
           },
           "title": {
             "showTitle": false,
@@ -4855,7 +4855,7 @@
       "chart_type": "SCORECARD",
       "label": "Distinct User IDs",
       "title": "Distinct User IDs",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "user_id",
       "aggregation": "COUNT_DISTINCT",
@@ -4893,10 +4893,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_aeca08f6",
                 "fieldName": "_user_id_",
                 "displayName": "Distinct User IDs",
                 "aggregation": "COUNT_DISTINCT"
@@ -4904,7 +4904,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_aeca08f6"
           },
           "title": {
             "showTitle": false,
@@ -4924,7 +4924,7 @@
       "chart_type": "SCORECARD",
       "label": "Distinct Conversations",
       "title": "Distinct Conversations",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "conversation_id",
       "aggregation": "COUNT_DISTINCT",
@@ -4962,10 +4962,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_a42e18b1",
                 "fieldName": "_conversation_id_",
                 "displayName": "Distinct Conversations",
                 "aggregation": "COUNT_DISTINCT"
@@ -4973,7 +4973,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_a42e18b1"
           },
           "title": {
             "showTitle": false,
@@ -4992,7 +4992,7 @@
       "component_type": "simple-barchart",
       "chart_type": "bar_chart",
       "title": "Turns by Persona",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "dimensions": [
         "persona"
@@ -5027,15 +5027,15 @@
         },
         "barChart": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "dim",
+                "id": "qt_c4ad495e",
                 "fieldName": "_persona_",
                 "displayName": "Persona"
               },
               {
-                "id": "m0",
+                "id": "qt_dd7d7d10",
                 "fieldName": "_invocation_id_",
                 "displayName": "Turns",
                 "aggregation": "COUNT_DISTINCT"
@@ -5044,11 +5044,11 @@
           },
           "fields": {
             "primaryAxis": {
-              "fieldId": "dim",
+              "fieldId": "qt_c4ad495e",
               "sort": [
                 {
                   "sortDir": "DESC",
-                  "sortFieldId": "m0"
+                  "sortFieldId": "qt_dd7d7d10"
                 }
               ],
               "limit": 15,
@@ -5057,7 +5057,7 @@
             },
             "metricSeries": {
               "metricIds": [
-                "m0"
+                "qt_dd7d7d10"
               ]
             }
           },
@@ -5081,7 +5081,7 @@
       "component_type": "simple-table",
       "chart_type": "table",
       "title": "Persona & Data Agent Activity",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "dimensions": [
         "persona",
@@ -5122,32 +5122,32 @@
         },
         "table": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "d0",
+                "id": "qt_8070d8ac",
                 "fieldName": "_persona_",
                 "displayName": "Persona"
               },
               {
-                "id": "d1",
+                "id": "qt_2b3c89df",
                 "fieldName": "_data_agent_id_",
                 "displayName": "Data Agent"
               },
               {
-                "id": "m0",
+                "id": "qt_cbce3e14",
                 "fieldName": "_invocation_id_",
                 "displayName": "Turns",
                 "aggregation": "COUNT_DISTINCT"
               },
               {
-                "id": "m1",
+                "id": "qt_c1b8027d",
                 "fieldName": "_total_tokens_",
                 "displayName": "Total Tokens",
                 "aggregation": "SUM"
               },
               {
-                "id": "m2",
+                "id": "qt_174cfaac",
                 "fieldName": "_turn_latency_ms_",
                 "displayName": "Avg Turn Latency (ms)",
                 "aggregation": "AVG"
@@ -5156,18 +5156,18 @@
           },
           "fields": {
             "dimensionIds": [
-              "d0",
-              "d1"
+              "qt_8070d8ac",
+              "qt_2b3c89df"
             ],
             "metricIds": [
-              "m0",
-              "m1",
-              "m2"
+              "qt_cbce3e14",
+              "qt_c1b8027d",
+              "qt_174cfaac"
             ],
             "sort": [
               {
                 "sortDir": "DESC",
-                "sortFieldId": "m0"
+                "sortFieldId": "qt_cbce3e14"
               }
             ],
             "limit": 100
@@ -5200,7 +5200,7 @@
       "chart_type": "SCORECARD",
       "label": "Avg End-to-End Turn Latency (ms)",
       "title": "Avg End-to-End Turn Latency (ms)",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "turn_latency_ms",
       "aggregation": "AVG",
@@ -5238,10 +5238,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_1e5c0a97",
                 "fieldName": "_turn_latency_ms_",
                 "displayName": "Avg End-to-End Turn Latency (ms)",
                 "aggregation": "AVG"
@@ -5249,7 +5249,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_1e5c0a97"
           },
           "title": {
             "showTitle": false,
@@ -5269,7 +5269,7 @@
       "chart_type": "SCORECARD",
       "label": "Avg LLM Latency (ms)",
       "title": "Avg LLM Latency (ms)",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "llm_latency_ms",
       "aggregation": "AVG",
@@ -5307,10 +5307,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_235cb0ae",
                 "fieldName": "_llm_latency_ms_",
                 "displayName": "Avg LLM Latency (ms)",
                 "aggregation": "AVG"
@@ -5318,7 +5318,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_235cb0ae"
           },
           "title": {
             "showTitle": false,
@@ -5338,7 +5338,7 @@
       "chart_type": "SCORECARD",
       "label": "Avg Event Latency (ms)",
       "title": "Avg Event Latency (ms)",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "total_latency_ms",
       "aggregation": "AVG",
@@ -5376,10 +5376,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_16a686b5",
                 "fieldName": "_total_latency_ms_",
                 "displayName": "Avg Event Latency (ms)",
                 "aggregation": "AVG"
@@ -5387,7 +5387,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_16a686b5"
           },
           "title": {
             "showTitle": false,
@@ -5406,7 +5406,7 @@
       "component_type": "simple-piechart",
       "chart_type": "pie_chart",
       "title": "Fast-Path vs Standard NL2SQL Turns",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "dimensions": [
         "fast_path_label"
@@ -5441,15 +5441,15 @@
         },
         "pieChart": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "dim",
+                "id": "qt_6d704d5c",
                 "fieldName": "_fast_path_label_",
                 "displayName": "Execution Path"
               },
               {
-                "id": "met",
+                "id": "qt_0a6310c4",
                 "fieldName": "_invocation_id_",
                 "displayName": "Turns",
                 "aggregation": "COUNT_DISTINCT"
@@ -5457,12 +5457,12 @@
             ]
           },
           "fields": {
-            "dimensionId": "dim",
-            "metricId": "met",
+            "dimensionId": "qt_6d704d5c",
+            "metricId": "qt_0a6310c4",
             "sort": [
               {
                 "sortDir": "DESC",
-                "sortFieldId": "met"
+                "sortFieldId": "qt_0a6310c4"
               }
             ],
             "limit": 10,
@@ -5486,7 +5486,7 @@
       "component_type": "simple-barchart",
       "chart_type": "bar_chart",
       "title": "Avg Turn Latency: Fast-Path vs Standard NL2SQL",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "dimensions": [
         "fast_path_label"
@@ -5521,15 +5521,15 @@
         },
         "barChart": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "dim",
+                "id": "qt_a286c105",
                 "fieldName": "_fast_path_label_",
                 "displayName": "Execution Path"
               },
               {
-                "id": "m0",
+                "id": "qt_cac76a3a",
                 "fieldName": "_turn_latency_ms_",
                 "displayName": "Avg Turn Latency (ms)",
                 "aggregation": "AVG"
@@ -5538,11 +5538,11 @@
           },
           "fields": {
             "primaryAxis": {
-              "fieldId": "dim",
+              "fieldId": "qt_a286c105",
               "sort": [
                 {
                   "sortDir": "DESC",
-                  "sortFieldId": "m0"
+                  "sortFieldId": "qt_cac76a3a"
                 }
               ],
               "limit": 15,
@@ -5551,7 +5551,7 @@
             },
             "metricSeries": {
               "metricIds": [
-                "m0"
+                "qt_cac76a3a"
               ]
             }
           },
@@ -5576,7 +5576,7 @@
       "chart_type": "SCORECARD",
       "label": "Error Events (3-Condition)",
       "title": "Error Events (3-Condition)",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "error_message",
       "aggregation": "COUNT",
@@ -5614,10 +5614,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_a813429f",
                 "fieldName": "_error_message_",
                 "displayName": "Error Events (3-Condition)",
                 "aggregation": "COUNT"
@@ -5625,7 +5625,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_a813429f"
           },
           "title": {
             "showTitle": false,
@@ -5645,7 +5645,7 @@
       "chart_type": "SCORECARD",
       "label": "Distinct Error Signatures",
       "title": "Distinct Error Signatures",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "field": "error_message",
       "aggregation": "COUNT_DISTINCT",
@@ -5683,10 +5683,10 @@
         },
         "scorecard": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "met",
+                "id": "qt_a8ab9425",
                 "fieldName": "_error_message_",
                 "displayName": "Distinct Error Signatures",
                 "aggregation": "COUNT_DISTINCT"
@@ -5694,7 +5694,7 @@
             ]
           },
           "fields": {
-            "primaryMetricId": "met"
+            "primaryMetricId": "qt_a8ab9425"
           },
           "title": {
             "showTitle": false,
@@ -5713,7 +5713,7 @@
       "component_type": "simple-barchart",
       "chart_type": "bar_chart",
       "title": "Error Events by BQCA Event Type",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "dimensions": [
         "event_type"
@@ -5748,15 +5748,15 @@
         },
         "barChart": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "dim",
+                "id": "qt_8eff7d70",
                 "fieldName": "_event_type_",
                 "displayName": "Event Type"
               },
               {
-                "id": "m0",
+                "id": "qt_79ac4183",
                 "fieldName": "_error_message_",
                 "displayName": "Error Events",
                 "aggregation": "COUNT"
@@ -5765,11 +5765,11 @@
           },
           "fields": {
             "primaryAxis": {
-              "fieldId": "dim",
+              "fieldId": "qt_8eff7d70",
               "sort": [
                 {
                   "sortDir": "DESC",
-                  "sortFieldId": "m0"
+                  "sortFieldId": "qt_79ac4183"
                 }
               ],
               "limit": 15,
@@ -5778,7 +5778,7 @@
             },
             "metricSeries": {
               "metricIds": [
-                "m0"
+                "qt_79ac4183"
               ]
             }
           },
@@ -5802,7 +5802,7 @@
       "component_type": "simple-barchart",
       "chart_type": "bar_chart",
       "title": "Error Events by Data Agent",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "dimensions": [
         "data_agent_id"
@@ -5837,15 +5837,15 @@
         },
         "barChart": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "dim",
+                "id": "qt_3859cfd6",
                 "fieldName": "_data_agent_id_",
                 "displayName": "Data Agent"
               },
               {
-                "id": "m0",
+                "id": "qt_891b1a3f",
                 "fieldName": "_error_message_",
                 "displayName": "Error Events",
                 "aggregation": "COUNT"
@@ -5854,11 +5854,11 @@
           },
           "fields": {
             "primaryAxis": {
-              "fieldId": "dim",
+              "fieldId": "qt_3859cfd6",
               "sort": [
                 {
                   "sortDir": "DESC",
-                  "sortFieldId": "m0"
+                  "sortFieldId": "qt_891b1a3f"
                 }
               ],
               "limit": 15,
@@ -5867,7 +5867,7 @@
             },
             "metricSeries": {
               "metricIds": [
-                "m0"
+                "qt_891b1a3f"
               ]
             }
           },
@@ -5891,7 +5891,7 @@
       "component_type": "simple-table",
       "chart_type": "table",
       "title": "Event-Level Prompt, Response & Extracted SQL",
-      "datasource_id": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+      "datasource_id": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
       "data_source_alias": "ds0",
       "dimensions": [
         "event_date",
@@ -5946,66 +5946,66 @@
         },
         "table": {
           "dataset": {
-            "datasourceId": "4f17a2b4-f79a-4a52-aaa1-5f65e49ca1cc",
+            "datasourceId": "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
             "columns": [
               {
-                "id": "d0",
+                "id": "qt_40f9b407",
                 "fieldName": "_event_date_",
                 "displayName": "Event Date"
               },
               {
-                "id": "d1",
+                "id": "qt_b684d2ed",
                 "fieldName": "_session_id_",
                 "displayName": "Session ID"
               },
               {
-                "id": "d2",
+                "id": "qt_54bd6219",
                 "fieldName": "_data_agent_id_",
                 "displayName": "Data Agent"
               },
               {
-                "id": "d3",
+                "id": "qt_7a28e588",
                 "fieldName": "_persona_",
                 "displayName": "Persona"
               },
               {
-                "id": "d4",
+                "id": "qt_800b7f96",
                 "fieldName": "_event_type_",
                 "displayName": "Event Type"
               },
               {
-                "id": "d5",
+                "id": "qt_bbf261e0",
                 "fieldName": "_fast_path_label_",
                 "displayName": "Path"
               },
               {
-                "id": "d6",
+                "id": "qt_1ada8666",
                 "fieldName": "_user_prompt_text_",
                 "displayName": "User Prompt"
               },
               {
-                "id": "d7",
+                "id": "qt_abb7920b",
                 "fieldName": "_extracted_sql_",
                 "displayName": "Extracted SQL"
               },
               {
-                "id": "d8",
+                "id": "qt_a04329d9",
                 "fieldName": "_summary_text_",
                 "displayName": "Response Summary"
               },
               {
-                "id": "d9",
+                "id": "qt_42c77379",
                 "fieldName": "_error_message_",
                 "displayName": "Error Message"
               },
               {
-                "id": "m0",
+                "id": "qt_a5d93a61",
                 "fieldName": "_total_latency_ms_",
                 "displayName": "Latency (ms)",
                 "aggregation": "AVG"
               },
               {
-                "id": "m1",
+                "id": "qt_e3fa0159",
                 "fieldName": "_total_tokens_",
                 "displayName": "Tokens",
                 "aggregation": "SUM"
@@ -6014,25 +6014,25 @@
           },
           "fields": {
             "dimensionIds": [
-              "d0",
-              "d1",
-              "d2",
-              "d3",
-              "d4",
-              "d5",
-              "d6",
-              "d7",
-              "d8",
-              "d9"
+              "qt_40f9b407",
+              "qt_b684d2ed",
+              "qt_54bd6219",
+              "qt_7a28e588",
+              "qt_800b7f96",
+              "qt_bbf261e0",
+              "qt_1ada8666",
+              "qt_abb7920b",
+              "qt_a04329d9",
+              "qt_42c77379"
             ],
             "metricIds": [
-              "m0",
-              "m1"
+              "qt_a5d93a61",
+              "qt_e3fa0159"
             ],
             "sort": [
               {
                 "sortDir": "DESC",
-                "sortFieldId": "d0"
+                "sortFieldId": "qt_40f9b407"
               }
             ],
             "limit": 100
