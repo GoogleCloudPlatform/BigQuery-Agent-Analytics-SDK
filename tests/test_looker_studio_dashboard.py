@@ -1855,6 +1855,7 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
   evidence = dict(bqca["live_template_verification"])
   pending = evidence.pop("pending_live_sync")
   assert evidence == {
+      "sync_generation": 1,
       "verified_date": "2026-10-09",
       "repository_sql_sha256": digest,
       "pages_sha256": pages_digest,
@@ -2725,6 +2726,29 @@ def test_bqca_derive_report_column_ids_lengthens_only_colliding_ids():
 
 _BQCA_DROP = object()
 BQCA_LIVE_PENDING = "bqca live_template_verification.pending_live_sync"
+# A binding whose verified digests are the pinned ones records a live sync,
+# so it needs the capture receipt that tools/finalize_live_sync.py commits
+# with it; a hand edit that only re-pins the verified digests has none,
+# whatever it leaves of the pending record.
+BQCA_LIVE_NO_RECEIPT = (
+    "bqca live_template_verification records a live sync (its verified"
+    " digests are the pinned ones), so it needs the capture receipt that"
+    " finalized it: cannot read bindings/bqca_live_capture_receipt.json: No"
+    " such file or directory"
+)
+BQCA_LIVE_PENDING_KEPT = (
+    f"{BQCA_LIVE_PENDING} must be removed: manifest_sha256 and"
+    " template_bundle_sha256 equal their verified digests"
+)
+# The values of a `pending_live_sync` that is present but no mapping, or an
+# empty one.
+BQCA_PENDING_NOT_A_RECORD = (
+    ("null", None),
+    ("empty_mapping", {}),
+    ("empty_list", []),
+    ("empty_string", ""),
+    ("false", False),
+)
 BQCA_LIVE_SYNCED = (
     (("verified_manifest_sha256",), lambda live: live["manifest_sha256"]),
     (
@@ -2813,17 +2837,47 @@ BQCA_PENDING_LIVE_SYNC_CASES = [
     ),
     pytest.param(
         _bqca_live_edit(*BQCA_LIVE_SYNCED),
-        [
-            f"{BQCA_LIVE_PENDING} must be removed: manifest_sha256 and"
-            " template_bundle_sha256 equal their verified digests"
-        ],
+        [BQCA_LIVE_PENDING_KEPT, BQCA_LIVE_NO_RECEIPT],
         id="kept_after_the_sync",
+    ),
+    # Present with a null, empty or wrong-typed value, the pending record
+    # still counts: it must go, and the receipt is still required.
+    *(
+        pytest.param(
+            _bqca_live_edit(*BQCA_LIVE_SYNCED, (("pending_live_sync",), value)),
+            [BQCA_LIVE_PENDING_KEPT, BQCA_LIVE_NO_RECEIPT],
+            id=f"{case_id}_after_the_sync",
+        )
+        for case_id, value in BQCA_PENDING_NOT_A_RECORD
+    ),
+    # While the digests differ, such a value is no pending record.
+    *(
+        pytest.param(
+            _bqca_live_edit((("pending_live_sync",), value)),
+            [f"{BQCA_LIVE_PENDING} must be a mapping"],
+            id=f"{case_id}_while_pending",
+        )
+        for case_id, value in BQCA_PENDING_NOT_A_RECORD
+        if value != {}
+    ),
+    pytest.param(
+        _bqca_live_edit((("pending_live_sync",), {})),
+        [
+            f"{BQCA_LIVE_PENDING}.reason None must be a non-empty string",
+            f"{BQCA_LIVE_PENDING}.since_date None is not a quoted YYYY-MM-DD"
+            " date",
+            f"{BQCA_LIVE_PENDING}.tracking_issue None is not the URL of an"
+            " issue of this repository",
+            f"{BQCA_LIVE_PENDING}.required_actions None must be a non-empty"
+            " list of non-empty strings",
+        ],
+        id="empty_mapping_while_pending",
     ),
     pytest.param(
         _bqca_live_edit(
             *BQCA_LIVE_SYNCED, (("pending_live_sync",), _BQCA_DROP)
         ),
-        [],
+        [BQCA_LIVE_NO_RECEIPT],
         id="removed_after_the_sync",
     ),
     *(
@@ -2850,6 +2904,30 @@ BQCA_PENDING_LIVE_SYNC_CASES = [
         _bqca_live_edit((("pending_live_sync",), "see the tracking issue")),
         [f"{BQCA_LIVE_PENDING} must be a mapping"],
         id="not_a_mapping",
+    ),
+    *(
+        pytest.param(
+            _bqca_live_edit((("sync_generation",), value)),
+            [
+                "bqca live_template_verification.sync_generation"
+                f" {None if value is _BQCA_DROP else value!r} is not an"
+                " integer of at least 1"
+            ],
+            id=f"sync_generation_{case_id}",
+        )
+        for case_id, value in (
+            ("missing", _BQCA_DROP),
+            ("zero", 0),
+            ("negative", -1),
+            ("string", "1"),
+            ("bool", True),
+            ("float", 1.0),
+        )
+    ),
+    pytest.param(
+        _bqca_live_edit((("sync_generation",), 7)),
+        [],
+        id="sync_generation_later",
     ),
     *_bqca_pending_cases(
         "reason",
@@ -2893,7 +2971,8 @@ BQCA_PENDING_LIVE_SYNC_CASES = [
         ),
         [
             "bqca live_template_verification.verified_date '2026-02-30' is not"
-            " a quoted YYYY-MM-DD date"
+            " a quoted YYYY-MM-DD date",
+            BQCA_LIVE_NO_RECEIPT,
         ],
         id="verified_date_invalid_after_sync",
     ),
@@ -2916,7 +2995,7 @@ BQCA_PENDING_LIVE_SYNC_CASES = [
                 ).isoformat(),
             ),
         ),
-        [],
+        [BQCA_LIVE_NO_RECEIPT],
         id="verified_date_today",
     ),
     pytest.param(
@@ -2987,7 +3066,10 @@ def test_validate_contracts_requires_a_pending_live_sync_record(edit, expected):
   While the pinned manifest or bundle digest differs from the one the live
   template was verified against, `pending_live_sync` must give a reason, a
   quoted since-date, the tracking issue of this repository, and the required
-  actions; once both match again it must be removed.
+  actions; once both match again it must be removed, and then the binding
+  needs the committed capture receipt of the sync, which no hand edit of the
+  binding writes (tests/test_looker_studio_live_sync.py checks the receipt of
+  a finalized binding).
   """
   validator = _load_dashboard_module("validate_contracts")
   binding = yaml.safe_load(
@@ -2995,6 +3077,75 @@ def test_validate_contracts_requires_a_pending_live_sync_record(edit, expected):
   )
   edit(binding["live_template_verification"])
   assert validator.validate_bqca(binding_override=binding) == expected
+
+
+def _bqca_generation_binding(generation, pending):
+  """A binding whose live sync is at `generation`, pending or finalized."""
+  live = {}
+  if generation is not None:
+    live["sync_generation"] = generation
+  if pending:
+    live["pending_live_sync"] = {"since_date": "2026-10-29"}
+  return {"live_template_verification": live}
+
+
+@pytest.mark.parametrize(
+    "previous, current, error",
+    [
+        ((None, True), (1, True), None),
+        ((1, True), (1, True), None),
+        ((1, True), (1, False), None),
+        ((1, True), (2, True), None),
+        ((1, False), (2, True), None),
+        ((1, False), (1, False), None),
+        (
+            (2, True),
+            (1, False),
+            "sync_generation 1 is less than 2, the previous binding's: it only"
+            " moves forward",
+        ),
+        (
+            (1, False),
+            (1, True),
+            "sync_generation is still 1, the previous binding's, although the"
+            " live sync is pending again: a reopened sync takes the next"
+            " generation",
+        ),
+        (
+            ("one", True),
+            (1, True),
+            "sync_generation of the previous binding, 'one', is not an"
+            " integer of at least 1",
+        ),
+    ],
+    ids=[
+        "first-generation",
+        "still-pending",
+        "finalized",
+        "reopened-while-pending",
+        "reopened",
+        "unchanged-after-the-sync",
+        "moved-back",
+        "reopened-without-a-new-generation",
+        "previous-not-an-integer",
+    ],
+)
+def test_validate_contracts_checks_that_the_sync_generation_moves_forward(
+    previous, current, error
+):
+  """#check-can-fail: `--previous-binding` keeps a receipt to its own sync.
+
+  The generation never goes down, and a sync that was not pending before
+  and is pending again takes a new one, so a binding cannot go back to a
+  generation whose committed receipt it still holds.
+  """
+  validator = _load_dashboard_module("validate_contracts")
+  errors = validator.bqca_sync_generation_progress_errors(
+      _bqca_generation_binding(*current), _bqca_generation_binding(*previous)
+  )
+  assert errors == (
+      [] if error is None else [f"bqca live_template_verification.{error}"]
+  )
 
 
 BQCA_CONTRACT_FILES = (
