@@ -399,9 +399,12 @@ panels easier to read:
   and, when the producer writes it, `otel_trace_id`.
 
 `scripts/check_grafana_queries_sync.py` does not cover this file, so its
-embedded SQL is the source of truth, and
+embedded SQL is the source of truth.
 [`tests/test_grafana_efficiency_trial.py`](../../tests/test_grafana_efficiency_trial.py)
-checks the filter encoding, the usage fallback and the panel wiring. Adopting
+checks the filter encoding and the panel wiring. It also runs every embedded
+query in SQLite against the SDK's own view definitions, and checks the call
+count, estimated cost and total tokens that the **LLM calls** query returns
+for sample rows. Adopting
 the trial in `bqaa-dashboard.json` means updating `queries/*.sql` (which
 `scripts/check_streamlit_queries_sync.py` also compares against the Streamlit
 dashboard), retiring `queries/estimated_cost.sql`, and updating the panel maps
