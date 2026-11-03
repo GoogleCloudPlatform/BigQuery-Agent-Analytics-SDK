@@ -1,0 +1,15 @@
+{
+  "format": "bqca-live-capture-receipt/v3",
+  "report_id": "42e79a1f-a979-4de8-911f-80d5a99543d5",
+  "revision": "1793504835696",
+  "dump_sha256": "7d0a64974f20d0412bd56a2e6c4a410bb85f7d7ae7798f434846bcf8358c1f86",
+  "signed_at": "2026-11-01T03:47:42Z",
+  "signer": "haiyuan-eng-google",
+  "export_command_sha256": "9a175f54089fe0b1f07f51259fad5f49d71039e8a266aeb495d9e5bc009a972a",
+  "manifest_sha256": "c450625ea44b671938587f33589b66d1a3adce00546e43ccae5b6e968428dd44",
+  "template_bundle_sha256": "c2fdbbb49b22333782dca1cfb8fa33aea3cc5d90490cd1b493538f2ccf954b62",
+  "pending_since_date": "2026-10-29",
+  "sync_generation": 1,
+  "before_dump_sha256": "90e6f259ec923c2213e99c2a1b4cda79065c13753268bec65c68b51fbd40084a",
+  "before_revision": "1793385843864"
+}

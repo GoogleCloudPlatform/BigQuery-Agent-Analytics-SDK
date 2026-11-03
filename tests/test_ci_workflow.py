@@ -389,6 +389,37 @@ def gate_step():
   return next(step for step in job["steps"] if _is_gate(step))
 
 
+SSH_KEYGEN = shutil.which("ssh-keygen")
+# What ssh-keygen prints, whatever it was asked to do, when it refuses to
+# start because the current user ID has no account entry (as in some
+# containers).
+SSH_KEYGEN_NO_USER = b"No user exists for uid"
+
+
+@pytest.fixture(scope="session")
+def openssh():
+  """Skip a test that needs ssh-keygen where OpenSSH cannot run.
+
+  The repository's BQCA binding is finalized, so the gate's validation
+  verifies the signature of its committed capture receipt with ssh-keygen
+  (OpenSSH 8.2 or later), as CI does. A test that needs the gate to pass
+  lists this fixture in `usefixtures`. It is skipped where ssh-keygen is not
+  on PATH, or refuses to start because the current user ID has no account
+  entry; anywhere else it runs, and any error, an old ssh-keygen's included,
+  fails it.
+  """
+  if SSH_KEYGEN is None:
+    pytest.skip("ssh-keygen (OpenSSH) is not installed")
+  started = subprocess.run(
+      [SSH_KEYGEN, "-l", "-f", os.devnull], capture_output=True, check=False
+  )
+  if SSH_KEYGEN_NO_USER in started.stderr:
+    pytest.skip(
+        "ssh-keygen cannot start: "
+        + started.stderr.decode("utf-8", "replace").strip()
+    )
+
+
 @pytest.mark.parametrize("event", EVENTS)
 def test_the_gate_refuses_a_generation_moved_back(gate_step, workspace, event):
   generation = _repository_generation()
@@ -422,6 +453,7 @@ def test_the_gate_refuses_a_generation_moved_back(gate_step, workspace, event):
         pytest.param(lambda: _binding_with_generation(None), id="forward"),
     ],
 )
+@pytest.mark.usefixtures("openssh")
 def test_the_gate_passes_a_generation_kept_or_moved_forward(
     gate_step, workspace, event, previous_binding
 ):
