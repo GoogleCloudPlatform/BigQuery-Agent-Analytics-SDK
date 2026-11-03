@@ -15,11 +15,14 @@ before agent events can land in BigQuery.
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/run_setup_check.sh"
    ```
 
-   The wrapper sets `PYTHONPATH` to the vendored package root and runs
-   `bigquery_agent_analytics_tracing.setup_check` like `python -m`, without
-   the working directory on `sys.path`. Exit code is
-   `0` when the runtime is ready, `1` when something required is missing
-   or unconfigured.
+   The wrapper prepends the vendored package root to `PYTHONPATH`,
+   dropping empty entries, and runs
+   `bigquery_agent_analytics_tracing.setup_check` like `python -m`,
+   without adding the working directory to `sys.path`. Non-empty
+   `PYTHONPATH` entries you set are kept as given, so `.` or another
+   relative entry can still import code from the working directory.
+   Exit code is `0` when the runtime is ready, `1` when something
+   required is missing or unconfigured.
 
 2. Surface the script's output to the user verbatim. The check is designed
    to be copy-pasteable — it already prints the exact `pip install ...`
@@ -80,11 +83,12 @@ unless `BQAA_TRACE_ENABLED` is `false`, `0`, `no` or `off`.
 - `google-cloud-bigquery-storage` + `pyarrow` — required only for the
   lower-latency Storage Write path; absence is reported as advisory
   (the drainer falls back to `insert_rows_json`).
-- Numeric `BQAA_*` settings (`BQAA_MAX_CONTENT_LENGTH`,
-  `BQAA_TRANSCRIPT_MAX_BYTES`, `BQAA_DRAIN_BATCH_SIZE`,
-  `BQAA_STATE_TTL_HOURS`, `BQAA_DRAIN_IDLE_SECONDS`,
-  `BQAA_DRAIN_POLL_SECONDS`) — must parse as numbers, and the two
-  `BQAA_DRAIN_*_SECONDS` timings must also be finite and above zero.
+- Numeric `BQAA_*` settings — `BQAA_MAX_CONTENT_LENGTH`,
+  `BQAA_TRANSCRIPT_MAX_BYTES` and `BQAA_DRAIN_BATCH_SIZE` must be
+  integers (so `5.0` and `1e3` are rejected); `BQAA_STATE_TTL_HOURS`,
+  `BQAA_DRAIN_IDLE_SECONDS` and `BQAA_DRAIN_POLL_SECONDS` must parse as
+  numbers, and the two `BQAA_DRAIN_*_SECONDS` timings must also be
+  finite and above zero.
   If one is not, the hooks cannot load their configuration and emit no
   trace events. Each hook still exits 0. When tracing is enabled it prints the error
   to stderr and tries to append it to the configured log file (a

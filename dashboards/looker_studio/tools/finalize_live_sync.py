@@ -81,10 +81,26 @@ This tool does not edit documentation or tests. See "Finalizing the live
 template sync" in ``docs/dashboard-implementation.md`` for the rest of the
 change.
 
-Exits 0 when the binding is finalized or already is, and with ``--check``
-when the audit passes, even if a write would be refused (the output says
-why); 1 when the audit fails or the binding cannot be finalized; 2 on bad
-arguments.
+A binding without ``pending_live_sync`` is already finalized, or never had a
+sync pending, so nothing is written. A dump that is not UTF-8 text or that
+carries the offline-preview marker is refused; otherwise the audit runs,
+checking the binding, its committed receipt and that receipt's signature and
+signer along with the dump, and only its pass is reported as nothing to
+finalize. The pass confirms the recorded sync only for the capture on record:
+the dump whose SHA-256 is ``verified_dump_sha256``, outside the test fixtures,
+that identifies the report. ``--check`` needs neither ``--before`` nor
+``--revision`` here, and labels the pass of any other dump a content audit
+only, saying why. A write still needs both (without them it exits 2 before
+any audit), and is refused unless the dump, the receipt beside it,
+``--revision`` and ``--before`` are those of the write that finalized the
+binding. A binding without a ``live_template_verification`` mapping is
+refused.
+
+Exits 0 when the binding is finalized, or already is and the audit passes
+(in a write, of the capture on record), and with ``--check`` when the audit
+passes, even if a write would be refused (the output says why); 1 when the
+dump is refused, the audit fails or the binding cannot be finalized; 2 on bad
+arguments, which include a write without ``--before`` or ``--revision``.
 """
 
 import argparse
@@ -163,15 +179,19 @@ In the same change:
     bindings/bqca_live_capture_signers if it is new; keep both exports
     privately: verified_dump_sha256 is the SHA-256 of the one after the
     write-back;
-  - remove the #559 known-issue notes: #bqca-column-id-note in
-    docs/index.html (then run tools/render_web_config.py), the BQCA notes in
-    README.md and USER_MANUAL.md, and the section 7.4 troubleshooting row in
-    docs/guides/bqca-prompt-response-logging-manual.md;
+  - remove the known-issue notes that pending_live_sync.required_actions
+    listed before this tool removed it (and run tools/render_web_config.py
+    if docs/index.html changed);
   - update the comments above live_template_verification in
     bindings/bqca_report_template.yaml and the tests that pin the pending
     sync (listed in docs/dashboard-implementation.md);
-  - create a report with the 1-click link and check that its Total, Input,
-    Output and Thinking Tokens scorecards each show their own value."""
+  - create a report with the 1-click link, check that every page renders,
+    that each scorecard shows its own field's value over the bound query
+    (the Total, Input, Output and Thinking Tokens scorecards each the sum of
+    their own field) and that each chart and table returns the rows that
+    BigQuery gives (up to its limit), and record the dated result, with the
+    report ID of that copy, in the comments above
+    live_template_verification."""
 
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -838,6 +858,27 @@ def before_blockers(
   return blockers
 
 
+def dump_text(
+    dump: pathlib.Path, snapshot: bytes
+) -> tuple[str | None, list[str]]:
+  """Return the text of the dump bytes `snapshot`, and why it is no dump.
+
+  `snapshot`, read from `dump`, is no dump of the live template at all if it
+  does not decode as UTF-8 (its text is then None) or if it carries the
+  offline-preview marker of tools/apply_bqca_rename_map.py.
+  """
+  try:
+    text = _decode_snapshot(snapshot)
+  except UnicodeDecodeError as exc:
+    return None, [f"cannot read {dump} as UTF-8 text: {exc}"]
+  if _has_offline_preview_marker(text):
+    return text, [
+        f"{dump} is an offline preview from tools/apply_bqca_rename_map.py,"
+        " not a dump of the synced live template"
+    ]
+  return text, []
+
+
 def dump_blockers(
     dump: pathlib.Path,
     snapshot: bytes,
@@ -847,24 +888,91 @@ def dump_blockers(
   """Return why the dump bytes `snapshot`, read from `dump`, are refused.
 
   `dump` must not be a test fixture of this repository, and `snapshot` must
-  decode as UTF-8, carry no offline-preview marker, and identify the report
-  (`dump_identity_errors`, with `data_sources`).
+  decode as UTF-8, carry no offline-preview marker (`dump_text`), and
+  identify the report (`dump_identity_errors`, with `data_sources`).
   """
   blockers = []
   fixtures = REPOSITORY_ROOT / FIXTURES_PATH
   if _inside_directory(dump, fixtures):
     blockers.append(f"{dump} is a test fixture of this repository")
-  try:
-    text = _decode_snapshot(snapshot)
-  except UnicodeDecodeError as exc:
-    blockers.append(f"cannot read {dump} as UTF-8 text: {exc}")
-    return blockers
-  if _has_offline_preview_marker(text):
+  text, problems = dump_text(dump, snapshot)
+  if text is None:
+    return blockers + problems
+  return blockers + problems + dump_identity_errors(text, binding, data_sources)
+
+
+def recorded_capture_blockers(
+    dump: pathlib.Path, snapshot: bytes, binding: dict
+) -> list[str]:
+  """Return why the dump bytes `snapshot` are not the capture on record.
+
+  A binding with nothing pending records the capture that its live sync was
+  finalized from: the dump bytes whose SHA-256 is its `verified_dump_sha256`.
+  `snapshot`, read from `dump`, is that capture only if it has that digest
+  and `dump_blockers` does not refuse it (a test fixture of this repository,
+  or a dump that does not identify the report, is not).
+  """
+  live = binding.get(LIVE_KEY)
+  recorded = (
+      live.get("verified_dump_sha256") if isinstance(live, dict) else None
+  )
+  digest = hashlib.sha256(snapshot).hexdigest()
+  blockers = []
+  if digest != recorded:
     blockers.append(
-        f"{dump} is an offline preview from tools/apply_bqca_rename_map.py,"
-        " not a dump of the synced live template"
+        f"{dump} has sha256 {digest}, not {LIVE_KEY}.verified_dump_sha256"
+        f" {recorded}"
     )
-  return blockers + dump_identity_errors(text, binding, data_sources)
+  return blockers + dump_blockers(dump, snapshot, binding)
+
+
+def rerun_blockers(
+    receipt: Receipt,
+    before: Capture | None,
+    revision: str | None,
+    binding: dict,
+) -> list[str]:
+  """Return why a write's other inputs are not those of the capture on record.
+
+  With nothing pending, a write writes nothing, and it passes only with the
+  inputs of the write that finalized the binding: the receipt beside the
+  dump must be the receipt it records (`capture_receipt_sha256`, which the
+  audit ties to the committed receipt and its signature), `revision` its
+  `verified_revision`, and `before` the capture before the write-back whose
+  SHA-256 that receipt names.
+  """
+  live = binding.get(LIVE_KEY)
+  live = live if isinstance(live, dict) else {}
+  blockers = list(receipt.errors)
+  if receipt.data is not None:
+    digest = hashlib.sha256(receipt.data).hexdigest()
+    recorded = live.get("capture_receipt_sha256")
+    if digest != recorded:
+      blockers.append(
+          f"the receipt {receipt.path} has sha256 {digest}, not"
+          f" {LIVE_KEY}.capture_receipt_sha256 {recorded}"
+      )
+  if revision is None:
+    blockers.append(NO_REVISION)
+  elif revision != live.get("verified_revision"):
+    blockers.append(
+        f"--revision {revision!r} is not {LIVE_KEY}.verified_revision"
+        f" {live.get('verified_revision')!r}"
+    )
+  fields = receipt.fields()
+  if before is None:
+    blockers.append(NO_BEFORE)
+  elif before.data is None:
+    blockers += before.errors
+  elif fields is not None:
+    digest = hashlib.sha256(before.data).hexdigest()
+    if digest != fields["before_dump_sha256"]:
+      blockers.append(
+          f"--before {before.path} has sha256 {digest}, not the"
+          " before_dump_sha256 of the receipt,"
+          f" {fields['before_dump_sha256']}"
+      )
+  return blockers
 
 
 def write_blockers(
@@ -1103,6 +1211,69 @@ def capture_record(
   }
 
 
+def _audit_finalized(
+    args: argparse.Namespace,
+    dump: pathlib.Path,
+    snapshot: bytes,
+    receipt: Receipt,
+    before: Capture | None,
+    binding: dict,
+    audited: pathlib.Path,
+) -> int:
+  """Audit a binding with nothing pending, with the dump `snapshot`.
+
+  Nothing is written: the binding records a live sync that is already
+  finalized. Bytes that are no dump of the live template at all
+  (`dump_text`) are refused before the audit. The audit, of `audited`, checks
+  that record (the binding, its committed receipt, the receipt's signature
+  and signer) with the dump's content, so nothing to finalize is reported
+  only if it passes. Whether the dump is the capture on record
+  (`recorded_capture_blockers`) decides what the pass confirms: with
+  `--check`, any other dump gets a content audit only, which the output says;
+  a write is refused unless the dump and its other inputs are those of the
+  write that finalized the binding (`rerun_blockers`).
+  """
+  unchanged = f"{BINDING_PATH} is unchanged"
+  _, problems = dump_text(dump, snapshot)
+  if problems:
+    print(f"not finalized: {'; '.join(problems)}; {unchanged}", file=sys.stderr)
+    return 1
+  code = _audit(audited)
+  if code != 0:
+    print(
+        f"not finalized: {BINDING_PATH} has no {LIVE_KEY}.{PENDING_KEY}, but"
+        f" {VALIDATOR_PATH} exited {code} on {args.dump}, so the live sync"
+        f" that it records is not confirmed; {unchanged}",
+        file=sys.stderr,
+    )
+    return 1
+  passed = (
+      f"nothing to finalize: {BINDING_PATH} has no {LIVE_KEY}.{PENDING_KEY},"
+      f" and the live audit of {args.dump}"
+  )
+  blockers = recorded_capture_blockers(dump, snapshot, binding)
+  if args.check:
+    if blockers:
+      print(
+          f"{passed} passed (content audit only, not the capture that it"
+          f" records: {'; '.join(blockers)}); it is unchanged"
+      )
+    else:
+      print(f"{passed}, the capture that it records, passed; it is unchanged")
+    return 0
+  blockers += rerun_blockers(receipt, before, args.revision, binding)
+  if blockers:
+    print(
+        f"not finalized: {BINDING_PATH} has no {LIVE_KEY}.{PENDING_KEY}, and"
+        f" the live audit of {args.dump} passed, but a write needs the"
+        f" capture that it records: {'; '.join(blockers)}; {unchanged}",
+        file=sys.stderr,
+    )
+    return 1
+  print(f"{passed}, the capture that it records, passed; it is unchanged")
+  return 0
+
+
 def _finalize_snapshot(
     args: argparse.Namespace,
     dump: pathlib.Path,
@@ -1126,12 +1297,22 @@ def _finalize_snapshot(
   binding = yaml.safe_load(original)
   binding = binding if isinstance(binding, dict) else {}
   live = binding.get(LIVE_KEY)
-  if not isinstance(live, dict) or PENDING_KEY not in live:
-    print(
-        f"nothing to finalize: {BINDING_PATH} has no"
-        f" {LIVE_KEY}.{PENDING_KEY}; it is unchanged"
+  if not isinstance(live, dict):
+    state = (
+        "is missing"
+        if LIVE_KEY not in binding
+        else f"is a {type(live).__name__}, not a mapping"
     )
-    return 0
+    print(
+        f"not finalized: {LIVE_KEY} in {BINDING_PATH} {state}, so it records"
+        f" no live sync to finalize or check; {unchanged}",
+        file=sys.stderr,
+    )
+    return 1
+  if PENDING_KEY not in live:
+    return _audit_finalized(
+        args, dump, snapshot, receipt, before, binding, audited
+    )
 
   # A write fails closed without a trusted capture of these bytes.
   blockers = write_blockers(

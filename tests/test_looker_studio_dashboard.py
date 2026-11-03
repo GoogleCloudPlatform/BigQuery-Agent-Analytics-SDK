@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 import datetime
 import hashlib
 import importlib.util
@@ -21,6 +22,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import types
 import urllib.parse
 
 import pytest
@@ -43,6 +45,40 @@ def _load_dashboard_module(name):
 
 def _load_hydration_module():
   return _load_dashboard_module("hydrate_dashboard")
+
+
+SSH_KEYGEN = shutil.which("ssh-keygen")
+# What ssh-keygen prints, whatever it was asked to do, when it refuses to
+# start because the current user ID has no account entry (as in some
+# containers).
+SSH_KEYGEN_NO_USER = b"No user exists for uid"
+
+
+@pytest.fixture(scope="session")
+def openssh():
+  """Skip a test that needs ssh-keygen where OpenSSH cannot run.
+
+  The BQCA binding is finalized, so validating it verifies the signature of
+  its committed capture receipt with ssh-keygen (OpenSSH 8.2 or later), as
+  CI does. A test that validates the repository's BQCA binding, or checks
+  that signature, lists this fixture in `usefixtures`; a parametrized test
+  that needs it in only some cases requests it in those cases with
+  `request.getfixturevalue`, because `pytest.param` cannot carry
+  `usefixtures`. The test or case is skipped where ssh-keygen is not on
+  PATH, or refuses to start because the current user ID has no account
+  entry; anywhere else it runs, and any error, an old ssh-keygen's
+  included, fails it.
+  """
+  if SSH_KEYGEN is None:
+    pytest.skip("ssh-keygen (OpenSSH) is not installed")
+  started = subprocess.run(
+      [SSH_KEYGEN, "-l", "-f", os.devnull], capture_output=True, check=False
+  )
+  if SSH_KEYGEN_NO_USER in started.stderr:
+    pytest.skip(
+        "ssh-keygen cannot start: "
+        + started.stderr.decode("utf-8", "replace").strip()
+    )
 
 
 def test_portable_linking_api_configuration():
@@ -1175,10 +1211,10 @@ BQCA_DATASOURCE_ID = "70e5ac1e-65bb-4c89-a9df-fa9990cb6029"
 RETIRED_BQCA_DATASOURCE_ID_SHA256 = (
     "dab46990e866e28766d6d686428437120f5ba12773da5e4894e9f0d131213fa2"
 )
-# The manifest and JSON bundle digests that were pinned when the live template
-# was last verified (2026-10-09). The repository has changed both since, so
-# `live_template_verification.pending_live_sync` records the live sync that is
-# still to happen, tracked on BQCA_LIVE_SYNC_ISSUE.
+# The manifest and JSON bundle digests that were pinned for the 2026-10-09
+# verification before the 2026-11-01 live sync (#559). Used by tests that
+# exercise `pending_live_sync` validation when the pinned and verified digests
+# differ.
 BQCA_LIVE_VERIFIED_MANIFEST_SHA256 = (
     "a6b4effd99d59097d3c014cf6242a4f2750da8622e7ad71a03b8f5585a486054"
 )
@@ -1189,6 +1225,32 @@ BQCA_LIVE_SYNC_ISSUE = (
     "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK"
     "/issues/559"
 )
+
+
+def _with_pending_live_sync(binding_copy):
+  """Return `binding_copy` with a pre-sync `pending_live_sync` record."""
+  live = binding_copy["live_template_verification"]
+  for key in (
+      "verified_revision",
+      "verified_dump_sha256",
+      "capture_receipt_sha256",
+      "captured_by",
+  ):
+    live.pop(key, None)
+  live["verified_date"] = "2026-10-09"
+  live["verified_manifest_sha256"] = BQCA_LIVE_VERIFIED_MANIFEST_SHA256
+  live["verified_template_bundle_sha256"] = BQCA_LIVE_VERIFIED_BUNDLE_SHA256
+  live["pending_live_sync"] = {
+      "reason": (
+          "The live template has not been synced with the contract change."
+      ),
+      "since_date": "2026-10-29",
+      "tracking_issue": BQCA_LIVE_SYNC_ISSUE,
+      "required_actions": ["Sync the live template."],
+  }
+  return binding_copy
+
+
 BQCA_DATASOURCE_ALIAS = "ds0"
 BQCA_DEFAULT_TABLE = "bqca_prompt_response_logs"
 SHARED_SENTINELS = (
@@ -1277,6 +1339,7 @@ def _profile_rows(events, attributed, fast_path=0):
   return rows
 
 
+@pytest.mark.usefixtures("openssh")
 def test_bqca_generated_artifacts_cannot_drift(tmp_path):
   generator = _load_dashboard_module("gen_bqca_events_tmpl")
   renderer = _load_dashboard_module("render_template")
@@ -1805,6 +1868,194 @@ def test_bqca_date_window_check_rejects_broken_queries(replacements):
   assert _bqca_date_window_defects(sql)
 
 
+def _latest_calendar_date():
+  """Today, on the later of the local and the UTC calendars.
+
+  A `verified_date` is a UTC date, which west of UTC is a day ahead of the
+  local calendar in the evening, so a bound on it takes the later of the two
+  dates, as tools/validate_contracts.py does.
+  """
+  return max(
+      datetime.date.today(),
+      datetime.datetime.now(datetime.timezone.utc).date(),
+  )
+
+
+# The signer of the committed capture receipt, and the SHA-256 fingerprint of
+# its key in bindings/bqca_live_capture_signers, as `ssh-keygen -l` prints it.
+BQCA_CAPTURE_SIGNER = "haiyuan-eng-google"
+BQCA_CAPTURE_SIGNER_FINGERPRINT = (
+    "SHA256:pum9Cf+yARVa64p0awyJRYegBJJL0AkCBKjAONAwLkY"
+)
+# The reports that the post-sync check of 2026-11-01 measured, by report ID:
+# the live template and the fresh copy of it that the Linking API created for
+# each of two tables, each with the `ds0` data source of its own, the table
+# that data source reads, and the dates of the check.
+BQCA_POST_SYNC_REPORTS = (
+    (
+        "Live template",
+        "42e79a1f-a979-4de8-911f-80d5a99543d5",
+        "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
+        "canonical sentinel table",
+        ("20200101", "20261231"),
+    ),
+    (
+        "Fresh copy",
+        "920ba558-cc2e-44f9-bc35-96158b3ccb7e",
+        "9663f7a6-a609-431a-ba31-e27f345d8ea6",
+        "canonical sentinel table",
+        ("20200101", "20261231"),
+    ),
+    (
+        "Fresh copy",
+        "35ebd06d-4d15-4ca9-ad23-0631cbb87ca3",
+        "180a6d04-ab80-43c0-bf59-c48f3efa90ee",
+        "hydrated table",
+        ("20250101", "20261101"),
+    ),
+)
+# What the post-sync check found, by scorecard: the value of its own field
+# over the bound query on the canonical sentinel table and on a hydrated
+# table. BatchedDataV2 returned it on each report above that reads the table,
+# and BigQuery gave the same.
+BQCA_POST_SYNC_SCORECARDS = {
+    "kpi_total_tokens": ("39,146,504", "59,097,881"),
+    "kpi_input_tokens": ("32,708,861", "57,677,125"),
+    "kpi_output_tokens": ("6,437,643", "364,388"),
+    "kpi_thoughts_tokens": ("null", "1,047,032"),
+    "kpi_cached_tokens": ("null", "1,147,570"),
+    "kpi_distinct_agents": ("1", "3"),
+    "kpi_total_sessions": ("14,100", "2,041"),
+    "kpi_turn_completes": ("14,093", "2,039"),
+    "kpi_extracted_sql_count": ("0", "0"),
+    "kpi_llm_calls": ("15,604", "2,876"),
+    "kpi_llm_latency_avg": ("5,941.28", "7,429.72"),
+    "kpi_ttft_avg": ("762.83", "7,429.71"),
+    "kpi_similar_queries": ("null", "null"),
+    "kpi_distinct_personas": ("1", "4"),
+    "kpi_distinct_users": ("500", "7"),
+    "kpi_distinct_conversations": ("0", "5"),
+    "kpi_turn_latency_avg": ("null", "26,073.58"),
+    "kpi_llm_latency_p5": ("5,941.28", "7,429.72"),
+    "kpi_total_latency_avg": ("5,940.97", "18,344.53"),
+    "kpi_total_errors": ("1", "3"),
+    "kpi_distinct_errors": ("1", "1"),
+}
+# What the post-sync check found, by chart or table: the number of rows that
+# BigQuery gives for its dimensions over the bound query on each table.
+# BatchedDataV2 returned as many on each report, up to the component's
+# `limit`.
+BQCA_POST_SYNC_CHART_ROWS = {
+    "chart_tokens_by_agent": (1, 3),
+    "chart_tokens_over_time": (32, 55),
+    "chart_turns_by_agent": (1, 3),
+    "chart_events_by_agent": (1, 3),
+    "chart_tokens_by_model": (3, 4),
+    "chart_embedding_reasons": (1, 1),
+    "chart_turns_by_persona": (1, 4),
+    "chart_persona_breakdown": (1, 4),
+    "chart_fast_path_pie": (1, 2),
+    "chart_latency_by_fast_path": (1, 2),
+    "chart_errors_by_event_type": (5, 8),
+    "chart_errors_by_agent": (1, 3),
+    "tbl_prompt_response_sql": (56380, 10184),
+}
+# The headers of the post-sync check's tables in
+# docs/dashboard-implementation.md. Observed values (BatchedDataV2, by
+# report) and expected values (BigQuery, by table) have columns of their own.
+BQCA_POST_SYNC_SCORECARD_HEADER = [
+    "Page",
+    "Page ID",
+    "ID",
+    "Scorecard",
+    "Component ID",
+    "Concept",
+    "Field, aggregation",
+    "Observed, fresh copy `920ba558` (sentinel)",
+    "Observed, live template `42e79a1f` (sentinel)",
+    "Expected, BigQuery (sentinel)",
+    "Observed, fresh copy `35ebd06d` (hydrated)",
+    "Expected, BigQuery (hydrated)",
+]
+BQCA_POST_SYNC_CHART_HEADER = [
+    "Page",
+    "Page ID",
+    "ID",
+    "Chart or table",
+    "Component ID",
+    "Type",
+    "Concepts",
+    "Sort",
+    "Status",
+    "Observed rows, fresh copy `920ba558` (sentinel)",
+    "Observed rows, live template `42e79a1f` (sentinel)",
+    "Expected rows, BigQuery (sentinel)",
+    "Observed rows, fresh copy `35ebd06d` (hydrated)",
+    "Expected rows, BigQuery (hydrated)",
+]
+
+
+def _signers_key(signers, signer):
+  """Return `(key type, base64 key)` of the signers line that lists `signer`."""
+  for line in signers.decode("utf-8").splitlines():
+    fields = line.split()
+    if fields and not line.startswith("#") and fields[0] == signer:
+      return fields[2], fields[3]
+  raise AssertionError(f"no line of the signers file lists {signer}")
+
+
+def _ssh_fingerprint(key):
+  """Return the SHA-256 fingerprint of the base64 key `key`, as ssh-keygen."""
+  digest = hashlib.sha256(base64.b64decode(key, validate=True)).digest()
+  return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _markdown_tables(text):
+  """Return `(header, body rows)` of each Markdown table in `text`, in order."""
+  tables = []
+  for block in re.findall(r"(?m)(?:^\|.*\n?)+", text):
+    header, _, *body = [
+        [cell.strip() for cell in line.strip().strip("|").split("|")]
+        for line in block.strip().splitlines()
+    ]
+    tables.append((header, body))
+  return tables
+
+
+def _bqca_post_sync_record():
+  """Return the post-sync check's guide section and binding comments."""
+  guide = (DASHBOARD / "docs/dashboard-implementation.md").read_text()
+  _, found, tail = guide.partition(
+      "##### Post-sync scorecard check (2026-11-01)\n"
+  )
+  assert found, "docs/dashboard-implementation.md has no scorecard check"
+  section = re.split(r"(?m)^#{1,6} ", tail, maxsplit=1)[0]
+  binding_text = (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+  _, found, tail = binding_text.partition(
+      "# Post-sync scorecard check, 2026-11-01"
+  )
+  assert found, "bindings/bqca_report_template.yaml has no scorecard check"
+  comments = re.sub(
+      r"(?m)^#", "", tail.partition("\nlive_template_verification:")[0]
+  )
+  return section, comments
+
+
+def _bqca_spec_limit(comp):
+  """Return the row limit of a chart or table of the BQCA manifest."""
+  fields = _bqca_spec_inner(comp)["fields"]
+  return fields.get("primaryAxis", fields)["limit"]
+
+
+def _bqca_spec_sort(comp):
+  """Return the one sort clause of a chart or table, as the guide gives it."""
+  fields = _bqca_spec_inner(comp)["fields"]
+  (clause,) = fields.get("primaryAxis", {}).get("sort", []) + fields.get(
+      "sort", []
+  )
+  return f"`{clause['sortFieldId']}` {clause['sortDir']}"
+
+
 def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
   """The published data source's required settings and live proof are pinned.
 
@@ -1847,22 +2098,50 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
       bqca["block_datasource"]["parameter_configuration"]
   )
 
-  # The live evidence names the exact SQL, pages, manifest, and JSON bundle it was gathered for.
+  # The live evidence names the exact SQL, pages, manifest, and JSON bundle it was gathered for,
+  # and the signed capture receipt of the 2026-11-01 live sync (#559).
   assert bqca["reviewed_template_sql"]["sha256"] == digest
-  # The manifest and bundle it was gathered for are the `verified_*` digests.
-  # Both have changed since, so their pinned digests differ, and a pending
-  # live sync is recorded until the live template matches them again.
+  receipt_bytes = (
+      DASHBOARD / "bindings/bqca_live_capture_receipt.json"
+  ).read_bytes()
+  receipt = validator.parse_bqca_capture_receipt(receipt_bytes)
+  # The signers file lists the receipt's signer in exactly the form that the
+  # tools trust (test_bqca_committed_capture_receipt_signature_verifies checks
+  # the signature, which needs ssh-keygen). Beside the signer's name, the
+  # guide records the fingerprint of the signer's key, for a reviewer to
+  # confirm with the signer by another channel than the change.
+  signers = (DASHBOARD / "bindings/bqca_live_capture_signers").read_bytes()
+  assert validator.bqca_capture_signers_error(signers) is None
+  assert receipt["signer"] == BQCA_CAPTURE_SIGNER
+  _, signer_key = _signers_key(signers, BQCA_CAPTURE_SIGNER)
+  assert _ssh_fingerprint(signer_key) == BQCA_CAPTURE_SIGNER_FINGERPRINT
+  guide_text = " ".join(
+      (DASHBOARD / "docs/dashboard-implementation.md").read_text().split()
+  )
+  listed = re.search(
+      rf"\(`{re.escape(BQCA_CAPTURE_SIGNER)}` is listed [^()]*\)", guide_text
+  )
+  assert listed, "the guide does not say which signer is listed"
+  assert re.findall(r"SHA256:[A-Za-z0-9+/]{43}", listed.group()) == [
+      _ssh_fingerprint(signer_key)
+  ]
   evidence = dict(bqca["live_template_verification"])
-  pending = evidence.pop("pending_live_sync")
+  assert "pending_live_sync" not in evidence
   assert evidence == {
       "sync_generation": 1,
-      "verified_date": "2026-10-09",
+      "verified_date": "2026-11-01",
       "repository_sql_sha256": digest,
       "pages_sha256": pages_digest,
       "manifest_sha256": manifest_digest,
       "template_bundle_sha256": bundle_digest,
-      "verified_manifest_sha256": BQCA_LIVE_VERIFIED_MANIFEST_SHA256,
-      "verified_template_bundle_sha256": BQCA_LIVE_VERIFIED_BUNDLE_SHA256,
+      "verified_manifest_sha256": manifest_digest,
+      "verified_template_bundle_sha256": bundle_digest,
+      "verified_revision": "1793504835696",
+      "verified_dump_sha256": (
+          "7d0a64974f20d0412bd56a2e6c4a410bb85f7d7ae7798f434846bcf8358c1f86"
+      ),
+      "capture_receipt_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+      "captured_by": "haiyuan-eng-google",
       "method": [
           "data_studio_web_service_publish_datasource",
           "data_studio_web_service_get_block_datasource",
@@ -1899,39 +2178,210 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
       "limitation": "mutable_external_report_requires_reverification_after_changes",
   }
   verified = datetime.date.fromisoformat(evidence["verified_date"])
-  assert (
-      datetime.date.fromisoformat(bqca["published_date"])
-      <= verified
-      <= datetime.date.today()
+  published = datetime.date.fromisoformat(bqca["published_date"])
+  latest = _latest_calendar_date()
+  assert published <= verified <= latest, (
+      f"verified_date {verified} is not between published_date {published}"
+      f" and today, {latest} (the later of the local and the UTC date)"
   )
-  assert manifest_digest != BQCA_LIVE_VERIFIED_MANIFEST_SHA256
-  assert bundle_digest != BQCA_LIVE_VERIFIED_BUNDLE_SHA256
-  # The pending sync gives its reason, its start, its tracking issue, and the
-  # actions that end it: the exact qt_ IDs, the copy's own data source, and a
-  # clean live audit before the record is removed.
-  assert list(pending) == [
-      "reason",
-      "since_date",
-      "tracking_issue",
-      "required_actions",
+
+  # The post-sync check is recorded as it was run, not as a check to make: on
+  # the live template and on a fresh copy that the Linking API created for
+  # each of two tables, each named by its report ID. The binding's comments
+  # give the copies, the token sums and the render of all 7 pages; the guide
+  # every value, observed and expected apart.
+  section, comments = _bqca_post_sync_record()
+  page_ids = [page["id"] for page in contract["pages"]]
+  report_ids = [report for _, report, _, _, _ in BQCA_POST_SYNC_REPORTS]
+  source_ids = [source for _, _, source, _, _ in BQCA_POST_SYNC_REPORTS]
+  for path, text in (
+      ("docs/dashboard-implementation.md", section),
+      ("bindings/bqca_report_template.yaml", comments),
+  ):
+    text = " ".join(text.split())
+    for fragment in (
+        "CreateTempReport` with the Linking API",
+        "ds.ds0.refreshFields=false",
+        "creation_type: LINKING_API",
+        "use_fresh_schema: false",
+        "fix_fields: false",
+        'connector_block_config.alias: "t0"',
+        "use_datetime_type: true",
+        "BatchedDataV2` (`VIEW` mode) on each fresh copy",
+        "RenderDashboardPdf",
+        "13,054 rows from 2026-07-31 to 2026-10-22",
+        "20200101",
+        "20261231",
+        "20250101",
+        "20261101",
+        "39,146,504",
+        "32,708,861",
+        "6,437,643",
+        "59,097,881",
+        "57,677,125",
+        "364,388",
+        "1,047,032",
+        "1,147,570",
+        *report_ids[1:],
+        *source_ids[1:],
+        *page_ids,
+    ):
+      assert fragment in text, f"{path} does not record {fragment!r}"
+    assert "must show" not in text, f"{path} still says what a copy must show"
+    # Finding 8: both records carry all three capture digests (D0, D0p, D1)
+    # with distinct labels, the exact non-elided final check line, the signer
+    # fingerprint, and the phrase "rendered without errors".
+    for fragment in (
+        "D0",
+        "D0p",
+        "D1",
+        "1793385843864",
+        "84,190",
+        "90e6f259ec923c2213e99c2a1b4cda79065c13753268bec65c68b51fbd40084a",
+        "86,069",
+        "b9be2dae36ecfe21b6867247aa115295622b729db4b0f24b6f6f8c87200b9e92",
+        "86,045",
+        "7d0a64974f20d0412bd56a2e6c4a410bb85f7d7ae7798f434846bcf8358c1f86",
+        "check: the live audit of /tmp/D1.textproto passed; "
+        "bindings/bqca_report_template.yaml would change as above, and "
+        "bindings/bqca_live_capture_receipt.json and its signature would "
+        "be written; nothing written",
+        "SHA256:pum9Cf+yARVa64p0awyJRYegBJJL0AkCBKjAONAwLkY",
+        "rendered without errors",
+        "supersedes",
+    ):
+      assert fragment in text, f"{path} does not record {fragment!r}"
+    # Finding 2: both records name the same set of report IDs, including
+    # the template ID and its data source ID.
+    for uuid in (
+        "42e79a1f-a979-4de8-911f-80d5a99543d5",
+        "70e5ac1e-65bb-4c89-a9df-fa9990cb6029",
+        "920ba558-cc2e-44f9-bc35-96158b3ccb7e",
+        "35ebd06d-4d15-4ca9-ad23-0631cbb87ca3",
+    ):
+      assert uuid in text, f"{path} does not name {uuid}"
+
+  # Each fresh copy is a report of its own: its ID is neither the template's
+  # nor any data source's.
+  assert report_ids[0] == bqca["report_id"]
+  assert source_ids[0] == bqca["datasource_id"]
+  assert len(set(report_ids)) == len(report_ids)
+  assert len(set(source_ids)) == len(source_ids)
+  assert not set(report_ids) & set(source_ids)
+
+  tables = _markdown_tables(section)
+  assert [header for header, _ in tables] == [
+      ["Report", "Report ID", "`ds0` data source", "Table", "Dates"],
+      [
+          "Report ID",
+          "Rendered pages",
+          "`contains_user_configuration_error`",
+          "Response (bytes)",
+          "Response SHA-256",
+      ],
+      [
+          "Report ID",
+          "Components",
+          "Errors",
+          "Request (bytes)",
+          "Request SHA-256",
+          "Response (bytes)",
+          "Response SHA-256",
+      ],
+      BQCA_POST_SYNC_SCORECARD_HEADER,
+      BQCA_POST_SYNC_CHART_HEADER,
   ]
-  assert pending["reason"].strip()
-  assert pending["since_date"] == "2026-10-29"
-  assert (
-      verified
-      <= datetime.date.fromisoformat(pending["since_date"])
-      <= datetime.date.today()
+  reports, renders, batches, scorecards, charts = (body for _, body in tables)
+  assert reports == [
+      [name, f"`{report}`", f"`{source}`", table, f"`{start}` to `{end}`"]
+      for name, report, source, table, (start, end) in BQCA_POST_SYNC_REPORTS
+  ]
+  manifest = yaml.safe_load(manifest_bytes)
+  components = manifest["components"]
+  size = re.compile(r"[1-9]\d{0,2}(?:,\d{3})*")
+  sha256 = re.compile(r"`[0-9a-f]{64}`")
+  # Every page of each report rendered, without a configuration error.
+  assert [row[:3] for row in renders] == [
+      [f"`{report}`", str(len(page_ids)), "false"] for report in report_ids
+  ]
+  # One BatchedDataV2 request for all 34 components of each report, which
+  # returned no error.
+  assert [row[:3] for row in batches] == [
+      [f"`{report}`", str(len(components)), "0"] for report in report_ids
+  ]
+  for row in renders + batches:
+    for value in row[3::2]:
+      assert size.fullmatch(value), row
+    for value in row[4::2]:
+      assert sha256.fullmatch(value), row
+
+  # Observed and expected values have columns of their own, by report and by
+  # table.
+  for header in (BQCA_POST_SYNC_SCORECARD_HEADER, BQCA_POST_SYNC_CHART_HEADER):
+    assert [cell.split(",")[0].split()[0] for cell in header[-5:]] == [
+        "Observed",
+        "Observed",
+        "Expected",
+        "Observed",
+        "Expected",
+    ]
+  page_numbers = {page["id"]: str(page["index"]) for page in contract["pages"]}
+  scorecard_components = [
+      comp for comp in components if comp["category"] == "scorecard"
+  ]
+  assert [comp["id"] for comp in scorecard_components] == list(
+      BQCA_POST_SYNC_SCORECARDS
   )
-  assert pending["tracking_issue"] == BQCA_LIVE_SYNC_ISSUE
-  rename, repoint, reverify = pending["required_actions"]
-  assert "exact qt_ IDs in spec/bqca_chart_manifest.yaml" in rename
-  assert repoint.endswith(f"datasource_id to {BQCA_DATASOURCE_ID}.")
-  assert "--live-report-textproto" in reverify
-  assert "README.md" in reverify
-  assert "USER_MANUAL.md" in reverify
-  assert "docs/guides/bqca-prompt-response-logging-manual.md" in reverify
-  assert "#bqca-column-id-note" in reverify
-  assert reverify.endswith("remove pending_live_sync.")
+  # Each of the 21 scorecards of pages 1 to 6 by its own concept: on each
+  # table, BatchedDataV2 on each report observed the value that BigQuery
+  # expects.
+  assert scorecards == [
+      [
+          page_numbers[comp["page_id"]],
+          f"`{comp['page_id']}`",
+          f"`{comp['id']}`",
+          comp["label"],
+          f"`{comp['component_id']}`",
+          f"`{_bqca_spec_columns(comp)[0]['id']}`",
+          f"`{comp['field']}`, {comp['aggregation']}",
+          sentinel,
+          sentinel,
+          sentinel,
+          hydrated,
+          hydrated,
+      ]
+      for comp in scorecard_components
+      for sentinel, hydrated in [BQCA_POST_SYNC_SCORECARDS[comp["id"]]]
+  ]
+  chart_components = [
+      comp for comp in components if comp["category"] != "scorecard"
+  ]
+  assert [comp["id"] for comp in chart_components] == list(
+      BQCA_POST_SYNC_CHART_ROWS
+  )
+  # Each of the 13 charts and tables of pages 1 to 7, by its concepts and its
+  # sort: on each table, BatchedDataV2 on each report observed the rows that
+  # BigQuery expects, up to the component's limit.
+  assert charts == [
+      [
+          page_numbers[comp["page_id"]],
+          f"`{comp['page_id']}`",
+          f"`{comp['id']}`",
+          comp["title"],
+          f"`{comp['component_id']}`",
+          f"`{comp['chart_type']}`",
+          ", ".join(f"`{column['id']}`" for column in _bqca_spec_columns(comp)),
+          _bqca_spec_sort(comp),
+          "OK",
+          f"{min(sentinel, _bqca_spec_limit(comp)):,}",
+          f"{min(sentinel, _bqca_spec_limit(comp)):,}",
+          f"{sentinel:,}",
+          f"{min(hydrated, _bqca_spec_limit(comp)):,}",
+          f"{hydrated:,}",
+      ]
+      for comp in chart_components
+      for sentinel, hydrated in [BQCA_POST_SYNC_CHART_ROWS[comp["id"]]]
+  ]
 
   # The contract states the gate to pass after every publish, and points at
   # the evidence of the last run.
@@ -2013,6 +2463,136 @@ def test_bqca_block_datasource_invariants_and_live_attestation_are_recorded():
   )
 
 
+@pytest.mark.usefixtures("openssh")
+def test_bqca_committed_capture_receipt_signature_verifies():
+  """The committed capture receipt is signed by the key listed for its signer.
+
+  ssh-keygen verifies the signature against bindings/bqca_live_capture_signers
+  and prints, for the signer's key, the fingerprint that the guide records.
+  """
+  validator = _load_dashboard_module("validate_contracts")
+  bindings = DASHBOARD / "bindings"
+  receipt_bytes = (bindings / "bqca_live_capture_receipt.json").read_bytes()
+  receipt = validator.parse_bqca_capture_receipt(receipt_bytes)
+  signers = (bindings / "bqca_live_capture_signers").read_bytes()
+  assert (
+      validator.bqca_capture_signature_error(
+          receipt_bytes,
+          (bindings / "bqca_live_capture_receipt.json.sig").read_bytes(),
+          receipt["signer"],
+          signers,
+      )
+      is None
+  )
+  key_type, key = _signers_key(signers, receipt["signer"])
+  listing = subprocess.run(
+      [SSH_KEYGEN, "-l", "-E", "sha256", "-f", "-"],
+      input=f"{key_type} {key}\n",
+      capture_output=True,
+      text=True,
+      check=True,
+  )
+  assert listing.stdout.split()[1] == BQCA_CAPTURE_SIGNER_FINGERPRINT
+
+
+def _frozen_datetime(utc_now, utc_offset_hours):
+  """A stand-in for the `datetime` module, frozen at the UTC time `utc_now`.
+
+  Its local time zone is the fixed offset `utc_offset_hours` from UTC, as
+  US/Hawaii is UTC-10 all year (it keeps no daylight saving time).
+  """
+  instant = datetime.datetime.fromisoformat(utc_now)
+  local = datetime.timezone(datetime.timedelta(hours=utc_offset_hours))
+
+  class Date(datetime.date):
+
+    @classmethod
+    def today(cls):
+      return instant.astimezone(local).date()
+
+  class DateTime(datetime.datetime):
+
+    @classmethod
+    def now(cls, tz=None):
+      if tz is None:
+        return instant.astimezone(local).replace(tzinfo=None)
+      return instant.astimezone(tz)
+
+  return types.SimpleNamespace(
+      date=Date,
+      datetime=DateTime,
+      timedelta=datetime.timedelta,
+      timezone=datetime.timezone,
+  )
+
+
+# UTC times and local offsets: 03:47 UTC on 2026-11-01 is still 2026-10-31 in
+# US/Hawaii (UTC-10); noon UTC on 2026-10-31 is 2026-11-01 at UTC+14; and the
+# last second of 2026-10-31 in UTC is 2026-10-31 in US/Hawaii too.
+_UTC_AHEAD = ("2026-11-01T03:47:43+00:00", -10)
+_LOCAL_AHEAD = ("2026-10-31T12:00:00+00:00", 14)
+_BOTH_BEFORE = ("2026-10-31T23:59:59+00:00", -10)
+
+
+@pytest.mark.parametrize(
+    "clock, local_date, latest",
+    [
+        (_UTC_AHEAD, "2026-10-31", "2026-11-01"),
+        (("2026-11-01T03:47:43+00:00", 0), "2026-11-01", "2026-11-01"),
+        (_LOCAL_AHEAD, "2026-11-01", "2026-11-01"),
+        (_BOTH_BEFORE, "2026-10-31", "2026-10-31"),
+    ],
+    ids=["utc-ahead-of-hawaii", "utc", "local-ahead-of-utc", "both-before"],
+)
+def test_latest_calendar_date_is_the_later_of_the_local_and_utc_dates(
+    monkeypatch, clock, local_date, latest
+):
+  monkeypatch.setitem(globals(), "datetime", _frozen_datetime(*clock))
+
+  assert datetime.date.today().isoformat() == local_date
+  assert _latest_calendar_date().isoformat() == latest
+  # A day beyond both calendars is beyond the bound.
+  beyond = datetime.date.fromisoformat(latest) + datetime.timedelta(days=1)
+  assert not beyond <= _latest_calendar_date()
+
+
+@pytest.mark.parametrize(
+    "clock, holds",
+    [
+        (_UTC_AHEAD, True),
+        (("2026-11-01T03:47:43+00:00", 0), True),
+        (_LOCAL_AHEAD, True),
+        (_BOTH_BEFORE, False),
+        (("2026-10-31T23:59:59+00:00", 0), False),
+    ],
+    ids=[
+        "utc-ahead-of-hawaii",
+        "utc",
+        "local-ahead-of-utc",
+        "both-before-in-hawaii",
+        "both-before-in-utc",
+    ],
+)
+@pytest.mark.usefixtures("openssh")
+def test_live_attestation_holds_once_either_calendar_reaches_its_date(
+    monkeypatch, clock, holds
+):
+  """The verified_date 2026-11-01 is not in the future on either calendar.
+
+  In US/Hawaii the local date is still 2026-10-31 for the first ten hours of
+  2026-11-01 in UTC, the calendar of verified_date: the attestation holds
+  then, and fails only while both calendars are a day before it.
+  """
+  monkeypatch.setitem(globals(), "datetime", _frozen_datetime(*clock))
+
+  if holds:
+    test_bqca_block_datasource_invariants_and_live_attestation_are_recorded()
+  else:
+    with pytest.raises(AssertionError, match="is not between published_date"):
+      test_bqca_block_datasource_invariants_and_live_attestation_are_recorded()
+
+
+@pytest.mark.usefixtures("openssh")
 def test_bqca_chart_manifest_and_contract_mutation_detection():
   """F6 & R2-P3-6: mutating any scorecard, chart, embedded spec, or SQL column fails."""
   validator = _load_dashboard_module("validate_contracts")
@@ -2192,12 +2772,11 @@ def _bqca_page_components(document):
 def test_bqca_column_ids_are_report_wide_unique_qt_identifiers():
   """All 65 BQCA column IDs are deterministic qt_ IDs, unique report-wide.
 
-  This pins the repository manifest and bundle. The live template keeps its
+  This pins the repository manifest and bundle. The live template kept its
   legacy generic column IDs (`met`, `dim`, `d0`, `m0`, ...), with which
-  components on one page of a copied report show each other's values, until
-  it is synced from these contracts; `verified_date` in
-  `bindings/bqca_report_template.yaml` stays 2026-10-09 until then, and
-  reports copied before the sync must be re-created after it.
+  components on one page of a copied report showed each other's values, until
+  the 2026-11-01 sync that `bindings/bqca_report_template.yaml` records;
+  reports copied before that sync must be re-created.
   """
   validator = _load_dashboard_module("validate_contracts")
   manifest = yaml.safe_load(
@@ -2269,7 +2848,7 @@ def test_validate_contracts_rejects_generic_or_repeated_column_ids():
     m_copy = json.loads(json.dumps(manifest))
     b_copy = json.loads(json.dumps(bundle))
     mutate_documents(m_copy, b_copy)
-    repinned = json.loads(json.dumps(binding))
+    repinned = _with_pending_live_sync(json.loads(json.dumps(binding)))
     live = repinned["live_template_verification"]
     live["manifest_sha256"] = hashlib.sha256(
         yaml.safe_dump(m_copy, sort_keys=False).encode("utf-8")
@@ -2592,7 +3171,7 @@ def test_validate_contracts_rejects_generic_or_repeated_column_ids():
     m_dup = json.loads(json.dumps(manifest))
     b_dup = json.loads(json.dumps(bundle))
     c_dup = json.loads(json.dumps(contract))
-    bi_dup = json.loads(json.dumps(binding))
+    bi_dup = _with_pending_live_sync(json.loads(json.dumps(binding)))
     for doc in (m_dup, b_dup):
       for collection in (
           [c for p in doc["pages"] for c in p["components"]],
@@ -2650,6 +3229,191 @@ def test_validate_contracts_rejects_generic_or_repeated_column_ids():
       "both show" in e
       for e in _validate("kpi_input_tokens", _show_average_total_tokens)
   )
+
+
+def _bqca_validate_repinned(edit):
+  """Validate the BQCA contracts with `edit` applied to manifest and bundle.
+
+  The binding's manifest and bundle digests are re-pinned to the edited
+  copies. Those are not the documents the live template was verified
+  against, so the binding records the pending live sync that any contract
+  change needs until the next sync, and only the checks of the documents'
+  content can fail.
+  """
+  validator = _load_dashboard_module("validate_contracts")
+  # A JSON round trip gives the manifest's top-level components list its own
+  # copies of the page components, as the bundle's are.
+  manifest = json.loads(
+      json.dumps(
+          yaml.safe_load(
+              (DASHBOARD / "spec/bqca_chart_manifest.yaml").read_text()
+          )
+      )
+  )
+  bundle = json.loads(
+      (DASHBOARD / "spec/bqca_dashboard_template.json").read_text()
+  )
+  binding = _with_pending_live_sync(
+      yaml.safe_load(
+          (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+      )
+  )
+  edit(manifest)
+  edit(bundle)
+  live = binding["live_template_verification"]
+  live["manifest_sha256"] = hashlib.sha256(
+      yaml.safe_dump(manifest, sort_keys=False).encode("utf-8")
+  ).hexdigest()
+  live["template_bundle_sha256"] = hashlib.sha256(
+      (json.dumps(bundle, indent=2) + "\n").encode("utf-8")
+  ).hexdigest()
+  return validator.validate_bqca(
+      manifest_override=manifest,
+      bundle_override=bundle,
+      binding_override=binding,
+  )
+
+
+def _bqca_spec_block_edit(component, key, block):
+  """Return an edit that sets `spec[key]` in every copy of `component`.
+
+  A callable `block` is called with the component to get the block.
+  """
+
+  def edit(document):
+    for comp in _bqca_page_components(document) + document["components"]:
+      if comp["id"] == component:
+        value = block(comp) if callable(block) else block
+        comp["spec"][key] = json.loads(json.dumps(value))
+
+  return edit
+
+
+# One case per block that a component's embedded spec must not hold: an edit
+# of the manifest and bundle that adds it, and the exact errors it must produce.
+# No edit (None) validates the repository's contracts as they are, whose
+# binding records the live sync of exactly those documents; the no-op edit
+# re-pins them as every other case does.
+BQCA_EXTRA_SPEC_BLOCK_CASES = [
+    pytest.param(None, [], id="unchanged"),
+    pytest.param(lambda document: None, [], id="repinned_without_an_edit"),
+    pytest.param(
+        # kpi_input_tokens' own column ID, in a block of another kind.
+        _bqca_spec_block_edit(
+            "kpi_total_tokens",
+            "barChart",
+            {
+                "dataset": {
+                    "datasourceId": BQCA_DATASOURCE_ID,
+                    "columns": [
+                        {
+                            "id": "qt_c90b69a4",
+                            "fieldName": "_input_tokens_",
+                            "aggregation": "SUM",
+                        }
+                    ],
+                },
+                "fields": {"metricSeries": {"metricIds": ["qt_c90b69a4"]}},
+            },
+        ),
+        [
+            "component kpi_total_tokens spec.barChart is not id, fixedLayout,"
+            " or the spec.scorecard block that chart_type 'SCORECARD' reads"
+        ],
+        id="another_kind_repeating_another_components_column_id",
+    ),
+    pytest.param(
+        # The legacy generic IDs, in a block of another kind.
+        _bqca_spec_block_edit(
+            "kpi_total_tokens",
+            "table",
+            {
+                "dataset": {
+                    "datasourceId": BQCA_DATASOURCE_ID,
+                    "columns": [
+                        {"id": "dim", "fieldName": "_data_agent_id_"},
+                        {
+                            "id": "met",
+                            "fieldName": "_total_tokens_",
+                            "aggregation": "SUM",
+                        },
+                    ],
+                },
+                "fields": {"dimensionIds": ["dim"], "metricIds": ["met"]},
+            },
+        ),
+        [
+            "component kpi_total_tokens spec.table is not id, fixedLayout, or"
+            " the spec.scorecard block that chart_type 'SCORECARD' reads"
+        ],
+        id="another_kind_with_generic_column_ids",
+    ),
+    pytest.param(
+        # The block of a kind the chart had before, repeating its column IDs.
+        _bqca_spec_block_edit(
+            "chart_tokens_by_agent",
+            "lineChart",
+            lambda comp: comp["spec"]["barChart"],
+        ),
+        [
+            "component chart_tokens_by_agent spec.lineChart is not id,"
+            " fixedLayout, or the spec.barChart block that chart_type"
+            " 'bar_chart' reads"
+        ],
+        id="stale_block_of_a_former_kind",
+    ),
+    pytest.param(
+        # A kind that no BQCA chart_type maps to.
+        _bqca_spec_block_edit(
+            "chart_tokens_by_agent",
+            "timeSeries",
+            {
+                "dataset": {
+                    "datasourceId": BQCA_DATASOURCE_ID,
+                    "columns": [
+                        {
+                            "id": "met",
+                            "fieldName": "_total_tokens_",
+                            "aggregation": "SUM",
+                        }
+                    ],
+                },
+                "fields": {"metricIds": ["met"]},
+            },
+        ),
+        [
+            "component chart_tokens_by_agent spec.timeSeries is not id,"
+            " fixedLayout, or the spec.barChart block that chart_type"
+            " 'bar_chart' reads"
+        ],
+        id="kind_no_chart_type_reads",
+    ),
+]
+
+
+@pytest.mark.parametrize("edit, expected", BQCA_EXTRA_SPEC_BLOCK_CASES)
+def test_validate_contracts_rejects_spec_blocks_the_chart_type_does_not_read(
+    edit, expected, request
+):
+  """#check-can-fail: a component's spec holds no block its kind does not read.
+
+  The column-ID checks read `spec.<kind>` alone, the block of the component's
+  `chart_type`, so any other block of its spec must be rejected rather than
+  left unchecked. Each case adds one, with a repeated, stale, or generic
+  column ID, to the manifest and the bundle, re-pins both digests and records
+  the pending live sync that the edit needs, so only that check can catch it.
+  The `unchanged` case validates the repository's own contracts, the live sync
+  and its capture receipt included, so it alone needs the `openssh` fixture:
+  the re-pinned cases verify no signature and run wherever the test runs.
+  """
+  if edit is None:
+    # `usefixtures("openssh")` for this case only, which pytest.param cannot
+    # carry: it skips this case alone where ssh-keygen cannot run.
+    request.getfixturevalue("openssh")
+    errors = _load_dashboard_module("validate_contracts").validate_bqca()
+  else:
+    errors = _bqca_validate_repinned(edit)
+  assert errors == expected
 
 
 def test_bqca_derive_report_column_ids_lengthens_only_colliding_ids():
@@ -3060,7 +3824,9 @@ BQCA_PENDING_LIVE_SYNC_CASES = [
 
 
 @pytest.mark.parametrize("edit, expected", BQCA_PENDING_LIVE_SYNC_CASES)
-def test_validate_contracts_requires_a_pending_live_sync_record(edit, expected):
+def test_validate_contracts_requires_a_pending_live_sync_record(
+    edit, expected, tmp_path
+):
   """#check-can-fail: an unverified live state is recorded, exactly.
 
   While the pinned manifest or bundle digest differs from the one the live
@@ -3072,11 +3838,21 @@ def test_validate_contracts_requires_a_pending_live_sync_record(edit, expected):
   a finalized binding).
   """
   validator = _load_dashboard_module("validate_contracts")
-  binding = yaml.safe_load(
-      (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+  for relative in BQCA_CONTRACT_FILES:
+    if relative.startswith("bindings/bqca_live_capture_"):
+      continue
+    (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(DASHBOARD / relative, tmp_path / relative)
+  binding = _with_pending_live_sync(
+      yaml.safe_load(
+          (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+      )
   )
   edit(binding["live_template_verification"])
-  assert validator.validate_bqca(binding_override=binding) == expected
+  assert (
+      validator.validate_bqca(root=tmp_path, binding_override=binding)
+      == expected
+  )
 
 
 def _bqca_generation_binding(generation, pending):
@@ -3149,6 +3925,9 @@ def test_validate_contracts_checks_that_the_sync_generation_moves_forward(
 
 
 BQCA_CONTRACT_FILES = (
+    "bindings/bqca_live_capture_receipt.json",
+    "bindings/bqca_live_capture_receipt.json.sig",
+    "bindings/bqca_live_capture_signers",
     "bindings/bqca_report_template.yaml",
     "spec/bqca_chart_manifest.yaml",
     "spec/bqca_compatibility_profile.json",
@@ -3158,6 +3937,7 @@ BQCA_CONTRACT_FILES = (
 )
 
 
+@pytest.mark.usefixtures("openssh")
 def test_validate_contracts_cli_rejects_a_column_id_that_is_not_derived(
     tmp_path, monkeypatch, capsys
 ):
@@ -3176,22 +3956,24 @@ def test_validate_contracts_cli_rejects_a_column_id_that_is_not_derived(
   assert capsys.readouterr().out == "ok: contracts validated (bqca)\n"
 
   binding_path = tmp_path / "bindings/bqca_report_template.yaml"
-  binding_bytes = binding_path.read_bytes()
+  binding_data = _with_pending_live_sync(
+      yaml.safe_load(binding_path.read_text())
+  )
   # The column ID and its primaryMetricId; the manifest's top-level list
   # aliases its page components, and the bundle's repeats them.
-  for relative, occurrences in (
-      ("spec/bqca_chart_manifest.yaml", 2),
-      ("spec/bqca_dashboard_template.json", 4),
+  for relative, digest_key, occurrences in (
+      ("spec/bqca_chart_manifest.yaml", "manifest_sha256", 2),
+      ("spec/bqca_dashboard_template.json", "template_bundle_sha256", 4),
   ):
     path = tmp_path / relative
     original = path.read_bytes()
     assert original.count(b"qt_d779815a") == occurrences, relative
     path.write_bytes(original.replace(b"qt_d779815a", b"qt_deadbeef"))
-    old_digest = hashlib.sha256(original).hexdigest().encode()
-    new_digest = hashlib.sha256(path.read_bytes()).hexdigest().encode()
-    assert binding_bytes.count(old_digest) == 1, relative
-    binding_bytes = binding_bytes.replace(old_digest, new_digest)
-  binding_path.write_bytes(binding_bytes)
+    new_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    binding_data["live_template_verification"][digest_key] = new_digest
+  binding_path.write_text(
+      yaml.safe_dump(binding_data, sort_keys=False), encoding="utf-8"
+  )
 
   assert validator.main(["--profile", "bqca"]) == 1
   assert capsys.readouterr().err.splitlines() == [
@@ -4054,6 +4836,7 @@ BQCA_LIVE_REPORT_DEFECTS = [
 ]
 
 
+@pytest.mark.usefixtures("openssh")
 def test_live_report_textproto_audit_accepts_the_synced_report(
     tmp_path, capsys
 ):
@@ -4145,6 +4928,7 @@ def test_live_report_textproto_audit_accepts_the_synced_report(
 
 
 @pytest.mark.parametrize("render, expected", BQCA_LIVE_REPORT_DEFECTS)
+@pytest.mark.usefixtures("openssh")
 def test_live_report_textproto_audit_rejects_each_defect(
     render, expected, tmp_path, capsys
 ):
@@ -4166,6 +4950,7 @@ def test_live_report_textproto_audit_rejects_each_defect(
   assert capsys.readouterr().err.splitlines() == [f"ERROR: {e}" for e in errors]
 
 
+@pytest.mark.usefixtures("openssh")
 def test_live_report_textproto_audit_fails_closed_on_unreadable_input(
     tmp_path, capsys
 ):
@@ -4193,6 +4978,7 @@ def test_live_report_textproto_audit_fails_closed_on_unreadable_input(
   ), errors
 
 
+@pytest.mark.usefixtures("openssh")
 def test_live_report_textproto_reader_keeps_to_its_documented_subset(
     tmp_path, capsys
 ):
@@ -4295,6 +5081,7 @@ BQCA_LIVE_DUMP_REMAPPED_FIXTURE = (
 )
 
 
+@pytest.mark.usefixtures("openssh")
 def test_live_report_textproto_audit_on_a_sanitized_live_dump(capsys):
   """The audit's verdict on a cut of a real dump of the live template.
 
@@ -4507,10 +5294,10 @@ def test_bqca_deep_link_page_is_published_with_the_site():
   assert "2026-10-09" in note
   assert "Dedicated 7-page tool-free BQCA Looker Studio template" in note
   assert '<details class="advanced-bqca-options">' in note
-  assert 'id="bqca-column-id-note"' in note
-  assert BQCA_LIVE_SYNC_ISSUE in note
-  assert "legacy generic column IDs" in note
-  assert "re-create any report created" in note
+  assert 'id="bqca-column-id-note"' not in page
+  assert 'id="bqca-column-id-note"' not in bqca_page
+  assert BQCA_LIVE_SYNC_ISSUE not in page
+  assert BQCA_LIVE_SYNC_ISSUE not in bqca_page
   assert BQCA_REPORT_ID in note
   assert "dashboards/looker_studio/sql/bqca_events_v1.sql.tmpl" in note
   assert "--profile bqca --custom-sql-out" in note
@@ -4876,6 +5663,10 @@ def test_bqca_profile_is_documented_for_contributors_and_users():
       "turns are keyed by `invocation_id`",
       "total turns (`invocation_id`), completed turns (`completed_turn_id`)",
       "Distinct Error Signatures",
+      # Validating the finalized BQCA binding runs ssh-keygen.
+      "`validate_contracts.py` with `--profile bqca` (or `all`, the default)"
+      " also verifies the signature of the committed capture receipt",
+      "needs OpenSSH 8.2 or later (`ssh-keygen` on `PATH`)",
   ):
     assert fragment in readme, f"README.md must document {fragment!r}"
   assert "session counts are turn counts" not in readme
@@ -4908,6 +5699,88 @@ def test_bqca_profile_is_documented_for_contributors_and_users():
   for relative, text in (("README.md", readme), ("USER_MANUAL.md", manual)):
     for event_type in BQCA_UNLOGGED_EVENT_TYPES:
       assert event_type not in text, f"{relative} names {event_type}"
+  # The live template has been synced (#559), so no page for users says that
+  # it still has generic column IDs or points at the issue that tracked it.
+  guide_path = "docs/guides/bqca-prompt-response-logging-manual.md"
+  guide = " ".join((ROOT / guide_path).read_text().split())
+  for relative, text in (
+      ("README.md", readme),
+      ("USER_MANUAL.md", manual),
+      (guide_path, guide),
+  ):
+    for phrase in (
+        "issues/559",
+        "still uses generic column IDs",
+        "legacy generic column IDs",
+    ):
+      assert phrase not in text, f"{relative} still says {phrase!r}"
+  # A report keeps the column IDs it was copied with, so the pages for users
+  # tell the owner of a report created before the sync to re-create it.
+  for relative in ("README.md", "USER_MANUAL.md"):
+    paragraphs = [
+        " ".join(block.split())
+        for block in (DASHBOARD / relative).read_text().split("\n\n")
+    ]
+    assert any(
+        "created before 2026-11-01" in paragraph
+        for paragraph in paragraphs
+        if "re-create it from the 1-click link" in paragraph
+    ), f"{relative} must say to re-create reports created before 2026-11-01"
+  guide_rows = [
+      [cell.strip() for cell in line.strip().strip("|").split("|")]
+      for line in (ROOT / guide_path).read_text().splitlines()
+      if line.startswith("| ")
+  ]
+  assert any(
+      len(row) == 2
+      and "Total, Input, Output, and Thinking Tokens scorecards show the same"
+      " number" in row[0]
+      and "created before the template's 2026-11-01 column-ID sync" in row[1]
+      and "Re-create the report from the 1-click link" in row[1]
+      for row in guide_rows
+  ), f"{guide_path} must say to re-create reports created before 2026-11-01"
+  # Finding 5: all five user-facing/generated files carry a dated re-create
+  # sentence (re-create, 2026-11-01, and a report/copy reference) and none
+  # carries the retired #559 phrases.
+  index_html = " ".join((DASHBOARD / "docs" / "index.html").read_text().split())
+  bqca_index_html = " ".join(
+      (DASHBOARD / "docs" / "bqca" / "index.html").read_text().split()
+  )
+  re_create_files = {
+      "README.md": readme,
+      "USER_MANUAL.md": manual,
+      "docs/index.html": index_html,
+      "docs/bqca/index.html": bqca_index_html,
+      guide_path: guide,
+  }
+  for relative, text in re_create_files.items():
+    assert (
+        "re-create" in text
+    ), f"{relative} must contain 're-create' for pre-sync-copy guidance"
+    assert (
+        "2026-11-01" in text
+    ), f"{relative} must reference the 2026-11-01 sync date"
+    assert (
+        "report" in text or "copy" in text
+    ), f"{relative} must reference a report or copy"
+  for relative, text in re_create_files.items():
+    for phrase in (
+        "issues/559",
+        "still uses generic column IDs",
+        "legacy generic column IDs",
+    ):
+      assert phrase not in text, f"{relative} still says {phrase!r}"
+  # Finding 12: the guide's opening scope statement no longer claims "no
+  # result values" now that the post-sync scorecard table holds 26 of them.
+  assert "result values" not in " ".join(
+      (DASHBOARD / "docs" / "dashboard-implementation.md")
+      .read_text()
+      .split("\n\n", 3)[0]
+      .split()
+  ), (
+      "docs/dashboard-implementation.md opening still claims "
+      "'no result values' while containing the post-sync scorecard table"
+  )
 
 
 def test_staleness_parser_rejects_malformed_or_nested_attestations(capsys):
@@ -5152,6 +6025,7 @@ def test_bqca_events_sql_semantic_turn_and_error_edge_cases():
   assert len(contract["pages"]) == 7
 
 
+@pytest.mark.usefixtures("openssh")
 def test_bqca_json_template_bundle_and_compatibility_profile_parity():
   """Verify the portable Looker Studio JSON template bundle, BQCA compatibility profile, and M03/M04/M07/M08/M12/M14/M15/M16/R4-N2/N8 mutation guards."""
   validator = _load_dashboard_module("validate_contracts")

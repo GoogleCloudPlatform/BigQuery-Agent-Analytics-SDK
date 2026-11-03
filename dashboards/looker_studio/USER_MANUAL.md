@@ -161,11 +161,11 @@ so external access is not yet verified. External Google accounts that see
 (`dashboards/streamlit/`) or export the custom query with `--custom-sql-out`
 into their own Looker Studio report.
 
-**Known issue ([#559](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/559)).**
-The template still uses generic column IDs, so components on one page of a
-report you create from it can show each other's values. After the live
-template sync (#559), re-create any report you created before it from the
-1-click link.
+**Reports created before 2026-11-01.** On 2026-11-01 the template's columns
+were renamed to unique IDs (revision `1793504835696`). Your report keeps the
+column IDs it was copied with, so a report you created before 2026-11-01 can
+show the same number in its Total, Input, Output, and Thinking Tokens
+scorecards: re-create it from the 1-click link.
 
 Because BQCA logs no tool calls, all tool-usage pages, tool-latency charts,
 and tool-error panels are omitted:
@@ -324,6 +324,7 @@ being printed.
 | Charts blank or trickling in after opening a page | Normal on a cold load — allow up to 90 seconds. If a chart is still empty after that, widen the date range: your table may have no events in the selected window. |
 | Layout looks cut off on the left | Collapse the Looker Studio navigation drawer, and make the window at least 1280 px wide. Phones and narrow tablets aren't supported. |
 | Bottom charts clipped on Token Consumption or Latency | You're on a copy created before 2026-07-29, which keeps the old page geometry. Create a fresh copy from the configurator. |
+| BQCA: the Total, Input, Output, and Thinking Tokens scorecards show the same number | Your report was created before the template's 2026-11-01 column-ID sync, and keeps the column IDs it was copied with. Re-create it from the 1-click link on the [BQCA page](https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/bqca/). |
 | Pasted a console link but the field shows an error instead of the dotted ID | The link must name exactly one table. Open the table itself in the BigQuery console (close other table tabs), copy the address-bar URL, and paste again — or just paste the dotted `project.dataset.table` ID from the table header's copy control. |
 | The table-ID field shows a red validation error | The error names what to fix. A *segment* error points at one part of `project.dataset.table`: project segments are 6–30 lowercase characters; dataset segments allow letters, digits, and underscores (no hyphens — that's a BigQuery rule); table segments also allow hyphens. Otherwise the value isn't three dot-separated segments — check for a missing dot or an extra one. |
 | Looker Studio asks me to sign in or authorize | Expected. The dashboard uses your credentials to read your data. Authorize BigQuery access on your own account. |
