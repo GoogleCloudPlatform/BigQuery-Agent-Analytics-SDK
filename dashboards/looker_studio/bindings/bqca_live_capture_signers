@@ -15,5 +15,5 @@
 # maintainer who exports the live template with the internal report tooling
 # (for example a GitHub username: letters, digits, '.', '_', '@', '+' or '-'),
 # and the key is that maintainer's SSH public key. A line is added, changed
-# or removed only in a reviewed change. No signer is listed yet, so no
-# receipt is trusted and no write can finalize the binding.
+# or removed only in a reviewed change.
+haiyuan-eng-google namespaces="bqca-live-capture-receipt" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKZ2EkAa5ZGatwX0jbRe+pW3DZE/eWwsn366hfDN5T9k
