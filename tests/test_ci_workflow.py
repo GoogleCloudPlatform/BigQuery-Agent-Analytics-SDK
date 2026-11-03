@@ -20,7 +20,9 @@ that sets it back to an earlier sync, whose committed receipt it still holds,
 passes the validator on its own; only the comparison with the previous
 binding refuses it. A failing step blocks a merge only when its job is a
 status check that main's ruleset requires, so the gate has to run in one of
-those jobs, with nothing there that can skip it.
+those jobs, with nothing there that can skip it, and on each event that
+brings a change into main: a pull request, a push, and a merge group once
+main has a merge queue.
 
 The first tests read the workflow. The others take the gate step's script
 from ci.yml and run it the way Actions does, in temporary git repositories
@@ -67,7 +69,10 @@ BASH = ("bash", "--noprofile", "--norc", "-eo", "pipefail")
 # A commit that none of the test repositories holds.
 ABSENT_COMMIT = "0123456789abcdef0123456789abcdef01234567"
 
-EVENTS = ("pull_request", "push")
+# The events that bring a change into main. A merge queue checks a merge
+# group, whose event has neither a pull request's base_ref nor a push's
+# before: only merge_group.base_sha names the commit it merges into.
+EVENTS = ("pull_request", "push", "merge_group")
 
 _MATRIX_VALUE = re.compile(r"\$\{\{\s*matrix\.([\w-]+)\s*\}\}")
 
@@ -111,8 +116,24 @@ def _is_gate(step):
   return VALIDATOR in run and GATE_FLAG in run
 
 
+def _workflow():
+  return yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
+
+
 def _jobs():
-  return yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+  return _workflow()["jobs"]
+
+
+def _triggers():
+  """Maps each event in ci.yml's `on:` to its filters ({} for none)."""
+  workflow = _workflow()
+  # YAML 1.1, which PyYAML reads, loads the bare key `on` as True.
+  on = workflow["on"] if "on" in workflow else workflow[True]
+  if isinstance(on, str):
+    on = [on]
+  if isinstance(on, list):
+    on = dict.fromkeys(on)
+  return {event: filters or {} for event, filters in on.items()}
 
 
 def _gate_jobs():
@@ -165,6 +186,26 @@ def test_only_the_exact_required_check_names_count():
   assert _check_names("test", unnamed) == ["test (3.12)"]
 
 
+def test_every_event_that_brings_a_change_into_main_runs_the_workflow():
+  """Each event in EVENTS is in ci.yml's `on:`, with no path filter.
+
+  A merge queue merges a group only once the required checks pass on the
+  group's commit, and Actions runs a workflow for a group only on
+  merge_group, which is separate from pull_request and push.
+  """
+  triggers = _triggers()
+
+  for event in EVENTS:
+    assert event in triggers, f"ci.yml does not run on {event}"
+    assert not {"paths", "paths-ignore"} & triggers[event].keys(), (
+        f"ci.yml filters {event} by path: the sync_generation gate has to"
+        f" run for every {event}"
+    )
+  assert "checks_requested" in triggers["merge_group"].get(
+      "types", ["checks_requested"]
+  ), "a merge queue asks for a group's checks with checks_requested"
+
+
 def test_the_gate_job_checks_out_the_full_history():
   """The previous binding is read at an earlier commit, so it must exist."""
   for names, job in _required_gate_jobs():
@@ -213,6 +254,21 @@ def test_the_gate_compares_with_the_base_branch_or_the_commit_before_a_push():
       assert env.get("BASE_REF") == "${{ github.base_ref }}", names
       assert env.get("BEFORE") == "${{ github.event.before }}", names
       assert "$BASE_REF" in step["run"] and "$BEFORE" in step["run"], names
+
+
+def test_the_gate_step_gets_the_merge_group_base_sha():
+  """A merge group has no base_ref or before; its base_sha is its parent."""
+  for names, job in _required_gate_jobs():
+    for step in job["steps"]:
+      if not _is_gate(step):
+        continue
+      env = step.get("env") or {}
+
+      assert (
+          env.get("MERGE_GROUP_BASE")
+          == "${{ github.event.merge_group.base_sha }}"
+      ), names
+      assert "$MERGE_GROUP_BASE" in step["run"], names
 
 
 # The gate step's script, run against temporary git histories.
@@ -308,11 +364,22 @@ class _Workspace:
         encoding="utf-8",
     )
     python.chmod(0o755)
+    # Actions sets GITHUB_EVENT_NAME, so a CI run of these tests has its own;
+    # run_gate sets the gate's inputs for each test's event.
     env = {
         key: value
         for key, value in os.environ.items()
         if not key.startswith("GIT_")
-        and key not in {"BASH_ENV", "ENV", "BASE_REF", "BEFORE", "RUNNER_TEMP"}
+        and key
+        not in {
+            "BASH_ENV",
+            "ENV",
+            "BASE_REF",
+            "BEFORE",
+            "GITHUB_EVENT_NAME",
+            "MERGE_GROUP_BASE",
+            "RUNNER_TEMP",
+        }
     }
     env.update(
         PATH=f"{bin_dir}{os.pathsep}{env.get('PATH', os.defpath)}",
@@ -350,7 +417,16 @@ class _Workspace:
     )
     return _Repository(path, self.env)
 
-  def run_gate(self, step, repository, *, base_ref, before):
+  def run_gate(
+      self, step, repository, *, event, base_ref="", before="", base_sha=""
+  ):
+    """Runs the gate's script for `event` the way Actions runs the step.
+
+    `base_ref`, `before` and `base_sha` are the step's BASE_REF, BEFORE and
+    MERGE_GROUP_BASE: github.base_ref, github.event.before and
+    github.event.merge_group.base_sha. An event without one of them gives
+    the step an empty string.
+    """
     script = self.tmp_path / "gate.sh"
     script.write_text(step["run"], encoding="utf-8")
     return subprocess.run(
@@ -358,8 +434,10 @@ class _Workspace:
         cwd=repository.path,
         env=dict(
             self.env,
+            GITHUB_EVENT_NAME=event,
             BASE_REF=base_ref,
             BEFORE=before,
+            MERGE_GROUP_BASE=base_sha,
             RUNNER_TEMP=str(self.runner_temp),
         ),
         capture_output=True,
@@ -369,13 +447,17 @@ class _Workspace:
 
 
 def _event(repository, event, previous):
-  """BASE_REF and BEFORE for `event`, comparing with commit `previous`."""
+  """The gate's inputs for `event`, comparing with commit `previous`."""
   if event == "pull_request":
     repository.git("update-ref", "refs/remotes/origin/main", previous)
     # A synchronize event's `before` is the pull request's old head, which a
     # force push may have dropped; only the merge base counts.
-    return {"base_ref": "main", "before": ABSENT_COMMIT}
-  return {"base_ref": "", "before": previous}
+    return {"event": event, "base_ref": "main", "before": ABSENT_COMMIT}
+  if event == "merge_group":
+    # The first group in the queue has main's head commit as its parent.
+    repository.git("update-ref", "refs/remotes/origin/main", previous)
+    return {"event": event, "base_sha": previous}
+  return {"event": event, "before": previous}
 
 
 @pytest.fixture
@@ -479,7 +561,9 @@ def test_a_push_with_nothing_before_it_skips_the_comparison(
   repository = workspace.repository()
   repository.commit(_repository_binding(), "first push")
 
-  result = workspace.run_gate(gate_step, repository, base_ref="", before=before)
+  result = workspace.run_gate(
+      gate_step, repository, event="push", base_ref="", before=before
+  )
 
   assert result.returncode == 0, result.stdout + result.stderr
   assert f"no previous {BINDING} to compare with" in result.stdout
@@ -517,7 +601,9 @@ def test_a_push_whose_previous_commit_is_missing_fails(gate_step, workspace):
   checkout = workspace.clone(origin)
   assert not checkout.has(f"{before}^{{commit}}")
 
-  result = workspace.run_gate(gate_step, checkout, base_ref="", before=before)
+  result = workspace.run_gate(
+      gate_step, checkout, event="push", base_ref="", before=before
+  )
 
   assert result.returncode != 0, result.stdout + result.stderr
   assert f"{before} is not in this clone" in result.stdout
@@ -531,9 +617,74 @@ def test_a_pull_request_without_a_merge_base_fails(gate_step, workspace):
   repository.git("update-ref", "refs/remotes/origin/main", unrelated)
 
   result = workspace.run_gate(
-      gate_step, repository, base_ref="main", before=ABSENT_COMMIT
+      gate_step,
+      repository,
+      event="pull_request",
+      base_ref="main",
+      before=ABSENT_COMMIT,
   )
 
   assert result.returncode != 0, result.stdout + result.stderr
   assert "no merge base of HEAD and origin/main in this clone" in result.stdout
+  assert not workspace.previous_binding.exists()
+
+
+def test_a_merge_group_compares_with_its_base_sha_not_with_main(
+    gate_step, workspace
+):
+  """A group queued behind another one merges into that group, not main.
+
+  Its base_sha is the earlier group, which moved the generation forward and
+  which main has not merged yet; HEAD^ is a commit of the group's own pull
+  request. Only the comparison with base_sha refuses the head.
+  """
+  generation = _repository_generation()
+  repository = workspace.repository()
+  main = repository.commit(_repository_binding(), "main")
+  earlier_group = repository.commit(
+      _binding_with_generation(generation + 1), "the earlier merge group"
+  )
+  repository.commit(_repository_binding(), "moved back")
+  repository.commit(_repository_binding(), "the pull request's next commit")
+  repository.git("update-ref", "refs/remotes/origin/main", main)
+
+  result = workspace.run_gate(
+      gate_step, repository, event="merge_group", base_sha=earlier_group
+  )
+
+  assert result.returncode != 0, result.stdout + result.stderr
+  assert (
+      f"sync_generation {generation} is less than {generation + 1}, the"
+      " previous binding's: it only moves forward"
+  ) in result.stderr
+  assert workspace.previous_binding.read_bytes() == repository.show(
+      earlier_group, BINDING
+  )
+
+
+@pytest.mark.parametrize(
+    "base_sha",
+    ["", "0" * 40, ABSENT_COMMIT],
+    ids=["empty", "all-zero", "absent"],
+)
+def test_a_merge_group_without_its_base_commit_fails(
+    gate_step, workspace, base_sha
+):
+  """Unlike a first push, a merge group always has a parent to compare with."""
+  repository = workspace.repository()
+  previous = repository.commit(
+      _binding_with_generation(_repository_generation() + 1), "previous sync"
+  )
+  repository.commit(_repository_binding(), "moved back")
+  repository.git("update-ref", "refs/remotes/origin/main", previous)
+
+  result = workspace.run_gate(
+      gate_step, repository, event="merge_group", base_sha=base_sha
+  )
+
+  assert result.returncode != 0, result.stdout + result.stderr
+  assert (
+      f"::error::cannot compare {BINDING} with the merge group's base:"
+      f" base_sha '{base_sha}' is not a commit in this clone"
+  ) in result.stdout
   assert not workspace.previous_binding.exists()
