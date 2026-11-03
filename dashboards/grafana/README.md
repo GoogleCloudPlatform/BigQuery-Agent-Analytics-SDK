@@ -385,7 +385,18 @@ It differs from the main dashboard in three ways:
   logger's rows still group under `unknown` in **Tokens by model**, because
   the view does not expose the `attributes.model` they carry.
 
-It also limits the auto-refresh picker to 5m, 15m, 30m and 1h.
+It also limits the auto-refresh picker to 5m, 15m, 30m and 1h, and makes a few
+panels easier to read:
+
+- **Event error rate** (renamed from **Error rate**) says it divides error
+  events by all events, and that its 1% and 5% thresholds are examples to tune.
+- The latency chart says its percentiles are approximate and pins the legend
+  names and colours of LLM p50, LLM p95 and TTFT p50.
+- **Estimated cost** shows four decimals, so small test spend is visible.
+- Clicking a `session_id` in **Recent sessions** opens **Trace detail** for the
+  whole session: the link clears the Agent, User ID and Event Type filters,
+  which only choose the sessions listed. **Trace detail** also shows `trace_id`
+  and, when the producer writes it, `otel_trace_id`.
 
 `scripts/check_grafana_queries_sync.py` does not cover this file, so its
 embedded SQL is the source of truth, and
