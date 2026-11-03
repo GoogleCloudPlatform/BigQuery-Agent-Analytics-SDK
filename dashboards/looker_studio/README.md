@@ -322,14 +322,11 @@ that see "This report isn't shared with you" should use the
 [Self-Hosted Streamlit BQCA Dashboard](../streamlit/)
 (`dashboards/streamlit/`) or `--custom-sql-out`.
 
-**Known issue ([#559](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/559)).**
-The live template still uses generic column IDs, so components on one page of
-a report created from it can show each other's values. The repository
-contracts already give every column a unique `qt_` ID, and
-`live_template_verification.pending_live_sync` in
-`bindings/bqca_report_template.yaml` tracks the sync of the live template.
-After the live template sync (#559), re-create any report created before it
-from the 1-click link.
+**Reports created before 2026-11-01.** On 2026-11-01 the template's columns
+were renamed to unique `qt_` IDs (revision `1793504835696`). A Looker Studio
+report keeps the column IDs it was copied with, so a report created from the
+template before 2026-11-01 can show the same number in its Total, Input,
+Output, and Thinking Tokens scorecards: re-create it from the 1-click link.
 
 Because BQCA never logs tool events, all tool-usage pages, tool-latency series,
 and tool-error charts are omitted from the template:
@@ -399,6 +396,14 @@ python3 tools/validate_contracts.py     # validate ADK and BQCA contracts & mani
 Each accepts `--check` to verify without writing. `docs/bqca/index.html` is
 derived from `docs/index.html`, so rerun `render_web_config.py` after any
 configurator page edit.
+
+`validate_contracts.py` with `--profile bqca` (or `all`, the default) also
+verifies the signature of the committed capture receipt
+(`bindings/bqca_live_capture_receipt.json`) with `ssh-keygen -Y verify`, so it
+needs OpenSSH 8.2 or later (`ssh-keygen` on `PATH`); without it, the BQCA
+check fails and says so. The tests that need `ssh-keygen` are skipped where it
+is not installed, or cannot start because the current user ID has no account
+entry.
 
 ## Already on Looker? Natural-language Q&A today
 
