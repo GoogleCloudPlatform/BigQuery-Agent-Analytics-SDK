@@ -1,0 +1,70 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "performance-p99-llm-latency",
+  "position": {
+    "x": 952,
+    "y": 1048,
+    "z": 4016,
+    "height": 112,
+    "width": 304,
+    "tabOrder": 4016
+  },
+  "visual": {
+    "visualType": "cardVisual",
+    "query": {
+      "queryState": {
+        "Data": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "P99 LLM Latency (ms)"
+                }
+              },
+              "queryRef": "events_v1.P99 LLM Latency (ms)",
+              "nativeQueryRef": "P99 LLM Latency (ms)",
+              "displayName": "P99 LLM Latency"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'P99 LLM Latency'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "performance-p99-llm-latency"
+    },
+    {
+      "name": "bqaa.oracle_query",
+      "value": "oracle/queries/performance-p99-llm-latency.sql"
+    }
+  ]
+}

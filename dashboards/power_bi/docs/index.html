@@ -1,0 +1,249 @@
+<!--
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="Configure and download a ready-to-open Power BI Project (PBIP) dashboard connected to your BigQuery Agent Analytics event table."
+    >
+    <meta name="theme-color" content="#1967d2">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Configure BigQuery Agent Analytics for Power BI">
+    <meta
+      property="og:description"
+      content="Download a pre-configured Power BI Project (TMDL + PBIR) bound to your BigQuery Agent Analytics table."
+    >
+    <title>Configure BigQuery Agent Analytics — Power BI (PBIP)</title>
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <div>
+          <nav class="surface-toggle" aria-label="Dashboard platform">
+            <a class="surface-option" href="../">Looker Studio</a>
+            <a class="surface-option" href="./" aria-current="page">Power BI (PBIP)</a>
+          </nav>
+          <div class="eyebrow">BigQuery Agent Analytics · Power BI Port</div>
+          <h1>1-click Power BI template.</h1>
+          <p class="lede">
+            Enter your fully qualified BQAA event table ID and download a
+            ready-to-open <strong>Power BI Project (<code>.pbip</code>)</strong>
+            bundle pre-configured with your BigQuery project, dataset, and table
+            parameters — or explore the interactive 8-page dashboard preview
+            below.
+          </p>
+          <ul class="facts" aria-label="Power BI dashboard facts">
+            <li>37 parity charts</li>
+            <li>8 report pages</li>
+            <li>49 DAX measures</li>
+            <li>100% client-side ZIP packager</li>
+          </ul>
+        </div>
+
+        <form class="card" id="configurator" novalidate>
+          <h2>Package your Power BI project</h2>
+          <p class="card-intro">
+            Generates a self-contained <code>BQAA_Agent_Analytics.pbip</code> +
+            <code>SemanticModel</code> (TMDL) + <code>Report</code> (PBIR)
+            archive in your browser with your parameters pre-populated in
+            <code>expressions.tmdl</code>.
+          </p>
+
+          <div class="preset-row">
+            <button type="button" class="chip-button" id="use-demo-fixture">
+              Use public demo fixture (test-project-0728-467323)
+            </button>
+          </div>
+
+          <label for="table-id">Fully qualified BQAA table ID</label>
+          <input
+            id="table-id"
+            name="tableId"
+            autocomplete="off"
+            placeholder="my-project.my_dataset.agent_events"
+            aria-describedby="table-id-hint table-id-error"
+            required
+          >
+          <span class="field-hint" id="table-id-hint">
+            <code>project.dataset.table</code> — paste a dotted ID or a
+            BigQuery Console table URL; backticks, a colon after the project,
+            and trailing <code>;</code> or <code>,</code> are cleaned up
+            automatically.
+          </span>
+          <span class="field-error" id="table-id-error" aria-live="polite"></span>
+
+          <details id="advanced-settings">
+            <summary>Advanced settings (billing, window, Storage Read API)</summary>
+
+            <label for="billing-project">Billing project ID (`BQAA_BillingProjectId`)</label>
+            <input
+              id="billing-project"
+              name="billingProject"
+              autocomplete="off"
+              placeholder="Defaults to the source project"
+              aria-describedby="billing-project-hint billing-project-error"
+            >
+            <span class="field-hint" id="billing-project-hint">
+              Optional. Leave blank to bill BigQuery metadata and scan jobs to the source project.
+            </span>
+            <span class="field-error" id="billing-project-error" aria-live="polite"></span>
+
+            <label for="window-end-date">Window anchor end date (`BQAA_WindowEndDate`)</label>
+            <input
+              id="window-end-date"
+              name="windowEndDate"
+              autocomplete="off"
+              value="auto"
+              placeholder="auto or YYYY-MM-DD"
+              aria-describedby="window-end-date-hint window-end-date-error"
+            >
+            <span class="field-hint" id="window-end-date-hint">
+              Default <code>auto</code> discovers the newest non-empty partition via
+              <code>INFORMATION_SCHEMA.PARTITIONS</code>. Set <code>YYYY-MM-DD</code> to pin a fixed date.
+            </span>
+            <span class="field-error" id="window-end-date-error" aria-live="polite"></span>
+
+            <label for="lookback-days">Lookback window days (`BQAA_LookbackDays`)</label>
+            <input
+              id="lookback-days"
+              name="lookbackDays"
+              type="number"
+              min="1"
+              max="366"
+              value="90"
+              aria-describedby="lookback-days-hint lookback-days-error"
+            >
+            <span class="field-hint" id="lookback-days-hint">
+              1..366 days (default <code>90</code>). Loads <code>2 × L</code> days so period-over-period measures have a complete prior window.
+            </span>
+            <span class="field-error" id="lookback-days-error" aria-live="polite"></span>
+
+            <label class="checkbox-row" for="use-storage-api">
+              <input id="use-storage-api" name="useStorageApi" type="checkbox" checked>
+              <span>Use BigQuery Storage Read API (`BQAA_UseStorageApi = true`)</span>
+            </label>
+          </details>
+
+          <p id="form-status" role="status" aria-live="polite"></p>
+
+          <div class="actions">
+            <button
+              class="button button-primary"
+              id="download-pbip"
+              type="button"
+              disabled
+            >
+              Download pre-configured PBIP (.zip)
+            </button>
+            <button class="button button-secondary" id="copy-link" type="button">
+              Copy setup link
+            </button>
+          </div>
+
+          <p class="privacy">
+            This page has no backend. Your project, dataset, and table IDs never
+            leave your browser; the ZIP archive is assembled locally from
+            <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/dashboards/power_bi">
+              the open-source PBIP files</a>.
+          </p>
+        </form>
+      </section>
+
+      <section class="preview-section" aria-labelledby="preview-heading">
+        <div class="preview-header">
+          <div>
+            <div class="eyebrow">Interactive 8-Page Dashboard Tour</div>
+            <h2 id="preview-heading">Live-verified on the BQAA synthetic fixture (100,004 events)</h2>
+          </div>
+        </div>
+        <div
+          class="page-tabs"
+          id="preview-page-tabs"
+          role="tablist"
+          aria-label="Power BI report pages"
+        ></div>
+        <p class="preview-caption" id="preview-caption">
+          Total Tokens scorecard, Token Consumption Over Time, Top 5 Users by Token Consumption, and Token Usage by Agent.
+        </p>
+        <div class="preview-frame">
+          <img
+            id="preview-screenshot"
+            src="../screenshots/01-token-consumption.png"
+            alt="1. Token Consumption — Power BI dashboard preview"
+            loading="lazy"
+          >
+        </div>
+      </section>
+
+      <section class="how" aria-label="How Power BI setup works">
+        <article class="step">
+          <span class="step-number">01</span>
+          <h3>Download your PBIP (.zip)</h3>
+          <p>
+            Enter your <code>project.dataset.table</code> above and click
+            <strong>Download pre-configured PBIP (.zip)</strong>. Unzip the
+            archive to get <code>BQAA_Agent_Analytics.pbip</code>,
+            <code>BQAA_Agent_Analytics.SemanticModel/</code>, and
+            <code>BQAA_Agent_Analytics.Report/</code>.
+          </p>
+        </article>
+        <article class="step">
+          <span class="step-number">02</span>
+          <h3>Open in Power BI Desktop or Fabric</h3>
+          <p>
+            In <strong>Power BI Desktop</strong> (with
+            <em>PBIP / TMDL / PBIR preview features</em> enabled), open
+            <code>BQAA_Agent_Analytics.pbip</code>. Or deploy directly to a
+            Power BI Service / Microsoft Fabric workspace using
+            <code>deploy_fabric.py</code> below.
+          </p>
+        </article>
+        <article class="step">
+          <span class="step-number">03</span>
+          <h3>Sign in with Google OAuth2 &amp; Refresh</h3>
+          <p>
+            When prompted for Google BigQuery credentials, choose
+            <strong>OAuth2</strong> (Organizational privacy level), sign in with
+            a Google account that has <code>bigquery.dataViewer</code> and
+            <code>bigquery.jobUser</code>, and click <strong>Refresh</strong>.
+          </p>
+        </article>
+      </section>
+
+      <section class="cli-panel" aria-label="CLI automation commands">
+        <h3>Prefer the command line?</h3>
+        <p class="field-hint">
+          Generate the same pre-configured <code>.zip</code> archive from a git
+          checkout or deploy directly to a Fabric / Power BI Service workspace:
+        </p>
+        <div class="code-block">
+          <code id="cli-zip-cmd">python dashboards/power_bi/tools/generate_pbip.py --output-zip BQAA_Agent_Analytics.zip --project test-project-0728-467323 --dataset bqaa_fixture_adk_1_27_0 --table agent_events</code>
+        </div>
+        <div class="code-block">
+          <code id="fabric-deploy-cmd">python dashboards/power_bi/tools/deploy_fabric.py --workspace-id &lt;WORKSPACE_GUID&gt; --token-file /path/to/fabric.token --project-dir ./BQAA_Agent_Analytics --display-name "BQAA Agent Analytics"</code>
+        </div>
+      </section>
+    </main>
+
+    <script src="./pbip-bundle.js"></script>
+    <script type="module" src="./configurator.mjs"></script>
+  </body>
+</html>

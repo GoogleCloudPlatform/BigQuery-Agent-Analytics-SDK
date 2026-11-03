@@ -1,0 +1,51 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "performance-nondata-4",
+  "position": {
+    "x": 16,
+    "y": 448,
+    "z": 4004,
+    "height": 72,
+    "width": 1240,
+    "tabOrder": 4004
+  },
+  "visual": {
+    "visualType": "textbox",
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "Tool Latency (in ms)",
+                    "textStyle": {
+                      "fontSize": "18pt",
+                      "fontWeight": "bold"
+                    }
+                  }
+                ],
+                "horizontalAlignment": "Center"
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "The P50, P75, P90, and P99 latency distributions for tool executions. Focus on P99 to identify the worst-case timeouts."
+                  }
+                ],
+                "horizontalAlignment": "Center"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "performance-nondata-4"
+    }
+  ]
+}

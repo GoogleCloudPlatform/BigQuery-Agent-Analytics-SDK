@@ -1,0 +1,70 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "usage-total-tokens",
+  "position": {
+    "x": 16,
+    "y": 128,
+    "z": 4000,
+    "height": 192,
+    "width": 460,
+    "tabOrder": 4000
+  },
+  "visual": {
+    "visualType": "cardVisual",
+    "query": {
+      "queryState": {
+        "Data": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "KPI Total Tokens"
+                }
+              },
+              "queryRef": "events_v1.KPI Total Tokens",
+              "nativeQueryRef": "KPI Total Tokens",
+              "displayName": "Total Tokens"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Total Tokens'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "usage-total-tokens"
+    },
+    {
+      "name": "bqaa.oracle_query",
+      "value": "oracle/queries/usage-total-tokens.sql"
+    }
+  ]
+}

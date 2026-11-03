@@ -365,3 +365,78 @@ def test_events_v1_29_columns_49_measures_and_tmdl_hygiene():
   broken_spec["measures"][1]["dax"] = "DISTINCTCOUNT('events_v1'[trace_id])"
   with pytest.raises(ValueError, match="DISTINCTCOUNTNOBLANK"):
     pbip_model.build_model(contracts, broken_spec)
+
+
+def test_output_zip_and_rewrite_expressions_parameters(tmp_path):
+  import zipfile
+
+  generate_pbip = _load_pbi_module("generate_pbip")
+  out_zip = tmp_path / "custom_bqaa.zip"
+  rc = generate_pbip.main(
+      [
+          "--output-zip",
+          str(out_zip),
+          "--project",
+          "my-prod-project-123",
+          "--dataset",
+          "my_agent_dataset",
+          "--table",
+          "my_agent_events",
+          "--billing-project",
+          "my-billing-proj-456",
+          "--window-end",
+          "2026-07-16",
+          "--lookback-days",
+          "30",
+          "--use-storage-api",
+          "false",
+      ]
+  )
+  assert rc == 0
+  assert out_zip.is_file()
+
+  with zipfile.ZipFile(out_zip, "r") as zf:
+    assert zf.testzip() is None
+    names = zf.namelist()
+    assert len(names) == 118
+    assert "BQAA_Agent_Analytics/BQAA_Agent_Analytics.pbip" in names
+    expr_arc = (
+        "BQAA_Agent_Analytics/"
+        "BQAA_Agent_Analytics.SemanticModel/definition/expressions.tmdl"
+    )
+    assert expr_arc in names
+    expr_text = zf.read(expr_arc).decode("utf-8")
+    assert 'expression BQAA_ProjectId = "my-prod-project-123" meta' in expr_text
+    assert 'expression BQAA_DatasetId = "my_agent_dataset" meta' in expr_text
+    assert 'expression BQAA_TableId = "my_agent_events" meta' in expr_text
+    assert (
+        'expression BQAA_BillingProjectId = "my-billing-proj-456" meta'
+        in expr_text
+    )
+    assert 'expression BQAA_WindowEndDate = "2026-07-16" meta' in expr_text
+    assert "expression BQAA_LookbackDays = 30 meta" in expr_text
+    assert "expression BQAA_UseStorageApi = false meta" in expr_text
+
+  # Invalid project ID must fail closed (#check-can-fail).
+  bad_zip = tmp_path / "bad.zip"
+  assert (
+      generate_pbip.main(
+          [
+              "--output-zip",
+              str(bad_zip),
+              "--project",
+              "BAD_PROJECT!",
+          ]
+      )
+      == 1
+  )
+  assert not bad_zip.exists()
+
+  # Trailing newline must be rejected by .fullmatch() (#check-can-fail).
+  with pytest.raises(ValueError, match="Invalid BigQuery project ID"):
+    generate_pbip.rewrite_expressions_parameters(
+        expr_text,
+        project="abcde-1\n",
+        dataset="my_agent_dataset",
+        table="my_agent_events",
+    )

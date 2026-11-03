@@ -20,12 +20,37 @@ import argparse
 import datetime
 import difflib
 import importlib.util
+import json
 from pathlib import Path
+import re
 import sys
 from types import ModuleType
 from typing import Any, Sequence
+import zipfile
 
 TOOLS_DIR = Path(__file__).resolve().parent
+
+BUNDLE_REL_PATH = "docs/pbip-bundle.js"
+BUNDLE_HEADER = """\
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+"""
+BUNDLE_PREFIX = BUNDLE_HEADER + "window.BQAA_PBIP_BUNDLE = Object.freeze("
+BUNDLE_SUFFIX = ");\n"
+ZIP_FIXED_DATETIME = (2026, 1, 1, 0, 0, 0)
+ZIP_ROOT_PREFIX = "BQAA_Agent_Analytics"
 
 
 def _load_sibling_module(name: str) -> ModuleType | None:
@@ -142,6 +167,137 @@ def _normalize_item_key(rel_path: str, item_folder: str) -> str:
   return f"{item_folder}/{clean}"
 
 
+def build_pbip_bundle_js(pbip_files: dict[str, str]) -> str:
+  """Build docs/pbip-bundle.js with the generated PBIP files for browser ZIP packaging."""
+  ordered = {
+      k: pbip_files[k] for k in sorted(pbip_files) if k != BUNDLE_REL_PATH
+  }
+  payload = json.dumps(ordered, indent=2, ensure_ascii=False)
+  return f"{BUNDLE_PREFIX}{payload}{BUNDLE_SUFFIX}"
+
+
+def rewrite_expressions_parameters(
+    expr_text: str,
+    *,
+    project: str,
+    dataset: str,
+    table: str,
+    billing_project: str | None = None,
+    window_end: str = "auto",
+    lookback_days: int = 90,
+    use_storage_api: bool = True,
+) -> str:
+  """Validate and rewrite the 7 BQAA_* M parameter defaults in expressions.tmdl."""
+  if not isinstance(project, str) or not pbip_common.PROJECT_RE.fullmatch(
+      project
+  ):
+    raise ValueError(f"Invalid BigQuery project ID: {project!r}")
+  if not isinstance(dataset, str) or not pbip_common.DATASET_RE.fullmatch(
+      dataset
+  ):
+    raise ValueError(f"Invalid BigQuery dataset ID: {dataset!r}")
+  if not isinstance(table, str) or not pbip_common.TABLE_RE.fullmatch(table):
+    raise ValueError(f"Invalid BigQuery table ID: {table!r}")
+  billing = (billing_project or "").strip() or project
+  if not pbip_common.PROJECT_RE.fullmatch(billing):
+    raise ValueError(f"Invalid BigQuery billing project ID: {billing!r}")
+
+  win_clean = str(window_end or "auto").strip()
+  if win_clean.lower() == "auto":
+    win_clean = "auto"
+  else:
+    if not re.fullmatch(r"^\d{4}-\d{2}-\d{2}$", win_clean):
+      raise ValueError(
+          f"Invalid window end date (expected 'auto' or YYYY-MM-DD): {window_end!r}"
+      )
+    try:
+      datetime.date.fromisoformat(win_clean)
+    except ValueError as exc:
+      raise ValueError(
+          f"Invalid calendar date for window end '{window_end}': {exc}"
+      ) from exc
+
+  if (
+      isinstance(lookback_days, bool)
+      or not isinstance(lookback_days, int)
+      or lookback_days < 1
+      or lookback_days > 366
+  ):
+    raise ValueError(
+        f"Lookback days must be an integer in 1..366, got {lookback_days!r}"
+    )
+  if not isinstance(use_storage_api, bool):
+    raise ValueError(f"use_storage_api must be a bool, got {use_storage_api!r}")
+
+  replacements = {
+      "BQAA_ProjectId": f'"{project}"',
+      "BQAA_DatasetId": f'"{dataset}"',
+      "BQAA_TableId": f'"{table}"',
+      "BQAA_BillingProjectId": f'"{billing}"',
+      "BQAA_WindowEndDate": f'"{win_clean}"',
+      "BQAA_LookbackDays": str(lookback_days),
+      "BQAA_UseStorageApi": "true" if use_storage_api else "false",
+  }
+  updated = expr_text
+  for param_name, literal_val in replacements.items():
+    pattern = re.compile(
+        rf"^(expression {re.escape(param_name)} = ).*?( meta \[IsParameterQuery=true, .*\])$",
+        re.MULTILINE,
+    )
+    updated, count = pattern.subn(rf"\g<1>{literal_val}\g<2>", updated)
+    if count != 1:
+      raise ValueError(
+          f"Expected exactly 1 declaration for {param_name} in expressions.tmdl, found {count}"
+      )
+  return updated
+
+
+def write_pbip_zip(
+    output_zip: Path | str,
+    *,
+    project: str = "test-project-0728-467323",
+    dataset: str = "bqaa_fixture_adk_1_27_0",
+    table: str = "agent_events",
+    billing_project: str | None = None,
+    window_end: str = "auto",
+    lookback_days: int = 90,
+    use_storage_api: bool = True,
+    power_bi_root: Path | None = None,
+    looker_root: Path | None = None,
+) -> Path:
+  """Generate a deterministic, pre-configured PBIP .zip archive."""
+  all_files = generate_all(power_bi_root=power_bi_root, looker_root=looker_root)
+  pbip_files = {k: v for k, v in all_files.items() if k != BUNDLE_REL_PATH}
+  expr_key = f"{MODEL_FOLDER_NAME}/definition/expressions.tmdl"
+  if expr_key in pbip_files:
+    pbip_files[expr_key] = rewrite_expressions_parameters(
+        pbip_files[expr_key],
+        project=project,
+        dataset=dataset,
+        table=table,
+        billing_project=billing_project,
+        window_end=window_end,
+        lookback_days=lookback_days,
+        use_storage_api=use_storage_api,
+    )
+
+  out_path = Path(output_zip)
+  out_path.parent.mkdir(parents=True, exist_ok=True)
+  with zipfile.ZipFile(
+      out_path, mode="w", compression=zipfile.ZIP_DEFLATED
+  ) as zf:
+    for rel_path in sorted(pbip_files):
+      arcname = f"{ZIP_ROOT_PREFIX}/{rel_path}"
+      info = zipfile.ZipInfo(filename=arcname, date_time=ZIP_FIXED_DATETIME)
+      info.compress_type = zipfile.ZIP_DEFLATED
+      info.external_attr = 0o644 << 16
+      normalized = (
+          pbip_files[rel_path].replace("\r\n", "\n").replace("\r", "\n")
+      )
+      zf.writestr(info, normalized.encode("utf-8"))
+  return out_path
+
+
 def generate_all(
     power_bi_root: Path | None = None,
     looker_root: Path | None = None,
@@ -180,6 +336,9 @@ def generate_all(
       norm_k = _normalize_item_key(k, REPORT_FOLDER_NAME)
       files[norm_k] = report_files[k]
 
+  if model_spec_path.exists() and report_spec_path.exists():
+    files[BUNDLE_REL_PATH] = build_pbip_bundle_js(files)
+
   return {k: files[k] for k in sorted(files)}
 
 
@@ -193,6 +352,9 @@ def _list_existing_item_files(
   pbip_file = pbi_root / "BQAA_Agent_Analytics.pbip"
   if pbip_file.is_file():
     found.add("BQAA_Agent_Analytics.pbip")
+  bundle_file = pbi_root / BUNDLE_REL_PATH
+  if bundle_file.is_file():
+    found.add(BUNDLE_REL_PATH)
 
   for folder_name, include_def in (
       (MODEL_FOLDER_NAME, include_model_def),
@@ -328,9 +490,13 @@ def main(argv: Sequence[str] | None = None) -> int:
       action="store_true",
       help="Print the rendered events_v1 BigQuery SQL for the given date window.",
   )
+  mode.add_argument(
+      "--output-zip",
+      help="Write a pre-configured PBIP .zip archive to the given file path.",
+  )
   parser.add_argument(
       "--window-end",
-      help="Anchor end date in YYYY-MM-DD format (required for --print-sql).",
+      help="Anchor end date in YYYY-MM-DD format (or 'auto' for --output-zip).",
   )
   parser.add_argument(
       "--lookback-days",
@@ -352,6 +518,17 @@ def main(argv: Sequence[str] | None = None) -> int:
       "--table",
       default="agent_events",
       help="BigQuery table ID.",
+  )
+  parser.add_argument(
+      "--billing-project",
+      default="",
+      help="BigQuery billing project ID (defaults to --project).",
+  )
+  parser.add_argument(
+      "--use-storage-api",
+      choices=("true", "false"),
+      default="true",
+      help="Whether GoogleBigQuery.Database uses the Storage Read API (default: true).",
   )
   args = parser.parse_args(argv)
 
@@ -385,6 +562,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
   try:
+    if args.output_zip:
+      write_pbip_zip(
+          args.output_zip,
+          project=args.project,
+          dataset=args.dataset,
+          table=args.table,
+          billing_project=args.billing_project or args.project,
+          window_end=args.window_end or "auto",
+          lookback_days=int(args.lookback_days),
+          use_storage_api=str(args.use_storage_api).lower() == "true",
+      )
+      return 0
     if args.write:
       write_generated_files()
       return 0

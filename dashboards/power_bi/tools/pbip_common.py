@@ -64,7 +64,7 @@ CANVAS_MIN_HEIGHT: int = 720
 CANVAS_BOTTOM_PADDING: int = 24
 
 HEADER_RECTS: dict[str, dict[str, int]] = {
-    "page-heading": {"x": 16, "y": 8, "width": 640, "height": 40},
+    "page-heading": {"x": 16, "y": 8, "width": 640, "height": 48},
     "slicer-date": {"x": 16, "y": 56, "width": 280, "height": 56},
     "slicer-agent": {"x": 304, "y": 56, "width": 232, "height": 56},
     "slicer-user-id": {"x": 544, "y": 56, "width": 232, "height": 56},
