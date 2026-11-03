@@ -346,6 +346,10 @@ collides with it, and each such change needs the live sync described below.
 - a column ID that repeats inside a component or anywhere in the report, or
   that differs between `spec/bqca_chart_manifest.yaml` and
   `spec/bqca_dashboard_template.json`;
+- a key of a component's embedded `spec` other than `id`, `fixedLayout`, and
+  the `spec.<kind>` block that its `chart_type` reads, such as a second chart
+  block (`spec.barChart` on a scorecard): the column checks above read
+  `spec.<kind>` alone, so a column in any other block would escape them;
 - a `*Id` or `*Ids` key under `spec.<kind>.fields` other than those the kind
   reads its columns from: `primaryMetricId` for a scorecard;
   `primaryAxis.fieldId`, `metricSeries.metricIds`, and
