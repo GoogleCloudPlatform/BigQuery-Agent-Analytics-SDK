@@ -1,0 +1,409 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""CLI generator for the BQAA Power BI Project (PBIP)."""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import difflib
+import importlib.util
+from pathlib import Path
+import sys
+from types import ModuleType
+from typing import Any, Sequence
+
+TOOLS_DIR = Path(__file__).resolve().parent
+
+
+def _load_sibling_module(name: str) -> ModuleType | None:
+  """Load a sibling module from dashboards/power_bi/tools/."""
+  mod_name = f"power_bi_{name}"
+  if mod_name in sys.modules:
+    return sys.modules[mod_name]
+  module_path = TOOLS_DIR / f"{name}.py"
+  if not module_path.exists():
+    return None
+  spec = importlib.util.spec_from_file_location(mod_name, module_path)
+  if spec is None or spec.loader is None:
+    return None
+  module = importlib.util.module_from_spec(spec)
+  sys.modules[mod_name] = module
+  spec.loader.exec_module(module)
+  return module
+
+
+pbip_common = _load_sibling_module("pbip_common")
+assert (
+    pbip_common is not None
+), "pbip_common.py must exist alongside generate_pbip.py"
+
+PBIP_SCHEMA = (
+    "https://developer.microsoft.com/json-schemas/fabric/pbip/"
+    "pbipProperties/1.0.0/schema.json"
+)
+PLATFORM_SCHEMA = (
+    "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/"
+    "platformProperties/2.0.0/schema.json"
+)
+PBISM_SCHEMA = (
+    "https://developer.microsoft.com/json-schemas/fabric/item/semanticModel/"
+    "definitionProperties/1.0.0/schema.json"
+)
+PBIR_SCHEMA = (
+    "https://developer.microsoft.com/json-schemas/fabric/item/report/"
+    "definitionProperties/2.0.0/schema.json"
+)
+
+MODEL_FOLDER_NAME = "BQAA_Agent_Analytics.SemanticModel"
+REPORT_FOLDER_NAME = "BQAA_Agent_Analytics.Report"
+
+
+def build_core_files() -> dict[str, str]:
+  """Build the root .pbip shortcut and item metadata (.platform, .pbism, .pbir)."""
+  display_name = pbip_common.DISPLAY_NAME
+  files: dict[str, str] = {}
+
+  files["BQAA_Agent_Analytics.pbip"] = pbip_common.dump_json(
+      {
+          "$schema": PBIP_SCHEMA,
+          "version": "1.0",
+          "artifacts": [{"report": {"path": REPORT_FOLDER_NAME}}],
+      }
+  )
+
+  files[f"{MODEL_FOLDER_NAME}/.platform"] = pbip_common.dump_json(
+      {
+          "$schema": PLATFORM_SCHEMA,
+          "metadata": {
+              "type": "SemanticModel",
+              "displayName": display_name,
+          },
+          "config": {
+              "version": "2.0",
+              "logicalId": pbip_common.stable_uuid(
+                  "platform", "SemanticModel", "BQAA_Agent_Analytics"
+              ),
+          },
+      }
+  )
+
+  files[f"{MODEL_FOLDER_NAME}/definition.pbism"] = pbip_common.dump_json(
+      {
+          "$schema": PBISM_SCHEMA,
+          "version": "4.0",
+          "settings": {"qnaEnabled": False},
+      }
+  )
+
+  files[f"{REPORT_FOLDER_NAME}/.platform"] = pbip_common.dump_json(
+      {
+          "$schema": PLATFORM_SCHEMA,
+          "metadata": {
+              "type": "Report",
+              "displayName": display_name,
+          },
+          "config": {
+              "version": "2.0",
+              "logicalId": pbip_common.stable_uuid(
+                  "platform", "Report", "BQAA_Agent_Analytics"
+              ),
+          },
+      }
+  )
+
+  files[f"{REPORT_FOLDER_NAME}/definition.pbir"] = pbip_common.dump_json(
+      {
+          "$schema": PBIR_SCHEMA,
+          "version": "4.0",
+          "datasetReference": {"byPath": {"path": f"../{MODEL_FOLDER_NAME}"}},
+      }
+  )
+
+  return files
+
+
+def _normalize_item_key(rel_path: str, item_folder: str) -> str:
+  clean = rel_path.strip().replace("\\", "/").lstrip("/")
+  if clean.startswith(f"{item_folder}/"):
+    return clean
+  return f"{item_folder}/{clean}"
+
+
+def generate_all(
+    power_bi_root: Path | None = None,
+    looker_root: Path | None = None,
+) -> dict[str, str]:
+  """Generate the complete PBIP file map (relative to power_bi_root -> text)."""
+  pbi_root = Path(
+      power_bi_root if power_bi_root is not None else pbip_common.POWER_BI_ROOT
+  )
+  lkr_root = Path(
+      looker_root if looker_root is not None else pbip_common.LOOKER_ROOT
+  )
+
+  contracts = pbip_common.load_contracts(looker_root=lkr_root)
+  files = build_core_files()
+
+  model_spec: dict[str, Any] | None = None
+  model_spec_path = pbi_root / "spec" / "semantic_model.yaml"
+  pbip_model = _load_sibling_module("pbip_model")
+  if pbip_model is not None and model_spec_path.exists():
+    model_spec = pbip_common.load_spec(
+        "semantic_model.yaml", power_bi_root=pbi_root
+    )
+    model_files = pbip_model.build_model(contracts, model_spec)
+    for k in sorted(model_files):
+      norm_k = _normalize_item_key(k, MODEL_FOLDER_NAME)
+      files[norm_k] = model_files[k]
+
+  report_spec_path = pbi_root / "spec" / "report_visuals.yaml"
+  pbip_report = _load_sibling_module("pbip_report")
+  if pbip_report is not None and report_spec_path.exists():
+    visuals_spec = pbip_common.load_spec(
+        "report_visuals.yaml", power_bi_root=pbi_root
+    )
+    report_files = pbip_report.build_report(contracts, visuals_spec, model_spec)
+    for k in sorted(report_files):
+      norm_k = _normalize_item_key(k, REPORT_FOLDER_NAME)
+      files[norm_k] = report_files[k]
+
+  return {k: files[k] for k in sorted(files)}
+
+
+def _list_existing_item_files(
+    pbi_root: Path,
+    include_model_def: bool,
+    include_report_def: bool,
+) -> set[str]:
+  """List existing files under the two generated item folders (ignoring .pbi/)."""
+  found: set[str] = set()
+  pbip_file = pbi_root / "BQAA_Agent_Analytics.pbip"
+  if pbip_file.is_file():
+    found.add("BQAA_Agent_Analytics.pbip")
+
+  for folder_name, include_def in (
+      (MODEL_FOLDER_NAME, include_model_def),
+      (REPORT_FOLDER_NAME, include_report_def),
+  ):
+    item_dir = pbi_root / folder_name
+    if not item_dir.exists():
+      continue
+    for path in sorted(item_dir.rglob("*")):
+      if not path.is_file():
+        continue
+      rel = path.relative_to(pbi_root).as_posix()
+      parts = rel.split("/")
+      if ".pbi" in parts:
+        continue
+      if (
+          not include_def
+          and len(parts) >= 2
+          and parts[1]
+          in (
+              "definition",
+              "StaticResources",
+          )
+      ):
+        continue
+      found.add(rel)
+  return found
+
+
+def write_generated_files(
+    power_bi_root: Path | None = None,
+    looker_root: Path | None = None,
+) -> dict[str, str]:
+  """Write all generated files and remove stale files under item folders."""
+  pbi_root = Path(
+      power_bi_root if power_bi_root is not None else pbip_common.POWER_BI_ROOT
+  )
+  expected = generate_all(power_bi_root=pbi_root, looker_root=looker_root)
+
+  has_model_def = any(
+      k.startswith(f"{MODEL_FOLDER_NAME}/definition/") for k in expected
+  )
+  has_report_def = any(
+      k.startswith(f"{REPORT_FOLDER_NAME}/definition/") for k in expected
+  )
+  existing = _list_existing_item_files(pbi_root, has_model_def, has_report_def)
+
+  # Remove stale files under the generated item folders.
+  for stale_rel in sorted(existing - set(expected)):
+    stale_path = pbi_root / stale_rel
+    if stale_path.is_file():
+      stale_path.unlink()
+
+  # Write expected files with LF line endings.
+  for rel_path, content in expected.items():
+    target = pbi_root / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    with open(target, "w", encoding="utf-8", newline="\n") as f:
+      f.write(normalized)
+
+  return expected
+
+
+def check_generated_files(
+    power_bi_root: Path | None = None,
+    looker_root: Path | None = None,
+) -> list[str]:
+  """Compare generated files against disk (CRLF normalized to LF). Return diff summaries."""
+  pbi_root = Path(
+      power_bi_root if power_bi_root is not None else pbip_common.POWER_BI_ROOT
+  )
+  expected = generate_all(power_bi_root=pbi_root, looker_root=looker_root)
+
+  has_model_def = any(
+      k.startswith(f"{MODEL_FOLDER_NAME}/definition/") for k in expected
+  )
+  has_report_def = any(
+      k.startswith(f"{REPORT_FOLDER_NAME}/definition/") for k in expected
+  )
+  existing = _list_existing_item_files(pbi_root, has_model_def, has_report_def)
+
+  diffs: list[str] = []
+
+  for missing_rel in sorted(set(expected) - existing):
+    diffs.append(f"MISSING: {missing_rel}")
+
+  for extra_rel in sorted(existing - set(expected)):
+    diffs.append(f"EXTRA: {extra_rel}")
+
+  for rel_path in sorted(set(expected) & existing):
+    disk_path = pbi_root / rel_path
+    disk_text = (
+        disk_path.read_text(encoding="utf-8")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+    )
+    exp_text = expected[rel_path].replace("\r\n", "\n").replace("\r", "\n")
+    if disk_text != exp_text:
+      udiff = list(
+          difflib.unified_diff(
+              exp_text.splitlines(keepends=True),
+              disk_text.splitlines(keepends=True),
+              fromfile=f"expected/{rel_path}",
+              tofile=f"actual/{rel_path}",
+              n=2,
+          )
+      )
+      snippet = "".join(udiff[:20]).rstrip()
+      diffs.append(f"MISMATCH: {rel_path}\n{snippet}")
+
+  return diffs[:20]
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+  """Run the PBIP generator CLI."""
+  parser = argparse.ArgumentParser(
+      description="Generate or verify the BQAA Power BI Project (PBIP)."
+  )
+  mode = parser.add_mutually_exclusive_group(required=True)
+  mode.add_argument(
+      "--write",
+      action="store_true",
+      help="Write generated PBIP files to disk.",
+  )
+  mode.add_argument(
+      "--check",
+      action="store_true",
+      help="Check that committed PBIP files match generator output.",
+  )
+  mode.add_argument(
+      "--print-sql",
+      action="store_true",
+      help="Print the rendered events_v1 BigQuery SQL for the given date window.",
+  )
+  parser.add_argument(
+      "--window-end",
+      help="Anchor end date in YYYY-MM-DD format (required for --print-sql).",
+  )
+  parser.add_argument(
+      "--lookback-days",
+      type=int,
+      default=90,
+      help="Lookback window L in days (1..366, default: 90).",
+  )
+  parser.add_argument(
+      "--project",
+      default="test-project-0728-467323",
+      help="BigQuery project ID.",
+  )
+  parser.add_argument(
+      "--dataset",
+      default="bqaa_fixture_adk_1_27_0",
+      help="BigQuery dataset ID.",
+  )
+  parser.add_argument(
+      "--table",
+      default="agent_events",
+      help="BigQuery table ID.",
+  )
+  args = parser.parse_args(argv)
+
+  if args.print_sql:
+    pbip_model = _load_sibling_module("pbip_model")
+    if pbip_model is None or not hasattr(pbip_model, "render_events_sql"):
+      raise NotImplementedError(
+          "--print-sql requires pbip_model.render_events_sql (implemented in S1b)"
+      )
+    if not args.window_end:
+      parser.error("--print-sql requires --window-end YYYY-MM-DD")
+    try:
+      anchor = datetime.date.fromisoformat(args.window_end)
+    except ValueError as exc:
+      parser.error(f"Invalid --window-end '{args.window_end}': {exc}")
+    lookback = int(args.lookback_days)
+    if lookback < 1 or lookback > 366:
+      parser.error(f"--lookback-days must be in 1..366, got {lookback}")
+    current_start = anchor - datetime.timedelta(days=lookback - 1)
+    load_start = current_start - datetime.timedelta(days=lookback)
+    sql = pbip_model.render_events_sql(
+        args.project,
+        args.dataset,
+        args.table,
+        load_start=load_start,
+        anchor=anchor,
+    )
+    sys.stdout.write(sql)
+    if not sql.endswith("\n"):
+      sys.stdout.write("\n")
+    return 0
+
+  try:
+    if args.write:
+      write_generated_files()
+      return 0
+    if args.check:
+      diffs = check_generated_files()
+      if diffs:
+        sys.stderr.write(
+            f"PBIP drift detected ({len(diffs)} file(s) differ):\n"
+        )
+        for item in diffs:
+          sys.stderr.write(f"{item}\n")
+        return 1
+      return 0
+  except Exception as exc:  # pylint: disable=broad-except
+    sys.stderr.write(f"Error: {exc}\n")
+    return 1
+
+  return 0
+
+
+if __name__ == "__main__":
+  sys.exit(main())
