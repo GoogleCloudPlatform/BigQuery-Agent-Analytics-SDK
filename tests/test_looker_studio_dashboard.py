@@ -61,10 +61,13 @@ def openssh():
   The BQCA binding is finalized, so validating it verifies the signature of
   its committed capture receipt with ssh-keygen (OpenSSH 8.2 or later), as
   CI does. A test that validates the repository's BQCA binding, or checks
-  that signature, lists this fixture in `usefixtures`. It is skipped where
-  ssh-keygen is not on PATH, or refuses to start because the current user
-  ID has no account entry; anywhere else it runs, and any error, an old
-  ssh-keygen's included, fails it.
+  that signature, lists this fixture in `usefixtures`; a parametrized test
+  that needs it in only some cases requests it in those cases with
+  `request.getfixturevalue`, because `pytest.param` cannot carry
+  `usefixtures`. The test or case is skipped where ssh-keygen is not on
+  PATH, or refuses to start because the current user ID has no account
+  entry; anywhere else it runs, and any error, an old ssh-keygen's
+  included, fails it.
   """
   if SSH_KEYGEN is None:
     pytest.skip("ssh-keygen (OpenSSH) is not installed")
@@ -3389,9 +3392,8 @@ BQCA_EXTRA_SPEC_BLOCK_CASES = [
 
 
 @pytest.mark.parametrize("edit, expected", BQCA_EXTRA_SPEC_BLOCK_CASES)
-@pytest.mark.usefixtures("openssh")
 def test_validate_contracts_rejects_spec_blocks_the_chart_type_does_not_read(
-    edit, expected
+    edit, expected, request
 ):
   """#check-can-fail: a component's spec holds no block its kind does not read.
 
@@ -3401,9 +3403,13 @@ def test_validate_contracts_rejects_spec_blocks_the_chart_type_does_not_read(
   column ID, to the manifest and the bundle, re-pins both digests and records
   the pending live sync that the edit needs, so only that check can catch it.
   The `unchanged` case validates the repository's own contracts, the live sync
-  and its capture receipt included.
+  and its capture receipt included, so it alone needs the `openssh` fixture:
+  the re-pinned cases verify no signature and run wherever the test runs.
   """
   if edit is None:
+    # `usefixtures("openssh")` for this case only, which pytest.param cannot
+    # carry: it skips this case alone where ssh-keygen cannot run.
+    request.getfixturevalue("openssh")
     errors = _load_dashboard_module("validate_contracts").validate_bqca()
   else:
     errors = _bqca_validate_repinned(edit)
