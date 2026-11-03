@@ -14,12 +14,13 @@
 
 """Unit tests for the BQAA Power BI project generator core (S1a) and semantic model (S1b)."""
 
-from __future__ import annotations
-
 import copy
+import datetime
 import importlib.util
+import io
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 from types import ModuleType
@@ -182,3 +183,185 @@ def test_generator_write_determinism_and_check_drift_detection(
   # Restore via --write and confirm --check passes again.
   assert generate_pbip.main(["--write"]) == 0
   assert generate_pbip.main(["--check"]) == 0
+
+
+def test_semantic_model_invariants_i1_to_i8_and_print_sql(monkeypatch):
+  pbip_common = _load_pbi_module("pbip_common")
+  pbip_model = _load_pbi_module("pbip_model")
+  generate_pbip = _load_pbi_module("generate_pbip")
+
+  contracts = pbip_common.load_contracts()
+  model_spec = pbip_common.load_spec("semantic_model.yaml")
+  model_files = pbip_model.build_model(contracts, model_spec)
+
+  expr_text = model_files["definition/expressions.tmdl"]
+  events_tmdl = model_files["definition/tables/events_v1.tmdl"]
+
+  # I1: reconstruct EventsSelectLines from expressions.tmdl and compare byte-for-byte.
+  select_lines = pbip_model.events_select_lines(contracts)
+  assert len(select_lines) == 128
+  assert select_lines[0] == "SELECT"
+  assert select_lines[-1] == "  ) AS tool_error_pk"
+
+  m_block_match = re.search(
+      r"EventsSelectLines = \{\n(.*?)\n\t\t\t\},", expr_text, re.DOTALL
+  )
+  assert m_block_match is not None
+  reconstructed: list[str] = []
+  for raw_line in m_block_match.group(1).splitlines():
+    m_lit = re.match(r'^\t\t\t\t"(.*)"(?:,)?$', raw_line)
+    assert (
+        m_lit is not None
+    ), f"Unexpected EventsSelectLines entry: {raw_line!r}"
+    reconstructed.append(pbip_model.unescape_m_string(m_lit.group(1)))
+  assert reconstructed == select_lines
+
+  # I2: FROM line uses validated TableRef and WHERE clause is the half-open UTC predicate.
+  assert '"FROM " & TableRef' in expr_text
+  assert (
+      '"WHERE timestamp >= TIMESTAMP(" & DateLit(LoadStart) & ", \'UTC\')"'
+      in expr_text
+  )
+  assert (
+      '"  AND timestamp < TIMESTAMP(DATE_ADD(" & DateLit(Anchor) & ", INTERVAL 1 DAY), \'UTC\')"'
+      in expr_text
+  )
+
+  # I3: raw parameter names appear only in declaration line (IsParameterQuery) and validator line (Is*/Reject).
+  for param_name in pbip_model.PARAMETER_NAMES:
+    matching_lines = [
+        line for line in expr_text.splitlines() if param_name in line
+    ]
+    assert (
+        len(matching_lines) == 2
+    ), f"Expected {param_name} on 2 lines (declaration + validator), got {matching_lines}"
+    assert "IsParameterQuery=true" in matching_lines[0]
+    assert f'Reject("{param_name}")' in matching_lines[1]
+    assert re.search(
+        r"if Is[A-Za-z]+\(" + re.escape(param_name) + r"\)", matching_lines[1]
+    )
+    assert param_name not in events_tmdl
+
+  # I4 & I5: no EnableFolding and no Implementation in connector/native query calls.
+  for tmdl_text in model_files.values():
+    assert "EnableFolding" not in tmdl_text
+    assert "Implementation" not in tmdl_text
+
+  # I6: explicit WindowEndDate skips AutoAnchor via lazy branch.
+  assert (
+      'Anchor = if Text.Lower(WindowEndRaw) = "auto" then AutoAnchor else ParseIsoDate(WindowEndRaw)'
+      in expr_text
+  )
+
+  # I7 & I8: --print-sql equals Python render_events_sql and TMDL composition, with 0 ;, ", #.
+  buf = io.StringIO()
+  monkeypatch.setattr(sys, "stdout", buf)
+  rc = generate_pbip.main(
+      [
+          "--print-sql",
+          "--window-end",
+          "2026-07-16",
+          "--lookback-days",
+          "90",
+      ]
+  )
+  assert rc == 0
+  printed_sql = buf.getvalue().rstrip("\n")
+
+  expected_sql = pbip_model.render_events_sql(
+      "test-project-0728-467323",
+      "bqaa_fixture_adk_1_27_0",
+      "agent_events",
+      load_start=datetime.date(2026, 1, 18),
+      anchor=datetime.date(2026, 7, 16),
+      contracts=contracts,
+  )
+  assert printed_sql == expected_sql
+  assert ";" not in printed_sql
+  assert '"' not in printed_sql
+  assert "#" not in printed_sql
+  assert printed_sql.splitlines()[:128] == select_lines
+  assert printed_sql.splitlines()[128:] == [
+      "FROM `test-project-0728-467323.bqaa_fixture_adk_1_27_0.agent_events`",
+      "WHERE timestamp >= TIMESTAMP(DATE '2026-01-18', 'UTC')",
+      "  AND timestamp < TIMESTAMP(DATE_ADD(DATE '2026-07-16', INTERVAL 1 DAY), 'UTC')",
+  ]
+
+  # F20 validation failure checks on render_events_sql (#check-can-fail).
+  with pytest.raises(ValueError, match="Invalid BigQuery project ID"):
+    pbip_model.render_events_sql(
+        "BAD_PROJECT!",
+        "bqaa_fixture_adk_1_27_0",
+        "agent_events",
+        datetime.date(2026, 1, 18),
+        datetime.date(2026, 7, 16),
+    )
+  with pytest.raises(ValueError, match="Invalid BigQuery dataset ID"):
+    pbip_model.render_events_sql(
+        "test-project-0728-467323",
+        "bad-dataset-with-hyphen",
+        "agent_events",
+        datetime.date(2026, 1, 18),
+        datetime.date(2026, 7, 16),
+    )
+  with pytest.raises(ValueError, match="Invalid BigQuery table ID"):
+    pbip_model.render_events_sql(
+        "test-project-0728-467323",
+        "bqaa_fixture_adk_1_27_0",
+        "-bad_table",
+        datetime.date(2026, 1, 18),
+        datetime.date(2026, 7, 16),
+    )
+
+
+def test_events_v1_29_columns_49_measures_and_tmdl_hygiene():
+  pbip_common = _load_pbi_module("pbip_common")
+  pbip_model = _load_pbi_module("pbip_model")
+
+  contracts = pbip_common.load_contracts()
+  model_spec = pbip_common.load_spec("semantic_model.yaml")
+  model_files = pbip_model.build_model(contracts, model_spec)
+
+  events_text = model_files["definition/tables/events_v1.tmdl"]
+  date_text = model_files["definition/tables/Date.tmdl"]
+  rel_text = model_files["definition/relationships.tmdl"]
+  db_text = model_files["definition/database.tmdl"]
+  model_text = model_files["definition/model.tmdl"]
+
+  assert "compatibilityLevel: 1567" in db_text
+  assert "defaultPowerBIDataSourceVersion: powerBI_V3" in model_text
+  assert "ref table events_v1" in model_text
+  assert "ref table Date" in model_text
+  assert "fromColumn: events_v1.event_date" in rel_text
+  assert "toColumn: Date.Date" in rel_text
+  assert "dataCategory: Time" in date_text
+
+  # 29 columns in exact order.
+  col_decls = re.findall(r"^\tcolumn (\S+)$", events_text, re.MULTILINE)
+  assert tuple(col_decls) == pbip_model.EVENT_COLUMN_NAMES
+  assert len(col_decls) == 29
+
+  # Hidden PK columns.
+  for pk_col in (
+      "event_pk",
+      "llm_response_pk",
+      "tool_completed_pk",
+      "tool_error_pk",
+  ):
+    assert f"column {pk_col}\n\t\tdataType: string\n\t\tisHidden" in events_text
+
+  # 49 measures in exact order, DISTINCTCOUNTNOBLANK-only rule.
+  assert "DISTINCTCOUNT(" not in events_text
+  assert "DISTINCTCOUNTNOBLANK(" in events_text
+  measure_decls = re.findall(
+      r"^\tmeasure (?:'([^']+)'|(\S+)) = (.+)$", events_text, re.MULTILINE
+  )
+  assert len(measure_decls) == 49
+  actual_measure_names = tuple(m[0] or m[1] for m in measure_decls)
+  assert actual_measure_names == pbip_model.MEASURE_NAMES
+
+  # Mutated spec fails build_model (#check-can-fail).
+  broken_spec = copy.deepcopy(model_spec)
+  broken_spec["measures"][1]["dax"] = "DISTINCTCOUNT('events_v1'[trace_id])"
+  with pytest.raises(ValueError, match="DISTINCTCOUNTNOBLANK"):
+    pbip_model.build_model(contracts, broken_spec)

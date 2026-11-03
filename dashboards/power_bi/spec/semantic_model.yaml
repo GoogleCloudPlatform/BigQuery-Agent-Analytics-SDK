@@ -1,0 +1,658 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+model:
+  name: Model
+  database_name: bqaa-agent-analytics
+  compatibility_level: 1567
+  culture: en-US
+  default_power_bi_data_source_version: powerBI_V3
+
+parameters:
+  - name: BQAA_ProjectId
+    m_type: Text
+    default: test-project-0728-467323
+    validation: PROJECT_RE
+    description: GCP project hosting the BigQuery Agent Analytics event table.
+  - name: BQAA_DatasetId
+    m_type: Text
+    default: bqaa_fixture_adk_1_27_0
+    validation: DATASET_RE
+    description: BigQuery dataset containing the BigQuery Agent Analytics event table.
+  - name: BQAA_TableId
+    m_type: Text
+    default: agent_events
+    validation: TABLE_RE
+    description: BigQuery table containing raw BigQuery Agent Analytics events.
+  - name: BQAA_BillingProjectId
+    m_type: Text
+    default: test-project-0728-467323
+    validation: PROJECT_RE
+    description: GCP project billed for BigQuery metadata and scan jobs.
+  - name: BQAA_WindowEndDate
+    m_type: Text
+    default: auto
+    validation: auto_or_iso_date
+    description: Anchor end date (YYYY-MM-DD) or auto for the newest non-empty partition.
+  - name: BQAA_LookbackDays
+    m_type: Number
+    default: 90
+    validation: int_1_to_366
+    description: Current reporting window length L in days (1..366); loads 2L days for PoP.
+  - name: BQAA_UseStorageApi
+    m_type: Logical
+    default: true
+    validation: logical
+    description: Whether GoogleBigQuery.Database uses the BigQuery Storage Read API.
+
+tables:
+  events_v1:
+    description: Reporting projection over the BigQuery Agent Analytics event table.
+    columns:
+      - name: timestamp
+        bigquery_type: TIMESTAMP
+        data_type: dateTime
+        m_type: type datetime
+        format_string: "yyyy-mm-dd hh:nn:ss"
+      - name: event_type
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+      - name: agent
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+      - name: session_id
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+      - name: invocation_id
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+      - name: user_id
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+      - name: trace_id
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+      - name: span_id
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+      - name: parent_span_id
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+      - name: status
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+      - name: error_message
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+      - name: is_truncated
+        bigquery_type: BOOL
+        data_type: boolean
+        m_type: type logical
+      - name: usage_prompt_tokens
+        bigquery_type: INT64
+        data_type: int64
+        m_type: Int64.Type
+        format_string: "#,0"
+      - name: usage_completion_tokens
+        bigquery_type: INT64
+        data_type: int64
+        m_type: Int64.Type
+        format_string: "#,0"
+      - name: usage_total_tokens
+        bigquery_type: INT64
+        data_type: int64
+        m_type: Int64.Type
+        format_string: "#,0"
+      - name: llm_total_ms
+        bigquery_type: INT64
+        data_type: int64
+        m_type: Int64.Type
+        format_string: "#,0"
+      - name: ttft_ms
+        bigquery_type: INT64
+        data_type: int64
+        m_type: Int64.Type
+        format_string: "#,0"
+      - name: model_version
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+      - name: tool_completed_name
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+      - name: tool_completed_origin
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+      - name: tool_completed_total_ms
+        bigquery_type: INT64
+        data_type: int64
+        m_type: Int64.Type
+        format_string: "#,0"
+      - name: tool_error_name
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+      - name: tool_error_origin
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+      - name: tool_error_total_ms
+        bigquery_type: INT64
+        data_type: int64
+        m_type: Int64.Type
+        format_string: "#,0"
+      - name: event_date
+        bigquery_type: DATE
+        data_type: dateTime
+        m_type: type date
+        format_string: "yyyy-mm-dd"
+      - name: event_pk
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+        is_hidden: true
+      - name: llm_response_pk
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+        is_hidden: true
+      - name: tool_completed_pk
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+        is_hidden: true
+      - name: tool_error_pk
+        bigquery_type: STRING
+        data_type: string
+        m_type: type text
+        is_hidden: true
+
+  Date:
+    data_category: Time
+    description: Contiguous UTC calendar covering the 2L loaded window.
+    columns:
+      - name: Date
+        data_type: dateTime
+        m_type: type date
+        format_string: "yyyy-mm-dd"
+        is_key: true
+      - name: Window
+        data_type: string
+        m_type: type text
+
+relationships:
+  - name: events_v1_event_date_to_Date_Date
+    from_table: events_v1
+    from_column: event_date
+    to_table: Date
+    to_column: Date
+    cross_filtering_behavior: oneDirection
+    is_active: true
+
+measures:
+  # Base measures (20)
+  - name: Total Tokens
+    display_folder: Base
+    format_string: "#,0"
+    dax: "SUM('events_v1'[usage_total_tokens])"
+    oracle_queries:
+      - oracle/queries/usage-total-tokens-consumption-over-the-time.sql
+      - oracle/queries/usage-token-usage-split-by-agent.sql
+      - oracle/queries/usage-top-5-users-with-most-tokens-consumption.sql
+    oracle_column: total_tokens_consumed
+
+  - name: Total Traces
+    display_folder: Base
+    format_string: "#,0"
+    dax: "DISTINCTCOUNTNOBLANK('events_v1'[trace_id])"
+    oracle_queries:
+      - oracle/queries/usage-total-traces-generation-over-the-time.sql
+    oracle_column: total_traces
+
+  - name: Total Sessions
+    display_folder: Base
+    format_string: "#,0"
+    dax: "DISTINCTCOUNTNOBLANK('events_v1'[session_id])"
+    oracle_queries:
+      - oracle/queries/usage-number-of-sessions-trend.sql
+    oracle_column: total_sessions
+
+  - name: Total Users
+    display_folder: Base
+    format_string: "#,0"
+    dax: "DISTINCTCOUNTNOBLANK('events_v1'[user_id])"
+    oracle_queries:
+      - oracle/queries/usage-user-growth-over-time.sql
+    oracle_column: total_users
+
+  - name: Total Events
+    display_folder: Base
+    format_string: "#,0"
+    dax: "COUNTROWS('events_v1')"
+    oracle_queries:
+      - oracle/queries/usage-top-5-users-by-events.sql
+    oracle_column: total_events
+
+  - name: LLM Calls
+    display_folder: Base
+    format_string: "#,0"
+    dax: "DISTINCTCOUNTNOBLANK('events_v1'[llm_response_pk])"
+    oracle_queries:
+      - oracle/queries/usage-llm-call-trends.sql
+      - oracle/queries/usage-top-5-agents-by-llm-calls.sql
+    oracle_column: total_llm_calls
+
+  - name: Tool Completion Events
+    display_folder: Base
+    format_string: "#,0"
+    dax: "CALCULATE(COUNTROWS('events_v1'), KEEPFILTERS('events_v1'[event_type] = \"TOOL_COMPLETED\"))"
+    oracle_queries:
+      - oracle/queries/usage-tool-calls-over-time.sql
+    oracle_column: total_events
+
+  - name: Distinct Tool Invocations
+    display_folder: Base
+    format_string: "#,0"
+    dax: "CALCULATE(DISTINCTCOUNTNOBLANK('events_v1'[invocation_id]), KEEPFILTERS('events_v1'[event_type] = \"TOOL_COMPLETED\"), KEEPFILTERS(NOT ISBLANK('events_v1'[tool_completed_name])))"
+    oracle_queries:
+      - oracle/queries/usage-tool-invocations.sql
+    oracle_column: total_invocations
+
+  - name: Tool Errors
+    display_folder: Base
+    format_string: "#,0"
+    dax: "DISTINCTCOUNTNOBLANK('events_v1'[tool_error_pk])"
+    oracle_queries:
+      - oracle/queries/performance-tool-errors-trend.sql
+    oracle_column: total_tool_errors
+
+  - name: Avg Tool Latency (ms)
+    display_folder: Base
+    format_string: "#,0.0"
+    dax: "AVERAGE('events_v1'[tool_completed_total_ms])"
+    oracle_queries:
+      - oracle/queries/performance-average-tool-latency-ms.sql
+      - oracle/queries/performance-tool-latency-trend.sql
+    oracle_column: average_tool_latency
+
+  - name: Avg LLM Latency (ms)
+    display_folder: Base
+    format_string: "#,0.0"
+    dax: "AVERAGE('events_v1'[llm_total_ms])"
+    oracle_queries:
+      - oracle/queries/performance-average-llm-latency-in-ms.sql
+      - oracle/queries/performance-llm-latency-trend.sql
+    oracle_column: average_llm_latency
+
+  - name: P50 Tool Latency (ms)
+    display_folder: Base
+    format_string: "#,0.0"
+    dax: "CALCULATE(PERCENTILE.INC('events_v1'[tool_completed_total_ms], 0.50), KEEPFILTERS(NOT ISBLANK('events_v1'[tool_completed_total_ms])))"
+    oracle_queries:
+      - oracle/queries/performance-p50-tool-latency.sql
+    oracle_column: p50_tool_latency
+
+  - name: P75 Tool Latency (ms)
+    display_folder: Base
+    format_string: "#,0.0"
+    dax: "CALCULATE(PERCENTILE.INC('events_v1'[tool_completed_total_ms], 0.75), KEEPFILTERS(NOT ISBLANK('events_v1'[tool_completed_total_ms])))"
+    oracle_queries:
+      - oracle/queries/performance-p75-tool-latency.sql
+    oracle_column: p75_tool_latency
+
+  - name: P90 Tool Latency (ms)
+    display_folder: Base
+    format_string: "#,0.0"
+    dax: "CALCULATE(PERCENTILE.INC('events_v1'[tool_completed_total_ms], 0.90), KEEPFILTERS(NOT ISBLANK('events_v1'[tool_completed_total_ms])))"
+    oracle_queries:
+      - oracle/queries/performance-p90-tool-latency.sql
+    oracle_column: p90_tool_latency
+
+  - name: P99 Tool Latency (ms)
+    display_folder: Base
+    format_string: "#,0.0"
+    dax: "CALCULATE(PERCENTILE.INC('events_v1'[tool_completed_total_ms], 0.99), KEEPFILTERS(NOT ISBLANK('events_v1'[tool_completed_total_ms])))"
+    oracle_queries:
+      - oracle/queries/performance-p99-tool-latency.sql
+    oracle_column: p99_tool_latency
+
+  - name: P50 LLM Latency (ms)
+    display_folder: Base
+    format_string: "#,0.0"
+    dax: "CALCULATE(PERCENTILE.INC('events_v1'[llm_total_ms], 0.50), KEEPFILTERS(NOT ISBLANK('events_v1'[llm_total_ms])))"
+    oracle_queries:
+      - oracle/queries/performance-p50-llm-latency.sql
+    oracle_column: p50_llm_latency
+
+  - name: P75 LLM Latency (ms)
+    display_folder: Base
+    format_string: "#,0.0"
+    dax: "CALCULATE(PERCENTILE.INC('events_v1'[llm_total_ms], 0.75), KEEPFILTERS(NOT ISBLANK('events_v1'[llm_total_ms])))"
+    oracle_queries:
+      - oracle/queries/performance-p75-llm-latency.sql
+    oracle_column: p75_llm_latency
+
+  - name: P90 LLM Latency (ms)
+    display_folder: Base
+    format_string: "#,0.0"
+    dax: "CALCULATE(PERCENTILE.INC('events_v1'[llm_total_ms], 0.90), KEEPFILTERS(NOT ISBLANK('events_v1'[llm_total_ms])))"
+    oracle_queries:
+      - oracle/queries/performance-p90-llm-latency.sql
+    oracle_column: p90_llm_latency
+
+  - name: P99 LLM Latency (ms)
+    display_folder: Base
+    format_string: "#,0.0"
+    dax: "CALCULATE(PERCENTILE.INC('events_v1'[llm_total_ms], 0.99), KEEPFILTERS(NOT ISBLANK('events_v1'[llm_total_ms])))"
+    oracle_queries:
+      - oracle/queries/performance-p99-llm-latency.sql
+    oracle_column: p99_llm_latency
+
+  - name: Traces for Agents With Tokens
+    display_folder: Base
+    format_string: "#,0"
+    dax: "IF(ISBLANK([Total Tokens]), BLANK(), [Total Traces])"
+    oracle_queries:
+      - oracle/queries/usage-traces-split-by-agent.sql
+    oracle_column: total_traces
+
+  # Scorecard KPI measures (18 = 6 * 3)
+  - name: KPI Total Tokens
+    display_folder: Scorecards
+    format_string: "#,0"
+    dax: "[Total Tokens]"
+    oracle_queries:
+      - oracle/queries/usage-total-tokens.sql
+    oracle_column: pop_total_tokens_current
+
+  - name: KPI Total Tokens Prior
+    display_folder: Scorecards
+    format_string: "#,0"
+    dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE([Total Tokens], REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
+    oracle_queries:
+      - oracle/queries/usage-total-tokens.sql
+    oracle_column: pop_total_tokens_prior
+
+  - name: KPI Total Tokens Change %
+    display_folder: Scorecards
+    format_string: "+0.0%;-0.0%;0.0%"
+    dax: "VAR _cur = [Total Tokens] VAR _prev = [KPI Total Tokens Prior] RETURN IF(ISBLANK(_cur) || ISBLANK(_prev), BLANK(), DIVIDE(_cur - _prev, _prev))"
+    oracle_queries:
+      - oracle/queries/usage-total-tokens.sql
+    oracle_column: pop_total_tokens_change
+
+  - name: KPI Total Traces
+    display_folder: Scorecards
+    format_string: "#,0"
+    dax: "COALESCE([Total Traces], 0)"
+    oracle_queries:
+      - oracle/queries/usage-total-traces.sql
+    oracle_column: pop_total_traces_current
+
+  - name: KPI Total Traces Prior
+    display_folder: Scorecards
+    format_string: "#,0"
+    dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE([Total Traces], REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
+    oracle_queries:
+      - oracle/queries/usage-total-traces.sql
+    oracle_column: pop_total_traces_prior
+
+  - name: KPI Total Traces Change %
+    display_folder: Scorecards
+    format_string: "+0.0%;-0.0%;0.0%"
+    dax: "VAR _cur = [KPI Total Traces] VAR _prev = [KPI Total Traces Prior] RETURN DIVIDE(_cur - _prev, _prev)"
+    oracle_queries:
+      - oracle/queries/usage-total-traces.sql
+    oracle_column: pop_total_traces_change
+
+  - name: KPI Total Sessions
+    display_folder: Scorecards
+    format_string: "#,0"
+    dax: "COALESCE([Total Sessions], 0)"
+    oracle_queries:
+      - oracle/queries/usage-total-sessions.sql
+    oracle_column: pop_total_sessions_current
+
+  - name: KPI Total Sessions Prior
+    display_folder: Scorecards
+    format_string: "#,0"
+    dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE([Total Sessions], REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
+    oracle_queries:
+      - oracle/queries/usage-total-sessions.sql
+    oracle_column: pop_total_sessions_prior
+
+  - name: KPI Total Sessions Change %
+    display_folder: Scorecards
+    format_string: "+0.0%;-0.0%;0.0%"
+    dax: "VAR _cur = [KPI Total Sessions] VAR _prev = [KPI Total Sessions Prior] RETURN DIVIDE(_cur - _prev, _prev)"
+    oracle_queries:
+      - oracle/queries/usage-total-sessions.sql
+    oracle_column: pop_total_sessions_change
+
+  - name: KPI Total LLM Calls
+    display_folder: Scorecards
+    format_string: "#,0"
+    dax: "COALESCE([LLM Calls], 0)"
+    oracle_queries:
+      - oracle/queries/usage-total-calls.sql
+    oracle_column: pop_llm_calls_current
+
+  - name: KPI Total LLM Calls Prior
+    display_folder: Scorecards
+    format_string: "#,0"
+    dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE([LLM Calls], REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
+    oracle_queries:
+      - oracle/queries/usage-total-calls.sql
+    oracle_column: pop_llm_calls_prior
+
+  - name: KPI Total LLM Calls Change %
+    display_folder: Scorecards
+    format_string: "+0.0%;-0.0%;0.0%"
+    dax: "VAR _cur = [KPI Total LLM Calls] VAR _prev = [KPI Total LLM Calls Prior] RETURN DIVIDE(_cur - _prev, _prev)"
+    oracle_queries:
+      - oracle/queries/usage-total-calls.sql
+    oracle_column: pop_llm_calls_change
+
+  - name: KPI Total Users
+    display_folder: Scorecards
+    format_string: "#,0"
+    dax: "COALESCE([Total Users], 0)"
+    oracle_queries:
+      - oracle/queries/usage-total-users.sql
+    oracle_column: pop_total_users_current
+
+  - name: KPI Total Users Prior
+    display_folder: Scorecards
+    format_string: "#,0"
+    dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE([Total Users], REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
+    oracle_queries:
+      - oracle/queries/usage-total-users.sql
+    oracle_column: pop_total_users_prior
+
+  - name: KPI Total Users Change %
+    display_folder: Scorecards
+    format_string: "+0.0%;-0.0%;0.0%"
+    dax: "VAR _cur = [KPI Total Users] VAR _prev = [KPI Total Users Prior] RETURN DIVIDE(_cur - _prev, _prev)"
+    oracle_queries:
+      - oracle/queries/usage-total-users.sql
+    oracle_column: pop_total_users_change
+
+  - name: KPI Tool Errors
+    display_folder: Scorecards
+    format_string: "#,0"
+    dax: "COALESCE([Tool Errors], 0)"
+    oracle_queries:
+      - oracle/queries/performance-total-errors.sql
+    oracle_column: pop_tool_errors_current
+
+  - name: KPI Tool Errors Prior
+    display_folder: Scorecards
+    format_string: "#,0"
+    dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE([Tool Errors], REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
+    oracle_queries:
+      - oracle/queries/performance-total-errors.sql
+    oracle_column: pop_tool_errors_prior
+
+  - name: KPI Tool Errors Change %
+    display_folder: Scorecards
+    format_string: "+0.0%;-0.0%;0.0%"
+    dax: "VAR _cur = [KPI Tool Errors] VAR _prev = [KPI Tool Errors Prior] RETURN DIVIDE(_cur - _prev, _prev)"
+    oracle_queries:
+      - oracle/queries/performance-total-errors.sql
+    oracle_column: pop_tool_errors_change
+
+  # Chart Top-N measures (11)
+  - name: Token Usage by Agent
+    display_folder: Charts
+    format_string: "#,0"
+    chart_id: usage-token-usage-split-by-agent
+    top_n: 5
+    dimension: "'events_v1'[agent]"
+    base_measure: "[Total Tokens]"
+    dax: "VAR _top = TOPN(5, FILTER(ALLSELECTED('events_v1'[agent]), NOT ISBLANK([Total Tokens])), [Total Tokens], DESC, 'events_v1'[agent], ASC) RETURN CALCULATE([Total Tokens], KEEPFILTERS(_top))"
+    oracle_queries:
+      - oracle/queries/usage-token-usage-split-by-agent.sql
+    oracle_column: total_tokens_consumed
+
+  - name: Top 5 Users by Token Consumption
+    display_folder: Charts
+    format_string: "#,0"
+    chart_id: usage-top-5-users-with-most-tokens-consumption
+    top_n: 5
+    dimension: "'events_v1'[user_id]"
+    base_measure: "[Total Tokens]"
+    dax: "VAR _top = TOPN(5, FILTER(ALLSELECTED('events_v1'[user_id]), NOT ISBLANK([Total Tokens])), [Total Tokens], DESC, 'events_v1'[user_id], ASC) RETURN CALCULATE([Total Tokens], KEEPFILTERS(_top))"
+    oracle_queries:
+      - oracle/queries/usage-top-5-users-with-most-tokens-consumption.sql
+    oracle_column: total_tokens_consumed
+
+  - name: Top 5 Users by Traces
+    display_folder: Charts
+    format_string: "#,0"
+    chart_id: usage-top-5-users-with-most-traces
+    top_n: 5
+    dimension: "'events_v1'[user_id]"
+    base_measure: "[Total Traces]"
+    dax: "VAR _top = TOPN(5, FILTER(ALLSELECTED('events_v1'[user_id]), NOT ISBLANK([Total Traces])), [Total Traces], DESC, 'events_v1'[user_id], ASC) RETURN CALCULATE([Total Traces], KEEPFILTERS(_top))"
+    oracle_queries:
+      - oracle/queries/usage-top-5-users-with-most-traces.sql
+    oracle_column: total_traces
+
+  - name: Traces by Agent
+    display_folder: Charts
+    format_string: "#,0"
+    chart_id: usage-traces-split-by-agent
+    top_n: 5
+    dimension: "'events_v1'[agent]"
+    base_measure: "[Traces for Agents With Tokens]"
+    dax: "VAR _top = TOPN(5, FILTER(ALLSELECTED('events_v1'[agent]), NOT ISBLANK([Traces for Agents With Tokens])), [Traces for Agents With Tokens], DESC, 'events_v1'[agent], ASC) RETURN CALCULATE([Traces for Agents With Tokens], KEEPFILTERS(_top))"
+    oracle_queries:
+      - oracle/queries/usage-traces-split-by-agent.sql
+    oracle_column: total_traces
+
+  - name: Top 5 Agents by Sessions
+    display_folder: Charts
+    format_string: "#,0"
+    chart_id: usage-top-5-agents-split-by-session-count
+    top_n: 5
+    dimension: "'events_v1'[agent]"
+    base_measure: "[Total Sessions]"
+    dax: "VAR _top = TOPN(5, FILTER(ALLSELECTED('events_v1'[agent]), NOT ISBLANK([Total Sessions])), [Total Sessions], DESC, 'events_v1'[agent], ASC) RETURN CALCULATE([Total Sessions], KEEPFILTERS(_top))"
+    oracle_queries:
+      - oracle/queries/usage-top-5-agents-split-by-session-count.sql
+    oracle_column: total_sessions
+
+  - name: Tool Invocations
+    display_folder: Charts
+    format_string: "#,0"
+    chart_id: usage-tool-invocations
+    top_n: 10
+    dimension: "'events_v1'[tool_completed_name]"
+    base_measure: "[Distinct Tool Invocations]"
+    dax: "VAR _top = TOPN(10, FILTER(ALLSELECTED('events_v1'[tool_completed_name]), NOT ISBLANK([Distinct Tool Invocations])), [Distinct Tool Invocations], DESC, 'events_v1'[tool_completed_name], ASC) RETURN CALCULATE([Distinct Tool Invocations], KEEPFILTERS(_top))"
+    oracle_queries:
+      - oracle/queries/usage-tool-invocations.sql
+    oracle_column: total_invocations
+
+  - name: Tool Completions by Agent
+    display_folder: Charts
+    format_string: "#,0"
+    chart_id: usage-events-by-agent
+    top_n: 10
+    dimension: "'events_v1'[agent]"
+    base_measure: "[Tool Completion Events]"
+    dax: "VAR _top = TOPN(10, FILTER(ALLSELECTED('events_v1'[agent]), NOT ISBLANK([Tool Completion Events])), [Tool Completion Events], DESC, 'events_v1'[agent], ASC) RETURN CALCULATE([Tool Completion Events], KEEPFILTERS(_top))"
+    oracle_queries:
+      - oracle/queries/usage-events-by-agent.sql
+    oracle_column: total_events
+
+  - name: Top 5 Users by Sessions
+    display_folder: Charts
+    format_string: "#,0"
+    chart_id: usage-top-5-users-by-session
+    top_n: 5
+    dimension: "'events_v1'[user_id]"
+    base_measure: "[Total Sessions]"
+    dax: "VAR _top = TOPN(5, FILTER(ALLSELECTED('events_v1'[user_id]), NOT ISBLANK([Total Sessions])), [Total Sessions], DESC, 'events_v1'[user_id], ASC) RETURN CALCULATE([Total Sessions], KEEPFILTERS(_top))"
+    oracle_queries:
+      - oracle/queries/usage-top-5-users-by-session.sql
+    oracle_column: total_sessions
+
+  - name: Top 5 Users by Events
+    display_folder: Charts
+    format_string: "#,0"
+    chart_id: usage-top-5-users-by-events
+    top_n: 5
+    dimension: "'events_v1'[user_id]"
+    base_measure: "[Total Events]"
+    dax: "VAR _top = TOPN(5, FILTER(ALLSELECTED('events_v1'[user_id]), NOT ISBLANK([Total Events])), [Total Events], DESC, 'events_v1'[user_id], ASC) RETURN CALCULATE([Total Events], KEEPFILTERS(_top))"
+    oracle_queries:
+      - oracle/queries/usage-top-5-users-by-events.sql
+    oracle_column: total_events
+
+  - name: Top 5 Agents by Tool Errors
+    display_folder: Charts
+    format_string: "#,0"
+    chart_id: performance-top-5-agents-by-errors
+    top_n: 5
+    dimension: "'events_v1'[agent]"
+    base_measure: "[Tool Errors]"
+    dax: "VAR _top = TOPN(5, FILTER(ALLSELECTED('events_v1'[agent]), NOT ISBLANK([Tool Errors])), [Tool Errors], DESC, 'events_v1'[agent], ASC) RETURN CALCULATE([Tool Errors], KEEPFILTERS(_top))"
+    oracle_queries:
+      - oracle/queries/performance-top-5-agents-by-errors.sql
+    oracle_column: total_tool_errors
+
+  - name: Top 5 Tools by Errors
+    display_folder: Charts
+    format_string: "#,0"
+    chart_id: performance-top-5-tools-by-errors
+    top_n: 5
+    dimension: "'events_v1'[tool_error_name]"
+    base_measure: "[Tool Errors]"
+    dax: "VAR _top = TOPN(5, FILTER(ALLSELECTED('events_v1'[tool_error_name]), NOT ISBLANK([Tool Errors])), [Tool Errors], DESC, 'events_v1'[tool_error_name], ASC) RETURN CALCULATE([Tool Errors], KEEPFILTERS(_top))"
+    oracle_queries:
+      - oracle/queries/performance-top-5-tools-by-errors.sql
+    oracle_column: total_tool_errors
