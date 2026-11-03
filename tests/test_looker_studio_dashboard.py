@@ -3232,7 +3232,10 @@ def _bqca_validate_repinned(edit):
   """Validate the BQCA contracts with `edit` applied to manifest and bundle.
 
   The binding's manifest and bundle digests are re-pinned to the edited
-  copies, so only the checks of their content can fail.
+  copies. Those are not the documents the live template was verified
+  against, so the binding records the pending live sync that any contract
+  change needs until the next sync, and only the checks of the documents'
+  content can fail.
   """
   validator = _load_dashboard_module("validate_contracts")
   # A JSON round trip gives the manifest's top-level components list its own
@@ -3247,8 +3250,10 @@ def _bqca_validate_repinned(edit):
   bundle = json.loads(
       (DASHBOARD / "spec/bqca_dashboard_template.json").read_text()
   )
-  binding = yaml.safe_load(
-      (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+  binding = _with_pending_live_sync(
+      yaml.safe_load(
+          (DASHBOARD / "bindings/bqca_report_template.yaml").read_text()
+      )
   )
   edit(manifest)
   edit(bundle)
@@ -3283,8 +3288,12 @@ def _bqca_spec_block_edit(component, key, block):
 
 # One case per block that a component's embedded spec must not hold: an edit
 # of the manifest and bundle that adds it, and the exact errors it must produce.
+# No edit (None) validates the repository's contracts as they are, whose
+# binding records the live sync of exactly those documents; the no-op edit
+# re-pins them as every other case does.
 BQCA_EXTRA_SPEC_BLOCK_CASES = [
-    pytest.param(lambda document: None, [], id="unchanged"),
+    pytest.param(None, [], id="unchanged"),
+    pytest.param(lambda document: None, [], id="repinned_without_an_edit"),
     pytest.param(
         # kpi_input_tokens' own column ID, in a block of another kind.
         _bqca_spec_block_edit(
@@ -3380,6 +3389,7 @@ BQCA_EXTRA_SPEC_BLOCK_CASES = [
 
 
 @pytest.mark.parametrize("edit, expected", BQCA_EXTRA_SPEC_BLOCK_CASES)
+@pytest.mark.usefixtures("openssh")
 def test_validate_contracts_rejects_spec_blocks_the_chart_type_does_not_read(
     edit, expected
 ):
@@ -3388,10 +3398,16 @@ def test_validate_contracts_rejects_spec_blocks_the_chart_type_does_not_read(
   The column-ID checks read `spec.<kind>` alone, the block of the component's
   `chart_type`, so any other block of its spec must be rejected rather than
   left unchecked. Each case adds one, with a repeated, stale, or generic
-  column ID, to the manifest and the bundle and re-pins both digests, so only
-  that check can catch it.
+  column ID, to the manifest and the bundle, re-pins both digests and records
+  the pending live sync that the edit needs, so only that check can catch it.
+  The `unchanged` case validates the repository's own contracts, the live sync
+  and its capture receipt included.
   """
-  assert _bqca_validate_repinned(edit) == expected
+  if edit is None:
+    errors = _load_dashboard_module("validate_contracts").validate_bqca()
+  else:
+    errors = _bqca_validate_repinned(edit)
+  assert errors == expected
 
 
 def test_bqca_derive_report_column_ids_lengthens_only_colliding_ids():
