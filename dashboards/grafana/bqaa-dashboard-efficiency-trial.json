@@ -476,7 +476,7 @@
     },
     {
       "type": "stat",
-      "title": "Error rate",
+      "title": "Event error rate",
       "id": 4,
       "gridPos": {
         "h": 4,
@@ -484,7 +484,7 @@
         "x": 12,
         "y": 1
       },
-      "description": "Share of events counted as errors: event_type ending in _ERROR, or a non-NULL error_message, or UPPER(status) = 'ERROR'. See dashboards/grafana/queries/README.md. Ignores the Event Type filter: the four Overview stats share one query that stays unfiltered so the error rate keeps its global context.",
+      "description": "Error events divided by all event rows, not failed calls or failed sessions. An event counts as an error when its event_type ends in _ERROR, it has a non-NULL error_message, or UPPER(status) = 'ERROR'. The 1% (yellow) and 5% (red) thresholds are examples to tune for your traffic. See dashboards/grafana/queries/README.md. Ignores the Event Type filter: the four Overview stats share one query that stays unfiltered so the error rate keeps its global context.",
       "datasource": {
         "type": "datasource",
         "uid": "-- Dashboard --"
@@ -942,7 +942,7 @@
         "x": 12,
         "y": 22
       },
-      "description": "Latency percentiles from ${view_prefix}llm_responses. Gaps mean missing latency telemetry.",
+      "description": "Approximate p50/p95 total latency and p50 time to first token from ${view_prefix}llm_responses. Rows with missing latency are ignored, so gaps mean no latency samples in that bucket.",
       "datasource": {
         "type": "grafana-bigquery-datasource",
         "uid": "${datasource}"
@@ -974,9 +974,68 @@
             "showPoints": "never",
             "spanNulls": false,
             "gradientMode": "opacity"
-          }
+          },
+          "decimals": 0
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p50_total_ms"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "LLM p50"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p95_total_ms"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "LLM p95"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p50_ttft_ms"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "TTFT p50"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -1112,7 +1171,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
-          "decimals": 2,
+          "decimals": 4,
           "noValue": "No matching data",
           "color": {
             "mode": "thresholds"
@@ -1513,7 +1572,7 @@
         "x": 0,
         "y": 52
       },
-      "description": "Session rollups over the raw ${table} table, capped at the 250 most recently active sessions in the time range — narrow the time range to reach older ones. All four filters are honored, but Agent, User and Event Type only select WHICH sessions are listed: each listed session's counts then cover that whole session, including the events those filters excluded, so they will not match the Overview stats. Filter to one agent and session_agents_in_window can still read 2, and session_errors_in_window can still include another agent's errors. session_errors_in_window counts events whose event_type ends in _ERROR, or that carry a non-NULL error_message, or whose UPPER(status) = 'ERROR'. session_users_in_window lists every distinct user_id in the session, so it can name more than one. session_input_tokens_in_window / session_output_tokens_in_window sum $.usage.prompt / $.usage.completion over the session's LLM_RESPONSE events — the same values the LLM & FinOps panels report as prompt/completion tokens. Click a session_id to pin it into the Session variable (the time range and the other three filters are carried over) and drive the Trace detail panel below; the Session dropdown above still accepts a typed or pasted value.",
+      "description": "Session rollups over the raw ${table} table, capped at the 250 most recently active sessions in the time range — narrow the time range to reach older ones. All four filters are honored, but Agent, User and Event Type only select WHICH sessions are listed: each listed session's counts then cover that whole session, including the events those filters excluded, so they will not match the Overview stats. Filter to one agent and session_agents_in_window can still read 2, and session_errors_in_window can still include another agent's errors. session_errors_in_window counts events whose event_type ends in _ERROR, or that carry a non-NULL error_message, or whose UPPER(status) = 'ERROR'. session_users_in_window lists every distinct user_id in the session, so it can name more than one. session_input_tokens_in_window / session_output_tokens_in_window sum $.usage.prompt / $.usage.completion, or attributes.usage_metadata when a row has no content usage, over the session's LLM_RESPONSE events — the same values the LLM & FinOps panels report as prompt/completion tokens. Click a session_id to open its Trace detail: the link keeps the time range and data source, pins Session to that session and clears the Agent, User ID and Event Type filters, so the timeline covers the whole session the row rolls up; the Session dropdown above still accepts a typed or pasted value.",
       "datasource": {
         "type": "grafana-bigquery-datasource",
         "uid": "${datasource}"
@@ -1565,8 +1624,8 @@
                 "id": "links",
                 "value": [
                   {
-                    "title": "Pin this session",
-                    "url": "${__url.path}?${__url_time_range}&${datasource:queryparam}&${agent:queryparam}&${user_id:queryparam}&${event_type:queryparam}&var-session_id=${__data.fields.session_id:percentencode}",
+                    "title": "Open session trace (all agents and event types)",
+                    "url": "${__url.path}?${__url_time_range}&${datasource:queryparam}&var-agent=%24__all&var-user_id=%24__all&var-event_type=%24__all&var-session_id=${__data.fields.session_id:percentencode}&viewPanel=19",
                     "targetBlank": false
                   }
                 ]
@@ -1603,7 +1662,7 @@
         "x": 0,
         "y": 60
       },
-      "description": "Event timeline within the active time window for the selected session. Capped at the 500 most recent events, so with Session on All you see the newest activity rather than the oldest; click the timestamp header to re-sort a pinned session into chronological order. model is COALESCE($.model, $.model_version) since requests and responses store it under different attribute keys.",
+      "description": "Event timeline within the active time window for the selected session. Capped at the 500 most recent events, so with Session on All you see the newest activity rather than the oldest; click the timestamp header to re-sort a pinned session into chronological order. trace_id, and otel_trace_id when the producer writes attributes.otel, identify each event's trace. model is COALESCE($.model, $.model_version) since requests and responses store it under different attribute keys.",
       "datasource": {
         "type": "grafana-bigquery-datasource",
         "uid": "${datasource}"
@@ -1617,7 +1676,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Trace detail for the selected session (Sessions & Traces row).\n-- Queries the raw table so every event type appears in one timeline.\n-- - Filter variables are interpolated with the json formatter below: each value\n--   becomes a double-quoted JSON string, which is also a valid BigQuery string\n--   literal, so quotes and backslashes in a value stay data.\n-- - session_id is selected explicitly: when the session filter is left on All,\n--   or several sessions are picked, the timeline interleaves events from\n--   different sessions and the column is the only way to tell them apart.\n-- - COALESCE(model, model_version): `model` exists on LLM_REQUEST attributes,\n--   `model_version` on LLM_RESPONSE attributes — one column covers both.\n-- - ORDER BY ... DESC decides *which* 500 rows survive the LIMIT, and that is\n--   the part a user cannot recover from. With the session filter on All the\n--   ascending order returned the oldest 500 events in the range, so a busy\n--   window showed the first few minutes and nothing since. Reading one pinned\n--   session as a chronological timeline is still available: the panel is a\n--   Grafana table, so clicking the `timestamp` header re-sorts the returned\n--   rows client-side.\nSELECT\n  timestamp,\n  session_id,\n  event_type,\n  agent,\n  invocation_id,\n  span_id,\n  parent_span_id,\n  status,\n  COALESCE(\n    JSON_VALUE(attributes, '$.model'),\n    JSON_VALUE(attributes, '$.model_version')\n  ) AS model,\n  JSON_VALUE(content, '$.tool') AS tool_name,\n  SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms,\n  error_message\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>${agent:json}) OR agent IN UNNEST(ARRAY<STRING>${agent:json}))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>${user_id:json}) OR user_id IN UNNEST(ARRAY<STRING>${user_id:json}))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>${event_type:json}) OR event_type IN UNNEST(ARRAY<STRING>${event_type:json}))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>${session_id:json}) OR session_id IN UNNEST(ARRAY<STRING>${session_id:json}))\nORDER BY timestamp DESC\nLIMIT 500\n",
+          "rawSql": "-- Panel: Trace detail for the selected session (Sessions & Traces row).\n-- Queries the raw table so every event type appears in one timeline.\n-- - Filter variables are interpolated with the json formatter below: each value\n--   becomes a double-quoted JSON string, which is also a valid BigQuery string\n--   literal, so quotes and backslashes in a value stay data.\n-- - session_id is selected explicitly: when the session filter is left on All,\n--   or several sessions are picked, the timeline interleaves events from\n--   different sessions and the column is the only way to tell them apart.\n-- - trace_id, and otel_trace_id when the producer writes attributes.otel,\n--   lead from a session to a specific trace.\n-- - COALESCE(model, model_version): `model` exists on LLM_REQUEST attributes,\n--   `model_version` on LLM_RESPONSE attributes — one column covers both.\n-- - ORDER BY ... DESC decides *which* 500 rows survive the LIMIT, and that is\n--   the part a user cannot recover from. With the session filter on All the\n--   ascending order returned the oldest 500 events in the range, so a busy\n--   window showed the first few minutes and nothing since. Reading one pinned\n--   session as a chronological timeline is still available: the panel is a\n--   Grafana table, so clicking the `timestamp` header re-sorts the returned\n--   rows client-side.\nSELECT\n  timestamp,\n  session_id,\n  event_type,\n  agent,\n  invocation_id,\n  trace_id,\n  span_id,\n  parent_span_id,\n  JSON_VALUE(attributes, '$.otel.trace_id') AS otel_trace_id,\n  status,\n  COALESCE(\n    JSON_VALUE(attributes, '$.model'),\n    JSON_VALUE(attributes, '$.model_version')\n  ) AS model,\n  JSON_VALUE(content, '$.tool') AS tool_name,\n  SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms,\n  error_message\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>${agent:json}) OR agent IN UNNEST(ARRAY<STRING>${agent:json}))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>${user_id:json}) OR user_id IN UNNEST(ARRAY<STRING>${user_id:json}))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>${event_type:json}) OR event_type IN UNNEST(ARRAY<STRING>${event_type:json}))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>${session_id:json}) OR session_id IN UNNEST(ARRAY<STRING>${session_id:json}))\nORDER BY timestamp DESC\nLIMIT 500\n",
           "format": 1,
           "location": ""
         }

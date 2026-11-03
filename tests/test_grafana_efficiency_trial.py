@@ -31,6 +31,7 @@ import json
 import pathlib
 import re
 import sqlite3
+from urllib import parse
 
 import pytest
 
@@ -441,3 +442,75 @@ def test_description_points_at_the_embedded_sql():
   assert "Efficiency trial" in description
   assert "not synced" in description
   assert "source of truth" not in description
+
+
+# --------------------------------------------------------------------------- #
+# Review presentation fixes                                                   #
+# --------------------------------------------------------------------------- #
+
+_SESSION_IDS = [
+    "plain-session",
+    "has space",
+    "a&var-agent=evil",
+    "O'Brien's run",
+    "path/with/slashes",
+    "100% + #hash",
+    "sessión-✓",
+]
+
+
+def _session_link():
+  (override,) = PANELS[18]["fieldConfig"]["overrides"]
+  assert override["matcher"] == {"id": "byName", "options": "session_id"}
+  (link,) = override["properties"][0]["value"]
+  return link
+
+
+def _render_session_link(session_id):
+  """Interpolates the link like Grafana, ``percentencode`` included."""
+  url = _session_link()["url"]
+  replacements = {
+      "${__url.path}": "/d/bqaa-dashboard-efficiency-trial/trial",
+      "${__url_time_range}": "from=now-24h&to=now",
+      "${datasource:queryparam}": "var-datasource=bqaa-bigquery",
+      # Grafana's percentencode is encodeURIComponent plus !'()*.
+      "${__data.fields.session_id:percentencode}": parse.quote(
+          session_id, safe="-_.~"
+      ),
+  }
+  for placeholder, value in replacements.items():
+    assert url.count(placeholder) == 1, placeholder
+    url = url.replace(placeholder, value)
+  assert "${" not in url
+  return url
+
+
+def test_session_link_opens_the_whole_trace():
+  link = _session_link()
+  assert link["title"] == "Open session trace (all agents and event types)"
+  assert link["targetBlank"] is False
+
+
+@pytest.mark.parametrize("session_id", _SESSION_IDS)
+def test_session_link_round_trips_the_session_id(session_id):
+  url = parse.urlsplit(_render_session_link(session_id))
+  query = parse.parse_qs(url.query, keep_blank_values=True, strict_parsing=True)
+  assert url.path == "/d/bqaa-dashboard-efficiency-trial/trial"
+  assert query == {
+      "from": ["now-24h"],
+      "to": ["now"],
+      "var-datasource": ["bqaa-bigquery"],
+      "var-agent": ["$__all"],
+      "var-user_id": ["$__all"],
+      "var-event_type": ["$__all"],
+      "var-session_id": [session_id],
+      "viewPanel": ["19"],
+  }
+
+
+def test_latency_legend_names_real_query_columns():
+  overrides = PANELS[10]["fieldConfig"]["overrides"]
+  named = {override["matcher"]["options"] for override in overrides}
+  aliases = set(re.findall(r"\bAS (\w+)", _strip_comments(_sql(10))))
+  assert named == {"p50_total_ms", "p95_total_ms", "p50_ttft_ms"}
+  assert named <= aliases
