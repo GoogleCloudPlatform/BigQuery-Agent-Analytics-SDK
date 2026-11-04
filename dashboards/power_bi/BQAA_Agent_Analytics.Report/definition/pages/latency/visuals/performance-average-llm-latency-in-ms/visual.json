@@ -1,0 +1,70 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "performance-average-llm-latency-in-ms",
+  "position": {
+    "x": 16,
+    "y": 728,
+    "z": 4010,
+    "height": 232,
+    "width": 408,
+    "tabOrder": 4010
+  },
+  "visual": {
+    "visualType": "cardVisual",
+    "query": {
+      "queryState": {
+        "Data": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "Avg LLM Latency (ms)"
+                }
+              },
+              "queryRef": "events_v1.Avg LLM Latency (ms)",
+              "nativeQueryRef": "Avg LLM Latency (ms)",
+              "displayName": "Average LLM Latency (ms)"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Average LLM Latency (ms)'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "performance-average-llm-latency-in-ms"
+    },
+    {
+      "name": "bqaa.oracle_query",
+      "value": "oracle/queries/performance-average-llm-latency-in-ms.sql"
+    }
+  ]
+}

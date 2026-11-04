@@ -1,0 +1,85 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "usage-total-calls",
+  "position": {
+    "x": 16,
+    "y": 128,
+    "z": 4000,
+    "height": 232,
+    "width": 408,
+    "tabOrder": 4000
+  },
+  "visual": {
+    "visualType": "cardVisual",
+    "query": {
+      "queryState": {
+        "Data": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "KPI Total LLM Calls"
+                }
+              },
+              "queryRef": "events_v1.KPI Total LLM Calls",
+              "nativeQueryRef": "KPI Total LLM Calls",
+              "displayName": "Total LLM Calls"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "KPI Total LLM Calls Change %"
+                }
+              },
+              "queryRef": "events_v1.KPI Total LLM Calls Change %",
+              "nativeQueryRef": "KPI Total LLM Calls Change %",
+              "displayName": "vs previous period"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Total LLM Calls'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "usage-total-calls"
+    },
+    {
+      "name": "bqaa.oracle_query",
+      "value": "oracle/queries/usage-total-calls.sql"
+    }
+  ]
+}

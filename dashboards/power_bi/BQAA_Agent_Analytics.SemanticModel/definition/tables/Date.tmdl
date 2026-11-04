@@ -1,0 +1,32 @@
+/// Contiguous UTC calendar covering the 2L loaded window.
+table Date
+	lineageTag: 5caea1e5-0e77-5ebe-ac1b-acb940e26501
+	dataCategory: Time
+
+	/// Column Date — sourceColumn=Date dataType=dateTime
+	column Date
+		dataType: dateTime
+		isKey
+		formatString: yyyy-mm-dd
+		lineageTag: 8a55545f-5fd6-5a0b-85ef-07ab9ae2c1ee
+		summarizeBy: none
+		sourceColumn: Date
+
+	/// Column Window — sourceColumn=Window dataType=string
+	column Window
+		dataType: string
+		lineageTag: 83cac814-45c8-53ca-a761-f5d8cf5d7820
+		summarizeBy: none
+		sourceColumn: Window
+
+	partition Date = m
+		mode: import
+		source =
+				let
+					Config = BQAA_Config,
+					Days = Duration.Days(Config[Anchor] - Config[LoadStart]) + 1,
+					Dates = List.Dates(Config[LoadStart], Days, #duration(1, 0, 0, 0)),
+					T = Table.FromList(Dates, Splitter.SplitByNothing(), type table [Date = date]),
+					W = Table.AddColumn(T, "Window", each if [Date] >= Config[CurrentStart] then "Current" else "Prior", type text)
+				in
+					W

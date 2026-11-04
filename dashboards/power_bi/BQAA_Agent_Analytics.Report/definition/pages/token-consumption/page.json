@@ -1,0 +1,26 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/page/2.1.0/schema.json",
+  "name": "token-consumption",
+  "displayName": "Token Consumption",
+  "displayOption": "FitToWidth",
+  "height": 720,
+  "width": 1280,
+  "annotations": [
+    {
+      "name": "bqaa.looker_page_id",
+      "value": "p_70hoa89q5d"
+    }
+  ],
+  "visualInteractions": [
+    {
+      "source": "slicer-user-id",
+      "target": "usage-top-5-users-with-most-tokens-consumption",
+      "type": "NoFilter"
+    },
+    {
+      "source": "slicer-user-id",
+      "target": "usage-token-usage-split-by-agent",
+      "type": "NoFilter"
+    }
+  ]
+}

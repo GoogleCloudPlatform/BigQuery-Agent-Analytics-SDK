@@ -32,5 +32,6 @@ prev AS (
 )
 SELECT
   cur.value AS pop_total_users_current,
+  prev.value AS pop_total_users_prior,
   SAFE_DIVIDE(cur.value - prev.value, prev.value) AS pop_total_users_change
 FROM cur CROSS JOIN prev

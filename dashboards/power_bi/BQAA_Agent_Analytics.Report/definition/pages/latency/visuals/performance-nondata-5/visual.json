@@ -1,0 +1,51 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "performance-nondata-5",
+  "position": {
+    "x": 16,
+    "y": 968,
+    "z": 4012,
+    "height": 72,
+    "width": 1240,
+    "tabOrder": 4012
+  },
+  "visual": {
+    "visualType": "textbox",
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "LLM Latency (in ms)",
+                    "textStyle": {
+                      "fontSize": "18pt",
+                      "fontWeight": "bold"
+                    }
+                  }
+                ],
+                "horizontalAlignment": "Center"
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "The P50, P75, P90, and P99 latency distributions for LLM calls. Crucial for understanding the true user experience delay."
+                  }
+                ],
+                "horizontalAlignment": "Center"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "performance-nondata-5"
+    }
+  ]
+}

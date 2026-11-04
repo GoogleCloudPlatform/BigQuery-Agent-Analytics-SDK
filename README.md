@@ -64,11 +64,11 @@ regressions — all through BigQuery SQL or Python.
 
 Two kinds of components share one `agent_events` table:
 
-- **Producers write it.** The ADK
-  [`BigQueryAgentAnalyticsPlugin`](https://adk.dev/observability/bigquery-agent-analytics/)
-  and the LangChain / LangGraph
-  [`BigQueryCallbackHandler`](https://docs.langchain.com/oss/python/integrations/callbacks/google_bigquery)
-  emit the same schema and can write to the same table side by side.
+- **Producers write it.** Multiple producer frameworks emit the same canonical
+  `agent_events` schema and write to the same table side by side:
+  - Google ADK: [`BigQueryAgentAnalyticsPlugin`](https://adk.dev/observability/bigquery-agent-analytics/)
+  - LangChain / LangGraph: [`BigQueryCallbackHandler`](https://docs.langchain.com/oss/python/integrations/callbacks/google_bigquery)
+  - Claude Code & coding agents: [`GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins) (`bigquery-agent-analytics-mod` and `bigquery-agent-analytics-tracing`)
 - **This SDK consumes it.** Everything here is read-only over that table:
   trace reconstruction, evaluation, insights, the context graph.
 
