@@ -1967,7 +1967,8 @@ def test_a_listed_signer_who_edits_a_field_of_the_preview_is_the_trust_boundary(
         "revision",
         "dump",
         "other-sync",
-        "other-contracts",
+        "other-contracts-manifest_sha256",
+        "other-contracts-template_bundle_sha256",
         "before-revision",
         "before-dump",
         "same-revision-as-before",
@@ -1982,9 +1983,9 @@ def test_finalize_refuses_a_receipt_for_another_report_revision_dump_or_sync(
   Each receipt is signed with the trusted key, so only the mismatch refuses
   it: one for another report; one that the copy's tool captured for another
   revision; one it captured for another dump; one for another pending sync
-  or other pinned contracts; one that names another revision or export as
-  the capture before the write-back; and one of the same revision as that
-  capture.
+  or other pinned contracts, where either pinned digest alone differs; one
+  that names another revision or export as the capture before the
+  write-back; and one of the same revision as that capture.
   """
   digest = hashlib.sha256(dump.read_bytes()).hexdigest()
   live = _live(tree)
@@ -2021,11 +2022,14 @@ def test_finalize_refuses_a_receipt_for_another_report_revision_dump_or_sync(
         "the receipt is for the live sync pending since 2026-10-30, not the"
         f" one pending since {_since_date(tree)}"
     )
-  elif mismatch == "other-contracts":
-    _receipt_for(tree, dump, trusted_key, before, manifest_sha256="a" * 64)
+  elif mismatch.startswith("other-contracts-"):
+    # One case per pinned digest: a receipt that differs in either one alone
+    # is refused.
+    digest_key = mismatch.removeprefix("other-contracts-")
+    _receipt_for(tree, dump, trusted_key, before, **{digest_key: "a" * 64})
     error = (
-        f"the receipt is for manifest_sha256 {'a' * 64}, not the pinned"
-        f" {live['manifest_sha256']}"
+        f"the receipt is for {digest_key} {'a' * 64}, not the pinned"
+        f" {live[digest_key]}"
     )
   elif mismatch == "before-revision":
     _receipt_for(tree, dump, trusted_key, before, before_revision="18300")
@@ -3778,7 +3782,8 @@ def _signer_lines(tree, signer):
         "signature-removed",
         "signer-removed",
         "receipt-before-the-write-back",
-        "receipt-for-other-contracts",
+        "receipt-for-other-contracts-manifest_sha256",
+        "receipt-for-other-contracts-template_bundle_sha256",
         "receipt-for-another-generation",
         "receipt-of-a-key-for-any-signer",
         "receipt-of-a-second-key-for-the-signer",
@@ -3873,13 +3878,16 @@ def test_validate_contracts_checks_the_committed_receipt_of_a_finalized_binding(
           f"{prefix}: {COMMITTED} is the receipt of a capture taken before the"
           " write-back, not after it"
       )
-    elif edit == "receipt-for-other-contracts":
+    elif edit.startswith("receipt-for-other-contracts-"):
+      # One case per pinned digest: a receipt that differs in either one
+      # alone fails.
+      digest_key = edit.removeprefix("receipt-for-other-contracts-")
       data = _receipt_bytes(
-          tree, before, dump_sha256="d" * 64, manifest_sha256="e" * 64
+          tree, before, dump_sha256="d" * 64, **{digest_key: "e" * 64}
       )
       expected = (
-          f"{prefix}: {COMMITTED} is for manifest_sha256 {'e' * 64}, not the"
-          f" pinned {live['manifest_sha256']}"
+          f"{prefix}: {COMMITTED} is for {digest_key} {'e' * 64}, not the"
+          f" pinned {live[digest_key]}"
       )
     elif edit == "receipt-for-another-generation":
       generation = live["sync_generation"] + 1
