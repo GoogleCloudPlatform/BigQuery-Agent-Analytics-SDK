@@ -36,7 +36,7 @@ You need four things:
 
 ### Option A — 1-Click Web Configurator & `.zip` Template Download (Fastest, No Clone Required)
 
-1. Open the [**Power BI Web Configurator**](https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/power-bi/) (or for local use, serve over HTTP via `python3 -m http.server 8799 --directory dashboards/power_bi` and open `http://localhost:8799/docs/index.html`, because browsers block ES module imports such as `./configurator.mjs` over `file://`) — you can also explore all 8 dashboard pages immediately in the interactive **8-Page Dashboard Tour** on that page.
+1. Open the [**Power BI Web Configurator**](https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/power-bi/) (the hosted page goes live after merge to `main`, because `.github/workflows/looker-studio-pages.yml` publishes from `main` only; before then, or for local use, serve over HTTP via `python3 -m http.server 8799 --directory dashboards/power_bi` and open `http://localhost:8799/docs/index.html`, because browsers block ES module imports such as `./configurator.mjs` over `file://`) — you can also explore all 8 dashboard pages immediately in the interactive **8-Page Dashboard Tour** on that page.
 2. Paste your `project.dataset.table` (or click **Use public demo fixture** to try `test-project-0728-467323.bqaa_fixture_adk_1_27_0.agent_events`).
 3. Click **Download pre-configured PBIP (.zip)** to download `BQAA_Agent_Analytics_<project>_<dataset>_<table>.zip` with your BigQuery parameters already baked into `expressions.tmdl`.
 4. Extract the `.zip` and open `BQAA_Agent_Analytics.pbip` in Power BI Desktop (Developer Mode enabled), or deploy to a Power BI / Fabric workspace.

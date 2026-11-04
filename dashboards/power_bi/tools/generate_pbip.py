@@ -26,6 +26,7 @@ import re
 import sys
 from types import ModuleType
 from typing import Sequence
+import unicodedata
 import zipfile
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -250,7 +251,11 @@ def rewrite_expressions_parameters(
       "BQAA_LookbackDays": str(lookback_days),
       "BQAA_UseStorageApi": "true" if use_storage_api else "false",
   }
-  updated = expr_text
+  # A file-start UTF-8 byte-order mark is an encoding signature, not text.
+  # Drop exactly one, and use the result for both the count and the rewrite:
+  # otherwise the mark hides a first-line declaration from the count, and a
+  # clean file that starts with one would miss the anchored rewrite.
+  updated = expr_text.removeprefix("\ufeff")
   # Pre-pass: count every declaration header independently of the right-hand
   # side and metadata, so a metadata-free duplicate (e.g.
   # `expression BQAA_ProjectId = "stale"`) is caught before the annotated
@@ -260,12 +265,21 @@ def rewrite_expressions_parameters(
       for ln in updated.splitlines()
       if not ln.lstrip().startswith("///") and not ln.lstrip().startswith("//")
   )
+  # Semantic-model object names are case-insensitive, so a declaration whose
+  # name differs only in case, width or another compatibility form
+  # (`bqaa_projectid`, `'BQAA_PROJECTID'`, fullwidth letters) is a duplicate
+  # of the canonical one.  NFKC plus lower-casing folds those forms and is
+  # applied identically by the browser packager (configurator.mjs); a regex
+  # IGNORECASE flag is not, because Python folds some non-ASCII letters that
+  # the browser's `i` flag does not.
+  folded = unicodedata.normalize("NFKC", non_comment_text).lower()
   for param_name in replacements:
+    folded_name = re.escape(param_name.lower())
     decl_re = re.compile(
-        rf"^[ \t]*expression[ \t]+(?:'{re.escape(param_name)}'|{re.escape(param_name)})[ \t]*=",
+        rf"^[ \t]*expression[ \t]+(?:'{folded_name}'|{folded_name})[ \t]*=",
         re.MULTILINE,
     )
-    found = len(decl_re.findall(non_comment_text))
+    found = len(decl_re.findall(folded))
     if found != 1:
       raise ValueError(
           f"Expected exactly 1 declaration for {param_name} in"

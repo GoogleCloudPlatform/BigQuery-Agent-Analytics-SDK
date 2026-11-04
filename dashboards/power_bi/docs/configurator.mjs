@@ -327,21 +327,36 @@ export function rewriteExpressionsTmdl(exprText, config) {
     ["BQAA_UseStorageApi", valid.useStorageApi ? "true" : "false"],
   ];
 
-  let updated = String(exprText);
+  // A file-start UTF-8 byte-order mark is an encoding signature, not text.
+  // Drop exactly one, and use the result for both the count and the rewrite:
+  // otherwise the mark hides a first-line declaration from the count, and a
+  // clean file that starts with one would miss the anchored rewrite.
+  let updated = String(exprText).replace(/^\uFEFF/, "");
   // Pre-pass: count every declaration header independently of the right-hand
   // side and metadata, so a metadata-free duplicate (e.g.
   // `expression BQAA_ProjectId = "stale"`) is caught before the annotated
-  // rewrite runs.  TMDL comment lines are skipped.
+  // rewrite runs.  TMDL comment lines are skipped.  Lines are split on the
+  // same separators as Python's str.splitlines(), so a declaration after a
+  // lone CR (which buildPkZip turns into a line break) is not mistaken for
+  // the tail of a preceding comment line.
   const nonCommentText = updated
-    .split(/\r?\n/)
+    .split(/\r\n|[\n\v\f\r\x1c-\x1e\x85\u2028\u2029]/)
     .filter((ln) => !ln.trimStart().startsWith("///") && !ln.trimStart().startsWith("//"))
     .join("\n");
+  // Semantic-model object names are case-insensitive, so a declaration whose
+  // name differs only in case, width or another compatibility form
+  // (`bqaa_projectid`, `'BQAA_PROJECTID'`, fullwidth letters) is a duplicate
+  // of the canonical one.  NFKC plus lower-casing folds those forms exactly
+  // as generate_pbip.py does; the regex `i` flag would not match Python's
+  // IGNORECASE, which also folds some non-ASCII letters.
+  const folded = nonCommentText.normalize("NFKC").toLowerCase();
   for (const [paramName] of replacements) {
+    const foldedName = paramName.toLowerCase();
     const declRe = new RegExp(
-      `^[ \\t]*expression[ \\t]+(?:'${paramName}'|${paramName})[ \\t]*=`,
+      `^[ \\t]*expression[ \\t]+(?:'${foldedName}'|${foldedName})[ \\t]*=`,
       "gm",
     );
-    const declCount = Array.from(nonCommentText.matchAll(declRe)).length;
+    const declCount = Array.from(folded.matchAll(declRe)).length;
     if (declCount !== 1) {
       throw new Error(
         `Expected exactly 1 declaration for ${paramName} in expressions.tmdl, found ${declCount}`,

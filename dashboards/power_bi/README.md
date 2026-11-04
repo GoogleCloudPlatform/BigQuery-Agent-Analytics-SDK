@@ -182,7 +182,7 @@ range.
 
 ### Option 0 — 1-click Web Configurator or CLI `.zip` packager
 
-Open the browser-based [**Power BI Web Configurator**](https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/power-bi/) on GitHub Pages (or for local use, serve over HTTP via `python3 -m http.server 8799 --directory dashboards/power_bi` and open `http://localhost:8799/docs/index.html`, because browsers block ES module imports such as `./configurator.mjs` over `file://`) to enter your `project.dataset.table` ID, preview all 8 dashboard pages interactively, and download a pre-configured `BQAA_Agent_Analytics_<project>_<dataset>_<table>.zip` archive with zero server-side processing. **Copy setup link** stores your settings in the URL fragment (the part after `#`), which browsers never send in HTTP requests to the host, so share copied links deliberately.
+Open the browser-based [**Power BI Web Configurator**](https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/power-bi/) on GitHub Pages (that hosted page goes live after merge to `main`, because `.github/workflows/looker-studio-pages.yml` publishes from `main` only; before then, or for local use, serve over HTTP via `python3 -m http.server 8799 --directory dashboards/power_bi` and open `http://localhost:8799/docs/index.html`, because browsers block ES module imports such as `./configurator.mjs` over `file://`) to enter your `project.dataset.table` ID, preview all 8 dashboard pages interactively, and download a pre-configured `BQAA_Agent_Analytics_<project>_<dataset>_<table>.zip` archive with zero server-side processing. **Copy setup link** stores your settings in the URL fragment (the part after `#`), which browsers never send in HTTP requests to the host, so share copied links deliberately.
 
 Or generate the same pre-configured `.zip` archive from the CLI:
 
@@ -321,6 +321,14 @@ bars (D14). `Tool Calls Over Time` has no row cap in Power BI, so its
 oracle also runs without `LIMIT` and every tool/day group is compared
 (D13).
 
+Ties: every Top-N measure orders by its value and then by its dimension
+ascending, so a chart draws at most N bars. When members tie at the N-th
+value, Power BI keeps the first of them in VertiPaq's case-insensitive,
+culture-aware order (D3), which can differ from BigQuery's byte order. The
+live check therefore accepts a different member at the tied cutoff when the
+value sequence is identical, and marks the chart `tie_adjusted` in the
+receipt.
+
 ## Intentional differences from Looker Studio
 
 | # | Area | Looker Studio | Power BI port | Why |
@@ -338,7 +346,7 @@ oracle also runs without `LIMIT` and every tool/day group is compared
 | D11 | Cost shape | Per-view queries | Per refresh: 2 metadata + one pruned scan | One Import scan |
 | D12 | Trace Inspector | Table, 7 fields | Same 7 fields, newest first | Parity |
 | D13 | Tool Calls Over Time rows | `limit: 5000`: the oracle keeps the first 5,000 tool/day rows (tool A→Z, newest day first) | No row cap: every tool/day group is queried, and the live check runs the oracle without `LIMIT` | A cap would drop the oldest days of later tools |
-| D14 | Top 5 Agents by LLM Calls | Bar tile titled Top 5 over up to 500 agents (`limit: 500`) | Top five agents (`TOPN(5)`, ties at fifth place kept); source and oracle keep `LIMIT 500` | Matches the title; the source contract is unchanged |
+| D14 | Top 5 Agents by LLM Calls | Bar tile titled Top 5 over up to 500 agents (`limit: 500`) | Top five agents (`TOPN(5)`, with agent ascending as the secondary tie-break); source and oracle keep `LIMIT 500` | Matches the title; the source contract is unchanged |
 
 ## Schema credit
 

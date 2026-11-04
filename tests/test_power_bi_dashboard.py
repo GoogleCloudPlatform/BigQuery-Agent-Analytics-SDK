@@ -1384,6 +1384,29 @@ class TestSourceContract:
         " 500 agents (`limit: 500`) |" in readme
     )
 
+  def test_d14_states_the_tie_break_rather_than_kept_ties(self):
+    """TOPN(5) breaks a fifth-place tie on the agent; it never keeps both."""
+    measures = yaml.safe_load(
+        (POWER_BI / "spec" / "semantic_model.yaml").read_text(encoding="utf-8")
+    )["measures"]
+    measure = next(m for m in measures if m.get("chart_id") == _LLM_AGENTS_ID)
+    assert measure["top_n"] == 5
+    assert measure["dax"].startswith("VAR _top = TOPN(5, ")
+    assert "[LLM Calls], DESC, 'events_v1'[agent], ASC)" in measure["dax"]
+    readme = " ".join(
+        (POWER_BI / "README.md").read_text(encoding="utf-8").split()
+    )
+    assert "ties at fifth place kept" not in readme
+    assert (
+        "Top five agents (`TOPN(5)`, with agent ascending as the secondary"
+        " tie-break); source and oracle keep `LIMIT 500`" in readme
+    )
+    # The live check tolerates a different member only at a tied cutoff.
+    assert (
+        "accepts a different member at the tied cutoff when the value"
+        " sequence is identical" in readme
+    )
+
   def test_llm_agents_source_matches_the_main_branch(self):
     """The source row cap is main's, not a rewrite that agrees with the port."""
     base = _main_merge_base()
@@ -1924,6 +1947,29 @@ class TestDocumentation:
         "power_bi/README.md" in text
     ), "dashboards/README.md must link to power_bi/README.md"
 
+  def test_pages_links_say_the_hosted_page_goes_live_after_merge(self):
+    """The hosted configurator is published from main only, so it 404s first."""
+    workflow = (
+        ROOT / ".github" / "workflows" / "looker-studio-pages.yml"
+    ).read_text(encoding="utf-8")
+    assert "branches: [main]" in workflow
+    assert "if: github.ref == 'refs/heads/main'" in workflow
+    url = (
+        "https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK"
+        "/power-bi/"
+    )
+    for path in (
+        POWER_BI / "README.md",
+        POWER_BI / "USER_MANUAL.md",
+        ROOT / "dashboards" / "README.md",
+    ):
+      text = " ".join(path.read_text(encoding="utf-8").split())
+      assert text.count(url) == 1, path
+      # The qualifier and the local alternative follow the link itself.
+      after = text.split(url, 1)[1][:400]
+      assert "after merge to `main`" in after, path
+      assert "over HTTP" in after or "over local HTTP" in after, path
+
   def test_tool_series_are_not_described_as_stacked(self):
     """Tool Calls Over Time draws overlapping areas, so no doc says stacked."""
     visual = json.loads(
@@ -2397,12 +2443,16 @@ emit({ base, cases, intact: attempt(() => cfg.buildCustomPbipBundle(bundle, data
 
   # Duplicate declarations a hand edit could leave behind.  None carries the
   # `meta [IsParameterQuery=true, ...]` annotation the rewrite itself matches.
+  # Object names are case-insensitive, so `{lower}` and `{upper}` spell the
+  # same parameter.
   _DUPLICATE_FORMS = {
       "metadata_free": 'expression {name} = "stale"',
       "quoted_name": "expression '{name}' = \"stale\"",
       "multiline": 'expression {name} =\n\t\t"stale"',
       "indented_no_spaces": '  expression {name}="stale"',
       "tab_separated": 'expression\t{name}\t= "stale"',
+      "lower_case_name": 'expression {lower} = "stale"',
+      "quoted_upper_case_name": "expression '{upper}' = \"stale\"",
   }
   # Lines that only look like a declaration.
   _NOT_DECLARATIONS = (
@@ -2432,7 +2482,10 @@ const base = bundle[EXPR_KEY];
 const results = {};
 for (const name of data.names) {
   for (const [form, template] of Object.entries(data.forms)) {
-    const duplicate = template.replaceAll("{name}", name);
+    const duplicate = template
+      .replaceAll("{name}", name)
+      .replaceAll("{lower}", name.toLowerCase())
+      .replaceAll("{upper}", name.toUpperCase());
     for (const [where, text] of [
       ["appended", `${base}\n${duplicate}\n`],
       ["prepended", `${duplicate}\n\n${base}`],
@@ -2463,7 +2516,7 @@ emit({
         },
     )
     base = out["base"]
-    assert len(out["results"]) == len(_BQAA_PARAMETERS) * 5 * 2
+    assert len(out["results"]) == len(_BQAA_PARAMETERS) * 7 * 2
     for key, result in out["results"].items():
       name, form, where = key.split("|")
       message = (
@@ -2474,7 +2527,9 @@ emit({
       assert result["rewrite"] == {"ok": False, "message": message}, key
       assert result["bundle"] == {"ok": False, "message": message}, key
       # ... and so does the Python generator, with the same words.
-      duplicate = self._DUPLICATE_FORMS[form].format(name=name)
+      duplicate = self._DUPLICATE_FORMS[form].format(
+          name=name, lower=name.lower(), upper=name.upper()
+      )
       text = (
           f"{base}\n{duplicate}\n"
           if where == "appended"
@@ -2497,6 +2552,178 @@ emit({
         )
         == 1
     )
+
+  # Every separator Python's str.splitlines() breaks on.  buildPkZip turns a
+  # lone CR into a line break, so a declaration after one is a real line.
+  _LINE_SEPARATORS = (
+      "\r",
+      "\v",
+      "\f",
+      "\x1c",
+      "\x1d",
+      "\x1e",
+      "\x85",
+      "\u2028",
+      "\u2029",
+  )
+
+  @staticmethod
+  def _fullwidth(text):
+    return "".join(
+        chr(ord(char) + 0xFEE0) if "!" <= char <= "~" else char for char in text
+    )
+
+  def _normalization_cases(self, base):
+    """Duplicates and controls that only a normalizing guard reads alike.
+
+    Each case is a (prefix, body, suffix) spec, where `body` names the
+    template the prefix and suffix wrap: the bundled one ("base"), or that
+    template without its `///` doc comments ("bare").  Specs keep the Node
+    command line short; both languages compose the same text from them.
+    """
+    bom = "\ufeff"
+    rejected = {}
+    for name in _BQAA_PARAMETERS:
+      canonical = next(
+          line
+          for line in base.split("\n")
+          if line.startswith(f"expression {name} = ")
+      )
+      # A file-start byte-order mark in front of a first-line duplicate.
+      rejected[f"{name}|bom|metadata_free"] = (
+          f'{bom}expression {name} = "stale"\n',
+          "base",
+          "",
+      )
+      rejected[f"{name}|bom|quoted_upper_case"] = (
+          f"{bom}expression '{name.upper()}' = \"stale\"\n",
+          "base",
+          "",
+      )
+      rejected[f"{name}|bom|annotated"] = (f"{bom}{canonical}\n", "base", "")
+      # A duplicate after a separator that follows a comment.
+      for index, separator in enumerate(self._LINE_SEPARATORS):
+        rejected[f"{name}|after_comment|{index}"] = (
+            "",
+            "base",
+            f'\n// note{separator}expression {name} = "stale"\n',
+        )
+      # Width and other compatibility forms of the name and the spaces.
+      rejected[f"{name}|compat|fullwidth"] = (
+          "",
+          "base",
+          f'\nexpression {self._fullwidth(name)} = "stale"\n',
+      )
+      rejected[f"{name}|compat|quoted_fullwidth_lower"] = (
+          "",
+          "base",
+          f"\nexpression '{self._fullwidth(name.lower())}' = \"stale\"\n",
+      )
+      rejected[f"{name}|compat|unicode_spaces"] = (
+          "",
+          "base",
+          f'\nexpression\u00a0{name}\u3000= "stale"\n',
+      )
+    # Letters that Unicode relates to ASCII ones: KELVIN SIGN and LONG S.
+    for label, name, variant in (
+        ("kelvin_sign", "BQAA_LookbackDays", "BQAA_Loo\u212abackDays"),
+        ("long_s", "BQAA_UseStorageApi", "BQAA_U\u017feStorageApi"),
+        ("long_s", "BQAA_DatasetId", "BQAA_Data\u017fetId"),
+    ):
+      rejected[f"{name}|compat|{label}"] = (
+          "",
+          "base",
+          f'\nexpression {variant} = "stale"\n',
+      )
+    comment = '// expression BQAA_ProjectId = "stale"'
+    similar = '\n// note\rexpression BQAA_ProjectIdBackup = "x"\n'
+    # Accepted spec, and the spec whose rewrite it must equal.
+    accepted = {
+        "bom_only": ((bom, "base", ""), ("", "base", "")),
+        "bom_before_first_declaration": ((bom, "bare", ""), ("", "bare", "")),
+        "bom_before_comment": (
+            (f"{bom}{comment}\n", "base", ""),
+            (f"{comment}\n", "base", ""),
+        ),
+        "similar_name_after_cr": (("", "base", similar), ("", "base", similar)),
+    }
+    return rejected, accepted
+
+  def test_rewrite_normalizes_bom_separators_and_name_forms_like_python(self):
+    """Both packagers read a declaration the same way, so both refuse it."""
+    gen_mod = _load_tool_module("generate_pbip")
+    base = (POWER_BI / _EXPRESSIONS_KEY).read_text(encoding="utf-8")
+    assert base.isascii() and "\r" not in base
+    bodies = {
+        "base": base,
+        "bare": "\n".join(
+            line for line in base.split("\n") if not line.startswith("///")
+        ),
+    }
+    assert bodies["bare"].startswith("expression BQAA_ProjectId = ")
+
+    def compose(spec):
+      prefix, body, suffix = spec
+      return f"{prefix}{bodies[body]}{suffix}"
+
+    rejected, accepted = self._normalization_cases(base)
+    assert len(rejected) == len(_BQAA_PARAMETERS) * (3 + 9 + 3) + 3
+    specs = dict(rejected)
+    specs.update({key: spec for key, (spec, _) in accepted.items()})
+    out = _run_node(
+        r"""
+const base = bundle[EXPR_KEY];
+const bodies = {
+  base,
+  bare: base.split("\n").filter((l) => !l.startsWith("///")).join("\n"),
+};
+const results = {};
+for (const [key, [prefix, body, suffix]] of Object.entries(data.specs)) {
+  const text = prefix + bodies[body] + suffix;
+  results[key] = {
+    rewrite: attempt(() => cfg.rewriteExpressionsTmdl(text, data.config)),
+    bundle: attempt(() =>
+      cfg.buildCustomPbipBundle({ ...bundle, [EXPR_KEY]: text }, data.config)[
+        EXPR_KEY
+      ],
+    ),
+  };
+}
+emit({ bodies, results });
+""",
+        data={"specs": specs, "config": _CUSTOM_CONFIG},
+    )
+    # Both languages composed their texts from the same template.
+    assert out["bodies"] == bodies
+    assert set(out["results"]) == set(specs)
+    for key, spec in rejected.items():
+      name = key.split("|")[0]
+      message = (
+          f"Expected exactly 1 declaration for {name} in expressions.tmdl,"
+          " found 2"
+      )
+      result = out["results"][key]
+      assert result["rewrite"] == {"ok": False, "message": message}, key
+      assert result["bundle"] == {"ok": False, "message": message}, key
+      with pytest.raises(ValueError) as python_error:
+        gen_mod.rewrite_expressions_parameters(
+            compose(spec), **self._PYTHON_KWARGS
+        )
+      assert str(python_error.value) == message, key
+    for key, (spec, clean_spec) in accepted.items():
+      expected = gen_mod.rewrite_expressions_parameters(
+          compose(clean_spec), **self._PYTHON_KWARGS
+      )
+      assert (
+          gen_mod.rewrite_expressions_parameters(
+              compose(spec), **self._PYTHON_KWARGS
+          )
+          == expected
+      ), key
+      result = out["results"][key]
+      assert result["rewrite"] == {"ok": True, "value": expected}, key
+      assert result["bundle"] == {"ok": True, "value": expected}, key
+      assert not expected.startswith("\ufeff"), key
 
   @pytest.mark.parametrize(
       "config,python_kwargs",
@@ -2623,6 +2850,70 @@ emit({
     assert out["good"]["statusKind"] == "ready"
     assert out["good"]["status"].startswith("Downloaded BQAA_Agent_Analytics_")
     # Control: the page is ready to download before the click.
+    assert out["badBefore"]["statusKind"] == "ready"
+    assert out["badBefore"]["downloadDisabled"] is False
+    assert out["bad"]["blobs"] == 0
+    assert out["bad"]["anchors"] == 0
+    assert out["bad"]["statusKind"] == "error"
+    assert out["bad"]["status"] == (
+        "Expected exactly 1 declaration for BQAA_LookbackDays in"
+        " expressions.tmdl, found 2"
+    )
+
+  @pytest.mark.parametrize(
+      "prefix,suffix",
+      [
+          pytest.param(
+              "", "\nexpression bqaa_lookbackdays = 7\n", id="lower_case"
+          ),
+          pytest.param(
+              "",
+              "\nexpression 'BQAA_LOOKBACKDAYS' = 7\n",
+              id="quoted_upper_case",
+          ),
+          pytest.param(
+              "\ufeffexpression BQAA_LookbackDays = 7\n",
+              "",
+              id="bom_first_line",
+          ),
+      ],
+  )
+  def test_download_refuses_case_variant_and_bom_duplicates(
+      self, prefix, suffix
+  ):
+    """The whole download path refuses them; a lone leading BOM is fine."""
+    out = _run_node(
+        r"""
+const template = bundle[EXPR_KEY];
+const good = mountPage(data.href, { ...bundle, [EXPR_KEY]: "\uFEFF" + template });
+await fillForm(good, data.form);
+await good.els["download-pbip"].fire("click");
+
+const bad = mountPage(data.href, {
+  ...bundle,
+  [EXPR_KEY]: data.prefix + template + data.suffix,
+});
+await fillForm(bad, data.form);
+const before = fields(bad);
+await bad.els["download-pbip"].fire("click");
+emit({
+  good: { blobs: good.blobs.length, ...fields(good) },
+  badBefore: before,
+  bad: { blobs: bad.blobs.length, anchors: bad.anchors.length, ...fields(bad) },
+});
+""",
+        data={
+            "href": "http://127.0.0.1/power-bi/",
+            "form": {"table": "my-org-proj-99.prod_telemetry.agent_events"},
+            "prefix": prefix,
+            "suffix": suffix,
+        },
+        page=True,
+    )
+    # Control: a template that only gains a byte-order mark still downloads.
+    assert out["good"]["blobs"] == 1
+    assert out["good"]["statusKind"] == "ready"
+    assert out["good"]["status"].startswith("Downloaded BQAA_Agent_Analytics_")
     assert out["badBefore"]["statusKind"] == "ready"
     assert out["badBefore"]["downloadDisabled"] is False
     assert out["bad"]["blobs"] == 0

@@ -2204,6 +2204,182 @@ def test_compare_topn_detects_a_non_tie_member_swap():
   assert detail.startswith("member[")
 
 
+# Every Top-N row is validated before a blank metric is omitted: a malformed
+# row must fail on its own, not vanish and leave the remaining rows matching.
+_TOPN_ORACLE = [{"agent": "a", "v": 7}, {"agent": "b", "v": 5}]
+_TOPN_DAX = [
+    {"events_v1[agent]": "a", "[v]": 7},
+    {"events_v1[agent]": "b", "[v]": 5},
+]
+
+
+@pytest.mark.parametrize(
+    "extra, code",
+    [
+        ("garbage-row", "dax_row_type"),
+        (None, "dax_row_type"),
+        (7, "dax_row_type"),
+        (["c", 3], "dax_row_type"),
+        ({"events_v1[agent]": "c"}, "dax_missing_metric"),
+        ({"events_v1[agent]": None}, "dax_missing_metric"),
+        ({"[v]": None}, "missing_dimension"),
+        ({"[v]": 3}, "missing_dimension"),
+        ({"events_v1[agent]": "a", "[v]": None}, "duplicate_member"),
+        ({"events_v1[agent]": "b", "[v]": ""}, "duplicate_member"),
+    ],
+    ids=[
+        "string",
+        "null",
+        "number",
+        "list",
+        "no-metric",
+        "null-member-no-metric",
+        "blank-no-dimension",
+        "valued-no-dimension",
+        "blank-repeat",
+        "empty-string-repeat",
+    ],
+)
+def test_compare_topn_rejects_a_malformed_dax_row(extra, code):
+  assert _topn(_TOPN_ORACLE, _TOPN_DAX, 5) == (True, None, None, None)
+  for dax in (_TOPN_DAX + [extra], [extra] + _TOPN_DAX):
+    assert _topn(_TOPN_ORACLE, dax, 5) == (False, code, None, None)
+
+
+@pytest.mark.parametrize(
+    "extra, code",
+    [
+        ("garbage-row", "oracle_row_type"),
+        (None, "oracle_row_type"),
+        (7, "oracle_row_type"),
+        (["c", 3], "oracle_row_type"),
+        ({"agent": "c"}, "oracle_missing_metric"),
+        ({"agent": None}, "oracle_missing_metric"),
+        ({"v": None}, "missing_dimension"),
+        ({"v": 3}, "missing_dimension"),
+        ({"agent": "a", "v": None}, "duplicate_member"),
+        ({"agent": "b", "v": 5}, "duplicate_member"),
+    ],
+    ids=[
+        "string",
+        "null",
+        "number",
+        "list",
+        "no-metric",
+        "null-member-no-metric",
+        "blank-no-dimension",
+        "valued-no-dimension",
+        "blank-repeat",
+        "identical-repeat",
+    ],
+)
+def test_compare_topn_rejects_a_malformed_oracle_row(extra, code):
+  assert _topn(_TOPN_ORACLE, _TOPN_DAX, 5) == (True, None, None, None)
+  for oracle in (_TOPN_ORACLE + [extra], [extra] + _TOPN_ORACLE):
+    assert _topn(oracle, _TOPN_DAX, 5) == (False, code, None, None)
+
+
+def test_compare_topn_rejects_malformed_rows():
+  """Each malformed row is a structured failure, never a skipped row."""
+  oracle = [{"agent": "a", "count": 7}]
+  valid = {"events_v1[agent]": "a", "[v]": 7}
+
+  def compare(dax):
+    return validate_mod.compare_topn(
+        oracle, dax, "count", "agent", 5, metric_type="int"
+    )
+
+  assert compare([valid]) == (True, None, None, None)
+  assert compare([valid, "garbage"]) == (False, "dax_row_type", None, None)
+  assert compare([valid, {"events_v1[agent]": "b"}]) == (
+      False,
+      "dax_missing_metric",
+      None,
+      None,
+  )
+  assert compare([valid, {"events_v1[agent]": "a", "[v]": None}]) == (
+      False,
+      "duplicate_member",
+      None,
+      None,
+  )
+
+  oracle = [{"agent": "a", "n": 7}, {"agent": "b", "n": 5}]
+  dax = [
+      {"events_v1[agent]": "a", "v": 7},
+      {"events_v1[agent]": "b", "v": 5},
+  ]
+  assert validate_mod.compare_topn(oracle, dax, "n", "agent", 5) == (
+      True,
+      None,
+      None,
+      None,
+  )
+  for oracle_rows, dax_rows, code in (
+      (oracle, dax + ["garbage-row"], "dax_row_type"),
+      (oracle, dax + [{"events_v1[agent]": "c"}], "dax_missing_metric"),
+      (oracle + [{"agent": "c"}], dax, "oracle_missing_metric"),
+      # A non-object oracle row used to raise AttributeError; it is now a
+      # structured code (the run already failed it as comparison_error).
+      (oracle + ["garbage-row"], dax, "oracle_row_type"),
+  ):
+    assert validate_mod.compare_topn(
+        oracle_rows, dax_rows, "n", "agent", 5
+    ) == (False, code, None, None)
+
+
+def test_compare_topn_omits_a_well_formed_blank_category():
+  blank_oracle = [{"agent": None, "v": None}, {"agent": "z", "v": None}]
+  blank_dax = [
+      {"events_v1[agent]": None, "[v]": None},
+      {"events_v1[agent]": "z", "[v]": ""},
+  ]
+  # A blank category on both sides, or on one side only, is omitted, and
+  # it does not count toward N.
+  for oracle, dax in (
+      (_TOPN_ORACLE + blank_oracle, _TOPN_DAX + blank_dax),
+      (blank_oracle + _TOPN_ORACLE, blank_dax + _TOPN_DAX),
+      (_TOPN_ORACLE + blank_oracle, _TOPN_DAX),
+      (_TOPN_ORACLE, _TOPN_DAX + blank_dax),
+  ):
+    assert _topn(oracle, dax, 2) == (True, None, None, None)
+
+
+def test_execute_dax_asks_for_explicit_nulls(monkeypatch):
+  """A BLANK arrives as an explicit null, so an absent key is malformed."""
+  sent = []
+
+  class _Response:
+
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc_info):
+      return False
+
+    def read(self):
+      return b'{"results": []}'
+
+  def fake_urlopen(request, timeout):
+    sent.append((json.loads(request.data), timeout))
+    return _Response()
+
+  monkeypatch.setattr(validate_mod.urllib.request, "urlopen", fake_urlopen)
+  query = 'EVALUATE ROW("v", 1)'
+  assert validate_mod.execute_dax("token", GUID_A, GUID_B, query) == {
+      "results": []
+  }
+  assert sent == [
+      (
+          {
+              "queries": [{"query": query}],
+              "serializerSettings": {"includeNulls": True},
+          },
+          60,
+      )
+  ]
+
+
 def _chart(chart_id):
   return next(
       c for c in validate_mod.load_chart_metadata() if c["id"] == chart_id
@@ -3279,6 +3455,86 @@ def test_live_main_fails_the_tool_calls_chart_on_a_non_object_row(
   rc, receipt = harness.run("--window", WINDOW)
   assert rc == 1
   assert receipt["results"][0]["error"] == "series mismatch at dax_row_type"
+
+
+# The charts that take the tie-aware Top-N path in _run_chart.
+_TOPN_CHART_IDS = sorted(
+    c["id"]
+    for c in validate_mod.load_chart_metadata()
+    if c["visual_type"] == "clusteredBarChart"
+    and c.get("top_n") is not None
+    and c["top_n"] <= 10
+)
+
+
+def test_twelve_bar_charts_are_compared_as_top_n():
+  assert len(_TOPN_CHART_IDS) == 12
+
+
+@pytest.mark.parametrize("chart_id", _TOPN_CHART_IDS)
+def test_live_main_fails_a_top_n_chart_with_malformed_rows(
+    tmp_path, monkeypatch, chart_id
+):
+  chart = _chart(chart_id)
+  value_col = chart["measure_info"][0]["oracle_column"]
+  dim_col = chart["category"].replace("events_v1.", "")
+  oracle_dim = (
+      "tool_name"
+      if dim_col in ("tool_completed_name", "tool_error_name")
+      else dim_col
+  )
+  dax_dim = f"events_v1[{dim_col}]"
+  oracle_rows = [
+      {oracle_dim: "m1", value_col: 7},
+      {oracle_dim: "m2", value_col: 5},
+  ]
+  dax_rows = [{dax_dim: "m1", "[v]": 7}, {dax_dim: "m2", "[v]": 5}]
+  harness = _one_chart_harness(
+      tmp_path, monkeypatch, chart, oracle_rows, dax_rows
+  )
+  rc, receipt = harness.run("--window", WINDOW)
+  assert (rc, receipt["results"][0]["status"]) == (0, "PASS")
+  # The second, uncapped oracle query is the tie-aware Top-N comparison.
+  assert [call[3] for call in harness.oracle_calls] == [False, True]
+
+  # A well-formed blank category on both sides is omitted and still passes.
+  harness.oracle = lambda *_: oracle_rows + [
+      {oracle_dim: "m3", value_col: None}
+  ]
+  harness.dax = lambda _: _dax_response(
+      dax_rows + [{dax_dim: "m3", "[v]": None}]
+  )
+  rc, receipt = harness.run("--window", WINDOW)
+  assert (rc, receipt["results"][0]["status"]) == (0, "PASS")
+
+  malformed = [
+      (oracle_rows, dax_rows + ["garbage-row"], "dax_row_type"),
+      (oracle_rows, dax_rows + [{dax_dim: "m3"}], "dax_missing_metric"),
+      (oracle_rows, dax_rows + [{"[v]": None}], "missing_dimension"),
+      (
+          oracle_rows,
+          dax_rows + [{dax_dim: "m1", "[v]": None}],
+          "duplicate_member",
+      ),
+      (oracle_rows + ["garbage-row"], dax_rows, "oracle_row_type"),
+      (oracle_rows + [{oracle_dim: "m3"}], dax_rows, "oracle_missing_metric"),
+      (oracle_rows + [{value_col: None}], dax_rows, "missing_dimension"),
+      (
+          oracle_rows + [{oracle_dim: "m1", value_col: None}],
+          dax_rows,
+          "duplicate_member",
+      ),
+  ]
+  for bad_oracle, bad_dax, code in malformed:
+    harness.oracle = lambda *_, rows=bad_oracle: rows
+    harness.dax = lambda _, rows=bad_dax: _dax_response(rows)
+    rc, receipt = harness.run("--window", WINDOW)
+    result = receipt["results"][0]
+    assert (rc, receipt["overall_pass"]) == (1, False), code
+    assert (result["status"], result["error"]) == (
+        "FAIL",
+        f"top-n mismatch: {code}",
+    )
 
 
 # ---------------------------------------------------------------------------

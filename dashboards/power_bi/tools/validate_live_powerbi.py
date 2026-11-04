@@ -651,6 +651,14 @@ def compare_topn(
   or a repeated member is a failure.  The ordered value sequences must be
   equal; members may differ only among the items tied with the N-th value.
 
+  Every row on either side is validated before the blank-omission policy
+  drops anything: a row that is not an object (``oracle_row_type`` /
+  ``dax_row_type``), lacks its metric key (``oracle_missing_metric`` /
+  ``dax_missing_metric``) or its dimension key (``missing_dimension``), or
+  repeats a member of an earlier row (``duplicate_member``) fails.  Only a
+  well-formed row whose metric is explicitly blank is then omitted, as DAX
+  omits a BLANK category.
+
   Returns ``(ok, detail, oracle_info, dax_info)``.  ``detail`` is a structural
   code and never contains a dimension label, so it is safe to put in a
   receipt.
@@ -661,42 +669,62 @@ def compare_topn(
       else dim_col
   )
   oracle_items = []
+  oracle_members = set()
   for row in oracle_rows:
-    number = _to_number(row.get(value_col))
+    if not isinstance(row, dict):
+      return False, "oracle_row_type", None, None
+    # An absent metric is malformed; only an explicit null is blank.
+    if value_col not in row:
+      return False, "oracle_missing_metric", None, None
+    if oracle_dim_col in row:
+      member = _dim_key(row[oracle_dim_col])
+    elif dim_col in row:
+      member = _dim_key(row[dim_col])
+    else:
+      return False, "missing_dimension", None, None
+    if member in oracle_members:
+      return False, "duplicate_member", None, None
+    oracle_members.add(member)
+    number = _to_number(row[value_col])
     if number is _CORRUPT:
       return False, "corrupt_value", None, None
     if number is None:
       continue
-    if oracle_dim_col in row:
-      member = row[oracle_dim_col]
-    elif dim_col in row:
-      member = row[dim_col]
-    else:
-      return False, "missing_dimension", None, None
-    oracle_items.append((_dim_key(member), number))
+    oracle_items.append((member, number))
 
   dax_items = []
+  dax_members = set()
   for row in dax_rows:
-    raw = _get_dax_value(row, "v")
-    if raw is None:
+    if not isinstance(row, dict):
+      return False, "dax_row_type", None, None
+    # The query names the metric `v`; an absent key is malformed, while an
+    # explicit null is a BLANK value.
+    if _has_dax_key(row, "v"):
+      raw = _get_dax_value(row, "v")
+    elif _has_dax_key(row, value_col):
       raw = _get_dax_value(row, value_col)
+    else:
+      return False, "dax_missing_metric", None, None
+    found, member = _dax_dimension(row, dim_col)
+    if not found:
+      return False, "missing_dimension", None, None
+    member = _dim_key(member)
+    # A repeated member fails before blank rows are dropped, so neither a
+    # blank-then-valued nor a valued-then-blank repeat can slip through.
+    if member in dax_members:
+      return False, "duplicate_member", None, None
+    dax_members.add(member)
     number = _to_number(raw)
     if number is _CORRUPT:
       return False, "corrupt_value", None, None
     if number is None:
       continue
-    found, member = _dax_dimension(row, dim_col)
-    if not found:
-      return False, "missing_dimension", None, None
-    dax_items.append((_dim_key(member), number))
+    dax_items.append((member, number))
 
-  # Cardinality and uniqueness are checked on the complete non-blank DAX
-  # result, before anything is sliced to N.
+  # Cardinality is checked on the complete non-blank DAX result, before
+  # anything is sliced to N.
   if len(dax_items) > n:
     return False, "row_count", len(oracle_items), len(dax_items)
-  dax_members = [member for member, _ in dax_items]
-  if len(set(dax_members)) != len(dax_members):
-    return False, "duplicate_member", None, None
 
   def rank(item):
     return (-item[1], item[0])

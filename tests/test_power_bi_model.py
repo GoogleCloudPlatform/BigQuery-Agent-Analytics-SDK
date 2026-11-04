@@ -1804,13 +1804,23 @@ _PARAMETER_NAMES = (
 )
 # Duplicate declarations a hand edit could leave behind.  None carries the
 # `meta [IsParameterQuery=true, ...]` annotation the rewrite itself matches.
+# Object names are case-insensitive, so `{lower}` and `{upper}` spell the same
+# parameter.
 _DUPLICATE_FORMS = {
     "metadata_free": 'expression {name} = "stale"',
     "quoted_name": "expression '{name}' = \"stale\"",
     "multiline": 'expression {name} =\n\t\t"stale"',
     "indented_no_spaces": '  expression {name}="stale"',
     "tab_separated": 'expression\t{name}\t= "stale"',
+    "lower_case_name": 'expression {lower} = "stale"',
+    "quoted_upper_case_name": "expression '{upper}' = \"stale\"",
 }
+
+
+def _duplicate_declaration(form, name):
+  return _DUPLICATE_FORMS[form].format(
+      name=name, lower=name.lower(), upper=name.upper()
+  )
 
 
 def _declaration_line(text, name):
@@ -1825,7 +1835,7 @@ def _declaration_line(text, name):
 @pytest.mark.parametrize("name", _PARAMETER_NAMES)
 def test_rewrite_rejects_a_duplicate_declaration_without_metadata(name, form):
   text = _spec_expressions_text()
-  duplicate = _DUPLICATE_FORMS[form].format(name=name)
+  duplicate = _duplicate_declaration(form, name)
   message = (
       f"Expected exactly 1 declaration for {name} in expressions.tmdl, found 2"
   )
@@ -1883,6 +1893,93 @@ def test_rewrite_ignores_comments_and_similar_names():
   assert rewritten.endswith(f"{noise}\n")
 
 
+# A file-start byte-order mark is an encoding signature, not text: it must
+# neither hide a first-line duplicate from the count nor keep a clean file
+# from being rewritten.
+_BOM = "\ufeff"
+
+
+@pytest.mark.parametrize("name", _PARAMETER_NAMES)
+def test_rewrite_rejects_a_duplicate_behind_a_byte_order_mark(name):
+  text = _spec_expressions_text()
+  message = (
+      f"Expected exactly 1 declaration for {name} in expressions.tmdl, found 2"
+  )
+  for first_line in (
+      _duplicate_declaration("metadata_free", name),
+      _duplicate_declaration("quoted_upper_case_name", name),
+      _declaration_line(text, name),
+  ):
+    tampered = f"{_BOM}{first_line}\n{text}"
+    with pytest.raises(ValueError) as err:
+      _rewrite(tampered)
+    assert str(err.value) == message, first_line
+
+
+def test_rewrite_strips_one_byte_order_mark_from_a_clean_file():
+  text = _spec_expressions_text()
+  # The template opens with a doc comment; also put the mark directly in
+  # front of the first declaration.
+  bare = "\n".join(
+      line for line in text.split("\n") if not line.startswith("///")
+  )
+  assert not text.startswith("expression ")
+  assert bare.startswith("expression BQAA_ProjectId = ")
+  for clean in (text, bare):
+    rewritten = _rewrite(f"{_BOM}{clean}")
+    assert rewritten == _rewrite(clean)
+    assert not rewritten.startswith(_BOM)
+  # A comment behind the mark is still a comment.
+  comment = '// expression BQAA_ProjectId = "stale"'
+  assert _rewrite(f"{_BOM}{comment}\n{text}") == f"{comment}\n{_rewrite(text)}"
+
+
+def _fullwidth(text):
+  """Returns `text` with each printable ASCII character in fullwidth form."""
+  return "".join(
+      chr(ord(char) + 0xFEE0) if "!" <= char <= "~" else char for char in text
+  )
+
+
+@pytest.mark.parametrize("name", _PARAMETER_NAMES)
+def test_rewrite_rejects_a_compatibility_form_duplicate(name):
+  """Width and other compatibility variants of a name fold like case does."""
+  text = _spec_expressions_text()
+  message = (
+      f"Expected exactly 1 declaration for {name} in expressions.tmdl, found 2"
+  )
+  for duplicate in (
+      f'expression {_fullwidth(name)} = "stale"',
+      f"expression '{_fullwidth(name.lower())}' = \"stale\"",
+      f'expression\u00a0{name}\u3000= "stale"',
+  ):
+    for tampered in (f"{text}\n{duplicate}\n", f"{duplicate}\n\n{text}"):
+      with pytest.raises(ValueError) as err:
+        _rewrite(tampered)
+      assert str(err.value) == message, duplicate
+
+
+@pytest.mark.parametrize(
+    "name,variant",
+    [
+        # KELVIN SIGN, which normalizes to `K`.
+        ("BQAA_LookbackDays", "BQAA_Loo\u212abackDays"),
+        # LATIN SMALL LETTER LONG S, which normalizes to `s`.
+        ("BQAA_UseStorageApi", "BQAA_U\u017feStorageApi"),
+        ("BQAA_DatasetId", "BQAA_Data\u017fetId"),
+    ],
+)
+def test_rewrite_rejects_a_duplicate_spelled_with_a_compatibility_letter(
+    name, variant
+):
+  text = _spec_expressions_text()
+  with pytest.raises(ValueError) as err:
+    _rewrite(f'{text}\nexpression {variant} = "stale"\n')
+  assert str(err.value) == (
+      f"Expected exactly 1 declaration for {name} in expressions.tmdl, found 2"
+  )
+
+
 def _tampered_generate_all(generate_pbip, suffix):
   files = generate_pbip.generate_all()
   tampered = dict(files)
@@ -1927,6 +2024,86 @@ def test_output_zip_cli_refuses_a_metadata_free_duplicate(
   assert generate_pbip.main(["--output-zip", str(out_zip)]) == 1
   assert (
       "Expected exactly 1 declaration for BQAA_LookbackDays in"
+      " expressions.tmdl, found 2"
+  ) in capsys.readouterr().err
+  assert not out_zip.exists()
+
+
+@pytest.fixture(scope="module")
+def generated_pbip_files():
+  return _load_pbi_module("generate_pbip").generate_all()
+
+
+# (prefix, suffix) around the generated expressions.tmdl.
+_CASE_AND_BOM_DUPLICATES = {
+    "lower_case_appended": ("", '\nexpression {lower} = "stale"\n'),
+    "quoted_upper_case_appended": ("", "\nexpression '{upper}' = \"stale\"\n"),
+    "bom_first_line": (_BOM + 'expression {name} = "stale"\n', ""),
+}
+
+
+@pytest.mark.parametrize("form", sorted(_CASE_AND_BOM_DUPLICATES))
+@pytest.mark.parametrize("name", _PARAMETER_NAMES)
+def test_write_pbip_zip_refuses_case_variant_and_bom_duplicates(
+    tmp_path, monkeypatch, generated_pbip_files, name, form
+):
+  generate_pbip = _load_pbi_module("generate_pbip")
+  prefix, suffix = (
+      part.format(name=name, lower=name.lower(), upper=name.upper())
+      for part in _CASE_AND_BOM_DUPLICATES[form]
+  )
+  tampered = dict(generated_pbip_files)
+  tampered[_EXPR_KEY] = f"{prefix}{generated_pbip_files[_EXPR_KEY]}{suffix}"
+  monkeypatch.setattr(generate_pbip, "generate_all", lambda **_: tampered)
+  message = (
+      f"Expected exactly 1 declaration for {name} in expressions.tmdl, found 2"
+  )
+  # No archive is created ...
+  new_zip = tmp_path / "nested" / "custom.zip"
+  with pytest.raises(ValueError) as err:
+    generate_pbip.write_pbip_zip(new_zip, project="abcde-1")
+  assert str(err.value) == message
+  assert not new_zip.exists()
+  assert not new_zip.parent.exists()
+  # ... and an existing one is not overwritten.
+  old_zip = tmp_path / "existing.zip"
+  old_zip.write_bytes(b"previous archive")
+  with pytest.raises(ValueError) as err:
+    generate_pbip.write_pbip_zip(old_zip, project="abcde-1")
+  assert str(err.value) == message
+  assert old_zip.read_bytes() == b"previous archive"
+
+
+def test_write_pbip_zip_packages_a_clean_file_that_starts_with_a_bom(
+    tmp_path, monkeypatch, generated_pbip_files
+):
+  generate_pbip = _load_pbi_module("generate_pbip")
+  clean_zip = generate_pbip.write_pbip_zip(
+      tmp_path / "clean.zip", project="abcde-1"
+  )
+  marked = dict(generated_pbip_files)
+  marked[_EXPR_KEY] = f"{_BOM}{generated_pbip_files[_EXPR_KEY]}"
+  monkeypatch.setattr(generate_pbip, "generate_all", lambda **_: marked)
+  marked_zip = generate_pbip.write_pbip_zip(
+      tmp_path / "marked.zip", project="abcde-1"
+  )
+  assert marked_zip.read_bytes() == clean_zip.read_bytes()
+
+
+def test_output_zip_cli_refuses_a_duplicate_behind_a_byte_order_mark(
+    tmp_path, monkeypatch, capsys, generated_pbip_files
+):
+  generate_pbip = _load_pbi_module("generate_pbip")
+  tampered = dict(generated_pbip_files)
+  tampered[_EXPR_KEY] = (
+      f"{_BOM}expression 'BQAA_WindowEndDate' = \"2020-01-01\"\n"
+      f"{generated_pbip_files[_EXPR_KEY]}"
+  )
+  monkeypatch.setattr(generate_pbip, "generate_all", lambda **_: tampered)
+  out_zip = tmp_path / "custom.zip"
+  assert generate_pbip.main(["--output-zip", str(out_zip)]) == 1
+  assert (
+      "Expected exactly 1 declaration for BQAA_WindowEndDate in"
       " expressions.tmdl, found 2"
   ) in capsys.readouterr().err
   assert not out_zip.exists()
