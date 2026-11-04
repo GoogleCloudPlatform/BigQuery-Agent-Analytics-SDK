@@ -164,6 +164,41 @@ MEASURE_NAMES = [
     "Top 5 Agents by LLM Calls",
 ]
 
+# The 16 measures the live check compares with a float tolerance: averages,
+# percentiles and period-over-period ratios.  Every other measure is an exact
+# count or token sum, so it must declare `comparison_type: int` and format as
+# `#,0`.  The list is pinned here, independently of the generator, so a
+# display-format edit cannot quietly loosen the live comparison.
+FLOAT_COMPARISON_MEASURES = frozenset(
+    {
+        "Avg Tool Latency (ms)",
+        "Avg LLM Latency (ms)",
+        "P50 Tool Latency (ms)",
+        "P75 Tool Latency (ms)",
+        "P90 Tool Latency (ms)",
+        "P99 Tool Latency (ms)",
+        "P50 LLM Latency (ms)",
+        "P75 LLM Latency (ms)",
+        "P90 LLM Latency (ms)",
+        "P99 LLM Latency (ms)",
+        "KPI Total Tokens Change %",
+        "KPI Total Traces Change %",
+        "KPI Total Sessions Change %",
+        "KPI Total LLM Calls Change %",
+        "KPI Total Users Change %",
+        "KPI Tool Errors Change %",
+    }
+)
+INT_MEASURE_FORMAT = "#,0"
+FLOAT_MEASURE_FORMATS = frozenset({"#,0.0", "#,0.00", "+0.0%;-0.0%;0.0%"})
+
+# Top-N visuals that intentionally draw fewer bars than the source query
+# returns (README "Known differences", D14): chart id -> (top_n, oracle LIMIT).
+# Every other Top-N visual draws exactly the source LIMIT.
+TOP_N_BELOW_SOURCE_LIMIT = {
+    "usage-top-5-agents-by-llm-calls": (5, 500),
+}
+
 # F4 listener exceptions: the 4 charts that do NOT listen to User ID.
 NON_UID_LISTENERS = frozenset(
     {
@@ -532,6 +567,7 @@ _TMDL_MEASURE_DECL_RE = re.compile(
     r"^\tmeasure\s+('(?:[^']|'')+'|[^\s=']+)\s*=\s*(.*?)\s*$"
 )
 _TMDL_ANNOTATION_RE = re.compile(r"^\t\tannotation\s+(\S+)\s*=\s*(.*?)\s*$")
+_TMDL_FORMAT_STRING_RE = re.compile(r"^\t\tformatString:\s*(.*?)\s*$")
 # A line indented by exactly one tab starts the next table-level object.
 _TMDL_OBJECT_LINE_RE = re.compile(r"^\t\S")
 # An M text literal: double quotes, with "" as the escaped quote.
@@ -630,8 +666,10 @@ def _parse_tmdl_columns(text, label):
 def _parse_tmdl_measures(text):
   """Parse the real `measure` declarations of a TMDL table file.
 
-  Returns a list of `{"name", "line", "annotations"}` dicts; `annotations`
-  maps an annotation name to the list of values declared in the measure block.
+  Returns a list of `{"name", "line", "dax", "format_strings", "annotations"}`
+  dicts; `format_strings` lists every `formatString` value in the measure block
+  and `annotations` maps an annotation name to the list of values declared in
+  the measure block.
   """
   measures = []
   current = None
@@ -644,6 +682,7 @@ def _parse_tmdl_measures(text):
           "name": _tmdl_unquote(decl.group(1)),
           "line": lineno,
           "dax": decl.group(2),
+          "format_strings": [],
           "annotations": {},
       }
       measures.append(current)
@@ -651,8 +690,11 @@ def _parse_tmdl_measures(text):
       current = None
     elif current is not None:
       ann = _TMDL_ANNOTATION_RE.match(raw)
+      fmt = _TMDL_FORMAT_STRING_RE.match(raw)
       if ann:
         current["annotations"].setdefault(ann.group(1), []).append(ann.group(2))
+      elif fmt:
+        current["format_strings"].append(fmt.group(1))
   return measures
 
 
@@ -717,7 +759,8 @@ def _check_events_columns(events_text):
 def _check_events_measures(events_text):
   """Check the real measure declarations of events_v1.tmdl (50 measures)."""
   errors = []
-  declared = [m["name"] for m in _parse_tmdl_measures(events_text)]
+  parsed = _parse_tmdl_measures(events_text)
+  declared = [m["name"] for m in parsed]
   counts = {}
   for name in declared:
     counts[name] = counts.get(name, 0) + 1
@@ -734,6 +777,38 @@ def _check_events_measures(events_text):
         f"events_v1.tmdl: expected {len(MEASURE_NAMES)} measures, "
         f"found {len(declared)}"
     )
+  errors.extend(_check_measure_format_strings(parsed))
+  return errors
+
+
+def _check_measure_format_strings(parsed_measures):
+  """Pin each measure's TMDL formatString to its live comparison type.
+
+  Exact counts and token sums must format as `#,0`; only the pinned
+  FLOAT_COMPARISON_MEASURES may use a fractional or percentage format.
+  """
+  errors = []
+  for measure in parsed_measures:
+    name = measure["name"]
+    if name not in MEASURE_NAMES:
+      continue
+    formats = measure.get("format_strings", [])
+    where = f"events_v1.tmdl:{measure['line']}: measure '{name}'"
+    if len(formats) != 1:
+      errors.append(
+          f"{where} must declare exactly one formatString, found {formats}"
+      )
+    elif name in FLOAT_COMPARISON_MEASURES:
+      if formats[0] not in FLOAT_MEASURE_FORMATS:
+        errors.append(
+            f"{where} is compared as a float and must use one of "
+            f"{sorted(FLOAT_MEASURE_FORMATS)}, found {formats[0]!r}"
+        )
+    elif formats[0] != INT_MEASURE_FORMAT:
+      errors.append(
+          f"{where} is an exact count or sum and must use formatString "
+          f"{INT_MEASURE_FORMAT!r}, found {formats[0]!r}"
+      )
   return errors
 
 
@@ -1242,15 +1317,53 @@ def validate_parity(power_bi_root=None, looker_root=None):
         if oracle_path.exists()
         else None
     )
-    if (
-        m_limit is None
-        or v_top_n is None
-        or o_limit is None
-        or not (m_limit == v_top_n == o_limit)
-    ):
+    if m_limit is None or v_top_n is None or o_limit is None:
+      errors.append(
+          f"Top-N limit is missing for '{cid}': "
+          f"manifest limit={m_limit}, report_visuals top_n={v_top_n}, "
+          f"oracle LIMIT={o_limit}"
+      )
+    elif m_limit != o_limit:
       errors.append(
           f"Top-N limit mismatch for '{cid}': "
-          f"manifest limit={m_limit}, report_visuals top_n={v_top_n}, "
+          f"source manifest limit={m_limit} and oracle LIMIT={o_limit} "
+          f"disagree"
+      )
+    elif v_top_n > o_limit:
+      errors.append(
+          f"Top-N limit mismatch for '{cid}': "
+          f"report_visuals top_n={v_top_n} exceeds the available "
+          f"source rows (oracle LIMIT={o_limit})"
+      )
+    elif cid in TOP_N_BELOW_SOURCE_LIMIT:
+      if (v_top_n, o_limit) != TOP_N_BELOW_SOURCE_LIMIT[cid]:
+        pinned_top_n, pinned_limit = TOP_N_BELOW_SOURCE_LIMIT[cid]
+        errors.append(
+            f"Top-N limit mismatch for '{cid}': report_visuals "
+            f"top_n={v_top_n} and oracle LIMIT={o_limit} must stay "
+            f"top_n={pinned_top_n} over a source LIMIT={pinned_limit} "
+            f"(README known difference D14)"
+        )
+    elif v_top_n != o_limit:
+      errors.append(
+          f"Top-N limit mismatch for '{cid}': report_visuals "
+          f"top_n={v_top_n} must equal the source LIMIT={o_limit}"
+      )
+
+  # Every other chart whose oracle query ends in a LIMIT must keep the source
+  # manifest limit equal to it, so neither side of the source contract can
+  # drift on its own (for example the 5,000-row Tool Calls Over Time query).
+  for cid in sorted(set(manifest_by_id) - set(top_n_chart_ids)):
+    oracle_path = looker / "oracle" / "queries" / f"{cid}.sql"
+    if not oracle_path.exists():
+      continue
+    o_limit = _oracle_final_limit(_read_text(oracle_path))
+    if o_limit is None:
+      continue
+    m_limit = manifest_by_id[cid].get("limit")
+    if m_limit != o_limit:
+      errors.append(
+          f"Source limit mismatch for '{cid}': manifest limit={m_limit}, "
           f"oracle LIMIT={o_limit}"
       )
 
@@ -1285,6 +1398,15 @@ def validate_parity(power_bi_root=None, looker_root=None):
         measure_oracle_queries[m_entry["name"]] = list(
             m_entry.get("oracle_queries") or []
         )
+        expected_type = (
+            "float" if m_entry["name"] in FLOAT_COMPARISON_MEASURES else "int"
+        )
+        if m_entry.get("comparison_type") != expected_type:
+          errors.append(
+              f"semantic_model.yaml: measure '{m_entry['name']}' has "
+              f"comparison_type {m_entry.get('comparison_type')!r}, "
+              f"expected {expected_type!r}"
+          )
     errors.extend(_check_oracle_lock(pbi_root, looker))
 
   for page_dir in sorted(report_pages_dir.iterdir()):

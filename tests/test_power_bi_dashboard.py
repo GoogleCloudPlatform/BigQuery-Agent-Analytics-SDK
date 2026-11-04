@@ -972,7 +972,11 @@ class TestCheckCanFail:
     ), errors
 
   def test_top_n_limit_mismatch_detected(self, tmp_path):
-    """A manifest limit that disagrees with report_visuals top_n or oracle LIMIT fails."""
+    """A source manifest limit that disagrees with the oracle LIMIT fails.
+
+    The visual-side cases (top_n above the source rows, top_n different from
+    the source LIMIT, the pinned D14 exception) are covered below.
+    """
     _skip_if_not_generated()
     import shutil
 
@@ -986,8 +990,9 @@ class TestCheckCanFail:
         for c in manifest_data["charts"]
         if c["id"] == "usage-top-5-agents-by-llm-calls"
     )
-    assert target["limit"] == 5
-    target["limit"] = 500
+    assert target["limit"] == 500
+    # Mutate manifest limit to disagree with oracle LIMIT (500).
+    target["limit"] = 5
     manifest_path.write_text(
         yaml.safe_dump(manifest_data, sort_keys=False), encoding="utf-8"
     )
@@ -996,8 +1001,262 @@ class TestCheckCanFail:
     )
     assert any(
         "Top-N limit mismatch for 'usage-top-5-agents-by-llm-calls':"
-        " manifest limit=500, report_visuals top_n=5, oracle LIMIT=5" in e
+        " source manifest limit=5 and oracle LIMIT=500" in e
         for e in errors
+    ), errors
+
+  # -- Row caps, bar counts and comparison types (README D13 and D14) -------
+
+  @staticmethod
+  def _set_entry_field(path, list_key, entry_id, field, value):
+    """Sets (or, for None, deletes) one field of one entry of a YAML list."""
+    key = "name" if list_key == "measures" else "id"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    entry = next(e for e in data[list_key] if e[key] == entry_id)
+    assert field in entry, (entry_id, field)
+    if value is None:
+      del entry[field]
+    else:
+      entry[field] = value
+    path.write_text(
+        yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+  @staticmethod
+  def _set_final_limit(sql_path, old, new):
+    sql = sql_path.read_text(encoding="utf-8")
+    assert sql.rstrip().endswith(f"LIMIT {old}"), sql[-60:]
+    head, _, tail = sql.rpartition(f"LIMIT {old}")
+    sql_path.write_text(f"{head}LIMIT {new}{tail}", encoding="utf-8")
+
+  def test_unmodified_copy_passes_parity_and_tmdl_checks(self, tmp_path):
+    """Control for the mutations below: the untouched copy is clean."""
+    _skip_if_not_generated()
+    pbi, looker = _copy_dashboards(tmp_path)
+    val_mod = _load_tool_module("validate_pbip")
+    assert val_mod.validate_parity(power_bi_root=pbi, looker_root=looker) == []
+    assert val_mod.validate_tmdl(power_bi_root=pbi, looker_root=looker) == []
+
+  @pytest.mark.parametrize(
+      "chart_id,top_n,message",
+      [
+          # The pinned D14 chart draws five bars over its 500-row source ...
+          (
+              "usage-top-5-agents-by-llm-calls",
+              501,
+              "report_visuals top_n=501 exceeds the available source rows"
+              " (oracle LIMIT=500)",
+          ),
+          (
+              "usage-top-5-agents-by-llm-calls",
+              500,
+              "report_visuals top_n=500 and oracle LIMIT=500 must stay"
+              " top_n=5 over a source LIMIT=500 (README known difference D14)",
+          ),
+          (
+              "usage-top-5-agents-by-llm-calls",
+              4,
+              "report_visuals top_n=4 and oracle LIMIT=500 must stay top_n=5"
+              " over a source LIMIT=500 (README known difference D14)",
+          ),
+          # ... and every other Top-N visual draws exactly its source LIMIT.
+          (
+              "usage-top-5-users-by-session",
+              3,
+              "report_visuals top_n=3 must equal the source LIMIT=5",
+          ),
+          (
+              "usage-top-5-users-by-session",
+              6,
+              "report_visuals top_n=6 exceeds the available source rows"
+              " (oracle LIMIT=5)",
+          ),
+          (
+              "usage-tool-invocations",
+              5,
+              "report_visuals top_n=5 must equal the source LIMIT=10",
+          ),
+      ],
+  )
+  def test_visual_top_n_drift_detected(
+      self, tmp_path, chart_id, top_n, message
+  ):
+    _skip_if_not_generated()
+    pbi, looker = _copy_dashboards(tmp_path)
+    val_mod = _load_tool_module("validate_pbip")
+    self._set_entry_field(
+        pbi / "spec" / "report_visuals.yaml",
+        "parity_visuals",
+        chart_id,
+        "top_n",
+        top_n,
+    )
+    errors = val_mod.validate_parity(power_bi_root=pbi, looker_root=looker)
+    expected = f"Top-N limit mismatch for '{chart_id}': {message}"
+    assert any(expected in e for e in errors), errors
+
+  def test_source_cut_to_the_bar_count_detected(self, tmp_path):
+    """Rewriting the 500-row source to five rows fails even when consistent."""
+    _skip_if_not_generated()
+    pbi, looker = _copy_dashboards(tmp_path)
+    val_mod = _load_tool_module("validate_pbip")
+    cid = "usage-top-5-agents-by-llm-calls"
+    self._set_entry_field(
+        looker / "spec" / "chart_manifest.yaml", "charts", cid, "limit", 5
+    )
+    self._set_final_limit(looker / "oracle" / "queries" / f"{cid}.sql", 500, 5)
+    errors = val_mod.validate_parity(power_bi_root=pbi, looker_root=looker)
+    assert any(
+        f"Top-N limit mismatch for '{cid}': report_visuals top_n=5 and oracle"
+        " LIMIT=5 must stay top_n=5 over a source LIMIT=500 (README known"
+        " difference D14)" in e
+        for e in errors
+    ), errors
+
+  @pytest.mark.parametrize(
+      "chart_id,side,message",
+      [
+          (
+              "usage-tool-calls-over-time",
+              "manifest",
+              "manifest limit=4000, oracle LIMIT=5000",
+          ),
+          (
+              "usage-tool-calls-over-time",
+              "oracle",
+              "manifest limit=5000, oracle LIMIT=4000",
+          ),
+          (
+              "usage-llm-call-trends",
+              "manifest",
+              "manifest limit=4000, oracle LIMIT=5000",
+          ),
+      ],
+  )
+  def test_source_limit_drift_detected_for_a_chart_without_top_n(
+      self, tmp_path, chart_id, side, message
+  ):
+    """Either half of a non-Top-N source row cap cannot drift on its own."""
+    _skip_if_not_generated()
+    pbi, looker = _copy_dashboards(tmp_path)
+    val_mod = _load_tool_module("validate_pbip")
+    if side == "manifest":
+      self._set_entry_field(
+          looker / "spec" / "chart_manifest.yaml",
+          "charts",
+          chart_id,
+          "limit",
+          4000,
+      )
+    else:
+      self._set_final_limit(
+          looker / "oracle" / "queries" / f"{chart_id}.sql", 5000, 4000
+      )
+    errors = val_mod.validate_parity(power_bi_root=pbi, looker_root=looker)
+    expected = f"Source limit mismatch for '{chart_id}': {message}"
+    assert any(expected in e for e in errors), errors
+
+  @pytest.mark.parametrize(
+      "measure,value,message",
+      [
+          ("KPI Total Tokens", "float", "'float', expected 'int'"),
+          ("Top 5 Agents by LLM Calls", "float", "'float', expected 'int'"),
+          ("Avg LLM Latency (ms)", "int", "'int', expected 'float'"),
+          ("KPI Total Users Change %", "int", "'int', expected 'float'"),
+          ("Total Events", None, "None, expected 'int'"),
+      ],
+  )
+  def test_comparison_type_drift_in_the_spec_detected(
+      self, tmp_path, measure, value, message
+  ):
+    """The repository validator pins which measures compare as floats."""
+    _skip_if_not_generated()
+    pbi, looker = _copy_dashboards(tmp_path)
+    val_mod = _load_tool_module("validate_pbip")
+    self._set_entry_field(
+        pbi / "spec" / "semantic_model.yaml",
+        "measures",
+        measure,
+        "comparison_type",
+        value,
+    )
+    errors = val_mod.validate_parity(power_bi_root=pbi, looker_root=looker)
+    expected = f"semantic_model.yaml: measure '{measure}' has comparison_type {message}"
+    assert expected in errors, errors
+
+  _KPI_TOKENS = (
+      "\tmeasure 'KPI Total Tokens' = [Total Tokens]\n\t\tformatString: #,0\n"
+  )
+  _AVG_LLM = (
+      "\tmeasure 'Avg LLM Latency (ms)' = AVERAGE('events_v1'[llm_total_ms])\n"
+      "\t\tformatString: #,0.0\n"
+  )
+
+  @pytest.mark.parametrize(
+      "old,new,measure,message",
+      [
+          (
+              _KPI_TOKENS,
+              _KPI_TOKENS.replace("#,0\n", "#,0.0\n"),
+              "KPI Total Tokens",
+              "is an exact count or sum and must use formatString '#,0',"
+              " found '#,0.0'",
+          ),
+          (
+              _KPI_TOKENS,
+              _KPI_TOKENS.replace("#,0\n", "+0.0%;-0.0%;0.0%\n"),
+              "KPI Total Tokens",
+              "is an exact count or sum and must use formatString '#,0',"
+              " found '+0.0%;-0.0%;0.0%'",
+          ),
+          (
+              _AVG_LLM,
+              _AVG_LLM.replace("#,0.0\n", "#,0\n"),
+              "Avg LLM Latency (ms)",
+              "is compared as a float and must use one of ['#,0.0', '#,0.00',"
+              " '+0.0%;-0.0%;0.0%'], found '#,0'",
+          ),
+          (
+              _KPI_TOKENS,
+              _KPI_TOKENS + "\t\tformatString: #,0.0\n",
+              "KPI Total Tokens",
+              "must declare exactly one formatString, found ['#,0', '#,0.0']",
+          ),
+          (
+              _KPI_TOKENS,
+              _KPI_TOKENS.replace("\t\tformatString: #,0\n", ""),
+              "KPI Total Tokens",
+              "must declare exactly one formatString, found []",
+          ),
+      ],
+  )
+  def test_measure_format_string_drift_detected(
+      self, tmp_path, old, new, measure, message
+  ):
+    """A display-format edit in the TMDL cannot loosen an exact count."""
+    _skip_if_not_generated()
+    pbi, looker = _copy_dashboards(tmp_path)
+    val_mod = _load_tool_module("validate_pbip")
+    events_path = (
+        pbi
+        / "BQAA_Agent_Analytics.SemanticModel"
+        / "definition"
+        / "tables"
+        / "events_v1.tmdl"
+    )
+    text = events_path.read_text(encoding="utf-8")
+    assert text.count(old) == 1
+    text = text.replace(old, new)
+    events_path.write_text(text, encoding="utf-8")
+    line = next(
+        i
+        for i, raw in enumerate(text.splitlines(), 1)
+        if raw.startswith(f"\tmeasure '{measure}' = ")
+    )
+    errors = val_mod.validate_tmdl(power_bi_root=pbi, looker_root=looker)
+    assert (
+        f"events_v1.tmdl:{line}: measure '{measure}' {message}" in errors
     ), errors
 
   def test_kpi_prior_missing_coalesce_detected(self, tmp_path):
@@ -1045,6 +1304,108 @@ class TestCheckCanFail:
       gen_mod.write_generated_files(power_bi_root=tmp_pbi)
     # Nothing was written or deleted.
     assert sorted(p.name for p in tmp_pbi.iterdir()) == ["spec"]
+
+
+# ---------------------------------------------------------------------------
+# Source contract: the Looker Studio snapshot is the baseline the port is
+# compared with, so a Power BI change must not rewrite it to agree with the
+# port (README known difference D14).
+# ---------------------------------------------------------------------------
+
+_LLM_AGENTS_ID = "usage-top-5-agents-by-llm-calls"
+_MANIFEST_REL = "dashboards/looker_studio/spec/chart_manifest.yaml"
+_LLM_AGENTS_ORACLE_REL = (
+    f"dashboards/looker_studio/oracle/queries/{_LLM_AGENTS_ID}.sql"
+)
+
+
+def _manifest_chart(text, chart_id):
+  return next(c for c in yaml.safe_load(text)["charts"] if c["id"] == chart_id)
+
+
+def _final_sql_limit(text):
+  limits = re.findall(r"(?m)^LIMIT (\d+)\s*$", text)
+  assert limits, "the oracle query has no final LIMIT"
+  return int(limits[-1])
+
+
+def _git(*args):
+  return subprocess.run(
+      ["git", "-C", str(ROOT), *args],
+      capture_output=True,
+      text=True,
+      check=False,
+  )
+
+
+def _main_merge_base():
+  """Returns the merge base of HEAD and the main branch, or skips the test."""
+  try:
+    shallow = _git("rev-parse", "--is-shallow-repository")
+  except FileNotFoundError:
+    pytest.skip("git is not installed")
+  if shallow.returncode != 0:
+    pytest.skip("not a git checkout")
+  if shallow.stdout.strip() != "false":
+    pytest.skip("shallow clone: the main branch history is not available")
+  for ref in ("upstream/main", "origin/main", "main"):
+    base = _git("merge-base", "HEAD", ref)
+    if base.returncode == 0 and base.stdout.strip():
+      return base.stdout.strip()
+  pytest.skip("no main branch to compare with")
+
+
+class TestSourceContract:
+  """The port is compared with the Looker Studio source; it never edits it."""
+
+  def test_llm_agents_draws_five_bars_over_its_500_row_source(self):
+    manifest = _manifest_chart(
+        (ROOT / _MANIFEST_REL).read_text(encoding="utf-8"), _LLM_AGENTS_ID
+    )
+    oracle = (ROOT / _LLM_AGENTS_ORACLE_REL).read_text(encoding="utf-8")
+    visuals = yaml.safe_load(
+        (POWER_BI / "spec" / "report_visuals.yaml").read_text(encoding="utf-8")
+    )["parity_visuals"]
+    visual = next(v for v in visuals if v["id"] == _LLM_AGENTS_ID)
+    # The source tile keeps its 500-row cap.  Its column_limit caps pivot
+    # columns, and the tile has neither a pivot nor a displayed-row limit.
+    assert (manifest["limit"], _final_sql_limit(oracle)) == (500, 500)
+    assert manifest["pivots"] == []
+    assert manifest["style"]["limit_displayed_rows"] is False
+    # The port draws five bars over it, as one pinned, documented exception.
+    assert visual["top_n"] == 5
+    val_mod = _load_tool_module("validate_pbip")
+    assert val_mod.TOP_N_BELOW_SOURCE_LIMIT == {_LLM_AGENTS_ID: (5, 500)}
+    readme = " ".join(
+        (POWER_BI / "README.md").read_text(encoding="utf-8").split()
+    )
+    assert (
+        "| D14 | Top 5 Agents by LLM Calls | Bar tile titled Top 5 over up to"
+        " 500 agents (`limit: 500`) |" in readme
+    )
+
+  def test_llm_agents_source_matches_the_main_branch(self):
+    """The source row cap is main's, not a rewrite that agrees with the port."""
+    base = _main_merge_base()
+
+    def at_base(rel):
+      shown = _git("show", f"{base}:{rel}")
+      if shown.returncode != 0:
+        pytest.skip(f"{rel} does not exist at the merge base {base}")
+      return shown.stdout
+
+    base_manifest = _manifest_chart(at_base(_MANIFEST_REL), _LLM_AGENTS_ID)
+    base_oracle = at_base(_LLM_AGENTS_ORACLE_REL)
+    manifest = _manifest_chart(
+        (ROOT / _MANIFEST_REL).read_text(encoding="utf-8"), _LLM_AGENTS_ID
+    )
+    oracle = (ROOT / _LLM_AGENTS_ORACLE_REL).read_text(encoding="utf-8")
+    assert (manifest["limit"], _final_sql_limit(oracle)) == (
+        base_manifest["limit"],
+        _final_sql_limit(base_oracle),
+    )
+    assert manifest == base_manifest
+    assert oracle == base_oracle
 
 
 # ---------------------------------------------------------------------------
@@ -1563,6 +1924,93 @@ class TestDocumentation:
         "power_bi/README.md" in text
     ), "dashboards/README.md must link to power_bi/README.md"
 
+  def test_tool_series_are_not_described_as_stacked(self):
+    """Tool Calls Over Time draws overlapping areas, so no doc says stacked."""
+    visual = json.loads(
+        (
+            POWER_BI
+            / "BQAA_Agent_Analytics.Report"
+            / "definition"
+            / "pages"
+            / "tool-usage"
+            / "visuals"
+            / "usage-tool-calls-over-time"
+            / "visual.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert visual["visual"]["visualType"] == "areaChart"
+    for rel in (
+        "README.md",
+        "USER_MANUAL.md",
+        "docs/index.html",
+        "docs/configurator.mjs",
+        "docs/pbip-bundle.js",
+    ):
+      text = (POWER_BI / rel).read_text(encoding="utf-8")
+      assert "stacked by tool name" not in text, rel
+    for rel in ("USER_MANUAL.md", "docs/configurator.mjs"):
+      text = (POWER_BI / rel).read_text(encoding="utf-8")
+      assert "broken down by tool name" in text, rel
+
+  def test_readme_says_a_card_is_never_empty(self):
+    """Only a grouped visual can be EMPTY; a card must return one row."""
+    readme = " ".join(
+        (POWER_BI / "README.md").read_text(encoding="utf-8").split()
+    )
+    assert (
+        "A grouped visual (area or bar chart) that is empty on both sides is"
+        " `EMPTY`, because nothing was compared." in readme
+    )
+    assert (
+        "A `cardVisual` is never `EMPTY`: its DAX query must return exactly"
+        " one row, and a missing oracle row fails it" in readme
+    )
+    assert "A chart that is empty on both sides is `EMPTY`" not in readme
+
+  def test_preview_heading_names_its_capture_revision(self):
+    """The static preview says which revision it shows and that it is static."""
+    html = (POWER_BI / "docs" / "index.html").read_text(encoding="utf-8")
+    match = re.search(
+        r'<h2 id="preview-heading" data-capture-revision="([0-9a-f]{7,40})">'
+        r"(.*?)</h2>",
+        html,
+        re.DOTALL,
+    )
+    assert match, "the preview heading names no capture revision"
+    revision = match.group(1)
+    heading = " ".join(match.group(2).split())
+    captured = re.search(
+        rf"static capture at {revision} on (\d{{4}}-\d{{2}}-\d{{2}});", heading
+    )
+    assert captured, heading
+    assert "not a live check of the current package" in heading
+    # The configurator never rewrites the heading.
+    configurator = (POWER_BI / "docs" / "configurator.mjs").read_text(
+        encoding="utf-8"
+    )
+    assert "preview-heading" not in configurator
+    # Where the capture revision is in this clone's history, the label carries
+    # its commit date and the screenshots are unchanged since it, so a
+    # recapture must update the label.
+    try:
+      known = _git("cat-file", "-e", f"{revision}^{{commit}}").returncode == 0
+    except FileNotFoundError:
+      known = False
+    if known and (
+        _git("merge-base", "--is-ancestor", revision, "HEAD").returncode == 0
+    ):
+      shown = _git("show", "-s", "--format=%cs", revision)
+      assert shown.stdout.strip() == captured.group(1)
+      changed = _git(
+          "diff",
+          "--name-only",
+          revision,
+          "--",
+          "dashboards/power_bi/screenshots",
+      )
+      assert changed.returncode == 0, changed.stderr
+      assert changed.stdout == ""
+
   def test_web_configurator_files_and_js_pkzip(self, tmp_path):
     """Verify dashboards/power_bi/docs/ configurator files and pure-JS PKZIP builder."""
     import zipfile
@@ -1946,6 +2394,109 @@ emit({ base, cases, intact: attempt(() => cfg.buildCustomPbipBundle(bundle, data
         with pytest.raises(ValueError) as python_error:
           gen_mod.rewrite_expressions_parameters(text, **python_kwargs)
         assert str(python_error.value) == message
+
+  # Duplicate declarations a hand edit could leave behind.  None carries the
+  # `meta [IsParameterQuery=true, ...]` annotation the rewrite itself matches.
+  _DUPLICATE_FORMS = {
+      "metadata_free": 'expression {name} = "stale"',
+      "quoted_name": "expression '{name}' = \"stale\"",
+      "multiline": 'expression {name} =\n\t\t"stale"',
+      "indented_no_spaces": '  expression {name}="stale"',
+      "tab_separated": 'expression\t{name}\t= "stale"',
+  }
+  # Lines that only look like a declaration.
+  _NOT_DECLARATIONS = (
+      '/// expression BQAA_ProjectId = "stale"\n'
+      '// expression BQAA_ProjectId = "stale"\n'
+      "\t/// expression 'BQAA_DatasetId' = \"stale\"\n"
+      'expression BQAA_ProjectIdBackup = "stale"\n'
+      'expression XBQAA_TableId = "stale"\n'
+      'expression BQAA_TableIds = "stale"'
+  )
+  _PYTHON_KWARGS = {
+      "project": "my-org-proj-99",
+      "dataset": "prod_telemetry",
+      "table": "agent_events",
+      "billing_project": "my-billing-proj-99",
+      "window_end": "2026-07-16",
+      "lookback_days": 14,
+      "use_storage_api": False,
+  }
+
+  def test_rewrite_rejects_a_duplicate_declaration_without_metadata(self):
+    """Every duplicate form fails in the browser and in Python, for all seven."""
+    gen_mod = _load_tool_module("generate_pbip")
+    out = _run_node(
+        r"""
+const base = bundle[EXPR_KEY];
+const results = {};
+for (const name of data.names) {
+  for (const [form, template] of Object.entries(data.forms)) {
+    const duplicate = template.replaceAll("{name}", name);
+    for (const [where, text] of [
+      ["appended", `${base}\n${duplicate}\n`],
+      ["prepended", `${duplicate}\n\n${base}`],
+    ]) {
+      results[`${name}|${form}|${where}`] = {
+        rewrite: attempt(() => cfg.rewriteExpressionsTmdl(text, data.config)),
+        bundle: attempt(() =>
+          Object.keys(
+            cfg.buildCustomPbipBundle({ ...bundle, [EXPR_KEY]: text }, data.config),
+          ).length,
+        ),
+      };
+    }
+  }
+}
+const noisy = `${base}\n${data.noise}\n`;
+emit({
+  base,
+  results,
+  noisy: attempt(() => cfg.rewriteExpressionsTmdl(noisy, data.config)),
+});
+""",
+        data={
+            "names": list(_BQAA_PARAMETERS),
+            "forms": self._DUPLICATE_FORMS,
+            "noise": self._NOT_DECLARATIONS,
+            "config": _CUSTOM_CONFIG,
+        },
+    )
+    base = out["base"]
+    assert len(out["results"]) == len(_BQAA_PARAMETERS) * 5 * 2
+    for key, result in out["results"].items():
+      name, form, where = key.split("|")
+      message = (
+          f"Expected exactly 1 declaration for {name} in expressions.tmdl,"
+          " found 2"
+      )
+      # The rewrite and the full packaging path both refuse the bundle ...
+      assert result["rewrite"] == {"ok": False, "message": message}, key
+      assert result["bundle"] == {"ok": False, "message": message}, key
+      # ... and so does the Python generator, with the same words.
+      duplicate = self._DUPLICATE_FORMS[form].format(name=name)
+      text = (
+          f"{base}\n{duplicate}\n"
+          if where == "appended"
+          else f"{duplicate}\n\n{base}"
+      )
+      with pytest.raises(ValueError) as python_error:
+        gen_mod.rewrite_expressions_parameters(text, **self._PYTHON_KWARGS)
+      assert str(python_error.value) == message, key
+    # Control: comments and similar names are not declarations, and both
+    # packagers rewrite around them identically.
+    noisy = f"{base}\n{self._NOT_DECLARATIONS}\n"
+    assert out["noisy"]["ok"] is True, out["noisy"]
+    assert out["noisy"]["value"] == gen_mod.rewrite_expressions_parameters(
+        noisy, **self._PYTHON_KWARGS
+    )
+    assert out["noisy"]["value"].endswith(f"{self._NOT_DECLARATIONS}\n")
+    assert (
+        out["noisy"]["value"].count(
+            'expression BQAA_ProjectId = "my-org-proj-99" meta'
+        )
+        == 1
+    )
 
   @pytest.mark.parametrize(
       "config,python_kwargs",
@@ -2504,6 +3055,79 @@ class TestCIWorkflow:
             f"{path.relative_to(ROOT)} contains internal shorthand tag "
             f"{match.group(0)!r}"
         )
+
+  # -- GitHub Pages staging (looker-studio-pages.yml) -------------------------
+
+  _PAGES_STAGE_STEP = (
+      "Stage Power BI configurator and screenshots under /power-bi"
+  )
+
+  @classmethod
+  def _pages_stage_script(cls):
+    path = ROOT / ".github" / "workflows" / "looker-studio-pages.yml"
+    jobs = yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]
+    steps = jobs["deploy"]["steps"]
+    stage = [s for s in steps if s.get("name") == cls._PAGES_STAGE_STEP]
+    assert len(stage) == 1, [s.get("name") for s in steps]
+    return stage[0]["run"]
+
+  @pytest.mark.parametrize("site_has_screenshots", [True, False])
+  def test_pages_staging_keeps_site_files_it_does_not_own(
+      self, tmp_path, site_has_screenshots
+  ):
+    """Staging adds the Power BI page and images; the site's files survive."""
+    import shutil
+
+    site = tmp_path / "dashboards" / "looker_studio" / "docs"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text("<p>site</p>\n", encoding="utf-8")
+    keep = site / "screenshots" / "keep.txt"
+    if site_has_screenshots:
+      keep.parent.mkdir()
+      keep.write_text("site asset\n", encoding="utf-8")
+    stale = site / "power-bi" / "stale.txt"
+    stale.parent.mkdir()
+    stale.write_text("previous build\n", encoding="utf-8")
+    pbi = tmp_path / "dashboards" / "power_bi"
+    shutil.copytree(POWER_BI / "docs", pbi / "docs")
+    shutil.copytree(POWER_BI / "screenshots", pbi / "screenshots")
+
+    script = self._pages_stage_script()
+    for _ in range(2):  # A re-run stages the same tree.
+      proc = subprocess.run(
+          ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+          cwd=tmp_path,
+          capture_output=True,
+          text=True,
+          check=False,
+      )
+      assert proc.returncode == 0, proc.stderr
+
+    assert (site / "index.html").read_text(encoding="utf-8") == "<p>site</p>\n"
+    if site_has_screenshots:
+      assert keep.read_text(encoding="utf-8") == "site asset\n"
+    # The step owns /power-bi only, so a stale file there is replaced.
+    assert not stale.exists()
+    page = site / "power-bi"
+    assert (page / "index.html").read_bytes() == (
+        POWER_BI / "docs" / "index.html"
+    ).read_bytes()
+    # Every preview image the page references resolves on the staged site to
+    # the same bytes it resolves to when dashboards/power_bi is served locally.
+    refs = set()
+    for name in ("index.html", "configurator.mjs"):
+      refs.update(
+          re.findall(
+              r"[\"'](\.\./screenshots/[^\"']+)[\"']",
+              (page / name).read_text(encoding="utf-8"),
+          )
+      )
+    assert len(refs) == 8, sorted(refs)
+    for ref in sorted(refs):
+      staged = (page / ref).resolve()
+      assert staged.is_relative_to(site.resolve()), ref
+      local = (POWER_BI / "docs" / ref).resolve()
+      assert staged.read_bytes() == local.read_bytes(), ref
 
 
 # ---------------------------------------------------------------------------

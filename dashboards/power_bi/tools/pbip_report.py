@@ -226,7 +226,7 @@ def _build_area_visual(vdef, model_spec):
       "Y": {"projections": [measure_proj]},
   }
 
-  # Series (pivot) for stacked area charts
+  # Series (pivot): one overlapping area per series value, not a stack
   series_field = vdef.get("series")
   if series_field:
     sparts = series_field.split(".")

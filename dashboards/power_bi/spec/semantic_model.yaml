@@ -213,10 +213,15 @@ relationships:
     is_active: true
 
 measures:
+  # comparison_type is how the live check compares a measure with its
+  # oracle: int = exact equality (counts, token totals), float = relative
+  # tolerance (averages, percentiles, Change %).  pbip_model checks it
+  # against format_string and the DAX shape.
   # Base measures (20)
   - name: Total Tokens
     display_folder: Base
     format_string: "#,0"
+    comparison_type: int
     dax: "SUM('events_v1'[usage_total_tokens])"
     oracle_queries:
       - oracle/queries/usage-total-tokens-consumption-over-the-time.sql
@@ -227,6 +232,7 @@ measures:
   - name: Total Traces
     display_folder: Base
     format_string: "#,0"
+    comparison_type: int
     dax: "DISTINCTCOUNTNOBLANK('events_v1'[trace_id])"
     oracle_queries:
       - oracle/queries/usage-total-traces-generation-over-the-time.sql
@@ -235,6 +241,7 @@ measures:
   - name: Total Sessions
     display_folder: Base
     format_string: "#,0"
+    comparison_type: int
     dax: "DISTINCTCOUNTNOBLANK('events_v1'[session_id])"
     oracle_queries:
       - oracle/queries/usage-number-of-sessions-trend.sql
@@ -243,6 +250,7 @@ measures:
   - name: Total Users
     display_folder: Base
     format_string: "#,0"
+    comparison_type: int
     dax: "DISTINCTCOUNTNOBLANK('events_v1'[user_id])"
     oracle_queries:
       - oracle/queries/usage-user-growth-over-time.sql
@@ -251,6 +259,7 @@ measures:
   - name: Total Events
     display_folder: Base
     format_string: "#,0"
+    comparison_type: int
     dax: "COUNTROWS('events_v1')"
     oracle_queries:
       - oracle/queries/usage-top-5-users-by-events.sql
@@ -259,6 +268,7 @@ measures:
   - name: LLM Calls
     display_folder: Base
     format_string: "#,0"
+    comparison_type: int
     dax: "DISTINCTCOUNTNOBLANK('events_v1'[llm_response_pk])"
     oracle_queries:
       - oracle/queries/usage-llm-call-trends.sql
@@ -268,6 +278,7 @@ measures:
   - name: Tool Completion Events
     display_folder: Base
     format_string: "#,0"
+    comparison_type: int
     dax: "CALCULATE(COUNTROWS('events_v1'), KEEPFILTERS('events_v1'[event_type] = \"TOOL_COMPLETED\"))"
     oracle_queries:
       - oracle/queries/usage-tool-calls-over-time.sql
@@ -276,6 +287,7 @@ measures:
   - name: Distinct Tool Invocations
     display_folder: Base
     format_string: "#,0"
+    comparison_type: int
     dax: "CALCULATE(DISTINCTCOUNTNOBLANK('events_v1'[invocation_id]), KEEPFILTERS('events_v1'[event_type] = \"TOOL_COMPLETED\"), KEEPFILTERS(NOT ISBLANK('events_v1'[tool_completed_name])))"
     oracle_queries:
       - oracle/queries/usage-tool-invocations.sql
@@ -284,6 +296,7 @@ measures:
   - name: Tool Errors
     display_folder: Base
     format_string: "#,0"
+    comparison_type: int
     dax: "DISTINCTCOUNTNOBLANK('events_v1'[tool_error_pk])"
     oracle_queries:
       - oracle/queries/performance-tool-errors-trend.sql
@@ -292,6 +305,7 @@ measures:
   - name: Avg Tool Latency (ms)
     display_folder: Base
     format_string: "#,0.0"
+    comparison_type: float
     dax: "AVERAGE('events_v1'[tool_completed_total_ms])"
     oracle_queries:
       - oracle/queries/performance-average-tool-latency-ms.sql
@@ -301,6 +315,7 @@ measures:
   - name: Avg LLM Latency (ms)
     display_folder: Base
     format_string: "#,0.0"
+    comparison_type: float
     dax: "AVERAGE('events_v1'[llm_total_ms])"
     oracle_queries:
       - oracle/queries/performance-average-llm-latency-in-ms.sql
@@ -310,6 +325,7 @@ measures:
   - name: P50 Tool Latency (ms)
     display_folder: Base
     format_string: "#,0.0"
+    comparison_type: float
     dax: "CALCULATE(PERCENTILE.INC('events_v1'[tool_completed_total_ms], 0.50), KEEPFILTERS(NOT ISBLANK('events_v1'[tool_completed_total_ms])))"
     oracle_queries:
       - oracle/queries/performance-p50-tool-latency.sql
@@ -318,6 +334,7 @@ measures:
   - name: P75 Tool Latency (ms)
     display_folder: Base
     format_string: "#,0.0"
+    comparison_type: float
     dax: "CALCULATE(PERCENTILE.INC('events_v1'[tool_completed_total_ms], 0.75), KEEPFILTERS(NOT ISBLANK('events_v1'[tool_completed_total_ms])))"
     oracle_queries:
       - oracle/queries/performance-p75-tool-latency.sql
@@ -326,6 +343,7 @@ measures:
   - name: P90 Tool Latency (ms)
     display_folder: Base
     format_string: "#,0.0"
+    comparison_type: float
     dax: "CALCULATE(PERCENTILE.INC('events_v1'[tool_completed_total_ms], 0.90), KEEPFILTERS(NOT ISBLANK('events_v1'[tool_completed_total_ms])))"
     oracle_queries:
       - oracle/queries/performance-p90-tool-latency.sql
@@ -334,6 +352,7 @@ measures:
   - name: P99 Tool Latency (ms)
     display_folder: Base
     format_string: "#,0.0"
+    comparison_type: float
     dax: "CALCULATE(PERCENTILE.INC('events_v1'[tool_completed_total_ms], 0.99), KEEPFILTERS(NOT ISBLANK('events_v1'[tool_completed_total_ms])))"
     oracle_queries:
       - oracle/queries/performance-p99-tool-latency.sql
@@ -342,6 +361,7 @@ measures:
   - name: P50 LLM Latency (ms)
     display_folder: Base
     format_string: "#,0.0"
+    comparison_type: float
     dax: "CALCULATE(PERCENTILE.INC('events_v1'[llm_total_ms], 0.50), KEEPFILTERS(NOT ISBLANK('events_v1'[llm_total_ms])))"
     oracle_queries:
       - oracle/queries/performance-p50-llm-latency.sql
@@ -350,6 +370,7 @@ measures:
   - name: P75 LLM Latency (ms)
     display_folder: Base
     format_string: "#,0.0"
+    comparison_type: float
     dax: "CALCULATE(PERCENTILE.INC('events_v1'[llm_total_ms], 0.75), KEEPFILTERS(NOT ISBLANK('events_v1'[llm_total_ms])))"
     oracle_queries:
       - oracle/queries/performance-p75-llm-latency.sql
@@ -358,6 +379,7 @@ measures:
   - name: P90 LLM Latency (ms)
     display_folder: Base
     format_string: "#,0.0"
+    comparison_type: float
     dax: "CALCULATE(PERCENTILE.INC('events_v1'[llm_total_ms], 0.90), KEEPFILTERS(NOT ISBLANK('events_v1'[llm_total_ms])))"
     oracle_queries:
       - oracle/queries/performance-p90-llm-latency.sql
@@ -366,6 +388,7 @@ measures:
   - name: P99 LLM Latency (ms)
     display_folder: Base
     format_string: "#,0.0"
+    comparison_type: float
     dax: "CALCULATE(PERCENTILE.INC('events_v1'[llm_total_ms], 0.99), KEEPFILTERS(NOT ISBLANK('events_v1'[llm_total_ms])))"
     oracle_queries:
       - oracle/queries/performance-p99-llm-latency.sql
@@ -374,6 +397,7 @@ measures:
   - name: Traces for Agents With Tokens
     display_folder: Base
     format_string: "#,0"
+    comparison_type: int
     dax: "IF(ISBLANK([Total Tokens]) || ISBLANK(SELECTEDVALUE('events_v1'[agent])), BLANK(), [Total Traces])"
     oracle_queries:
       - oracle/queries/usage-traces-split-by-agent.sql
@@ -383,6 +407,7 @@ measures:
   - name: KPI Total Tokens
     display_folder: Scorecards
     format_string: "#,0"
+    comparison_type: int
     dax: "[Total Tokens]"
     oracle_queries:
       - oracle/queries/usage-total-tokens.sql
@@ -391,6 +416,7 @@ measures:
   - name: KPI Total Tokens Prior
     display_folder: Scorecards
     format_string: "#,0"
+    comparison_type: int
     dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE([Total Tokens], REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
     oracle_queries:
       - oracle/queries/usage-total-tokens.sql
@@ -399,6 +425,7 @@ measures:
   - name: KPI Total Tokens Change %
     display_folder: Scorecards
     format_string: "+0.0%;-0.0%;0.0%"
+    comparison_type: float
     dax: "VAR _cur = [Total Tokens] VAR _prev = [KPI Total Tokens Prior] RETURN IF(ISBLANK(_cur) || ISBLANK(_prev), BLANK(), DIVIDE(_cur - _prev, _prev))"
     oracle_queries:
       - oracle/queries/usage-total-tokens.sql
@@ -407,6 +434,7 @@ measures:
   - name: KPI Total Traces
     display_folder: Scorecards
     format_string: "#,0"
+    comparison_type: int
     dax: "COALESCE([Total Traces], 0)"
     oracle_queries:
       - oracle/queries/usage-total-traces.sql
@@ -415,6 +443,7 @@ measures:
   - name: KPI Total Traces Prior
     display_folder: Scorecards
     format_string: "#,0"
+    comparison_type: int
     dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE(COALESCE([Total Traces], 0), REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
     oracle_queries:
       - oracle/queries/usage-total-traces.sql
@@ -423,6 +452,7 @@ measures:
   - name: KPI Total Traces Change %
     display_folder: Scorecards
     format_string: "+0.0%;-0.0%;0.0%"
+    comparison_type: float
     dax: "VAR _cur = [KPI Total Traces] VAR _prev = [KPI Total Traces Prior] RETURN DIVIDE(_cur - _prev, _prev)"
     oracle_queries:
       - oracle/queries/usage-total-traces.sql
@@ -431,6 +461,7 @@ measures:
   - name: KPI Total Sessions
     display_folder: Scorecards
     format_string: "#,0"
+    comparison_type: int
     dax: "COALESCE([Total Sessions], 0)"
     oracle_queries:
       - oracle/queries/usage-total-sessions.sql
@@ -439,6 +470,7 @@ measures:
   - name: KPI Total Sessions Prior
     display_folder: Scorecards
     format_string: "#,0"
+    comparison_type: int
     dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE(COALESCE([Total Sessions], 0), REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
     oracle_queries:
       - oracle/queries/usage-total-sessions.sql
@@ -447,6 +479,7 @@ measures:
   - name: KPI Total Sessions Change %
     display_folder: Scorecards
     format_string: "+0.0%;-0.0%;0.0%"
+    comparison_type: float
     dax: "VAR _cur = [KPI Total Sessions] VAR _prev = [KPI Total Sessions Prior] RETURN DIVIDE(_cur - _prev, _prev)"
     oracle_queries:
       - oracle/queries/usage-total-sessions.sql
@@ -455,6 +488,7 @@ measures:
   - name: KPI Total LLM Calls
     display_folder: Scorecards
     format_string: "#,0"
+    comparison_type: int
     dax: "COALESCE([LLM Calls], 0)"
     oracle_queries:
       - oracle/queries/usage-total-calls.sql
@@ -463,6 +497,7 @@ measures:
   - name: KPI Total LLM Calls Prior
     display_folder: Scorecards
     format_string: "#,0"
+    comparison_type: int
     dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE(COALESCE([LLM Calls], 0), REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
     oracle_queries:
       - oracle/queries/usage-total-calls.sql
@@ -471,6 +506,7 @@ measures:
   - name: KPI Total LLM Calls Change %
     display_folder: Scorecards
     format_string: "+0.0%;-0.0%;0.0%"
+    comparison_type: float
     dax: "VAR _cur = [KPI Total LLM Calls] VAR _prev = [KPI Total LLM Calls Prior] RETURN DIVIDE(_cur - _prev, _prev)"
     oracle_queries:
       - oracle/queries/usage-total-calls.sql
@@ -479,6 +515,7 @@ measures:
   - name: KPI Total Users
     display_folder: Scorecards
     format_string: "#,0"
+    comparison_type: int
     dax: "COALESCE([Total Users], 0)"
     oracle_queries:
       - oracle/queries/usage-total-users.sql
@@ -487,6 +524,7 @@ measures:
   - name: KPI Total Users Prior
     display_folder: Scorecards
     format_string: "#,0"
+    comparison_type: int
     dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE(COALESCE([Total Users], 0), REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
     oracle_queries:
       - oracle/queries/usage-total-users.sql
@@ -495,6 +533,7 @@ measures:
   - name: KPI Total Users Change %
     display_folder: Scorecards
     format_string: "+0.0%;-0.0%;0.0%"
+    comparison_type: float
     dax: "VAR _cur = [KPI Total Users] VAR _prev = [KPI Total Users Prior] RETURN DIVIDE(_cur - _prev, _prev)"
     oracle_queries:
       - oracle/queries/usage-total-users.sql
@@ -503,6 +542,7 @@ measures:
   - name: KPI Tool Errors
     display_folder: Scorecards
     format_string: "#,0"
+    comparison_type: int
     dax: "COALESCE([Tool Errors], 0)"
     oracle_queries:
       - oracle/queries/performance-total-errors.sql
@@ -511,6 +551,7 @@ measures:
   - name: KPI Tool Errors Prior
     display_folder: Scorecards
     format_string: "#,0"
+    comparison_type: int
     dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE(COALESCE([Tool Errors], 0), REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
     oracle_queries:
       - oracle/queries/performance-total-errors.sql
@@ -519,6 +560,7 @@ measures:
   - name: KPI Tool Errors Change %
     display_folder: Scorecards
     format_string: "+0.0%;-0.0%;0.0%"
+    comparison_type: float
     dax: "VAR _cur = [KPI Tool Errors] VAR _prev = [KPI Tool Errors Prior] RETURN DIVIDE(_cur - _prev, _prev)"
     oracle_queries:
       - oracle/queries/performance-total-errors.sql
@@ -528,6 +570,7 @@ measures:
   - name: Token Usage by Agent
     display_folder: Charts
     format_string: "#,0"
+    comparison_type: int
     chart_id: usage-token-usage-split-by-agent
     top_n: 5
     dimension: "'events_v1'[agent]"
@@ -540,6 +583,7 @@ measures:
   - name: Top 5 Users by Token Consumption
     display_folder: Charts
     format_string: "#,0"
+    comparison_type: int
     chart_id: usage-top-5-users-with-most-tokens-consumption
     top_n: 5
     dimension: "'events_v1'[user_id]"
@@ -552,6 +596,7 @@ measures:
   - name: Top 5 Users by Traces
     display_folder: Charts
     format_string: "#,0"
+    comparison_type: int
     chart_id: usage-top-5-users-with-most-traces
     top_n: 5
     dimension: "'events_v1'[user_id]"
@@ -564,6 +609,7 @@ measures:
   - name: Traces by Agent
     display_folder: Charts
     format_string: "#,0"
+    comparison_type: int
     chart_id: usage-traces-split-by-agent
     top_n: 5
     dimension: "'events_v1'[agent]"
@@ -576,6 +622,7 @@ measures:
   - name: Top 5 Agents by Sessions
     display_folder: Charts
     format_string: "#,0"
+    comparison_type: int
     chart_id: usage-top-5-agents-split-by-session-count
     top_n: 5
     dimension: "'events_v1'[agent]"
@@ -588,6 +635,7 @@ measures:
   - name: Tool Invocations
     display_folder: Charts
     format_string: "#,0"
+    comparison_type: int
     chart_id: usage-tool-invocations
     top_n: 10
     dimension: "'events_v1'[tool_completed_name]"
@@ -600,6 +648,7 @@ measures:
   - name: Tool Completions by Agent
     display_folder: Charts
     format_string: "#,0"
+    comparison_type: int
     chart_id: usage-events-by-agent
     top_n: 10
     dimension: "'events_v1'[agent]"
@@ -612,6 +661,7 @@ measures:
   - name: Top 5 Users by Sessions
     display_folder: Charts
     format_string: "#,0"
+    comparison_type: int
     chart_id: usage-top-5-users-by-session
     top_n: 5
     dimension: "'events_v1'[user_id]"
@@ -624,6 +674,7 @@ measures:
   - name: Top 5 Users by Events
     display_folder: Charts
     format_string: "#,0"
+    comparison_type: int
     chart_id: usage-top-5-users-by-events
     top_n: 5
     dimension: "'events_v1'[user_id]"
@@ -636,6 +687,7 @@ measures:
   - name: Top 5 Agents by Tool Errors
     display_folder: Charts
     format_string: "#,0"
+    comparison_type: int
     chart_id: performance-top-5-agents-by-errors
     top_n: 5
     dimension: "'events_v1'[agent]"
@@ -648,6 +700,7 @@ measures:
   - name: Top 5 Tools by Errors
     display_folder: Charts
     format_string: "#,0"
+    comparison_type: int
     chart_id: performance-top-5-tools-by-errors
     top_n: 5
     dimension: "'events_v1'[tool_error_name]"
@@ -660,6 +713,7 @@ measures:
   - name: Top 5 Agents by LLM Calls
     display_folder: Charts
     format_string: "#,0"
+    comparison_type: int
     chart_id: usage-top-5-agents-by-llm-calls
     top_n: 5
     dimension: "'events_v1'[agent]"

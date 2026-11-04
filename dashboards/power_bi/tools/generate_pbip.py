@@ -251,6 +251,26 @@ def rewrite_expressions_parameters(
       "BQAA_UseStorageApi": "true" if use_storage_api else "false",
   }
   updated = expr_text
+  # Pre-pass: count every declaration header independently of the right-hand
+  # side and metadata, so a metadata-free duplicate (e.g.
+  # `expression BQAA_ProjectId = "stale"`) is caught before the annotated
+  # rewrite runs.  TMDL comment lines are skipped.
+  non_comment_text = "\n".join(
+      ln
+      for ln in updated.splitlines()
+      if not ln.lstrip().startswith("///") and not ln.lstrip().startswith("//")
+  )
+  for param_name in replacements:
+    decl_re = re.compile(
+        rf"^[ \t]*expression[ \t]+(?:'{re.escape(param_name)}'|{re.escape(param_name)})[ \t]*=",
+        re.MULTILINE,
+    )
+    found = len(decl_re.findall(non_comment_text))
+    if found != 1:
+      raise ValueError(
+          f"Expected exactly 1 declaration for {param_name} in"
+          f" expressions.tmdl, found {found}"
+      )
   for param_name, literal_val in replacements.items():
     pattern = re.compile(
         rf"^(expression {re.escape(param_name)} = ).*?( meta \[IsParameterQuery=true, .*\])$",

@@ -42,7 +42,7 @@ table events_v1
 		formatString: #,0
 		displayFolder: Base
 		lineageTag: b57ede15-d020-5401-b91d-438927abc438
-		annotation bqaa_oracle_sha256 = aee8321e0a9e736b
+		annotation bqaa_oracle_sha256 = 1abf9f7a3e508f8c
 
 	/// measure Tool Completion Events — oracle/queries/usage-tool-calls-over-time.sql (total_events)
 	measure 'Tool Completion Events' = CALCULATE(COUNTROWS('events_v1'), KEEPFILTERS('events_v1'[event_type] = "TOOL_COMPLETED"))
@@ -350,7 +350,7 @@ table events_v1
 		formatString: #,0
 		displayFolder: Charts
 		lineageTag: 7dc47be4-764c-5fb3-aa7d-765a07927875
-		annotation bqaa_oracle_sha256 = 09647704f45a7fcf
+		annotation bqaa_oracle_sha256 = d7cfce34e5a2d093
 
 	/// Column timestamp — sourceColumn=timestamp dataType=dateTime
 	column timestamp

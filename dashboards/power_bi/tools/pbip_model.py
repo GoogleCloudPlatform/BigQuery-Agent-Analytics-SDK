@@ -150,6 +150,48 @@ VALID_TMDL_DATA_TYPES: frozenset[str] = frozenset(
     }
 )
 
+# How the live check compares a measure with its oracle (spec.md §9.2): "int"
+# is exact equality, "float" a relative tolerance.  Each measure declares its
+# type, and the type must agree with both the display format and the DAX
+# shape, so neither a format edit nor a mislabelled type can loosen an exact
+# count.
+COMPARISON_TYPES: tuple[str, ...] = ("int", "float")
+INT_FORMAT_STRING = "#,0"
+FLOAT_FORMAT_STRINGS: tuple[str, ...] = ("#,0.0", "#,0.00", "+0.0%;-0.0%;0.0%")
+# DAX functions whose result is fractional even over integer inputs.
+_FRACTIONAL_DAX_RE = re.compile(
+    r"\b(?:AVERAGEX?|MEDIANX?|DIVIDE|PERCENTILEX?\.(?:INC|EXC))\s*\(",
+    re.IGNORECASE,
+)
+# A bare [Measure] reference; 'table'[column] and table[column] are skipped.
+_MEASURE_REF_RE = re.compile(r"(?<![\w'\]])\[([^\[\]]+)\]")
+
+
+def infer_comparison_types(
+    measures: list[Mapping[str, Any]],
+) -> dict[str, str]:
+  """Return ``{measure name: "int" | "float"}`` from the DAX shape alone.
+
+  A measure is "float" when its DAX calls a fractional function (average,
+  median, percentile, DIVIDE) or references a "float" measure.  Every other
+  measure of this model is a count or a sum of integer columns, so "int".
+  """
+  names = {m["name"] for m in measures}
+  inferred = {}
+  refs = {}
+  for m in measures:
+    dax = m.get("dax") or ""
+    inferred[m["name"]] = "float" if _FRACTIONAL_DAX_RE.search(dax) else "int"
+    refs[m["name"]] = set(_MEASURE_REF_RE.findall(dax)) & names
+  changed = True
+  while changed:
+    changed = False
+    for name, deps in refs.items():
+      if inferred[name] == "int" and any(inferred[d] == "float" for d in deps):
+        inferred[name] = "float"
+        changed = True
+  return inferred
+
 
 def escape_m_string(text: str) -> str:
   """Escape a Python string for embedding inside a Power Query M string literal."""
@@ -421,6 +463,32 @@ def _validate_model_spec(contracts: Any, model_spec: Mapping[str, Any]) -> None:
               f"cited oracle query {oq!r} does not contain "
               f"COUNT(DISTINCT ... {distinct_col})"
           )
+
+  # Each measure declares how the live check compares it.  The declared type
+  # must match the display format and the DAX shape, so flipping a count's
+  # format to "#,0.0" (or its type to "float") cannot make an off-by-one
+  # count pass.
+  inferred_types = infer_comparison_types(measures)
+  for m in measures:
+    mname = m["name"]
+    ctype = m.get("comparison_type")
+    if ctype not in COMPARISON_TYPES:
+      raise ValueError(
+          f"Measure {mname!r} must declare comparison_type 'int' or "
+          f"'float', got {ctype!r}"
+      )
+    fmt = m.get("format_string")
+    allowed = (INT_FORMAT_STRING,) if ctype == "int" else FLOAT_FORMAT_STRINGS
+    if fmt not in allowed:
+      raise ValueError(
+          f"Measure {mname!r} has comparison_type {ctype!r} but "
+          f"format_string {fmt!r}; expected one of {allowed}"
+      )
+    if inferred_types[mname] != ctype:
+      raise ValueError(
+          f"Measure {mname!r} declares comparison_type {ctype!r}, but its "
+          f"DAX is {inferred_types[mname]!r}-shaped"
+      )
 
 
 def _emit_database_tmdl(model_spec: Mapping[str, Any]) -> str:

@@ -45,7 +45,7 @@ export const PREVIEW_PAGES = Object.freeze([
     id: "tool-usage",
     title: "3. Tool Usage",
     caption:
-      "Tool Calls Over Time stacked by tool name, Tool Invocations (Top 10), and Tool Completions by Agent (Top 10).",
+      "Tool Calls Over Time broken down by tool name, Tool Invocations (Top 10), and Tool Completions by Agent (Top 10).",
     screenshot: "../screenshots/03-tool-usage.png",
   },
   {
@@ -328,6 +328,26 @@ export function rewriteExpressionsTmdl(exprText, config) {
   ];
 
   let updated = String(exprText);
+  // Pre-pass: count every declaration header independently of the right-hand
+  // side and metadata, so a metadata-free duplicate (e.g.
+  // `expression BQAA_ProjectId = "stale"`) is caught before the annotated
+  // rewrite runs.  TMDL comment lines are skipped.
+  const nonCommentText = updated
+    .split(/\r?\n/)
+    .filter((ln) => !ln.trimStart().startsWith("///") && !ln.trimStart().startsWith("//"))
+    .join("\n");
+  for (const [paramName] of replacements) {
+    const declRe = new RegExp(
+      `^[ \\t]*expression[ \\t]+(?:'${paramName}'|${paramName})[ \\t]*=`,
+      "gm",
+    );
+    const declCount = Array.from(nonCommentText.matchAll(declRe)).length;
+    if (declCount !== 1) {
+      throw new Error(
+        `Expected exactly 1 declaration for ${paramName} in expressions.tmdl, found ${declCount}`,
+      );
+    }
+  }
   for (const [paramName, literalVal] of replacements) {
     // Count every declaration first: a missing or duplicated one means the
     // bundled source is malformed, and rewriting only the first match would

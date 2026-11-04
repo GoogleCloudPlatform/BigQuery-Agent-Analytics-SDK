@@ -149,8 +149,10 @@ def load_chart_metadata():
     measures = visual.get("measures", [])
     measure_info = []
     for m in measures:
-      info = dict(measure_map.get(m, {}))
-      info["comparison_type"] = _measure_comparison_type(measure_map.get(m, {}))
+      if m not in measure_map:
+        raise ValueError(f"chart {cid!r} binds unknown measure {m!r}")
+      info = dict(measure_map[m])
+      info["comparison_type"] = _measure_comparison_type(measure_map[m])
       measure_info.append(info)
     enriched.append(
         {
@@ -449,16 +451,21 @@ def _resolve_oracle_col(oracle_row, oracle_col):
 
 
 def _measure_comparison_type(measure_dict):
-  """Derive ``"int"`` or ``"float"`` from a measure's ``format_string``."""
-  if not isinstance(measure_dict, dict):
-    return None
-  fmt = measure_dict.get("format_string", "")
-  if not fmt:
-    return None
-  # Percentage and decimal formats imply float comparison.
-  if "%" in fmt or ".0" in fmt or ".00" in fmt:
-    return "float"
-  return "int"
+  """Return a measure's declared ``comparison_type``: ``"int"`` or ``"float"``.
+
+  The type is an explicit field of semantic_model.yaml, checked by the
+  generator against the measure's format and DAX.  It is never derived from
+  the display format, and a missing or unknown type stops the run.
+  """
+  ctype = (
+      measure_dict.get("comparison_type")
+      if isinstance(measure_dict, dict)
+      else None
+  )
+  if ctype not in ("int", "float"):
+    name = measure_dict.get("name") if isinstance(measure_dict, dict) else None
+    raise ValueError(f"measure {name!r} has no valid comparison_type")
+  return ctype
 
 
 def compare_card(oracle_row, dax_rows, oracle_cols, metric_types=None):
@@ -540,7 +547,12 @@ def compare_series(
   axis label (which can be user data) never reaches a receipt.
   """
   oracle_map = {}
+  seen_oracle_keys = set()
   for row in oracle_rows:
+    if not isinstance(row, dict):
+      return False, "oracle_row_type", None, None
+    if axis_col not in row or value_col not in row:
+      return False, "oracle_missing_key", None, None
     key = str(row.get(axis_col, ""))
     if has_series:
       if "tool_completed_name" in row:
@@ -550,12 +562,23 @@ def compare_series(
       else:
         return False, "missing_series", None, None
       key = (key, _dim_key(s_val))
+    if key in seen_oracle_keys:
+      return False, "duplicate_axis_key", None, None
+    seen_oracle_keys.add(key)
     oracle_map[key] = row.get(value_col)
 
   dax_map = {}
+  seen_dax_keys = set()
+  axis_keys = ("Date[Date]", "[Date]", f"events_v1[{axis_col}]", axis_col)
   for dax_row in dax_rows:
     if not isinstance(dax_row, dict):
-      continue
+      return False, "dax_row_type", None, None
+    # Require explicit metric key presence on the DAX row.
+    if not _has_dax_key(dax_row, "v"):
+      return False, "dax_missing_metric", None, None
+    # Require an axis key too: a row without one would be keyed "None".
+    if not any(_has_dax_key(dax_row, key) for key in axis_keys):
+      return False, "dax_missing_axis", None, None
     # Extract axis key - try multiple key forms
     date_val = (
         _get_dax_value(dax_row, "Date[Date]")
@@ -576,6 +599,12 @@ def compare_series(
       if not found:
         return False, "missing_series", None, None
       d_key = (d_key, _dim_key(series_val))
+
+    # Check for a duplicate axis key BEFORE any skip so a wrong-then-right
+    # duplicate or blank-then-right duplicate never overwrites or is ignored.
+    if d_key in seen_dax_keys:
+      return False, "duplicate_axis_key", None, None
+    seen_dax_keys.add(d_key)
 
     d_val = _get_dax_value(dax_row, "v")
     dax_map[d_key] = d_val
@@ -762,6 +791,8 @@ def build_dax_query(chart, start, end):
     measure = chart["measures"][0]
     series = chart.get("series", "")
     if series:
+      # Every date/series group, uncapped: the visual has no row cap, and the
+      # oracle of a series chart runs without its LIMIT (README D13).
       col = _to_dax_col(series)
       return (
           f"EVALUATE SUMMARIZECOLUMNS('Date'[Date], {col}, "
@@ -879,6 +910,17 @@ def _daily_llm_trend_rows(oracle_path, args, billing_project, start, end):
         end,
     )
   return rows
+
+
+def oracle_runs_uncapped(chart):
+  """Return True when a chart's oracle query runs without its final LIMIT.
+
+  The LLM-call trend is re-aggregated to day grain, and a series chart (Tool
+  Calls Over Time) is drawn with no row cap, so every date/series group is
+  compared rather than the source's first 5,000 rows (README D13).  Top-N
+  charts drop the LIMIT for their separate tie-aware query.
+  """
+  return chart["id"] == "usage-llm-call-trends" or bool(chart.get("series"))
 
 
 def _compare_chart(chart, oracle_rows, topn_rows, dax_rows, allow_empty=False):
@@ -1004,7 +1046,7 @@ def _run_chart(chart, window, args, billing_project, token):
         args.location,
         start,
         end,
-        remove_limit=(chart_id == "usage-llm-call-trends"),
+        remove_limit=oracle_runs_uncapped(chart),
     )
     if chart_id == "usage-llm-call-trends":
       oracle_rows = _daily_llm_trend_rows(
@@ -1047,14 +1089,11 @@ def _run_chart(chart, window, args, billing_project, token):
     return result(STATUS_FAIL, "comparison_error", oracle_rows, dax_rows)
   if not is_match:
     return result(STATUS_FAIL, error, oracle_rows, dax_rows)
-  # A cardVisual that returned 0 DAX rows is a structural failure even under
-  # --allow-empty: a scalar card always returns exactly one row.  The
-  # compare_card function already rejects this via "dax_row_count", but if
-  # both sides are empty the check above would have passed it as EMPTY.
-  if chart["visual_type"] == "cardVisual" and not oracle_rows and not dax_rows:
-    return result(STATUS_FAIL, "empty_card", oracle_rows, dax_rows)
+  # A grouped visual (areaChart, clusteredBarChart) that is empty on both
+  # sides is EMPTY: nothing was compared.  A cardVisual is never EMPTY:
+  # a scalar card always returns exactly one row, so compare_card already
+  # rejects zero-row DAX results via "dax_row_count".
   if not oracle_rows and not dax_rows:
-    # Nothing was compared: an empty-versus-empty chart is not evidence.
     return result(STATUS_EMPTY, "empty_result", oracle_rows, dax_rows)
   return result(STATUS_PASS, None, oracle_rows, dax_rows, tie_adjusted)
 
@@ -1088,8 +1127,10 @@ def main(argv=None):
       "--allow-empty",
       action="store_true",
       help=(
-          "accept charts that are empty on both sides, and a run in which no"
-          " oracle query returned any row (for deliberate empty-window checks)"
+          "accept grouped visuals (area/bar charts) that are empty on both"
+          " sides, and a run in which no oracle query returned any row (for"
+          " deliberate empty-window checks); a cardVisual must always return"
+          " exactly one row and is never EMPTY"
       ),
   )
   parser.add_argument(

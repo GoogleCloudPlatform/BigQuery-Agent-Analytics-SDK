@@ -129,7 +129,7 @@ sessions. Scorecards show total traces and total sessions.
 
 ### 3. Tool Usage
 
-Tool calls over time (stacked by tool name), tool invocations, and tool
+Tool calls over time (broken down by tool name), tool invocations, and tool
 completions by agent.
 
 ### 4. LLM Interactions

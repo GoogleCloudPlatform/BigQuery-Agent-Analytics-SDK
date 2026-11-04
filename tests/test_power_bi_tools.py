@@ -28,6 +28,7 @@ import sys
 import tempfile
 
 import pytest
+import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 POWER_BI_ROOT = ROOT / "dashboards" / "power_bi"
@@ -1595,50 +1596,47 @@ def test_find_existing_item_name_match_is_exact(monkeypatch):
   assert _find() is None
 
 
-def test_find_existing_item_ignores_entries_without_an_id(monkeypatch):
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"displayName": NAME},
+        {"displayName": NAME, "id": None},
+        {"displayName": NAME, "id": ""},
+        {"displayName": NAME, "id": "   "},
+    ],
+    ids=["no-id", "null-id", "empty-id", "blank-id"],
+)
+def test_find_existing_item_rejects_a_match_without_an_id(monkeypatch, entry):
+  """A matching entry without a usable id is an error, never absence."""
   _install(
       monkeypatch,
-      (
-          "GET",
-          LIST_URL,
-          _resp(
-              200,
-              {
-                  "value": [
-                      {"displayName": NAME},
-                  ]
-              },
-          ),
-      ),
+      ("GET", LIST_URL, _resp(200, {"value": [_item(GUID_C, "other"), entry]})),
   )
-  assert _find() is None
-
-
-def test_find_existing_item_rejects_entries_with_bad_id(monkeypatch):
-  """A matched item with an invalid id raises ValueError, not silently skipped."""
-  _install(
-      monkeypatch,
-      (
-          "GET",
-          LIST_URL,
-          _resp(
-              200,
-              {
-                  "value": [
-                      {"displayName": NAME, "id": ""},
-                      {"displayName": NAME, "id": None},
-                      {"displayName": NAME, "id": 123},
-                  ]
-              },
-          ),
-      ),
-  )
-  with pytest.raises(ValueError, match="invalid"):
+  with pytest.raises(RuntimeError, match="with a missing or empty id"):
     _find()
 
 
-def test_find_existing_item_rejects_entries_with_non_guid_id(monkeypatch):
-  """A matched item with a non-GUID id raises ValueError."""
+@pytest.mark.parametrize(
+    "bad_id",
+    [123, "bad-id", GUID_B + "\n", ["x"]],
+    ids=["number", "not-a-guid", "trailing-newline", "list"],
+)
+def test_find_existing_item_rejects_a_match_with_an_invalid_id(
+    monkeypatch, bad_id
+):
+  """A matching entry whose id is not exactly one GUID raises ValueError."""
+  _install(
+      monkeypatch,
+      ("GET", LIST_URL, _resp(200, {"value": [_item(bad_id)]})),
+  )
+  with pytest.raises(ValueError, match="invalid semanticModels_id"):
+    _find()
+
+
+def test_find_existing_item_ignores_non_matching_entries_without_an_id(
+    monkeypatch,
+):
+  """Only a matching entry has to carry an id; other names are skipped."""
   _install(
       monkeypatch,
       (
@@ -1646,28 +1644,81 @@ def test_find_existing_item_rejects_entries_with_non_guid_id(monkeypatch):
           LIST_URL,
           _resp(
               200,
-              {
-                  "value": [
-                      {"displayName": NAME, "id": "bad-id"},
-                  ]
-              },
+              {"value": [{"displayName": "other"}, _item(GUID_B)]},
           ),
-      ),
-  )
-  with pytest.raises(ValueError, match="invalid"):
-    _find()
-
-
-def test_find_existing_item_skips_non_object_entries(monkeypatch):
-  _install(
-      monkeypatch,
-      (
-          "GET",
-          LIST_URL,
-          _resp(200, {"value": ["x", None, 3, [1], _item(GUID_B)]}),
       ),
   )
   assert _find() == GUID_B
+
+
+@pytest.mark.parametrize(
+    "junk", ["x", None, 3, [1]], ids=["string", "null", "number", "list"]
+)
+def test_find_existing_item_rejects_non_object_entries(monkeypatch, junk):
+  """A malformed entry could be the wanted item, so the listing fails."""
+  _install(
+      monkeypatch,
+      ("GET", LIST_URL, _resp(200, {"value": [junk, _item(GUID_B)]})),
+  )
+  with pytest.raises(RuntimeError, match="returned a non-object item"):
+    _find()
+
+
+@pytest.mark.parametrize(
+    "entry, error",
+    [
+        ({"displayName": "sample"}, RuntimeError),
+        ({"displayName": "sample", "id": None}, RuntimeError),
+        ({"displayName": "sample", "id": ""}, RuntimeError),
+        ({"displayName": "sample", "id": "not-a-guid"}, ValueError),
+        ("sample", RuntimeError),
+    ],
+    ids=["no-id", "null-id", "empty-id", "non-guid-id", "non-object"],
+)
+def test_deploy_item_update_never_creates_after_a_malformed_match(
+    monkeypatch, entry, error
+):
+  """Only the listing GET is sent; the malformed match never becomes a POST."""
+  fake = _install(
+      monkeypatch,
+      ("GET", REPORTS_URL, _resp(200, {"value": [entry]})),
+      ("POST", REPORTS_URL, _resp(201, {"id": GUID_C})),
+  )
+  with pytest.raises(error):
+    deploy_mod.deploy_item("tok", GUID_A, "reports", [], "sample", True)
+  assert [method for method, _, _ in fake.requests] == ["GET"]
+  assert fake.posts() == []
+
+
+def test_deploy_item_update_with_an_empty_listing_still_creates(monkeypatch):
+  fake = _install(
+      monkeypatch,
+      ("GET", REPORTS_URL, _resp(200, {"value": []})),
+      ("POST", REPORTS_URL, _resp(201, {"id": GUID_C})),
+  )
+  assert (
+      deploy_mod.deploy_item("tok", GUID_A, "reports", [], "sample", True)
+      == GUID_C
+  )
+  assert [method for method, _, _ in fake.requests] == ["GET", "POST"]
+  assert fake.posts()[0][2]["displayName"] == "sample"
+
+
+def test_deploy_item_update_with_a_valid_match_updates_in_place(monkeypatch):
+  fake = _install(
+      monkeypatch,
+      ("GET", REPORTS_URL, _resp(200, {"value": [_item(GUID_B, "sample")]})),
+      ("POST", f"{REPORTS_URL}/{GUID_B}/updateDefinition", _resp(200, b"")),
+  )
+  assert (
+      deploy_mod.deploy_item("tok", GUID_A, "reports", [], "sample", True)
+      == GUID_B
+  )
+  assert [(m, u) for m, u, _ in fake.requests] == [
+      ("GET", REPORTS_URL),
+      ("POST", f"{REPORTS_URL}/{GUID_B}/updateDefinition"),
+  ]
+  assert "displayName" not in fake.posts()[0][2]
 
 
 def test_find_existing_item_stops_on_a_self_referencing_continuation(
@@ -2950,4 +3001,677 @@ def test_compare_chart_card_requires_exactly_one_oracle_row_and_int_exactness():
   assert not validate_mod.values_match(10.5, 10.5, metric_type="int")
   assert validate_mod.values_match(
       1000000000.0, 1000000000.0, metric_type="int"
+  )
+
+
+# ---------------------------------------------------------------------------
+# Live validator: a malformed or repeated series row fails closed
+# ---------------------------------------------------------------------------
+
+_DAY = "2026-07-01"
+_NEXT_DAY = "2026-07-02"
+_TOKENS_OVER_TIME = "usage-total-tokens-consumption-over-the-time"
+_TOOL_CALLS = "usage-tool-calls-over-time"
+_LLM_AGENTS = "usage-top-5-agents-by-llm-calls"
+_NON_OBJECT_ROWS = ["garbage-row", None, 7, [_DAY, 5]]
+
+
+def _series(oracle, dax, has_series=False):
+  return validate_mod.compare_series(
+      oracle, dax, "v", "timestamp_date", has_series=has_series
+  )
+
+
+def _day_row(day, value, key="[Date]"):
+  return {key: f"{day}T00:00:00", "[v]": value}
+
+
+def _tool_day_row(day, tool, value):
+  return {
+      "[Date]": f"{day}T00:00:00",
+      "events_v1[tool_completed_name]": tool,
+      "[v]": value,
+  }
+
+
+@pytest.mark.parametrize(
+    "dax",
+    [
+        pytest.param(
+            [_day_row(_DAY, 999), _day_row(_DAY, 5)], id="wrong-then-right"
+        ),
+        pytest.param(
+            [_day_row(_DAY, 5), _day_row(_DAY, 999)], id="right-then-wrong"
+        ),
+        pytest.param([_day_row(_DAY, 5), _day_row(_DAY, 5)], id="identical"),
+        pytest.param(
+            [_day_row(_DAY, None), _day_row(_DAY, 5)], id="blank-then-right"
+        ),
+        pytest.param(
+            [_day_row(_DAY, 5), _day_row(_DAY, None)], id="right-then-blank"
+        ),
+        pytest.param(
+            [_day_row(_DAY, 5, key="Date[Date]"), {"[Date]": _DAY, "[v]": 5}],
+            id="one-day-two-spellings",
+        ),
+    ],
+)
+def test_compare_series_rejects_a_repeated_dax_date(dax):
+  oracle = [{"timestamp_date": _DAY, "v": 5}]
+  assert _series(oracle, dax) == (False, "duplicate_axis_key", None, None)
+
+
+def test_compare_series_one_row_per_date_matches_in_any_order():
+  oracle = [
+      {"timestamp_date": _DAY, "v": 5},
+      {"timestamp_date": _NEXT_DAY, "v": 7},
+  ]
+  dax = [_day_row(_DAY, 5), _day_row(_NEXT_DAY, 7)]
+  assert _series(oracle, dax) == (True, None, None, None)
+  assert _series(oracle[::-1], dax[::-1]) == (True, None, None, None)
+
+
+@pytest.mark.parametrize("first_value", [999, 5, None])
+def test_compare_series_rejects_a_repeated_oracle_date(first_value):
+  oracle = [
+      {"timestamp_date": _DAY, "v": first_value},
+      {"timestamp_date": _DAY, "v": 5},
+  ]
+  assert _series(oracle, [_day_row(_DAY, 5)]) == (
+      False,
+      "duplicate_axis_key",
+      None,
+      None,
+  )
+
+
+def test_compare_series_repeat_check_keys_on_the_date_and_tool_pair():
+  oracle = [
+      {"timestamp_date": _DAY, "tool_name": "search", "v": 4},
+      {"timestamp_date": _DAY, "tool_name": "fetch", "v": 2},
+  ]
+  two_tools = [
+      _tool_day_row(_DAY, "search", 4),
+      _tool_day_row(_DAY, "fetch", 2),
+  ]
+  # Two tools on one day are two groups, not a repeat.
+  assert _series(oracle, two_tools, True) == (True, None, None, None)
+  for repeated in (
+      [_tool_day_row(_DAY, "search", 4), _tool_day_row(_DAY, "search", 2)],
+      [_tool_day_row(_DAY, "search", 2), _tool_day_row(_DAY, "search", 4)],
+  ):
+    assert _series(oracle, two_tools[1:] + repeated, True) == (
+        False,
+        "duplicate_axis_key",
+        None,
+        None,
+    )
+  assert _series(oracle + oracle[:1], two_tools, True) == (
+      False,
+      "duplicate_axis_key",
+      None,
+      None,
+  )
+
+
+def test_compare_series_null_and_empty_tools_are_distinct_groups():
+  oracle = [
+      {"timestamp_date": _DAY, "tool_name": None, "v": 4},
+      {"timestamp_date": _DAY, "tool_name": "", "v": 2},
+  ]
+  dax = [_tool_day_row(_DAY, None, 4), _tool_day_row(_DAY, "", 2)]
+  assert _series(oracle, dax, True) == (True, None, None, None)
+  swapped = [_tool_day_row(_DAY, None, 2), _tool_day_row(_DAY, "", 4)]
+  assert _series(oracle, swapped, True)[0] is False
+
+
+@pytest.mark.parametrize("garbage", _NON_OBJECT_ROWS, ids=repr)
+def test_compare_series_rejects_a_non_object_dax_row_anywhere(garbage):
+  oracle = [{"timestamp_date": _DAY, "v": 5}]
+  valid = _day_row(_DAY, 5)
+  assert _series(oracle, [valid]) == (True, None, None, None)
+  for dax in ([valid, garbage], [garbage, valid], [garbage]):
+    assert _series(oracle, dax) == (False, "dax_row_type", None, None)
+
+
+@pytest.mark.parametrize("garbage", _NON_OBJECT_ROWS, ids=repr)
+def test_compare_series_rejects_a_non_object_oracle_row_anywhere(garbage):
+  valid = {"timestamp_date": _DAY, "v": 5}
+  dax = [_day_row(_DAY, 5)]
+  for oracle in ([valid, garbage], [garbage, valid], [garbage]):
+    assert _series(oracle, dax) == (False, "oracle_row_type", None, None)
+
+
+@pytest.mark.parametrize(
+    "row",
+    [{"v": 5}, {"timestamp_date": _DAY}, {"timestamp": _DAY, "v": 5}, {}],
+    ids=repr,
+)
+def test_compare_series_rejects_an_oracle_row_without_its_date_or_metric(row):
+  assert _series([row], [_day_row(_DAY, 5)]) == (
+      False,
+      "oracle_missing_key",
+      None,
+      None,
+  )
+  # Control: an explicit NULL metric is present and compares as a BLANK.
+  assert _series(
+      [{"timestamp_date": _DAY, "v": None}], [_day_row(_DAY, None)]
+  ) == (True, None, None, None)
+
+
+def test_compare_series_rejects_a_dax_row_without_its_metric():
+  oracle = [{"timestamp_date": _DAY, "v": None}]
+  # The row names the day but carries no value column at all ...
+  assert _series(oracle, [{"[Date]": f"{_DAY}T00:00:00"}]) == (
+      False,
+      "dax_missing_metric",
+      None,
+      None,
+  )
+  # ... whereas an explicit BLANK value is a real NULL-versus-BLANK match.
+  assert _series(oracle, [_day_row(_DAY, None)]) == (True, None, None, None)
+  assert _series(oracle, [{"Date[Date]": f"{_DAY}T00:00:00", "v": None}]) == (
+      True,
+      None,
+      None,
+      None,
+  )
+
+
+@pytest.mark.parametrize(
+    "row", [{"[v]": 5}, {"v": 5, "events_v1[agent]": "a"}], ids=repr
+)
+def test_compare_series_rejects_a_dax_row_without_a_date(row):
+  oracle = [{"timestamp_date": _DAY, "v": 5}]
+  assert _series(oracle, [row]) == (False, "dax_missing_axis", None, None)
+
+
+@pytest.mark.parametrize(
+    "oracle_value, dax_value, expected",
+    [
+        (None, None, True),
+        ("", "", True),
+        ("", None, True),
+        (None, "", True),
+        (0, 0, True),
+        (None, 0, False),
+        (0, None, False),
+    ],
+)
+def test_compare_series_blank_matches_only_blank(
+    oracle_value, dax_value, expected
+):
+  oracle = [{"timestamp_date": _DAY, "v": oracle_value}]
+  assert _series(oracle, [_day_row(_DAY, dax_value)])[0] is expected
+
+
+def _one_chart_harness(tmp_path, monkeypatch, chart, oracle_rows, dax_rows):
+  harness = _LiveHarness(tmp_path, monkeypatch, charts=[chart])
+  harness.oracle = lambda *_: oracle_rows
+  harness.dax = lambda _: _dax_response(dax_rows)
+  return harness
+
+
+@pytest.mark.parametrize(
+    "oracle_value, dax_rows, error",
+    [
+        (5, [_day_row(_DAY, 999), _day_row(_DAY, 5)], "duplicate_axis_key"),
+        (5, [_day_row(_DAY, 5), _day_row(_DAY, 5)], "duplicate_axis_key"),
+        (5, [_day_row(_DAY, 5), "garbage-row"], "dax_row_type"),
+        (None, [{"[Date]": f"{_DAY}T00:00:00"}], "dax_missing_metric"),
+        (5, [{"[v]": 5}], "dax_missing_axis"),
+    ],
+    ids=["wrong-then-right", "identical", "garbage", "no-metric", "no-date"],
+)
+def test_live_main_fails_a_daily_chart_with_malformed_dax_rows(
+    tmp_path, monkeypatch, oracle_value, dax_rows, error
+):
+  chart = _chart(_TOKENS_OVER_TIME)
+  value_col = chart["measure_info"][0]["oracle_column"]
+  oracle_rows = [{"timestamp_date": _DAY, value_col: oracle_value}]
+  harness = _one_chart_harness(
+      tmp_path, monkeypatch, chart, oracle_rows, dax_rows
+  )
+  rc, receipt = harness.run("--window", WINDOW)
+  assert rc == 1
+  assert receipt["overall_pass"] is False
+  result = receipt["results"][0]
+  assert (result["status"], result["error"]) == (
+      "FAIL",
+      f"series mismatch at {error}",
+  )
+  assert (result["oracle_row_count"], result["dax_row_count"]) == (
+      1,
+      len(dax_rows),
+  )
+
+
+def test_live_main_passes_a_daily_chart_with_one_row_per_date(
+    tmp_path, monkeypatch
+):
+  chart = _chart(_TOKENS_OVER_TIME)
+  value_col = chart["measure_info"][0]["oracle_column"]
+  oracle_rows = [
+      {"timestamp_date": _DAY, value_col: 5},
+      {"timestamp_date": _NEXT_DAY, value_col: None},
+  ]
+  dax_rows = [_day_row(_DAY, 5), _day_row(_NEXT_DAY, None)]
+  harness = _one_chart_harness(
+      tmp_path, monkeypatch, chart, oracle_rows, dax_rows
+  )
+  rc, receipt = harness.run("--window", WINDOW)
+  assert rc == 0
+  assert receipt["results"][0]["status"] == "PASS"
+
+
+def test_live_main_fails_the_tool_calls_chart_on_a_non_object_row(
+    tmp_path, monkeypatch
+):
+  chart = _chart(_TOOL_CALLS)
+  value_col = chart["measure_info"][0]["oracle_column"]
+  oracle_rows = [{"timestamp_date": _DAY, "tool_name": "search", value_col: 4}]
+  valid = [_tool_day_row(_DAY, "search", 4)]
+  harness = _one_chart_harness(tmp_path, monkeypatch, chart, oracle_rows, valid)
+  rc, receipt = harness.run("--window", WINDOW)
+  assert (rc, receipt["results"][0]["status"]) == (0, "PASS")
+  harness.dax = lambda _: _dax_response(valid + ["garbage-row"])
+  rc, receipt = harness.run("--window", WINDOW)
+  assert rc == 1
+  assert receipt["results"][0]["error"] == "series mismatch at dax_row_type"
+
+
+# ---------------------------------------------------------------------------
+# Live validator: Tool Calls Over Time compares every date/tool group, past
+# the source's 5,000-row LIMIT (README known difference D13)
+# ---------------------------------------------------------------------------
+
+
+def _tool_day_oracle(tools, days, value_col):
+  """Rows in the source's order: tool_name, then timestamp_date DESC."""
+  first_day = datetime.date(2026, 4, 18)
+  return [
+      {
+          "tool_name": f"tool_{tool:02d}",
+          "timestamp_date": (
+              first_day + datetime.timedelta(days=offset)
+          ).isoformat(),
+          value_col: tool + offset + 1,
+      }
+      for tool in range(tools)
+      for offset in reversed(range(days))
+  ]
+
+
+def _tool_day_dax(oracle_rows, value_col):
+  return [
+      _tool_day_row(row["timestamp_date"], row["tool_name"], row[value_col])
+      for row in oracle_rows
+  ]
+
+
+def test_only_the_llm_trend_and_the_series_chart_run_their_oracle_uncapped():
+  charts = validate_mod.load_chart_metadata()
+  assert {c["id"] for c in charts if validate_mod.oracle_runs_uncapped(c)} == {
+      "usage-llm-call-trends",
+      _TOOL_CALLS,
+  }
+
+
+def test_tool_calls_oracle_loses_only_its_final_limit():
+  chart = _chart(_TOOL_CALLS)
+  sql = (validate_mod.LOOKER_ROOT / chart["oracle_query"]).read_text()
+  assert sql.rstrip().splitlines()[-1] == "LIMIT 5000"
+  uncapped = validate_mod.LIMIT_RE.sub("", sql)
+  assert uncapped == sql[: sql.rindex("\nLIMIT 5000")]
+  assert uncapped.splitlines()[-1] == "ORDER BY tool_name, timestamp_date DESC"
+
+
+def test_build_dax_query_tool_calls_chart_reads_every_group():
+  chart = _chart(_TOOL_CALLS)
+  assert validate_mod.build_dax_query(chart, "2026-04-18", "2026-07-16") == (
+      "EVALUATE SUMMARIZECOLUMNS('Date'[Date], "
+      "'events_v1'[tool_completed_name], "
+      "FILTER(ALL('Date'), 'Date'[Window] = \"Current\" "
+      "&& 'Date'[Date] >= DATE(2026, 04, 18) "
+      "&& 'Date'[Date] <= DATE(2026, 07, 16)), "
+      '"v", [Tool Completion Events])\n'
+  )
+
+
+def test_live_main_compares_all_5040_tool_day_groups(tmp_path, monkeypatch):
+  chart = _chart(_TOOL_CALLS)
+  value_col = chart["measure_info"][0]["oracle_column"]
+  rows = _tool_day_oracle(56, 90, value_col)
+  assert len(rows) == 5040
+  harness = _LiveHarness(tmp_path, monkeypatch, charts=[chart])
+  # The stub honours the LIMIT: a capped run returns the first 5,000 rows.
+  harness.oracle = lambda name, start, end, remove_limit: (
+      rows if remove_limit else rows[:5000]
+  )
+  harness.dax = lambda _: _dax_response(_tool_day_dax(rows, value_col))
+  rc, receipt = harness.run("--window", WINDOW)
+  assert harness.oracle_calls == [
+      ("usage-tool-calls-over-time.sql", "2026-04-18", "2026-07-16", True)
+  ]
+  assert rc == 0
+  result = receipt["results"][0]
+  assert (
+      result["status"],
+      result["oracle_row_count"],
+      result["dax_row_count"],
+  ) == ("PASS", 5040, 5040)
+
+
+def test_compare_chart_tool_calls_needs_every_group_on_both_sides():
+  chart = _chart(_TOOL_CALLS)
+  value_col = chart["measure_info"][0]["oracle_column"]
+  rows = _tool_day_oracle(56, 90, value_col)
+  dax = _tool_day_dax(rows, value_col)
+  assert validate_mod._compare_chart(chart, rows, None, dax) == (
+      True,
+      False,
+      None,
+  )
+  # The source's first 5,000 rows end inside tool_55, so its 40 oldest days
+  # are missing and a LIMIT-capped oracle never passes against the model.
+  assert {row["tool_name"] for row in rows[5000:]} == {"tool_55"}
+  ok, _, error = validate_mod._compare_chart(chart, rows[:5000], None, dax)
+  assert ok is False
+  assert error.startswith("series mismatch at row_index=")
+  # A model that drops those 40 groups fails the same way ...
+  ok, _, error = validate_mod._compare_chart(chart, rows, None, dax[:5000])
+  assert ok is False
+  assert error.startswith("series mismatch at row_index=")
+  # ... and so does a model missing one group of a middle tool.
+  one_missing = [
+      row
+      for row in dax
+      if (row["events_v1[tool_completed_name]"], row["[Date]"])
+      != ("tool_30", "2026-04-18T00:00:00")
+  ]
+  assert len(one_missing) == 5039
+  assert validate_mod._compare_chart(chart, rows, None, one_missing)[0] is False
+
+
+def test_compare_chart_tool_calls_below_the_limit_matches_in_any_order():
+  chart = _chart(_TOOL_CALLS)
+  value_col = chart["measure_info"][0]["oracle_column"]
+  rows = _tool_day_oracle(10, 90, value_col)
+  dax = _tool_day_dax(rows, value_col)
+  assert len(rows) == 900
+  for oracle_rows, dax_rows in ((rows, dax), (rows[::-1], dax)):
+    assert validate_mod._compare_chart(chart, oracle_rows, None, dax_rows) == (
+        True,
+        False,
+        None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Live validator: Top 5 Agents by LLM Calls draws five bars over a 500-row
+# source (README known difference D14)
+# ---------------------------------------------------------------------------
+
+
+def _agent_rows(values):
+  return [
+      {"agent": f"agent_{i:03d}", "total_llm_calls": value}
+      for i, value in enumerate(values)
+  ]
+
+
+def _agent_dax(oracle_rows):
+  return [
+      {"events_v1[agent]": row["agent"], "[v]": row["total_llm_calls"]}
+      for row in oracle_rows
+  ]
+
+
+def test_top5_llm_agents_six_agents_compare_as_the_top_five():
+  chart = _chart(_LLM_AGENTS)
+  assert chart["top_n"] == 5
+  oracle = _agent_rows([600, 590, 580, 570, 560, 550])
+  dax = _agent_dax(oracle)
+  assert validate_mod._compare_chart(chart, oracle, oracle, dax[:5]) == (
+      True,
+      False,
+      None,
+  )
+  assert validate_mod._compare_chart(chart, oracle, oracle, dax) == (
+      False,
+      False,
+      "top-n mismatch: row_count",
+  )
+  assert validate_mod._compare_chart(chart, oracle, oracle, dax[1:]) == (
+      False,
+      False,
+      "top-n mismatch: value[0]",
+  )
+
+
+def test_top5_llm_agents_tie_for_fifth_in_a_501_agent_source():
+  chart = _chart(_LLM_AGENTS)
+  # Four leaders, then agent_004 and agent_005 tied for fifth place.
+  oracle = _agent_rows(
+      [1000, 900, 800, 700, 600, 600] + [500 - i for i in range(495)]
+  )
+  assert len(oracle) == 501
+  top5 = _agent_dax(oracle[:5])
+  tie_pick = top5[:4] + _agent_dax(oracle[5:6])
+  for topn_rows in (oracle, oracle[:500]):
+    assert validate_mod._compare_chart(
+        chart, oracle[:500], topn_rows, top5
+    ) == (True, False, None)
+    assert validate_mod._compare_chart(
+        chart, oracle[:500], topn_rows, tie_pick
+    ) == (True, True, None)
+  # An agent ranked below fifth never passes, whatever value the model shows.
+  for intruder_value in (6, 600):
+    intruder = top5[:4] + [
+        {"events_v1[agent]": "agent_500", "[v]": intruder_value}
+    ]
+    ok, _, error = validate_mod._compare_chart(
+        chart, oracle[:500], oracle, intruder
+    )
+    assert ok is False, intruder_value
+    assert error.startswith("top-n mismatch: "), error
+  unknown = top5[:4] + [{"events_v1[agent]": "agent_999", "[v]": 600}]
+  assert validate_mod._compare_chart(chart, oracle[:500], oracle, unknown) == (
+      False,
+      False,
+      "top-n mismatch: member not in oracle",
+  )
+
+
+# ---------------------------------------------------------------------------
+# Live validator: comparison types come from the spec's explicit
+# comparison_type, never from a display format
+# ---------------------------------------------------------------------------
+
+_FLOAT_COMPARISON_MEASURES = frozenset(
+    {
+        "Avg Tool Latency (ms)",
+        "Avg LLM Latency (ms)",
+        "P50 Tool Latency (ms)",
+        "P75 Tool Latency (ms)",
+        "P90 Tool Latency (ms)",
+        "P99 Tool Latency (ms)",
+        "P50 LLM Latency (ms)",
+        "P75 LLM Latency (ms)",
+        "P90 LLM Latency (ms)",
+        "P99 LLM Latency (ms)",
+        "KPI Total Tokens Change %",
+        "KPI Total Traces Change %",
+        "KPI Total Sessions Change %",
+        "KPI Total LLM Calls Change %",
+        "KPI Total Users Change %",
+        "KPI Tool Errors Change %",
+    }
+)
+
+
+def test_chart_metadata_comparison_types_are_the_pinned_set():
+  types = {}
+  for chart in validate_mod.load_chart_metadata():
+    for info in chart["measure_info"]:
+      types[info["name"]] = info["comparison_type"]
+  assert set(types.values()) == {"int", "float"}
+  assert {n for n, t in types.items() if t == "float"} == (
+      _FLOAT_COMPARISON_MEASURES
+  )
+  for chart_id in KPI_CARD_PREFIXES:
+    value, change = _chart(chart_id)["measure_info"]
+    assert (value["comparison_type"], change["comparison_type"]) == (
+        "int",
+        "float",
+    ), chart_id
+
+
+def test_measure_comparison_type_ignores_the_display_format():
+  assert (
+      validate_mod._measure_comparison_type(
+          {"name": "m", "format_string": "#,0.0", "comparison_type": "int"}
+      )
+      == "int"
+  )
+  assert (
+      validate_mod._measure_comparison_type(
+          {"name": "m", "format_string": "#,0", "comparison_type": "float"}
+      )
+      == "float"
+  )
+
+
+@pytest.mark.parametrize(
+    "measure",
+    [
+        {},
+        {"name": "Total Tokens", "format_string": "#,0.0"},
+        {"name": "Total Tokens", "comparison_type": "exact"},
+        {"name": "Total Tokens", "comparison_type": None},
+        {"name": "Total Tokens", "comparison_type": "INT"},
+        "int",
+        None,
+    ],
+    ids=repr,
+)
+def test_measure_comparison_type_fails_closed_without_a_valid_type(measure):
+  with pytest.raises(ValueError, match="has no valid comparison_type"):
+    validate_mod._measure_comparison_type(measure)
+
+
+def _spec_copy(tmp_path, monkeypatch):
+  """Copies the Power BI spec files and points the live tool at the copy."""
+  source = validate_mod.ROOT / "spec"
+  spec_dir = tmp_path / "power_bi" / "spec"
+  spec_dir.mkdir(parents=True)
+  for name in ("report_visuals.yaml", "semantic_model.yaml"):
+    (spec_dir / name).write_text((source / name).read_text())
+  monkeypatch.setattr(validate_mod, "ROOT", spec_dir.parent)
+  return spec_dir
+
+
+def test_load_chart_metadata_refuses_a_measure_without_a_comparison_type(
+    tmp_path, monkeypatch
+):
+  spec_dir = _spec_copy(tmp_path, monkeypatch)
+  assert len(validate_mod.load_chart_metadata()) == 37
+  model_path = spec_dir / "semantic_model.yaml"
+  model = yaml.safe_load(model_path.read_text())
+  measure = next(
+      m for m in model["measures"] if m["name"] == "KPI Total Tokens"
+  )
+  del measure["comparison_type"]
+  model_path.write_text(yaml.safe_dump(model, sort_keys=False))
+  with pytest.raises(
+      ValueError, match="'KPI Total Tokens' has no valid comparison_type"
+  ):
+    validate_mod.load_chart_metadata()
+
+
+def test_load_chart_metadata_refuses_a_chart_bound_to_an_unknown_measure(
+    tmp_path, monkeypatch
+):
+  spec_dir = _spec_copy(tmp_path, monkeypatch)
+  visuals_path = spec_dir / "report_visuals.yaml"
+  visuals = yaml.safe_load(visuals_path.read_text())
+  tokens = next(
+      v for v in visuals["parity_visuals"] if v["id"] == "usage-total-tokens"
+  )
+  tokens["measures"][0] = "KPI Total Tokenz"
+  visuals_path.write_text(yaml.safe_dump(visuals, sort_keys=False))
+  with pytest.raises(ValueError, match="binds unknown measure"):
+    validate_mod.load_chart_metadata()
+
+
+def test_a_count_card_is_compared_exactly_whatever_its_format():
+  chart = _chart("usage-total-tokens")
+  # A display-format edit must not loosen the exact count comparison.
+  chart["measure_info"][0]["format_string"] = "#,0.0"
+  cols = [m["oracle_column"] for m in chart["measure_info"]]
+  oracle_row = {cols[0]: 1000000000, cols[1]: 0.125}
+  assert validate_mod._compare_chart(
+      chart, [oracle_row], [], [{"[v0]": 1000000001, "[v1]": 0.125}]
+  ) == (False, False, f"{cols[0]}: mismatch")
+  # The Change % ratio keeps its relative tolerance.
+  assert validate_mod._compare_chart(
+      chart, [oracle_row], [], [{"[v0]": 1000000000.0, "[v1]": 0.125 + 1e-12}]
+  ) == (True, False, None)
+
+
+# ---------------------------------------------------------------------------
+# Live validator: EMPTY applies only to grouped visuals; a card never is
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "chart_id, error",
+    [
+        ("usage-total-tokens", "oracle_row: mismatch"),
+        ("performance-p50-llm-latency", "dax_row_count: mismatch"),
+    ],
+)
+def test_live_main_an_empty_card_fails_even_with_allow_empty(
+    tmp_path, monkeypatch, chart_id, error
+):
+  harness = _one_chart_harness(tmp_path, monkeypatch, _chart(chart_id), [], [])
+  rc, receipt = harness.run("--window", WINDOW, "--allow-empty")
+  assert rc == 1
+  result = receipt["results"][0]
+  assert (result["status"], result["error"]) == ("FAIL", error)
+  assert (result["oracle_row_count"], result["dax_row_count"]) == (0, 0)
+  assert (receipt["charts_fail"], receipt["charts_empty"]) == (1, 0)
+
+
+@pytest.mark.parametrize(
+    "chart_id", [_TOKENS_OVER_TIME, "usage-top-5-users-by-session"]
+)
+def test_live_main_an_empty_grouped_chart_is_empty_only_when_allowed(
+    tmp_path, monkeypatch, chart_id
+):
+  harness = _one_chart_harness(tmp_path, monkeypatch, _chart(chart_id), [], [])
+  rc, receipt = harness.run("--window", WINDOW, "--allow-empty")
+  assert rc == 0
+  result = receipt["results"][0]
+  assert (result["status"], result["error"]) == ("EMPTY", "empty_result")
+  assert (receipt["charts_empty"], receipt["overall_pass"]) == (1, True)
+  rc, receipt = harness.run("--window", WINDOW)
+  assert rc == 1
+  assert receipt["results"][0]["status"] == "EMPTY"
+  assert receipt["overall_pass"] is False
+
+
+def test_allow_empty_help_says_a_card_is_never_empty(capsys):
+  with pytest.raises(SystemExit) as exit_info:
+    validate_mod.main(["--help"])
+  assert exit_info.value.code == 0
+  text = " ".join(capsys.readouterr().out.split())
+  assert (
+      "accept grouped visuals (area/bar charts) that are empty on both sides"
+      in text
+  )
+  assert (
+      "a cardVisual must always return exactly one row and is never EMPTY"
+      in text
   )

@@ -926,8 +926,13 @@ def test_editing_a_cited_oracle_query_changes_only_the_citing_measures(
 
 
 # ---------------------------------------------------------------------------
-# Top-N measures: declared top_n, the DAX TOPN, and the oracle LIMIT agree.
+# Top-N measures: declared top_n equals the DAX TOPN, and the oracle LIMIT is
+# the source row cap: equal to top_n, except for the one chart whose source
+# reads more rows than it draws.
 # ---------------------------------------------------------------------------
+
+# Source row caps that deliberately exceed the drawn bar count (README D14).
+_SOURCE_LIMIT_ABOVE_TOP_N = {"Top 5 Agents by LLM Calls": 500}
 
 
 def _final_limit(sql):
@@ -944,13 +949,20 @@ def test_top_n_measures_agree_with_their_dax_and_oracle_limit():
       m for m in model_spec["measures"] if m.get("top_n") is not None
   ]
   assert len(top_n_measures) == 12
+  assert set(_SOURCE_LIMIT_ABOVE_TOP_N) <= {m["name"] for m in top_n_measures}
   mismatches = []
   for measure in top_n_measures:
     declared = measure["top_n"]
     in_dax = [int(n) for n in re.findall(r"TOPN\(\s*(\d+)\s*,", measure["dax"])]
     queries = measure["oracle_queries"]
     limit = _final_limit(contracts.oracle_files[queries[0]])
-    if in_dax != [declared] or len(queries) != 1 or limit != declared:
+    expected_limit = _SOURCE_LIMIT_ABOVE_TOP_N.get(measure["name"], declared)
+    if (
+        in_dax != [declared]
+        or len(queries) != 1
+        or limit != expected_limit
+        or limit < declared
+    ):
       mismatches.append((measure["name"], declared, in_dax, limit))
   assert mismatches == []
 
@@ -966,7 +978,10 @@ def test_top_5_agents_by_llm_calls_is_a_real_top_five_measure():
   assert measure["oracle_queries"] == [
       "oracle/queries/usage-top-5-agents-by-llm-calls.sql"
   ]
-  assert _final_limit(contracts.oracle_files[measure["oracle_queries"][0]]) == 5
+  # The source keeps its 500-row cap; the visual draws the top five of it.
+  assert (
+      _final_limit(contracts.oracle_files[measure["oracle_queries"][0]]) == 500
+  )
   # The base measure stays un-truncated for the other LLM-call visuals.
   assert "TOPN(" not in by_name["LLM Calls"]["dax"]
 
@@ -982,11 +997,15 @@ def test_top_n_charts_agree_across_manifest_report_visuals_and_oracle_limit():
   }
   assert len(visual_top_n) == 12
   manifest_by_id = {c["id"]: c for c in contracts.manifest["charts"]}
-  assert manifest_by_id["usage-top-5-agents-by-llm-calls"]["limit"] == 5
+  assert manifest_by_id["usage-top-5-agents-by-llm-calls"]["limit"] == 500
   for cid, top_n in visual_top_n.items():
     m_limit = manifest_by_id[cid].get("limit")
     o_limit = _final_limit(contracts.oracle_files[f"oracle/queries/{cid}.sql"])
-    assert m_limit == top_n == o_limit, (cid, m_limit, top_n, o_limit)
+    assert m_limit == o_limit, (cid, m_limit, o_limit)
+    if cid == "usage-top-5-agents-by-llm-calls":
+      assert (top_n, o_limit) == (5, 500), (cid, top_n, o_limit)
+    else:
+      assert top_n == o_limit, (cid, top_n, o_limit)
 
 
 def test_count_based_kpi_prior_measures_use_calculate_coalesce():
@@ -1526,3 +1545,388 @@ def test_print_sql_cli_exits_2_with_a_message_for_a_newline_project():
   assert proc.stdout == ""
   assert "Invalid BigQuery project ID" in proc.stderr
   assert "Traceback" not in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Comparison types: every measure declares how the live check compares it,
+# and the declaration must agree with its display format and its DAX shape.
+# ---------------------------------------------------------------------------
+
+# The only measures the live check may compare with a tolerance.  Every other
+# measure is a count or a token sum and must match its oracle exactly.
+_FLOAT_COMPARISON_MEASURES = frozenset(
+    {
+        "Avg Tool Latency (ms)",
+        "Avg LLM Latency (ms)",
+        "P50 Tool Latency (ms)",
+        "P75 Tool Latency (ms)",
+        "P90 Tool Latency (ms)",
+        "P99 Tool Latency (ms)",
+        "P50 LLM Latency (ms)",
+        "P75 LLM Latency (ms)",
+        "P90 LLM Latency (ms)",
+        "P99 LLM Latency (ms)",
+        "KPI Total Tokens Change %",
+        "KPI Total Traces Change %",
+        "KPI Total Sessions Change %",
+        "KPI Total LLM Calls Change %",
+        "KPI Total Users Change %",
+        "KPI Tool Errors Change %",
+    }
+)
+
+
+def _spec_measure(model_spec, name):
+  for measure in model_spec["measures"]:
+    if measure["name"] == name:
+      return measure
+  raise AssertionError(f"measure {name} is not declared in the spec")
+
+
+def test_every_measure_declares_the_pinned_comparison_type():
+  pbip_model = _load_pbi_module("pbip_model")
+  validate_pbip = _load_pbi_module("validate_pbip")
+  contracts, model_spec = _contracts_and_spec()
+  measures = model_spec["measures"]
+  assert len(measures) == 50
+  declared = {m["name"]: m.get("comparison_type") for m in measures}
+  assert {n for n, t in declared.items() if t == "float"} == (
+      _FLOAT_COMPARISON_MEASURES
+  )
+  assert sum(1 for t in declared.values() if t == "int") == 34
+  # The repository validator pins the same set independently.
+  assert validate_pbip.FLOAT_COMPARISON_MEASURES == _FLOAT_COMPARISON_MEASURES
+  # The declared type is the one the DAX shape implies ...
+  assert pbip_model.infer_comparison_types(measures) == declared
+  # ... and the display format follows the type.
+  for measure in measures:
+    if measure["comparison_type"] == "int":
+      assert measure["format_string"] == "#,0", measure["name"]
+    else:
+      assert (
+          measure["format_string"] in pbip_model.FLOAT_FORMAT_STRINGS
+      ), measure["name"]
+  pbip_model._validate_model_spec(contracts, model_spec)
+
+
+@pytest.mark.parametrize(
+    "name,overrides,message",
+    [
+        # A count's display format cannot be loosened on its own ...
+        (
+            "KPI Total Tokens",
+            {"format_string": "#,0.0"},
+            "Measure 'KPI Total Tokens' has comparison_type 'int' but"
+            " format_string '#,0.0'",
+        ),
+        (
+            "Top 5 Agents by LLM Calls",
+            {"format_string": "#,0.00"},
+            "Measure 'Top 5 Agents by LLM Calls' has comparison_type 'int'"
+            " but format_string '#,0.00'",
+        ),
+        (
+            "KPI Total Tokens",
+            {"format_string": "0"},
+            "Measure 'KPI Total Tokens' has comparison_type 'int' but"
+            " format_string '0'",
+        ),
+        # ... nor together with its declared type: the DAX is still a count.
+        (
+            "KPI Total Tokens",
+            {"format_string": "#,0.0", "comparison_type": "float"},
+            "Measure 'KPI Total Tokens' declares comparison_type 'float', but"
+            " its DAX is 'int'-shaped",
+        ),
+        (
+            "Total Tokens",
+            {"format_string": "#,0.00", "comparison_type": "float"},
+            "Measure 'Total Tokens' declares comparison_type 'float', but its"
+            " DAX is 'int'-shaped",
+        ),
+        (
+            "Tool Completion Events",
+            {"format_string": "+0.0%;-0.0%;0.0%", "comparison_type": "float"},
+            "Measure 'Tool Completion Events' declares comparison_type"
+            " 'float', but its DAX is 'int'-shaped",
+        ),
+        # A fractional measure cannot be relabelled as an exact count.
+        (
+            "Avg LLM Latency (ms)",
+            {"format_string": "#,0", "comparison_type": "int"},
+            "Measure 'Avg LLM Latency (ms)' declares comparison_type 'int',"
+            " but its DAX is 'float'-shaped",
+        ),
+        (
+            "KPI Total Tokens Change %",
+            {"format_string": "#,0", "comparison_type": "int"},
+            "Measure 'KPI Total Tokens Change %' declares comparison_type"
+            " 'int', but its DAX is 'float'-shaped",
+        ),
+        (
+            "Avg LLM Latency (ms)",
+            {"comparison_type": "int"},
+            "Measure 'Avg LLM Latency (ms)' has comparison_type 'int' but"
+            " format_string '#,0.0'",
+        ),
+        (
+            "P99 LLM Latency (ms)",
+            {"format_string": "#,0"},
+            "Measure 'P99 LLM Latency (ms)' has comparison_type 'float' but"
+            " format_string '#,0'",
+        ),
+        # Only the two known types are accepted, spelled exactly.
+        (
+            "KPI Total Tokens",
+            {"comparison_type": "exact"},
+            "Measure 'KPI Total Tokens' must declare comparison_type 'int' or"
+            " 'float', got 'exact'",
+        ),
+        (
+            "KPI Total Tokens",
+            {"comparison_type": "INT"},
+            "Measure 'KPI Total Tokens' must declare comparison_type 'int' or"
+            " 'float', got 'INT'",
+        ),
+        (
+            "KPI Total Tokens",
+            {"comparison_type": None},
+            "Measure 'KPI Total Tokens' must declare comparison_type 'int' or"
+            " 'float', got None",
+        ),
+    ],
+)
+def test_model_spec_rejects_an_inconsistent_comparison_type(
+    name, overrides, message
+):
+  pbip_model = _load_pbi_module("pbip_model")
+  contracts, model_spec = _contracts_and_spec()
+  broken = copy.deepcopy(model_spec)
+  _spec_measure(broken, name).update(overrides)
+  with pytest.raises(ValueError, match=re.escape(message)):
+    pbip_model._validate_model_spec(contracts, broken)
+  with pytest.raises(ValueError, match=re.escape(message)):
+    pbip_model.build_model(contracts, broken)
+
+
+def test_model_spec_rejects_a_measure_without_a_comparison_type():
+  pbip_model = _load_pbi_module("pbip_model")
+  contracts, model_spec = _contracts_and_spec()
+  broken = copy.deepcopy(model_spec)
+  del _spec_measure(broken, "KPI Total Tokens")["comparison_type"]
+  message = (
+      "Measure 'KPI Total Tokens' must declare comparison_type 'int' or"
+      " 'float', got None"
+  )
+  with pytest.raises(ValueError, match=re.escape(message)):
+    pbip_model._validate_model_spec(contracts, broken)
+  with pytest.raises(ValueError, match=re.escape(message)):
+    pbip_model.build_model(contracts, broken)
+
+
+@pytest.mark.parametrize(
+    "name,dax",
+    [
+        ("Total Tokens", "AVERAGE('events_v1'[usage_total_tokens])"),
+        ("Total Events", "DIVIDE(COUNTROWS('events_v1'), 2)"),
+        ("KPI Total Traces", "COALESCE([Avg LLM Latency (ms)], 0)"),
+    ],
+)
+def test_model_spec_rejects_a_count_whose_dax_turns_fractional(name, dax):
+  """A DAX edit that makes a count fractional cannot keep exact comparison."""
+  pbip_model = _load_pbi_module("pbip_model")
+  contracts, model_spec = _contracts_and_spec()
+  broken = copy.deepcopy(model_spec)
+  measure = _spec_measure(broken, name)
+  assert (measure["comparison_type"], measure["format_string"]) == (
+      "int",
+      "#,0",
+  )
+  measure["dax"] = dax
+  message = (
+      f"Measure {name!r} declares comparison_type 'int', but its DAX is"
+      " 'float'-shaped"
+  )
+  with pytest.raises(ValueError, match=re.escape(message)):
+    pbip_model._validate_model_spec(contracts, broken)
+
+
+def test_infer_comparison_types_follows_measure_references():
+  pbip_model = _load_pbi_module("pbip_model")
+  measures = [
+      # Listed before what it depends on, so one pass is not enough.
+      {"name": "Uses Uses Avg", "dax": "COALESCE([Uses Avg], 0)"},
+      {"name": "Uses Avg", "dax": "[Avg] + 1"},
+      {"name": "Avg", "dax": "AVERAGE('t'[x])"},
+      {"name": "Count", "dax": "COUNTROWS('t')"},
+      {"name": "Ratio", "dax": "DIVIDE([Count], 2)"},
+      {"name": "Median", "dax": "MEDIANX(VALUES('t'[k]), [Count])"},
+      {"name": "Pct", "dax": "PERCENTILE.INC('t'[x], 0.5)"},
+      {"name": "Lower Case", "dax": "averagex(VALUES('t'[k]), [Count])"},
+      # A table column that shares a measure's name is not a reference.
+      {"name": "Quoted Column", "dax": "SUM('t'[Avg])"},
+      {"name": "Bare Column", "dax": "SUM(t[Avg])"},
+      # A column whose name contains a function name is not a call.
+      {"name": "Column Name", "dax": "SUM('t'[AVERAGE_ms])"},
+      {"name": "Unknown Ref", "dax": "COALESCE([Not A Measure], 0)"},
+      {"name": "Uses Count", "dax": "COALESCE([Count], 0)"},
+  ]
+  assert pbip_model.infer_comparison_types(measures) == {
+      "Uses Uses Avg": "float",
+      "Uses Avg": "float",
+      "Avg": "float",
+      "Count": "int",
+      "Ratio": "float",
+      "Median": "float",
+      "Pct": "float",
+      "Lower Case": "float",
+      "Quoted Column": "int",
+      "Bare Column": "int",
+      "Column Name": "int",
+      "Unknown Ref": "int",
+      "Uses Count": "int",
+  }
+
+
+# ---------------------------------------------------------------------------
+# rewrite_expressions_parameters: each BQAA_* parameter is declared exactly
+# once, whatever form a duplicate declaration takes.
+# ---------------------------------------------------------------------------
+
+_PARAMETER_NAMES = (
+    "BQAA_ProjectId",
+    "BQAA_DatasetId",
+    "BQAA_TableId",
+    "BQAA_BillingProjectId",
+    "BQAA_WindowEndDate",
+    "BQAA_LookbackDays",
+    "BQAA_UseStorageApi",
+)
+# Duplicate declarations a hand edit could leave behind.  None carries the
+# `meta [IsParameterQuery=true, ...]` annotation the rewrite itself matches.
+_DUPLICATE_FORMS = {
+    "metadata_free": 'expression {name} = "stale"',
+    "quoted_name": "expression '{name}' = \"stale\"",
+    "multiline": 'expression {name} =\n\t\t"stale"',
+    "indented_no_spaces": '  expression {name}="stale"',
+    "tab_separated": 'expression\t{name}\t= "stale"',
+}
+
+
+def _declaration_line(text, name):
+  return next(
+      line
+      for line in text.split("\n")
+      if line.startswith(f"expression {name} = ")
+  )
+
+
+@pytest.mark.parametrize("form", sorted(_DUPLICATE_FORMS))
+@pytest.mark.parametrize("name", _PARAMETER_NAMES)
+def test_rewrite_rejects_a_duplicate_declaration_without_metadata(name, form):
+  text = _spec_expressions_text()
+  duplicate = _DUPLICATE_FORMS[form].format(name=name)
+  message = (
+      f"Expected exactly 1 declaration for {name} in expressions.tmdl, found 2"
+  )
+  for tampered in (f"{text}\n{duplicate}\n", f"{duplicate}\n\n{text}"):
+    with pytest.raises(ValueError) as err:
+      _rewrite(tampered)
+    assert str(err.value) == message
+
+
+@pytest.mark.parametrize("name", _PARAMETER_NAMES)
+def test_rewrite_rejects_a_repeated_annotated_declaration(name):
+  text = _spec_expressions_text()
+  tampered = f"{text}\n{_declaration_line(text, name)}\n"
+  with pytest.raises(ValueError) as err:
+    _rewrite(tampered)
+  assert str(err.value) == (
+      f"Expected exactly 1 declaration for {name} in expressions.tmdl, found 2"
+  )
+
+
+@pytest.mark.parametrize("name", _PARAMETER_NAMES)
+def test_rewrite_rejects_a_missing_or_commented_out_declaration(name):
+  text = _spec_expressions_text()
+  line = _declaration_line(text, name)
+  message = (
+      f"Expected exactly 1 declaration for {name} in expressions.tmdl, found 0"
+  )
+  for tampered in (
+      text.replace(f"{line}\n", ""),
+      text.replace(line, f"/// {line}"),
+      text.replace(line, f"// {line}"),
+  ):
+    assert tampered != text
+    with pytest.raises(ValueError) as err:
+      _rewrite(tampered)
+    assert str(err.value) == message
+
+
+def test_rewrite_ignores_comments_and_similar_names():
+  """Lines that only look like a declaration do not count as one."""
+  text = _spec_expressions_text()
+  noise = "\n".join(
+      [
+          '/// expression BQAA_ProjectId = "stale"',
+          '// expression BQAA_ProjectId = "stale"',
+          "\t/// expression 'BQAA_DatasetId' = \"stale\"",
+          'expression BQAA_ProjectIdBackup = "stale"',
+          'expression XBQAA_TableId = "stale"',
+          'expression BQAA_TableIds = "stale"',
+      ]
+  )
+  rewritten = _rewrite(f"{text}\n{noise}\n")
+  assert rewritten.count('expression BQAA_ProjectId = "abcde-1" meta') == 1
+  assert rewritten.count('expression BQAA_TableId = "my_table" meta') == 1
+  assert rewritten.endswith(f"{noise}\n")
+
+
+def _tampered_generate_all(generate_pbip, suffix):
+  files = generate_pbip.generate_all()
+  tampered = dict(files)
+  tampered[_EXPR_KEY] = files[_EXPR_KEY] + suffix
+  return lambda **_: tampered
+
+
+def test_write_pbip_zip_refuses_a_metadata_free_duplicate(
+    tmp_path, monkeypatch
+):
+  generate_pbip = _load_pbi_module("generate_pbip")
+  monkeypatch.setattr(
+      generate_pbip,
+      "generate_all",
+      _tampered_generate_all(
+          generate_pbip, '\nexpression BQAA_TableId = "stale"\n'
+      ),
+  )
+  out_zip = tmp_path / "nested" / "custom.zip"
+  with pytest.raises(ValueError) as err:
+    generate_pbip.write_pbip_zip(out_zip, project="abcde-1")
+  assert str(err.value) == (
+      "Expected exactly 1 declaration for BQAA_TableId in expressions.tmdl,"
+      " found 2"
+  )
+  assert not out_zip.exists()
+  assert not out_zip.parent.exists()
+
+
+def test_output_zip_cli_refuses_a_metadata_free_duplicate(
+    tmp_path, monkeypatch, capsys
+):
+  generate_pbip = _load_pbi_module("generate_pbip")
+  monkeypatch.setattr(
+      generate_pbip,
+      "generate_all",
+      _tampered_generate_all(
+          generate_pbip, "\nexpression 'BQAA_LookbackDays' = 7\n"
+      ),
+  )
+  out_zip = tmp_path / "custom.zip"
+  assert generate_pbip.main(["--output-zip", str(out_zip)]) == 1
+  assert (
+      "Expected exactly 1 declaration for BQAA_LookbackDays in"
+      " expressions.tmdl, found 2"
+  ) in capsys.readouterr().err
+  assert not out_zip.exists()

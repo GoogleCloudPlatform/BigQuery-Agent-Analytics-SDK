@@ -295,13 +295,31 @@ passed, and the receipt records the resolved source in
 `YYYY-MM-DD:YYYY-MM-DD` window is validated before any query runs.
 
 The run fails closed. A DAX error (response, result, or table level), a
-value that is not a finite number, an off-by-one count, or more Top-N rows
-than requested is a `FAIL`. A chart that is empty on both sides is
-`EMPTY`, because nothing was compared. Pass = every chart `PASS` in every
-requested window (`charts_pass == charts_expected`, which is 37 times the
-number of windows) with at least one oracle row returned. Use
-`--allow-empty` only for a deliberately empty window; the receipt records
-it as `allow_empty`.
+value that is not a finite number, an off-by-one count, a malformed,
+duplicated, or key-less row on either side, or more Top-N rows than
+requested is a `FAIL`. A grouped visual (area or bar chart) that is empty
+on both sides is `EMPTY`, because nothing was compared. A `cardVisual` is
+never `EMPTY`: its DAX query must return exactly one row, and a missing
+oracle row fails it (under `--allow-empty`, only the eight percentile cards
+accept an empty oracle against one blank DAX row). Pass = every chart
+`PASS` in every requested window (`charts_pass == charts_expected`, which
+is 37 times the number of windows) with at least one oracle row returned.
+Use `--allow-empty` only for a deliberately empty window; the receipt
+records it as `allow_empty`.
+
+Each measure declares a `comparison_type` in `spec/semantic_model.yaml`:
+`int` (counts and token totals) must match exactly, and `float` (averages,
+percentiles, `Change %`) must match within a relative tolerance of 1e-9.
+The generator rejects a type that disagrees with the measure's format or
+DAX shape, so a format edit cannot loosen an exact count.
+
+Row limits: a Top-N chart's oracle runs without its `LIMIT` for the
+tie-aware comparison, and its source `LIMIT` must equal both the manifest
+`limit` and the visual's `top_n`. The one exception is `Top 5 Agents by
+LLM Calls`, whose source keeps its 500-row cap while the visual draws five
+bars (D14). `Tool Calls Over Time` has no row cap in Power BI, so its
+oracle also runs without `LIMIT` and every tool/day group is compared
+(D13).
 
 ## Intentional differences from Looker Studio
 
@@ -319,6 +337,8 @@ it as `allow_empty`.
 | D10 | Freshness | Live query per view | Import, as of last refresh | Import mode |
 | D11 | Cost shape | Per-view queries | Per refresh: 2 metadata + one pruned scan | One Import scan |
 | D12 | Trace Inspector | Table, 7 fields | Same 7 fields, newest first | Parity |
+| D13 | Tool Calls Over Time rows | `limit: 5000`: the oracle keeps the first 5,000 tool/day rows (tool A→Z, newest day first) | No row cap: every tool/day group is queried, and the live check runs the oracle without `LIMIT` | A cap would drop the oldest days of later tools |
+| D14 | Top 5 Agents by LLM Calls | Bar tile titled Top 5 over up to 500 agents (`limit: 500`) | Top five agents (`TOPN(5)`, ties at fifth place kept); source and oracle keep `LIMIT 500` | Matches the title; the source contract is unchanged |
 
 ## Schema credit
 

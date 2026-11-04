@@ -299,8 +299,9 @@ def find_existing_item(token, workspace_id, item_type, display_name):
 
   Follows listing pagination so an item beyond the first page is found, fails
   closed when the listing itself fails (so a transient error can never turn an
-  update into a duplicate create), and refuses to guess between several items
-  that share the same display name.
+  update into a duplicate create), treats a non-object entry or a matching
+  entry without a valid id as an error rather than as absence, and refuses to
+  guess between several items that share the same display name.
   """
   base_url = f"{FABRIC_API_BASE}/workspaces/{workspace_id}/{item_type}"
   url = base_url
@@ -321,13 +322,22 @@ def find_existing_item(token, workspace_id, item_type, display_name):
       )
     items = result["value"]
     for item in items:
+      # A malformed entry, or a matching entry without a usable id, is never
+      # read as "no such item": that would turn an update into a duplicate
+      # create.
       if not isinstance(item, dict):
+        raise RuntimeError(f"list {item_type} returned a non-object item")
+      if item.get("displayName") != display_name:
         continue
-      if item.get("displayName") == display_name and "id" in item:
-        item_id = item["id"]
-        validate_guid(item_id, f"{item_type}_id")
-        if item_id not in matches:
-          matches.append(item_id)
+      item_id = item.get("id")
+      if item_id is None or (isinstance(item_id, str) and not item_id.strip()):
+        raise RuntimeError(
+            f"list {item_type} returned {display_name!r} with a missing or"
+            " empty id"
+        )
+      validate_guid(item_id, f"{item_type}_id")
+      if item_id not in matches:
+        matches.append(item_id)
     url = _next_page_url(base_url, result)
   if len(matches) > 1:
     raise RuntimeError(

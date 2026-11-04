@@ -26,4 +26,4 @@ FROM (
 )
 GROUP BY agent
 ORDER BY total_llm_calls DESC, agent
-LIMIT 5
+LIMIT 500
