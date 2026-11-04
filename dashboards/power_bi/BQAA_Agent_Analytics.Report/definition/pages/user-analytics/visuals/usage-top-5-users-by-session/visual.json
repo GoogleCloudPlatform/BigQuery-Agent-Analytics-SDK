@@ -1,0 +1,105 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "usage-top-5-users-by-session",
+  "position": {
+    "x": 16,
+    "y": 488,
+    "z": 4004,
+    "height": 272,
+    "width": 616,
+    "tabOrder": 4004
+  },
+  "visual": {
+    "visualType": "clusteredBarChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "user_id"
+                }
+              },
+              "queryRef": "events_v1.user_id",
+              "nativeQueryRef": "user_id"
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "Top 5 Users by Sessions"
+                }
+              },
+              "queryRef": "events_v1.Top 5 Users by Sessions",
+              "nativeQueryRef": "Top 5 Users by Sessions"
+            }
+          ]
+        }
+      },
+      "sortDefinition": {
+        "sort": [
+          {
+            "field": {
+              "Measure": {
+                "Expression": {
+                  "SourceRef": {
+                    "Entity": "events_v1"
+                  }
+                },
+                "Property": "Top 5 Users by Sessions"
+              }
+            },
+            "direction": "Descending"
+          }
+        ],
+        "isDefaultSort": false
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Top 5 Users by Sessions'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "usage-top-5-users-by-session"
+    },
+    {
+      "name": "bqaa.oracle_query",
+      "value": "oracle/queries/usage-top-5-users-by-session.sql"
+    }
+  ]
+}

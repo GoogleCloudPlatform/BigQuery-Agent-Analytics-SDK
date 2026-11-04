@@ -44,5 +44,6 @@ prev AS (
 )
 SELECT
   cur.value AS pop_llm_calls_current,
+  prev.value AS pop_llm_calls_prior,
   SAFE_DIVIDE(cur.value - prev.value, prev.value) AS pop_llm_calls_change
 FROM cur CROSS JOIN prev

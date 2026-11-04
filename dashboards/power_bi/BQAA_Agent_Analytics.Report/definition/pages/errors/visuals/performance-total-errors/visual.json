@@ -1,0 +1,85 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "performance-total-errors",
+  "position": {
+    "x": 16,
+    "y": 128,
+    "z": 4000,
+    "height": 272,
+    "width": 408,
+    "tabOrder": 4000
+  },
+  "visual": {
+    "visualType": "cardVisual",
+    "query": {
+      "queryState": {
+        "Data": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "KPI Tool Errors"
+                }
+              },
+              "queryRef": "events_v1.KPI Tool Errors",
+              "nativeQueryRef": "KPI Tool Errors",
+              "displayName": "Tool Errors"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "KPI Tool Errors Change %"
+                }
+              },
+              "queryRef": "events_v1.KPI Tool Errors Change %",
+              "nativeQueryRef": "KPI Tool Errors Change %",
+              "displayName": "vs previous period"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Tool Errors'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "performance-total-errors"
+    },
+    {
+      "name": "bqaa.oracle_query",
+      "value": "oracle/queries/performance-total-errors.sql"
+    }
+  ]
+}
