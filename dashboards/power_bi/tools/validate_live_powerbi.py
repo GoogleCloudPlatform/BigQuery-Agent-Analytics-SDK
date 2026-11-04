@@ -17,12 +17,19 @@
 Runs the 37 oracle SQL queries via ``bq`` and compares their results
 against DAX queries executed through the Power BI REST ``executeQueries``
 endpoint.  Produces a sanitized receipt with no data values.
+
+The run fails closed: an error in the DAX response, a corrupt value, an
+off-by-one count, a chart that is empty on both sides, or a run in which no
+oracle query returned any row is never reported as a pass.  ``--allow-empty``
+opts in to deliberately empty windows.
 """
 
 import argparse
 import datetime
+import decimal
 import hashlib
 import json
+import math
 import os
 import pathlib
 import re
@@ -38,14 +45,16 @@ import yaml
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LOOKER_ROOT = ROOT.parent / "looker_studio"
 POWERBI_API_BASE = "https://api.powerbi.com/v1.0/myorg"
+# `\Z` (not `$`) so a trailing newline is never accepted, even by callers that
+# use `.match()` instead of `.fullmatch()`.
 GUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
-    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
 )
-PROJECT_RE = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
-DATASET_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,1023}$")
-TABLE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,1023}$")
-LOCATION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+PROJECT_RE = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]\Z")
+DATASET_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,1023}\Z")
+TABLE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,1023}\Z")
+LOCATION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}\Z")
 FILTER_PARAMS = (
     "filter_agent",
     "filter_user_id",
@@ -53,18 +62,38 @@ FILTER_PARAMS = (
     "filter_span_id",
     "filter_tool_name",
 )
-FLOAT_TOLERANCE = 1e-9
+FLOAT_TOLERANCE = decimal.Decimal("1e-9")
 LIMIT_RE = re.compile(r"\nLIMIT\s+\d+\s*$", re.IGNORECASE)
+# Plain decimal text only: rejects NaN/Infinity, digit-group underscores and
+# anything else decimal.Decimal() would otherwise be willing to parse.
+_NUMERIC_RE = re.compile(
+    r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+)
+_ISO_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+# A value that is present but is not a finite number.  It is kept distinct
+# from None (a genuine NULL/BLANK) so corrupt data can never pass as a blank.
+_CORRUPT = object()
+# Bounds of the report's loaded "Current" window, read from the model itself.
+DATE_WINDOW_DAX = (
+    "EVALUATE CALCULATETABLE(ROW(\"min_date\", MIN('Date'[Date]), "
+    "\"max_date\", MAX('Date'[Date])), 'Date'[Window] = \"Current\")\n"
+)
+# Used only when the Date-table lookup fails; the receipt records the fallback.
+FIXTURE_WINDOW = ("2026-04-18", "2026-07-16")
+STATUS_PASS = "PASS"
+STATUS_FAIL = "FAIL"
+STATUS_EMPTY = "EMPTY"
 
 
-def validate_guid(value, label):
-  if not GUID_RE.match(value):
+def validate_guid(value, label="GUID"):
+  """Return *value* when it is exactly one GUID string, else raise."""
+  if not isinstance(value, str) or not GUID_RE.fullmatch(value):
     raise ValueError(f"invalid {label}")
   return value
 
 
 def require_identifier(label, value, pattern):
-  if not pattern.fullmatch(value):
+  if not isinstance(value, str) or not pattern.fullmatch(value):
     raise ValueError(f"invalid {label}: {value!r}")
   return value
 
@@ -239,34 +268,103 @@ def execute_dax(token, workspace_id, dataset_id, dax_query):
       raise RuntimeError(f"executeQueries HTTP {exc.code}") from None
 
 
+class DaxResponseError(ValueError):
+  """The executeQueries response is malformed or reports an error."""
+
+
+def _has_error(node):
+  return isinstance(node, dict) and bool(
+      node.get("error") or node.get("errors")
+  )
+
+
+def extract_dax_rows(response):
+  """Return the rows of the first result table of an executeQueries response.
+
+  The response envelope is validated before anything is compared: an error at
+  the response, result or table level (a truncated result included) or a
+  missing result/table is a failure, whereas a table that is present with no
+  rows is a legitimately empty result.
+  """
+  if not isinstance(response, dict) or _has_error(response):
+    raise DaxResponseError("dax_response_error")
+  results = response.get("results")
+  if not isinstance(results, list) or not results:
+    raise DaxResponseError("dax_response_error")
+  first_rows = None
+  for result_index, result in enumerate(results):
+    if not isinstance(result, dict) or _has_error(result):
+      raise DaxResponseError("dax_response_error")
+    tables = result.get("tables")
+    if not isinstance(tables, list) or not tables:
+      raise DaxResponseError("dax_response_error")
+    for table_index, table in enumerate(tables):
+      if not isinstance(table, dict) or _has_error(table):
+        raise DaxResponseError("dax_response_error")
+      rows = table.get("rows")
+      if rows is None:
+        rows = []
+      if not isinstance(rows, list):
+        raise DaxResponseError("dax_response_error")
+      if result_index == 0 and table_index == 0:
+        first_rows = rows
+  return first_rows
+
+
 # ---------------------------------------------------------------------------
 # Comparison engine (pure functions for unit testing)
 # ---------------------------------------------------------------------------
 
 
-def _to_float(value):
+def _to_number(value):
+  """Classify *value* as NULL (None), corrupt (_CORRUPT) or an exact Decimal.
+
+  None and blank text are NULL/BLANK.  Booleans, non-finite floats and text
+  that is not a plain decimal number are corrupt: they are present, so they
+  must never be mistaken for a blank.
+  """
   if value is None:
     return None
   if isinstance(value, bool):
-    return None
-  if isinstance(value, (int, float)):
-    return float(value)
-  try:
-    return float(value)
-  except (TypeError, ValueError):
-    return None
+    return _CORRUPT
+  if isinstance(value, int):
+    return decimal.Decimal(value)
+  if isinstance(value, float):
+    if not math.isfinite(value):
+      return _CORRUPT
+    return decimal.Decimal(repr(value))
+  if isinstance(value, decimal.Decimal):
+    return value if value.is_finite() else _CORRUPT
+  if isinstance(value, str):
+    text = value.strip()
+    if not text:
+      return None
+    if not _NUMERIC_RE.fullmatch(text):
+      return _CORRUPT
+    return decimal.Decimal(text)
+  return _CORRUPT
 
 
 def values_match(a, b):
-  """Compare two scalar values under the parity rules in spec.md §9.2."""
-  a_none = a is None or _to_float(a) is None
-  b_none = b is None or _to_float(b) is None
-  if a_none and b_none:
-    return True
-  if a_none != b_none:
+  """Compare two scalar values under the parity rules in spec.md §9.2.
+
+  NULL/BLANK matches only NULL/BLANK, and a corrupt value matches nothing.
+  Two integral values (counts, token totals) must be exactly equal; a value
+  with a fractional part is compared with a relative tolerance of 1e-9.
+  """
+  da, db = _to_number(a), _to_number(b)
+  if da is _CORRUPT or db is _CORRUPT:
     return False
-  fa, fb = _to_float(a), _to_float(b)
-  return abs(fa - fb) <= FLOAT_TOLERANCE * max(1, abs(fb))
+  if da is None or db is None:
+    return da is None and db is None
+  try:
+    with decimal.localcontext() as context:
+      context.prec = 100
+      if da == da.to_integral_value() and db == db.to_integral_value():
+        return da == db
+      return abs(da - db) <= FLOAT_TOLERANCE * max(decimal.Decimal(1), abs(db))
+  except decimal.DecimalException:
+    return False
 
 
 def _get_dax_value(dax_row, key):
@@ -338,7 +436,12 @@ def _aggregate_llm_trends(oracle_rows):
 def compare_series(
     oracle_rows, dax_rows, value_col, axis_col, has_series=False
 ):
-  """Compare time-series or bar data on the union of axis keys."""
+  """Compare time-series or bar data on the union of axis keys.
+
+  Returns ``(ok, detail, oracle_value, dax_value)``.  On a mismatch ``detail``
+  is ``row_index=<n>``, the position in the sorted union of axis keys, so an
+  axis label (which can be user data) never reaches a receipt.
+  """
   oracle_map = {}
   for row in oracle_rows:
     key = str(row.get(axis_col, ""))
@@ -359,10 +462,10 @@ def compare_series(
         or _get_dax_value(dax_row, axis_col)
     )
     d_key = (
-        _normalize_date_key(date_val)
-        if axis_col == "timestamp_date"
-        else str(date_val)
+        _normalize_date_key(date_val) if axis_col == "timestamp_date" else None
     )
+    if d_key is None:
+      d_key = str(date_val)
 
     if has_series:
       series_val = _get_dax_value(
@@ -375,113 +478,120 @@ def compare_series(
     d_val = _get_dax_value(dax_row, "v")
     dax_map[d_key] = d_val
 
-  all_keys = set(oracle_map.keys()) | set(dax_map.keys())
-  for key in sorted(all_keys):
+  all_keys = sorted(set(oracle_map.keys()) | set(dax_map.keys()))
+  for index, key in enumerate(all_keys):
     o_val = oracle_map.get(key)
     d_val = dax_map.get(key)
-    # Skip if both are None/BLANK (spec §9.2)
-    o_none = o_val is None or _to_float(o_val) is None
-    d_none = d_val is None or _to_float(d_val) is None
-    if o_none and d_none:
+    # Both BLANK is a match (spec §9.2); a corrupt cell is never BLANK, so it
+    # falls through to values_match() and fails there.
+    if _to_number(o_val) is None and _to_number(d_val) is None:
       continue
     if not values_match(o_val, d_val):
-      return False, key, o_val, d_val
+      return False, f"row_index={index}", o_val, d_val
   return True, None, None, None
+
+
+def _dim_key(value):
+  """Typed dimension key: NULL stays distinct from the empty string."""
+  return (0, "") if value is None else (1, str(value))
+
+
+def _dax_dimension(dax_row, dim_col):
+  """Return ``(found, value)`` for the dimension column of a DAX row."""
+  if isinstance(dax_row, dict):
+    for key in (
+        f"events_v1[{dim_col}]",
+        f"'events_v1'[{dim_col}]",
+        dim_col,
+        f"[{dim_col}]",
+    ):
+      if key in dax_row:
+        return True, dax_row[key]
+  return False, None
 
 
 def compare_topn(oracle_rows, dax_rows, value_col, dim_col, n):
   """Tie-aware Top-N comparison.
 
-  The ordered value sequences must be equal.  Members may differ only
-  among items tied with the N-th value.
+  A DAX Top-N result holds at most *n* members, each member once (the model's
+  TOPN measures break ties on the dimension), so more than *n* non-blank rows
+  or a repeated member is a failure.  The ordered value sequences must be
+  equal; members may differ only among the items tied with the N-th value.
+
+  Returns ``(ok, detail, oracle_info, dax_info)``.  ``detail`` is a structural
+  code and never contains a dimension label, so it is safe to put in a
+  receipt.
   """
   oracle_dim_col = (
       "tool_name"
       if dim_col in ("tool_completed_name", "tool_error_name")
       else dim_col
   )
-  oracle_nonnull = [
-      r for r in oracle_rows if _to_float(r.get(value_col)) is not None
-  ]
-  dax_nonnull = [
-      r
-      for r in dax_rows
-      if _to_float(
-          _get_dax_value(r, "v")
-          if _get_dax_value(r, "v") is not None
-          else _get_dax_value(r, value_col)
-      )
-      is not None
-  ]
-  oracle_sorted = sorted(
-      oracle_nonnull,
-      key=lambda r: (
-          -(_to_float(r.get(value_col)) or 0),
-          str(r.get(oracle_dim_col, r.get(dim_col, ""))),
-      ),
-  )[:n]
-  dax_sorted = sorted(
-      dax_nonnull,
-      key=lambda r: (
-          -(
-              _to_float(
-                  _get_dax_value(r, "v")
-                  if _get_dax_value(r, "v") is not None
-                  else _get_dax_value(r, value_col)
-              )
-              or 0
-          ),
-          str(
-              _get_dax_value(r, f"events_v1[{dim_col}]")
-              or _get_dax_value(r, dim_col)
-              or ""
-          ),
-      ),
-  )[:n]
+  oracle_items = []
+  for row in oracle_rows:
+    number = _to_number(row.get(value_col))
+    if number is _CORRUPT:
+      return False, "corrupt_value", None, None
+    if number is None:
+      continue
+    if oracle_dim_col in row:
+      member = row[oracle_dim_col]
+    elif dim_col in row:
+      member = row[dim_col]
+    else:
+      return False, "missing_dimension", None, None
+    oracle_items.append((_dim_key(member), number))
 
-  o_vals = [r.get(value_col) for r in oracle_sorted]
-  o_dims = [
-      str(r.get(oracle_dim_col, r.get(dim_col, ""))) for r in oracle_sorted
-  ]
-  d_vals = [
-      _get_dax_value(r, "v")
-      if _get_dax_value(r, "v") is not None
-      else _get_dax_value(r, value_col)
-      for r in dax_sorted
-  ]
-  d_dims = [
-      str(
-          _get_dax_value(r, f"events_v1[{dim_col}]")
-          or _get_dax_value(r, dim_col)
-          or ""
-      )
-      for r in dax_sorted
-  ]
+  dax_items = []
+  for row in dax_rows:
+    raw = _get_dax_value(row, "v")
+    if raw is None:
+      raw = _get_dax_value(row, value_col)
+    number = _to_number(raw)
+    if number is _CORRUPT:
+      return False, "corrupt_value", None, None
+    if number is None:
+      continue
+    found, member = _dax_dimension(row, dim_col)
+    if not found:
+      return False, "missing_dimension", None, None
+    dax_items.append((_dim_key(member), number))
+
+  # Cardinality and uniqueness are checked on the complete non-blank DAX
+  # result, before anything is sliced to N.
+  if len(dax_items) > n:
+    return False, "row_count", len(oracle_items), len(dax_items)
+  dax_members = [member for member, _ in dax_items]
+  if len(set(dax_members)) != len(dax_members):
+    return False, "duplicate_member", None, None
+
+  def rank(item):
+    return (-item[1], item[0])
+
+  oracle_top = sorted(oracle_items, key=rank)[:n]
+  dax_top = sorted(dax_items, key=rank)
+  o_vals = [number for _, number in oracle_top]
+  d_vals = [number for _, number in dax_top]
   if len(o_vals) != len(d_vals):
-    return False, "length", o_vals, d_vals
-  for i, (o, d) in enumerate(zip(o_vals, d_vals)):
-    if not values_match(o, d):
-      return False, f"value[{i}]", o, d
-  # Verify dimension member keys using no_limit_rows for tie tolerance.
-  oracle_dim_vals = {
-      str(r.get(oracle_dim_col, r.get(dim_col, ""))): _to_float(
-          r.get(value_col)
-      )
-      for r in oracle_nonnull
-  }
-  for i, d_dim in enumerate(d_dims):
-    d_v = _to_float(d_vals[i])
-    if d_dim not in oracle_dim_vals:
-      return False, f"Member {d_dim} not in oracle", None, d_v
-    o_v = oracle_dim_vals[d_dim]
-    if not values_match(o_v, d_v):
-      return False, f"member[{i}]", d_dim, d_v
-  tie_adjusted = d_dims != o_dims
+    return False, "length", len(o_vals), len(d_vals)
+  for index, (o_val, d_val) in enumerate(zip(o_vals, d_vals)):
+    if not values_match(o_val, d_val):
+      return False, f"value[{index}]", o_val, d_val
+  # Every DAX member must be a real oracle member carrying the same value.
+  oracle_by_member = dict(oracle_items)
+  for index, (member, number) in enumerate(dax_top):
+    if member not in oracle_by_member:
+      return False, "member not in oracle", None, number
+    if not values_match(oracle_by_member[member], number):
+      return False, f"member[{index}]", oracle_by_member[member], number
+  o_members = [member for member, _ in oracle_top]
+  d_members = [member for member, _ in dax_top]
+  tie_adjusted = o_members != d_members
   if tie_adjusted and o_vals:
-    nth_val = _to_float(o_vals[-1])
-    for o_dim, d_dim, d_v in zip(o_dims, d_dims, d_vals):
-      if o_dim != d_dim and not values_match(_to_float(d_v), nth_val):
-        return False, "non-tie member order mismatch", o_dim, d_dim
+    nth_val = o_vals[-1]
+    for o_member, d_member, d_val in zip(o_members, d_members, d_vals):
+      if o_member != d_member and not values_match(d_val, nth_val):
+        return False, "non-tie member order mismatch", None, None
   return True, ("tie_adjusted" if tie_adjusted else None), None, None
 
 
@@ -571,6 +681,226 @@ def build_dax_query(chart, start, end):
 # ---------------------------------------------------------------------------
 
 
+def _parse_iso_date(text):
+  """Parse a strict ``YYYY-MM-DD`` calendar date."""
+  if not isinstance(text, str) or not _ISO_DATE_RE.fullmatch(text):
+    raise ValueError(f"invalid date: {text!r}")
+  try:
+    return datetime.date.fromisoformat(text)
+  except ValueError:
+    raise ValueError(f"invalid date: {text!r}") from None
+
+
+def parse_window(spec):
+  """Parse ``YYYY-MM-DD:YYYY-MM-DD`` into a validated ``(start, end)`` pair."""
+  parts = spec.split(":")
+  if len(parts) != 2:
+    raise ValueError(f"invalid window: {spec}")
+  start, end = _parse_iso_date(parts[0]), _parse_iso_date(parts[1])
+  if start > end:
+    raise ValueError(f"invalid window: {spec} (start is after end)")
+  return parts[0], parts[1]
+
+
+def resolve_default_window(token, workspace_id, dataset_id):
+  """Return ``(start, end, source)`` for the report's loaded "Current" window.
+
+  The bounds come from the model's own Date table, so the oracle and the DAX
+  side are both evaluated over the window the report actually shows.  When
+  that lookup fails the fixture range is used instead and ``source`` says so.
+  """
+  try:
+    rows = extract_dax_rows(
+        execute_dax(token, workspace_id, dataset_id, DATE_WINDOW_DAX)
+    )
+    row = rows[0]
+    start = _parse_iso_date(
+        _normalize_date_key(_get_dax_value(row, "min_date"))
+    )
+    end = _parse_iso_date(_normalize_date_key(_get_dax_value(row, "max_date")))
+    if start > end:
+      raise ValueError("reversed window")
+    return start.isoformat(), end.isoformat(), "date_table"
+  except Exception:  # pylint: disable=broad-except
+    return FIXTURE_WINDOW[0], FIXTURE_WINDOW[1], "fixture_fallback"
+
+
+def _daily_llm_trend_rows(oracle_path, args, billing_project, start, end):
+  """Re-run the LLM-call trend oracle at UTC date grain.
+
+  COUNT(DISTINCT CONCAT(trace_id, '|', span_id)) is evaluated at event_date
+  grain (spec §9.2 compare_at: event_date) so cross-minute duplicate
+  (trace_id, span_id) pairs are not double-counted.
+  """
+  daily_sql = (
+      oracle_path.read_text()
+      .replace("{{PROJECT}}", args.project)
+      .replace("{{DATASET}}", args.dataset)
+      .replace("{{TABLE}}", args.table)
+      .replace(
+          "TIMESTAMP_TRUNC(timestamp, MINUTE) AS timestamp_minute",
+          "DATE(timestamp, 'UTC') AS timestamp_date",
+      )
+      .replace("GROUP BY timestamp_minute", "GROUP BY timestamp_date")
+      .replace(
+          "ORDER BY timestamp_minute DESC",
+          "ORDER BY timestamp_date DESC",
+      )
+  )
+  daily_sql = LIMIT_RE.sub("", daily_sql)
+  with tempfile.TemporaryDirectory() as tmp_dir:
+    tmp_sql = pathlib.Path(tmp_dir) / "llm_trends_daily.sql"
+    tmp_sql.write_text(daily_sql)
+    rows, _ = run_oracle_query(
+        tmp_sql,
+        args.project,
+        billing_project,
+        args.dataset,
+        args.table,
+        args.location,
+        start,
+        end,
+    )
+  return rows
+
+
+def _compare_chart(chart, oracle_rows, topn_rows, dax_rows):
+  """Compare one chart; return ``(is_match, tie_adjusted, error_detail)``.
+
+  The error detail is built only from structural codes, row indices and
+  configured column names, never from a data value or a dimension label.
+  """
+  visual_type = chart["visual_type"]
+
+  if visual_type == "cardVisual":
+    oracle_cols = [m.get("oracle_column", "") for m in chart["measure_info"]]
+    oracle_row = oracle_rows[0] if oracle_rows else {}
+    match, col, _, _ = compare_card(oracle_row, dax_rows, oracle_cols)
+    return match, False, (None if match else f"{col}: mismatch")
+
+  if visual_type == "areaChart":
+    if chart["id"] == "usage-llm-call-trends":
+      value_col = "total_llm_calls"
+    else:
+      value_col = chart["measure_info"][0].get("oracle_column", "")
+    match, detail, _, _ = compare_series(
+        oracle_rows,
+        dax_rows,
+        value_col,
+        "timestamp_date",
+        has_series=bool(chart.get("series")),
+    )
+    return match, False, (None if match else f"series mismatch at {detail}")
+
+  if visual_type == "clusteredBarChart":
+    value_col = chart["measure_info"][0].get("oracle_column", "")
+    dim_col = chart.get("category", "").replace("events_v1.", "")
+    if topn_rows is not None:
+      match, detail, _, _ = compare_topn(
+          topn_rows, dax_rows, value_col, dim_col, chart["top_n"]
+      )
+      return (
+          match,
+          bool(match and detail == "tie_adjusted"),
+          (None if match else f"top-n mismatch: {detail}"),
+      )
+    match, detail, _, _ = compare_series(
+        oracle_rows, dax_rows, value_col, dim_col, has_series=False
+    )
+    return match, False, (None if match else f"bar mismatch at {detail}")
+
+  return False, False, "unsupported_visual_type"
+
+
+def _run_chart(chart, window, args, billing_project, token):
+  """Validate one chart in one window and return its sanitized result.
+
+  Every failure is reported as an allowlisted code: upstream error text, data
+  values and dimension labels are never copied into the result.
+  """
+  chart_id = chart["id"]
+  start, end = window["start"], window["end"]
+  oracle_path = LOOKER_ROOT / chart["oracle_query"]
+  dax_query = build_dax_query(chart, start, end)
+  top_n = chart.get("top_n")
+  wants_topn = (
+      chart["visual_type"] == "clusteredBarChart"
+      and top_n is not None
+      and top_n <= 10
+  )
+
+  def result(status, error=None, oracle_rows=(), dax_rows=(), tie=False):
+    try:
+      oracle_sha = sha256_file(oracle_path)
+    except OSError:
+      oracle_sha = None
+    return {
+        "chart_id": chart_id,
+        "window": window["label"],
+        "status": status,
+        "tie_adjusted": tie,
+        "oracle_row_count": len(oracle_rows),
+        "dax_row_count": len(dax_rows),
+        "oracle_query_sha256": oracle_sha,
+        "dax_query_sha256": sha256_text(dax_query),
+        "error": _sanitize_error(error),
+    }
+
+  try:
+    oracle_rows, _ = run_oracle_query(
+        oracle_path,
+        args.project,
+        billing_project,
+        args.dataset,
+        args.table,
+        args.location,
+        start,
+        end,
+        remove_limit=(chart_id == "usage-llm-call-trends"),
+    )
+    if chart_id == "usage-llm-call-trends":
+      oracle_rows = _daily_llm_trend_rows(
+          oracle_path, args, billing_project, start, end
+      )
+    topn_rows = None
+    if wants_topn:
+      topn_rows, _ = run_oracle_query(
+          oracle_path,
+          args.project,
+          billing_project,
+          args.dataset,
+          args.table,
+          args.location,
+          start,
+          end,
+          remove_limit=True,
+      )
+  except Exception:  # pylint: disable=broad-except
+    return result(STATUS_FAIL, "oracle_query_failed")
+
+  try:
+    dax_rows = extract_dax_rows(
+        execute_dax(token, args.workspace_id, args.dataset_id, dax_query)
+    )
+  except DaxResponseError:
+    return result(STATUS_FAIL, "dax_response_error", oracle_rows)
+  except Exception:  # pylint: disable=broad-except
+    return result(STATUS_FAIL, "dax_request_failed", oracle_rows)
+
+  try:
+    is_match, tie_adjusted, error = _compare_chart(
+        chart, oracle_rows, topn_rows, dax_rows
+    )
+  except Exception:  # pylint: disable=broad-except
+    return result(STATUS_FAIL, "comparison_error", oracle_rows, dax_rows)
+  if not is_match:
+    return result(STATUS_FAIL, error, oracle_rows, dax_rows)
+  if not oracle_rows and not dax_rows:
+    # Nothing was compared: an empty-versus-empty chart is not evidence.
+    return result(STATUS_EMPTY, "empty_result", oracle_rows, dax_rows)
+  return result(STATUS_PASS, None, oracle_rows, dax_rows, tie_adjusted)
+
+
 def main(argv=None):
   parser = argparse.ArgumentParser(
       description="Live parity validator for the Power BI BQAA dashboard"
@@ -587,10 +917,22 @@ def main(argv=None):
       "--window",
       action="append",
       default=[],
-      help="default | YYYY-MM-DD:YYYY-MM-DD (repeatable)",
+      help=(
+          "default | YYYY-MM-DD:YYYY-MM-DD (repeatable); 'default' (also used"
+          " when omitted) is the report's loaded Current window, read from the"
+          " model's Date table"
+      ),
   )
   parser.add_argument("--report-id", default=None)
   parser.add_argument("--output")
+  parser.add_argument(
+      "--allow-empty",
+      action="store_true",
+      help=(
+          "accept charts that are empty on both sides, and a run in which no"
+          " oracle query returned any row (for deliberate empty-window checks)"
+      ),
+  )
   args = parser.parse_args(argv)
 
   validate_guid(args.workspace_id, "workspace ID")
@@ -608,217 +950,31 @@ def main(argv=None):
 
   charts = load_chart_metadata()
 
+  # Every explicit window is validated before any query is issued.
+  specs = list(dict.fromkeys(args.window or ["default"]))
+  explicit = {spec: parse_window(spec) for spec in specs if spec != "default"}
   windows = []
-  if not args.window:
-    windows.append(("default", "2026-04-18", "2026-07-16"))
-  for w in args.window:
-    if w == "default":
-      windows.append(("default", "2026-04-18", "2026-07-16"))
+  for spec in specs:
+    if spec == "default":
+      start, end, source = resolve_default_window(
+          token, args.workspace_id, args.dataset_id
+      )
+      if source != "date_table":
+        print(
+            "warning: the loaded window could not be read from the Date table;"
+            " using the fixture window",
+            file=sys.stderr,
+        )
     else:
-      parts = w.split(":")
-      if len(parts) != 2:
-        raise ValueError(f"invalid window: {w}")
-      datetime.date.fromisoformat(parts[0])
-      datetime.date.fromisoformat(parts[1])
-      windows.append((w, parts[0], parts[1]))
+      (start, end), source = explicit[spec], "explicit"
+    windows.append(
+        {"label": spec, "start": start, "end": end, "source": source}
+    )
 
   results = []
-  all_pass = True
-
-  for win_label, start, end in windows:
+  for window in windows:
     for chart in charts:
-      chart_id = chart["id"]
-      oracle_path = LOOKER_ROOT / chart["oracle_query"]
-      try:
-        oracle_rows, job_id = run_oracle_query(
-            oracle_path,
-            args.project,
-            billing_project,
-            args.dataset,
-            args.table,
-            args.location,
-            start,
-            end,
-            remove_limit=(chart_id == "usage-llm-call-trends"),
-        )
-      except Exception as exc:  # pylint: disable=broad-except
-        results.append(
-            {
-                "chart_id": chart_id,
-                "window": win_label,
-                "status": "FAIL",
-                "tie_adjusted": False,
-                "error": _sanitize_error(str(exc)[:200]),
-            }
-        )
-        all_pass = False
-        continue
-
-      dax_query = build_dax_query(chart, start, end)
-      try:
-        dax_response = execute_dax(
-            token, args.workspace_id, args.dataset_id, dax_query
-        )
-      except Exception as exc:  # pylint: disable=broad-except
-        results.append(
-            {
-                "chart_id": chart_id,
-                "window": win_label,
-                "status": "FAIL",
-                "tie_adjusted": False,
-                "error": _sanitize_error(str(exc)[:200]),
-            }
-        )
-        all_pass = False
-        continue
-
-      dax_results = dax_response.get("results", [])
-      dax_rows = []
-      if dax_results:
-        tables = dax_results[0].get("tables", [])
-        if tables:
-          dax_rows = tables[0].get("rows", [])
-
-      is_match = True
-      tie_adjusted = False
-      error_detail = None
-      visual_type = chart["visual_type"]
-
-      try:
-        if visual_type == "cardVisual":
-          oracle_cols = [
-              m.get("oracle_column", "") for m in chart["measure_info"]
-          ]
-          oracle_row = oracle_rows[0] if oracle_rows else {}
-          match, col, o_val, d_val = compare_card(
-              oracle_row, dax_rows, oracle_cols
-          )
-          is_match = match
-          if not match:
-            error_detail = _sanitize_error(f"{col}: mismatch")
-
-        elif visual_type == "areaChart":
-          if chart_id == "usage-llm-call-trends":
-            # Re-evaluate COUNT(DISTINCT CONCAT(trace_id, '|', span_id)) at
-            # event_date grain (spec §9.2 compare_at: event_date) so cross-minute
-            # duplicate (trace_id, span_id) pairs are not double-counted.
-            daily_sql = (
-                oracle_path.read_text()
-                .replace("{{PROJECT}}", args.project)
-                .replace("{{DATASET}}", args.dataset)
-                .replace("{{TABLE}}", args.table)
-                .replace(
-                    "TIMESTAMP_TRUNC(timestamp, MINUTE) AS timestamp_minute",
-                    "DATE(timestamp, 'UTC') AS timestamp_date",
-                )
-                .replace("GROUP BY timestamp_minute", "GROUP BY timestamp_date")
-                .replace(
-                    "ORDER BY timestamp_minute DESC",
-                    "ORDER BY timestamp_date DESC",
-                )
-            )
-            daily_sql = LIMIT_RE.sub("", daily_sql)
-            with tempfile.TemporaryDirectory() as tmp_dir:
-              tmp_sql = pathlib.Path(tmp_dir) / "llm_trends_daily.sql"
-              tmp_sql.write_text(daily_sql)
-              oracle_rows, job_id = run_oracle_query(
-                  tmp_sql,
-                  args.project,
-                  billing_project,
-                  args.dataset,
-                  args.table,
-                  args.location,
-                  start,
-                  end,
-              )
-            axis_col = "timestamp_date"
-            value_col = "total_llm_calls"
-          else:
-            axis_col = "timestamp_date"
-            value_col = chart["measure_info"][0].get("oracle_column", "")
-          has_series = bool(chart.get("series"))
-          if has_series:
-            axis_col = "timestamp_date"
-            value_col = chart["measure_info"][0].get("oracle_column", "")
-          match, key, o_val, d_val = compare_series(
-              oracle_rows,
-              dax_rows,
-              value_col,
-              axis_col,
-              has_series=has_series,
-          )
-          is_match = match
-          if not match:
-            error_detail = _sanitize_error(f"series mismatch at {key}")
-
-        elif visual_type == "clusteredBarChart":
-          top_n = chart.get("top_n")
-          value_col = chart["measure_info"][0].get("oracle_column", "")
-          category = chart.get("category", "")
-          dim_col = category.replace("events_v1.", "")
-
-          if chart_id == "usage-top-5-agents-by-llm-calls":
-            match, key, o_val, d_val = compare_series(
-                oracle_rows,
-                dax_rows,
-                value_col,
-                dim_col,
-                has_series=False,
-            )
-            is_match = match
-            if not match:
-              error_detail = _sanitize_error(f"bar mismatch at {key}")
-          elif top_n is not None and top_n <= 10:
-            no_limit_rows, _ = run_oracle_query(
-                oracle_path,
-                args.project,
-                billing_project,
-                args.dataset,
-                args.table,
-                args.location,
-                start,
-                end,
-                remove_limit=True,
-            )
-            match, detail, o_val, d_val = compare_topn(
-                no_limit_rows, dax_rows, value_col, dim_col, top_n
-            )
-            is_match = match
-            tie_adjusted = bool(match and detail == "tie_adjusted")
-            if not match:
-              error_detail = _sanitize_error(f"{detail}")
-          else:
-            match, key, o_val, d_val = compare_series(
-                oracle_rows,
-                dax_rows,
-                value_col,
-                dim_col,
-                has_series=False,
-            )
-            is_match = match
-            if not match:
-              error_detail = _sanitize_error(f"bar mismatch at {key}")
-      except Exception as exc:  # pylint: disable=broad-except
-        is_match = False
-        error_detail = _sanitize_error(str(exc)[:200])
-
-      status = "PASS" if is_match else "FAIL"
-      if not is_match:
-        all_pass = False
-
-      results.append(
-          {
-              "chart_id": chart_id,
-              "window": win_label,
-              "status": status,
-              "tie_adjusted": tie_adjusted,
-              "oracle_row_count": len(oracle_rows),
-              "dax_row_count": len(dax_rows),
-              "oracle_query_sha256": sha256_file(oracle_path),
-              "dax_query_sha256": sha256_text(dax_query),
-              "error": error_detail,
-          }
-      )
+      results.append(_run_chart(chart, window, args, billing_project, token))
 
   now_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
   try:
@@ -833,6 +989,25 @@ def main(argv=None):
   except OSError:
     git_sha = "unknown"
 
+  def count(status, label=None):
+    return sum(
+        1
+        for r in results
+        if r["status"] == status and (label is None or r["window"] == label)
+    )
+
+  charts_expected = len(charts) * len(windows)
+  charts_pass = count(STATUS_PASS)
+  charts_fail = count(STATUS_FAIL)
+  charts_empty = count(STATUS_EMPTY)
+  oracle_rows_total = sum(r["oracle_row_count"] for r in results)
+  overall_pass = (
+      charts_expected > 0
+      and len(results) == charts_expected
+      and charts_fail == 0
+      and (args.allow_empty or (charts_empty == 0 and oracle_rows_total > 0))
+  )
+
   receipt = {
       "kind": "sanitized-powerbi-live-parity",
       "git_sha": git_sha,
@@ -840,13 +1015,29 @@ def main(argv=None):
       "executed_at_utc": now_utc,
       "dataset_id": args.dataset_id,
       "report_id": args.report_id,
-      "windows": [w[0] for w in windows],
-      "charts_expected": 37,
-      "charts_pass": sum(1 for r in results if r["status"] == "PASS"),
-      "charts_fail": sum(1 for r in results if r["status"] == "FAIL"),
+      "windows": [w["label"] for w in windows],
+      "window_details": [
+          {
+              "window": w["label"],
+              "start": w["start"],
+              "end": w["end"],
+              "source": w["source"],
+              "charts_expected": len(charts),
+              "charts_pass": count(STATUS_PASS, w["label"]),
+              "charts_fail": count(STATUS_FAIL, w["label"]),
+              "charts_empty": count(STATUS_EMPTY, w["label"]),
+          }
+          for w in windows
+      ],
+      "allow_empty": args.allow_empty,
+      "charts_expected": charts_expected,
+      "charts_pass": charts_pass,
+      "charts_fail": charts_fail,
+      "charts_empty": charts_empty,
+      "oracle_rows_total": oracle_rows_total,
       "results": results,
-      "overall_pass": all_pass,
-      "pass": all_pass,
+      "overall_pass": overall_pass,
+      "pass": overall_pass,
   }
 
   if args.output:
@@ -855,13 +1046,19 @@ def main(argv=None):
     output.write_text(json.dumps(receipt, indent=1, sort_keys=True) + "\n")
     print(f"sanitized receipt: {output}")
 
-  if all_pass:
-    print("live parity OK: 37/37 charts PASS on all windows")
-    return 0
-  print(
-      f"live parity FAIL: {receipt['charts_fail']} charts failed",
-      file=sys.stderr,
+  summary = (
+      f"{charts_pass}/{charts_expected} charts PASS across"
+      f" {len(windows)} window(s)"
   )
+  if overall_pass:
+    if charts_empty:
+      summary += f", {charts_empty} empty (allowed)"
+    print(f"live parity OK: {summary}")
+    return 0
+  reasons = [f"{charts_fail} failed", f"{charts_empty} empty"]
+  if oracle_rows_total == 0:
+    reasons.append("no oracle rows returned")
+  print(f"live parity FAIL: {summary}; {', '.join(reasons)}", file=sys.stderr)
   return 1
 
 

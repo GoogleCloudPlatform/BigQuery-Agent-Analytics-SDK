@@ -246,8 +246,13 @@ class TestParity:
     assert "DISTINCTCOUNTNOBLANK" in text
 
   def test_29_event_columns_present(self):
-    """All 29 events_v1 columns must be present in the TMDL."""
+    """All 29 events_v1 columns are really declared, bound and typed.
+
+    Reads the actual `column` blocks (`///` description lines are skipped), so
+    a comment can never stand in for a declaration.
+    """
     _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
     model_dir = POWER_BI / "BQAA_Agent_Analytics.SemanticModel" / "definition"
     events_path = model_dir / "tables" / "events_v1.tmdl"
     if not events_path.exists():
@@ -284,14 +289,24 @@ class TestParity:
         "tool_completed_pk",
         "tool_error_pk",
     ]
-    for col in expected_columns:
-      assert (
-          f"sourceColumn={col}" in text
-      ), f"Missing column '{col}' in events_v1.tmdl"
+    columns, parse_errors = val_mod._parse_tmdl_columns(text, "events_v1.tmdl")
+    assert not parse_errors, parse_errors
+    declared = [col["name"] for col in columns]
+    assert len(declared) == len(expected_columns) == 29
+    assert sorted(declared) == sorted(expected_columns)
+    for col in columns:
+      assert col.get("sourceColumn") == col["name"], col
+      assert col.get("dataType") in val_mod.VALID_DATA_TYPES, col
+    assert val_mod._check_events_columns(text) == []
 
-  def test_49_measures_present(self):
-    """All 49 measures must be present in events_v1.tmdl."""
+  def test_50_measures_present(self):
+    """All 50 measures are really declared in events_v1.tmdl.
+
+    Reads the actual `measure` declarations (`///` description lines are
+    skipped), so a description naming a measure cannot satisfy the check.
+    """
     _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
     model_dir = POWER_BI / "BQAA_Agent_Analytics.SemanticModel" / "definition"
     events_path = model_dir / "tables" / "events_v1.tmdl"
     if not events_path.exists():
@@ -347,15 +362,16 @@ class TestParity:
         "Top 5 Users by Events",
         "Top 5 Agents by Tool Errors",
         "Top 5 Tools by Errors",
+        "Top 5 Agents by LLM Calls",
     ]
-    for measure in expected_measures:
-      assert (
-          f"measure {measure}" in text
-      ), f"Missing measure '{measure}' in events_v1.tmdl"
+    declared = [m["name"] for m in val_mod._parse_tmdl_measures(text)]
+    assert len(declared) == len(set(declared)) == len(expected_measures) == 50
+    assert sorted(declared) == sorted(expected_measures)
 
-  def test_measure_count_is_49(self):
-    """Count of measure declarations must be exactly 49."""
+  def test_measure_count_is_50(self):
+    """Count of measure declarations must be exactly 50."""
     _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
     model_dir = POWER_BI / "BQAA_Agent_Analytics.SemanticModel" / "definition"
     events_path = model_dir / "tables" / "events_v1.tmdl"
     if not events_path.exists():
@@ -363,7 +379,8 @@ class TestParity:
     text = events_path.read_text()
     measure_re = re.compile(r"^\s*measure\s+", re.MULTILINE)
     count = len(measure_re.findall(text))
-    assert count == 49, f"Expected 49 measures, found {count}"
+    assert count == 50, f"Expected 50 measures, found {count}"
+    assert len(val_mod._parse_tmdl_measures(text)) == count
 
   def test_no_uuid4_calls(self):
     """uuid.uuid4 must never be called in any tool."""
@@ -375,19 +392,27 @@ class TestParity:
       assert "uuid4" not in text, f"uuid4 found in {py_file.name}"
 
   def test_tmdl_no_semicolon_in_sql(self):
-    """I8: no ; in embedded SQL in expressions.tmdl."""
+    """I8: no ; (or other M-escape hazard) in the SQL expressions.tmdl builds.
+
+    Scans the literals of the real `EventsSelectLines` list and `EventsSql`
+    expression.  The test first proves it found the 128 SELECT lines, so it
+    cannot pass by matching nothing.
+    """
     _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
     model_dir = POWER_BI / "BQAA_Agent_Analytics.SemanticModel" / "definition"
     expr_path = model_dir / "expressions.tmdl"
     if not expr_path.exists():
       pytest.skip("expressions.tmdl not found")
     text = expr_path.read_text()
-    # Check for semicolons in SQL-like lines.
-    # M text literals escape ; as nothing special, so a raw ; in SQL
-    # context is a bug.
-    for m in re.finditer(r"EventsSql\s*=\s*\"([^\"]*)\"", text):
-      sql = m.group(1)
-      assert ";" not in sql, f"Found ';' in EventsSql: {sql}"
+    select = re.search(r"\bEventsSelectLines\s*=\s*\{", text)
+    assert select is not None, "EventsSelectLines not found"
+    literals, problem = val_mod._m_string_list(text, select.end())
+    assert problem is None, problem
+    assert len(literals) == 128
+    assert literals[0] == "SELECT"
+    assert not [lit for lit in literals if ";" in lit]
+    assert val_mod._check_events_sql(text) == []
 
   def test_listener_matrix_nofilter(self):
     """visualInteractions NoFilter set must match F4 exactly.
@@ -716,6 +741,194 @@ class TestCheckCanFail:
     errors = val_mod.validate_parity(power_bi_root=tmp_path)
     assert any("Overlap on page" in e for e in errors), errors
 
+  # -- Real declarations, not description lines (F8) -------------------------
+
+  @staticmethod
+  def _copy_model_definition(tmp_path):
+    import shutil
+
+    tmp_model = tmp_path / "BQAA_Agent_Analytics.SemanticModel" / "definition"
+    shutil.copytree(
+        POWER_BI / "BQAA_Agent_Analytics.SemanticModel" / "definition",
+        tmp_model,
+    )
+    return tmp_model
+
+  @staticmethod
+  def _edit_once(path, old, new):
+    text = path.read_text()
+    assert text.count(old) == 1, f"{old!r} occurs {text.count(old)}x"
+    path.write_text(text.replace(old, new))
+
+  def test_wrong_source_column_detected(self, tmp_path):
+    """Editing only `sourceColumn:` fails although the `///` line still agrees."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    tmp_model = self._copy_model_definition(tmp_path)
+    events_path = tmp_model / "tables" / "events_v1.tmdl"
+    self._edit_once(
+        events_path,
+        "\t\tsourceColumn: agent\n",
+        "\t\tsourceColumn: agent_renamed\n",
+    )
+    # A substring check would still be satisfied by the description line.
+    assert "sourceColumn=agent dataType=string" in events_path.read_text()
+    errors = val_mod.validate_tmdl(power_bi_root=tmp_path)
+    assert any(
+        "column 'agent' has sourceColumn 'agent_renamed'" in e for e in errors
+    ), errors
+
+  @pytest.mark.parametrize(
+      "new_type, expected",
+      [
+          ("notatype", "column 'event_type' has invalid dataType 'notatype'"),
+          (
+              "int64",
+              "column 'event_type' has dataType 'int64', expected 'string'",
+          ),
+      ],
+  )
+  def test_wrong_data_type_detected(self, tmp_path, new_type, expected):
+    """Editing only `dataType:` fails (invalid and valid-but-wrong types)."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    tmp_model = self._copy_model_definition(tmp_path)
+    events_path = tmp_model / "tables" / "events_v1.tmdl"
+    self._edit_once(
+        events_path,
+        "\tcolumn event_type\n\t\tdataType: string\n",
+        f"\tcolumn event_type\n\t\tdataType: {new_type}\n",
+    )
+    errors = val_mod.validate_tmdl(power_bi_root=tmp_path)
+    assert any(expected in e for e in errors), errors
+
+  def test_description_line_cannot_stand_in_for_a_column(self, tmp_path):
+    """A `///` line naming a column is not a declaration of that column."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    tmp_model = self._copy_model_definition(tmp_path)
+    events_path = tmp_model / "tables" / "events_v1.tmdl"
+    self._edit_once(events_path, "\tcolumn agent\n", "\tcolumn agent_renamed\n")
+    assert "/// Column agent " in events_path.read_text()
+    errors = val_mod.validate_tmdl(power_bi_root=tmp_path)
+    assert any("missing column 'agent'" in e for e in errors), errors
+    assert any("unexpected column 'agent_renamed'" in e for e in errors), errors
+
+  def test_description_line_cannot_stand_in_for_a_measure(self, tmp_path):
+    """A `///` line naming a measure is not a declaration of that measure."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    tmp_model = self._copy_model_definition(tmp_path)
+    events_path = tmp_model / "tables" / "events_v1.tmdl"
+    self._edit_once(
+        events_path,
+        "\tmeasure 'Total Events' = COUNTROWS('events_v1')\n",
+        "\tmeasure 'Total Events Renamed' = COUNTROWS('events_v1')\n",
+    )
+    assert "/// measure Total Events " in events_path.read_text()
+    errors = val_mod.validate_tmdl(power_bi_root=tmp_path)
+    assert any("missing measure 'Total Events'" in e for e in errors), errors
+    assert any(
+        "unexpected measure 'Total Events Renamed'" in e for e in errors
+    ), errors
+
+  @pytest.mark.parametrize(
+      "literal, expected",
+      [
+          ('"SELECT;",', "contains ';'"),
+          ('"SELECT ""x""",', "contains a double quote"),
+          ('"SELECT #(lf)",', "unescaped '#('"),
+      ],
+      ids=["semicolon", "double-quote", "m-escape-sequence"],
+  )
+  def test_events_sql_hazards_detected(self, tmp_path, literal, expected):
+    """I8: the real EventsSelectLines literals are scanned, not a lookalike."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    tmp_model = self._copy_model_definition(tmp_path)
+    self._edit_once(
+        tmp_model / "expressions.tmdl",
+        '\t\t\t\t"SELECT",\n',
+        f"\t\t\t\t{literal}\n",
+    )
+    errors = val_mod.validate_tmdl(power_bi_root=tmp_path)
+    assert any(expected in e for e in errors), errors
+
+  # -- Oracle contract drift and missing specs (F4, F5, F13) -----------------
+
+  def test_oracle_edit_without_regeneration_detected(self, tmp_path):
+    """An edited cited oracle query is reported until the model is regenerated."""
+    _skip_if_not_generated()
+    import shutil
+
+    val_mod = _load_tool_module("validate_pbip")
+    gen_mod = _load_tool_module("generate_pbip")
+    assert val_mod.validate_parity(power_bi_root=POWER_BI) == []
+    assert gen_mod.check_generated_files(power_bi_root=POWER_BI) == []
+
+    tmp_looker = tmp_path / "looker_studio"
+    shutil.copytree(LOOKER, tmp_looker)
+    query_path = tmp_looker / "oracle" / "queries" / "usage-total-traces.sql"
+    sql = query_path.read_text()
+    assert sql.count("COUNT(DISTINCT trace_id)") == 2
+    query_path.write_text(
+        sql.replace("COUNT(DISTINCT trace_id)", "COUNT(DISTINCT session_id)")
+    )
+
+    errors = val_mod.validate_parity(
+        power_bi_root=POWER_BI, looker_root=tmp_looker
+    )
+    assert any(
+        "measure 'KPI Total Traces' oracle digest" in e for e in errors
+    ), errors
+    diffs = gen_mod.check_generated_files(
+        power_bi_root=POWER_BI, looker_root=tmp_looker
+    )
+    assert any("events_v1.tmdl" in d for d in diffs), diffs
+
+  def test_removed_oracle_alias_detected(self, tmp_path):
+    """A measure whose oracle_column is not an output alias is reported."""
+    _skip_if_not_generated()
+    import shutil
+
+    val_mod = _load_tool_module("validate_pbip")
+    tmp_looker = tmp_path / "looker_studio"
+    shutil.copytree(LOOKER, tmp_looker)
+    query_path = tmp_looker / "oracle" / "queries" / "usage-total-tokens.sql"
+    sql = query_path.read_text()
+    alias_line = "  prev.value AS pop_total_tokens_prior,\n"
+    assert sql.count(alias_line) == 1
+    query_path.write_text(sql.replace(alias_line, ""))
+    errors = val_mod.validate_parity(
+        power_bi_root=POWER_BI, looker_root=tmp_looker
+    )
+    assert any(
+        "oracle_column 'pop_total_tokens_prior' is not an output alias" in e
+        for e in errors
+    ), errors
+
+  @pytest.mark.parametrize(
+      "missing", ["semantic_model.yaml", "report_visuals.yaml"]
+  )
+  def test_missing_spec_is_not_silently_skipped(self, tmp_path, missing):
+    """Deleting an input spec fails the sync check instead of skipping its half."""
+    import shutil
+
+    gen_mod = _load_tool_module("generate_pbip")
+    tmp_pbi = tmp_path / "power_bi"
+    shutil.copytree(POWER_BI / "spec", tmp_pbi / "spec")
+    (tmp_pbi / "spec" / missing).unlink()
+
+    assert gen_mod.check_generated_files(power_bi_root=tmp_pbi) == [
+        f"MISSING: spec/{missing}"
+    ]
+    with pytest.raises(FileNotFoundError, match="Missing required spec"):
+      gen_mod.generate_all(power_bi_root=tmp_pbi)
+    with pytest.raises(FileNotFoundError, match="Missing required spec"):
+      gen_mod.write_generated_files(power_bi_root=tmp_pbi)
+    # Nothing was written or deleted.
+    assert sorted(p.name for p in tmp_pbi.iterdir()) == ["spec"]
+
 
 # ---------------------------------------------------------------------------
 # Schema lock integrity tests
@@ -908,6 +1121,28 @@ class TestDocumentation:
           name.lower() not in text.lower()
       ), f"USER_MANUAL contains forbidden name: '{name}'"
 
+  def test_docs_state_the_real_measure_count(self):
+    """README and the web configurator quote the generated measure count."""
+    pbip_model = _load_tool_module("pbip_model")
+    count = len(pbip_model.MEASURE_NAMES)
+    assert count == 50
+    readme = (POWER_BI / "README.md").read_text()
+    index_html = (POWER_BI / "docs" / "index.html").read_text()
+    assert f"{count} DAX measures" in readme
+    assert f"{count} DAX measures" in index_html
+    for stale in ("49 DAX measures", "49 measures"):
+      assert stale not in readme
+      assert stale not in index_html
+
+  def test_docs_describe_kpi_change_callout_and_live_gate(self):
+    """The docs describe what the six KPI cards and the live validator do."""
+    readme = (POWER_BI / "README.md").read_text()
+    manual = (POWER_BI / "USER_MANUAL.md").read_text()
+    assert "vs previous period" in readme
+    assert "vs previous period" in manual
+    assert "--allow-empty" in readme
+    assert "fails closed" in readme
+
   def test_dashboards_readme_has_power_bi_row(self):
     """dashboards/README.md must have a Power BI row."""
     text = (ROOT / "dashboards" / "README.md").read_text()
@@ -1054,6 +1289,105 @@ class TestCIWorkflow:
     assert "dashboards/power_bi/**" in text
     assert "dashboards/looker_studio/spec/**" in text
     assert "tests/test_power_bi_*.py" in text
+
+  @staticmethod
+  def _workflow_doc():
+    path = ROOT / ".github" / "workflows" / "power-bi-sync-check.yml"
+    return yaml.safe_load(path.read_text())
+
+  def test_workflow_runs_in_the_merge_queue(self):
+    """`merge_group` is a trigger, so a merge queue runs this check."""
+    doc = self._workflow_doc()
+    # PyYAML (YAML 1.1) reads the bare key `on` as the boolean True.
+    triggers = doc.get("on", doc.get(True))
+    assert isinstance(triggers, dict), triggers
+    assert "merge_group" in triggers, sorted(map(str, triggers))
+    assert triggers["merge_group"] == {"types": ["checks_requested"]}
+    assert "push" in triggers and "pull_request" in triggers
+
+  @staticmethod
+  def _install_requirements(run_text):
+    """Quoted requirement specifiers of a `pip install` command."""
+    assert "pip install" in run_text, run_text
+    return re.findall(r'"([^"]+)"', run_text)
+
+  @staticmethod
+  def _is_exact_pin(requirement):
+    return re.fullmatch(r"[A-Za-z0-9_.-]+==[0-9]+(\.[0-9]+)*", requirement)
+
+  def test_workflow_pins_python_dependencies_exactly(self):
+    """Validation dependencies change only through a repository diff."""
+    steps = self._workflow_doc()["jobs"]["power-bi-sync"]["steps"]
+    installs = [s["run"] for s in steps if "pip install" in s.get("run", "")]
+    assert len(installs) == 1, installs
+    requirements = self._install_requirements(installs[0])
+    assert [r.split("==")[0] for r in requirements] == [
+        "pyyaml",
+        "jsonschema",
+        "pytest",
+    ]
+    assert all(self._is_exact_pin(r) for r in requirements), requirements
+
+  @pytest.mark.parametrize(
+      "requirement",
+      [
+          "pyyaml>=6.0",
+          "jsonschema~=4.18",
+          "pytest",
+          "pytest==8.*",
+          "pyyaml==6.0.2; python_version>'3'",
+          "pytest===8.3.4",
+      ],
+  )
+  def test_exact_pin_check_rejects_ranges(self, requirement):
+    """The exact-pin check can fail: ranges, wildcards and markers are rejected."""
+    assert not self._is_exact_pin(requirement)
+
+  def test_workflow_install_line_rejects_open_ended_ranges(self):
+    """The requirement parser sees the three specifiers of an unpinned line."""
+    old = 'pip install "pyyaml>=6.0" "jsonschema>=4.18" "pytest>=7.0"'
+    requirements = self._install_requirements(old)
+    assert requirements == ["pyyaml>=6.0", "jsonschema>=4.18", "pytest>=7.0"]
+    assert not any(self._is_exact_pin(r) for r in requirements)
+
+  @pytest.mark.parametrize(
+      "rel",
+      [
+          "dashboards/power_bi/spec/semantic_model.yaml",
+          "dashboards/power_bi/spec/report_visuals.yaml",
+          "dashboards/power_bi/spec/pbir_schemas.lock.json",
+          ".github/workflows/power-bi-sync-check.yml",
+      ],
+  )
+  def test_hand_written_inputs_pass_whitespace_hygiene(self, rel):
+    """No trailing whitespace and exactly one newline at EOF (git diff --check)."""
+    text = (ROOT / rel).read_text(encoding="utf-8")
+    assert text.endswith("\n"), f"{rel} must end with a newline"
+    assert not text.endswith("\n\n"), f"{rel} has a blank line at EOF"
+    bad = [
+        number
+        for number, line in enumerate(text.splitlines(), 1)
+        if line != line.rstrip()
+    ]
+    assert not bad, f"{rel}: trailing whitespace on lines {bad}"
+
+  @pytest.mark.parametrize(
+      "text, ok",
+      [
+          ("a: 1\n", True),
+          ("a: 1", False),
+          ("a: 1\n\n", False),
+          ("a: 1 \n", False),
+      ],
+  )
+  def test_whitespace_hygiene_rules_can_fail(self, text, ok):
+    """The EOF/whitespace rules reject a missing newline, a blank EOF line, or padding."""
+    passes = (
+        text.endswith("\n")
+        and not text.endswith("\n\n")
+        and all(line == line.rstrip() for line in text.splitlines())
+    )
+    assert passes is ok
 
   def test_workflow_no_vendor_names(self):
     path = ROOT / ".github" / "workflows" / "power-bi-sync-check.yml"

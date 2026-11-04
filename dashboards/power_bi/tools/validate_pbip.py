@@ -51,38 +51,42 @@ REPORT_DIR = POWER_BI_ROOT / "BQAA_Agent_Analytics.Report"
 # Schema URL prefix used inside generated JSON files.
 SCHEMA_URL_PREFIX = "https://developer.microsoft.com/json-schemas/"
 
-# The 29 event columns (spec.md §4.3, F1).
-EVENTS_COLUMNS = [
-    "timestamp",
-    "event_type",
-    "agent",
-    "session_id",
-    "invocation_id",
-    "user_id",
-    "trace_id",
-    "span_id",
-    "parent_span_id",
-    "status",
-    "error_message",
-    "is_truncated",
-    "usage_prompt_tokens",
-    "usage_completion_tokens",
-    "usage_total_tokens",
-    "llm_total_ms",
-    "ttft_ms",
-    "model_version",
-    "tool_completed_name",
-    "tool_completed_origin",
-    "tool_completed_total_ms",
-    "tool_error_name",
-    "tool_error_origin",
-    "tool_error_total_ms",
-    "event_date",
-    "event_pk",
-    "llm_response_pk",
-    "tool_completed_pk",
-    "tool_error_pk",
-]
+# The 29 event columns and their TMDL data types (spec.md §4.3, F1).  This is
+# deliberately an independent copy of the generator spec: the lint compares the
+# generated `column` declarations against it, so a corrupted declaration is
+# reported instead of being echoed back.
+EVENTS_COLUMN_TYPES = {
+    "timestamp": "dateTime",
+    "event_type": "string",
+    "agent": "string",
+    "session_id": "string",
+    "invocation_id": "string",
+    "user_id": "string",
+    "trace_id": "string",
+    "span_id": "string",
+    "parent_span_id": "string",
+    "status": "string",
+    "error_message": "string",
+    "is_truncated": "boolean",
+    "usage_prompt_tokens": "int64",
+    "usage_completion_tokens": "int64",
+    "usage_total_tokens": "int64",
+    "llm_total_ms": "int64",
+    "ttft_ms": "int64",
+    "model_version": "string",
+    "tool_completed_name": "string",
+    "tool_completed_origin": "string",
+    "tool_completed_total_ms": "int64",
+    "tool_error_name": "string",
+    "tool_error_origin": "string",
+    "tool_error_total_ms": "int64",
+    "event_date": "dateTime",
+    "event_pk": "string",
+    "llm_response_pk": "string",
+    "tool_completed_pk": "string",
+    "tool_error_pk": "string",
+}
+EVENTS_COLUMNS = list(EVENTS_COLUMN_TYPES)
 
 # Valid TMDL data types.
 VALID_DATA_TYPES = {
@@ -106,7 +110,7 @@ PAGES = [
     ("trace-inspector", "BKJH"),
 ]
 
-# The 49 measure names (spec.md §4.5, plan.md §2).
+# The 50 measure names (spec.md §4.5, plan.md §2).
 MEASURE_NAMES = [
     "Total Tokens",
     "Total Traces",
@@ -157,6 +161,7 @@ MEASURE_NAMES = [
     "Top 5 Users by Events",
     "Top 5 Agents by Tool Errors",
     "Top 5 Tools by Errors",
+    "Top 5 Agents by LLM Calls",
 ]
 
 # F4 listener exceptions: the 4 charts that do NOT listen to User ID.
@@ -168,6 +173,17 @@ NON_UID_LISTENERS = frozenset(
         "usage-traces-split-by-agent",
     }
 )
+
+# The six KPI scorecards (chart id -> current-value measure).  Each also binds
+# "<measure> Change %", the comparison against the previous period.
+KPI_SCORECARDS = {
+    "usage-total-tokens": "KPI Total Tokens",
+    "usage-total-traces": "KPI Total Traces",
+    "usage-total-sessions": "KPI Total Sessions",
+    "usage-total-calls": "KPI Total LLM Calls",
+    "usage-total-users": "KPI Total Users",
+    "performance-total-errors": "KPI Tool Errors",
+}
 
 # Slicer names for visualInteractions check.
 SLICER_NAMES = [
@@ -230,12 +246,13 @@ def _load_lock():
     return json.load(f)
 
 
-def _load_looker_contracts():
+def _load_looker_contracts(looker_root=None):
   """Load chart_manifest.yaml and product_contract.yaml."""
   import yaml
 
-  manifest_path = LOOKER_ROOT / "spec" / "chart_manifest.yaml"
-  product_path = LOOKER_ROOT / "spec" / "product_contract.yaml"
+  root = Path(looker_root) if looker_root is not None else LOOKER_ROOT
+  manifest_path = root / "spec" / "chart_manifest.yaml"
+  product_path = root / "spec" / "product_contract.yaml"
   with open(manifest_path, "r", encoding="utf-8") as f:
     manifest = yaml.safe_load(f)
   with open(product_path, "r", encoding="utf-8") as f:
@@ -253,6 +270,17 @@ def _load_tool_module(name):
   module = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(module)
   return module
+
+
+_PBIP_COMMON = None
+
+
+def _pbip_common():
+  """Return the shared generator helpers (loaded once)."""
+  global _PBIP_COMMON
+  if _PBIP_COMMON is None:
+    _PBIP_COMMON = _load_tool_module("pbip_common")
+  return _PBIP_COMMON
 
 
 def _read_text(path):
@@ -498,9 +526,234 @@ def validate_json_schemas(power_bi_root_or_schemas_dir, schemas_dir=None):
 # ---------------------------------------------------------------------------
 
 
-def validate_tmdl(power_bi_root=None):
+_TMDL_COLUMN_DECL_RE = re.compile(r"^\tcolumn\s+(.+?)\s*$")
+_TMDL_COLUMN_PROP_RE = re.compile(r"^\t\t(dataType|sourceColumn):\s*(.+?)\s*$")
+_TMDL_MEASURE_DECL_RE = re.compile(
+    r"^\tmeasure\s+('(?:[^']|'')+'|[^\s=']+)\s*="
+)
+_TMDL_ANNOTATION_RE = re.compile(r"^\t\tannotation\s+(\S+)\s*=\s*(.*?)\s*$")
+# A line indented by exactly one tab starts the next table-level object.
+_TMDL_OBJECT_LINE_RE = re.compile(r"^\t\S")
+# An M text literal: double quotes, with "" as the escaped quote.
+_M_STRING_LITERAL_RE = re.compile(r'"((?:[^"]|"")*)"')
+_M_LIST_TOKEN_RE = re.compile(r'\s*(?:(,)|(\})|"((?:[^"]|"")*)")')
+
+
+def _tmdl_unquote(name):
+  """Strip the optional single quotes around a TMDL object name."""
+  if len(name) >= 2 and name[0] == "'" and name[-1] == "'":
+    return name[1:-1].replace("''", "'")
+  return name
+
+
+def _is_tmdl_doc_line(raw):
+  """Whether *raw* is a `///` documentation line (never a declaration)."""
+  return raw.lstrip("\t").startswith("///")
+
+
+def _parse_tmdl_columns(text, label):
+  """Parse the real `column` blocks of a TMDL table file.
+
+  `///` documentation lines are skipped, so a comment that merely describes a
+  column can neither satisfy nor mask the actual declaration.  Returns
+  `(columns, errors)`; each column is a dict with `name`, `line` and the
+  `dataType` / `sourceColumn` properties found in its block.
+  """
+  columns = []
+  errors = []
+  current = None
+  for lineno, raw in enumerate(text.splitlines(), 1):
+    if _is_tmdl_doc_line(raw):
+      continue
+    decl = _TMDL_COLUMN_DECL_RE.match(raw)
+    if decl:
+      current = {"name": _tmdl_unquote(decl.group(1)), "line": lineno}
+      columns.append(current)
+    elif _TMDL_OBJECT_LINE_RE.match(raw):
+      current = None
+    elif current is not None:
+      prop = _TMDL_COLUMN_PROP_RE.match(raw)
+      if prop:
+        key, value = prop.group(1), _tmdl_unquote(prop.group(2))
+        if key in current:
+          errors.append(
+              f"{label}:{lineno}: duplicate {key} on column {current['name']!r}"
+          )
+        else:
+          current[key] = value
+  return columns, errors
+
+
+def _parse_tmdl_measures(text):
+  """Parse the real `measure` declarations of a TMDL table file.
+
+  Returns a list of `{"name", "line", "annotations"}` dicts; `annotations`
+  maps an annotation name to the list of values declared in the measure block.
+  """
+  measures = []
+  current = None
+  for lineno, raw in enumerate(text.splitlines(), 1):
+    if _is_tmdl_doc_line(raw):
+      continue
+    decl = _TMDL_MEASURE_DECL_RE.match(raw)
+    if decl:
+      current = {
+          "name": _tmdl_unquote(decl.group(1)),
+          "line": lineno,
+          "annotations": {},
+      }
+      measures.append(current)
+    elif _TMDL_OBJECT_LINE_RE.match(raw):
+      current = None
+    elif current is not None:
+      ann = _TMDL_ANNOTATION_RE.match(raw)
+      if ann:
+        current["annotations"].setdefault(ann.group(1), []).append(ann.group(2))
+  return measures
+
+
+def _m_string_list(text, start):
+  """Parse the string literals of an M list, just after its opening brace.
+
+  Returns `(literals, error)`; the literals are unescaped (`""` -> `"`) and
+  `error` is None only when the list holds nothing but string literals.
+  """
+  literals = []
+  pos = start
+  while True:
+    token = _M_LIST_TOKEN_RE.match(text, pos)
+    if token is None:
+      return literals, f"unexpected token near {text[pos:pos + 30]!r}"
+    pos = token.end()
+    if token.group(2):
+      return literals, None
+    if token.group(3) is not None:
+      literals.append(token.group(3).replace('""', '"'))
+
+
+def _check_events_columns(events_text):
+  """Check the real column declarations of events_v1.tmdl (29 columns)."""
+  columns, errors = _parse_tmdl_columns(events_text, "events_v1.tmdl")
+  seen = set()
+  for col in columns:
+    if col["name"] in seen:
+      errors.append(
+          f"events_v1.tmdl:{col['line']}: duplicate column {col['name']!r}"
+      )
+    seen.add(col["name"])
+  for name in EVENTS_COLUMNS:
+    if name not in seen:
+      errors.append(f"events_v1.tmdl: missing column '{name}'")
+  for col in columns:
+    name, line = col["name"], col["line"]
+    expected_type = EVENTS_COLUMN_TYPES.get(name)
+    if expected_type is None:
+      errors.append(f"events_v1.tmdl:{line}: unexpected column '{name}'")
+      continue
+    source = col.get("sourceColumn")
+    if source != name:
+      errors.append(
+          f"events_v1.tmdl:{line}: column '{name}' has sourceColumn "
+          f"{source!r}, expected '{name}'"
+      )
+    dtype = col.get("dataType")
+    if dtype not in VALID_DATA_TYPES:
+      errors.append(
+          f"events_v1.tmdl:{line}: column '{name}' has invalid "
+          f"dataType {dtype!r}"
+      )
+    elif dtype != expected_type:
+      errors.append(
+          f"events_v1.tmdl:{line}: column '{name}' has dataType "
+          f"'{dtype}', expected '{expected_type}'"
+      )
+  return errors
+
+
+def _check_events_measures(events_text):
+  """Check the real measure declarations of events_v1.tmdl (50 measures)."""
+  errors = []
+  declared = [m["name"] for m in _parse_tmdl_measures(events_text)]
+  counts = {}
+  for name in declared:
+    counts[name] = counts.get(name, 0) + 1
+  for measure in MEASURE_NAMES:
+    if measure not in counts:
+      errors.append(f"events_v1.tmdl: missing measure '{measure}'")
+  for name, count in counts.items():
+    if name not in MEASURE_NAMES:
+      errors.append(f"events_v1.tmdl: unexpected measure '{name}'")
+    elif count > 1:
+      errors.append(f"events_v1.tmdl: duplicate measure '{name}'")
+  if len(declared) != len(MEASURE_NAMES):
+    errors.append(
+        f"events_v1.tmdl: expected {len(MEASURE_NAMES)} measures, "
+        f"found {len(declared)}"
+    )
+  return errors
+
+
+def _check_oracle_refs(events_text, looker_root):
+  """Every oracle query cited by a measure description must exist."""
+  errors = []
+  for raw in events_text.splitlines():
+    if not _is_tmdl_doc_line(raw):
+      continue
+    for ref in re.findall(r"oracle/queries/(\S+\.sql)", raw):
+      if not (looker_root / "oracle" / "queries" / ref).exists():
+        errors.append(
+            f"events_v1.tmdl: references non-existent oracle file '{ref}'"
+        )
+  return errors
+
+
+def _check_events_sql(expr_text):
+  """I8: no ';', '\"' or unescaped '#(' in the SQL built by expressions.tmdl.
+
+  The SQL is assembled from the string literals of `EventsSelectLines` and
+  `EventsSql`; every one of those literals is scanned (after undoing the M
+  `""` escape), not just a single quoted assignment.
+  """
+  errors = []
+  sources = []
+  select = re.search(r"\bEventsSelectLines\s*=\s*\{", expr_text)
+  if select is None:
+    errors.append("expressions.tmdl: EventsSelectLines list not found")
+  else:
+    literals, problem = _m_string_list(expr_text, select.end())
+    if problem:
+      errors.append(
+          "expressions.tmdl: EventsSelectLines is not a plain list of "
+          f"string literals ({problem})"
+      )
+    for index, literal in enumerate(literals, 1):
+      sources.append((f"EventsSelectLines literal {index}", literal))
+  sql_expr = re.search(r"(?m)^[ \t]*EventsSql\s*=\s*(.*)$", expr_text)
+  if sql_expr is None:
+    errors.append("expressions.tmdl: EventsSql expression not found")
+  else:
+    for index, match in enumerate(
+        _M_STRING_LITERAL_RE.finditer(sql_expr.group(1)), 1
+    ):
+      literal = match.group(1).replace('""', '"')
+      # "#(lf)" is the line separator handed to Text.Combine, not SQL text.
+      if literal != "#(lf)":
+        sources.append((f"EventsSql literal {index}", literal))
+  for label, literal in sources:
+    if ";" in literal:
+      errors.append(f"expressions.tmdl: {label} contains ';'")
+    if '"' in literal:
+      errors.append(f"expressions.tmdl: {label} contains a double quote")
+    # "#(#)(" spells a literal "#(" in M; any other "#(" starts an escape.
+    if "#(" in literal.replace("#(#)(", ""):
+      errors.append(f"expressions.tmdl: {label} contains unescaped '#('")
+  return errors
+
+
+def validate_tmdl(power_bi_root=None, looker_root=None):
   """Run custom TMDL lint checks."""
   errors = []
+  looker = Path(looker_root) if looker_root is not None else LOOKER_ROOT
   if power_bi_root is None:
     model_dir = MODEL_DIR / "definition"
   else:
@@ -519,11 +772,10 @@ def validate_tmdl(power_bi_root=None):
   for rel, text in _iter_tmdl_files(model_dir):
     tmdl_files[str(rel)] = text
 
-  # Check database.tmdl and model.tmdl exist.
-  if "database.tmdl" not in tmdl_files:
-    errors.append("Missing database.tmdl")
-  if "model.tmdl" not in tmdl_files:
-    errors.append("Missing model.tmdl")
+  # Check database.tmdl, model.tmdl and expressions.tmdl exist.
+  for required in ("database.tmdl", "model.tmdl", "expressions.tmdl"):
+    if required not in tmdl_files:
+      errors.append(f"Missing {required}")
 
   # Tabs-only indentation, no mixed tabs/spaces, no pure-space indentation.
   for rel, text in tmdl_files.items():
@@ -551,55 +803,24 @@ def validate_tmdl(power_bi_root=None):
     if table_files - ref_tables:
       errors.append(f"table files without ref: {table_files - ref_tables}")
 
-  # Validate events_v1.tmdl columns and measures.
+  # Validate events_v1.tmdl columns and measures from the real declarations.
   events_path = tables_dir / "events_v1.tmdl"
-  if events_path.exists():
+  expr_text = tmdl_files.get("expressions.tmdl", "")
+  if not events_path.exists():
+    errors.append("Missing tables/events_v1.tmdl")
+  else:
     events_text = _read_text(events_path)
-    # Check all 29 columns present.
-    for col in EVENTS_COLUMNS:
-      if f"sourceColumn={col}" not in events_text:
-        errors.append(f"events_v1.tmdl: missing column '{col}'")
-    # Check column data types.
-    for m in re.finditer(r"sourceColumn=(\S+)\s+dataType=(\S+)", events_text):
-      col_name, dtype = m.group(1), m.group(2)
-      if dtype not in VALID_DATA_TYPES:
-        errors.append(
-            f"events_v1.tmdl: column '{col_name}' has invalid "
-            f"dataType '{dtype}'"
-        )
+    errors.extend(_check_events_columns(events_text))
     # No DISTINCTCOUNT( (only DISTINCTCOUNTNOBLANK).
     if "DISTINCTCOUNT(" in events_text:
       errors.append(
-          "events_v1.tmdl: found DISTINCTCOUNT( — use " "DISTINCTCOUNTNOBLANK"
+          "events_v1.tmdl: found DISTINCTCOUNT( — use DISTINCTCOUNTNOBLANK"
       )
-    # Check all 49 measures present.
-    for measure in MEASURE_NAMES:
-      if not re.search(
-          rf"^\tmeasure\s+(?:'{re.escape(measure)}'|{re.escape(measure)})\s*=",
-          events_text,
-          re.MULTILINE,
-      ):
-        errors.append(f"events_v1.tmdl: missing measure '{measure}'")
-    # Check measure descriptions cite oracle files.
-    for m in re.finditer(r"///.*?oracle/queries/(\S+\.sql)", events_text):
-      oracle_ref = m.group(1)
-      oracle_path = LOOKER_ROOT / "oracle" / "queries" / oracle_ref
-      if not oracle_path.exists():
-        errors.append(
-            f"events_v1.tmdl: references non-existent oracle "
-            f"file '{oracle_ref}'"
-        )
-    # I8: no ; or " or # in embedded SQL.
-    # Look for Value.NativeQuery SQL lines in both events_v1.tmdl
-    # and expressions.tmdl.
-    expr_text = tmdl_files.get("expressions.tmdl", "")
-    for scan_text in (events_text, expr_text):
-      for m in re.finditer(r'EventsSql\s*=\s*"([^"]*(?:""[^"]*)*)"', scan_text):
-        sql_text = m.group(1).replace('""', '"')
-        if ";" in sql_text:
-          errors.append(f"TMDL: EventsSql contains ';'")
-        if "#(" in sql_text.replace("#(#)(", ""):
-          errors.append(f"TMDL: EventsSql contains unescaped '#('")
+    errors.extend(_check_events_measures(events_text))
+    errors.extend(_check_oracle_refs(events_text, looker))
+  # I8: the SQL that expressions.tmdl assembles must stay free of ; " and #(.
+  if expr_text:
+    errors.extend(_check_events_sql(expr_text))
 
   # I3: raw parameter names only in validator lines.
   raw_params = [
@@ -611,7 +832,6 @@ def validate_tmdl(power_bi_root=None):
       "BQAA_LookbackDays",
       "BQAA_UseStorageApi",
   ]
-  expr_text = tmdl_files.get("expressions.tmdl", "")
   for param in raw_params:
     # Find all occurrences of the raw param name.
     for m in re.finditer(re.escape(param), expr_text):
@@ -648,10 +868,73 @@ def validate_tmdl(power_bi_root=None):
 # ---------------------------------------------------------------------------
 
 
-def validate_parity(power_bi_root=None):
+def _projection_measure(projection):
+  """Return the measure a visual projection is bound to ('' if none)."""
+  if not isinstance(projection, dict):
+    return ""
+  return (
+      projection.get("field", {}).get("Measure", {}).get("Property")
+      or projection.get("nativeQueryRef", "")
+      or ""
+  )
+
+
+def _check_measure_oracle_binding(
+    events_text, measure_queries, measure_columns, looker_root
+):
+  """Check each measure against the live oracle SQL it cites.
+
+  `measure_queries` / `measure_columns` come from semantic_model.yaml.  Every
+  generated measure must (a) name its `oracle_column` as an `AS <column>`
+  output alias of a cited query, and (b) carry the `bqaa_oracle_sha256`
+  annotation that matches the SQL on disk, so an oracle edited after the
+  model was generated is reported until the model is regenerated.
+  """
+  errors = []
+  common = _pbip_common()
+  declared = {m["name"]: m for m in _parse_tmdl_measures(events_text)}
+  for name, queries in measure_queries.items():
+    block = declared.get(name)
+    if block is None:
+      continue  # reported by validate_tmdl as a missing measure
+    texts = {}
+    for query in queries:
+      query_path = looker_root / query
+      if not query_path.is_file():
+        errors.append(f"Measure '{name}' cites missing oracle query '{query}'")
+      else:
+        texts[query] = _read_text(query_path)
+    if len(texts) != len(queries):
+      continue
+    ocol = measure_columns.get(name, "")
+    if ocol and not any(
+        common.has_output_alias(sql, ocol) for sql in texts.values()
+    ):
+      errors.append(
+          f"Measure '{name}' oracle_column '{ocol}' is not an output alias of "
+          f"any cited oracle query"
+      )
+    digests = block["annotations"].get("bqaa_oracle_sha256", [])
+    expected = common.oracle_digest(texts, queries)
+    if len(digests) != 1:
+      errors.append(
+          f"events_v1.tmdl: measure '{name}' must carry exactly one "
+          f"bqaa_oracle_sha256 annotation, found {len(digests)}"
+      )
+    elif digests[0] != expected:
+      errors.append(
+          f"events_v1.tmdl: measure '{name}' oracle digest {digests[0]} != "
+          f"{expected} for the cited oracle SQL (regenerate with "
+          "generate_pbip.py --write)"
+      )
+  return errors
+
+
+def validate_parity(power_bi_root=None, looker_root=None):
   """Check chart_manifest ↔ visuals ↔ measures ↔ oracle parity."""
   errors = []
-  manifest, product = _load_looker_contracts()
+  looker = Path(looker_root) if looker_root is not None else LOOKER_ROOT
+  manifest, product = _load_looker_contracts(looker)
   pbi_root = Path(power_bi_root) if power_bi_root is not None else POWER_BI_ROOT
   if (
       pbi_root / "BQAA_Agent_Analytics.Report" / "definition" / "pages"
@@ -838,7 +1121,7 @@ def validate_parity(power_bi_root=None):
 
   # Check oracle files exist for all 37 chart ids.
   for chart_id in manifest_charts:
-    oracle_path = LOOKER_ROOT / "oracle" / "queries" / f"{chart_id}.sql"
+    oracle_path = looker / "oracle" / "queries" / f"{chart_id}.sql"
     if not oracle_path.exists():
       errors.append(f"Oracle file missing for chart '{chart_id}'")
 
@@ -860,13 +1143,19 @@ def validate_parity(power_bi_root=None):
       else POWER_BI_ROOT / "spec" / "semantic_model.yaml"
   )
   measure_oracle_col = {}
-  if sm_path.exists():
+  measure_oracle_queries = {}
+  if not sm_path.exists():
+    errors.append(f"Missing spec: {sm_path}")
+  else:
     import yaml
 
     sm_data = yaml.safe_load(_read_text(sm_path))
     for m_entry in sm_data.get("measures", []):
       if isinstance(m_entry, dict) and m_entry.get("name"):
         measure_oracle_col[m_entry["name"]] = m_entry.get("oracle_column", "")
+        measure_oracle_queries[m_entry["name"]] = list(
+            m_entry.get("oracle_queries") or []
+        )
 
   for page_dir in sorted(report_pages_dir.iterdir()):
     if not page_dir.is_dir():
@@ -927,26 +1216,35 @@ def validate_parity(power_bi_root=None):
                 f"Card visual '{vname}' displayName "
                 f"{projs[0].get('displayName') if projs else None!r} != {raw_title!r}"
             )
+          # The six KPI scorecards show their current value and the
+          # "Change %" comparison against the previous period.
+          kpi_measure = KPI_SCORECARDS.get(vname)
+          if kpi_measure is not None:
+            bound = [_projection_measure(p) for p in projs]
+            expected_bound = [kpi_measure, f"{kpi_measure} Change %"]
+            if bound != expected_bound:
+              errors.append(
+                  f"KPI scorecard '{vname}' binds {bound}, expected "
+                  f"{expected_bound}"
+              )
         else:
           projs = qstate.get("Y", {}).get("projections", [])
 
-        oracle_sql_path = LOOKER_ROOT / "oracle" / "queries" / f"{vname}.sql"
+        oracle_sql_path = looker / "oracle" / "queries" / f"{vname}.sql"
         oracle_sql_text = (
             _read_text(oracle_sql_path) if oracle_sql_path.exists() else ""
         )
         for p in projs:
-          m_prop = p.get("field", {}).get("Measure", {}).get(
-              "Property"
-          ) or p.get("nativeQueryRef", "")
+          m_prop = _projection_measure(p)
           ocol = measure_oracle_col.get(m_prop, "")
           if (
               ocol
               and oracle_sql_text
-              and not re.search(rf"\b{re.escape(ocol)}\b", oracle_sql_text)
+              and not _pbip_common().has_output_alias(oracle_sql_text, ocol)
           ):
             errors.append(
                 f"Visual '{vname}' measure '{m_prop}' oracle_column '{ocol}' "
-                f"not found in {oracle_sql_path.name}"
+                f"is not an output alias of {oracle_sql_path.name}"
             )
 
     for i in range(len(rects)):
@@ -992,6 +1290,11 @@ def validate_parity(power_bi_root=None):
         )
     if "KEEPFILTERS(_top)" not in events_tmdl:
       errors.append("events_v1.tmdl: Top-N measures must use KEEPFILTERS(_top)")
+    errors.extend(
+        _check_measure_oracle_binding(
+            events_tmdl, measure_oracle_queries, measure_oracle_col, looker
+        )
+    )
     if "PERCENTILE.INC(" not in events_tmdl:
       errors.append(
           "events_v1.tmdl: latency percentile measures missing PERCENTILE.INC"

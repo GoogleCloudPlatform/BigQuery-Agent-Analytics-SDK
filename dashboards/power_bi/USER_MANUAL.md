@@ -170,11 +170,13 @@ page applies the same filter on all pages.
 
 ### Period-over-period
 
-Each KPI card displays the primary metric (Total Tokens, Total Traces,
-Total Sessions, LLM Calls, Total Users, or Tool Errors). The `KPI * Prior`
-and `KPI * Change %` measures remain in the semantic model for optional
-period-over-period analysis. The prior window is the same number of days
-immediately before the current selection.
+Each KPI card (Total Tokens, Total Traces, Total Sessions, LLM Calls,
+Total Users, or Tool Errors) shows the current value and, as a second
+callout labelled "vs previous period", the percentage change from the
+prior window (the `KPI * Change %` measure). The prior window is the same
+number of days immediately before the current selection. The
+`KPI * Prior` measures stay in the semantic model if you want the prior
+value itself.
 
 ### Date range
 

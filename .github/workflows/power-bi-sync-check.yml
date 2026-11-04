@@ -35,6 +35,10 @@ on:
       - "tests/test_power_bi_*.py"
       - "pyproject.toml"
       - ".github/workflows/power-bi-sync-check.yml"
+  # A merge queue merges a group of pull requests only once the required
+  # checks pass on the group's commit, and only this event runs them there.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -53,7 +57,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install "pyyaml>=6.0" "jsonschema>=4.18" "pytest>=7.0"
+        # Exact versions: validator behavior must only change through a
+        # repository diff, like the SHA-pinned actions and schema lock.
+        run: pip install "pyyaml==6.0.2" "jsonschema==4.23.0" "pytest==8.3.4"
 
       - name: Check generated files are in sync
         run: |

@@ -29,6 +29,21 @@
               "queryRef": "events_v1.KPI Total Tokens",
               "nativeQueryRef": "KPI Total Tokens",
               "displayName": "Total Tokens"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "KPI Total Tokens Change %"
+                }
+              },
+              "queryRef": "events_v1.KPI Total Tokens Change %",
+              "nativeQueryRef": "KPI Total Tokens Change %",
+              "displayName": "vs previous period"
             }
           ]
         }

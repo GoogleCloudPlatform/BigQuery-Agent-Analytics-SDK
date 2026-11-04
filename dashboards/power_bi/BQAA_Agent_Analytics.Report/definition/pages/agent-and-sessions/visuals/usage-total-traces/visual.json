@@ -29,6 +29,21 @@
               "queryRef": "events_v1.KPI Total Traces",
               "nativeQueryRef": "KPI Total Traces",
               "displayName": "Total Traces"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "KPI Total Traces Change %"
+                }
+              },
+              "queryRef": "events_v1.KPI Total Traces Change %",
+              "nativeQueryRef": "KPI Total Traces Change %",
+              "displayName": "vs previous period"
             }
           ]
         }

@@ -42,5 +42,6 @@ prev AS (
 )
 SELECT
   cur.value AS pop_tool_errors_current,
+  prev.value AS pop_tool_errors_prior,
   SAFE_DIVIDE(cur.value - prev.value, prev.value) AS pop_tool_errors_change
 FROM cur CROSS JOIN prev

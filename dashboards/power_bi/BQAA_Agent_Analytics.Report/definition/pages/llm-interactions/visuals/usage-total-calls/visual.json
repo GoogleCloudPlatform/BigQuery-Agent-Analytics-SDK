@@ -29,6 +29,21 @@
               "queryRef": "events_v1.KPI Total LLM Calls",
               "nativeQueryRef": "KPI Total LLM Calls",
               "displayName": "Total LLM Calls"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "KPI Total LLM Calls Change %"
+                }
+              },
+              "queryRef": "events_v1.KPI Total LLM Calls Change %",
+              "nativeQueryRef": "KPI Total LLM Calls Change %",
+              "displayName": "vs previous period"
             }
           ]
         }

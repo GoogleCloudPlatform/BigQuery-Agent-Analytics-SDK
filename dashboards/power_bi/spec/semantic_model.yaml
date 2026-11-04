@@ -374,7 +374,7 @@ measures:
   - name: Traces for Agents With Tokens
     display_folder: Base
     format_string: "#,0"
-    dax: "IF(ISBLANK([Total Tokens]), BLANK(), [Total Traces])"
+    dax: "IF(ISBLANK([Total Tokens]) || ISBLANK(SELECTEDVALUE('events_v1'[agent])), BLANK(), [Total Traces])"
     oracle_queries:
       - oracle/queries/usage-traces-split-by-agent.sql
     oracle_column: total_traces
@@ -524,7 +524,7 @@ measures:
       - oracle/queries/performance-total-errors.sql
     oracle_column: pop_tool_errors_change
 
-  # Chart Top-N measures (11)
+  # Chart Top-N measures (12)
   - name: Token Usage by Agent
     display_folder: Charts
     format_string: "#,0"
@@ -656,3 +656,15 @@ measures:
     oracle_queries:
       - oracle/queries/performance-top-5-tools-by-errors.sql
     oracle_column: total_tool_errors
+
+  - name: Top 5 Agents by LLM Calls
+    display_folder: Charts
+    format_string: "#,0"
+    chart_id: usage-top-5-agents-by-llm-calls
+    top_n: 5
+    dimension: "'events_v1'[agent]"
+    base_measure: "[LLM Calls]"
+    dax: "VAR _top = TOPN(5, FILTER(ALLSELECTED('events_v1'[agent]), NOT ISBLANK([LLM Calls])), [LLM Calls], DESC, 'events_v1'[agent], ASC) RETURN CALCULATE([LLM Calls], KEEPFILTERS(_top))"
+    oracle_queries:
+      - oracle/queries/usage-top-5-agents-by-llm-calls.sql
+    oracle_column: total_llm_calls

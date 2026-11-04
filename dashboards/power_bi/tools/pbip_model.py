@@ -114,7 +114,7 @@ MEASURE_NAMES: tuple[str, ...] = (
     "KPI Tool Errors",
     "KPI Tool Errors Prior",
     "KPI Tool Errors Change %",
-    # Charts (11)
+    # Charts (12)
     "Token Usage by Agent",
     "Top 5 Users by Token Consumption",
     "Top 5 Users by Traces",
@@ -126,6 +126,7 @@ MEASURE_NAMES: tuple[str, ...] = (
     "Top 5 Users by Events",
     "Top 5 Agents by Tool Errors",
     "Top 5 Tools by Errors",
+    "Top 5 Agents by LLM Calls",
 )
 
 PARAMETER_NAMES: tuple[str, ...] = (
@@ -195,11 +196,15 @@ def render_events_sql(
     contracts: Any = None,
 ) -> str:
   """Render the exact BigQuery SQL executed by the events_v1 M partition (I7, I8)."""
-  if not isinstance(project, str) or not pbip_common.PROJECT_RE.match(project):
+  if not isinstance(project, str) or not pbip_common.PROJECT_RE.fullmatch(
+      project
+  ):
     raise ValueError(f"Invalid BigQuery project ID: {project!r}")
-  if not isinstance(dataset, str) or not pbip_common.DATASET_RE.match(dataset):
+  if not isinstance(dataset, str) or not pbip_common.DATASET_RE.fullmatch(
+      dataset
+  ):
     raise ValueError(f"Invalid BigQuery dataset ID: {dataset!r}")
-  if not isinstance(table, str) or not pbip_common.TABLE_RE.match(table):
+  if not isinstance(table, str) or not pbip_common.TABLE_RE.fullmatch(table):
     raise ValueError(f"Invalid BigQuery table ID: {table!r}")
   if (
       not isinstance(load_start, datetime.date)
@@ -233,7 +238,7 @@ def render_events_sql(
 
 
 def _quote_tmdl_name(name: str) -> str:
-  if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
+  if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
     return name
   escaped = name.replace("'", "''")
   return f"'{escaped}'"
@@ -253,31 +258,38 @@ def _validate_model_spec(contracts: Any, model_spec: Mapping[str, Any]) -> None:
     pname = p["name"]
     default_val = p["default"]
     if pname in ("BQAA_ProjectId", "BQAA_BillingProjectId"):
-      if not isinstance(default_val, str) or not pbip_common.PROJECT_RE.match(
-          default_val
-      ):
+      if not isinstance(
+          default_val, str
+      ) or not pbip_common.PROJECT_RE.fullmatch(default_val):
         raise ValueError(
             f"Default for {pname} fails PROJECT_RE: {default_val!r}"
         )
     elif pname == "BQAA_DatasetId":
-      if not isinstance(default_val, str) or not pbip_common.DATASET_RE.match(
-          default_val
-      ):
+      if not isinstance(
+          default_val, str
+      ) or not pbip_common.DATASET_RE.fullmatch(default_val):
         raise ValueError(
             f"Default for {pname} fails DATASET_RE: {default_val!r}"
         )
     elif pname == "BQAA_TableId":
-      if not isinstance(default_val, str) or not pbip_common.TABLE_RE.match(
+      if not isinstance(default_val, str) or not pbip_common.TABLE_RE.fullmatch(
           default_val
       ):
         raise ValueError(f"Default for {pname} fails TABLE_RE: {default_val!r}")
     elif pname == "BQAA_WindowEndDate":
-      if default_val != "auto" and not re.match(
-          r"^\d{4}-\d{2}-\d{2}$", str(default_val)
-      ):
-        raise ValueError(
-            f"Default for {pname} must be 'auto' or YYYY-MM-DD: {default_val!r}"
-        )
+      if default_val != "auto":
+        if not isinstance(default_val, str) or not re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}", default_val
+        ):
+          raise ValueError(
+              f"Default for {pname} must be 'auto' or YYYY-MM-DD: {default_val!r}"
+          )
+        try:
+          datetime.date.fromisoformat(default_val)
+        except ValueError:
+          raise ValueError(
+              f"Default for {pname} is not a real calendar date: {default_val!r}"
+          ) from None
     elif pname == "BQAA_LookbackDays":
       if (
           not isinstance(default_val, int)
@@ -309,9 +321,9 @@ def _validate_model_spec(contracts: Any, model_spec: Mapping[str, Any]) -> None:
       )
 
   measures = model_spec.get("measures")
-  if not isinstance(measures, list) or len(measures) != 49:
+  if not isinstance(measures, list) or len(measures) != 50:
     raise ValueError(
-        f"Expected 49 measures in semantic_model.yaml, got {len(measures) if isinstance(measures, list) else 0}"
+        f"Expected 50 measures in semantic_model.yaml, got {len(measures) if isinstance(measures, list) else 0}"
     )
   m_names = tuple(m.get("name") for m in measures)
   if m_names != MEASURE_NAMES:
@@ -341,6 +353,17 @@ def _validate_model_spec(contracts: Any, model_spec: Mapping[str, Any]) -> None:
     for oq in oqueries:
       if oq not in contracts.oracle_files:
         raise ValueError(f"Measure {mname!r} cites unknown oracle query {oq!r}")
+    ocol = m.get("oracle_column")
+    if not isinstance(ocol, str) or not ocol:
+      raise ValueError(f"Measure {mname!r} must name its oracle_column")
+    if not any(
+        pbip_common.has_output_alias(contracts.oracle_files[oq], ocol)
+        for oq in oqueries
+    ):
+      raise ValueError(
+          f"Measure {mname!r} oracle_column {ocol!r} is not an output alias "
+          "of any cited oracle query"
+      )
 
 
 def _emit_database_tmdl(model_spec: Mapping[str, Any]) -> str:
@@ -568,7 +591,7 @@ def _emit_relationships_tmdl(model_spec: Mapping[str, Any]) -> str:
   return "\n".join(lines) + "\n"
 
 
-def _emit_events_v1_tmdl(model_spec: Mapping[str, Any]) -> str:
+def _emit_events_v1_tmdl(contracts: Any, model_spec: Mapping[str, Any]) -> str:
   events_tbl = model_spec["tables"]["events_v1"]
   columns = events_tbl["columns"]
   measures = model_spec["measures"]
@@ -588,6 +611,7 @@ def _emit_events_v1_tmdl(model_spec: Mapping[str, Any]) -> str:
     oqueries = m["oracle_queries"]
     ocol = m.get("oracle_column", "")
     oracle_str = " and ".join(oqueries)
+    oracle_sha = pbip_common.oracle_digest(contracts.oracle_files, oqueries)
     # The /// description includes 'measure <Name>' and space-delimited oracle/queries/<id>.sql
     # so both TMDL object documentation and substring/regex lints succeed.
     lines.append(f"\t/// measure {mname} — {oracle_str} ({ocol})")
@@ -597,6 +621,9 @@ def _emit_events_v1_tmdl(model_spec: Mapping[str, Any]) -> str:
     lines.append(
         f"\t\tlineageTag: {pbip_common.stable_uuid('measure', 'events_v1', mname)}"
     )
+    # Digest of the cited oracle SQL: changing a cited query without
+    # regenerating the model makes the generated file differ (drift check).
+    lines.append(f"\t\tannotation bqaa_oracle_sha256 = {oracle_sha}")
     lines.append("")
 
   for col in columns:
@@ -738,7 +765,9 @@ def build_model(
           contracts, model_spec
       ),
       "definition/relationships.tmdl": _emit_relationships_tmdl(model_spec),
-      "definition/tables/events_v1.tmdl": _emit_events_v1_tmdl(model_spec),
+      "definition/tables/events_v1.tmdl": _emit_events_v1_tmdl(
+          contracts, model_spec
+      ),
       "definition/tables/Date.tmdl": _emit_date_tmdl(model_spec),
   }
   _assert_tmdl_hygiene(files)

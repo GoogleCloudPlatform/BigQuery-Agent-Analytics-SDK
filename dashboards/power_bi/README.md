@@ -28,7 +28,7 @@ when the Looker Studio contracts change.
 An 8-page Power BI report — Token Consumption, Agent & Sessions, Tool
 Usage, LLM Interactions, User Analytics, Latency, Errors, and a Trace
 Inspector — with 37 parity charts, 9 non-data elements, 40 synced
-slicers, and 49 DAX measures that match the 37 oracle SQL queries.
+slicers, and 50 DAX measures that match the 37 oracle SQL queries.
 
 ### One BigQuery scan per refresh
 
@@ -59,7 +59,7 @@ connection and date window. Defaults ship the public fixture table.
 | `BQAA_DatasetId` | `bqaa_fixture_adk_1_27_0` | `^[A-Za-z_][A-Za-z0-9_]{0,1023}$` |
 | `BQAA_TableId` | `agent_events` | `^[A-Za-z0-9_][A-Za-z0-9_-]{0,1023}$` |
 | `BQAA_BillingProjectId` | `test-project-0728-467323` | Same as `BQAA_ProjectId` |
-| `BQAA_WindowEndDate` | `auto` | `auto` or strict `YYYY-MM-DD` |
+| `BQAA_WindowEndDate` | `auto` | `auto` or a real calendar date in strict `YYYY-MM-DD` form |
 | `BQAA_LookbackDays` | `90` | Integer 1–366 |
 | `BQAA_UseStorageApi` | `true` | Logical; set `false` if the account lacks `bigquery.readsessions.*` |
 
@@ -78,6 +78,12 @@ The identifier regexes reject some BigQuery identifiers (domain-scoped
 projects like `example.com:p` and table ids with Unicode spaces). We
 keep the repository's existing contract for one consistent fail-closed
 rule.
+
+The generator, deploy helper, and live validator match the whole value
+rather than a prefix, so a trailing newline is rejected in project,
+dataset, table, and GUID inputs, like the M `Only(...)` checks do. An
+impossible date such as `2026-02-30` is rejected for
+`BQAA_WindowEndDate`.
 
 ## SQL substitution contract
 
@@ -156,7 +162,7 @@ With `BQAA_LookbackDays = L` (default 90), the current window is
 
 A report-level filter `Date[Window] = "Current"` is hidden and locked.
 Viewers can narrow the date range inside the current window but cannot
-leave it. This ensures the prior window (for optional `KPI * Prior` and
+leave it. This ensures the prior window (for the `KPI * Prior` and
 `KPI * Change %` period-over-period measures) is always inside the loaded
 range.
 
@@ -193,6 +199,13 @@ The script creates the semantic model and report via the Fabric REST
 API with TMDL and PBIR definitions, rewriting `definition.pbir` from
 `byPath` to `byConnection` in memory. Use `--dry-run` to list parts
 without network access. Use `--update` to update existing items.
+
+Existing items are found by display name across every page of the
+workspace listing. The script stops with an error, instead of creating a
+duplicate, when the listing fails or when two items share the display
+name. The report connection is always rewritten with the semantic model
+id, which an update keeps even when the service answers with an empty
+body.
 
 ### Option 2 — Fabric trial
 
@@ -257,8 +270,24 @@ python dashboards/power_bi/tools/validate_live_powerbi.py \
 
 The validator runs each oracle SQL via `bq` and each DAX query via the
 Power BI `executeQueries` API, then compares under exact-count,
-float-tolerance, NULL≡BLANK, and tie-aware Top-N rules. Pass = 37/37 on
-both windows.
+float-tolerance, NULL≡BLANK, and tie-aware Top-N rules. The six KPI
+scorecards are compared on both the value and its `Change %`.
+
+`--window default` (also used when `--window` is omitted) is the loaded
+Current window, read from the model's Date table, so the oracle and the
+DAX query cover the window the report shows. If that lookup fails, the
+validator warns and uses the fixture window, and the receipt records
+which one it used in `window_details[].source`. An explicit
+`YYYY-MM-DD:YYYY-MM-DD` window is validated before any query runs.
+
+The run fails closed. A DAX error (response, result, or table level), a
+value that is not a finite number, an off-by-one count, or more Top-N rows
+than requested is a `FAIL`. A chart that is empty on both sides is
+`EMPTY`, because nothing was compared. Pass = every chart `PASS` in every
+requested window (`charts_pass == charts_expected`, which is 37 times the
+number of windows) with at least one oracle row returned. Use
+`--allow-empty` only for a deliberately empty window; the receipt records
+it as `allow_empty`.
 
 ## Intentional differences from Looker Studio
 
@@ -268,7 +297,7 @@ both windows.
 | D2 | Date range freedom | Any range | Slicer limited to current window (locked filter) | Exact PoP for every reachable state |
 | D3 | String identity | BigQuery case-sensitive, byte order | VertiPaq case-insensitive, culture-aware | Engine property; tie-aware validation |
 | D4 | NULL-metric categories | SQL may list a NULL category | Not drawn | Power BI omits blank rows |
-| D5 | Scorecard comparison | Comparison arrow | Card with the primary metric (`Total Tokens`, `Total Traces`, etc.); `KPI * Prior` and `KPI * Change %` measures remain in the model for optional PoP analysis | Native visual |
+| D5 | Scorecard comparison | Comparison arrow | Card with the current value and a second callout bound to `KPI * Change %`, labelled `vs previous period`; `KPI * Prior` stays in the model | Native visual; a number, not an arrow |
 | D6 | Layout | Absolute live positions | 1280-px canvas, header band, manifest 24-col geometry | Manifest geometry is complete |
 | D7 | Controls | Filter bar + report date control | 5 synced page slicers + Filters-pane cards | Power BI idiom |
 | D8 | Nav buttons | Link to separate dashboards | Navigate to report pages | Single report |

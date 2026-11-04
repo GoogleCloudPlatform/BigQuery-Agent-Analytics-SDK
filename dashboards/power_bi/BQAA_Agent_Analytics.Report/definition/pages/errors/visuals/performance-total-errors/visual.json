@@ -29,6 +29,21 @@
               "queryRef": "events_v1.KPI Tool Errors",
               "nativeQueryRef": "KPI Tool Errors",
               "displayName": "Tool Errors"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "KPI Tool Errors Change %"
+                }
+              },
+              "queryRef": "events_v1.KPI Tool Errors Change %",
+              "nativeQueryRef": "KPI Tool Errors Change %",
+              "displayName": "vs previous period"
             }
           ]
         }

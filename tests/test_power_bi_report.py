@@ -25,6 +25,7 @@ Per spec.md §7.5, S2 tests cover:
 - determinism (two runs produce identical output)
 """
 
+import copy
 import importlib.util
 import json
 import os
@@ -741,3 +742,108 @@ def test_button_visual_type(generated_files):
       link["properties"]["navigationSection"]["expr"]["Literal"]["Value"]
       == "'latency'"
   )
+
+
+# --- Period-over-period KPI scorecards and the Top-5 LLM chart ---
+
+_KPI_CARDS = {
+    "usage-total-tokens": ("KPI Total Tokens", "KPI Total Tokens Change %"),
+    "usage-total-traces": ("KPI Total Traces", "KPI Total Traces Change %"),
+    "usage-total-sessions": (
+        "KPI Total Sessions",
+        "KPI Total Sessions Change %",
+    ),
+    "usage-total-calls": (
+        "KPI Total LLM Calls",
+        "KPI Total LLM Calls Change %",
+    ),
+    "usage-total-users": ("KPI Total Users", "KPI Total Users Change %"),
+    "performance-total-errors": ("KPI Tool Errors", "KPI Tool Errors Change %"),
+}
+
+
+def _visual_path(vdef):
+  return (
+      "BQAA_Agent_Analytics.Report/definition/pages/"
+      f"{vdef['page']}/visuals/{vdef['id']}/visual.json"
+  )
+
+
+def _spec_visual(visuals_spec, chart_id):
+  return next(v for v in visuals_spec["parity_visuals"] if v["id"] == chart_id)
+
+
+def _card_projections(files, vdef):
+  vc = json.loads(files[_visual_path(vdef)])
+  return vc["visual"]["query"]["queryState"]["Data"]["projections"]
+
+
+@pytest.mark.parametrize("chart_id", sorted(_KPI_CARDS))
+def test_kpi_scorecards_bind_the_value_and_the_change_percent(
+    generated_files, visuals_spec, chart_id
+):
+  """Each scorecard shows the headline value and its change vs the prior period."""
+  current, change = _KPI_CARDS[chart_id]
+  vdef = _spec_visual(visuals_spec, chart_id)
+  assert vdef["visual_type"] == "cardVisual"
+  assert vdef["measures"] == [current, change]
+
+  projs = _card_projections(generated_files, vdef)
+  assert [p["nativeQueryRef"] for p in projs] == [current, change]
+  assert [p["queryRef"] for p in projs] == [
+      f"events_v1.{current}",
+      f"events_v1.{change}",
+  ]
+  assert projs[0]["displayName"] == vdef["title"]
+  assert projs[1]["displayName"] == "vs previous period"
+  for proj in projs:
+    measure = proj["field"]["Measure"]
+    assert measure["Expression"]["SourceRef"]["Entity"] == "events_v1"
+    assert measure["Property"] == proj["nativeQueryRef"]
+
+
+def test_only_the_kpi_scorecards_carry_a_change_callout(
+    generated_files, visuals_spec
+):
+  with_callout = set()
+  for vdef in visuals_spec["parity_visuals"]:
+    if vdef["visual_type"] != "cardVisual":
+      continue
+    projs = _card_projections(generated_files, vdef)
+    assert len(projs) == len(vdef["measures"]), vdef["id"]
+    if len(projs) == 2:
+      with_callout.add(vdef["id"])
+    else:
+      assert len(projs) == 1, vdef["id"]
+  assert with_callout == set(_KPI_CARDS)
+
+
+def test_card_projections_follow_the_spec_measures(
+    report_mod, contracts, visuals_spec
+):
+  """Dropping the change measure from the spec drops the callout (can fail)."""
+  mutated = copy.deepcopy(visuals_spec)
+  vdef = _spec_visual(mutated, "usage-total-tokens")
+  vdef["measures"] = ["KPI Total Tokens"]
+  files = report_mod.build_report(contracts, mutated)
+  projs = _card_projections(files, vdef)
+  assert [p["nativeQueryRef"] for p in projs] == ["KPI Total Tokens"]
+  assert projs[0]["displayName"] == vdef["title"]
+
+
+def test_top_5_agents_by_llm_calls_binds_the_top_five_measure(
+    generated_files, visuals_spec
+):
+  vdef = _spec_visual(visuals_spec, "usage-top-5-agents-by-llm-calls")
+  assert vdef["visual_type"] == "clusteredBarChart"
+  assert vdef["top_n"] == 5
+  assert vdef["measures"] == ["Top 5 Agents by LLM Calls"]
+
+  vc = json.loads(generated_files[_visual_path(vdef)])
+  state = vc["visual"]["query"]["queryState"]
+  assert [p["nativeQueryRef"] for p in state["Y"]["projections"]] == [
+      "Top 5 Agents by LLM Calls"
+  ]
+  assert [p["nativeQueryRef"] for p in state["Category"]["projections"]] == [
+      "agent"
+  ]

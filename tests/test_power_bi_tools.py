@@ -14,6 +14,10 @@
 
 """Tests for the Power BI deploy and live parity tools."""
 
+import base64
+import datetime
+import decimal
+import email.utils
 import importlib.util
 import json
 import os
@@ -354,32 +358,32 @@ def test_chart_metadata_has_measures():
     assert len(c["measure_info"]) == len(c["measures"])
 
 
-def test_chart_metadata_kpi_cards_have_single_measure():
+# Chart id -> oracle column prefix of the six period-over-period KPI cards.
+KPI_CARD_PREFIXES = {
+    "usage-total-tokens": "pop_total_tokens",
+    "usage-total-traces": "pop_total_traces",
+    "usage-total-sessions": "pop_total_sessions",
+    "usage-total-calls": "pop_llm_calls",
+    "usage-total-users": "pop_total_users",
+    "performance-total-errors": "pop_tool_errors",
+}
+
+
+def test_chart_metadata_kpi_cards_bind_value_and_change_pct():
   charts = validate_mod.load_chart_metadata()
-  kpi_cards = [
-      c
-      for c in charts
-      if c["visual_type"] == "cardVisual"
-      and c["id"].startswith("usage-total-")
-      or (
-          c["visual_type"] == "cardVisual"
-          and c["id"] == "performance-total-errors"
-      )
-  ]
-  # 6 KPI cards, each with a single base measure (not KPI prefix)
-  kpi_card_ids = {
-      "usage-total-tokens",
-      "usage-total-traces",
-      "usage-total-sessions",
-      "usage-total-calls",
-      "usage-total-users",
-      "performance-total-errors",
-  }
-  kpi_cards = [c for c in charts if c["id"] in kpi_card_ids]
+  kpi_cards = [c for c in charts if c["id"] in KPI_CARD_PREFIXES]
   assert len(kpi_cards) == 6
   for c in kpi_cards:
-    assert len(c["measures"]) == 1, f"{c['id']}: {c['measures']}"
+    prefix = KPI_CARD_PREFIXES[c["id"]]
+    # Each scorecard binds the KPI value and its "Change %" callout, and the
+    # live comparison checks both against the oracle's current/change columns.
+    assert len(c["measures"]) == 2, f"{c['id']}: {c['measures']}"
     assert c["measures"][0].startswith("KPI "), c["id"]
+    assert c["measures"][1] == f"{c['measures'][0]} Change %", c["id"]
+    assert [m["oracle_column"] for m in c["measure_info"]] == [
+        f"{prefix}_current",
+        f"{prefix}_change",
+    ], c["id"]
 
 
 def test_chart_metadata_latency_cards_have_1_measure():
@@ -397,11 +401,15 @@ def test_chart_metadata_latency_cards_have_1_measure():
 def test_chart_metadata_bar_charts_have_top_n():
   charts = validate_mod.load_chart_metadata()
   bars = [c for c in charts if c["visual_type"] == "clusteredBarChart"]
-  # 11 Top-N bars + 1 no-top-N bar (usage-top-5-agents-by-llm-calls)
-  top_n_bars = [c for c in bars if c["top_n"] is not None]
-  assert len(top_n_bars) == 11
-  for c in top_n_bars:
+  assert len(bars) == 12
+  for c in bars:
     assert c["top_n"] in (5, 10), c["id"]
+  llm_top5 = next(
+      c for c in bars if c["id"] == "usage-top-5-agents-by-llm-calls"
+  )
+  assert llm_top5["top_n"] == 5
+  assert llm_top5["measures"] == ["Top 5 Agents by LLM Calls"]
+  assert llm_top5["measure_info"][0]["oracle_column"] == "total_llm_calls"
 
 
 def test_chart_metadata_area_chart_with_series():
@@ -580,6 +588,7 @@ def test_compare_topn_rejects_member_absent_from_oracle():
   match, detail, _, _ = validate_mod.compare_topn(oracle, dax, "v", "agent", 5)
   assert match is False
   assert "not in oracle" in detail
+  assert "intruder" not in detail
 
 
 def test_compare_topn_different_values():
@@ -602,14 +611,33 @@ def test_compare_topn_tie_aware():
       {"agent": "c", "v": 80},
       {"agent": "d", "v": 80},
   ]
+  # Exactly N members, the two slots tied at the N-th value taken by c and d.
+  dax = [
+      {"agent": "a", "v": 100},
+      {"agent": "c", "v": 80},
+      {"agent": "d", "v": 80},
+  ]
+  match, detail, _, _ = validate_mod.compare_topn(oracle, dax, "v", "agent", 3)
+  assert match is True
+  assert detail == "tie_adjusted"
+
+
+def test_compare_topn_rejects_more_than_n_dax_rows():
+  oracle = [
+      {"agent": "a", "v": 100},
+      {"agent": "b", "v": 80},
+      {"agent": "c", "v": 80},
+      {"agent": "d", "v": 80},
+  ]
   dax = [
       {"agent": "a", "v": 100},
       {"agent": "c", "v": 80},
       {"agent": "b", "v": 80},
       {"agent": "d", "v": 80},
   ]
-  match, _, _, _ = validate_mod.compare_topn(oracle, dax, "v", "agent", 3)
-  assert match is True
+  match, detail, _, _ = validate_mod.compare_topn(oracle, dax, "v", "agent", 3)
+  assert match is False
+  assert detail == "row_count"
 
 
 def test_compare_topn_length_mismatch():
@@ -957,3 +985,1649 @@ def test_token_never_in_stdout(tmp_path, capsys, monkeypatch):
   captured = capsys.readouterr()
   assert secret not in captured.out
   assert secret not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Strict GUID / identifier validation
+# ---------------------------------------------------------------------------
+
+GUID_A = "11111111-1111-1111-1111-111111111111"
+GUID_B = "22222222-2222-2222-2222-222222222222"
+GUID_C = "33333333-3333-3333-3333-333333333333"
+
+_BAD_GUID_STRINGS = [
+    GUID_A + "\n",
+    GUID_A + "\r\n",
+    GUID_A + "\r",
+    GUID_A + " ",
+    " " + GUID_A,
+    "\n" + GUID_A,
+    GUID_A + "\x00",
+    GUID_A[:-1],
+    GUID_A + "0",
+    GUID_A.replace("-", ""),
+    "",
+    "not-a-guid",
+]
+_NON_STRING_GUIDS = [None, 123, 1.5, True, GUID_A.encode("ascii"), [GUID_A]]
+_BOTH_MODULES = pytest.mark.parametrize(
+    "module", [deploy_mod, validate_mod], ids=["deploy", "live"]
+)
+
+
+@_BOTH_MODULES
+@pytest.mark.parametrize("bad", _BAD_GUID_STRINGS + _NON_STRING_GUIDS, ids=repr)
+def test_validate_guid_rejects_malformed_values(module, bad):
+  with pytest.raises(ValueError, match="invalid"):
+    module.validate_guid(bad)
+
+
+@_BOTH_MODULES
+@pytest.mark.parametrize("bad", _BAD_GUID_STRINGS, ids=repr)
+def test_guid_regex_alone_rejects_malformed_strings(module, bad):
+  """A caller that uses GUID_RE.match() directly is protected as well."""
+  assert module.GUID_RE.match(bad) is None
+
+
+@_BOTH_MODULES
+def test_validate_guid_accepts_upper_and_lower_case(module):
+  upper = "ABCDEF12-ABCD-ABCD-ABCD-ABCDEF123456"
+  assert module.validate_guid(upper) == upper
+  assert module.validate_guid(upper.lower()) == upper.lower()
+
+
+@_BOTH_MODULES
+def test_validate_guid_error_names_the_field(module):
+  with pytest.raises(ValueError, match="invalid semantic_model_id"):
+    module.validate_guid(GUID_A + "\n", "semantic_model_id")
+
+
+@pytest.mark.parametrize(
+    "pattern_name, good",
+    [
+        ("PROJECT_RE", "test-project-0728-467323"),
+        ("DATASET_RE", "bqaa_fixture_adk_1_27_0"),
+        ("TABLE_RE", "agent_events"),
+        ("LOCATION_RE", "US"),
+    ],
+)
+def test_live_identifier_regexes_reject_trailing_newline(pattern_name, good):
+  pattern = getattr(validate_mod, pattern_name)
+  assert pattern.match(good)
+  validate_mod.require_identifier("identifier", good, pattern)
+  for bad in (good + "\n", good + "\r\n", good + " ", "\n" + good):
+    assert pattern.match(bad) is None, repr(bad)
+    assert pattern.fullmatch(bad) is None, repr(bad)
+    with pytest.raises(ValueError, match="invalid"):
+      validate_mod.require_identifier("identifier", bad, pattern)
+
+
+@pytest.mark.parametrize("bad", [None, 7, b"agent_events", ["agent_events"]])
+def test_require_identifier_rejects_non_strings(bad):
+  with pytest.raises(ValueError, match="invalid"):
+    validate_mod.require_identifier("table ID", bad, validate_mod.TABLE_RE)
+
+
+def test_deploy_main_rejects_workspace_id_with_trailing_newline(tmp_path):
+  with pytest.raises(ValueError, match="invalid workspace ID"):
+    deploy_mod.main(
+        [
+            "--workspace-id",
+            GUID_A + "\n",
+            "--project-dir",
+            str(tmp_path),
+            "--dry-run",
+        ]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fabric REST double
+# ---------------------------------------------------------------------------
+
+FABRIC = deploy_mod.FABRIC_API_BASE
+LIST_URL = f"{FABRIC}/workspaces/{GUID_A}/semanticModels"
+REPORTS_URL = f"{FABRIC}/workspaces/{GUID_A}/reports"
+OP_URL = f"{FABRIC}/operations/op-1"
+OP_RESULT_URL = f"{FABRIC}/operations/op-1/result"
+LRO_HEADERS = {"Location": OP_URL, "x-ms-operation-id": "op-1"}
+NAME = "BQAA Agent Analytics"
+PARTS = [{"path": "definition.pbism", "data": b"{}"}]
+
+
+def _resp(status, body=b"", headers=None):
+  if isinstance(body, (dict, list)):
+    body = json.dumps(body)
+  if isinstance(body, str):
+    body = body.encode("utf-8")
+  return status, dict(headers or {}), body
+
+
+def _item(item_id, name=NAME):
+  return {"displayName": name, "id": item_id}
+
+
+class _FakeFabric:
+  """Scripted stand-in for ``deploy_fabric.http_request``.
+
+  Every entry of *script* is ``(method, url, response)``.  A request that is
+  not the next scripted one fails the test, and each URL passes the tool's own
+  allow-list first, exactly as the real ``http_request`` does.
+  """
+
+  def __init__(self, *script):
+    self.script = list(script)
+    self.requests = []
+
+  def __call__(self, url, method, token, body=None):
+    deploy_mod.validate_operation_url(url)
+    self.requests.append((method, url, body))
+    assert self.script, f"unexpected request: {method} {url}"
+    expected_method, expected_url, response = self.script.pop(0)
+    assert (method, url) == (expected_method, expected_url)
+    return response
+
+  def posts(self):
+    return [r for r in self.requests if r[0] == "POST"]
+
+
+def _install(monkeypatch, *script):
+  fake = _FakeFabric(*script)
+  monkeypatch.setattr(deploy_mod, "http_request", fake)
+  return fake
+
+
+@pytest.fixture(name="sleeps")
+def _sleeps(monkeypatch):
+  """Replace time.sleep in the deploy tool and record the requested waits."""
+  waits = []
+  monkeypatch.setattr(deploy_mod.time, "sleep", waits.append)
+  return waits
+
+
+def _http_date(delta_seconds):
+  when = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+      seconds=delta_seconds
+  )
+  return email.utils.format_datetime(when, usegmt=True)
+
+
+# ---------------------------------------------------------------------------
+# LRO polling: empty result body and Retry-After
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "result_response",
+    [_resp(200, b""), _resp(200, b"  \n"), _resp(204, b"")],
+    ids=["empty-200", "blank-200", "no-content-204"],
+)
+def test_poll_lro_succeeded_with_empty_result_body_is_an_empty_dict(
+    monkeypatch, sleeps, result_response
+):
+  _install(
+      monkeypatch,
+      ("GET", OP_URL, _resp(200, {"status": "Succeeded"})),
+      ("GET", OP_RESULT_URL, result_response),
+  )
+  assert deploy_mod.poll_lro("tok", OP_URL, "op-1") == {}
+
+
+def test_poll_lro_succeeded_returns_the_result_object(monkeypatch, sleeps):
+  _install(
+      monkeypatch,
+      ("GET", OP_URL, _resp(200, {"status": "Succeeded"})),
+      ("GET", OP_RESULT_URL, _resp(200, {"id": GUID_A})),
+  )
+  assert deploy_mod.poll_lro("tok", OP_URL, "op-1") == {"id": GUID_A}
+
+
+@pytest.mark.parametrize(
+    "result_response, message",
+    [
+        (
+            _resp(500, {"errorCode": "Boom", "message": "bad"}),
+            "LRO result fetch failed: Boom",
+        ),
+        (_resp(200, b"<html>not json</html>"), "non-JSON"),
+        (_resp(200, b'["not", "an", "object"]'), "unexpected JSON shape"),
+    ],
+    ids=["http-500", "non-json", "json-array"],
+)
+def test_poll_lro_rejects_a_bad_result_body(
+    monkeypatch, sleeps, result_response, message
+):
+  _install(
+      monkeypatch,
+      ("GET", OP_URL, _resp(200, {"status": "Succeeded"})),
+      ("GET", OP_RESULT_URL, result_response),
+  )
+  with pytest.raises(RuntimeError, match=message):
+    deploy_mod.poll_lro("tok", OP_URL, "op-1")
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("5", 5),
+        (" 7 ", 7),
+        (12, 12),
+        ("0", 0),
+        ("-3", 0),
+        ("99999", deploy_mod.MAX_LRO_SECONDS),
+        (None, deploy_mod.DEFAULT_RETRY_AFTER),
+        ("", deploy_mod.DEFAULT_RETRY_AFTER),
+        ("soon", deploy_mod.DEFAULT_RETRY_AFTER),
+        ("1.5", deploy_mod.DEFAULT_RETRY_AFTER),
+        ("9" * 5000, deploy_mod.DEFAULT_RETRY_AFTER),
+    ],
+)
+def test_parse_retry_after_delta_seconds_and_garbage(value, expected):
+  assert deploy_mod._parse_retry_after(value) == expected
+
+
+def test_parse_retry_after_http_date_in_the_future():
+  assert 20 <= deploy_mod._parse_retry_after(_http_date(30)) <= 30
+
+
+def test_parse_retry_after_http_date_in_the_past_is_zero():
+  assert deploy_mod._parse_retry_after(_http_date(-3600)) == 0
+
+
+def test_parse_retry_after_far_future_http_date_is_clamped():
+  assert (
+      deploy_mod._parse_retry_after(_http_date(86400))
+      == deploy_mod.MAX_LRO_SECONDS
+  )
+
+
+def test_parse_retry_after_respects_a_custom_maximum():
+  assert deploy_mod._parse_retry_after("100", 20) == 20
+  assert deploy_mod._parse_retry_after(_http_date(86400), 45) == 45
+
+
+def test_parse_retry_after_treats_a_zoneless_date_as_utc():
+  when = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+      seconds=30
+  )
+  zoneless = email.utils.format_datetime(when.replace(tzinfo=None))
+  assert zoneless.endswith("-0000")
+  assert 20 <= deploy_mod._parse_retry_after(zoneless) <= 30
+
+
+def test_poll_lro_honors_http_date_and_any_header_case(monkeypatch, sleeps):
+  _install(
+      monkeypatch,
+      (
+          "GET",
+          OP_URL,
+          _resp(200, {"status": "Running"}, {"retry-after": _http_date(5)}),
+      ),
+      (
+          "GET",
+          OP_URL,
+          _resp(200, {"status": "Running"}, {"RETRY-AFTER": "3"}),
+      ),
+      ("GET", OP_URL, _resp(200, {"status": "Succeeded"})),
+      ("GET", OP_RESULT_URL, _resp(200, b"")),
+  )
+  assert deploy_mod.poll_lro("tok", OP_URL, "op-1") == {}
+  assert sleeps[0] == deploy_mod.DEFAULT_RETRY_AFTER
+  assert 0 <= sleeps[1] <= 5
+  assert sleeps[2] == 3
+
+
+# ---------------------------------------------------------------------------
+# find_existing_item: pagination, failures, duplicates
+# ---------------------------------------------------------------------------
+
+
+def _find():
+  return deploy_mod.find_existing_item("tok", GUID_A, "semanticModels", NAME)
+
+
+def test_find_existing_item_follows_continuation_token(monkeypatch):
+  fake = _install(
+      monkeypatch,
+      (
+          "GET",
+          LIST_URL,
+          _resp(
+              200,
+              {
+                  "value": [_item(GUID_B, "other")],
+                  "continuationToken": "tok en&x=1+2",
+              },
+          ),
+      ),
+      (
+          "GET",
+          f"{LIST_URL}?continuationToken=tok%20en%26x%3D1%2B2",
+          _resp(200, {"value": [_item(GUID_C)]}),
+      ),
+  )
+  assert _find() == GUID_C
+  assert not fake.script
+
+
+def test_find_existing_item_prefers_the_continuation_uri(monkeypatch):
+  next_url = f"{LIST_URL}?continuationToken=abc"
+  fake = _install(
+      monkeypatch,
+      (
+          "GET",
+          LIST_URL,
+          _resp(
+              200,
+              {
+                  "value": [],
+                  "continuationUri": next_url,
+                  "continuationToken": "zzz",
+              },
+          ),
+      ),
+      ("GET", next_url, _resp(200, {"value": [_item(GUID_B)]})),
+  )
+  assert _find() == GUID_B
+  assert not fake.script
+
+
+def test_find_existing_item_rejects_an_untrusted_continuation_uri(monkeypatch):
+  fake = _install(
+      monkeypatch,
+      (
+          "GET",
+          LIST_URL,
+          _resp(
+              200,
+              {
+                  "value": [],
+                  "continuationUri": "https://evil.example.com/steal?x=1",
+              },
+          ),
+      ),
+  )
+  with pytest.raises(ValueError, match="untrusted operation URL"):
+    _find()
+  assert [url for _, url, _ in fake.requests] == [LIST_URL]
+
+
+def test_find_existing_item_fails_closed_on_a_listing_error(monkeypatch):
+  _install(
+      monkeypatch,
+      (
+          "GET",
+          LIST_URL,
+          _resp(500, {"errorCode": "InternalError", "message": "later"}),
+      ),
+  )
+  with pytest.raises(
+      RuntimeError, match=r"list semanticModels failed \(500\): InternalError"
+  ):
+    _find()
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 429, 500, 503])
+def test_find_existing_item_raises_on_any_non_200(monkeypatch, status):
+  _install(monkeypatch, ("GET", LIST_URL, _resp(status, b"{}")))
+  with pytest.raises(
+      RuntimeError, match=rf"list semanticModels failed \({status}\)"
+  ):
+    _find()
+
+
+def test_find_existing_item_rejects_duplicates_on_one_page(monkeypatch):
+  _install(
+      monkeypatch,
+      ("GET", LIST_URL, _resp(200, {"value": [_item(GUID_B), _item(GUID_C)]})),
+  )
+  with pytest.raises(RuntimeError, match="Ambiguous duplicate semanticModels"):
+    _find()
+
+
+def test_find_existing_item_rejects_duplicates_across_pages(monkeypatch):
+  _install(
+      monkeypatch,
+      (
+          "GET",
+          LIST_URL,
+          _resp(200, {"value": [_item(GUID_B)], "continuationToken": "p2"}),
+      ),
+      (
+          "GET",
+          f"{LIST_URL}?continuationToken=p2",
+          _resp(200, {"value": [_item(GUID_C)]}),
+      ),
+  )
+  with pytest.raises(RuntimeError, match="Ambiguous duplicate semanticModels"):
+    _find()
+
+
+def test_find_existing_item_same_id_repeated_is_not_ambiguous(monkeypatch):
+  _install(
+      monkeypatch,
+      (
+          "GET",
+          LIST_URL,
+          _resp(200, {"value": [_item(GUID_B)], "continuationToken": "p2"}),
+      ),
+      (
+          "GET",
+          f"{LIST_URL}?continuationToken=p2",
+          _resp(200, {"value": [_item(GUID_B)]}),
+      ),
+  )
+  assert _find() == GUID_B
+
+
+def test_find_existing_item_is_none_only_after_a_complete_scan(monkeypatch):
+  fake = _install(
+      monkeypatch,
+      (
+          "GET",
+          LIST_URL,
+          _resp(
+              200,
+              {"value": [_item(GUID_B, "other")], "continuationToken": "p2"},
+          ),
+      ),
+      (
+          "GET",
+          f"{LIST_URL}?continuationToken=p2",
+          _resp(200, {"value": [_item(GUID_C, "another")]}),
+      ),
+  )
+  assert _find() is None
+  assert len(fake.requests) == 2
+
+
+def test_find_existing_item_name_match_is_exact(monkeypatch):
+  _install(
+      monkeypatch,
+      (
+          "GET",
+          LIST_URL,
+          _resp(
+              200,
+              {
+                  "value": [
+                      _item(GUID_B, NAME.lower()),
+                      _item(GUID_C, NAME + " "),
+                  ]
+              },
+          ),
+      ),
+  )
+  assert _find() is None
+
+
+def test_find_existing_item_ignores_entries_without_an_id(monkeypatch):
+  _install(
+      monkeypatch,
+      (
+          "GET",
+          LIST_URL,
+          _resp(
+              200,
+              {
+                  "value": [
+                      {"displayName": NAME},
+                      {"displayName": NAME, "id": ""},
+                      {"displayName": NAME, "id": None},
+                  ]
+              },
+          ),
+      ),
+  )
+  assert _find() is None
+
+
+def test_find_existing_item_skips_non_object_entries(monkeypatch):
+  _install(
+      monkeypatch,
+      (
+          "GET",
+          LIST_URL,
+          _resp(200, {"value": ["x", None, 3, [1], _item(GUID_B)]}),
+      ),
+  )
+  assert _find() == GUID_B
+
+
+def test_find_existing_item_stops_on_a_self_referencing_continuation(
+    monkeypatch,
+):
+  _install(
+      monkeypatch,
+      (
+          "GET",
+          LIST_URL,
+          _resp(200, {"value": [], "continuationUri": LIST_URL}),
+      ),
+  )
+  with pytest.raises(RuntimeError, match="pagination did not terminate"):
+    _find()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"value": None}, {"value": "x"}, {"value": {"id": GUID_B}}, {"value": 3}],
+    ids=["null", "string", "object", "number"],
+)
+def test_find_existing_item_rejects_a_malformed_value_list(monkeypatch, body):
+  _install(monkeypatch, ("GET", LIST_URL, _resp(200, body)))
+  with pytest.raises(RuntimeError, match="unexpected response shape"):
+    _find()
+
+
+@pytest.mark.parametrize(
+    "response, message",
+    [
+        (_resp(200, b""), "empty body"),
+        (_resp(200, b"   \n"), "empty body"),
+        (_resp(200, b"<html>"), "non-JSON"),
+        (_resp(200, b"[1, 2]"), "unexpected JSON shape"),
+    ],
+    ids=["empty", "blank", "html", "array"],
+)
+def test_find_existing_item_rejects_a_listing_that_is_not_an_object(
+    monkeypatch, response, message
+):
+  _install(monkeypatch, ("GET", LIST_URL, response))
+  with pytest.raises(RuntimeError, match=message):
+    _find()
+
+
+def test_find_existing_item_object_without_value_is_an_empty_page(monkeypatch):
+  _install(monkeypatch, ("GET", LIST_URL, _resp(200, {})))
+  assert _find() is None
+
+
+# ---------------------------------------------------------------------------
+# deploy_item: the id of an update is never lost, a created id is validated
+# ---------------------------------------------------------------------------
+
+
+def _deploy(update=False, item_type="semanticModels"):
+  return deploy_mod.deploy_item(
+      "tok", GUID_A, item_type, PARTS, NAME, update=update
+  )
+
+
+UPDATE_URL = f"{LIST_URL}/{GUID_B}/updateDefinition"
+_FOUND = ("GET", LIST_URL, _resp(200, {"value": [_item(GUID_B)]}))
+
+
+@pytest.mark.parametrize(
+    "response",
+    [_resp(200, b""), _resp(200, b"  "), _resp(200, b"OK"), _resp(200, {})],
+    ids=["empty", "blank", "non-json", "empty-object"],
+)
+def test_deploy_item_update_keeps_the_id_when_the_response_has_no_id(
+    monkeypatch, response
+):
+  _install(monkeypatch, _FOUND, ("POST", UPDATE_URL, response))
+  assert _deploy(update=True) == GUID_B
+
+
+def test_deploy_item_update_returns_the_id_from_the_response_body(monkeypatch):
+  _install(
+      monkeypatch, _FOUND, ("POST", UPDATE_URL, _resp(200, {"id": GUID_C}))
+  )
+  assert _deploy(update=True) == GUID_C
+
+
+def test_deploy_item_update_with_empty_lro_result_keeps_the_id(
+    monkeypatch, sleeps
+):
+  _install(
+      monkeypatch,
+      _FOUND,
+      ("POST", UPDATE_URL, _resp(202, b"", LRO_HEADERS)),
+      ("GET", OP_URL, _resp(200, {"status": "Succeeded"})),
+      ("GET", OP_RESULT_URL, _resp(200, b"")),
+  )
+  assert _deploy(update=True) == GUID_B
+
+
+def test_deploy_item_update_with_lro_result_id(monkeypatch, sleeps):
+  _install(
+      monkeypatch,
+      _FOUND,
+      (
+          "POST",
+          UPDATE_URL,
+          _resp(
+              202,
+              b"",
+              {"location": OP_URL, "X-MS-Operation-Id": "op-1"},
+          ),
+      ),
+      ("GET", OP_URL, _resp(200, {"status": "Succeeded"})),
+      ("GET", OP_RESULT_URL, _resp(200, {"id": GUID_C})),
+  )
+  assert _deploy(update=True) == GUID_C
+
+
+def test_deploy_item_update_false_never_lists_and_creates(monkeypatch):
+  fake = _install(monkeypatch, ("POST", LIST_URL, _resp(201, {"id": GUID_C})))
+  assert _deploy(update=False) == GUID_C
+  method, url, body = fake.requests[0]
+  assert (method, url) == ("POST", LIST_URL)
+  assert body["displayName"] == NAME
+  assert body["definition"]["format"] == "TMDL"
+
+
+def test_deploy_item_update_without_a_match_creates_the_item(monkeypatch):
+  fake = _install(
+      monkeypatch,
+      ("GET", LIST_URL, _resp(200, {"value": []})),
+      ("POST", LIST_URL, _resp(201, {"id": GUID_C})),
+  )
+  assert _deploy(update=True) == GUID_C
+  assert len(fake.posts()) == 1
+
+
+@pytest.mark.parametrize(
+    "response",
+    [_resp(201, b""), _resp(200, {}), _resp(201, {"id": ""}), _resp(201, b"x")],
+    ids=["empty", "empty-object", "empty-id", "non-json"],
+)
+def test_deploy_item_create_without_an_id_fails(monkeypatch, response):
+  _install(monkeypatch, ("POST", LIST_URL, response))
+  with pytest.raises(RuntimeError, match="create semanticModels returned no"):
+    _deploy()
+
+
+def test_deploy_item_create_with_lro_result_without_an_id_fails(
+    monkeypatch, sleeps
+):
+  _install(
+      monkeypatch,
+      ("POST", LIST_URL, _resp(202, b"", LRO_HEADERS)),
+      ("GET", OP_URL, _resp(200, {"status": "Succeeded"})),
+      ("GET", OP_RESULT_URL, _resp(200, b"")),
+  )
+  with pytest.raises(RuntimeError, match="returned no item id"):
+    _deploy()
+
+
+@pytest.mark.parametrize("bad_id", ["not-a-guid", GUID_C + "\n", 12345])
+def test_deploy_item_create_validates_the_returned_id(monkeypatch, bad_id):
+  _install(monkeypatch, ("POST", LIST_URL, _resp(201, {"id": bad_id})))
+  with pytest.raises(ValueError, match="invalid semanticModels_id"):
+    _deploy()
+
+
+def test_deploy_item_create_accepts_a_well_formed_id(monkeypatch):
+  _install(monkeypatch, ("POST", LIST_URL, _resp(201, {"id": GUID_C})))
+  assert _deploy() == GUID_C
+
+
+def test_deploy_item_202_without_lro_headers_fails(monkeypatch):
+  _install(monkeypatch, ("POST", LIST_URL, _resp(202, b"", {})))
+  with pytest.raises(RuntimeError, match="missing LRO headers"):
+    _deploy()
+
+
+def test_deploy_item_http_error_is_reported(monkeypatch):
+  _install(
+      monkeypatch,
+      (
+          "POST",
+          LIST_URL,
+          _resp(400, {"errorCode": "InvalidDefinition", "message": "bad"}),
+      ),
+  )
+  with pytest.raises(RuntimeError, match="deploy failed: InvalidDefinition"):
+    _deploy()
+
+
+# ---------------------------------------------------------------------------
+# deploy_fabric.main --update, end to end against the Fabric double
+# ---------------------------------------------------------------------------
+
+
+def _make_project(tmp_path):
+  project_dir = tmp_path / "project"
+  model_dir = project_dir / deploy_mod.MODEL_DIR_NAME
+  (model_dir / "definition").mkdir(parents=True)
+  (model_dir / ".platform").write_text("{}")
+  (model_dir / "definition.pbism").write_text("{}")
+  (model_dir / "definition" / "database.tmdl").write_text("database")
+  report_dir = project_dir / deploy_mod.REPORT_DIR_NAME
+  (report_dir / "definition").mkdir(parents=True)
+  (report_dir / ".platform").write_text("{}")
+  (report_dir / "definition.pbir").write_text(
+      json.dumps({"datasetReference": {"byPath": {"path": "../model"}}})
+  )
+  (report_dir / "definition" / "version.json").write_text("{}")
+  token_file = tmp_path / "token.txt"
+  token_file.write_text("secret-token")
+  os.chmod(token_file, 0o600)
+  return project_dir, token_file
+
+
+def _deploy_argv(project_dir, token_file, *extra):
+  return [
+      "--workspace-id",
+      GUID_A,
+      "--token-file",
+      str(token_file),
+      "--project-dir",
+      str(project_dir),
+      *extra,
+  ]
+
+
+def test_main_update_keeps_both_ids_when_the_service_returns_no_body(
+    tmp_path, monkeypatch, capsys
+):
+  project_dir, token_file = _make_project(tmp_path)
+  fake = _install(
+      monkeypatch,
+      ("GET", LIST_URL, _resp(200, {"value": [_item(GUID_B)]})),
+      ("POST", f"{LIST_URL}/{GUID_B}/updateDefinition", _resp(200, b"")),
+      ("GET", REPORTS_URL, _resp(200, {"value": [_item(GUID_C)]})),
+      ("POST", f"{REPORTS_URL}/{GUID_C}/updateDefinition", _resp(200, b"")),
+  )
+  assert deploy_mod.main(_deploy_argv(project_dir, token_file, "--update")) == 0
+  assert not fake.script
+  out = capsys.readouterr().out
+  assert f"semantic model id: {GUID_B}" in out
+  assert f"report id: {GUID_C}" in out
+  assert f"/groups/{GUID_A}/reports/{GUID_C}" in out
+  report_body = fake.posts()[1][2]
+  parts = {
+      part["path"]: base64.b64decode(part["payload"])
+      for part in report_body["definition"]["parts"]
+  }
+  pbir = json.loads(parts["definition.pbir"])
+  assert (
+      pbir["datasetReference"]["byConnection"]["connectionString"]
+      == f"semanticmodelid={GUID_B}"
+  )
+
+
+def test_main_update_lookup_failure_never_posts(tmp_path, monkeypatch):
+  project_dir, token_file = _make_project(tmp_path)
+  fake = _install(monkeypatch, ("GET", LIST_URL, _resp(500, b"{}")))
+  with pytest.raises(RuntimeError, match=r"list semanticModels failed \(500\)"):
+    deploy_mod.main(_deploy_argv(project_dir, token_file, "--update"))
+  assert fake.posts() == []
+
+
+@pytest.mark.parametrize(
+    "model_id, exc, message",
+    [
+        ("", RuntimeError, "semantic model id is empty"),
+        (None, RuntimeError, "semantic model id is empty"),
+        ("not-a-guid", ValueError, "invalid semantic_model_id"),
+        (GUID_B + "\n", ValueError, "invalid semantic_model_id"),
+    ],
+    ids=["empty", "none", "malformed", "trailing-newline"],
+)
+def test_main_rejects_a_bad_model_id_before_deploying_the_report(
+    tmp_path, monkeypatch, model_id, exc, message
+):
+  project_dir, token_file = _make_project(tmp_path)
+  deployed = []
+
+  def fake_deploy_item(
+      token, workspace_id, item_type, parts, display_name, update=False
+  ):
+    deployed.append(item_type)
+    return model_id
+
+  monkeypatch.setattr(deploy_mod, "deploy_item", fake_deploy_item)
+  with pytest.raises(exc, match=message):
+    deploy_mod.main(_deploy_argv(project_dir, token_file))
+  assert deployed == ["semanticModels"]
+
+
+def _dax_response(rows):
+  return {"results": [{"tables": [{"rows": rows}]}]}
+
+
+def _date_row(min_date, max_date):
+  return _dax_response([{"[min_date]": min_date, "[max_date]": max_date}])
+
+
+# ---------------------------------------------------------------------------
+# Live validator: scalar comparison
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "a, b, expected",
+    [
+        ("1000000000", 1000000001, False),
+        ("9007199254740992", "9007199254740993", False),
+        (1_000_000_000, 1_000_000_001, False),
+        (2**53, 2**53 + 1, False),
+        ("1000000000", "1000000000", True),
+        (1.0, 1.0000000001, True),
+        (1.0, 1.00000001, False),
+        ("corrupt-string", None, False),
+        (None, "corrupt-string", False),
+        ("corrupt-string", "corrupt-string", False),
+        (None, None, True),
+        ("", None, True),
+        ("  ", None, True),
+        (100, "100", True),
+        (True, 1, False),
+        (1, True, False),
+        (False, 0, False),
+        (float("nan"), float("nan"), False),
+        (float("inf"), float("inf"), False),
+        (float("nan"), None, False),
+        ("NaN", None, False),
+        ("Infinity", "Infinity", False),
+        ("1e3", 1000, True),
+        ("0x10", 16, False),
+        ("1_000", 1000, False),
+        ([1], None, False),
+        ({"a": 1}, {"a": 1}, False),
+        (decimal.Decimal("5"), 5, True),
+        (decimal.Decimal("NaN"), 5, False),
+    ],
+)
+def test_values_match_matrix_in_both_argument_orders(a, b, expected):
+  assert validate_mod.values_match(a, b) is expected
+  assert validate_mod.values_match(b, a) is expected
+
+
+# ---------------------------------------------------------------------------
+# Live validator: series, Top-N and card comparisons
+# ---------------------------------------------------------------------------
+
+
+def test_compare_series_corrupt_value_is_not_a_blank_in_either_direction():
+  corrupt_oracle = [{"timestamp_date": "2026-07-01", "v": "garbage"}]
+  corrupt_dax = [{"[Date]": "2026-07-01T00:00:00", "[v]": "garbage"}]
+  ok, detail, _, _ = validate_mod.compare_series(
+      corrupt_oracle, [], "v", "timestamp_date"
+  )
+  assert (ok, detail) == (False, "row_index=0")
+  ok, detail, _, _ = validate_mod.compare_series(
+      [], corrupt_dax, "v", "timestamp_date"
+  )
+  assert (ok, detail) == (False, "row_index=0")
+  ok, _, _, _ = validate_mod.compare_series(
+      corrupt_oracle, corrupt_dax, "v", "timestamp_date"
+  )
+  assert ok is False
+
+
+def test_compare_series_large_counts_compare_exactly():
+  oracle = [{"timestamp_date": "2026-07-01", "v": 1000000000}]
+  dax = [{"[Date]": "2026-07-01T00:00:00", "[v]": 1000000001}]
+  result = validate_mod.compare_series(oracle, dax, "v", "timestamp_date")
+  assert result == (False, "row_index=0", 1000000000, 1000000001)
+
+
+def test_compare_series_null_dax_date_key_is_a_mismatch_not_a_crash():
+  oracle = [{"timestamp_date": "2026-07-01", "v": 5}]
+  dax = [
+      {"[Date]": None, "[v]": 5},
+      {"[Date]": "2026-07-01T00:00:00", "[v]": 5},
+  ]
+  ok, _, _, _ = validate_mod.compare_series(oracle, dax, "v", "timestamp_date")
+  assert ok is False
+
+
+def test_compare_series_blank_on_both_sides_is_skipped():
+  oracle = [{"timestamp_date": "2026-07-01", "v": None}]
+  dax = [{"[Date]": "2026-07-01T00:00:00", "[v]": None}]
+  ok, _, _, _ = validate_mod.compare_series(oracle, dax, "v", "timestamp_date")
+  assert ok is True
+
+
+def _topn(oracle, dax, n):
+  return validate_mod.compare_topn(oracle, dax, "v", "agent", n)
+
+
+def test_compare_topn_rejects_three_rows_for_top_two():
+  oracle = [
+      {"agent": "a", "v": 100},
+      {"agent": "b", "v": 90},
+      {"agent": "c", "v": 90},
+  ]
+  ok, detail, _, _ = _topn(oracle, list(oracle), 2)
+  assert (ok, detail) == (False, "row_count")
+
+
+def test_compare_topn_genuine_boundary_tie_still_passes():
+  oracle = [
+      {"agent": "a", "v": 100},
+      {"agent": "b", "v": 90},
+      {"agent": "c", "v": 90},
+  ]
+  dax = [{"agent": "a", "v": 100}, {"agent": "c", "v": 90}]
+  assert _topn(oracle, dax, 2) == (True, "tie_adjusted", None, None)
+
+
+def test_compare_topn_oracle_larger_than_n_with_dax_exactly_n_passes():
+  oracle = [{"agent": f"m{i}", "v": 100 - i} for i in range(7)]
+  dax = oracle[:5]
+  assert _topn(oracle, dax, 5) == (True, None, None, None)
+
+
+def test_compare_topn_blank_dax_rows_do_not_count_toward_n():
+  oracle = [{"agent": "a", "v": 100}, {"agent": "b", "v": 90}]
+  dax = oracle + [{"agent": "c", "v": None}, {"agent": "d", "v": ""}]
+  assert _topn(oracle, dax, 2) == (True, None, None, None)
+
+
+def test_compare_topn_identical_null_members_pass():
+  oracle = [{"agent": None, "v": 5}, {"agent": "a", "v": 3}]
+  dax = [
+      {"events_v1[agent]": None, "[v]": 5},
+      {"events_v1[agent]": "a", "[v]": 3},
+  ]
+  assert _topn(oracle, dax, 5) == (True, None, None, None)
+
+
+def test_compare_topn_null_member_is_not_the_empty_string():
+  oracle_null = [{"agent": None, "v": 5}]
+  oracle_empty = [{"agent": "", "v": 5}]
+  dax_null = [{"events_v1[agent]": None, "[v]": 5}]
+  dax_empty = [{"events_v1[agent]": "", "[v]": 5}]
+  assert _topn(oracle_null, dax_empty, 5)[:2] == (False, "member not in oracle")
+  assert _topn(oracle_empty, dax_null, 5)[:2] == (False, "member not in oracle")
+
+
+def test_compare_topn_rejects_a_repeated_member():
+  oracle = [{"agent": "a", "v": 100}, {"agent": "b", "v": 90}]
+  dax = [{"agent": "a", "v": 100}, {"agent": "a", "v": 100}]
+  ok, detail, _, _ = _topn(oracle, dax, 5)
+  assert (ok, detail) == (False, "duplicate_member")
+
+
+@pytest.mark.parametrize("bad", ["oops", float("nan"), True, "1_0"])
+def test_compare_topn_corrupt_values_fail_on_either_side(bad):
+  good = [{"agent": "a", "v": 5}]
+  ok, detail, _, _ = _topn([{"agent": "a", "v": bad}], good, 5)
+  assert (ok, detail) == (False, "corrupt_value")
+  ok, detail, _, _ = _topn(good, [{"agent": "a", "v": bad}], 5)
+  assert (ok, detail) == (False, "corrupt_value")
+
+
+def test_compare_topn_missing_dimension_fails_on_either_side():
+  ok, detail, _, _ = _topn([{"v": 5}], [{"agent": "a", "v": 5}], 5)
+  assert (ok, detail) == (False, "missing_dimension")
+  ok, detail, _, _ = _topn([{"agent": "a", "v": 5}], [{"v": 5}], 5)
+  assert (ok, detail) == (False, "missing_dimension")
+
+
+def test_compare_topn_detail_never_carries_a_dimension_label():
+  oracle = [{"agent": "a", "v": 100}, {"agent": "b", "v": 90}]
+  dax = [{"agent": "a", "v": 100}, {"agent": "intruder", "v": 90}]
+  result = _topn(oracle, dax, 5)
+  assert result[0] is False
+  assert "intruder" not in repr(result)
+
+
+def test_compare_topn_detects_a_non_tie_member_swap():
+  oracle = [{"agent": "a", "v": 100}, {"agent": "b", "v": 90}]
+  dax = [{"agent": "b", "v": 100}, {"agent": "a", "v": 90}]
+  ok, detail, _, _ = _topn(oracle, dax, 5)
+  assert ok is False
+  assert detail.startswith("member[")
+
+
+def _chart(chart_id):
+  return next(
+      c for c in validate_mod.load_chart_metadata() if c["id"] == chart_id
+  )
+
+
+def test_top5_llm_calls_chart_is_compared_as_a_top_5():
+  chart = _chart("usage-top-5-agents-by-llm-calls")
+  oracle = [
+      {"agent": f"agent_{i}", "total_llm_calls": 100 - i} for i in range(7)
+  ]
+  dax = [{"events_v1[agent]": f"agent_{i}", "[v]": 100 - i} for i in range(5)]
+  assert validate_mod._compare_chart(chart, oracle, oracle, dax) == (
+      True,
+      False,
+      None,
+  )
+  six = dax + [{"events_v1[agent]": "agent_5", "[v]": 95}]
+  assert validate_mod._compare_chart(chart, oracle, oracle, six) == (
+      False,
+      False,
+      "top-n mismatch: row_count",
+  )
+
+
+@pytest.mark.parametrize("chart_id", sorted(KPI_CARD_PREFIXES))
+def test_kpi_card_compares_value_and_change_pct_independently(chart_id):
+  chart = _chart(chart_id)
+  prefix = KPI_CARD_PREFIXES[chart_id]
+  cols = [m["oracle_column"] for m in chart["measure_info"]]
+  oracle_row = {cols[0]: 1200, cols[1]: 0.25, f"{prefix}_prior": 960}
+  assert validate_mod.compare_card(
+      oracle_row, [{"[v0]": 1200, "[v1]": 0.25}], cols
+  ) == (True, None, None, None)
+  ok, col, _, _ = validate_mod.compare_card(
+      oracle_row, [{"[v0]": 1200, "[v1]": 0.5}], cols
+  )
+  assert (ok, col) == (False, f"{prefix}_change")
+  ok, col, _, _ = validate_mod.compare_card(
+      oracle_row, [{"[v0]": 1201, "[v1]": 0.25}], cols
+  )
+  assert (ok, col) == (False, f"{prefix}_current")
+  ok, col, _, _ = validate_mod.compare_card(
+      oracle_row, [{"[v0]": 1200, "[v1]": None}], cols
+  )
+  assert (ok, col) == (False, f"{prefix}_change")
+
+
+@pytest.mark.parametrize("chart_id", sorted(KPI_CARD_PREFIXES))
+def test_kpi_card_blank_oracle_does_not_match_a_zero_dax_value(chart_id):
+  chart = _chart(chart_id)
+  cols = [m["oracle_column"] for m in chart["measure_info"]]
+  oracle_row = {cols[0]: None, cols[1]: None}
+  ok, col, _, _ = validate_mod.compare_card(
+      oracle_row, [{"[v0]": 0, "[v1]": None}], cols
+  )
+  assert (ok, col) == (False, cols[0])
+
+
+@pytest.mark.parametrize("chart_id", sorted(KPI_CARD_PREFIXES))
+def test_build_dax_query_kpi_card_reads_value_and_change_pct(chart_id):
+  chart = _chart(chart_id)
+  dax = validate_mod.build_dax_query(chart, "2026-04-18", "2026-07-16")
+  assert f'"v0", CALCULATE([{chart["measures"][0]}]' in dax
+  assert f'"v1", CALCULATE([{chart["measures"][1]}]' in dax
+
+
+def test_build_dax_query_top5_llm_calls_chart():
+  chart = _chart("usage-top-5-agents-by-llm-calls")
+  dax = validate_mod.build_dax_query(chart, "2026-04-18", "2026-07-16")
+  assert "[Top 5 Agents by LLM Calls]" in dax
+  assert "'events_v1'[agent]" in dax
+
+
+# ---------------------------------------------------------------------------
+# Live validator: executeQueries response envelope
+# ---------------------------------------------------------------------------
+
+_BAD_DAX_RESPONSES = {
+    "none": None,
+    "list": [],
+    "string": "text",
+    "top-level-error": {"error": {"code": "X"}},
+    "top-level-errors": {"errors": [{"code": "X"}]},
+    "empty-object": {},
+    "no-results": {"results": []},
+    "null-results": {"results": None},
+    "results-string": {"results": "x"},
+    "result-error": {"results": [{"error": {"code": "X"}}]},
+    "result-errors": {"results": [{"errors": ["x"]}]},
+    "no-tables": {"results": [{}]},
+    "empty-tables": {"results": [{"tables": []}]},
+    "null-tables": {"results": [{"tables": None}]},
+    "truncated-table": {
+        "results": [{"tables": [{"error": {"code": "Truncated"}, "rows": []}]}]
+    },
+    "rows-string": {"results": [{"tables": [{"rows": "x"}]}]},
+    "table-string": {"results": [{"tables": ["x"]}]},
+    "result-string": {"results": ["x"]},
+    "error-beside-results": {
+        "error": {"code": "X"},
+        "results": [{"tables": [{"rows": [{"[v0]": 1}]}]}],
+    },
+    "second-result-error": {
+        "results": [{"tables": [{"rows": []}]}, {"error": {"code": "X"}}]
+    },
+    "second-table-error": {
+        "results": [{"tables": [{"rows": []}, {"error": {"code": "X"}}]}]
+    },
+}
+
+
+@pytest.mark.parametrize(
+    "response", list(_BAD_DAX_RESPONSES.values()), ids=list(_BAD_DAX_RESPONSES)
+)
+def test_extract_dax_rows_rejects_error_and_malformed_envelopes(response):
+  with pytest.raises(validate_mod.DaxResponseError, match="dax_response_error"):
+    validate_mod.extract_dax_rows(response)
+
+
+@pytest.mark.parametrize(
+    "response, expected",
+    [
+        (
+            {"results": [{"tables": [{"rows": [{"[v0]": None}]}]}]},
+            [{"[v0]": None}],
+        ),
+        ({"results": [{"tables": [{"rows": []}]}]}, []),
+        ({"results": [{"tables": [{}]}]}, []),
+        ({"results": [{"tables": [{"rows": None}]}]}, []),
+        (
+            {"results": [{"tables": [{"rows": [{"[v0]": 5}]}]}]},
+            [{"[v0]": 5}],
+        ),
+    ],
+    ids=["blank-scalar", "empty-rows", "no-rows-key", "null-rows", "one-row"],
+)
+def test_extract_dax_rows_accepts_well_formed_results(response, expected):
+  assert validate_mod.extract_dax_rows(response) == expected
+
+
+# ---------------------------------------------------------------------------
+# Live validator: windows
+# ---------------------------------------------------------------------------
+
+_BAD_WINDOWS = [
+    "2026-07-16:2026-04-18",
+    "2026-02-30:2026-03-01",
+    "2026-04-01:2026-13-01",
+    "2026-07-01",
+    "2026-07-01:2026-07-02:2026-07-03",
+    "20260701:20260702",
+    "2026-07-01:2026-07-02\n",
+    "2026-07-01 :2026-07-02",
+    "2026-07-1:2026-07-02",
+    "a:b",
+    ":",
+    "",
+]
+
+
+@pytest.mark.parametrize("spec", _BAD_WINDOWS, ids=repr)
+def test_parse_window_rejects_invalid_specs(spec):
+  with pytest.raises(ValueError, match="invalid"):
+    validate_mod.parse_window(spec)
+
+
+@pytest.mark.parametrize(
+    "spec",
+    ["2026-04-18:2026-07-16", "2026-07-16:2026-07-16", "2028-02-29:2028-02-29"],
+)
+def test_parse_window_accepts_valid_specs(spec):
+  assert validate_mod.parse_window(spec) == tuple(spec.split(":"))
+
+
+def _resolve(monkeypatch, response=None, error=None):
+  def fake_execute_dax(token, workspace_id, dataset_id, query):
+    assert query == validate_mod.DATE_WINDOW_DAX
+    if error is not None:
+      raise error
+    return response
+
+  monkeypatch.setattr(validate_mod, "execute_dax", fake_execute_dax)
+  return validate_mod.resolve_default_window("tok", GUID_A, GUID_B)
+
+
+def test_resolve_default_window_reads_the_date_table(monkeypatch):
+  response = _date_row("2026-08-01T00:00:00", "2026-10-29T00:00:00")
+  assert _resolve(monkeypatch, response) == (
+      "2026-08-01",
+      "2026-10-29",
+      "date_table",
+  )
+
+
+@pytest.mark.parametrize(
+    "response, error",
+    [
+        (None, RuntimeError("Date table unavailable")),
+        ({"error": {"code": "X"}}, None),
+        ({"results": []}, None),
+        ({"results": [{"tables": [{"rows": []}]}]}, None),
+        (_date_row("2026-10-29T00:00:00", "2026-08-01T00:00:00"), None),
+        (_date_row("not-a-date", "2026-08-01T00:00:00"), None),
+        (_date_row(None, None), None),
+        (_date_row("2026-02-30T00:00:00", "2026-03-01T00:00:00"), None),
+        ({"results": [{"tables": [{"rows": [{"[other]": 1}]}]}]}, None),
+    ],
+    ids=[
+        "request-error",
+        "error-envelope",
+        "no-results",
+        "no-rows",
+        "reversed",
+        "garbage",
+        "null-dates",
+        "impossible-date",
+        "missing-columns",
+    ],
+)
+def test_resolve_default_window_falls_back_to_the_fixture_window(
+    monkeypatch, response, error
+):
+  start, end, source = _resolve(monkeypatch, response, error)
+  assert (start, end) == validate_mod.FIXTURE_WINDOW
+  assert source == "fixture_fallback"
+
+
+# ---------------------------------------------------------------------------
+# Live validator: main() accounting, fail-closed rules, sanitization
+# ---------------------------------------------------------------------------
+
+PBI_PROJECT = "test-project-0728-467323"
+PBI_DATASET = "bqaa_fixture_adk_1_27_0"
+WINDOW = "2026-04-18:2026-07-16"
+SENTINEL = "confidential_customer_x"
+
+
+def _no_date_table():
+  raise RuntimeError("Date table unavailable")
+
+
+class _LiveHarness:
+  """Runs ``validate_live_powerbi.main`` against stubbed oracle/DAX callers."""
+
+  def __init__(self, tmp_path, monkeypatch, charts=None):
+    self.oracle_calls = []
+    self.dax_queries = []
+    self.window_lookups = 0
+    self.oracle = lambda name, start, end, remove_limit: []
+    self.dax = lambda query: _dax_response([])
+    self.date_window = _no_date_table
+    self.token_file = tmp_path / "pbi-token.txt"
+    self.token_file.write_text("pbi-secret-token")
+    os.chmod(self.token_file, 0o600)
+    self.output = tmp_path / "receipt.json"
+    monkeypatch.setattr(validate_mod, "run_oracle_query", self._run_oracle)
+    monkeypatch.setattr(validate_mod, "execute_dax", self._execute_dax)
+    if charts is not None:
+      monkeypatch.setattr(validate_mod, "load_chart_metadata", lambda: charts)
+
+  def _run_oracle(
+      self,
+      sql_path,
+      project,
+      billing_project,
+      dataset,
+      table,
+      location,
+      start,
+      end,
+      remove_limit=False,
+  ):
+    self.oracle_calls.append((sql_path.name, start, end, remove_limit))
+    return self.oracle(sql_path.name, start, end, remove_limit), "job"
+
+  def _execute_dax(self, token, workspace_id, dataset_id, query):
+    if query == validate_mod.DATE_WINDOW_DAX:
+      self.window_lookups += 1
+      return self.date_window()
+    self.dax_queries.append(query)
+    return self.dax(query)
+
+  def run(self, *extra):
+    argv = [
+        "--workspace-id",
+        GUID_A,
+        "--dataset-id",
+        GUID_B,
+        "--pbi-token-file",
+        str(self.token_file),
+        "--project",
+        PBI_PROJECT,
+        "--dataset",
+        PBI_DATASET,
+        "--output",
+        str(self.output),
+        *extra,
+    ]
+    rc = validate_mod.main(argv)
+    return rc, json.loads(self.output.read_text())
+
+  def text(self, captured):
+    return self.output.read_text() + captured.out + captured.err
+
+
+def _tokens_card_harness(tmp_path, monkeypatch):
+  harness = _LiveHarness(
+      tmp_path, monkeypatch, charts=[_chart("usage-total-tokens")]
+  )
+  harness.oracle = lambda *_: [
+      {"pop_total_tokens_current": 5, "pop_total_tokens_change": 0.5}
+  ]
+  harness.dax = lambda _: _dax_response([{"[v0]": 5, "[v1]": 0.5}])
+  return harness
+
+
+def _consistent_pair(chart):
+  """Oracle rows and a matching DAX response for one chart."""
+  cols = [m.get("oracle_column", "") for m in chart["measure_info"]]
+  if chart["visual_type"] == "cardVisual":
+    return (
+        [{col: 5 for col in cols}],
+        _dax_response([{f"[v{i}]": 5 for i in range(len(cols))}]),
+    )
+  if chart["visual_type"] == "areaChart":
+    llm_trends = chart["id"] == "usage-llm-call-trends"
+    value_col = "total_llm_calls" if llm_trends else cols[0]
+    oracle_row = {"timestamp_date": "2026-07-01", value_col: 5}
+    dax_row = {"[Date]": "2026-07-01T00:00:00", "[v]": 5}
+    if chart["series"]:
+      oracle_row["tool_name"] = "t1"
+      dax_row["events_v1[tool_completed_name]"] = "t1"
+    return [oracle_row], _dax_response([dax_row])
+  dim_col = chart["category"].replace("events_v1.", "")
+  oracle_dim = (
+      "tool_name"
+      if dim_col in ("tool_completed_name", "tool_error_name")
+      else dim_col
+  )
+  return (
+      [{oracle_dim: "m1", cols[0]: 5}],
+      _dax_response([{f"events_v1[{dim_col}]": "m1", "[v]": 5}]),
+  )
+
+
+def _make_all_charts_consistent(harness, charts, window):
+  start, end = window.split(":")
+  by_oracle = {pathlib.Path(c["oracle_query"]).name: c for c in charts}
+  by_dax = {validate_mod.build_dax_query(c, start, end): c for c in charts}
+  assert len(by_oracle) == len(by_dax) == len(charts)
+  llm_trends = next(c for c in charts if c["id"] == "usage-llm-call-trends")
+
+  def oracle(name, _start, _end, _remove_limit):
+    # The daily LLM-trend re-query runs from a temporary file.
+    return _consistent_pair(by_oracle.get(name, llm_trends))[0]
+
+  harness.oracle = oracle
+  harness.dax = lambda query: _consistent_pair(by_dax[query])[1]
+  return by_oracle, by_dax
+
+
+def test_live_main_one_card_run_reports_its_own_denominator(
+    tmp_path, monkeypatch, capsys
+):
+  harness = _tokens_card_harness(tmp_path, monkeypatch)
+  rc, receipt = harness.run("--window", WINDOW)
+  assert rc == 0
+  assert receipt["charts_expected"] == 1
+  assert (
+      receipt["charts_pass"],
+      receipt["charts_fail"],
+      receipt["charts_empty"],
+  ) == (1, 0, 0)
+  assert receipt["overall_pass"] is True
+  assert receipt["pass"] is True
+  out = capsys.readouterr().out
+  assert "1/1 charts PASS across 1 window(s)" in out
+  assert "37/37" not in out
+
+
+def test_live_main_counts_every_chart_in_every_window_once(
+    tmp_path, monkeypatch
+):
+  harness = _tokens_card_harness(tmp_path, monkeypatch)
+  other = "2026-07-17:2026-07-20"
+  rc, receipt = harness.run(
+      "--window", WINDOW, "--window", other, "--window", WINDOW
+  )
+  assert rc == 0
+  assert receipt["windows"] == [WINDOW, other]
+  assert receipt["charts_expected"] == 2
+  assert receipt["charts_pass"] == 2
+  assert [d["window"] for d in receipt["window_details"]] == [WINDOW, other]
+  assert {d["source"] for d in receipt["window_details"]} == {"explicit"}
+  assert [d["charts_pass"] for d in receipt["window_details"]] == [1, 1]
+
+
+def test_live_main_one_failing_window_fails_the_run(
+    tmp_path, monkeypatch, capsys
+):
+  harness = _tokens_card_harness(tmp_path, monkeypatch)
+  harness.dax = lambda query: _dax_response(
+      [{"[v0]": 6 if "DATE(2026, 07, 17)" in query else 5, "[v1]": 0.5}]
+  )
+  rc, receipt = harness.run(
+      "--window", WINDOW, "--window", "2026-07-17:2026-07-20"
+  )
+  assert rc == 1
+  assert (receipt["charts_pass"], receipt["charts_fail"]) == (1, 1)
+  assert receipt["overall_pass"] is False
+  assert "1/2 charts PASS across 2 window(s)" in capsys.readouterr().err
+
+
+def test_live_main_all_37_consistent_charts_pass(tmp_path, monkeypatch, capsys):
+  harness = _LiveHarness(tmp_path, monkeypatch)
+  _make_all_charts_consistent(
+      harness, validate_mod.load_chart_metadata(), WINDOW
+  )
+  rc, receipt = harness.run("--window", WINDOW)
+  assert rc == 0
+  assert (receipt["charts_expected"], receipt["charts_pass"]) == (37, 37)
+  assert receipt["charts_fail"] == receipt["charts_empty"] == 0
+  assert receipt["oracle_rows_total"] > 0
+  assert (
+      "live parity OK: 37/37 charts PASS across 1 window(s)"
+      in capsys.readouterr().out
+  )
+
+
+def test_live_main_a_single_empty_chart_fails_unless_allowed(
+    tmp_path, monkeypatch, capsys
+):
+  harness = _LiveHarness(tmp_path, monkeypatch)
+  charts = validate_mod.load_chart_metadata()
+  _make_all_charts_consistent(harness, charts, WINDOW)
+  start, end = WINDOW.split(":")
+  tokens = _chart("usage-total-tokens")
+  tokens_dax = validate_mod.build_dax_query(tokens, start, end)
+  base_oracle, base_dax = harness.oracle, harness.dax
+  harness.oracle = lambda name, *rest: (
+      [] if name == "usage-total-tokens.sql" else base_oracle(name, *rest)
+  )
+  harness.dax = lambda query: (
+      _dax_response([]) if query == tokens_dax else base_dax(query)
+  )
+  rc, receipt = harness.run("--window", WINDOW)
+  assert rc == 1
+  assert (receipt["charts_pass"], receipt["charts_empty"]) == (36, 1)
+  assert receipt["overall_pass"] is False
+  assert "1 empty" in capsys.readouterr().err
+  rc, receipt = harness.run("--window", WINDOW, "--allow-empty")
+  assert rc == 0
+  assert (receipt["charts_pass"], receipt["charts_empty"]) == (36, 1)
+  assert "1 empty (allowed)" in capsys.readouterr().out
+
+
+def test_live_main_all_empty_run_is_not_a_pass(tmp_path, monkeypatch, capsys):
+  harness = _LiveHarness(tmp_path, monkeypatch)
+  rc, receipt = harness.run("--window", WINDOW)
+  assert rc == 1
+  assert receipt["charts_expected"] == 37
+  assert receipt["charts_empty"] == 37
+  assert receipt["charts_pass"] == receipt["charts_fail"] == 0
+  assert receipt["oracle_rows_total"] == 0
+  assert receipt["overall_pass"] is False
+  assert receipt["pass"] is False
+  assert receipt["allow_empty"] is False
+  assert {r["status"] for r in receipt["results"]} == {"EMPTY"}
+  assert {r["error"] for r in receipt["results"]} == {"empty_result"}
+  err = capsys.readouterr().err
+  assert "live parity FAIL" in err
+  assert "no oracle rows returned" in err
+
+
+def test_live_main_allow_empty_accepts_a_deliberately_empty_window(
+    tmp_path, monkeypatch, capsys
+):
+  harness = _LiveHarness(tmp_path, monkeypatch)
+  rc, receipt = harness.run("--window", WINDOW, "--allow-empty")
+  assert rc == 0
+  assert receipt["allow_empty"] is True
+  assert receipt["overall_pass"] is True
+  assert receipt["charts_empty"] == 37
+  assert "37 empty (allowed)" in capsys.readouterr().out
+
+
+def test_live_main_dax_envelope_error_fails_even_with_allow_empty(
+    tmp_path, monkeypatch
+):
+  harness = _LiveHarness(tmp_path, monkeypatch)
+  harness.dax = lambda query: {"results": []}
+  rc, receipt = harness.run("--window", WINDOW, "--allow-empty")
+  assert rc == 1
+  assert receipt["charts_fail"] == 37
+  assert receipt["overall_pass"] is False
+  assert {r["error"] for r in receipt["results"]} == {"dax_response_error"}
+
+
+def test_live_main_a_run_without_charts_is_never_a_pass(tmp_path, monkeypatch):
+  harness = _LiveHarness(tmp_path, monkeypatch, charts=[])
+  rc, receipt = harness.run("--window", WINDOW, "--allow-empty")
+  assert rc == 1
+  assert receipt["charts_expected"] == 0
+  assert receipt["overall_pass"] is False
+
+
+def test_live_main_receipt_never_contains_numeric_values(
+    tmp_path, monkeypatch, capsys
+):
+  harness = _tokens_card_harness(tmp_path, monkeypatch)
+  harness.oracle = lambda *_: [
+      {"pop_total_tokens_current": 7777701, "pop_total_tokens_change": 0.1}
+  ]
+  harness.dax = lambda _: _dax_response([{"[v0]": 8888802, "[v1]": 0.1}])
+  rc, receipt = harness.run("--window", WINDOW)
+  assert rc == 1
+  assert receipt["results"][0]["status"] == "FAIL"
+  assert receipt["results"][0]["error"] == "pop_total_tokens_current: mismatch"
+  text = harness.text(capsys.readouterr())
+  for secret in ("7777701", "8888802", "pbi-secret-token"):
+    assert secret not in text
+
+
+def test_live_main_receipt_never_contains_dimension_labels(
+    tmp_path, monkeypatch, capsys
+):
+  chart = _chart("usage-top-5-users-by-session")
+  value_col = chart["measure_info"][0]["oracle_column"]
+  dim_col = chart["category"].replace("events_v1.", "")
+  harness = _LiveHarness(tmp_path, monkeypatch, charts=[chart])
+  harness.oracle = lambda *_: [{dim_col: SENTINEL, value_col: 10}]
+  harness.dax = lambda _: _dax_response(
+      [{f"events_v1[{dim_col}]": "other_" + SENTINEL, "[v]": 10}]
+  )
+  rc, receipt = harness.run("--window", WINDOW)
+  assert rc == 1
+  assert (
+      receipt["results"][0]["error"] == "top-n mismatch: member not in oracle"
+  )
+  assert SENTINEL not in harness.text(capsys.readouterr())
+
+
+def _raise_with_sentinel(*_):
+  raise RuntimeError(f"upstream said {SENTINEL}")
+
+
+@pytest.mark.parametrize(
+    "stub, expected",
+    [
+        ("oracle", "oracle_query_failed"),
+        ("dax", "dax_request_failed"),
+    ],
+)
+def test_live_main_upstream_exceptions_are_reported_as_codes(
+    tmp_path, monkeypatch, capsys, stub, expected
+):
+  harness = _tokens_card_harness(tmp_path, monkeypatch)
+  setattr(harness, stub, _raise_with_sentinel)
+  rc, receipt = harness.run("--window", WINDOW)
+  assert rc == 1
+  assert receipt["results"][0]["error"] == expected
+  assert SENTINEL not in harness.text(capsys.readouterr())
+
+
+def test_live_main_dax_error_envelope_text_never_reaches_the_receipt(
+    tmp_path, monkeypatch, capsys
+):
+  harness = _tokens_card_harness(tmp_path, monkeypatch)
+  harness.dax = lambda _: {"error": {"code": "X", "message": SENTINEL}}
+  rc, receipt = harness.run("--window", WINDOW)
+  assert rc == 1
+  assert receipt["results"][0]["error"] == "dax_response_error"
+  assert SENTINEL not in harness.text(capsys.readouterr())
+
+
+@pytest.mark.parametrize("bad_window", _BAD_WINDOWS, ids=repr)
+def test_live_main_rejects_invalid_windows_before_any_query(
+    tmp_path, monkeypatch, bad_window
+):
+  harness = _LiveHarness(tmp_path, monkeypatch)
+  with pytest.raises(ValueError, match="invalid"):
+    harness.run("--window", bad_window)
+  assert harness.oracle_calls == []
+  assert harness.dax_queries == []
+  assert harness.window_lookups == 0
+
+
+def test_live_main_invalid_window_is_rejected_before_the_date_lookup(
+    tmp_path, monkeypatch
+):
+  harness = _LiveHarness(tmp_path, monkeypatch)
+  with pytest.raises(ValueError, match="invalid"):
+    harness.run("--window", "default", "--window", "2026-02-30:2026-03-01")
+  assert harness.window_lookups == 0
+
+
+@pytest.mark.parametrize(
+    "flag, value",
+    [
+        ("--workspace-id", GUID_A + "\n"),
+        ("--dataset-id", GUID_B + "\n"),
+        ("--report-id", GUID_C + "\n"),
+        ("--project", PBI_PROJECT + "\n"),
+        ("--billing-project", PBI_PROJECT + "\n"),
+        ("--dataset", PBI_DATASET + "\n"),
+        ("--table", "agent_events\n"),
+        ("--location", "US\n"),
+    ],
+)
+def test_live_main_rejects_arguments_with_a_trailing_newline(
+    tmp_path, monkeypatch, flag, value
+):
+  harness = _LiveHarness(tmp_path, monkeypatch)
+  with pytest.raises(ValueError, match="invalid"):
+    harness.run("--window", WINDOW, flag, value)
+  assert harness.oracle_calls == []
+  assert harness.dax_queries == []
+
+
+def test_live_main_default_window_comes_from_the_date_table(
+    tmp_path, monkeypatch, capsys
+):
+  harness = _tokens_card_harness(tmp_path, monkeypatch)
+  harness.date_window = lambda: _date_row(
+      "2026-08-01T00:00:00", "2026-10-29T00:00:00"
+  )
+  rc, receipt = harness.run()
+  assert rc == 0
+  assert harness.window_lookups == 1
+  assert {call[1:3] for call in harness.oracle_calls} == {
+      ("2026-08-01", "2026-10-29")
+  }
+  assert "DATE(2026, 08, 01)" in harness.dax_queries[0]
+  assert "DATE(2026, 10, 29)" in harness.dax_queries[0]
+  detail = receipt["window_details"][0]
+  assert (detail["window"], detail["start"], detail["end"]) == (
+      "default",
+      "2026-08-01",
+      "2026-10-29",
+  )
+  assert detail["source"] == "date_table"
+  assert "warning" not in capsys.readouterr().err
+
+
+def test_live_main_default_window_falls_back_to_the_fixture_and_says_so(
+    tmp_path, monkeypatch, capsys
+):
+  harness = _tokens_card_harness(tmp_path, monkeypatch)
+  rc, receipt = harness.run("--window", "default")
+  assert rc == 0
+  detail = receipt["window_details"][0]
+  assert (detail["start"], detail["end"]) == validate_mod.FIXTURE_WINDOW
+  assert detail["source"] == "fixture_fallback"
+  assert "fixture window" in capsys.readouterr().err

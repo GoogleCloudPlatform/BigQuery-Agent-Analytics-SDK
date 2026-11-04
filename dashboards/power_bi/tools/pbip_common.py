@@ -15,6 +15,7 @@
 """Shared constants, contract loading, deterministic UUIDs, and layout helpers."""
 
 from collections.abc import Iterable, Mapping
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -35,10 +36,12 @@ PBIP_NAMESPACE: uuid.UUID = uuid.uuid5(
     "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/dashboards/power_bi",
 )
 
-# Identifier validation regexes (F20).
-PROJECT_RE: re.Pattern[str] = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
-DATASET_RE: re.Pattern[str] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,1023}$")
-TABLE_RE: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,1023}$")
+# Identifier validation regexes (F20).  `\Z` rather than `$` so that a trailing
+# newline is never accepted, even by a caller that uses `.match()`; callers
+# should still prefer `.fullmatch()`.
+PROJECT_RE: re.Pattern[str] = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]\Z")
+DATASET_RE: re.Pattern[str] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,1023}\Z")
+TABLE_RE: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,1023}\Z")
 
 # F4 User ID non-listening chart IDs (33/37 listen; these 4 do not).
 NON_UID_LISTENERS: frozenset[str] = frozenset(
@@ -123,6 +126,41 @@ class Contracts:
     self.product = product
     self.events_template = events_template
     self.oracle_files = oracle_files
+
+
+def oracle_digest(
+    oracle_files: Mapping[str, str], oracle_queries: Iterable[str]
+) -> str:
+  """Return a short stable sha256 over the cited oracle SQL texts.
+
+  Every generated measure is stamped with this digest of the oracle queries it
+  cites, so editing a cited query without regenerating the model is detected
+  by the drift check.  Line endings are normalized so the digest does not
+  depend on the checkout's newline convention.
+  """
+  digest = hashlib.sha256()
+  for query in oracle_queries:
+    text = oracle_files[query].replace("\r\n", "\n")
+    digest.update(str(query).encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(text.encode("utf-8"))
+    digest.update(b"\0")
+  return digest.hexdigest()[:16]
+
+
+_SQL_BLOCK_COMMENT_RE: re.Pattern[str] = re.compile(r"/\*.*?\*/", re.DOTALL)
+_SQL_LINE_COMMENT_RE: re.Pattern[str] = re.compile(r"--[^\n]*")
+
+
+def has_output_alias(sql: str, column: str) -> bool:
+  """Whether *sql* names *column* as an `AS <column>` output alias.
+
+  SQL comments are ignored so an alias that only appears in a comment does not
+  count as an output column.
+  """
+  stripped = _SQL_LINE_COMMENT_RE.sub("", _SQL_BLOCK_COMMENT_RE.sub("", sql))
+  pattern = rf"\bAS\s+{re.escape(column)}\b"
+  return re.search(pattern, stripped, re.IGNORECASE) is not None
 
 
 def _product_charts_by_id(

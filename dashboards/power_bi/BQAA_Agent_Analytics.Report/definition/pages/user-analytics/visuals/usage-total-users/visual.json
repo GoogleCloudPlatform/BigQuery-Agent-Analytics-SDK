@@ -29,6 +29,21 @@
               "queryRef": "events_v1.KPI Total Users",
               "nativeQueryRef": "KPI Total Users",
               "displayName": "Total Users"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "KPI Total Users Change %"
+                }
+              },
+              "queryRef": "events_v1.KPI Total Users Change %",
+              "nativeQueryRef": "KPI Total Users Change %",
+              "displayName": "vs previous period"
             }
           ]
         }

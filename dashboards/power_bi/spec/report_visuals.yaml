@@ -112,6 +112,7 @@ parity_visuals:
   visual_type: cardVisual
   measures:
   - KPI Total Tokens
+  - KPI Total Tokens Change %
   geometry:
     row: 0
     col: 0
@@ -165,6 +166,7 @@ parity_visuals:
   visual_type: cardVisual
   measures:
   - KPI Total Traces
+  - KPI Total Traces Change %
   geometry:
     row: 2
     col: 0
@@ -218,6 +220,7 @@ parity_visuals:
   visual_type: cardVisual
   measures:
   - KPI Total Sessions
+  - KPI Total Sessions Change %
   geometry:
     row: 17
     col: 0
@@ -299,6 +302,7 @@ parity_visuals:
   visual_type: cardVisual
   measures:
   - KPI Total LLM Calls
+  - KPI Total LLM Calls Change %
   geometry:
     row: 0
     col: 0
@@ -324,7 +328,8 @@ parity_visuals:
   visual_type: clusteredBarChart
   category: events_v1.agent
   measures:
-  - LLM Calls
+  - Top 5 Agents by LLM Calls
+  top_n: 5
   geometry:
     row: 6
     col: 1
@@ -337,6 +342,7 @@ parity_visuals:
   visual_type: cardVisual
   measures:
   - KPI Total Users
+  - KPI Total Users Change %
   geometry:
     row: 2
     col: 0
@@ -536,6 +542,7 @@ parity_visuals:
   visual_type: cardVisual
   measures:
   - KPI Tool Errors
+  - KPI Tool Errors Change %
   geometry:
     row: 0
     col: 0
@@ -731,4 +738,3 @@ theme:
   background_light: '#F8F9FA'
   table_accent: '#4285F4'
   bad: '#C5221F'
-

@@ -314,7 +314,7 @@ def test_semantic_model_invariants_i1_to_i8_and_print_sql(monkeypatch):
     )
 
 
-def test_events_v1_29_columns_49_measures_and_tmdl_hygiene():
+def test_events_v1_29_columns_50_measures_and_tmdl_hygiene():
   pbip_common = _load_pbi_module("pbip_common")
   pbip_model = _load_pbi_module("pbip_model")
 
@@ -350,15 +350,17 @@ def test_events_v1_29_columns_49_measures_and_tmdl_hygiene():
   ):
     assert f"column {pk_col}\n\t\tdataType: string\n\t\tisHidden" in events_text
 
-  # 49 measures in exact order, DISTINCTCOUNTNOBLANK-only rule.
+  # 50 measures in exact order, DISTINCTCOUNTNOBLANK-only rule.
   assert "DISTINCTCOUNT(" not in events_text
   assert "DISTINCTCOUNTNOBLANK(" in events_text
   measure_decls = re.findall(
       r"^\tmeasure (?:'([^']+)'|(\S+)) = (.+)$", events_text, re.MULTILINE
   )
-  assert len(measure_decls) == 49
+  assert len(measure_decls) == 50
   actual_measure_names = tuple(m[0] or m[1] for m in measure_decls)
   assert actual_measure_names == pbip_model.MEASURE_NAMES
+  assert len(set(actual_measure_names)) == 50
+  assert actual_measure_names[-1] == "Top 5 Agents by LLM Calls"
 
   # Mutated spec fails build_model (#check-can-fail).
   broken_spec = copy.deepcopy(model_spec)
@@ -440,3 +442,542 @@ def test_output_zip_and_rewrite_expressions_parameters(tmp_path):
         dataset="my_agent_dataset",
         table="my_agent_events",
     )
+
+
+# ---------------------------------------------------------------------------
+# Strict identifier and date validation: patterns match the raw string.
+# ---------------------------------------------------------------------------
+
+_CLEAN_IDS = (
+    "test-project-0728-467323",
+    "bqaa_fixture_adk_1_27_0",
+    "agent_events",
+)
+_ID_ERRORS = (
+    "Invalid BigQuery project ID",
+    "Invalid BigQuery dataset ID",
+    "Invalid BigQuery table ID",
+)
+
+
+def _render_sql(pbip_model, project, dataset, table):
+  return pbip_model.render_events_sql(
+      project,
+      dataset,
+      table,
+      datetime.date(2026, 1, 18),
+      datetime.date(2026, 7, 16),
+  )
+
+
+def _contracts_and_spec():
+  pbip_common = _load_pbi_module("pbip_common")
+  return pbip_common.load_contracts(), pbip_common.load_spec(
+      "semantic_model.yaml"
+  )
+
+
+def _spec_parameter(model_spec, name):
+  for param in model_spec["parameters"]:
+    if param["name"] == name:
+      return param
+  raise AssertionError(f"parameter {name} is not declared in the spec")
+
+
+def _copy_looker(tmp_path):
+  dest = tmp_path / "looker_studio"
+  shutil.copytree(LOOKER, dest)
+  return dest
+
+
+def test_render_events_sql_accepts_the_clean_control_identifiers():
+  pbip_model = _load_pbi_module("pbip_model")
+  sql = _render_sql(pbip_model, *_CLEAN_IDS)
+  assert (
+      "FROM `test-project-0728-467323.bqaa_fixture_adk_1_27_0.agent_events`"
+      in sql
+  )
+
+
+@pytest.mark.parametrize("position", [0, 1, 2])
+@pytest.mark.parametrize(
+    "suffix", ["\n", "\r\n", "\r", " ", "`", ";", "'", '"', "#", "\x00"]
+)
+def test_render_events_sql_rejects_a_suffix_after_a_valid_identifier(
+    position, suffix
+):
+  pbip_model = _load_pbi_module("pbip_model")
+  args = list(_CLEAN_IDS)
+  args[position] += suffix
+  with pytest.raises(ValueError, match=_ID_ERRORS[position]):
+    _render_sql(pbip_model, *args)
+
+
+@pytest.mark.parametrize("position", [0, 1, 2])
+@pytest.mark.parametrize("prefix", ["\n", " ", "`", "\t"])
+def test_render_events_sql_rejects_a_prefix_before_a_valid_identifier(
+    position, prefix
+):
+  pbip_model = _load_pbi_module("pbip_model")
+  args = list(_CLEAN_IDS)
+  args[position] = prefix + args[position]
+  with pytest.raises(ValueError, match=_ID_ERRORS[position]):
+    _render_sql(pbip_model, *args)
+
+
+@pytest.mark.parametrize(
+    "position,bad",
+    [
+        (0, ""),
+        (0, "Test-Project-0728"),
+        (0, "abcd"),
+        (0, None),
+        (0, 123),
+        (1, ""),
+        (1, "1_leading_digit"),
+        (1, "has-hyphen"),
+        (1, None),
+        (2, ""),
+        (2, "-leading-hyphen"),
+        (2, "has space"),
+        (2, None),
+        (2, b"agent_events"),
+    ],
+)
+def test_render_events_sql_rejects_malformed_or_non_string_identifiers(
+    position, bad
+):
+  pbip_model = _load_pbi_module("pbip_model")
+  args = list(_CLEAN_IDS)
+  args[position] = bad
+  with pytest.raises(ValueError, match=_ID_ERRORS[position]):
+    _render_sql(pbip_model, *args)
+
+
+@pytest.mark.parametrize(
+    "pattern_name,clean",
+    [
+        ("PROJECT_RE", "abcde-1"),
+        ("DATASET_RE", "my_dataset"),
+        ("TABLE_RE", "my_table-1"),
+    ],
+)
+def test_identifier_patterns_do_not_accept_a_trailing_newline(
+    pattern_name, clean
+):
+  pbip_common = _load_pbi_module("pbip_common")
+  pattern = getattr(pbip_common, pattern_name)
+  assert pattern.match(clean) is not None
+  assert pattern.fullmatch(clean) is not None
+  # A '$' anchor would let a terminal LF through; the patterns must not.
+  assert pattern.match(clean + "\n") is None
+  assert pattern.fullmatch(clean + "\n") is None
+
+
+@pytest.mark.parametrize(
+    "name,bad",
+    [
+        ("BQAA_ProjectId", "test-project-0728-467323\n"),
+        ("BQAA_ProjectId", None),
+        ("BQAA_BillingProjectId", "test-project-0728-467323\n"),
+        ("BQAA_DatasetId", "bqaa_fixture_adk_1_27_0\n"),
+        ("BQAA_TableId", "agent_events\n"),
+        ("BQAA_WindowEndDate", "2026-07-16\n"),
+        ("BQAA_WindowEndDate", " 2026-07-16"),
+        ("BQAA_WindowEndDate", "2026-02-30"),
+        ("BQAA_WindowEndDate", "2026-13-01"),
+        ("BQAA_WindowEndDate", "2026-04-31"),
+        ("BQAA_WindowEndDate", "2027-02-29"),
+        ("BQAA_WindowEndDate", "2026-7-16"),
+        ("BQAA_WindowEndDate", datetime.date(2026, 7, 16)),
+        ("BQAA_WindowEndDate", 20260716),
+    ],
+)
+def test_model_spec_rejects_non_canonical_parameter_defaults(name, bad):
+  pbip_model = _load_pbi_module("pbip_model")
+  contracts, model_spec = _contracts_and_spec()
+  broken = copy.deepcopy(model_spec)
+  _spec_parameter(broken, name)["default"] = bad
+  with pytest.raises(ValueError, match=f"Default for {name}"):
+    pbip_model._validate_model_spec(contracts, broken)
+  with pytest.raises(ValueError, match=f"Default for {name}"):
+    pbip_model.build_model(contracts, broken)
+
+
+@pytest.mark.parametrize(
+    "default", ["auto", "2026-07-16", "2028-02-29", "2000-02-29"]
+)
+def test_model_spec_accepts_auto_and_real_calendar_dates(default):
+  pbip_model = _load_pbi_module("pbip_model")
+  contracts, model_spec = _contracts_and_spec()
+  ok = copy.deepcopy(model_spec)
+  _spec_parameter(ok, "BQAA_WindowEndDate")["default"] = default
+  pbip_model._validate_model_spec(contracts, ok)
+  expressions = pbip_model.build_model(contracts, ok)[
+      "definition/expressions.tmdl"
+  ]
+  assert f'expression BQAA_WindowEndDate = "{default}" meta' in expressions
+
+
+def _spec_expressions_text():
+  pbip_model = _load_pbi_module("pbip_model")
+  contracts, model_spec = _contracts_and_spec()
+  return pbip_model.build_model(contracts, model_spec)[
+      "definition/expressions.tmdl"
+  ]
+
+
+def _rewrite(expr_text, **overrides):
+  generate_pbip = _load_pbi_module("generate_pbip")
+  kwargs = {"project": "abcde-1", "dataset": "my_dataset", "table": "my_table"}
+  kwargs.update(overrides)
+  return generate_pbip.rewrite_expressions_parameters(expr_text, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "window_end",
+    [
+        "2026-02-30",
+        "2026-13-01",
+        "2026-04-31",
+        "2027-02-29",
+        "2026-00-10",
+        "2026-07-00",
+    ],
+)
+def test_rewrite_expressions_parameters_rejects_impossible_dates(window_end):
+  with pytest.raises(ValueError, match="Invalid calendar date"):
+    _rewrite(_spec_expressions_text(), window_end=window_end)
+
+
+@pytest.mark.parametrize(
+    "window_end",
+    [
+        "2026-7-16",
+        "20260716",
+        "2026-07-16T00:00:00",
+        "tomorrow",
+        "2026-07-16 x",
+    ],
+)
+def test_rewrite_expressions_parameters_rejects_malformed_dates(window_end):
+  with pytest.raises(ValueError, match="Invalid window end date"):
+    _rewrite(_spec_expressions_text(), window_end=window_end)
+
+
+def test_rewrite_expressions_parameters_accepts_a_leap_day_and_auto():
+  text = _spec_expressions_text()
+  leap = _rewrite(text, window_end="2028-02-29")
+  assert 'expression BQAA_WindowEndDate = "2028-02-29" meta' in leap
+  auto = _rewrite(text, window_end="AUTO")
+  assert 'expression BQAA_WindowEndDate = "auto" meta' in auto
+
+
+@pytest.mark.parametrize(
+    "field,message",
+    [
+        ("project", "Invalid BigQuery project ID"),
+        ("dataset", "Invalid BigQuery dataset ID"),
+        ("table", "Invalid BigQuery table ID"),
+    ],
+)
+def test_rewrite_expressions_parameters_rejects_a_trailing_newline(
+    field, message
+):
+  clean = {"project": "abcde-1", "dataset": "my_dataset", "table": "my_table"}
+  with pytest.raises(ValueError, match=message):
+    _rewrite(_spec_expressions_text(), **{field: clean[field] + "\n"})
+
+
+# ---------------------------------------------------------------------------
+# Oracle references: every cited column is a real output alias, and every
+# measure carries a digest of the oracle SQL it cites.
+# ---------------------------------------------------------------------------
+
+_KPI_PRIOR_ALIASES = {
+    "KPI Total Tokens Prior": ("usage-total-tokens", "pop_total_tokens_prior"),
+    "KPI Total Traces Prior": ("usage-total-traces", "pop_total_traces_prior"),
+    "KPI Total Sessions Prior": (
+        "usage-total-sessions",
+        "pop_total_sessions_prior",
+    ),
+    "KPI Total LLM Calls Prior": ("usage-total-calls", "pop_llm_calls_prior"),
+    "KPI Total Users Prior": ("usage-total-users", "pop_total_users_prior"),
+    "KPI Tool Errors Prior": (
+        "performance-total-errors",
+        "pop_tool_errors_prior",
+    ),
+}
+
+
+@pytest.mark.parametrize("measure_name", sorted(_KPI_PRIOR_ALIASES))
+def test_kpi_prior_measures_cite_a_real_oracle_output_alias(measure_name):
+  pbip_common = _load_pbi_module("pbip_common")
+  contracts, model_spec = _contracts_and_spec()
+  query, alias = _KPI_PRIOR_ALIASES[measure_name]
+  measure = next(m for m in model_spec["measures"] if m["name"] == measure_name)
+  assert measure["oracle_queries"] == [f"oracle/queries/{query}.sql"]
+  assert measure["oracle_column"] == alias
+  sql = contracts.oracle_files[query]
+  assert pbip_common.has_output_alias(sql, alias)
+  assert re.search(rf"^[ \t]*prev\.value AS {alias},$", sql, re.MULTILINE)
+
+
+@pytest.mark.parametrize("measure_name", sorted(_KPI_PRIOR_ALIASES))
+def test_build_model_fails_when_a_kpi_prior_alias_is_removed(
+    tmp_path, measure_name
+):
+  pbip_common = _load_pbi_module("pbip_common")
+  pbip_model = _load_pbi_module("pbip_model")
+  query, alias = _KPI_PRIOR_ALIASES[measure_name]
+  looker = _copy_looker(tmp_path)
+  sql_path = looker / "oracle" / "queries" / f"{query}.sql"
+  original = sql_path.read_text(encoding="utf-8")
+  alias_line = re.compile(rf"^[ \t]*prev\.value AS {alias},\n", re.MULTILINE)
+  assert len(alias_line.findall(original)) == 1
+  sql_path.write_text(alias_line.sub("", original), encoding="utf-8")
+
+  contracts = pbip_common.load_contracts(looker_root=looker)
+  model_spec = pbip_common.load_spec("semantic_model.yaml")
+  with pytest.raises(
+      ValueError, match=f"oracle_column '{alias}' is not an output alias"
+  ):
+    pbip_model.build_model(contracts, model_spec)
+
+
+@pytest.mark.parametrize(
+    "sql,column,expected",
+    [
+        ("SELECT cur.value AS pop_x_prior FROM t", "pop_x_prior", True),
+        ("SELECT cur.value as pop_x_prior FROM t", "pop_x_prior", True),
+        ("SELECT cur.value AS POP_X_PRIOR FROM t", "pop_x_prior", True),
+        ("SELECT cur.value AS\n  pop_x_prior\nFROM t", "pop_x_prior", True),
+        ("SELECT a AS pop_x_prior_extra FROM t", "pop_x_prior", False),
+        ("SELECT a AS xpop_x_prior FROM t", "pop_x_prior", False),
+        ("SELECT pop_x_prior FROM t", "pop_x_prior", False),
+        ("SELECT a -- AS pop_x_prior\nFROM t", "pop_x_prior", False),
+        ("SELECT a /* AS pop_x_prior */ FROM t", "pop_x_prior", False),
+        ("SELECT a AS popxx FROM t", "pop.x", False),
+    ],
+)
+def test_has_output_alias_matrix(sql, column, expected):
+  pbip_common = _load_pbi_module("pbip_common")
+  assert pbip_common.has_output_alias(sql, column) is expected
+
+
+@pytest.mark.parametrize(
+    "bad,message",
+    [
+        (None, "must name its oracle_column"),
+        ("", "must name its oracle_column"),
+        (7, "must name its oracle_column"),
+        ("pop_not_a_column", "is not an output alias"),
+        ("pop_total_tokens", "is not an output alias"),
+    ],
+)
+def test_model_spec_rejects_a_bad_oracle_column(bad, message):
+  pbip_model = _load_pbi_module("pbip_model")
+  contracts, model_spec = _contracts_and_spec()
+  broken = copy.deepcopy(model_spec)
+  measure = next(
+      m for m in broken["measures"] if m["name"] == "KPI Total Tokens Prior"
+  )
+  measure["oracle_column"] = bad
+  with pytest.raises(ValueError, match=message):
+    pbip_model._validate_model_spec(contracts, broken)
+
+
+def test_model_spec_rejects_an_unknown_oracle_query():
+  pbip_model = _load_pbi_module("pbip_model")
+  contracts, model_spec = _contracts_and_spec()
+  broken = copy.deepcopy(model_spec)
+  broken["measures"][0]["oracle_queries"] = ["oracle/queries/not-a-query.sql"]
+  with pytest.raises(ValueError, match="unknown oracle query"):
+    pbip_model._validate_model_spec(contracts, broken)
+
+
+def test_model_spec_rejects_a_wrong_measure_count():
+  pbip_model = _load_pbi_module("pbip_model")
+  contracts, model_spec = _contracts_and_spec()
+  short = copy.deepcopy(model_spec)
+  short["measures"].pop()
+  with pytest.raises(ValueError, match="Expected 50 measures"):
+    pbip_model._validate_model_spec(contracts, short)
+
+
+def _measure_blocks(events_text):
+  """Splits events_v1.tmdl into {measure name: its property lines}."""
+  blocks = {}
+  current = None
+  for line in events_text.splitlines():
+    declaration = re.match(r"^\tmeasure (?:'((?:[^']|'')+)'|(\S+)) = ", line)
+    if declaration:
+      current = (declaration.group(1) or declaration.group(2)).replace(
+          "''", "'"
+      )
+      blocks[current] = []
+    elif current is not None:
+      if line.startswith("\t\t") or line == "":
+        blocks[current].append(line)
+      else:
+        current = None
+  return blocks
+
+
+def test_oracle_digest_is_short_stable_and_content_sensitive():
+  pbip_common = _load_pbi_module("pbip_common")
+  files = pbip_common.OracleFilesDict(
+      {
+          "oracle/queries/a.sql": "SELECT 1\n",
+          "oracle/queries/b.sql": "SELECT 2\n",
+      }
+  )
+  digest = pbip_common.oracle_digest(files, ["oracle/queries/a.sql"])
+  assert re.fullmatch(r"[0-9a-f]{16}", digest)
+  assert digest == pbip_common.oracle_digest(files, ["oracle/queries/a.sql"])
+
+  # Line endings are normalized so the digest does not depend on the checkout.
+  crlf = pbip_common.OracleFilesDict({"oracle/queries/a.sql": "SELECT 1\r\n"})
+  assert pbip_common.oracle_digest(crlf, ["oracle/queries/a.sql"]) == digest
+
+  # An edit, a different name, a different query set, or a different order
+  # each change the digest.
+  edited = pbip_common.OracleFilesDict({"oracle/queries/a.sql": "SELECT 2\n"})
+  assert pbip_common.oracle_digest(edited, ["oracle/queries/a.sql"]) != digest
+  renamed = pbip_common.OracleFilesDict({"oracle/queries/c.sql": "SELECT 1\n"})
+  assert pbip_common.oracle_digest(renamed, ["oracle/queries/c.sql"]) != digest
+  assert pbip_common.oracle_digest(files, ["oracle/queries/b.sql"]) != digest
+  both = pbip_common.oracle_digest(
+      files, ["oracle/queries/a.sql", "oracle/queries/b.sql"]
+  )
+  assert both != digest
+  assert both != pbip_common.oracle_digest(
+      files, ["oracle/queries/b.sql", "oracle/queries/a.sql"]
+  )
+
+
+def test_every_measure_is_stamped_with_its_oracle_digest():
+  pbip_common = _load_pbi_module("pbip_common")
+  pbip_model = _load_pbi_module("pbip_model")
+  contracts, model_spec = _contracts_and_spec()
+  events_text = pbip_model.build_model(contracts, model_spec)[
+      "definition/tables/events_v1.tmdl"
+  ]
+  blocks = _measure_blocks(events_text)
+  assert tuple(blocks) == pbip_model.MEASURE_NAMES
+  for measure in model_spec["measures"]:
+    expected = pbip_common.oracle_digest(
+        contracts.oracle_files, measure["oracle_queries"]
+    )
+    annotations = [
+        line
+        for line in blocks[measure["name"]]
+        if line.strip().startswith("annotation ")
+    ]
+    assert annotations == [
+        f"\t\tannotation bqaa_oracle_sha256 = {expected}"
+    ], measure["name"]
+
+
+def test_editing_a_cited_oracle_query_changes_only_the_citing_measures(
+    tmp_path,
+):
+  pbip_common = _load_pbi_module("pbip_common")
+  pbip_model = _load_pbi_module("pbip_model")
+  contracts, model_spec = _contracts_and_spec()
+  baseline = pbip_model.build_model(contracts, model_spec)
+
+  query = "usage-total-traces"
+  looker = _copy_looker(tmp_path)
+  sql_path = looker / "oracle" / "queries" / f"{query}.sql"
+  sql_path.write_text(
+      sql_path.read_text(encoding="utf-8") + "-- edited after review\n",
+      encoding="utf-8",
+  )
+  edited = pbip_model.build_model(
+      pbip_common.load_contracts(looker_root=looker), model_spec
+  )
+
+  changed_files = {name for name in baseline if baseline[name] != edited[name]}
+  assert changed_files == {"definition/tables/events_v1.tmdl"}
+
+  citing = {
+      m["name"]
+      for m in model_spec["measures"]
+      if f"oracle/queries/{query}.sql" in m["oracle_queries"]
+  }
+  assert citing
+  old_blocks = _measure_blocks(baseline["definition/tables/events_v1.tmdl"])
+  new_blocks = _measure_blocks(edited["definition/tables/events_v1.tmdl"])
+  differing = {
+      name for name in old_blocks if old_blocks[name] != new_blocks[name]
+  }
+  assert differing == citing
+
+  def _without_digest(lines):
+    return [line for line in lines if "bqaa_oracle_sha256" not in line]
+
+  for name in old_blocks:
+    assert _without_digest(old_blocks[name]) == _without_digest(
+        new_blocks[name]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Top-N measures: declared top_n, the DAX TOPN, and the oracle LIMIT agree.
+# ---------------------------------------------------------------------------
+
+
+def _final_limit(sql):
+  no_comments = re.sub(
+      r"--[^\n]*", "", re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
+  )
+  limits = re.findall(r"\bLIMIT\s+(\d+)\b", no_comments, flags=re.IGNORECASE)
+  return int(limits[-1]) if limits else None
+
+
+def test_top_n_measures_agree_with_their_dax_and_oracle_limit():
+  contracts, model_spec = _contracts_and_spec()
+  top_n_measures = [
+      m for m in model_spec["measures"] if m.get("top_n") is not None
+  ]
+  assert len(top_n_measures) == 12
+  mismatches = []
+  for measure in top_n_measures:
+    declared = measure["top_n"]
+    in_dax = [int(n) for n in re.findall(r"TOPN\(\s*(\d+)\s*,", measure["dax"])]
+    queries = measure["oracle_queries"]
+    limit = _final_limit(contracts.oracle_files[queries[0]])
+    if in_dax != [declared] or len(queries) != 1 or limit != declared:
+      mismatches.append((measure["name"], declared, in_dax, limit))
+  assert mismatches == []
+
+
+def test_top_5_agents_by_llm_calls_is_a_real_top_five_measure():
+  contracts, model_spec = _contracts_and_spec()
+  by_name = {m["name"]: m for m in model_spec["measures"]}
+  measure = by_name["Top 5 Agents by LLM Calls"]
+  assert measure["display_folder"] == "Charts"
+  assert measure["top_n"] == 5
+  assert "TOPN(5," in measure["dax"]
+  assert "KEEPFILTERS(_top)" in measure["dax"]
+  assert measure["oracle_queries"] == [
+      "oracle/queries/usage-top-5-agents-by-llm-calls.sql"
+  ]
+  assert _final_limit(contracts.oracle_files[measure["oracle_queries"][0]]) == 5
+  # The base measure stays un-truncated for the other LLM-call visuals.
+  assert "TOPN(" not in by_name["LLM Calls"]["dax"]
+
+
+def test_traces_by_agent_excludes_rows_without_an_agent():
+  _, model_spec = _contracts_and_spec()
+  by_name = {m["name"]: m for m in model_spec["measures"]}
+  helper = by_name["Traces for Agents With Tokens"]["dax"]
+  assert "ISBLANK([Total Tokens])" in helper
+  assert "ISBLANK(SELECTEDVALUE('events_v1'[agent]))" in helper
+  assert "BLANK()" in helper
+  ranked = by_name["Traces by Agent"]["dax"]
+  assert (
+      "NOT ISBLANK([Traces for Agents With Tokens])" in ranked
+      and "[Traces for Agents With Tokens], DESC" in ranked
+  )

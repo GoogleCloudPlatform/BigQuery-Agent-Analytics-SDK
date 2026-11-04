@@ -25,7 +25,7 @@ from pathlib import Path
 import re
 import sys
 from types import ModuleType
-from typing import Any, Sequence
+from typing import Sequence
 import zipfile
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -70,6 +70,14 @@ def _load_sibling_module(name: str) -> ModuleType | None:
   return module
 
 
+def _require_sibling_module(name: str) -> ModuleType:
+  """Load a sibling module the generator cannot produce correct output without."""
+  module = _load_sibling_module(name)
+  if module is None:
+    raise FileNotFoundError(f"Missing required module: {TOOLS_DIR / name}.py")
+  return module
+
+
 pbip_common = _load_sibling_module("pbip_common")
 assert (
     pbip_common is not None
@@ -94,6 +102,10 @@ PBIR_SCHEMA = (
 
 MODEL_FOLDER_NAME = "BQAA_Agent_Analytics.SemanticModel"
 REPORT_FOLDER_NAME = "BQAA_Agent_Analytics.Report"
+
+# Spec inputs the generator cannot run without.  A missing one is an error (or
+# drift), never a reason to silently skip half of the generated project.
+REQUIRED_SPEC_RELS = ("spec/semantic_model.yaml", "spec/report_visuals.yaml")
 
 
 def build_core_files() -> dict[str, str]:
@@ -310,43 +322,38 @@ def generate_all(
       looker_root if looker_root is not None else pbip_common.LOOKER_ROOT
   )
 
+  for spec_rel in REQUIRED_SPEC_RELS:
+    spec_path = pbi_root / spec_rel
+    if not spec_path.is_file():
+      raise FileNotFoundError(f"Missing required spec: {spec_path}")
+  pbip_model = _require_sibling_module("pbip_model")
+  pbip_report = _require_sibling_module("pbip_report")
+
   contracts = pbip_common.load_contracts(looker_root=lkr_root)
   files = build_core_files()
 
-  model_spec: dict[str, Any] | None = None
-  model_spec_path = pbi_root / "spec" / "semantic_model.yaml"
-  pbip_model = _load_sibling_module("pbip_model")
-  if pbip_model is not None and model_spec_path.exists():
-    model_spec = pbip_common.load_spec(
-        "semantic_model.yaml", power_bi_root=pbi_root
-    )
-    model_files = pbip_model.build_model(contracts, model_spec)
-    for k in sorted(model_files):
-      norm_k = _normalize_item_key(k, MODEL_FOLDER_NAME)
-      files[norm_k] = model_files[k]
+  model_spec = pbip_common.load_spec(
+      "semantic_model.yaml", power_bi_root=pbi_root
+  )
+  model_files = pbip_model.build_model(contracts, model_spec)
+  for k in sorted(model_files):
+    norm_k = _normalize_item_key(k, MODEL_FOLDER_NAME)
+    files[norm_k] = model_files[k]
 
-  report_spec_path = pbi_root / "spec" / "report_visuals.yaml"
-  pbip_report = _load_sibling_module("pbip_report")
-  if pbip_report is not None and report_spec_path.exists():
-    visuals_spec = pbip_common.load_spec(
-        "report_visuals.yaml", power_bi_root=pbi_root
-    )
-    report_files = pbip_report.build_report(contracts, visuals_spec, model_spec)
-    for k in sorted(report_files):
-      norm_k = _normalize_item_key(k, REPORT_FOLDER_NAME)
-      files[norm_k] = report_files[k]
+  visuals_spec = pbip_common.load_spec(
+      "report_visuals.yaml", power_bi_root=pbi_root
+  )
+  report_files = pbip_report.build_report(contracts, visuals_spec, model_spec)
+  for k in sorted(report_files):
+    norm_k = _normalize_item_key(k, REPORT_FOLDER_NAME)
+    files[norm_k] = report_files[k]
 
-  if model_spec_path.exists() and report_spec_path.exists():
-    files[BUNDLE_REL_PATH] = build_pbip_bundle_js(files)
+  files[BUNDLE_REL_PATH] = build_pbip_bundle_js(files)
 
   return {k: files[k] for k in sorted(files)}
 
 
-def _list_existing_item_files(
-    pbi_root: Path,
-    include_model_def: bool,
-    include_report_def: bool,
-) -> set[str]:
+def _list_existing_item_files(pbi_root: Path) -> set[str]:
   """List existing files under the two generated item folders (ignoring .pbi/)."""
   found: set[str] = set()
   pbip_file = pbi_root / "BQAA_Agent_Analytics.pbip"
@@ -356,10 +363,7 @@ def _list_existing_item_files(
   if bundle_file.is_file():
     found.add(BUNDLE_REL_PATH)
 
-  for folder_name, include_def in (
-      (MODEL_FOLDER_NAME, include_model_def),
-      (REPORT_FOLDER_NAME, include_report_def),
-  ):
+  for folder_name in (MODEL_FOLDER_NAME, REPORT_FOLDER_NAME):
     item_dir = pbi_root / folder_name
     if not item_dir.exists():
       continue
@@ -367,18 +371,7 @@ def _list_existing_item_files(
       if not path.is_file():
         continue
       rel = path.relative_to(pbi_root).as_posix()
-      parts = rel.split("/")
-      if ".pbi" in parts:
-        continue
-      if (
-          not include_def
-          and len(parts) >= 2
-          and parts[1]
-          in (
-              "definition",
-              "StaticResources",
-          )
-      ):
+      if ".pbi" in rel.split("/"):
         continue
       found.add(rel)
   return found
@@ -393,14 +386,7 @@ def write_generated_files(
       power_bi_root if power_bi_root is not None else pbip_common.POWER_BI_ROOT
   )
   expected = generate_all(power_bi_root=pbi_root, looker_root=looker_root)
-
-  has_model_def = any(
-      k.startswith(f"{MODEL_FOLDER_NAME}/definition/") for k in expected
-  )
-  has_report_def = any(
-      k.startswith(f"{REPORT_FOLDER_NAME}/definition/") for k in expected
-  )
-  existing = _list_existing_item_files(pbi_root, has_model_def, has_report_def)
+  existing = _list_existing_item_files(pbi_root)
 
   # Remove stale files under the generated item folders.
   for stale_rel in sorted(existing - set(expected)):
@@ -427,15 +413,16 @@ def check_generated_files(
   pbi_root = Path(
       power_bi_root if power_bi_root is not None else pbip_common.POWER_BI_ROOT
   )
-  expected = generate_all(power_bi_root=pbi_root, looker_root=looker_root)
+  missing_specs = [
+      f"MISSING: {spec_rel}"
+      for spec_rel in REQUIRED_SPEC_RELS
+      if not (pbi_root / spec_rel).is_file()
+  ]
+  if missing_specs:
+    return missing_specs
 
-  has_model_def = any(
-      k.startswith(f"{MODEL_FOLDER_NAME}/definition/") for k in expected
-  )
-  has_report_def = any(
-      k.startswith(f"{REPORT_FOLDER_NAME}/definition/") for k in expected
-  )
-  existing = _list_existing_item_files(pbi_root, has_model_def, has_report_def)
+  expected = generate_all(power_bi_root=pbi_root, looker_root=looker_root)
+  existing = _list_existing_item_files(pbi_root)
 
   diffs: list[str] = []
 
@@ -533,11 +520,7 @@ def main(argv: Sequence[str] | None = None) -> int:
   args = parser.parse_args(argv)
 
   if args.print_sql:
-    pbip_model = _load_sibling_module("pbip_model")
-    if pbip_model is None or not hasattr(pbip_model, "render_events_sql"):
-      raise NotImplementedError(
-          "--print-sql requires pbip_model.render_events_sql (implemented in S1b)"
-      )
+    pbip_model = _require_sibling_module("pbip_model")
     if not args.window_end:
       parser.error("--print-sql requires --window-end YYYY-MM-DD")
     try:

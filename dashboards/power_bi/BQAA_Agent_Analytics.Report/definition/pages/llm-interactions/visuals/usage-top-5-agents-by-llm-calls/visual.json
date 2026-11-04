@@ -41,11 +41,11 @@
                       "Entity": "events_v1"
                     }
                   },
-                  "Property": "LLM Calls"
+                  "Property": "Top 5 Agents by LLM Calls"
                 }
               },
-              "queryRef": "events_v1.LLM Calls",
-              "nativeQueryRef": "LLM Calls"
+              "queryRef": "events_v1.Top 5 Agents by LLM Calls",
+              "nativeQueryRef": "Top 5 Agents by LLM Calls"
             }
           ]
         }
@@ -60,7 +60,7 @@
                     "Entity": "events_v1"
                   }
                 },
-                "Property": "LLM Calls"
+                "Property": "Top 5 Agents by LLM Calls"
               }
             },
             "direction": "Descending"

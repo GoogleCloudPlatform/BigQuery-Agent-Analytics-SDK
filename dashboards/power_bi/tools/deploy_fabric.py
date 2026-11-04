@@ -21,6 +21,8 @@ or environment variable and never prints or logs the token.
 
 import argparse
 import base64
+import datetime
+import email.utils
 import hashlib
 import json
 import os
@@ -30,6 +32,7 @@ import stat
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 FABRIC_API_BASE = "https://api.fabric.microsoft.com/v1"
@@ -37,9 +40,11 @@ PBIR_SCHEMA_URL = (
     "https://developer.microsoft.com/json-schemas/fabric/"
     "item/report/definitionProperties/2.0.0/schema.json"
 )
+# `\Z` (not `$`) so that a trailing newline is never accepted, even by callers
+# that use `.match()` instead of `.fullmatch()`.
 GUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
-    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
 )
 MAX_LRO_SECONDS = 600
 DEFAULT_RETRY_AFTER = 10
@@ -48,7 +53,8 @@ REPORT_DIR_NAME = "BQAA_Agent_Analytics.Report"
 
 
 def validate_guid(value, label="workspace ID"):
-  if not GUID_RE.match(value):
+  """Return *value* when it is exactly one GUID string, else raise."""
+  if not isinstance(value, str) or not GUID_RE.fullmatch(value):
     raise ValueError(f"invalid {label}")
   return value
 
@@ -159,13 +165,76 @@ def _extract_error(body_bytes):
     error = json.loads(body_bytes)
   except (json.JSONDecodeError, ValueError):
     return "unknown", "non-JSON response"
-  code = error.get("errorCode", error.get("error", {}).get("code", "unknown"))
-  msg = error.get("message", error.get("error", {}).get("message", ""))
+  if not isinstance(error, dict):
+    return "unknown", "unexpected response body"
+  nested = error.get("error")
+  if not isinstance(nested, dict):
+    nested = {}
+  code = error.get("errorCode", nested.get("code", "unknown"))
+  msg = error.get("message", nested.get("message", ""))
   return code, msg
 
 
+def _header(headers, name):
+  """Case-insensitive HTTP header lookup."""
+  wanted = name.lower()
+  for key, value in (headers or {}).items():
+    if str(key).lower() == wanted:
+      return value
+  return None
+
+
+def _load_json_object(body, label, allow_empty=True):
+  """Parse *body* as a JSON object.
+
+  A blank body is an empty object unless *allow_empty* is false, in which case
+  it is an error: a listing that came back without a body is not evidence that
+  the scan was complete.
+  """
+  if not body or not body.strip():
+    if allow_empty:
+      return {}
+    raise RuntimeError(f"{label} returned an empty body")
+  try:
+    parsed = json.loads(body)
+  except ValueError:
+    raise RuntimeError(f"{label} returned a non-JSON body") from None
+  if not isinstance(parsed, dict):
+    raise RuntimeError(f"{label} returned an unexpected JSON shape")
+  return parsed
+
+
+def _parse_retry_after(value, max_seconds=MAX_LRO_SECONDS):
+  """Convert a Retry-After header into whole seconds.
+
+  RFC 9110 allows either delta-seconds or an HTTP-date.  The result is clamped
+  to [0, *max_seconds*] so a date in the past or a hostile value can neither
+  spin the poller nor stall it; an unparsable value falls back to the default
+  polling interval.
+  """
+  if value is None:
+    return DEFAULT_RETRY_AFTER
+  text = str(value).strip()
+  try:
+    seconds = int(text)
+  except ValueError:
+    try:
+      when = email.utils.parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError):
+      return DEFAULT_RETRY_AFTER
+    if when.tzinfo is None:
+      when = when.replace(tzinfo=datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    seconds = int((when - now).total_seconds())
+  return max(0, min(max_seconds, seconds))
+
+
 def poll_lro(token, location_url, operation_id, max_seconds=MAX_LRO_SECONDS):
-  """Poll a long-running operation until Succeeded or Failed."""
+  """Poll a long-running operation until Succeeded or Failed.
+
+  Returns the operation result as a dict; an operation that succeeds with an
+  empty result body (HTTP 200 with no content, or 204) yields an empty dict.
+  """
   validate_operation_url(location_url)
   deadline = time.monotonic() + max_seconds
   retry_after = DEFAULT_RETRY_AFTER
@@ -176,34 +245,81 @@ def poll_lro(token, location_url, operation_id, max_seconds=MAX_LRO_SECONDS):
     if status != 200:
       code, msg = _extract_error(body)
       raise RuntimeError(f"LRO poll failed: {code}: {msg}")
-    result = json.loads(body)
+    result = _load_json_object(body, "LRO poll")
     op_status = result.get("status", "Running")
     if op_status == "Succeeded":
       result_url = f"{FABRIC_API_BASE}/operations/{operation_id}/result"
       r_status, _, r_body = http_request(result_url, "GET", token)
-      if r_status != 200:
+      if r_status not in (200, 204):
         code, msg = _extract_error(r_body)
         raise RuntimeError(f"LRO result fetch failed: {code}: {msg}")
-      return json.loads(r_body)
+      return _load_json_object(r_body, "LRO result fetch")
     if op_status == "Failed":
       error = result.get("error", {})
+      if not isinstance(error, dict):
+        error = {}
       code = error.get("errorCode", "unknown")
       msg = error.get("message", "operation failed")
       raise RuntimeError(f"LRO failed: {code}: {msg}")
-    retry_after = int(headers.get("Retry-After", DEFAULT_RETRY_AFTER))
+    retry_after = _parse_retry_after(
+        _header(headers, "Retry-After"), max_seconds
+    )
   raise RuntimeError(f"LRO timed out after {max_seconds}s")
 
 
-def find_existing_item(token, workspace_id, item_type, display_name):
-  url = f"{FABRIC_API_BASE}/workspaces/{workspace_id}/{item_type}"
-  status, _, body = http_request(url, "GET", token)
-  if status != 200:
-    return None
-  result = json.loads(body)
-  for item in result.get("value", []):
-    if item.get("displayName") == display_name:
-      return item.get("id")
+MAX_LIST_PAGES = 1000
+
+
+def _next_page_url(base_url, result):
+  """Return the URL of the next listing page, or None on the last page."""
+  continuation_uri = result.get("continuationUri")
+  if continuation_uri:
+    return continuation_uri
+  continuation_token = result.get("continuationToken")
+  if continuation_token:
+    quoted = urllib.parse.quote(str(continuation_token))
+    return f"{base_url}?continuationToken={quoted}"
   return None
+
+
+def find_existing_item(token, workspace_id, item_type, display_name):
+  """Return the id of the one item named *display_name*, or None.
+
+  Follows listing pagination so an item beyond the first page is found, fails
+  closed when the listing itself fails (so a transient error can never turn an
+  update into a duplicate create), and refuses to guess between several items
+  that share the same display name.
+  """
+  base_url = f"{FABRIC_API_BASE}/workspaces/{workspace_id}/{item_type}"
+  url = base_url
+  seen_urls = set()
+  matches = []
+  while url:
+    if url in seen_urls or len(seen_urls) >= MAX_LIST_PAGES:
+      raise RuntimeError(f"list {item_type} pagination did not terminate")
+    seen_urls.add(url)
+    status, _, body = http_request(url, "GET", token)
+    if status != 200:
+      code, msg = _extract_error(body)
+      raise RuntimeError(f"list {item_type} failed ({status}): {code}: {msg}")
+    result = _load_json_object(body, f"list {item_type}", allow_empty=False)
+    items = result.get("value", [])
+    if not isinstance(items, list):
+      raise RuntimeError(
+          f"list {item_type} returned an unexpected response shape"
+      )
+    for item in items:
+      if not isinstance(item, dict):
+        continue
+      if item.get("displayName") == display_name and item.get("id"):
+        if item["id"] not in matches:
+          matches.append(item["id"])
+    url = _next_page_url(base_url, result)
+  if len(matches) > 1:
+    raise RuntimeError(
+        f"Ambiguous duplicate {item_type} items named {display_name!r}"
+    )
+  return matches[0] if matches else None
 
 
 def deploy_item(
@@ -214,7 +330,13 @@ def deploy_item(
     display_name,
     update=False,
 ):
-  """Create or update an item.  Returns the item id."""
+  """Create or update an item.  Returns the item id.
+
+  When *update* is true and an item with the same display name exists, its
+  definition is updated in place and its existing id is returned even if the
+  service replies with no body.  A newly created item must come back with a
+  well-formed id, otherwise the call fails rather than returning an empty one.
+  """
   encoded = encode_parts(parts)
   format_type = "TMDL" if item_type == "semanticModels" else "PBIR"
   item_id = None
@@ -232,19 +354,32 @@ def deploy_item(
         "displayName": display_name,
         "definition": {"format": format_type, "parts": encoded},
     }
+  verb = "update" if item_id else "create"
   status, headers, resp_body = http_request(url, "POST", token, body)
   if status == 202:
-    location = headers.get("Location", "")
-    operation_id = headers.get("x-ms-operation-id", "")
+    location = _header(headers, "Location") or ""
+    operation_id = _header(headers, "x-ms-operation-id") or ""
     if not location or not operation_id:
-      raise RuntimeError("create accepted but missing LRO headers")
+      raise RuntimeError(f"{verb} accepted but missing LRO headers")
     result = poll_lro(token, location, operation_id)
-    return result.get("id", "")
-  if status in (200, 201):
-    result = json.loads(resp_body) if resp_body else {}
-    return result.get("id", "")
-  code, msg = _extract_error(resp_body)
-  raise RuntimeError(f"deploy failed: {code}: {msg}")
+    returned_id = result.get("id") if isinstance(result, dict) else None
+  elif status in (200, 201):
+    try:
+      body_obj = (
+          json.loads(resp_body) if resp_body and resp_body.strip() else {}
+      )
+    except ValueError:
+      body_obj = {}
+    returned_id = body_obj.get("id") if isinstance(body_obj, dict) else None
+  else:
+    code, msg = _extract_error(resp_body)
+    raise RuntimeError(f"deploy failed: {code}: {msg}")
+  if item_id:
+    return returned_id or item_id
+  if not returned_id:
+    raise RuntimeError(f"create {item_type} returned no item id")
+  validate_guid(returned_id, f"{item_type}_id")
+  return returned_id
 
 
 def _print_dry_run_parts(label, parts):
@@ -298,6 +433,9 @@ def main(argv=None):
       args.display_name,
       args.update,
   )
+  if not model_id:
+    raise RuntimeError("semantic model id is empty")
+  validate_guid(model_id, "semantic_model_id")
   print(f"semantic model id: {model_id}")
 
   report_parts = collect_parts(report_dir)

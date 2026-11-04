@@ -148,7 +148,12 @@ def _annotations(chart_id, is_parity=True):
 
 
 def _build_card_visual(vdef, model_spec):
-  """Build a cardVisual visual.json dict."""
+  """Build a cardVisual visual.json dict.
+
+  The first measure is the headline value and carries the chart title as its
+  display name; any further measure (the period-over-period change) is labelled
+  "vs previous period".
+  """
   measures = vdef.get("measures", [])
   title = vdef.get("title")
   # Use events_v1 as the entity for all measures
@@ -159,9 +164,9 @@ def _build_card_visual(vdef, model_spec):
               entity,
               m,
               kind="Measure",
-              display_name=title if len(measures) == 1 else None,
+              display_name=title if i == 0 else "vs previous period",
           )
-          for m in measures
+          for i, m in enumerate(measures)
       ]
   }
   visual = {

@@ -29,6 +29,21 @@
               "queryRef": "events_v1.KPI Total Sessions",
               "nativeQueryRef": "KPI Total Sessions",
               "displayName": "Total Sessions"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "KPI Total Sessions Change %"
+                }
+              },
+              "queryRef": "events_v1.KPI Total Sessions Change %",
+              "nativeQueryRef": "KPI Total Sessions Change %",
+              "displayName": "vs previous period"
             }
           ]
         }
