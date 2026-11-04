@@ -244,6 +244,47 @@ def _quote_tmdl_name(name: str) -> str:
   return f"'{escaped}'"
 
 
+_DISTINCT_COUNT_COL_RE = re.compile(
+    r"DISTINCTCOUNTNOBLANK\(\s*'events_v1'\[(trace_id|session_id|user_id|invocation_id)\]\s*\)"
+)
+
+
+def _strip_sql_comments(sql: str) -> str:
+  without_block = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+  return re.sub(r"--[^\r\n]*", " ", without_block)
+
+
+def _resolve_measure_distinct_columns(
+    measures: list[Mapping[str, Any]],
+) -> dict[str, str]:
+  """Map each measure to its distinct-count column (direct or transitive)."""
+  resolved: dict[str, str] = {}
+  dax_by_name: dict[str, str] = {}
+  for m in measures:
+    mname = m.get("name")
+    dax = m.get("dax")
+    if isinstance(mname, str) and isinstance(dax, str):
+      dax_by_name[mname] = dax
+      match = _DISTINCT_COUNT_COL_RE.search(dax)
+      if match:
+        resolved[mname] = match.group(1)
+  changed = True
+  while changed:
+    changed = False
+    for mname, dax in dax_by_name.items():
+      if mname in resolved:
+        continue
+      ref_cols = {
+          resolved[ref]
+          for ref in re.findall(r"\[([^\[\]]+)\]", dax)
+          if ref in resolved
+      }
+      if len(ref_cols) == 1:
+        resolved[mname] = next(iter(ref_cols))
+        changed = True
+  return resolved
+
+
 def _validate_model_spec(contracts: Any, model_spec: Mapping[str, Any]) -> None:
   params = model_spec.get("parameters")
   if not isinstance(params, list) or len(params) != 7:
@@ -331,6 +372,8 @@ def _validate_model_spec(contracts: Any, model_spec: Mapping[str, Any]) -> None:
         f"Measure names/order mismatch: expected {MEASURE_NAMES}, got {m_names}"
     )
 
+  measure_distinct_cols = _resolve_measure_distinct_columns(measures)
+
   for m in measures:
     mname = m["name"]
     dax = m.get("dax", "")
@@ -364,6 +407,20 @@ def _validate_model_spec(contracts: Any, model_spec: Mapping[str, Any]) -> None:
           f"Measure {mname!r} oracle_column {ocol!r} is not an output alias "
           "of any cited oracle query"
       )
+    distinct_col = measure_distinct_cols.get(mname)
+    if distinct_col is not None:
+      col_pat = re.compile(
+          rf"COUNT\s*\(\s*DISTINCT\b[^)]*\b{re.escape(distinct_col)}\b",
+          re.IGNORECASE,
+      )
+      for oq in oqueries:
+        sql_clean = _strip_sql_comments(contracts.oracle_files[oq])
+        if not col_pat.search(sql_clean):
+          raise ValueError(
+              f"Measure {mname!r} counts distinct {distinct_col!r}, but "
+              f"cited oracle query {oq!r} does not contain "
+              f"COUNT(DISTINCT ... {distinct_col})"
+          )
 
 
 def _emit_database_tmdl(model_spec: Mapping[str, Any]) -> str:

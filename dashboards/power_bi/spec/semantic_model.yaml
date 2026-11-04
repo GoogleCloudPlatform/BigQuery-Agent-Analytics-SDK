@@ -415,7 +415,7 @@ measures:
   - name: KPI Total Traces Prior
     display_folder: Scorecards
     format_string: "#,0"
-    dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE([Total Traces], REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
+    dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE(COALESCE([Total Traces], 0), REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
     oracle_queries:
       - oracle/queries/usage-total-traces.sql
     oracle_column: pop_total_traces_prior
@@ -439,7 +439,7 @@ measures:
   - name: KPI Total Sessions Prior
     display_folder: Scorecards
     format_string: "#,0"
-    dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE([Total Sessions], REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
+    dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE(COALESCE([Total Sessions], 0), REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
     oracle_queries:
       - oracle/queries/usage-total-sessions.sql
     oracle_column: pop_total_sessions_prior
@@ -463,7 +463,7 @@ measures:
   - name: KPI Total LLM Calls Prior
     display_folder: Scorecards
     format_string: "#,0"
-    dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE([LLM Calls], REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
+    dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE(COALESCE([LLM Calls], 0), REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
     oracle_queries:
       - oracle/queries/usage-total-calls.sql
     oracle_column: pop_llm_calls_prior
@@ -487,7 +487,7 @@ measures:
   - name: KPI Total Users Prior
     display_folder: Scorecards
     format_string: "#,0"
-    dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE([Total Users], REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
+    dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE(COALESCE([Total Users], 0), REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
     oracle_queries:
       - oracle/queries/usage-total-users.sql
     oracle_column: pop_total_users_prior
@@ -511,7 +511,7 @@ measures:
   - name: KPI Tool Errors Prior
     display_folder: Scorecards
     format_string: "#,0"
-    dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE([Tool Errors], REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
+    dax: "VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE(COALESCE([Tool Errors], 0), REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)"
     oracle_queries:
       - oracle/queries/performance-total-errors.sql
     oracle_column: pop_tool_errors_prior

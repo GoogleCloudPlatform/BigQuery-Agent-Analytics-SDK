@@ -859,6 +859,42 @@ class TestCheckCanFail:
     errors = val_mod.validate_tmdl(power_bi_root=tmp_path)
     assert any(expected in e for e in errors), errors
 
+  @pytest.mark.parametrize(
+      "old_frag, new_frag, expected",
+      [
+          (
+              'AnchorSql = "SELECT MAX(',
+              'AnchorSql = "SELECT; MAX(',
+              "AnchorSql literal 1 contains ';'",
+          ),
+          (
+              'AnchorSql = "SELECT MAX(',
+              'AnchorSql = "SELECT ""x"" MAX(',
+              "AnchorSql literal 1 contains a double quote",
+          ),
+          (
+              'AnchorSql = "SELECT MAX(',
+              'AnchorSql = "SELECT #(lf) MAX(',
+              "AnchorSql literal 1 contains unescaped '#('",
+          ),
+          (
+              "\"SELECT DATE(MAX(timestamp), 'UTC') AS newest_date FROM \"",
+              "\"SELECT; DATE(MAX(timestamp), 'UTC') AS newest_date FROM \"",
+              "FallbackAnchor literal 1 contains ';'",
+          ),
+      ],
+  )
+  def test_anchor_and_fallback_sql_hazards_detected(
+      self, tmp_path, old_frag, new_frag, expected
+  ):
+    """I8: AnchorSql and FallbackAnchor literals are scanned for SQL hazards."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    tmp_model = self._copy_model_definition(tmp_path)
+    self._edit_once(tmp_model / "expressions.tmdl", old_frag, new_frag)
+    errors = val_mod.validate_tmdl(power_bi_root=tmp_path)
+    assert any(expected in e for e in errors), errors
+
   # -- Oracle contract drift and missing specs (F4, F5, F13) -----------------
 
   def test_oracle_edit_without_regeneration_detected(self, tmp_path):
@@ -875,10 +911,8 @@ class TestCheckCanFail:
     shutil.copytree(LOOKER, tmp_looker)
     query_path = tmp_looker / "oracle" / "queries" / "usage-total-traces.sql"
     sql = query_path.read_text()
-    assert sql.count("COUNT(DISTINCT trace_id)") == 2
-    query_path.write_text(
-        sql.replace("COUNT(DISTINCT trace_id)", "COUNT(DISTINCT session_id)")
-    )
+    assert sql.count("INTERVAL 1 DAY") == 2
+    query_path.write_text(sql.replace("INTERVAL 1 DAY", "INTERVAL 2 DAY"))
 
     errors = val_mod.validate_parity(
         power_bi_root=POWER_BI, looker_root=tmp_looker
@@ -909,6 +943,84 @@ class TestCheckCanFail:
     )
     assert any(
         "oracle_column 'pop_total_tokens_prior' is not an output alias" in e
+        for e in errors
+    ), errors
+
+  def test_oracle_distinct_count_column_mismatch_detected(self, tmp_path):
+    """Mutating COUNT(DISTINCT session_id) to trace_id in oracle SQL fails parity."""
+    _skip_if_not_generated()
+    import shutil
+
+    val_mod = _load_tool_module("validate_pbip")
+    tmp_looker = tmp_path / "looker_studio"
+    shutil.copytree(LOOKER, tmp_looker)
+    query_path = tmp_looker / "oracle" / "queries" / "usage-total-sessions.sql"
+    sql = query_path.read_text(encoding="utf-8")
+    assert sql.count("COUNT(DISTINCT session_id)") == 2
+    query_path.write_text(
+        sql.replace("COUNT(DISTINCT session_id)", "COUNT(DISTINCT trace_id)"),
+        encoding="utf-8",
+    )
+    errors = val_mod.validate_parity(
+        power_bi_root=POWER_BI, looker_root=tmp_looker
+    )
+    assert any(
+        "counts distinct 'session_id', but cited oracle query"
+        " 'oracle/queries/usage-total-sessions.sql' does not contain"
+        " COUNT(DISTINCT ... session_id)" in e
+        for e in errors
+    ), errors
+
+  def test_top_n_limit_mismatch_detected(self, tmp_path):
+    """A manifest limit that disagrees with report_visuals top_n or oracle LIMIT fails."""
+    _skip_if_not_generated()
+    import shutil
+
+    val_mod = _load_tool_module("validate_pbip")
+    tmp_looker = tmp_path / "looker_studio"
+    shutil.copytree(LOOKER, tmp_looker)
+    manifest_path = tmp_looker / "spec" / "chart_manifest.yaml"
+    manifest_data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    target = next(
+        c
+        for c in manifest_data["charts"]
+        if c["id"] == "usage-top-5-agents-by-llm-calls"
+    )
+    assert target["limit"] == 5
+    target["limit"] = 500
+    manifest_path.write_text(
+        yaml.safe_dump(manifest_data, sort_keys=False), encoding="utf-8"
+    )
+    errors = val_mod.validate_parity(
+        power_bi_root=POWER_BI, looker_root=tmp_looker
+    )
+    assert any(
+        "Top-N limit mismatch for 'usage-top-5-agents-by-llm-calls':"
+        " manifest limit=500, report_visuals top_n=5, oracle LIMIT=5" in e
+        for e in errors
+    ), errors
+
+  def test_kpi_prior_missing_coalesce_detected(self, tmp_path):
+    """Dropping COALESCE from a count-based KPI * Prior measure fails validate_parity."""
+    _skip_if_not_generated()
+    pbi, looker = _copy_dashboards(tmp_path)
+    val_mod = _load_tool_module("validate_pbip")
+    events_path = (
+        pbi
+        / "BQAA_Agent_Analytics.SemanticModel"
+        / "definition"
+        / "tables"
+        / "events_v1.tmdl"
+    )
+    self._edit_once(
+        events_path,
+        "CALCULATE(COALESCE([Total Traces], 0), REMOVEFILTERS('Date')",
+        "CALCULATE([Total Traces], REMOVEFILTERS('Date')",
+    )
+    errors = val_mod.validate_parity(power_bi_root=pbi, looker_root=looker)
+    assert any(
+        "'KPI Total Traces Prior' must use CALCULATE(COALESCE(..., 0), ...)"
+        in e
         for e in errors
     ), errors
 
@@ -961,12 +1073,12 @@ def _copy_dashboards(tmp_path):
 
 
 def _edit_traces_query(looker_root):
-  """Changes what the traces oracle counts, as a reviewer would object to."""
+  """Changes the traces oracle date window, as a reviewer would object to."""
   query_path = looker_root / _TRACES_QUERY
   sql = query_path.read_text(encoding="utf-8")
-  assert sql.count("COUNT(DISTINCT trace_id)") == 2
+  assert sql.count("INTERVAL 1 DAY") == 2
   query_path.write_text(
-      sql.replace("COUNT(DISTINCT trace_id)", "COUNT(DISTINCT session_id)"),
+      sql.replace("INTERVAL 1 DAY", "INTERVAL 2 DAY"),
       encoding="utf-8",
   )
 
@@ -1359,7 +1471,7 @@ class TestDocumentation:
     ).exists(), "dashboards/power_bi/USER_MANUAL.md not found"
 
   def test_readme_documents_sql_substitution_contract(self):
-    """README must document the SQL substitution contract (#625)."""
+    """README must document the SQL substitution contract."""
     text = (POWER_BI / "README.md").read_text().lower()
     required_topics = [
         "sql substitution",
@@ -1475,7 +1587,7 @@ class TestDocumentation:
               vname.lower() not in text.lower()
           ), f"{fname} contains forbidden name '{vname}'"
 
-    # Security guard: no open iframe / ?embed= parameter framing (#ugc-host-embed).
+    # Security guard: no open iframe / ?embed= parameter framing.
     index_text = (docs_dir / "index.html").read_text(encoding="utf-8")
     mjs_text = (docs_dir / "configurator.mjs").read_text(encoding="utf-8")
     assert "<iframe" not in index_text.lower()
@@ -2201,18 +2313,24 @@ emit({
     index_text = " ".join(
         (docs_dir / "index.html").read_text(encoding="utf-8").split()
     )
-    assert "after the <code>#</code>" in index_text
-    assert "browsers never send to a server" in index_text
+    assert "after <code>#</code>" in index_text
+    assert "browsers never send in HTTP requests to the host" in index_text
+    assert "share copied links deliberately" in index_text
+    assert "never leave your browser" not in index_text
     manual = " ".join(
         (POWER_BI / "USER_MANUAL.md").read_text(encoding="utf-8").split()
     )
     assert "Copy setup link" in manual
-    assert "browsers never send to the server" in manual
+    assert "browsers never send to the server in HTTP requests" in manual
+    assert "share copied links deliberately" in manual
+    assert "http.server 8799" in manual
     readme = " ".join(
         (POWER_BI / "README.md").read_text(encoding="utf-8").split()
     )
     assert "Copy setup link" in readme
     assert "fragment" in readme
+    assert "share copied links deliberately" in readme
+    assert "http.server 8799" in readme
 
 
 # ---------------------------------------------------------------------------
@@ -2362,6 +2480,30 @@ class TestCIWorkflow:
     text = path.read_text()
     for name in _FORBIDDEN_VENDOR_NAMES():
       assert name.lower() not in text.lower()
+
+  def test_no_internal_review_or_vault_shorthand_tags(self):
+    """Tracked Power BI files and tests must not contain internal shorthand IDs."""
+    patterns = (
+        re.compile(r"#6\d\d\b"),
+        re.compile(r"#ugc-" + r"host-embed\b"),
+        re.compile(r"\bR\d+-(?:F|P|NIT)\d*\b"),
+    )
+    candidates = list(POWER_BI.rglob("*")) + list(
+        (ROOT / "tests").glob("test_power_bi_*.py")
+    )
+    for path in candidates:
+      if not path.is_file() or path.suffix.lower() in (".png", ".ico", ".zip"):
+        continue
+      try:
+        text = path.read_text(encoding="utf-8")
+      except UnicodeDecodeError:
+        continue
+      for pat in patterns:
+        match = pat.search(text)
+        assert match is None, (
+            f"{path.relative_to(ROOT)} contains internal shorthand tag "
+            f"{match.group(0)!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

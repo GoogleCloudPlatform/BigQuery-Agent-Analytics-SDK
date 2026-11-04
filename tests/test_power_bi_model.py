@@ -971,6 +971,86 @@ def test_top_5_agents_by_llm_calls_is_a_real_top_five_measure():
   assert "TOPN(" not in by_name["LLM Calls"]["dax"]
 
 
+def test_top_n_charts_agree_across_manifest_report_visuals_and_oracle_limit():
+  pbip_common = _load_pbi_module("pbip_common")
+  contracts, _ = _contracts_and_spec()
+  visuals_spec = pbip_common.load_spec("report_visuals.yaml")
+  visual_top_n = {
+      v["id"]: v["top_n"]
+      for v in visuals_spec["parity_visuals"]
+      if v.get("top_n") is not None
+  }
+  assert len(visual_top_n) == 12
+  manifest_by_id = {c["id"]: c for c in contracts.manifest["charts"]}
+  assert manifest_by_id["usage-top-5-agents-by-llm-calls"]["limit"] == 5
+  for cid, top_n in visual_top_n.items():
+    m_limit = manifest_by_id[cid].get("limit")
+    o_limit = _final_limit(contracts.oracle_files[f"oracle/queries/{cid}.sql"])
+    assert m_limit == top_n == o_limit, (cid, m_limit, top_n, o_limit)
+
+
+def test_count_based_kpi_prior_measures_use_calculate_coalesce():
+  pbip_model = _load_pbi_module("pbip_model")
+  contracts, model_spec = _contracts_and_spec()
+  by_name = {m["name"]: m for m in model_spec["measures"]}
+  count_priors = (
+      "KPI Total Traces Prior",
+      "KPI Total Sessions Prior",
+      "KPI Total LLM Calls Prior",
+      "KPI Total Users Prior",
+      "KPI Tool Errors Prior",
+  )
+  for name in count_priors:
+    assert "CALCULATE(COALESCE(" in by_name[name]["dax"], name
+  assert "COALESCE(" not in by_name["KPI Total Tokens Prior"]["dax"]
+  events_tmdl = pbip_model.build_model(contracts, model_spec)[
+      "definition/tables/events_v1.tmdl"
+  ]
+  for name in count_priors:
+    assert re.search(
+        rf"measure\s+'{re.escape(name)}'\s*=[^\n]*CALCULATE\(COALESCE\(",
+        events_tmdl,
+    ), name
+
+
+@pytest.mark.parametrize(
+    "query_name,from_col,to_col",
+    [
+        ("usage-total-sessions", "session_id", "trace_id"),
+        ("usage-number-of-sessions-trend", "session_id", "trace_id"),
+    ],
+)
+def test_build_model_and_accept_oracle_reject_distinct_count_column_mismatch(
+    tmp_path, query_name, from_col, to_col
+):
+  pbip_common = _load_pbi_module("pbip_common")
+  pbip_model = _load_pbi_module("pbip_model")
+  generate_pbip = _load_pbi_module("generate_pbip")
+  tmp_pbi = _copy_spec(tmp_path)
+  tmp_looker = _copy_looker(tmp_path)
+  sql_path = tmp_looker / "oracle" / "queries" / f"{query_name}.sql"
+  sql = sql_path.read_text(encoding="utf-8")
+  assert f"COUNT(DISTINCT {from_col})" in sql
+  sql_path.write_text(
+      sql.replace(f"COUNT(DISTINCT {from_col})", f"COUNT(DISTINCT {to_col})"),
+      encoding="utf-8",
+  )
+  contracts = pbip_common.load_contracts(looker_root=tmp_looker)
+  model_spec = pbip_common.load_spec(
+      "semantic_model.yaml", power_bi_root=tmp_pbi
+  )
+  with pytest.raises(
+      ValueError,
+      match=f"counts distinct '{from_col}', but cited oracle query",
+  ):
+    pbip_model.build_model(contracts, model_spec)
+  with pytest.raises(
+      ValueError,
+      match=f"counts distinct '{from_col}', but cited oracle query",
+  ):
+    generate_pbip.accept_oracle_changes(tmp_pbi, tmp_looker)
+
+
 def test_traces_by_agent_excludes_rows_without_an_agent():
   _, model_spec = _contracts_and_spec()
   by_name = {m["name"]: m for m in model_spec["measures"]}

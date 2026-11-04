@@ -159,12 +159,14 @@ limitations under the License.
           </div>
 
           <p class="privacy">
-            This page has no backend. Your project, dataset, and table IDs never
-            leave your browser; the ZIP archive is assembled locally from
+            This page has no backend. The ZIP archive is assembled in your browser
+            from
             <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/dashboards/power_bi">
-              the open-source PBIP files</a>. A copied setup link keeps your
-            settings in the part of the address after the <code>#</code>, which
-            browsers never send to a server.
+              the open-source PBIP files</a>, without uploading your inputs to a
+            server. Clicking <strong>Copy setup link</strong> encodes your project,
+            dataset, table, and window settings in the URL fragment (after
+            <code>#</code>), which browsers never send in HTTP requests to the
+            host, so share copied links deliberately.
           </p>
         </form>
       </section>

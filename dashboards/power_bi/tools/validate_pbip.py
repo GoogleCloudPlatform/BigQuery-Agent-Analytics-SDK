@@ -529,7 +529,7 @@ def validate_json_schemas(power_bi_root_or_schemas_dir, schemas_dir=None):
 _TMDL_COLUMN_DECL_RE = re.compile(r"^\tcolumn\s+(.+?)\s*$")
 _TMDL_COLUMN_PROP_RE = re.compile(r"^\t\t(dataType|sourceColumn):\s*(.+?)\s*$")
 _TMDL_MEASURE_DECL_RE = re.compile(
-    r"^\tmeasure\s+('(?:[^']|'')+'|[^\s=']+)\s*="
+    r"^\tmeasure\s+('(?:[^']|'')+'|[^\s=']+)\s*=\s*(.*?)\s*$"
 )
 _TMDL_ANNOTATION_RE = re.compile(r"^\t\tannotation\s+(\S+)\s*=\s*(.*?)\s*$")
 # A line indented by exactly one tab starts the next table-level object.
@@ -537,6 +537,49 @@ _TMDL_OBJECT_LINE_RE = re.compile(r"^\t\S")
 # An M text literal: double quotes, with "" as the escaped quote.
 _M_STRING_LITERAL_RE = re.compile(r'"((?:[^"]|"")*)"')
 _M_LIST_TOKEN_RE = re.compile(r'\s*(?:(,)|(\})|"((?:[^"]|"")*)")')
+_DISTINCT_COUNT_COL_RE = re.compile(
+    r"DISTINCTCOUNTNOBLANK\(\s*'events_v1'\[(trace_id|session_id|user_id|invocation_id)\]\s*\)"
+)
+
+
+def _strip_sql_comments(sql):
+  """Strip /* ... */ and -- ... SQL comments."""
+  without_block = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+  return re.sub(r"--[^\r\n]*", " ", without_block)
+
+
+def _oracle_final_limit(sql):
+  """Return the integer value of the final LIMIT clause in *sql*, or None."""
+  limits = re.findall(
+      r"\bLIMIT\s+(\d+)\b", _strip_sql_comments(sql), flags=re.IGNORECASE
+  )
+  return int(limits[-1]) if limits else None
+
+
+def _resolve_tmdl_measure_distinct_columns(declared):
+  """Map each measure name to its distinct-count column (direct or transitive)."""
+  resolved = {}
+  for name, info in declared.items():
+    dax = info.get("dax", "")
+    match = _DISTINCT_COUNT_COL_RE.search(dax)
+    if match:
+      resolved[name] = match.group(1)
+  changed = True
+  while changed:
+    changed = False
+    for name, info in declared.items():
+      if name in resolved:
+        continue
+      dax = info.get("dax", "")
+      ref_cols = {
+          resolved[ref]
+          for ref in re.findall(r"\[([^\[\]]+)\]", dax)
+          if ref in resolved
+      }
+      if len(ref_cols) == 1:
+        resolved[name] = next(iter(ref_cols))
+        changed = True
+  return resolved
 
 
 def _tmdl_unquote(name):
@@ -600,6 +643,7 @@ def _parse_tmdl_measures(text):
       current = {
           "name": _tmdl_unquote(decl.group(1)),
           "line": lineno,
+          "dax": decl.group(2),
           "annotations": {},
       }
       measures.append(current)
@@ -728,17 +772,20 @@ def _check_events_sql(expr_text):
       )
     for index, literal in enumerate(literals, 1):
       sources.append((f"EventsSelectLines literal {index}", literal))
-  sql_expr = re.search(r"(?m)^[ \t]*EventsSql\s*=\s*(.*)$", expr_text)
-  if sql_expr is None:
-    errors.append("expressions.tmdl: EventsSql expression not found")
-  else:
-    for index, match in enumerate(
-        _M_STRING_LITERAL_RE.finditer(sql_expr.group(1)), 1
-    ):
-      literal = match.group(1).replace('""', '"')
-      # "#(lf)" is the line separator handed to Text.Combine, not SQL text.
-      if literal != "#(lf)":
-        sources.append((f"EventsSql literal {index}", literal))
+  for expr_name in ("EventsSql", "AnchorSql", "FallbackAnchor"):
+    sql_expr = re.search(
+        rf"(?m)^[ \t]*{re.escape(expr_name)}\s*=\s*(.*)$", expr_text
+    )
+    if sql_expr is None:
+      errors.append(f"expressions.tmdl: {expr_name} expression not found")
+    else:
+      for index, match in enumerate(
+          _M_STRING_LITERAL_RE.finditer(sql_expr.group(1)), 1
+      ):
+        literal = match.group(1).replace('""', '"')
+        # "#(lf)" is the line separator handed to Text.Combine, not SQL text.
+        if literal != "#(lf)":
+          sources.append((f"{expr_name} literal {index}", literal))
   for label, literal in sources:
     if ";" in literal:
       errors.append(f"expressions.tmdl: {label} contains ';'")
@@ -893,6 +940,7 @@ def _check_measure_oracle_binding(
   errors = []
   common = _pbip_common()
   declared = {m["name"]: m for m in _parse_tmdl_measures(events_text)}
+  measure_distinct_cols = _resolve_tmdl_measure_distinct_columns(declared)
   for name, queries in measure_queries.items():
     block = declared.get(name)
     if block is None:
@@ -914,6 +962,19 @@ def _check_measure_oracle_binding(
           f"Measure '{name}' oracle_column '{ocol}' is not an output alias of "
           f"any cited oracle query"
       )
+    distinct_col = measure_distinct_cols.get(name)
+    if distinct_col is not None:
+      col_pat = re.compile(
+          rf"COUNT\s*\(\s*DISTINCT\b[^)]*\b{re.escape(distinct_col)}\b",
+          re.IGNORECASE,
+      )
+      for query, sql in texts.items():
+        if not col_pat.search(_strip_sql_comments(sql)):
+          errors.append(
+              f"Measure '{name}' counts distinct '{distinct_col}', but cited "
+              f"oracle query '{query}' does not contain "
+              f"COUNT(DISTINCT ... {distinct_col})"
+          )
     digests = block["annotations"].get("bqaa_oracle_sha256", [])
     expected = common.oracle_digest(texts, queries)
     if len(digests) != 1:
@@ -1142,6 +1203,57 @@ def validate_parity(power_bi_root=None, looker_root=None):
     if not oracle_path.exists():
       errors.append(f"Oracle file missing for chart '{chart_id}'")
 
+  # Check Top-N limit parity across chart_manifest.yaml, report_visuals.yaml,
+  # and oracle SQL final LIMIT for all 12 looker_bar / Top-N charts.
+  rv_path = (
+      pbi_root / "spec" / "report_visuals.yaml"
+      if (pbi_root / "spec" / "report_visuals.yaml").exists()
+      else POWER_BI_ROOT / "spec" / "report_visuals.yaml"
+  )
+  visual_top_n_by_id = {}
+  if rv_path.exists():
+    import yaml
+
+    rv_data = yaml.safe_load(_read_text(rv_path)) or {}
+    for v_entry in (
+        rv_data.get("parity_visuals") or rv_data.get("visuals") or []
+    ):
+      if isinstance(v_entry, dict) and v_entry.get("top_n") is not None:
+        visual_top_n_by_id[v_entry.get("id", "")] = v_entry.get("top_n")
+  manifest_by_id = {
+      c["id"]: c
+      for c in manifest.get("charts", [])
+      if isinstance(c, dict) and c.get("id")
+  }
+  top_n_chart_ids = sorted(
+      {
+          cid
+          for cid, c in manifest_by_id.items()
+          if c.get("looker_type") == "looker_bar"
+      }
+      | set(visual_top_n_by_id)
+  )
+  for cid in top_n_chart_ids:
+    m_limit = manifest_by_id.get(cid, {}).get("limit")
+    v_top_n = visual_top_n_by_id.get(cid)
+    oracle_path = looker / "oracle" / "queries" / f"{cid}.sql"
+    o_limit = (
+        _oracle_final_limit(_read_text(oracle_path))
+        if oracle_path.exists()
+        else None
+    )
+    if (
+        m_limit is None
+        or v_top_n is None
+        or o_limit is None
+        or not (m_limit == v_top_n == o_limit)
+    ):
+      errors.append(
+          f"Top-N limit mismatch for '{cid}': "
+          f"manifest limit={m_limit}, report_visuals top_n={v_top_n}, "
+          f"oracle LIMIT={o_limit}"
+      )
+
   # Check parity visual titles in visualContainerObjects.title, cardVisual
   # projection displayName, measure oracle_column in oracle SQL, and overlaps.
   product_titles = {}
@@ -1293,6 +1405,21 @@ def validate_parity(power_bi_root=None, looker_root=None):
           rf"measure\s+'{re.escape(kpi_name)}'\s*=\s*COALESCE\(", events_tmdl
       ):
         errors.append(f"events_v1.tmdl: '{kpi_name}' must use COALESCE(..., 0)")
+    for kpi_prior_name in (
+        "KPI Total Traces Prior",
+        "KPI Total Sessions Prior",
+        "KPI Total Users Prior",
+        "KPI Total LLM Calls Prior",
+        "KPI Tool Errors Prior",
+    ):
+      if not re.search(
+          rf"measure\s+'{re.escape(kpi_prior_name)}'\s*=[^\n]*CALCULATE\(COALESCE\(",
+          events_tmdl,
+      ):
+        errors.append(
+            f"events_v1.tmdl: '{kpi_prior_name}' must use "
+            "CALCULATE(COALESCE(..., 0), ...)"
+        )
     for m_name in (
         "Total Traces",
         "Total Sessions",

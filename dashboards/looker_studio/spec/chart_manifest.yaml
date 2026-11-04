@@ -1440,7 +1440,7 @@ charts:
     agent_events.timestamp_date: 7 days
   sorts:
   - v_llm_response.total_llm_calls desc 0
-  limit: 500
+  limit: 5
   column_limit: 5
   listen:
     Agent: agent_events.agent

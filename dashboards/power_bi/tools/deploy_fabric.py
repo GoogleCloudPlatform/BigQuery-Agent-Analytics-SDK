@@ -240,7 +240,7 @@ def poll_lro(token, location_url, operation_id, max_seconds=MAX_LRO_SECONDS):
   retry_after = DEFAULT_RETRY_AFTER
   while time.monotonic() < deadline:
     remaining = deadline - time.monotonic()
-    time.sleep(min(retry_after, max(0, remaining)))
+    time.sleep(min(max(1, retry_after), max(0, remaining)))
     status, headers, body = http_request(location_url, "GET", token)
     if status != 200:
       code, msg = _extract_error(body)
@@ -273,7 +273,19 @@ MAX_LIST_PAGES = 1000
 def _next_page_url(base_url, result):
   """Return the URL of the next listing page, or None on the last page."""
   continuation_uri = result.get("continuationUri")
-  if continuation_uri:
+  if continuation_uri is not None:
+    if not isinstance(continuation_uri, str) or not continuation_uri:
+      raise ValueError("Invalid continuationUri in Fabric paginated response")
+    validate_operation_url(continuation_uri)
+    parsed_base = urllib.parse.urlparse(base_url)
+    parsed_cont = urllib.parse.urlparse(continuation_uri)
+    if (
+        parsed_cont.netloc.lower() != parsed_base.netloc.lower()
+        or parsed_cont.path.rstrip("/") != parsed_base.path.rstrip("/")
+    ):
+      raise ValueError(
+          f"Invalid continuationUri collection: {continuation_uri}"
+      )
     return continuation_uri
   continuation_token = result.get("continuationToken")
   if continuation_token:
@@ -303,17 +315,19 @@ def find_existing_item(token, workspace_id, item_type, display_name):
       code, msg = _extract_error(body)
       raise RuntimeError(f"list {item_type} failed ({status}): {code}: {msg}")
     result = _load_json_object(body, f"list {item_type}", allow_empty=False)
-    items = result.get("value", [])
-    if not isinstance(items, list):
+    if "value" not in result or not isinstance(result["value"], list):
       raise RuntimeError(
           f"list {item_type} returned an unexpected response shape"
       )
+    items = result["value"]
     for item in items:
       if not isinstance(item, dict):
         continue
-      if item.get("displayName") == display_name and item.get("id"):
-        if item["id"] not in matches:
-          matches.append(item["id"])
+      if item.get("displayName") == display_name and "id" in item:
+        item_id = item["id"]
+        validate_guid(item_id, f"{item_type}_id")
+        if item_id not in matches:
+          matches.append(item_id)
     url = _next_page_url(base_url, result)
   if len(matches) > 1:
     raise RuntimeError(
@@ -375,6 +389,8 @@ def deploy_item(
     code, msg = _extract_error(resp_body)
     raise RuntimeError(f"deploy failed: {code}: {msg}")
   if item_id:
+    if returned_id:
+      validate_guid(returned_id, f"{item_type}_id")
     return returned_id or item_id
   if not returned_id:
     raise RuntimeError(f"create {item_type} returned no item id")
@@ -455,6 +471,9 @@ def main(argv=None):
       args.display_name,
       args.update,
   )
+  if not report_id:
+    raise RuntimeError("report id is empty")
+  validate_guid(report_id, "report_id")
   print(f"report id: {report_id}")
   print(
       f"report url: https://app.powerbi.com/groups/"

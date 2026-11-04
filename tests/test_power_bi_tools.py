@@ -491,11 +491,53 @@ def test_compare_card_null_blank():
   assert match is True
 
 
-def test_compare_card_empty_oracle_is_blank():
+def test_compare_card_empty_oracle_is_rejected():
   oracle_row = {}
   dax_row = {"[v0]": None}
   match, _, _, _ = validate_mod.compare_card(oracle_row, [dax_row], ["col_a"])
-  assert match is True
+  assert match is False
+
+
+def test_compare_card_c5_1_empty_oracle_empty_dax():
+  """C5-1: empty oracle and empty dax -> fail."""
+  assert (
+      validate_mod.compare_card({}, [], ["pop_total_tokens_current"])[0]
+      is False
+  )
+
+
+def test_compare_card_c5_2_null_oracle_empty_dax():
+  """C5-2: null-valued oracle and empty dax -> fail."""
+  assert validate_mod.compare_card({"x": None}, [], ["x"])[0] is False
+
+
+def test_compare_card_c5_3_empty_oracle_blank_dax():
+  """C5-3: empty oracle with a blank dax row -> fail."""
+  assert validate_mod.compare_card({}, [{"[v0]": None}], ["x"])[0] is False
+
+
+def test_compare_card_c5_4_two_dax_rows_is_rejected():
+  """C5-4: two dax rows -> fail (card expects exactly one)."""
+  assert (
+      validate_mod.compare_card({"x": 10}, [{"[v0]": 10}, {"[v0]": 99}], ["x"])[
+          0
+      ]
+      is False
+  )
+
+
+def test_compare_card_null_oracle_null_dax_is_valid():
+  """Explicit null on both sides is a valid match (blank)."""
+  assert (
+      validate_mod.compare_card({"x": None}, [{"[v0]": None}], ["x"])[0] is True
+  )
+
+
+def test_compare_card_dax_row_count_rejected():
+  """dax_rows that is not a list of exactly 1 dict -> fail."""
+  match, code, _, _ = validate_mod.compare_card({"x": 10}, [], ["x"])
+  assert match is False
+  assert code == "dax_row_count"
 
 
 def test_compare_card_exact_pop_current_alias():
@@ -723,6 +765,78 @@ def test_compare_series_null_on_both_sides():
       oracle, dax, "v", "timestamp_date"
   )
   assert match is True
+
+
+def test_compare_series_with_series_null_vs_empty_is_distinguishable():
+  """Null and empty-string series values must remain distinguishable."""
+  oracle = [{"timestamp_date": "2026-07-03", "tool_name": None, "v": 4}]
+  dax_empty = [
+      {
+          "[Date]": "2026-07-03T00:00:00",
+          "events_v1[tool_completed_name]": "",
+          "[v]": 4,
+      }
+  ]
+  match, _, _, _ = validate_mod.compare_series(
+      oracle, dax_empty, "v", "timestamp_date", has_series=True
+  )
+  assert match is False
+
+
+def test_compare_series_with_series_null_both_sides_passes():
+  """Null series on both sides matches."""
+  oracle = [{"timestamp_date": "2026-07-03", "tool_name": None, "v": 4}]
+  dax = [
+      {
+          "[Date]": "2026-07-03T00:00:00",
+          "events_v1[tool_completed_name]": None,
+          "[v]": 4,
+      }
+  ]
+  match, _, _, _ = validate_mod.compare_series(
+      oracle, dax, "v", "timestamp_date", has_series=True
+  )
+  assert match is True
+
+
+def test_compare_series_with_series_tool_name_passes():
+  """The tool_name oracle column maps to the tool_completed_name DAX key."""
+  oracle = [{"timestamp_date": "2026-07-03", "tool_name": "search", "v": 4}]
+  dax = [
+      {
+          "[Date]": "2026-07-03T00:00:00",
+          "events_v1[tool_completed_name]": "search",
+          "[v]": 4,
+      }
+  ]
+  match, _, _, _ = validate_mod.compare_series(
+      oracle, dax, "v", "timestamp_date", has_series=True
+  )
+  assert match is True
+
+
+def test_compare_series_missing_series_key_returns_missing_series():
+  """Missing tool_name/tool_completed_name with has_series=True fails."""
+  oracle = [{"timestamp_date": "2026-07-03", "v": 4}]
+  dax = [
+      {"[Date]": "2026-07-03T00:00:00", "[v]": 4},
+  ]
+  match, detail, _, _ = validate_mod.compare_series(
+      oracle, dax, "v", "timestamp_date", has_series=True
+  )
+  assert match is False
+  assert detail == "missing_series"
+
+
+def test_compare_series_missing_series_key_on_dax_returns_missing_series():
+  """DAX row without a series dimension key fails."""
+  oracle = [{"timestamp_date": "2026-07-03", "tool_name": "search", "v": 4}]
+  dax = [{"[Date]": "2026-07-03T00:00:00", "[v]": 4}]
+  match, detail, _, _ = validate_mod.compare_series(
+      oracle, dax, "v", "timestamp_date", has_series=True
+  )
+  assert match is False
+  assert detail == "missing_series"
 
 
 # ---------------------------------------------------------------------------
@@ -1352,6 +1466,26 @@ def test_find_existing_item_rejects_an_untrusted_continuation_uri(monkeypatch):
   assert [url for _, url, _ in fake.requests] == [LIST_URL]
 
 
+def test_find_existing_item_rejects_a_continuation_uri_to_another_collection(
+    monkeypatch,
+):
+  """A continuationUri pointing to a different workspace or collection is
+  rejected even if it targets a valid Fabric host."""
+  other_url = (
+      f"{deploy_mod.FABRIC_API_BASE}/workspaces/other-workspace-id/reports"
+  )
+  _install(
+      monkeypatch,
+      (
+          "GET",
+          LIST_URL,
+          _resp(200, {"value": [], "continuationUri": other_url}),
+      ),
+  )
+  with pytest.raises(ValueError, match="Invalid continuationUri collection"):
+    _find()
+
+
 def test_find_existing_item_fails_closed_on_a_listing_error(monkeypatch):
   _install(
       monkeypatch,
@@ -1472,14 +1606,56 @@ def test_find_existing_item_ignores_entries_without_an_id(monkeypatch):
               {
                   "value": [
                       {"displayName": NAME},
-                      {"displayName": NAME, "id": ""},
-                      {"displayName": NAME, "id": None},
                   ]
               },
           ),
       ),
   )
   assert _find() is None
+
+
+def test_find_existing_item_rejects_entries_with_bad_id(monkeypatch):
+  """A matched item with an invalid id raises ValueError, not silently skipped."""
+  _install(
+      monkeypatch,
+      (
+          "GET",
+          LIST_URL,
+          _resp(
+              200,
+              {
+                  "value": [
+                      {"displayName": NAME, "id": ""},
+                      {"displayName": NAME, "id": None},
+                      {"displayName": NAME, "id": 123},
+                  ]
+              },
+          ),
+      ),
+  )
+  with pytest.raises(ValueError, match="invalid"):
+    _find()
+
+
+def test_find_existing_item_rejects_entries_with_non_guid_id(monkeypatch):
+  """A matched item with a non-GUID id raises ValueError."""
+  _install(
+      monkeypatch,
+      (
+          "GET",
+          LIST_URL,
+          _resp(
+              200,
+              {
+                  "value": [
+                      {"displayName": NAME, "id": "bad-id"},
+                  ]
+              },
+          ),
+      ),
+  )
+  with pytest.raises(ValueError, match="invalid"):
+    _find()
 
 
 def test_find_existing_item_skips_non_object_entries(monkeypatch):
@@ -1538,9 +1714,10 @@ def test_find_existing_item_rejects_a_listing_that_is_not_an_object(
     _find()
 
 
-def test_find_existing_item_object_without_value_is_an_empty_page(monkeypatch):
+def test_find_existing_item_object_without_value_raises(monkeypatch):
   _install(monkeypatch, ("GET", LIST_URL, _resp(200, {})))
-  assert _find() is None
+  with pytest.raises(RuntimeError, match="unexpected response shape"):
+    _find()
 
 
 # ---------------------------------------------------------------------------
@@ -2151,7 +2328,7 @@ def test_parse_window_accepts_valid_specs(spec):
   assert validate_mod.parse_window(spec) == tuple(spec.split(":"))
 
 
-def _resolve(monkeypatch, response=None, error=None):
+def _resolve(monkeypatch, response=None, error=None, allow_fallback=False):
   def fake_execute_dax(token, workspace_id, dataset_id, query):
     assert query == validate_mod.DATE_WINDOW_DAX
     if error is not None:
@@ -2159,7 +2336,9 @@ def _resolve(monkeypatch, response=None, error=None):
     return response
 
   monkeypatch.setattr(validate_mod, "execute_dax", fake_execute_dax)
-  return validate_mod.resolve_default_window("tok", GUID_A, GUID_B)
+  return validate_mod.resolve_default_window(
+      "tok", GUID_A, GUID_B, allow_fallback=allow_fallback
+  )
 
 
 def test_resolve_default_window_reads_the_date_table(monkeypatch):
@@ -2196,10 +2375,44 @@ def test_resolve_default_window_reads_the_date_table(monkeypatch):
         "missing-columns",
     ],
 )
-def test_resolve_default_window_falls_back_to_the_fixture_window(
+def test_resolve_default_window_fails_closed_without_allow_fallback(
     monkeypatch, response, error
 ):
-  start, end, source = _resolve(monkeypatch, response, error)
+  with pytest.raises(RuntimeError, match="default_window_lookup_failed"):
+    validate_mod.resolve_default_window("tok", GUID_A, GUID_B)
+
+
+@pytest.mark.parametrize(
+    "response, error",
+    [
+        (None, RuntimeError("Date table unavailable")),
+        ({"error": {"code": "X"}}, None),
+        ({"results": []}, None),
+        ({"results": [{"tables": [{"rows": []}]}]}, None),
+        (_date_row("2026-10-29T00:00:00", "2026-08-01T00:00:00"), None),
+        (_date_row("not-a-date", "2026-08-01T00:00:00"), None),
+        (_date_row(None, None), None),
+        (_date_row("2026-02-30T00:00:00", "2026-03-01T00:00:00"), None),
+        ({"results": [{"tables": [{"rows": [{"[other]": 1}]}]}]}, None),
+    ],
+    ids=[
+        "request-error",
+        "error-envelope",
+        "no-results",
+        "no-rows",
+        "reversed",
+        "garbage",
+        "null-dates",
+        "impossible-date",
+        "missing-columns",
+    ],
+)
+def test_resolve_default_window_falls_back_with_allow_fallback(
+    monkeypatch, response, error
+):
+  start, end, source = _resolve(
+      monkeypatch, response, error, allow_fallback=True
+  )
   assert (start, end) == validate_mod.FIXTURE_WINDOW
   assert source == "fixture_fallback"
 
@@ -2227,7 +2440,9 @@ class _LiveHarness:
     self.window_lookups = 0
     self.oracle = lambda name, start, end, remove_limit: []
     self.dax = lambda query: _dax_response([])
-    self.date_window = _no_date_table
+    self.date_window = lambda: _date_row(
+        "2026-04-18T00:00:00", "2026-07-16T00:00:00"
+    )
     self.token_file = tmp_path / "pbi-token.txt"
     self.token_file.write_text("pbi-secret-token")
     os.chmod(self.token_file, 0o600)
@@ -2422,45 +2637,87 @@ def test_live_main_a_single_empty_chart_fails_unless_allowed(
   harness.dax = lambda query: (
       _dax_response([]) if query == tokens_dax else base_dax(query)
   )
-  rc, receipt = harness.run("--window", WINDOW)
-  assert rc == 1
-  assert (receipt["charts_pass"], receipt["charts_empty"]) == (36, 1)
-  assert receipt["overall_pass"] is False
-  assert "1 empty" in capsys.readouterr().err
+  # A cardVisual returning 0 DAX rows fails even under --allow-empty.
   rc, receipt = harness.run("--window", WINDOW, "--allow-empty")
-  assert rc == 0
-  assert (receipt["charts_pass"], receipt["charts_empty"]) == (36, 1)
-  assert "1 empty (allowed)" in capsys.readouterr().out
+  assert rc == 1
+  assert receipt["charts_fail"] == 1
+  assert receipt["overall_pass"] is False
+  fail_result = [
+      r for r in receipt["results"] if r["chart_id"] == "usage-total-tokens"
+  ][0]
+  assert fail_result["status"] == "FAIL"
 
 
 def test_live_main_all_empty_run_is_not_a_pass(tmp_path, monkeypatch, capsys):
   harness = _LiveHarness(tmp_path, monkeypatch)
+  # Scalar cardVisuals return exactly one row (always), while grouped
+  # charts (bar/area) return [].  A card with blank values compares as
+  # oracle_row={} which compare_card now rejects, so the run fails.
+  charts = validate_mod.load_chart_metadata()
+  harness.oracle = lambda *_: []
+
+  def _empty_dax(query):
+    return _dax_response([])
+
+  harness.dax = _empty_dax
   rc, receipt = harness.run("--window", WINDOW)
   assert rc == 1
   assert receipt["charts_expected"] == 37
-  assert receipt["charts_empty"] == 37
-  assert receipt["charts_pass"] == receipt["charts_fail"] == 0
+  assert receipt["charts_pass"] == 0
   assert receipt["oracle_rows_total"] == 0
   assert receipt["overall_pass"] is False
   assert receipt["pass"] is False
   assert receipt["allow_empty"] is False
-  assert {r["status"] for r in receipt["results"]} == {"EMPTY"}
-  assert {r["error"] for r in receipt["results"]} == {"empty_result"}
-  err = capsys.readouterr().err
-  assert "live parity FAIL" in err
-  assert "no oracle rows returned" in err
+  assert "FAIL" in capsys.readouterr().err
 
 
 def test_live_main_allow_empty_accepts_a_deliberately_empty_window(
     tmp_path, monkeypatch, capsys
 ):
   harness = _LiveHarness(tmp_path, monkeypatch)
+  # Only grouped charts (bar/area) can be empty on both sides.  Card
+  # visuals always return exactly one row, so a truly empty window
+  # means the card oracle returns [] and the DAX returns [] too, which
+  # compare_card rejects as a structural failure.  To exercise the
+  # allow-empty path we make grouped charts empty and keep cards
+  # consistent.
+  charts = validate_mod.load_chart_metadata()
+  card_count = sum(1 for c in charts if c["visual_type"] == "cardVisual")
+  expected_empty = len(charts) - card_count
+  start, end = WINDOW.split(":")
+
+  def oracle(name, *rest):
+    by_name = {pathlib.Path(c["oracle_query"]).name: c for c in charts}
+    chart = by_name.get(name)
+    if chart is None:
+      # The daily LLM-trend re-query runs from a temp file.
+      return []
+    if chart["visual_type"] != "cardVisual":
+      return []
+    cols = [m.get("oracle_column", "") for m in chart["measure_info"]]
+    return [{col: 5 for col in cols}]
+
+  def dax(query):
+    by_dax = {validate_mod.build_dax_query(c, start, end): c for c in charts}
+    chart = by_dax.get(query)
+    if chart and chart["visual_type"] != "cardVisual":
+      return _dax_response([])
+    cols = (
+        [m.get("oracle_column", "") for m in chart["measure_info"]]
+        if chart
+        else []
+    )
+    return _dax_response([{f"[v{i}]": 5 for i in range(len(cols))}])
+
+  harness.oracle = oracle
+  harness.dax = dax
   rc, receipt = harness.run("--window", WINDOW, "--allow-empty")
   assert rc == 0
   assert receipt["allow_empty"] is True
   assert receipt["overall_pass"] is True
-  assert receipt["charts_empty"] == 37
-  assert "37 empty (allowed)" in capsys.readouterr().out
+  assert receipt["charts_empty"] == expected_empty
+  assert receipt["charts_pass"] == card_count
+  assert f"{expected_empty} empty (allowed)" in capsys.readouterr().out
 
 
 def test_live_main_dax_envelope_error_fails_even_with_allow_empty(
@@ -2621,13 +2878,76 @@ def test_live_main_default_window_comes_from_the_date_table(
   assert "warning" not in capsys.readouterr().err
 
 
-def test_live_main_default_window_falls_back_to_the_fixture_and_says_so(
+def test_live_main_default_window_fails_closed_without_allow_fixture_fallback(
     tmp_path, monkeypatch, capsys
 ):
   harness = _tokens_card_harness(tmp_path, monkeypatch)
+  harness.date_window = _no_date_table
   rc, receipt = harness.run("--window", "default")
+  assert rc == 1
+  assert receipt["overall_pass"] is False
+  assert receipt["window_details"][0]["source"] == "lookup_failed"
+  err = capsys.readouterr().err
+  assert "default window lookup failed" in err
+
+
+def test_live_main_default_window_falls_back_with_allow_fixture_fallback(
+    tmp_path, monkeypatch, capsys
+):
+  harness = _tokens_card_harness(tmp_path, monkeypatch)
+  harness.date_window = _no_date_table
+  rc, receipt = harness.run("--window", "default", "--allow-fixture-fallback")
   assert rc == 0
   detail = receipt["window_details"][0]
   assert (detail["start"], detail["end"]) == validate_mod.FIXTURE_WINDOW
   assert detail["source"] == "fixture_fallback"
   assert "fixture window" in capsys.readouterr().err
+
+
+def test_live_main_fixture_window_uses_the_fixture_dates(
+    tmp_path, monkeypatch, capsys
+):
+  harness = _tokens_card_harness(tmp_path, monkeypatch)
+  harness.date_window = _no_date_table
+  rc, receipt = harness.run("--window", "fixture")
+  assert rc == 0
+  detail = receipt["window_details"][0]
+  assert (detail["start"], detail["end"]) == validate_mod.FIXTURE_WINDOW
+  assert detail["source"] == "fixture"
+  assert detail["window"] == "fixture"
+
+
+def test_compare_chart_card_requires_exactly_one_oracle_row_and_int_exactness():
+  p50_chart = _chart("performance-p50-llm-latency")
+  is_match, _, err = validate_mod._compare_chart(
+      p50_chart, [], [], [{"[v0]": None}]
+  )
+  assert is_match is False
+  assert err == "oracle_row: mismatch"
+
+  # Under allow_empty=True, percentile window queries returning 0 rows compare
+  # as NULL against DAX BLANK().
+  assert validate_mod._compare_chart(
+      p50_chart, [], [], [{"[v0]": None}], allow_empty=True
+  ) == (True, False, None)
+  assert validate_mod._compare_chart(
+      p50_chart, [], [], [{"[v0]": 0}], allow_empty=True
+  ) == (False, False, "p50_llm_latency: mismatch")
+
+  tokens_chart = _chart("usage-total-tokens")
+  is_match_multi, _, err_multi = validate_mod._compare_chart(
+      tokens_chart,
+      [{"total_tokens": 10}, {"total_tokens": 20}],
+      [],
+      [{"[v0]": 10}],
+  )
+  assert is_match_multi is False
+  assert err_multi == "oracle_row: mismatch"
+
+  assert not validate_mod.values_match(
+      1000000000.0, 1000000000.1, metric_type="int"
+  )
+  assert not validate_mod.values_match(10.5, 10.5, metric_type="int")
+  assert validate_mod.values_match(
+      1000000000.0, 1000000000.0, metric_type="int"
+  )

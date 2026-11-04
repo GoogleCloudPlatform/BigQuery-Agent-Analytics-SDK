@@ -25,7 +25,7 @@
     "oracle/queries/usage-token-usage-split-by-agent.sql": "1c5d0f2d2e137a1356f6bf176667134792937c36c4b9f7267314f92f101e218f",
     "oracle/queries/usage-tool-calls-over-time.sql": "1221c734ee9ab8f9dcac2ca65efc98a6a7dfd5421e8e6435128fa0647ff63dd6",
     "oracle/queries/usage-tool-invocations.sql": "d8f3a4c67d71a7951cf1b25e693a75705180b7c696a980afcc45ea01aae1402a",
-    "oracle/queries/usage-top-5-agents-by-llm-calls.sql": "712904b8075df4c9b3a370c43a9601b501e2423336cc6810a8a83b213cdd3e0e",
+    "oracle/queries/usage-top-5-agents-by-llm-calls.sql": "f443ccfba655169b24a9d12881d86245e70948e4cd0595e454b968fba4cf96b8",
     "oracle/queries/usage-top-5-agents-split-by-session-count.sql": "83fed5a6174fd2c864fc728c7e59988c431cb22574ff764ed3019ece8e9d212c",
     "oracle/queries/usage-top-5-users-by-events.sql": "503c29c5bcf17a32cb8e08d16dfea490005235ee88c51241b1865acecd65d123",
     "oracle/queries/usage-top-5-users-by-session.sql": "6930923fac24cfc63dc16c765d8219123ff5e4c78ec4d853d9ae7032789d3798",

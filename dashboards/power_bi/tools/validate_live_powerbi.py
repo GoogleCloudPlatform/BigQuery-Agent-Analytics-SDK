@@ -147,6 +147,11 @@ def load_chart_metadata():
     cid = chart["id"]
     visual = visual_map.get(cid, {})
     measures = visual.get("measures", [])
+    measure_info = []
+    for m in measures:
+      info = dict(measure_map.get(m, {}))
+      info["comparison_type"] = _measure_comparison_type(measure_map.get(m, {}))
+      measure_info.append(info)
     enriched.append(
         {
             "id": cid,
@@ -160,7 +165,7 @@ def load_chart_metadata():
             "series": visual.get("series", ""),
             "top_n": visual.get("top_n"),
             "listens_user_id": visual.get("listens_user_id", True),
-            "measure_info": [measure_map.get(m, {}) for m in measures],
+            "measure_info": measure_info,
         }
     )
   return enriched
@@ -259,7 +264,7 @@ def execute_dax(token, workspace_id, dataset_id, dax_query):
       if exc.code in (429, 502, 503, 504) and attempt < max_attempts - 1:
         retry_after = exc.headers.get("Retry-After") if exc.headers else None
         wait_s = (
-            int(retry_after)
+            max(1, int(retry_after))
             if retry_after and str(retry_after).strip().isdigit()
             else backoff_seconds[attempt]
         )
@@ -345,26 +350,76 @@ def _to_number(value):
   return _CORRUPT
 
 
-def values_match(a, b):
+def values_match(a, b, metric_type=None):
   """Compare two scalar values under the parity rules in spec.md §9.2.
 
   NULL/BLANK matches only NULL/BLANK, and a corrupt value matches nothing.
   Two integral values (counts, token totals) must be exactly equal; a value
   with a fractional part is compared with a relative tolerance of 1e-9.
+
+  When *metric_type* is ``"float"`` the integral-exactness rule is relaxed so
+  that large values stored as floats are compared with the tolerance instead
+  of requiring exact integer equality.  When *metric_type* is ``"int"``
+  the integral-exactness rule is always enforced.
   """
   da, db = _to_number(a), _to_number(b)
   if da is _CORRUPT or db is _CORRUPT:
     return False
   if da is None or db is None:
     return da is None and db is None
+
+  if metric_type == "int":
+    if da != da.to_integral_value() or db != db.to_integral_value():
+      return False
+    return da == db
+  if metric_type == "float":
+    try:
+      with decimal.localcontext() as context:
+        context.prec = 100
+        return abs(da - db) <= FLOAT_TOLERANCE * max(
+            decimal.Decimal(1), abs(db)
+        )
+    except decimal.DecimalException:
+      return False
+
+  # A Python int (or a string/Decimal whose value is integral) forces exact
+  # comparison.  A Python float always uses tolerance even when its value
+  # is integral (e.g. 100.0 vs 100.0000000001), so large floats stored by
+  # DAX are not rejected for sub-integer drift.
+  def _is_exact(value, number):
+    if isinstance(value, bool):
+      return False
+    if isinstance(value, int):
+      return True
+    if isinstance(value, (str, decimal.Decimal)):
+      return number == number.to_integral_value()
+    return False
+
   try:
     with decimal.localcontext() as context:
       context.prec = 100
-      if da == da.to_integral_value() and db == db.to_integral_value():
-        return da == db
+      if _is_exact(a, da) or _is_exact(b, db):
+        return (
+            da == da.to_integral_value()
+            and db == db.to_integral_value()
+            and da == db
+        )
       return abs(da - db) <= FLOAT_TOLERANCE * max(decimal.Decimal(1), abs(db))
   except decimal.DecimalException:
     return False
+
+
+def _has_dax_key(dax_row, key):
+  """Return True iff *dax_row* is a dict containing *key* in any form."""
+  if not isinstance(dax_row, dict):
+    return False
+  if key in dax_row:
+    return True
+  bare = key.strip("[]")
+  if bare in dax_row:
+    return True
+  bracketed = f"[{bare}]"
+  return bracketed in dax_row
 
 
 def _get_dax_value(dax_row, key):
@@ -393,19 +448,56 @@ def _resolve_oracle_col(oracle_row, oracle_col):
   return None
 
 
-def compare_card(oracle_row, dax_rows, oracle_cols):
+def _measure_comparison_type(measure_dict):
+  """Derive ``"int"`` or ``"float"`` from a measure's ``format_string``."""
+  if not isinstance(measure_dict, dict):
+    return None
+  fmt = measure_dict.get("format_string", "")
+  if not fmt:
+    return None
+  # Percentage and decimal formats imply float comparison.
+  if "%" in fmt or ".0" in fmt or ".00" in fmt:
+    return "float"
+  return "int"
+
+
+def compare_card(oracle_row, dax_rows, oracle_cols, metric_types=None):
   """Compare a card oracle row with DAX ROW result.
 
   dax_rows is the list of rows from executeQueries tables[0].rows.
   Each DAX row has keys like ``[v0]``, ``[v1]``, etc.
+
+  Returns ``(match, failure_code, oracle_value, dax_value)``.  The
+  failure_code is ``"oracle_row"`` when the oracle row is empty,
+  ``"dax_row_count"`` when DAX returned zero or multiple rows, a column
+  name when the oracle column is missing or the DAX key is absent, or
+  ``None`` on a match.
   """
-  dax_row = dax_rows[0] if dax_rows else {}
+  if not isinstance(oracle_row, dict) or not oracle_row:
+    return False, "oracle_row", None, None
+  if (
+      not isinstance(dax_rows, list)
+      or len(dax_rows) != 1
+      or not isinstance(dax_rows[0], dict)
+  ):
+    return (
+        False,
+        "dax_row_count",
+        len(dax_rows) if isinstance(dax_rows, list) else None,
+        None,
+    )
+  dax_row = dax_rows[0]
   for i, col in enumerate(oracle_cols):
     d_val = _get_dax_value(dax_row, f"v{i}")
-    if isinstance(oracle_row, dict) and oracle_row and col not in oracle_row:
+    if col not in oracle_row:
       return False, col, None, d_val
+    if not _has_dax_key(dax_row, f"v{i}"):
+      return False, col, _resolve_oracle_col(oracle_row, col), None
     o_val = _resolve_oracle_col(oracle_row, col)
-    if not values_match(o_val, d_val):
+    m_type = (
+        metric_types[i] if (metric_types and i < len(metric_types)) else None
+    )
+    if not values_match(o_val, d_val, metric_type=m_type):
       return False, col, o_val, d_val
   return True, None, None, None
 
@@ -434,7 +526,12 @@ def _aggregate_llm_trends(oracle_rows):
 
 
 def compare_series(
-    oracle_rows, dax_rows, value_col, axis_col, has_series=False
+    oracle_rows,
+    dax_rows,
+    value_col,
+    axis_col,
+    has_series=False,
+    metric_type=None,
 ):
   """Compare time-series or bar data on the union of axis keys.
 
@@ -446,8 +543,13 @@ def compare_series(
   for row in oracle_rows:
     key = str(row.get(axis_col, ""))
     if has_series:
-      s_val = row.get("tool_completed_name") or row.get("tool_name") or ""
-      key = f"{key}|{s_val}"
+      if "tool_completed_name" in row:
+        s_val = row["tool_completed_name"]
+      elif "tool_name" in row:
+        s_val = row["tool_name"]
+      else:
+        return False, "missing_series", None, None
+      key = (key, _dim_key(s_val))
     oracle_map[key] = row.get(value_col)
 
   dax_map = {}
@@ -468,12 +570,12 @@ def compare_series(
       d_key = str(date_val)
 
     if has_series:
-      series_val = _get_dax_value(
-          dax_row, "events_v1[tool_completed_name]"
-      ) or _get_dax_value(dax_row, "[tool_completed_name]")
-      if series_val is None:
-        continue
-      d_key = f"{d_key}|{series_val}"
+      found, series_val = _dax_dimension(dax_row, "tool_completed_name")
+      if not found:
+        found, series_val = _dax_dimension(dax_row, "tool_name")
+      if not found:
+        return False, "missing_series", None, None
+      d_key = (d_key, _dim_key(series_val))
 
     d_val = _get_dax_value(dax_row, "v")
     dax_map[d_key] = d_val
@@ -486,7 +588,7 @@ def compare_series(
     # falls through to values_match() and fails there.
     if _to_number(o_val) is None and _to_number(d_val) is None:
       continue
-    if not values_match(o_val, d_val):
+    if not values_match(o_val, d_val, metric_type=metric_type):
       return False, f"row_index={index}", o_val, d_val
   return True, None, None, None
 
@@ -510,7 +612,9 @@ def _dax_dimension(dax_row, dim_col):
   return False, None
 
 
-def compare_topn(oracle_rows, dax_rows, value_col, dim_col, n):
+def compare_topn(
+    oracle_rows, dax_rows, value_col, dim_col, n, metric_type=None
+):
   """Tie-aware Top-N comparison.
 
   A DAX Top-N result holds at most *n* members, each member once (the model's
@@ -575,14 +679,16 @@ def compare_topn(oracle_rows, dax_rows, value_col, dim_col, n):
   if len(o_vals) != len(d_vals):
     return False, "length", len(o_vals), len(d_vals)
   for index, (o_val, d_val) in enumerate(zip(o_vals, d_vals)):
-    if not values_match(o_val, d_val):
+    if not values_match(o_val, d_val, metric_type=metric_type):
       return False, f"value[{index}]", o_val, d_val
   # Every DAX member must be a real oracle member carrying the same value.
   oracle_by_member = dict(oracle_items)
   for index, (member, number) in enumerate(dax_top):
     if member not in oracle_by_member:
       return False, "member not in oracle", None, number
-    if not values_match(oracle_by_member[member], number):
+    if not values_match(
+        oracle_by_member[member], number, metric_type=metric_type
+    ):
       return False, f"member[{index}]", oracle_by_member[member], number
   o_members = [member for member, _ in oracle_top]
   d_members = [member for member, _ in dax_top]
@@ -590,7 +696,9 @@ def compare_topn(oracle_rows, dax_rows, value_col, dim_col, n):
   if tie_adjusted and o_vals:
     nth_val = o_vals[-1]
     for o_member, d_member, d_val in zip(o_members, d_members, d_vals):
-      if o_member != d_member and not values_match(d_val, nth_val):
+      if o_member != d_member and not values_match(
+          d_val, nth_val, metric_type=metric_type
+      ):
         return False, "non-tie member order mismatch", None, None
   return True, ("tie_adjusted" if tie_adjusted else None), None, None
 
@@ -702,12 +810,15 @@ def parse_window(spec):
   return parts[0], parts[1]
 
 
-def resolve_default_window(token, workspace_id, dataset_id):
+def resolve_default_window(
+    token, workspace_id, dataset_id, allow_fallback=False
+):
   """Return ``(start, end, source)`` for the report's loaded "Current" window.
 
   The bounds come from the model's own Date table, so the oracle and the DAX
   side are both evaluated over the window the report actually shows.  When
-  that lookup fails the fixture range is used instead and ``source`` says so.
+  that lookup fails the fixture range is used only when *allow_fallback* is
+  True; otherwise a ``RuntimeError`` is raised so the caller fails closed.
   """
   try:
     rows = extract_dax_rows(
@@ -722,6 +833,8 @@ def resolve_default_window(token, workspace_id, dataset_id):
       raise ValueError("reversed window")
     return start.isoformat(), end.isoformat(), "date_table"
   except Exception:  # pylint: disable=broad-except
+    if not allow_fallback:
+      raise RuntimeError("default_window_lookup_failed") from None
     return FIXTURE_WINDOW[0], FIXTURE_WINDOW[1], "fixture_fallback"
 
 
@@ -732,21 +845,25 @@ def _daily_llm_trend_rows(oracle_path, args, billing_project, start, end):
   grain (spec §9.2 compare_at: event_date) so cross-minute duplicate
   (trace_id, span_id) pairs are not double-counted.
   """
-  daily_sql = (
-      oracle_path.read_text()
-      .replace("{{PROJECT}}", args.project)
-      .replace("{{DATASET}}", args.dataset)
-      .replace("{{TABLE}}", args.table)
-      .replace(
+  daily_sql = oracle_path.read_text()
+  for placeholder, replacement in (
+      ("{{PROJECT}}", args.project),
+      ("{{DATASET}}", args.dataset),
+      ("{{TABLE}}", args.table),
+  ):
+    daily_sql = daily_sql.replace(placeholder, replacement)
+  clause_replacements = [
+      (
           "TIMESTAMP_TRUNC(timestamp, MINUTE) AS timestamp_minute",
           "DATE(timestamp, 'UTC') AS timestamp_date",
-      )
-      .replace("GROUP BY timestamp_minute", "GROUP BY timestamp_date")
-      .replace(
-          "ORDER BY timestamp_minute DESC",
-          "ORDER BY timestamp_date DESC",
-      )
-  )
+      ),
+      ("GROUP BY timestamp_minute", "GROUP BY timestamp_date"),
+      ("ORDER BY timestamp_minute DESC", "ORDER BY timestamp_date DESC"),
+  ]
+  for old_clause, new_clause in clause_replacements:
+    if old_clause not in daily_sql:
+      raise RuntimeError("llm_trend_clause_missing")
+    daily_sql = daily_sql.replace(old_clause, new_clause)
   daily_sql = LIMIT_RE.sub("", daily_sql)
   with tempfile.TemporaryDirectory() as tmp_dir:
     tmp_sql = pathlib.Path(tmp_dir) / "llm_trends_daily.sql"
@@ -764,7 +881,7 @@ def _daily_llm_trend_rows(oracle_path, args, billing_project, start, end):
   return rows
 
 
-def _compare_chart(chart, oracle_rows, topn_rows, dax_rows):
+def _compare_chart(chart, oracle_rows, topn_rows, dax_rows, allow_empty=False):
   """Compare one chart; return ``(is_match, tie_adjusted, error_detail)``.
 
   The error detail is built only from structural codes, row indices and
@@ -774,8 +891,18 @@ def _compare_chart(chart, oracle_rows, topn_rows, dax_rows):
 
   if visual_type == "cardVisual":
     oracle_cols = [m.get("oracle_column", "") for m in chart["measure_info"]]
-    oracle_row = oracle_rows[0] if oracle_rows else {}
-    match, col, _, _ = compare_card(oracle_row, dax_rows, oracle_cols)
+    metric_types = [m.get("comparison_type") for m in chart["measure_info"]]
+    if (
+        allow_empty
+        and not oracle_rows
+        and chart["id"].startswith("performance-p")
+    ):
+      oracle_row = {col: None for col in oracle_cols}
+    else:
+      oracle_row = oracle_rows[0] if len(oracle_rows) == 1 else {}
+    match, col, _, _ = compare_card(
+        oracle_row, dax_rows, oracle_cols, metric_types=metric_types
+    )
     return match, False, (None if match else f"{col}: mismatch")
 
   if visual_type == "areaChart":
@@ -783,21 +910,37 @@ def _compare_chart(chart, oracle_rows, topn_rows, dax_rows):
       value_col = "total_llm_calls"
     else:
       value_col = chart["measure_info"][0].get("oracle_column", "")
+    m_type = (
+        chart["measure_info"][0].get("comparison_type")
+        if chart.get("measure_info")
+        else None
+    )
     match, detail, _, _ = compare_series(
         oracle_rows,
         dax_rows,
         value_col,
         "timestamp_date",
         has_series=bool(chart.get("series")),
+        metric_type=m_type,
     )
     return match, False, (None if match else f"series mismatch at {detail}")
 
   if visual_type == "clusteredBarChart":
     value_col = chart["measure_info"][0].get("oracle_column", "")
+    m_type = (
+        chart["measure_info"][0].get("comparison_type")
+        if chart.get("measure_info")
+        else None
+    )
     dim_col = chart.get("category", "").replace("events_v1.", "")
     if topn_rows is not None:
       match, detail, _, _ = compare_topn(
-          topn_rows, dax_rows, value_col, dim_col, chart["top_n"]
+          topn_rows,
+          dax_rows,
+          value_col,
+          dim_col,
+          chart["top_n"],
+          metric_type=m_type,
       )
       return (
           match,
@@ -805,7 +948,12 @@ def _compare_chart(chart, oracle_rows, topn_rows, dax_rows):
           (None if match else f"top-n mismatch: {detail}"),
       )
     match, detail, _, _ = compare_series(
-        oracle_rows, dax_rows, value_col, dim_col, has_series=False
+        oracle_rows,
+        dax_rows,
+        value_col,
+        dim_col,
+        has_series=False,
+        metric_type=m_type,
     )
     return match, False, (None if match else f"bar mismatch at {detail}")
 
@@ -889,12 +1037,22 @@ def _run_chart(chart, window, args, billing_project, token):
 
   try:
     is_match, tie_adjusted, error = _compare_chart(
-        chart, oracle_rows, topn_rows, dax_rows
+        chart,
+        oracle_rows,
+        topn_rows,
+        dax_rows,
+        allow_empty=getattr(args, "allow_empty", False),
     )
   except Exception:  # pylint: disable=broad-except
     return result(STATUS_FAIL, "comparison_error", oracle_rows, dax_rows)
   if not is_match:
     return result(STATUS_FAIL, error, oracle_rows, dax_rows)
+  # A cardVisual that returned 0 DAX rows is a structural failure even under
+  # --allow-empty: a scalar card always returns exactly one row.  The
+  # compare_card function already rejects this via "dax_row_count", but if
+  # both sides are empty the check above would have passed it as EMPTY.
+  if chart["visual_type"] == "cardVisual" and not oracle_rows and not dax_rows:
+    return result(STATUS_FAIL, "empty_card", oracle_rows, dax_rows)
   if not oracle_rows and not dax_rows:
     # Nothing was compared: an empty-versus-empty chart is not evidence.
     return result(STATUS_EMPTY, "empty_result", oracle_rows, dax_rows)
@@ -918,9 +1076,10 @@ def main(argv=None):
       action="append",
       default=[],
       help=(
-          "default | YYYY-MM-DD:YYYY-MM-DD (repeatable); 'default' (also used"
-          " when omitted) is the report's loaded Current window, read from the"
-          " model's Date table"
+          "default | fixture | YYYY-MM-DD:YYYY-MM-DD (repeatable); 'default'"
+          " is the report's loaded Current window, read from the model's Date"
+          " table; 'fixture' uses the fixture window"
+          f" {FIXTURE_WINDOW[0]}:{FIXTURE_WINDOW[1]}"
       ),
   )
   parser.add_argument("--report-id", default=None)
@@ -931,6 +1090,14 @@ def main(argv=None):
       help=(
           "accept charts that are empty on both sides, and a run in which no"
           " oracle query returned any row (for deliberate empty-window checks)"
+      ),
+  )
+  parser.add_argument(
+      "--allow-fixture-fallback",
+      action="store_true",
+      help=(
+          "when the default window cannot be read from the Date table, use the"
+          " fixture window instead of failing closed"
       ),
   )
   args = parser.parse_args(argv)
@@ -952,19 +1119,65 @@ def main(argv=None):
 
   # Every explicit window is validated before any query is issued.
   specs = list(dict.fromkeys(args.window or ["default"]))
-  explicit = {spec: parse_window(spec) for spec in specs if spec != "default"}
+  explicit = {
+      spec: parse_window(spec)
+      for spec in specs
+      if spec not in ("default", "fixture")
+  }
   windows = []
   for spec in specs:
     if spec == "default":
-      start, end, source = resolve_default_window(
-          token, args.workspace_id, args.dataset_id
-      )
+      try:
+        start, end, source = resolve_default_window(
+            token,
+            args.workspace_id,
+            args.dataset_id,
+            allow_fallback=args.allow_fixture_fallback,
+        )
+      except RuntimeError:
+        results = []
+        receipt = {
+            "kind": "sanitized-powerbi-live-parity",
+            "windows": ["default"],
+            "window_details": [
+                {
+                    "window": "default",
+                    "source": "lookup_failed",
+                    "charts_expected": len(charts),
+                    "charts_pass": 0,
+                    "charts_fail": 0,
+                    "charts_empty": 0,
+                }
+            ],
+            "allow_empty": args.allow_empty,
+            "charts_expected": len(charts),
+            "charts_pass": 0,
+            "charts_fail": 0,
+            "charts_empty": 0,
+            "oracle_rows_total": 0,
+            "results": results,
+            "overall_pass": False,
+            "pass": False,
+        }
+        if args.output:
+          output = pathlib.Path(args.output)
+          output.parent.mkdir(parents=True, exist_ok=True)
+          output.write_text(
+              json.dumps(receipt, indent=1, sort_keys=True) + "\n"
+          )
+        print(
+            "live parity FAIL: default window lookup failed",
+            file=sys.stderr,
+        )
+        return 1
       if source != "date_table":
         print(
             "warning: the loaded window could not be read from the Date table;"
             " using the fixture window",
             file=sys.stderr,
         )
+    elif spec == "fixture":
+      start, end, source = FIXTURE_WINDOW[0], FIXTURE_WINDOW[1], "fixture"
     else:
       (start, end), source = explicit[spec], "explicit"
     windows.append(

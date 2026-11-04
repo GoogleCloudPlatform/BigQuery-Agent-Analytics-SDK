@@ -182,7 +182,7 @@ range.
 
 ### Option 0 — 1-click Web Configurator or CLI `.zip` packager
 
-Open the browser-based **Power BI Web Configurator** (`dashboards/power_bi/docs/index.html`, published to `/power-bi/` on GitHub Pages) to enter your `project.dataset.table` ID, preview all 8 dashboard pages interactively, and download a pre-configured `BQAA_Agent_Analytics_<project>_<dataset>_<table>.zip` archive with zero server-side processing. **Copy setup link** stores your settings in the URL fragment (the part after `#`), which browsers never send to the server.
+Open the browser-based [**Power BI Web Configurator**](https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/power-bi/) on GitHub Pages (or for local use, serve over HTTP via `python3 -m http.server 8799 --directory dashboards/power_bi` and open `http://localhost:8799/docs/index.html`, because browsers block ES module imports such as `./configurator.mjs` over `file://`) to enter your `project.dataset.table` ID, preview all 8 dashboard pages interactively, and download a pre-configured `BQAA_Agent_Analytics_<project>_<dataset>_<table>.zip` archive with zero server-side processing. **Copy setup link** stores your settings in the URL fragment (the part after `#`), which browsers never send in HTTP requests to the host, so share copied links deliberately.
 
 Or generate the same pre-configured `.zip` archive from the CLI:
 
@@ -288,8 +288,10 @@ scorecards are compared on both the value and its `Change %`.
 `--window default` (also used when `--window` is omitted) is the loaded
 Current window, read from the model's Date table, so the oracle and the
 DAX query cover the window the report shows. If that lookup fails, the
-validator warns and uses the fixture window, and the receipt records
-which one it used in `window_details[].source`. An explicit
+validator exits with an error before running any chart or oracle queries
+unless `--allow-fixture-fallback` (or an explicit `--window fixture`) is
+passed, and the receipt records the resolved source in
+`window_details[].source`. An explicit
 `YYYY-MM-DD:YYYY-MM-DD` window is validated before any query runs.
 
 The run fails closed. A DAX error (response, result, or table level), a

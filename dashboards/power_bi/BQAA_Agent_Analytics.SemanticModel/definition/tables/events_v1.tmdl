@@ -42,7 +42,7 @@ table events_v1
 		formatString: #,0
 		displayFolder: Base
 		lineageTag: b57ede15-d020-5401-b91d-438927abc438
-		annotation bqaa_oracle_sha256 = 32f5926dcf087a46
+		annotation bqaa_oracle_sha256 = aee8321e0a9e736b
 
 	/// measure Tool Completion Events — oracle/queries/usage-tool-calls-over-time.sql (total_events)
 	measure 'Tool Completion Events' = CALCULATE(COUNTROWS('events_v1'), KEEPFILTERS('events_v1'[event_type] = "TOOL_COMPLETED"))
@@ -171,7 +171,7 @@ table events_v1
 		annotation bqaa_oracle_sha256 = 19ea4fe08bc65f9a
 
 	/// measure KPI Total Traces Prior — oracle/queries/usage-total-traces.sql (pop_total_traces_prior)
-	measure 'KPI Total Traces Prior' = VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE([Total Traces], REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)
+	measure 'KPI Total Traces Prior' = VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE(COALESCE([Total Traces], 0), REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)
 		formatString: #,0
 		displayFolder: Scorecards
 		lineageTag: c9914c55-d85d-5fd3-8540-7f6a2250b3e8
@@ -192,7 +192,7 @@ table events_v1
 		annotation bqaa_oracle_sha256 = 902c07a313423e33
 
 	/// measure KPI Total Sessions Prior — oracle/queries/usage-total-sessions.sql (pop_total_sessions_prior)
-	measure 'KPI Total Sessions Prior' = VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE([Total Sessions], REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)
+	measure 'KPI Total Sessions Prior' = VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE(COALESCE([Total Sessions], 0), REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)
 		formatString: #,0
 		displayFolder: Scorecards
 		lineageTag: 8bd028ed-4650-588f-824c-a7abba7741c9
@@ -213,7 +213,7 @@ table events_v1
 		annotation bqaa_oracle_sha256 = 4d0a758be46f861b
 
 	/// measure KPI Total LLM Calls Prior — oracle/queries/usage-total-calls.sql (pop_llm_calls_prior)
-	measure 'KPI Total LLM Calls Prior' = VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE([LLM Calls], REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)
+	measure 'KPI Total LLM Calls Prior' = VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE(COALESCE([LLM Calls], 0), REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)
 		formatString: #,0
 		displayFolder: Scorecards
 		lineageTag: 6e56b0a0-5903-5e71-bbc5-2bca3de6e8f4
@@ -234,7 +234,7 @@ table events_v1
 		annotation bqaa_oracle_sha256 = ad2da0fe9f5e6639
 
 	/// measure KPI Total Users Prior — oracle/queries/usage-total-users.sql (pop_total_users_prior)
-	measure 'KPI Total Users Prior' = VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE([Total Users], REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)
+	measure 'KPI Total Users Prior' = VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE(COALESCE([Total Users], 0), REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)
 		formatString: #,0
 		displayFolder: Scorecards
 		lineageTag: 701a27ed-aa97-535c-a8fc-29c90d310d18
@@ -255,7 +255,7 @@ table events_v1
 		annotation bqaa_oracle_sha256 = b12829bb50fc9b55
 
 	/// measure KPI Tool Errors Prior — oracle/queries/performance-total-errors.sql (pop_tool_errors_prior)
-	measure 'KPI Tool Errors Prior' = VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE([Tool Errors], REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)
+	measure 'KPI Tool Errors Prior' = VAR _start = MIN('Date'[Date]) VAR _end = MAX('Date'[Date]) VAR _days = INT(_end - _start) + 1 RETURN CALCULATE(COALESCE([Tool Errors], 0), REMOVEFILTERS('Date'), 'Date'[Date] >= _start - _days && 'Date'[Date] <= _start - 1)
 		formatString: #,0
 		displayFolder: Scorecards
 		lineageTag: 55d78cec-ebd3-596d-be4a-93db775fbe09
@@ -350,7 +350,7 @@ table events_v1
 		formatString: #,0
 		displayFolder: Charts
 		lineageTag: 7dc47be4-764c-5fb3-aa7d-765a07927875
-		annotation bqaa_oracle_sha256 = 32abb5b42f9a1085
+		annotation bqaa_oracle_sha256 = 09647704f45a7fcf
 
 	/// Column timestamp — sourceColumn=timestamp dataType=dateTime
 	column timestamp
