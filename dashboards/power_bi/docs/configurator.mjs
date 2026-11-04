@@ -329,14 +329,23 @@ export function rewriteExpressionsTmdl(exprText, config) {
 
   let updated = String(exprText);
   for (const [paramName, literalVal] of replacements) {
+    // Count every declaration first: a missing or duplicated one means the
+    // bundled source is malformed, and rewriting only the first match would
+    // ship a project whose second declaration keeps a stale default.
     const re = new RegExp(
       `^(expression ${paramName} = ).*?( meta \\[IsParameterQuery=true, .*\\])$`,
-      "m",
+      "gm",
     );
-    if (!re.test(updated)) {
-      throw new Error(`Missing declaration for ${paramName} in expressions.tmdl`);
+    const count = Array.from(updated.matchAll(re)).length;
+    if (count !== 1) {
+      throw new Error(
+        `Expected exactly 1 declaration for ${paramName} in expressions.tmdl, found ${count}`,
+      );
     }
-    updated = updated.replace(re, `$1${literalVal}$2`);
+    updated = updated.replace(
+      re,
+      (_match, head, tail) => `${head}${literalVal}${tail}`,
+    );
   }
   return updated;
 }
@@ -494,8 +503,11 @@ export function buildSetupUrl(input, pageUrl) {
   if (!valid.useStorageApi) {
     params.set("useStorageApi", "false");
   }
-  url.search = params.toString();
-  url.hash = "";
+  // The configuration travels in the URL fragment: browsers never send the
+  // fragment to the server, so a shared setup link keeps the project, dataset,
+  // and table IDs on the client.  The query string is cleared for new links.
+  url.search = "";
+  url.hash = params.toString();
   return url.toString();
 }
 
@@ -637,9 +649,13 @@ export function initPowerBIConfigurator(doc = globalThis.document) {
     }
   }
 
-  // Hydrate from URL query parameters if present.
+  // Hydrate from the URL fragment (a setup link) if present.  Only the
+  // fragment is read: the query string is sent to the host, so setup links
+  // never carry configuration there.
   try {
-    const params = new URLSearchParams(globalThis.location?.search ?? "");
+    const params = new URLSearchParams(
+      String(globalThis.location?.hash ?? "").replace(/^#/, ""),
+    );
     const p = params.get("project");
     const d = params.get("dataset");
     const t = params.get("table");
@@ -661,7 +677,7 @@ export function initPowerBIConfigurator(doc = globalThis.document) {
       storageApiInput.checked = false;
     }
   } catch {
-    // Ignore malformed query strings.
+    // Ignore a malformed fragment.
   }
 
   for (const el of [
@@ -739,7 +755,8 @@ export function initPowerBIConfigurator(doc = globalThis.document) {
         await globalThis.navigator.clipboard.writeText(setupUrl);
         if (statusEl) {
           statusEl.dataset.kind = "ready";
-          statusEl.textContent = "Copied shareable Power BI setup link to clipboard.";
+          statusEl.textContent =
+            "Copied shareable Power BI setup link to clipboard. Its settings sit after the # in the address, which browsers never send to a server.";
         }
       }
     });

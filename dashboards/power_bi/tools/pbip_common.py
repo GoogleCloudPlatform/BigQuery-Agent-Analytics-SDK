@@ -148,6 +148,144 @@ def oracle_digest(
   return digest.hexdigest()[:16]
 
 
+# Reviewed lock over the oracle SQL the DAX measures are written against.  The
+# per-measure digest above is derived and is refreshed by every regeneration;
+# the lock is the opposite: a committed record of the oracle SQL that was last
+# reconciled with the DAX, which generation refuses to move past until a person
+# re-records it with `generate_pbip.py --write --accept-oracle-changes`.
+ORACLE_LOCK_REL: str = "spec/oracle_lock.json"
+ORACLE_LOCK_VERSION: int = 1
+ORACLE_LOCK_DESCRIPTION: str = (
+    "Reviewed sha256 digests of the Looker Studio oracle SQL that the Power BI"
+    " measures are written against. Changing a cited query fails"
+    " generate_pbip.py --check and --write until the DAX and the semantic"
+    " fixtures are reconciled and the new digests are recorded deliberately"
+    " with generate_pbip.py --write --accept-oracle-changes."
+)
+ORACLE_LOCK_HINT: str = (
+    "Reconcile the DAX measures that cite the changed oracle SQL and the"
+    " semantic fixtures, then record the new digests with: python"
+    " dashboards/power_bi/tools/generate_pbip.py --write"
+    " --accept-oracle-changes"
+)
+_SHA256_HEX_RE: re.Pattern[str] = re.compile(r"[0-9a-f]{64}")
+
+
+class OracleLockError(ValueError):
+  """The cited oracle SQL no longer matches the reviewed lock."""
+
+  def __init__(self, problems: Iterable[str]) -> None:
+    self.problems: list[str] = list(problems)
+    super().__init__("\n".join([*self.problems, ORACLE_LOCK_HINT]))
+
+
+def oracle_sql_digest(sql: str) -> str:
+  """Return the full sha256 of an oracle query's text (CRLF read as LF)."""
+  return hashlib.sha256(sql.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+
+
+def referenced_oracle_queries(
+    contracts: Contracts, model_spec: Mapping[str, Any]
+) -> list[str]:
+  """Return the sorted oracle query keys the report or the model cites."""
+  normalize = OracleFilesDict._normalize_key
+  refs: set[str] = set()
+  for chart in contracts.manifest.get("charts", []):
+    refs.add(
+        normalize(
+            chart.get("oracle_query", f"oracle/queries/{chart['id']}.sql")
+        )
+    )
+  for measure in model_spec.get("measures", []):
+    for query in measure.get("oracle_queries") or []:
+      refs.add(normalize(query))
+  return sorted(refs)
+
+
+def current_oracle_digests(
+    contracts: Contracts, model_spec: Mapping[str, Any]
+) -> dict[str, str]:
+  """Return query key -> sha256 for every oracle query that is cited."""
+  digests: dict[str, str] = {}
+  for query in referenced_oracle_queries(contracts, model_spec):
+    if query not in contracts.oracle_files:
+      raise ValueError(f"Missing oracle query {query!r}")
+    digests[query] = oracle_sql_digest(contracts.oracle_files[query])
+  return digests
+
+
+def read_oracle_lock(path: Path | str) -> dict[str, str]:
+  """Read and structurally validate the committed oracle lock."""
+  with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+  if (
+      not isinstance(data, dict)
+      or data.get("version") != ORACLE_LOCK_VERSION
+      or data.get("algorithm") != "sha256"
+  ):
+    raise ValueError(
+        f"expected a JSON object with version {ORACLE_LOCK_VERSION} and"
+        ' algorithm "sha256"'
+    )
+  queries = data.get("oracle_queries")
+  if not isinstance(queries, dict) or not queries:
+    raise ValueError("oracle_queries must be a non-empty JSON object")
+  for key, digest in queries.items():
+    if not isinstance(digest, str) or not _SHA256_HEX_RE.fullmatch(digest):
+      raise ValueError(f"{key!r} does not map to a sha256 hex digest")
+  return dict(queries)
+
+
+def render_oracle_lock(digests: Mapping[str, str]) -> str:
+  """Render the lock file text deterministically (sorted keys, final LF)."""
+  payload = {
+      "version": ORACLE_LOCK_VERSION,
+      "algorithm": "sha256",
+      "description": ORACLE_LOCK_DESCRIPTION,
+      "oracle_queries": {key: digests[key] for key in sorted(digests)},
+  }
+  return json.dumps(payload, indent=2) + "\n"
+
+
+def diff_oracle_lock(
+    current: Mapping[str, str], locked: Mapping[str, str]
+) -> list[str]:
+  """Describe every way the cited oracle SQL departs from the lock."""
+  problems: list[str] = []
+  for query in sorted(current):
+    if query not in locked:
+      problems.append(
+          f"ORACLE LOCK: {query} is not recorded in {ORACLE_LOCK_REL}"
+      )
+    elif locked[query] != current[query]:
+      problems.append(
+          f"ORACLE LOCK: {query} changed since it was reviewed (locked sha256"
+          f" {locked[query][:12]}, now {current[query][:12]})"
+      )
+  for query in sorted(set(locked) - set(current)):
+    problems.append(
+        f"ORACLE LOCK: {ORACLE_LOCK_REL} records {query}, which no chart or"
+        " measure cites"
+    )
+  return problems
+
+
+def oracle_lock_problems(
+    power_bi_root: Path | str,
+    contracts: Contracts,
+    model_spec: Mapping[str, Any],
+) -> list[str]:
+  """Compare the cited oracle SQL with the committed lock (empty when equal)."""
+  lock_path = Path(power_bi_root) / ORACLE_LOCK_REL
+  if not lock_path.is_file():
+    return [f"MISSING: {ORACLE_LOCK_REL}"]
+  try:
+    locked = read_oracle_lock(lock_path)
+  except (OSError, ValueError) as exc:
+    return [f"ORACLE LOCK: {ORACLE_LOCK_REL} is unusable: {exc}"]
+  return diff_oracle_lock(current_oracle_digests(contracts, model_spec), locked)
+
+
 _SQL_BLOCK_COMMENT_RE: re.Pattern[str] = re.compile(r"/\*.*?\*/", re.DOTALL)
 _SQL_LINE_COMMENT_RE: re.Pattern[str] = re.compile(r"--[^\n]*")
 

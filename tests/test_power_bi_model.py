@@ -16,12 +16,14 @@
 
 import copy
 import datetime
+import hashlib
 import importlib.util
 import io
 import json
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 from types import ModuleType
 import uuid
@@ -981,3 +983,466 @@ def test_traces_by_agent_excludes_rows_without_an_agent():
       "NOT ISBLANK([Traces for Agents With Tokens])" in ranked
       and "[Traces for Agents With Tokens], DESC" in ranked
   )
+
+
+# ---------------------------------------------------------------------------
+# Reviewed oracle lock (spec/oracle_lock.json): a committed record of the
+# oracle SQL the DAX was last reconciled with.  Unlike the per-measure digest,
+# regeneration never refreshes it.
+# ---------------------------------------------------------------------------
+
+_HEX_A = "a" * 64
+_HEX_B = "b" * 64
+_LOCK_REL = "spec/oracle_lock.json"
+_TRACES_QUERY = "oracle/queries/usage-total-traces.sql"
+
+
+def _lock_contracts(pbip_common, charts, oracle_files=None):
+  return pbip_common.Contracts(
+      manifest={"charts": charts},
+      product={},
+      events_template="",
+      oracle_files=pbip_common.OracleFilesDict(oracle_files or {}),
+  )
+
+
+def _copy_spec(tmp_path):
+  tmp_pbi = tmp_path / "power_bi"
+  shutil.copytree(POWER_BI / "spec", tmp_pbi / "spec")
+  return tmp_pbi
+
+
+def test_oracle_sql_digest_is_a_full_sha256_over_lf_normalized_text():
+  pbip_common = _load_pbi_module("pbip_common")
+  digest = pbip_common.oracle_sql_digest("SELECT 1\n")
+  assert digest == hashlib.sha256(b"SELECT 1\n").hexdigest()
+  assert re.fullmatch(r"[0-9a-f]{64}", digest)
+  # The digest does not depend on the checkout's newline convention.
+  assert pbip_common.oracle_sql_digest("SELECT 1\r\n") == digest
+  assert pbip_common.oracle_sql_digest("SELECT 2\n") != digest
+  assert pbip_common.oracle_sql_digest("SELECT 1") != digest
+
+
+def test_referenced_oracle_queries_is_the_sorted_union_of_charts_and_measures():
+  pbip_common = _load_pbi_module("pbip_common")
+  contracts = _lock_contracts(
+      pbip_common,
+      [
+          {"id": "chart-b"},
+          {"id": "chart-a"},
+          {"id": "chart-c", "oracle_query": "oracle/queries/custom.sql"},
+      ],
+  )
+  model_spec = {
+      "measures": [
+          {"oracle_queries": ["measure-only"]},
+          {"oracle_queries": ["chart-a.sql", "oracle/queries/chart-a.sql"]},
+          {"oracle_queries": None},
+          {},
+      ]
+  }
+  assert pbip_common.referenced_oracle_queries(contracts, model_spec) == [
+      "oracle/queries/chart-a.sql",
+      "oracle/queries/chart-b.sql",
+      "oracle/queries/custom.sql",
+      "oracle/queries/measure-only.sql",
+  ]
+
+
+def test_current_oracle_digests_digests_each_cited_query_once():
+  pbip_common = _load_pbi_module("pbip_common")
+  contracts = _lock_contracts(
+      pbip_common,
+      [{"id": "a"}, {"id": "b"}],
+      {
+          "oracle/queries/a.sql": "SELECT 1\n",
+          "oracle/queries/b.sql": "SELECT 2\r\n",
+          "oracle/queries/unused.sql": "SELECT 3\n",
+      },
+  )
+  model_spec = {"measures": [{"oracle_queries": ["a"]}]}
+  assert pbip_common.current_oracle_digests(contracts, model_spec) == {
+      "oracle/queries/a.sql": pbip_common.oracle_sql_digest("SELECT 1\n"),
+      "oracle/queries/b.sql": pbip_common.oracle_sql_digest("SELECT 2\n"),
+  }
+
+
+def test_current_oracle_digests_rejects_a_cited_query_that_does_not_exist():
+  pbip_common = _load_pbi_module("pbip_common")
+  contracts = _lock_contracts(
+      pbip_common, [{"id": "a"}], {"oracle/queries/other.sql": "SELECT 1\n"}
+  )
+  with pytest.raises(ValueError, match="Missing oracle query"):
+    pbip_common.current_oracle_digests(contracts, {"measures": []})
+
+
+def test_render_oracle_lock_is_deterministic_and_round_trips(tmp_path):
+  pbip_common = _load_pbi_module("pbip_common")
+  digests = {"oracle/queries/b.sql": _HEX_B, "oracle/queries/a.sql": _HEX_A}
+  text = pbip_common.render_oracle_lock(digests)
+  assert text == pbip_common.render_oracle_lock(dict(reversed(digests.items())))
+  assert text.endswith("}\n")
+  assert "\r" not in text
+  payload = json.loads(text)
+  assert payload["version"] == pbip_common.ORACLE_LOCK_VERSION
+  assert payload["algorithm"] == "sha256"
+  assert "--accept-oracle-changes" in payload["description"]
+  assert list(payload["oracle_queries"]) == [
+      "oracle/queries/a.sql",
+      "oracle/queries/b.sql",
+  ]
+  lock_path = tmp_path / "oracle_lock.json"
+  lock_path.write_text(text, encoding="utf-8")
+  assert pbip_common.read_oracle_lock(lock_path) == digests
+
+
+_QUERIES_A = {"oracle/queries/a.sql": _HEX_A}
+
+
+def _lock_json(**overrides):
+  payload = {
+      "version": 1,
+      "algorithm": "sha256",
+      "oracle_queries": dict(_QUERIES_A),
+  }
+  payload.update(overrides)
+  return json.dumps(payload)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "{",
+        "not json",
+        "[]",
+        '"sha256"',
+        _lock_json(version=2),
+        _lock_json(version="1"),
+        _lock_json(algorithm="md5"),
+        _lock_json(oracle_queries={}),
+        _lock_json(oracle_queries=[]),
+        _lock_json(oracle_queries=None),
+        _lock_json(oracle_queries={"oracle/queries/a.sql": "g" * 64}),
+        _lock_json(oracle_queries={"oracle/queries/a.sql": "a" * 63}),
+        _lock_json(oracle_queries={"oracle/queries/a.sql": "A" * 64}),
+        _lock_json(oracle_queries={"oracle/queries/a.sql": _HEX_A + "\n"}),
+        _lock_json(oracle_queries={"oracle/queries/a.sql": 12345}),
+        _lock_json(oracle_queries={"oracle/queries/a.sql": None}),
+    ],
+)
+def test_read_oracle_lock_rejects_malformed_files(tmp_path, text):
+  pbip_common = _load_pbi_module("pbip_common")
+  lock_path = tmp_path / "oracle_lock.json"
+  lock_path.write_text(text, encoding="utf-8")
+  with pytest.raises(ValueError):
+    pbip_common.read_oracle_lock(lock_path)
+
+
+def test_read_oracle_lock_accepts_the_well_formed_minimum(tmp_path):
+  pbip_common = _load_pbi_module("pbip_common")
+  lock_path = tmp_path / "oracle_lock.json"
+  lock_path.write_text(_lock_json(), encoding="utf-8")
+  assert pbip_common.read_oracle_lock(lock_path) == _QUERIES_A
+
+
+def test_diff_oracle_lock_describes_every_way_the_sql_departs_from_the_lock():
+  pbip_common = _load_pbi_module("pbip_common")
+  current = {
+      "oracle/queries/a.sql": "1" * 64,
+      "oracle/queries/b.sql": "2" * 64,
+      "oracle/queries/c.sql": "3" * 64,
+  }
+  assert pbip_common.diff_oracle_lock(current, dict(current)) == []
+
+  locked = {
+      "oracle/queries/a.sql": "1" * 64,
+      "oracle/queries/b.sql": "9" * 64,
+      "oracle/queries/d.sql": "4" * 64,
+  }
+  assert pbip_common.diff_oracle_lock(current, locked) == [
+      "ORACLE LOCK: oracle/queries/b.sql changed since it was reviewed"
+      " (locked sha256 999999999999, now 222222222222)",
+      "ORACLE LOCK: oracle/queries/c.sql is not recorded in"
+      " spec/oracle_lock.json",
+      "ORACLE LOCK: spec/oracle_lock.json records oracle/queries/d.sql,"
+      " which no chart or measure cites",
+  ]
+
+
+def test_oracle_lock_error_lists_the_problems_and_the_remedy():
+  pbip_common = _load_pbi_module("pbip_common")
+  error = pbip_common.OracleLockError(["ORACLE LOCK: a", "ORACLE LOCK: b"])
+  assert isinstance(error, ValueError)
+  assert error.problems == ["ORACLE LOCK: a", "ORACLE LOCK: b"]
+  lines = str(error).splitlines()
+  assert lines[:2] == ["ORACLE LOCK: a", "ORACLE LOCK: b"]
+  assert len(lines) == 3
+  assert "generate_pbip.py --write --accept-oracle-changes" in lines[2]
+
+
+def test_oracle_lock_problems_reports_a_missing_or_unusable_lock(tmp_path):
+  pbip_common = _load_pbi_module("pbip_common")
+  contracts, model_spec = _contracts_and_spec()
+  assert pbip_common.oracle_lock_problems(tmp_path, contracts, model_spec) == [
+      f"MISSING: {_LOCK_REL}"
+  ]
+
+  (tmp_path / "spec").mkdir()
+  (tmp_path / _LOCK_REL).write_text("{", encoding="utf-8")
+  problems = pbip_common.oracle_lock_problems(tmp_path, contracts, model_spec)
+  assert len(problems) == 1
+  assert problems[0].startswith(f"ORACLE LOCK: {_LOCK_REL} is unusable: ")
+
+
+def test_committed_oracle_lock_matches_the_cited_oracle_sql():
+  pbip_common = _load_pbi_module("pbip_common")
+  contracts, model_spec = _contracts_and_spec()
+  lock_path = POWER_BI / _LOCK_REL
+  locked = pbip_common.read_oracle_lock(lock_path)
+
+  assert pbip_common.oracle_lock_problems(POWER_BI, contracts, model_spec) == []
+  assert sorted(locked) == pbip_common.referenced_oracle_queries(
+      contracts, model_spec
+  )
+  # Every digest is recomputed here straight from the SQL files, so the lock
+  # cannot pass by agreeing with itself.
+  for query, digest in locked.items():
+    sql_bytes = (LOOKER / query).read_bytes().replace(b"\r\n", b"\n")
+    assert digest == hashlib.sha256(sql_bytes).hexdigest(), query
+  # The committed file is exactly what the tool renders (no hand edits).
+  assert lock_path.read_text(encoding="utf-8") == (
+      pbip_common.render_oracle_lock(locked)
+  )
+
+
+def test_generate_all_refuses_an_oracle_query_that_differs_from_the_lock(
+    tmp_path,
+):
+  generate_pbip = _load_pbi_module("generate_pbip")
+  tmp_pbi = _copy_spec(tmp_path)
+  tmp_looker = _copy_looker(tmp_path)
+  assert generate_pbip.generate_all(tmp_pbi, tmp_looker)
+
+  sql_path = tmp_looker / _TRACES_QUERY
+  sql_path.write_text(
+      sql_path.read_text(encoding="utf-8") + "-- edited after review\n",
+      encoding="utf-8",
+  )
+  with pytest.raises(ValueError) as exc_info:
+    generate_pbip.generate_all(tmp_pbi, tmp_looker)
+  assert type(exc_info.value).__name__ == "OracleLockError"
+  assert f"ORACLE LOCK: {_TRACES_QUERY} changed since it was reviewed" in str(
+      exc_info.value
+  )
+  assert "--accept-oracle-changes" in str(exc_info.value)
+  # Only the drift check and the accept flow may generate past the lock.
+  assert generate_pbip.generate_all(
+      tmp_pbi, tmp_looker, enforce_oracle_lock=False
+  )
+
+
+def test_generate_all_refuses_a_missing_lock_but_not_when_unenforced(tmp_path):
+  generate_pbip = _load_pbi_module("generate_pbip")
+  tmp_pbi = _copy_spec(tmp_path)
+  (tmp_pbi / _LOCK_REL).unlink()
+  with pytest.raises(ValueError, match=f"MISSING: {_LOCK_REL}"):
+    generate_pbip.generate_all(tmp_pbi)
+  assert generate_pbip.generate_all(tmp_pbi, enforce_oracle_lock=False)
+
+
+def test_accept_oracle_changes_records_exactly_the_edited_query(tmp_path):
+  pbip_common = _load_pbi_module("pbip_common")
+  generate_pbip = _load_pbi_module("generate_pbip")
+  tmp_pbi = _copy_spec(tmp_path)
+  tmp_looker = _copy_looker(tmp_path)
+  lock_path = tmp_pbi / _LOCK_REL
+  before = pbip_common.read_oracle_lock(lock_path)
+  assert before == pbip_common.read_oracle_lock(POWER_BI / _LOCK_REL)
+
+  # Nothing to accept: the lock is already what the SQL says, byte for byte.
+  committed = (POWER_BI / _LOCK_REL).read_bytes()
+  assert generate_pbip.accept_oracle_changes(tmp_pbi, tmp_looker) == []
+  assert lock_path.read_bytes() == committed
+
+  sql_path = tmp_looker / _TRACES_QUERY
+  sql_path.write_text(
+      sql_path.read_text(encoding="utf-8") + "-- edited after review\n",
+      encoding="utf-8",
+  )
+  pending = generate_pbip.oracle_lock_problems(tmp_pbi, tmp_looker)
+  assert len(pending) == 1
+  assert pending[0].startswith(
+      f"ORACLE LOCK: {_TRACES_QUERY} changed since it was reviewed"
+  )
+  # Accepting reports what it re-recorded.
+  assert generate_pbip.accept_oracle_changes(tmp_pbi, tmp_looker) == pending
+
+  after = pbip_common.read_oracle_lock(lock_path)
+  assert sorted(after) == sorted(before)
+  assert {query for query in after if after[query] != before[query]} == {
+      _TRACES_QUERY
+  }
+  assert after[_TRACES_QUERY] == pbip_common.oracle_sql_digest(
+      sql_path.read_text(encoding="utf-8")
+  )
+  assert generate_pbip.oracle_lock_problems(tmp_pbi, tmp_looker) == []
+  assert generate_pbip.generate_all(tmp_pbi, tmp_looker)
+
+
+def test_accept_oracle_changes_does_not_lock_in_a_model_that_cannot_build(
+    tmp_path,
+):
+  generate_pbip = _load_pbi_module("generate_pbip")
+  tmp_pbi = _copy_spec(tmp_path)
+  tmp_looker = _copy_looker(tmp_path)
+  lock_path = tmp_pbi / _LOCK_REL
+  committed = lock_path.read_bytes()
+
+  # Removing a cited output alias breaks the model build.
+  sql_path = tmp_looker / "oracle" / "queries" / "usage-total-tokens.sql"
+  alias_line = "  prev.value AS pop_total_tokens_prior,\n"
+  sql = sql_path.read_text(encoding="utf-8")
+  assert sql.count(alias_line) == 1
+  sql_path.write_text(sql.replace(alias_line, ""), encoding="utf-8")
+
+  with pytest.raises(ValueError, match="is not an output alias"):
+    generate_pbip.accept_oracle_changes(tmp_pbi, tmp_looker)
+  assert lock_path.read_bytes() == committed
+
+
+def test_accept_oracle_changes_recreates_a_deleted_lock(tmp_path):
+  generate_pbip = _load_pbi_module("generate_pbip")
+  tmp_pbi = _copy_spec(tmp_path)
+  committed = (tmp_pbi / _LOCK_REL).read_bytes()
+  (tmp_pbi / _LOCK_REL).unlink()
+
+  recorded = generate_pbip.accept_oracle_changes(tmp_pbi)
+  assert recorded == [f"MISSING: {_LOCK_REL}"]
+  assert (tmp_pbi / _LOCK_REL).read_bytes() == committed
+
+
+# ---------------------------------------------------------------------------
+# write_pbip_zip: a generated project missing a required file is never zipped
+# as if it had been configured.
+# ---------------------------------------------------------------------------
+
+_EXPR_KEY = "BQAA_Agent_Analytics.SemanticModel/definition/expressions.tmdl"
+_PBIP_KEY = "BQAA_Agent_Analytics.pbip"
+
+
+@pytest.mark.parametrize("missing_key", [_EXPR_KEY, _PBIP_KEY])
+def test_write_pbip_zip_refuses_a_project_missing_a_required_file(
+    tmp_path, monkeypatch, missing_key
+):
+  generate_pbip = _load_pbi_module("generate_pbip")
+  files = generate_pbip.generate_all()
+  assert missing_key in files
+  incomplete = {k: v for k, v in files.items() if k != missing_key}
+  monkeypatch.setattr(generate_pbip, "generate_all", lambda **_: incomplete)
+
+  out_zip = tmp_path / "nested" / "custom.zip"
+  with pytest.raises(FileNotFoundError, match="missing required file") as err:
+    generate_pbip.write_pbip_zip(out_zip, project="abcde-1")
+  assert missing_key in str(err.value)
+  # Nothing is created: no archive and no destination directory.
+  assert not out_zip.exists()
+  assert not out_zip.parent.exists()
+
+
+def test_output_zip_cli_reports_a_project_missing_expressions_tmdl(
+    tmp_path, monkeypatch, capsys
+):
+  generate_pbip = _load_pbi_module("generate_pbip")
+  files = generate_pbip.generate_all()
+  incomplete = {k: v for k, v in files.items() if k != _EXPR_KEY}
+  monkeypatch.setattr(generate_pbip, "generate_all", lambda **_: incomplete)
+
+  out_zip = tmp_path / "custom.zip"
+  assert generate_pbip.main(["--output-zip", str(out_zip)]) == 1
+  assert "expressions.tmdl" in capsys.readouterr().err
+  assert not out_zip.exists()
+
+
+def test_write_pbip_zip_still_writes_a_complete_project(tmp_path):
+  import zipfile
+
+  generate_pbip = _load_pbi_module("generate_pbip")
+  out_zip = tmp_path / "complete.zip"
+  generate_pbip.write_pbip_zip(out_zip, project="abcde-1")
+  with zipfile.ZipFile(out_zip) as zf:
+    assert len(zf.namelist()) == 118
+    assert f"BQAA_Agent_Analytics/{_EXPR_KEY}" in zf.namelist()
+
+
+def test_write_pbip_zip_refuses_oracle_sql_that_differs_from_the_lock(tmp_path):
+  generate_pbip = _load_pbi_module("generate_pbip")
+  tmp_pbi = _copy_spec(tmp_path)
+  tmp_looker = _copy_looker(tmp_path)
+  sql_path = tmp_looker / _TRACES_QUERY
+  sql_path.write_text(
+      sql_path.read_text(encoding="utf-8") + "-- edited after review\n",
+      encoding="utf-8",
+  )
+  out_zip = tmp_path / "out" / "custom.zip"
+  with pytest.raises(ValueError, match="ORACLE LOCK"):
+    generate_pbip.write_pbip_zip(
+        out_zip,
+        project="abcde-1",
+        power_bi_root=tmp_pbi,
+        looker_root=tmp_looker,
+    )
+  assert not out_zip.parent.exists()
+
+
+# ---------------------------------------------------------------------------
+# --print-sql reports an invalid identifier as a usage error, not a traceback.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "flag,value,message",
+    [
+        ("--project", "my-proj-123\n", "Invalid BigQuery project ID"),
+        ("--project", "BAD_PROJECT!", "Invalid BigQuery project ID"),
+        ("--dataset", "my_dataset\n", "Invalid BigQuery dataset ID"),
+        ("--dataset", "bad-dataset", "Invalid BigQuery dataset ID"),
+        ("--table", "my_table\n", "Invalid BigQuery table ID"),
+        ("--table", "-bad_table", "Invalid BigQuery table ID"),
+    ],
+)
+def test_print_sql_reports_an_invalid_identifier_as_a_usage_error(
+    capsys, flag, value, message
+):
+  generate_pbip = _load_pbi_module("generate_pbip")
+  with pytest.raises(SystemExit) as exc_info:
+    # `--flag=value` so a value starting with '-' is not read as another flag.
+    generate_pbip.main(
+        ["--print-sql", "--window-end", "2026-07-16", f"{flag}={value}"]
+    )
+  assert exc_info.value.code == 2
+  captured = capsys.readouterr()
+  assert captured.out == ""
+  assert message in captured.err
+  assert "Traceback" not in captured.err
+
+
+def test_print_sql_cli_exits_2_with_a_message_for_a_newline_project():
+  proc = subprocess.run(
+      [
+          sys.executable,
+          str(POWER_BI / "tools" / "generate_pbip.py"),
+          "--print-sql",
+          "--window-end",
+          "2026-07-16",
+          "--project",
+          "my-proj-123\n",
+      ],
+      capture_output=True,
+      text=True,
+      check=False,
+  )
+  assert proc.returncode == 2, proc.stderr
+  assert proc.stdout == ""
+  assert "Invalid BigQuery project ID" in proc.stderr
+  assert "Traceback" not in proc.stderr

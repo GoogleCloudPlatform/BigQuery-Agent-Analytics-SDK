@@ -23,6 +23,18 @@ text-based Power BI project that is reviewable in plain diffs. A
 `--check` drift gate keeps the Power BI port from silently diverging
 when the Looker Studio contracts change.
 
+The DAX measures are written by hand against the oracle SQL, so editing an
+oracle query changes what a measure must compute without changing any
+generated file. `spec/oracle_lock.json` is a reviewed lock: it records the
+sha256 of every oracle query the model and report cite.
+`generate_pbip.py --check`, `--write`, `--output-zip`, and
+`validate_pbip.py` fail while a cited query differs from the lock. After you
+have reconciled the affected measures and fixtures, record the new digests on
+purpose with `generate_pbip.py --write --accept-oracle-changes`. Regeneration
+alone never moves the lock (the `bqaa_oracle_sha256` annotation on each
+measure is derived and refreshes with every regeneration, so it is not the
+review).
+
 ### What you get
 
 An 8-page Power BI report — Token Consumption, Agent & Sessions, Tool
@@ -170,7 +182,7 @@ range.
 
 ### Option 0 — 1-click Web Configurator or CLI `.zip` packager
 
-Open the browser-based **Power BI Web Configurator** (`dashboards/power_bi/docs/index.html`, published to `/power-bi/` on GitHub Pages) to enter your `project.dataset.table` ID, preview all 8 dashboard pages interactively, and download a pre-configured `BQAA_Agent_Analytics_<project>_<dataset>_<table>.zip` archive with zero server-side processing.
+Open the browser-based **Power BI Web Configurator** (`dashboards/power_bi/docs/index.html`, published to `/power-bi/` on GitHub Pages) to enter your `project.dataset.table` ID, preview all 8 dashboard pages interactively, and download a pre-configured `BQAA_Agent_Analytics_<project>_<dataset>_<table>.zip` archive with zero server-side processing. **Copy setup link** stores your settings in the URL fragment (the part after `#`), which browsers never send to the server.
 
 Or generate the same pre-configured `.zip` archive from the CLI:
 

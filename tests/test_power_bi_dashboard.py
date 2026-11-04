@@ -19,6 +19,8 @@ Schema-dependent tests run only when BQAA_POWER_BI_SCHEMAS_DIR is set; a guard
 test verifies the CI workflow cannot silently skip them.
 """
 
+import hashlib
+import http.server
 import importlib.util
 import json
 import os
@@ -26,6 +28,9 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import threading
+import urllib.parse
+import urllib.request
 
 import pytest
 import yaml
@@ -931,6 +936,301 @@ class TestCheckCanFail:
 
 
 # ---------------------------------------------------------------------------
+# Reviewed oracle lock (spec/oracle_lock.json): the committed record of the
+# oracle SQL the DAX measures were last reconciled with.  Regenerating the
+# model must never move it; only --accept-oracle-changes does.
+# ---------------------------------------------------------------------------
+
+_LOCK_REL = "spec/oracle_lock.json"
+_TRACES_QUERY = "oracle/queries/usage-total-traces.sql"
+
+
+def _copy_dashboards(tmp_path):
+  """Copies both dashboard trees into a throwaway repo layout.
+
+  The tools find their inputs relative to their own location, so the CLI can
+  be run from the copy without touching the checkout.
+  """
+  import shutil
+
+  ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
+  dashboards = tmp_path / "dashboards"
+  shutil.copytree(POWER_BI, dashboards / "power_bi", ignore=ignore)
+  shutil.copytree(LOOKER, dashboards / "looker_studio", ignore=ignore)
+  return dashboards / "power_bi", dashboards / "looker_studio"
+
+
+def _edit_traces_query(looker_root):
+  """Changes what the traces oracle counts, as a reviewer would object to."""
+  query_path = looker_root / _TRACES_QUERY
+  sql = query_path.read_text(encoding="utf-8")
+  assert sql.count("COUNT(DISTINCT trace_id)") == 2
+  query_path.write_text(
+      sql.replace("COUNT(DISTINCT trace_id)", "COUNT(DISTINCT session_id)"),
+      encoding="utf-8",
+  )
+
+
+def _tree_digest(root):
+  digest = hashlib.sha256()
+  for path in sorted(root.rglob("*")):
+    if path.is_file() and "__pycache__" not in path.parts:
+      digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+      digest.update(b"\0")
+      digest.update(path.read_bytes())
+      digest.update(b"\0")
+  return digest.hexdigest()
+
+
+def _run_generator(power_bi_root, *args):
+  return subprocess.run(
+      [
+          sys.executable,
+          str(power_bi_root / "tools" / "generate_pbip.py"),
+          *args,
+      ],
+      cwd=str(power_bi_root.parent.parent),
+      capture_output=True,
+      text=True,
+      env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
+      check=False,
+  )
+
+
+class TestOracleLock:
+  """An edited oracle query fails every gate until a person accepts it."""
+
+  def test_clean_tree_matches_the_lock(self):
+    _skip_if_not_generated()
+    gen_mod = _load_tool_module("generate_pbip")
+    val_mod = _load_tool_module("validate_pbip")
+    assert gen_mod.oracle_lock_problems(POWER_BI, LOOKER) == []
+    assert val_mod.validate_parity(power_bi_root=POWER_BI) == []
+
+  def test_edited_oracle_query_is_reported_by_the_check_and_the_validator(
+      self, tmp_path
+  ):
+    _skip_if_not_generated()
+    gen_mod = _load_tool_module("generate_pbip")
+    val_mod = _load_tool_module("validate_pbip")
+    pbi, looker = _copy_dashboards(tmp_path)
+    # Control: the copy is clean until the query is edited.
+    assert gen_mod.check_generated_files(pbi, looker) == []
+    assert val_mod.validate_parity(power_bi_root=pbi, looker_root=looker) == []
+
+    _edit_traces_query(looker)
+    expected = f"ORACLE LOCK: {_TRACES_QUERY} changed since it was reviewed"
+    diffs = gen_mod.check_generated_files(pbi, looker)
+    assert diffs[0].startswith(expected), diffs
+    errors = val_mod.validate_parity(power_bi_root=pbi, looker_root=looker)
+    assert any(e.startswith(expected) for e in errors), errors
+
+  def test_regenerating_the_model_does_not_clear_the_lock(self, tmp_path):
+    """Regenerating every file from the edited SQL must still be reported.
+
+    The per-measure digest follows the SQL on every regeneration, so on its
+    own it only proves the model was regenerated.  The lock is what records
+    that a person looked at the new SQL.
+    """
+    _skip_if_not_generated()
+    gen_mod = _load_tool_module("generate_pbip")
+    val_mod = _load_tool_module("validate_pbip")
+    pbi, looker = _copy_dashboards(tmp_path)
+    _edit_traces_query(looker)
+
+    regenerated = gen_mod.generate_all(pbi, looker, enforce_oracle_lock=False)
+    for rel_path, text in regenerated.items():
+      target = pbi / rel_path
+      target.parent.mkdir(parents=True, exist_ok=True)
+      with open(target, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+    diffs = gen_mod.check_generated_files(pbi, looker)
+    assert diffs, "regenerated files must not be enough to pass the check"
+    # Every generated file is now in sync; only the lock disagrees.
+    assert all(d.startswith("ORACLE LOCK:") for d in diffs), diffs
+    errors = val_mod.validate_parity(power_bi_root=pbi, looker_root=looker)
+    assert any(e.startswith("ORACLE LOCK:") for e in errors), errors
+
+  def test_generation_refuses_an_edited_query_and_writes_nothing(
+      self, tmp_path
+  ):
+    _skip_if_not_generated()
+    gen_mod = _load_tool_module("generate_pbip")
+    pbi, looker = _copy_dashboards(tmp_path)
+    _edit_traces_query(looker)
+    before = _tree_digest(pbi)
+    oracle_lock_error = gen_mod.pbip_common.OracleLockError
+
+    with pytest.raises(oracle_lock_error, match="--accept-oracle-changes"):
+      gen_mod.generate_all(pbi, looker)
+    with pytest.raises(oracle_lock_error, match="ORACLE LOCK"):
+      gen_mod.write_generated_files(pbi, looker)
+    out_zip = tmp_path / "out" / "custom.zip"
+    with pytest.raises(oracle_lock_error, match="ORACLE LOCK"):
+      gen_mod.write_pbip_zip(
+          out_zip, project="abcde-1", power_bi_root=pbi, looker_root=looker
+      )
+    assert _tree_digest(pbi) == before
+    assert not out_zip.parent.exists()
+
+  def test_accepting_the_change_rewrites_the_lock_and_the_annotations(
+      self, tmp_path
+  ):
+    _skip_if_not_generated()
+    common = _load_tool_module("pbip_common")
+    gen_mod = _load_tool_module("generate_pbip")
+    val_mod = _load_tool_module("validate_pbip")
+    pbi, looker = _copy_dashboards(tmp_path)
+    locked_before = common.read_oracle_lock(POWER_BI / _LOCK_REL)
+    events_path = (
+        pbi
+        / "BQAA_Agent_Analytics.SemanticModel"
+        / "definition"
+        / "tables"
+        / "events_v1.tmdl"
+    )
+    events_before = events_path.read_text(encoding="utf-8")
+
+    _edit_traces_query(looker)
+    gen_mod.write_generated_files(pbi, looker, accept_oracle=True)
+
+    assert gen_mod.check_generated_files(pbi, looker) == []
+    assert val_mod.validate_parity(power_bi_root=pbi, looker_root=looker) == []
+    locked_after = common.read_oracle_lock(pbi / _LOCK_REL)
+    assert sorted(locked_after) == sorted(locked_before)
+    assert {q for q in locked_after if locked_after[q] != locked_before[q]} == {
+        _TRACES_QUERY
+    }
+    # The derived per-measure annotations followed the accepted SQL.
+    assert events_path.read_text(encoding="utf-8") != events_before
+
+  def test_missing_lock_is_reported_and_recreated_only_on_request(
+      self, tmp_path
+  ):
+    _skip_if_not_generated()
+    gen_mod = _load_tool_module("generate_pbip")
+    val_mod = _load_tool_module("validate_pbip")
+    pbi, looker = _copy_dashboards(tmp_path)
+    committed = (pbi / _LOCK_REL).read_bytes()
+    (pbi / _LOCK_REL).unlink()
+
+    assert gen_mod.check_generated_files(pbi, looker) == [
+        f"MISSING: {_LOCK_REL}"
+    ]
+    errors = val_mod.validate_parity(power_bi_root=pbi, looker_root=looker)
+    assert f"MISSING: {_LOCK_REL}" in errors, errors
+    with pytest.raises(ValueError, match=f"MISSING: {_LOCK_REL}"):
+      gen_mod.write_generated_files(pbi, looker)
+    assert not (pbi / _LOCK_REL).exists()
+
+    gen_mod.write_generated_files(pbi, looker, accept_oracle=True)
+    assert (pbi / _LOCK_REL).read_bytes() == committed
+    assert gen_mod.check_generated_files(pbi, looker) == []
+
+  @pytest.mark.parametrize(
+      "text",
+      [
+          "{",
+          "[]",
+          '{"version": 2, "algorithm": "sha256", "oracle_queries": {}}',
+          '{"version": 1, "algorithm": "sha256", "oracle_queries": {}}',
+          '{"version": 1, "algorithm": "sha256",'
+          ' "oracle_queries": {"oracle/queries/a.sql": "not-a-digest"}}',
+      ],
+  )
+  def test_unusable_lock_is_reported(self, tmp_path, text):
+    _skip_if_not_generated()
+    gen_mod = _load_tool_module("generate_pbip")
+    pbi, looker = _copy_dashboards(tmp_path)
+    (pbi / _LOCK_REL).write_text(text, encoding="utf-8")
+    diffs = gen_mod.check_generated_files(pbi, looker)
+    assert len(diffs) == 1, diffs
+    assert diffs[0].startswith(f"ORACLE LOCK: {_LOCK_REL} is unusable: ")
+
+  def test_lock_entries_must_match_the_cited_queries_exactly(self, tmp_path):
+    _skip_if_not_generated()
+    gen_mod = _load_tool_module("generate_pbip")
+    pbi, looker = _copy_dashboards(tmp_path)
+    lock = json.loads((pbi / _LOCK_REL).read_text(encoding="utf-8"))
+    del lock["oracle_queries"][_TRACES_QUERY]
+    lock["oracle_queries"]["oracle/queries/retired.sql"] = "0" * 64
+    (pbi / _LOCK_REL).write_text(json.dumps(lock), encoding="utf-8")
+
+    diffs = gen_mod.check_generated_files(pbi, looker)
+    assert diffs == [
+        f"ORACLE LOCK: {_TRACES_QUERY} is not recorded in {_LOCK_REL}",
+        f"ORACLE LOCK: {_LOCK_REL} records oracle/queries/retired.sql,"
+        " which no chart or measure cites",
+    ]
+
+  def test_cli_check_write_and_accept_flow(self, tmp_path):
+    _skip_if_not_generated()
+    pbi, looker = _copy_dashboards(tmp_path)
+    clean = _run_generator(pbi, "--check")
+    assert clean.returncode == 0, clean.stderr
+    _edit_traces_query(looker)
+
+    check = _run_generator(pbi, "--check")
+    assert check.returncode == 1
+    assert "PBIP drift detected" in check.stderr
+    assert (
+        f"ORACLE LOCK: {_TRACES_QUERY} changed since it was reviewed"
+        in check.stderr
+    )
+    assert "generate_pbip.py --write --accept-oracle-changes" in check.stderr
+
+    before = _tree_digest(pbi)
+    write = _run_generator(pbi, "--write")
+    assert write.returncode == 1
+    assert "ORACLE LOCK" in write.stderr
+    assert "--accept-oracle-changes" in write.stderr
+    assert _tree_digest(pbi) == before
+
+    accept = _run_generator(pbi, "--write", "--accept-oracle-changes")
+    assert accept.returncode == 0, accept.stderr
+    assert f"Re-recorded {_LOCK_REL} (1 change(s))." in accept.stdout
+    assert _TRACES_QUERY in accept.stdout
+    after = _run_generator(pbi, "--check")
+    assert after.returncode == 0, after.stderr
+
+  @pytest.mark.parametrize(
+      "mode", [["--check"], ["--print-sql", "--window-end", "2026-07-16"]]
+  )
+  def test_accept_flag_is_only_valid_with_write(self, mode):
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(POWER_BI / "tools" / "generate_pbip.py"),
+            *mode,
+            "--accept-oracle-changes",
+        ],
+        capture_output=True,
+        text=True,
+        env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
+        check=False,
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "--accept-oracle-changes is only valid with --write" in proc.stderr
+
+  def test_readme_describes_the_reviewed_lock(self):
+    readme = (POWER_BI / "README.md").read_text(encoding="utf-8")
+    paragraphs = [
+        " ".join(paragraph.split()) for paragraph in readme.split("\n\n")
+    ]
+    (lock_doc,) = [p for p in paragraphs if "spec/oracle_lock.json" in p]
+    for gate in (
+        "--check",
+        "--write",
+        "--output-zip",
+        "validate_pbip.py",
+        "--accept-oracle-changes",
+    ):
+      assert gate in lock_doc, gate
+    assert "Regeneration alone never moves the lock" in lock_doc
+
+
+# ---------------------------------------------------------------------------
 # Schema lock integrity tests
 # ---------------------------------------------------------------------------
 
@@ -1153,7 +1453,6 @@ class TestDocumentation:
 
   def test_web_configurator_files_and_js_pkzip(self, tmp_path):
     """Verify dashboards/power_bi/docs/ configurator files and pure-JS PKZIP builder."""
-    import shutil
     import zipfile
 
     docs_dir = POWER_BI / "docs"
@@ -1185,19 +1484,7 @@ class TestDocumentation:
     assert "validatePublishToWebUrl" not in mjs_text
     assert 'params.get("embed")' not in mjs_text
 
-    import glob
-
-    node_bin = shutil.which("node")
-    if not node_bin:
-      nvm_nodes = sorted(
-          glob.glob(str(Path.home() / ".nvm/versions/node/*/bin/node"))
-          + glob.glob("/usr/local/nvm/versions/node/*/bin/node")
-      )
-      if nvm_nodes:
-        node_bin = nvm_nodes[-1]
-    assert (
-        node_bin is not None
-    ), "node binary required for configurator.mjs PKZIP test"
+    node_bin = _node_binary()
 
     out_zip = tmp_path / "browser_out.zip"
     script = f"""
@@ -1245,6 +1532,687 @@ fs.writeFileSync({str(out_zip)!r}, zipBytes);
       assert 'expression BQAA_WindowEndDate = "2026-07-16" meta' in expr_text
       assert "expression BQAA_LookbackDays = 14 meta" in expr_text
       assert "expression BQAA_UseStorageApi = false meta" in expr_text
+
+
+# ---------------------------------------------------------------------------
+# Web configurator: the shipped configurator.mjs and pbip-bundle.js run under
+# Node, so these tests exercise what the browser runs (no re-implementation).
+# ---------------------------------------------------------------------------
+
+_EXPRESSIONS_KEY = (
+    "BQAA_Agent_Analytics.SemanticModel/definition/expressions.tmdl"
+)
+_BQAA_PARAMETERS = (
+    "BQAA_ProjectId",
+    "BQAA_DatasetId",
+    "BQAA_TableId",
+    "BQAA_BillingProjectId",
+    "BQAA_WindowEndDate",
+    "BQAA_LookbackDays",
+    "BQAA_UseStorageApi",
+)
+_CUSTOM_CONFIG = {
+    "tableId": "my-org-proj-99.prod_telemetry.agent_events",
+    "billingProject": "my-billing-proj-99",
+    "windowEndDate": "2026-07-16",
+    "lookbackDays": 14,
+    "useStorageApi": False,
+}
+_CUSTOM_IDENTIFIERS = (
+    "my-org-proj-99",
+    "prod_telemetry",
+    "agent_events",
+    "my-billing-proj-99",
+)
+
+# Loads the real module and the real bundle.  The module is imported before
+# globalThis.window exists, so its browser-only auto-start stays inactive.
+_NODE_PRELUDE = r"""
+import crypto from "node:crypto";
+import fs from "node:fs";
+import vm from "node:vm";
+import * as cfg from "__CONFIGURATOR_URI__";
+
+const sandbox = { window: {}, Object };
+vm.runInNewContext(fs.readFileSync("__BUNDLE_PATH__", "utf8"), sandbox);
+const bundle = sandbox.window.BQAA_PBIP_BUNDLE;
+const EXPR_KEY =
+  "BQAA_Agent_Analytics.SemanticModel/definition/expressions.tmdl";
+const emit = (value) => process.stdout.write(JSON.stringify(value));
+const attempt = (fn) => {
+  try {
+    return { ok: true, value: fn() };
+  } catch (err) {
+    return { ok: false, message: String(err && err.message) };
+  }
+};
+const sha256 = (bytes) =>
+  crypto.createHash("sha256").update(bytes).digest("hex");
+"""
+
+# A minimal DOM: just enough surface for initPowerBIConfigurator to run its
+# real event handlers, with the clipboard and Blob downloads captured.
+_NODE_PAGE = r"""
+function makeElement(id) {
+  const listeners = {};
+  const attributes = {};
+  const el = {
+    id,
+    value: "",
+    checked: false,
+    disabled: false,
+    textContent: "",
+    dataset: {},
+    children: [],
+    clicks: 0,
+    removed: false,
+    addEventListener(type, fn) {
+      (listeners[type] ??= []).push(fn);
+    },
+    setAttribute(name, value) {
+      attributes[name] = String(value);
+    },
+    removeAttribute(name) {
+      delete attributes[name];
+    },
+    getAttribute(name) {
+      return attributes[name] ?? null;
+    },
+    appendChild(child) {
+      el.children.push(child);
+      return child;
+    },
+    querySelectorAll() {
+      return [];
+    },
+    remove() {
+      el.removed = true;
+    },
+    click() {
+      el.clicks += 1;
+    },
+    async fire(type) {
+      for (const fn of listeners[type] ?? []) {
+        await fn({ type, target: el });
+      }
+    },
+  };
+  return el;
+}
+
+const PAGE_IDS = [
+  "configurator", "table-id", "billing-project", "window-end-date",
+  "lookback-days", "use-storage-api", "use-demo-fixture", "download-pbip",
+  "copy-link", "form-status", "cli-zip-cmd", "fabric-deploy-cmd",
+  "table-id-error", "billing-project-error", "window-end-date-error",
+  "lookback-days-error",
+];
+
+function mountPage(href, pageBundle = bundle) {
+  const els = Object.fromEntries(PAGE_IDS.map((id) => [id, makeElement(id)]));
+  els["window-end-date"].value = "auto";
+  els["lookback-days"].value = "90";
+  els["use-storage-api"].checked = true;
+  const page = { els, blobs: [], copied: [], anchors: [] };
+  const doc = {
+    getElementById: (id) => els[id] ?? null,
+    createElement: () => {
+      const created = makeElement("created");
+      page.anchors.push(created);
+      return created;
+    },
+    body: makeElement("body"),
+  };
+  globalThis.location = new URL(href);
+  globalThis.window = { BQAA_PBIP_BUNDLE: pageBundle };
+  for (const [name, value] of [
+    ["createObjectURL", (blob) => `blob:test/${page.blobs.push(blob)}`],
+    ["revokeObjectURL", () => {}],
+  ]) {
+    Object.defineProperty(URL, name, { configurable: true, writable: true, value });
+  }
+  globalThis.setTimeout = () => ({ unref() {} });
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    writable: true,
+    value: { clipboard: { writeText: async (text) => page.copied.push(text) } },
+  });
+  cfg.initPowerBIConfigurator(doc);
+  return page;
+}
+
+async function fillForm(page, form) {
+  const { els } = page;
+  els["table-id"].value = form.table;
+  els["billing-project"].value = form.billing ?? "";
+  els["window-end-date"].value = form.windowEnd ?? "auto";
+  els["lookback-days"].value = String(form.lookback ?? 90);
+  els["use-storage-api"].checked = form.storageApi ?? true;
+  await els["table-id"].fire("input");
+}
+
+const fields = (page) => ({
+  table: page.els["table-id"].value,
+  billing: page.els["billing-project"].value,
+  windowEnd: page.els["window-end-date"].value,
+  lookback: page.els["lookback-days"].value,
+  storageApi: page.els["use-storage-api"].checked,
+  downloadDisabled: page.els["download-pbip"].disabled,
+  status: page.els["form-status"].textContent,
+  statusKind: page.els["form-status"].dataset.kind,
+});
+"""
+
+
+def _node_binary():
+  import glob
+  import shutil
+
+  node_bin = shutil.which("node")
+  if not node_bin:
+    nvm_nodes = sorted(
+        glob.glob(str(Path.home() / ".nvm/versions/node/*/bin/node"))
+        + glob.glob("/usr/local/nvm/versions/node/*/bin/node")
+    )
+    if nvm_nodes:
+      node_bin = nvm_nodes[-1]
+  assert (
+      node_bin is not None
+  ), "node binary required for the configurator.mjs tests"
+  return node_bin
+
+
+def _run_node(body, *, data=None, page=False):
+  """Runs `body` after the prelude and returns the JSON it emitted."""
+  docs_dir = POWER_BI / "docs"
+  prelude = _NODE_PRELUDE.replace(
+      "__CONFIGURATOR_URI__", (docs_dir / "configurator.mjs").as_uri()
+  ).replace('"__BUNDLE_PATH__"', json.dumps(str(docs_dir / "pbip-bundle.js")))
+  script = "\n".join(
+      [
+          prelude,
+          f"const data = {json.dumps(data)};",
+          _NODE_PAGE if page else "",
+          body,
+      ]
+  )
+  proc = subprocess.run(
+      [_node_binary(), "--input-type=module", "-e", script],
+      capture_output=True,
+      text=True,
+      check=False,
+      timeout=120,
+  )
+  assert proc.returncode == 0, f"Node script failed:\n{proc.stderr}"
+  return json.loads(proc.stdout)
+
+
+def _without_declaration(text, name):
+  lines = text.split("\n")
+  idx = next(
+      i
+      for i, line in enumerate(lines)
+      if line.startswith(f"expression {name} = ")
+  )
+  return "\n".join(lines[:idx] + lines[idx + 1 :])
+
+
+def _with_duplicate_declaration(text, name):
+  lines = text.split("\n")
+  idx = next(
+      i
+      for i, line in enumerate(lines)
+      if line.startswith(f"expression {name} = ")
+  )
+  return "\n".join(lines[: idx + 1] + [lines[idx]] + lines[idx + 1 :])
+
+
+class TestWebConfigurator:
+  """The browser packager and the setup link, as a visitor would use them."""
+
+  # -- Duplicate or missing declarations in the bundled expressions.tmdl -----
+
+  def test_rewrite_rejects_a_missing_or_duplicated_declaration(self):
+    """Each BQAA_* parameter must be declared exactly once, as in Python."""
+    gen_mod = _load_tool_module("generate_pbip")
+    out = _run_node(
+        r"""
+const base = bundle[EXPR_KEY];
+const lines = base.split("\n");
+const cases = {};
+for (const name of data.names) {
+  const idx = lines.findIndex((l) => l.startsWith(`expression ${name} = `));
+  const dropped = [...lines.slice(0, idx), ...lines.slice(idx + 1)].join("\n");
+  const doubled = [
+    ...lines.slice(0, idx + 1), lines[idx], ...lines.slice(idx + 1),
+  ].join("\n");
+  const packaged = (text) =>
+    Object.keys(
+      cfg.buildCustomPbipBundle({ ...bundle, [EXPR_KEY]: text }, data.config),
+    ).length;
+  cases[name] = {
+    declared: idx >= 0,
+    dropped: attempt(() => cfg.rewriteExpressionsTmdl(dropped, data.config)),
+    doubled: attempt(() => cfg.rewriteExpressionsTmdl(doubled, data.config)),
+    droppedBundle: attempt(() => packaged(dropped)),
+    doubledBundle: attempt(() => packaged(doubled)),
+  };
+}
+emit({ base, cases, intact: attempt(() => cfg.buildCustomPbipBundle(bundle, data.config)[EXPR_KEY].length) });
+""",
+        data={"names": list(_BQAA_PARAMETERS), "config": _CUSTOM_CONFIG},
+    )
+
+    assert out["intact"]["ok"] is True
+    python_kwargs = {
+        "project": "my-org-proj-99",
+        "dataset": "prod_telemetry",
+        "table": "agent_events",
+        "billing_project": "my-billing-proj-99",
+        "window_end": "2026-07-16",
+        "lookback_days": 14,
+        "use_storage_api": False,
+    }
+    for name in _BQAA_PARAMETERS:
+      case = out["cases"][name]
+      assert case["declared"], f"{name} is not declared in the bundle"
+      for key, count, text in (
+          ("dropped", 0, _without_declaration(out["base"], name)),
+          ("doubled", 2, _with_duplicate_declaration(out["base"], name)),
+      ):
+        message = (
+            f"Expected exactly 1 declaration for {name} in expressions.tmdl,"
+            f" found {count}"
+        )
+        # Rewriting and the full packaging path both refuse the bundle ...
+        assert case[key] == {"ok": False, "message": message}, (name, key)
+        assert case[f"{key}Bundle"] == {"ok": False, "message": message}, (
+            name,
+            key,
+        )
+        # ... with the same words the Python generator uses.
+        with pytest.raises(ValueError) as python_error:
+          gen_mod.rewrite_expressions_parameters(text, **python_kwargs)
+        assert str(python_error.value) == message
+
+  @pytest.mark.parametrize(
+      "config,python_kwargs",
+      [
+          (
+              _CUSTOM_CONFIG,
+              {
+                  "project": "my-org-proj-99",
+                  "dataset": "prod_telemetry",
+                  "table": "agent_events",
+                  "billing_project": "my-billing-proj-99",
+                  "window_end": "2026-07-16",
+                  "lookback_days": 14,
+                  "use_storage_api": False,
+              },
+          ),
+          (
+              {"tableId": "my-org-proj-99.prod_telemetry.agent_events"},
+              {
+                  "project": "my-org-proj-99",
+                  "dataset": "prod_telemetry",
+                  "table": "agent_events",
+              },
+          ),
+          (
+              {"tableId": "`my-org-proj-99:prod_telemetry.agent_events`;"},
+              {
+                  "project": "my-org-proj-99",
+                  "dataset": "prod_telemetry",
+                  "table": "agent_events",
+              },
+          ),
+          (
+              {
+                  "tableId": "abcde-1.ds_1.tbl-1",
+                  "billingProject": "other-billing-1",
+                  "windowEndDate": "auto",
+                  "lookbackDays": 366,
+                  "useStorageApi": True,
+              },
+              {
+                  "project": "abcde-1",
+                  "dataset": "ds_1",
+                  "table": "tbl-1",
+                  "billing_project": "other-billing-1",
+                  "window_end": "auto",
+                  "lookback_days": 366,
+                  "use_storage_api": True,
+              },
+          ),
+          (
+              {
+                  "tableId": "abcde-1.ds_1.tbl-1",
+                  "windowEndDate": "2028-02-29",
+                  "lookbackDays": 1,
+              },
+              {
+                  "project": "abcde-1",
+                  "dataset": "ds_1",
+                  "table": "tbl-1",
+                  "window_end": "2028-02-29",
+                  "lookback_days": 1,
+              },
+          ),
+      ],
+  )
+  def test_browser_rewrite_matches_the_python_generator(
+      self, config, python_kwargs
+  ):
+    gen_mod = _load_tool_module("generate_pbip")
+    out = _run_node(
+        r"""
+const base = bundle[EXPR_KEY];
+emit({
+  base,
+  rewritten: cfg.rewriteExpressionsTmdl(base, data.config),
+  viaBundle: cfg.buildCustomPbipBundle(bundle, data.config)[EXPR_KEY],
+});
+""",
+        data={"config": config},
+    )
+    expected = gen_mod.rewrite_expressions_parameters(
+        out["base"], **python_kwargs
+    )
+    assert out["rewritten"] == expected
+    assert out["viaBundle"] == expected
+    assert out["rewritten"] != out["base"] or config["tableId"] == (
+        "my-org-proj-99.prod_telemetry.agent_events"
+    )
+
+  def test_download_refuses_a_bundle_with_a_duplicated_declaration(self):
+    """The Download button reports the malformed bundle and ships no ZIP."""
+    gen_mod = _load_tool_module("generate_pbip")
+    del gen_mod  # Only used to fail fast if the generator cannot be loaded.
+    out = _run_node(
+        r"""
+const lines = bundle[EXPR_KEY].split("\n");
+const idx = lines.findIndex((l) => l.startsWith("expression BQAA_LookbackDays = "));
+const doubled = [
+  ...lines.slice(0, idx + 1), lines[idx], ...lines.slice(idx + 1),
+].join("\n");
+
+const good = mountPage(data.href);
+await fillForm(good, data.form);
+await good.els["download-pbip"].fire("click");
+
+const bad = mountPage(data.href, { ...bundle, [EXPR_KEY]: doubled });
+await fillForm(bad, data.form);
+const before = fields(bad);
+await bad.els["download-pbip"].fire("click");
+emit({
+  good: { blobs: good.blobs.length, anchors: good.anchors.length, ...fields(good) },
+  badBefore: before,
+  bad: { blobs: bad.blobs.length, anchors: bad.anchors.length, ...fields(bad) },
+});
+""",
+        data={
+            "href": "http://127.0.0.1/power-bi/",
+            "form": {"table": "my-org-proj-99.prod_telemetry.agent_events"},
+        },
+        page=True,
+    )
+    assert out["good"]["blobs"] == 1
+    assert out["good"]["statusKind"] == "ready"
+    assert out["good"]["status"].startswith("Downloaded BQAA_Agent_Analytics_")
+    # Control: the page is ready to download before the click.
+    assert out["badBefore"]["statusKind"] == "ready"
+    assert out["badBefore"]["downloadDisabled"] is False
+    assert out["bad"]["blobs"] == 0
+    assert out["bad"]["anchors"] == 0
+    assert out["bad"]["statusKind"] == "error"
+    assert out["bad"]["status"] == (
+        "Expected exactly 1 declaration for BQAA_LookbackDays in"
+        " expressions.tmdl, found 2"
+    )
+
+  # -- Setup links keep the configuration out of anything sent to a server ---
+
+  def test_setup_link_puts_the_configuration_in_the_fragment_only(self):
+    out = _run_node(
+        r"""
+emit({
+  full: cfg.buildSetupUrl(
+    data.config,
+    "http://127.0.0.1:8123/power-bi/?stale=1&project=old-project-1#old-fragment",
+  ),
+  minimal: cfg.buildSetupUrl(
+    { tableId: "abcde-1.ds_1.tbl-1" },
+    "https://example.test/power-bi/?x=1#y",
+  ),
+});
+""",
+        data={"config": _CUSTOM_CONFIG},
+    )
+    full = urllib.parse.urlsplit(out["full"])
+    assert (full.scheme, full.netloc, full.path) == (
+        "http",
+        "127.0.0.1:8123",
+        "/power-bi/",
+    )
+    assert full.query == ""
+    assert urllib.parse.parse_qs(full.fragment, strict_parsing=True) == {
+        "project": ["my-org-proj-99"],
+        "dataset": ["prod_telemetry"],
+        "table": ["agent_events"],
+        "billingProject": ["my-billing-proj-99"],
+        "windowEndDate": ["2026-07-16"],
+        "lookbackDays": ["14"],
+        "useStorageApi": ["false"],
+    }
+    request_part = out["full"].split("#", 1)[0]
+    for identifier in _CUSTOM_IDENTIFIERS:
+      assert identifier not in request_part
+      assert identifier in full.fragment
+    assert "old-project-1" not in out["full"]
+
+    minimal = urllib.parse.urlsplit(out["minimal"])
+    assert minimal.query == ""
+    assert urllib.parse.parse_qs(minimal.fragment, strict_parsing=True) == {
+        "project": ["abcde-1"],
+        "dataset": ["ds_1"],
+        "table": ["tbl-1"],
+    }
+
+  def test_copied_setup_link_never_sends_the_configuration_to_the_server(self):
+    """A loopback server records the request target a browser would send."""
+    seen = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+
+      def do_GET(self):  # pylint: disable=invalid-name
+        seen.append(self.path)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+      def log_message(self, *args):
+        del args
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+      page_url = f"http://127.0.0.1:{server.server_address[1]}/power-bi/"
+      out = _run_node(
+          r"""
+const page = mountPage(data.href);
+await fillForm(page, data.form);
+await page.els["copy-link"].fire("click");
+emit({ copied: page.copied, status: page.els["form-status"].textContent });
+""",
+          data={
+              "href": page_url,
+              "form": {
+                  "table": "my-org-proj-99.prod_telemetry.agent_events",
+                  "billing": "my-billing-proj-99",
+                  "windowEnd": "2026-07-16",
+                  "lookback": 14,
+                  "storageApi": False,
+              },
+          },
+          page=True,
+      )
+      assert len(out["copied"]) == 1
+      copied = out["copied"][0]
+      assert copied.startswith(page_url + "#")
+      assert urllib.request.Request(copied).selector == "/power-bi/"
+
+      # Bypass any proxy settings: the request must reach the loopback server.
+      opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+      with opener.open(copied, timeout=10) as response:
+        assert response.status == 200
+        response.read()
+    finally:
+      server.shutdown()
+      server.server_close()
+      thread.join(timeout=10)
+
+    assert seen == ["/power-bi/"]
+    for identifier in _CUSTOM_IDENTIFIERS:
+      assert identifier not in seen[0]
+    assert "never send" in out["status"]
+
+  def test_setup_link_round_trips_through_the_page_to_an_identical_zip(self):
+    out = _run_node(
+        r"""
+const first = mountPage(data.href);
+await fillForm(first, data.form);
+await first.els["copy-link"].fire("click");
+const copiedUrl = first.copied[0];
+
+const second = mountPage(copiedUrl);
+const hydrated = fields(second);
+await second.els["download-pbip"].fire("click");
+const pageZip = new Uint8Array(await second.blobs[0].arrayBuffer());
+const direct = cfg.buildPkZip(
+  cfg.buildCustomPbipBundle(bundle, data.config),
+  "BQAA_Agent_Analytics",
+);
+emit({
+  copiedUrl,
+  hydrated,
+  blobs: second.blobs.length,
+  blobType: second.blobs[0].type,
+  downloadName: second.anchors[0].download,
+  pageZipSha: sha256(pageZip),
+  directZipSha: sha256(direct),
+  zipBytes: pageZip.length,
+});
+""",
+        data={
+            "href": "http://127.0.0.1:8123/power-bi/?stale=1#old",
+            "config": _CUSTOM_CONFIG,
+            "form": {
+                "table": "my-org-proj-99.prod_telemetry.agent_events",
+                "billing": "my-billing-proj-99",
+                "windowEnd": "2026-07-16",
+                "lookback": 14,
+                "storageApi": False,
+            },
+        },
+        page=True,
+    )
+    assert urllib.parse.urlsplit(out["copiedUrl"]).query == ""
+    hydrated = out["hydrated"]
+    assert hydrated["table"] == "my-org-proj-99.prod_telemetry.agent_events"
+    assert hydrated["billing"] == "my-billing-proj-99"
+    assert hydrated["windowEnd"] == "2026-07-16"
+    assert hydrated["lookback"] == "14"
+    assert hydrated["storageApi"] is False
+    assert hydrated["downloadDisabled"] is False
+    assert hydrated["statusKind"] == "ready"
+    assert out["blobs"] == 1
+    assert out["blobType"] == "application/zip"
+    assert out["downloadName"] == (
+        "BQAA_Agent_Analytics_my-org-proj-99_prod_telemetry_agent_events.zip"
+    )
+    assert out["zipBytes"] > 0
+    assert out["pageZipSha"] == out["directZipSha"]
+
+  def test_query_string_setup_links_are_not_read(self):
+    """Old-style ?project=...&dataset=... links no longer configure the page."""
+    out = _run_node(
+        r"""
+emit({
+  legacy: fields(mountPage(data.legacy)),
+  fragment: fields(mountPage(data.fragment)),
+  tableId: fields(mountPage(data.tableId)),
+  invalid: fields(mountPage(data.invalid)),
+});
+""",
+        data={
+            "legacy": (
+                "http://127.0.0.1/power-bi/?project=my-org-proj-99"
+                "&dataset=prod_telemetry&table=agent_events"
+                "&billingProject=other-billing-1&windowEndDate=2026-07-16"
+                "&lookbackDays=14&useStorageApi=false"
+            ),
+            "fragment": (
+                "http://127.0.0.1/power-bi/#project=my-org-proj-99"
+                "&dataset=prod_telemetry&table=agent_events"
+                "&billingProject=other-billing-1&windowEndDate=2026-07-16"
+                "&lookbackDays=14&useStorageApi=false"
+            ),
+            "tableId": (
+                "http://127.0.0.1/power-bi/"
+                "#tableId=my-org-proj-99.prod_telemetry.agent_events"
+            ),
+            "invalid": (
+                "http://127.0.0.1/power-bi/#project=BAD_PROJECT"
+                "&dataset=prod_telemetry&table=agent_events"
+            ),
+        },
+        page=True,
+    )
+    legacy = out["legacy"]
+    assert legacy["table"] == ""
+    assert legacy["billing"] == ""
+    assert legacy["windowEnd"] == "auto"
+    assert legacy["lookback"] == "90"
+    assert legacy["storageApi"] is True
+    assert legacy["downloadDisabled"] is True
+
+    # Control: the same settings in the fragment do configure the page.
+    fragment = out["fragment"]
+    assert fragment["table"] == "my-org-proj-99.prod_telemetry.agent_events"
+    assert fragment["billing"] == "other-billing-1"
+    assert fragment["windowEnd"] == "2026-07-16"
+    assert fragment["lookback"] == "14"
+    assert fragment["storageApi"] is False
+    assert fragment["downloadDisabled"] is False
+
+    assert out["tableId"]["table"] == (
+        "my-org-proj-99.prod_telemetry.agent_events"
+    )
+    assert out["tableId"]["downloadDisabled"] is False
+    # A hydrated link still goes through validation.
+    assert out["invalid"]["statusKind"] == "error"
+    assert out["invalid"]["downloadDisabled"] is True
+
+  def test_docs_say_where_the_setup_link_keeps_its_settings(self):
+    docs_dir = POWER_BI / "docs"
+    index_text = " ".join(
+        (docs_dir / "index.html").read_text(encoding="utf-8").split()
+    )
+    assert "after the <code>#</code>" in index_text
+    assert "browsers never send to a server" in index_text
+    manual = " ".join(
+        (POWER_BI / "USER_MANUAL.md").read_text(encoding="utf-8").split()
+    )
+    assert "Copy setup link" in manual
+    assert "browsers never send to the server" in manual
+    readme = " ".join(
+        (POWER_BI / "README.md").read_text(encoding="utf-8").split()
+    )
+    assert "Copy setup link" in readme
+    assert "fragment" in readme
 
 
 # ---------------------------------------------------------------------------

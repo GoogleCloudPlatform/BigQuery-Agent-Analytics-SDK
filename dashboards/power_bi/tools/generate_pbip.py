@@ -281,17 +281,28 @@ def write_pbip_zip(
   all_files = generate_all(power_bi_root=power_bi_root, looker_root=looker_root)
   pbip_files = {k: v for k, v in all_files.items() if k != BUNDLE_REL_PATH}
   expr_key = f"{MODEL_FOLDER_NAME}/definition/expressions.tmdl"
-  if expr_key in pbip_files:
-    pbip_files[expr_key] = rewrite_expressions_parameters(
-        pbip_files[expr_key],
-        project=project,
-        dataset=dataset,
-        table=table,
-        billing_project=billing_project,
-        window_end=window_end,
-        lookback_days=lookback_days,
-        use_storage_api=use_storage_api,
+  # Fail before the destination is touched if the generated project lacks a
+  # file the archive cannot be correct without.  The parameter defaults are
+  # rewritten in expressions.tmdl, so a project without it must not be zipped
+  # as if it had been configured.
+  missing_files = sorted(
+      (set(build_core_files()) | {expr_key}) - set(pbip_files)
+  )
+  if missing_files:
+    raise FileNotFoundError(
+        "Generated project is missing required file(s): "
+        + ", ".join(missing_files)
     )
+  pbip_files[expr_key] = rewrite_expressions_parameters(
+      pbip_files[expr_key],
+      project=project,
+      dataset=dataset,
+      table=table,
+      billing_project=billing_project,
+      window_end=window_end,
+      lookback_days=lookback_days,
+      use_storage_api=use_storage_api,
+  )
 
   out_path = Path(output_zip)
   out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -313,8 +324,26 @@ def write_pbip_zip(
 def generate_all(
     power_bi_root: Path | None = None,
     looker_root: Path | None = None,
+    *,
+    enforce_oracle_lock: bool = True,
 ) -> dict[str, str]:
-  """Generate the complete PBIP file map (relative to power_bi_root -> text)."""
+  """Generate the complete PBIP file map (relative to power_bi_root -> text).
+
+  Args:
+    power_bi_root: The dashboards/power_bi directory (default: this checkout).
+    looker_root: The dashboards/looker_studio directory (default: this
+      checkout).
+    enforce_oracle_lock: Refuse to generate when the cited oracle SQL differs
+      from the reviewed lock (spec/oracle_lock.json).  Only the drift check and
+      the explicit --accept-oracle-changes flow turn this off.
+
+  Returns:
+    Relative path -> file text for every generated file.
+
+  Raises:
+    FileNotFoundError: A required spec is missing.
+    OracleLockError: The oracle SQL no longer matches the reviewed lock.
+  """
   pbi_root = Path(
       power_bi_root if power_bi_root is not None else pbip_common.POWER_BI_ROOT
   )
@@ -336,6 +365,12 @@ def generate_all(
       "semantic_model.yaml", power_bi_root=pbi_root
   )
   model_files = pbip_model.build_model(contracts, model_spec)
+  if enforce_oracle_lock:
+    lock_problems = pbip_common.oracle_lock_problems(
+        pbi_root, contracts, model_spec
+    )
+    if lock_problems:
+      raise pbip_common.OracleLockError(lock_problems)
   for k in sorted(model_files):
     norm_k = _normalize_item_key(k, MODEL_FOLDER_NAME)
     files[norm_k] = model_files[k]
@@ -377,14 +412,87 @@ def _list_existing_item_files(pbi_root: Path) -> set[str]:
   return found
 
 
-def write_generated_files(
+def oracle_lock_problems(
     power_bi_root: Path | None = None,
     looker_root: Path | None = None,
-) -> dict[str, str]:
-  """Write all generated files and remove stale files under item folders."""
+) -> list[str]:
+  """Compare the cited oracle SQL with the reviewed lock; empty when equal."""
   pbi_root = Path(
       power_bi_root if power_bi_root is not None else pbip_common.POWER_BI_ROOT
   )
+  lkr_root = Path(
+      looker_root if looker_root is not None else pbip_common.LOOKER_ROOT
+  )
+  contracts = pbip_common.load_contracts(looker_root=lkr_root)
+  model_spec = pbip_common.load_spec(
+      "semantic_model.yaml", power_bi_root=pbi_root
+  )
+  return pbip_common.oracle_lock_problems(pbi_root, contracts, model_spec)
+
+
+def accept_oracle_changes(
+    power_bi_root: Path | None = None,
+    looker_root: Path | None = None,
+) -> list[str]:
+  """Record the cited oracle SQL as reviewed; return what the lock gained.
+
+  This is the only code path that writes spec/oracle_lock.json.  It runs after
+  the rest of the model has been generated in memory, so a model that does not
+  build can never be locked in.
+
+  Args:
+    power_bi_root: The dashboards/power_bi directory (default: this checkout).
+    looker_root: The dashboards/looker_studio directory (default: this
+      checkout).
+
+  Returns:
+    One line per lock entry that changed (empty when nothing changed).
+  """
+  pbi_root = Path(
+      power_bi_root if power_bi_root is not None else pbip_common.POWER_BI_ROOT
+  )
+  lkr_root = Path(
+      looker_root if looker_root is not None else pbip_common.LOOKER_ROOT
+  )
+  generate_all(
+      power_bi_root=pbi_root, looker_root=lkr_root, enforce_oracle_lock=False
+  )
+  contracts = pbip_common.load_contracts(looker_root=lkr_root)
+  model_spec = pbip_common.load_spec(
+      "semantic_model.yaml", power_bi_root=pbi_root
+  )
+  current = pbip_common.current_oracle_digests(contracts, model_spec)
+  lock_path = pbi_root / pbip_common.ORACLE_LOCK_REL
+  changes = oracle_lock_problems(pbi_root, lkr_root)
+  lock_path.parent.mkdir(parents=True, exist_ok=True)
+  with open(lock_path, "w", encoding="utf-8", newline="\n") as f:
+    f.write(pbip_common.render_oracle_lock(current))
+  return changes
+
+
+def write_generated_files(
+    power_bi_root: Path | None = None,
+    looker_root: Path | None = None,
+    *,
+    accept_oracle: bool = False,
+) -> dict[str, str]:
+  """Write all generated files and remove stale files under item folders.
+
+  Args:
+    power_bi_root: The dashboards/power_bi directory (default: this checkout).
+    looker_root: The dashboards/looker_studio directory (default: this
+      checkout).
+    accept_oracle: Re-record the reviewed oracle lock first.  Without it the
+      write refuses to run when the oracle SQL differs from the lock.
+
+  Returns:
+    Relative path -> text for every file written.
+  """
+  pbi_root = Path(
+      power_bi_root if power_bi_root is not None else pbip_common.POWER_BI_ROOT
+  )
+  if accept_oracle:
+    accept_oracle_changes(power_bi_root=pbi_root, looker_root=looker_root)
   expected = generate_all(power_bi_root=pbi_root, looker_root=looker_root)
   existing = _list_existing_item_files(pbi_root)
 
@@ -421,10 +529,14 @@ def check_generated_files(
   if missing_specs:
     return missing_specs
 
-  expected = generate_all(power_bi_root=pbi_root, looker_root=looker_root)
-  existing = _list_existing_item_files(pbi_root)
+  # The reviewed oracle lock comes first so its findings survive the cap on
+  # the number of reported differences below.
+  diffs: list[str] = oracle_lock_problems(pbi_root, looker_root)
 
-  diffs: list[str] = []
+  expected = generate_all(
+      power_bi_root=pbi_root, looker_root=looker_root, enforce_oracle_lock=False
+  )
+  existing = _list_existing_item_files(pbi_root)
 
   for missing_rel in sorted(set(expected) - existing):
     diffs.append(f"MISSING: {missing_rel}")
@@ -517,7 +629,20 @@ def main(argv: Sequence[str] | None = None) -> int:
       default="true",
       help="Whether GoogleBigQuery.Database uses the Storage Read API (default: true).",
   )
+  parser.add_argument(
+      "--accept-oracle-changes",
+      action="store_true",
+      help=(
+          "With --write: record the current oracle SQL digests in"
+          f" {pbip_common.ORACLE_LOCK_REL} after reviewing that the DAX"
+          " measures still match them. Without this flag, --write and --check"
+          " fail when a cited oracle query differs from the lock."
+      ),
+  )
   args = parser.parse_args(argv)
+
+  if args.accept_oracle_changes and not args.write:
+    parser.error("--accept-oracle-changes is only valid with --write")
 
   if args.print_sql:
     pbip_model = _require_sibling_module("pbip_model")
@@ -532,13 +657,16 @@ def main(argv: Sequence[str] | None = None) -> int:
       parser.error(f"--lookback-days must be in 1..366, got {lookback}")
     current_start = anchor - datetime.timedelta(days=lookback - 1)
     load_start = current_start - datetime.timedelta(days=lookback)
-    sql = pbip_model.render_events_sql(
-        args.project,
-        args.dataset,
-        args.table,
-        load_start=load_start,
-        anchor=anchor,
-    )
+    try:
+      sql = pbip_model.render_events_sql(
+          args.project,
+          args.dataset,
+          args.table,
+          load_start=load_start,
+          anchor=anchor,
+      )
+    except ValueError as exc:
+      parser.error(str(exc))
     sys.stdout.write(sql)
     if not sql.endswith("\n"):
       sys.stdout.write("\n")
@@ -558,16 +686,24 @@ def main(argv: Sequence[str] | None = None) -> int:
       )
       return 0
     if args.write:
+      if args.accept_oracle_changes:
+        changes = accept_oracle_changes()
+        sys.stdout.write(
+            f"Re-recorded {pbip_common.ORACLE_LOCK_REL}"
+            f" ({len(changes)} change(s)).\n"
+        )
+        for change in changes:
+          sys.stdout.write(f"  {change}\n")
       write_generated_files()
       return 0
     if args.check:
       diffs = check_generated_files()
       if diffs:
-        sys.stderr.write(
-            f"PBIP drift detected ({len(diffs)} file(s) differ):\n"
-        )
+        sys.stderr.write(f"PBIP drift detected ({len(diffs)} difference(s)):\n")
         for item in diffs:
           sys.stderr.write(f"{item}\n")
+        if any(item.startswith("ORACLE LOCK:") for item in diffs):
+          sys.stderr.write(f"{pbip_common.ORACLE_LOCK_HINT}\n")
         return 1
       return 0
   except Exception as exc:  # pylint: disable=broad-except

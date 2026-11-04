@@ -930,6 +930,23 @@ def _check_measure_oracle_binding(
   return errors
 
 
+def _check_oracle_lock(pbi_root, looker_root):
+  """Compare the cited oracle SQL with the reviewed lock (spec/oracle_lock.json).
+
+  Unlike the per-measure digest annotation, which every regeneration refreshes,
+  the lock only moves when a person runs `generate_pbip.py --write
+  --accept-oracle-changes`, so an edited oracle query is reported here until
+  the DAX measures that cite it have been reconciled.
+  """
+  common = _pbip_common()
+  try:
+    contracts = common.load_contracts(looker_root=looker_root)
+    model_spec = common.load_spec("semantic_model.yaml", power_bi_root=pbi_root)
+    return common.oracle_lock_problems(pbi_root, contracts, model_spec)
+  except (OSError, ValueError, KeyError) as exc:
+    return [f"oracle lock could not be evaluated: {exc}"]
+
+
 def validate_parity(power_bi_root=None, looker_root=None):
   """Check chart_manifest ↔ visuals ↔ measures ↔ oracle parity."""
   errors = []
@@ -1156,6 +1173,7 @@ def validate_parity(power_bi_root=None, looker_root=None):
         measure_oracle_queries[m_entry["name"]] = list(
             m_entry.get("oracle_queries") or []
         )
+    errors.extend(_check_oracle_lock(pbi_root, looker))
 
   for page_dir in sorted(report_pages_dir.iterdir()):
     if not page_dir.is_dir():

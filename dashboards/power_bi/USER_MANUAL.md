@@ -41,6 +41,8 @@ You need four things:
 3. Click **Download pre-configured PBIP (.zip)** to download `BQAA_Agent_Analytics_<project>_<dataset>_<table>.zip` with your BigQuery parameters already baked into `expressions.tmdl`.
 4. Extract the `.zip` and open `BQAA_Agent_Analytics.pbip` in Power BI Desktop (Developer Mode enabled), or deploy to a Power BI / Fabric workspace.
 
+To share your settings with a teammate, click **Copy setup link**. The link keeps them in the part of the address after the `#`, which browsers never send to the server.
+
 You can also generate the same pre-configured `.zip` bundle from the CLI:
 
 ```bash
