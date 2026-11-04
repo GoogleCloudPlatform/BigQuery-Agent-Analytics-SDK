@@ -44,23 +44,28 @@ logger.log_event(
 )
 ```
 
-## Quickstart (Claude Code plugin)
+## Quickstart (Claude Code plugins & mods)
 
-If you run Claude Code, the
-[Claude Code plugin artifact](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/plugins/claude_code) wires up all
-nine hooks for you. Install via the marketplace catalog this repo
-serves at [`/.claude-plugin/marketplace.json`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/.claude-plugin/marketplace.json):
+For coding-agent tracing in Claude Code, official plugins are maintained and published from the dedicated marketplace repository [`GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins):
 
+- **`bigquery-agent-analytics-mod`** (recommended for Claude Code v2.1.296+): An in-process TypeScript mod that records turns, model requests (with token usage and latency), and tool executions from the background into BigQuery with zero interactive latency.
+- **`bigquery-agent-analytics-tracing`**: Hook scripts (bash) that call the Python tracing package and stream events to BigQuery.
+
+Install via the `bqaa-tracing` marketplace:
+
+```bash
+claude plugin marketplace add GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins
+claude plugin install bigquery-agent-analytics-mod@bqaa-tracing \
+  --config project=my-gcp-project --config dataset=agent_analytics
 ```
-/plugin marketplace add GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK
-/plugin install bigquery-agent-analytics-tracing@bqaa-tracing
+
+Or for the hook-based tracer:
+
+```bash
+claude plugin install bigquery-agent-analytics-tracing@bqaa-tracing
 ```
 
-Add the marketplace by `<owner>/<repo>`, **not** by a direct URL to
-`marketplace.json` — the catalog's `source` is a relative path that
-Claude Code can only resolve from a Git checkout. See the
-[plugin README](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/plugins/claude_code/README.md#installing-the-plugin)
-for the sparse-checkout variant and details.
+See the [BigQuery-Agent-Analytics-Plugins repository](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins) for complete setup, configuration, and migration guides.
 
 The plugin vendors its own copy of the tracing package, so the
 `BQAA_PYTHON` interpreter does **not** need
