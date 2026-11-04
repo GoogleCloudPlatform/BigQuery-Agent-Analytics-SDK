@@ -1,0 +1,85 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "usage-total-users",
+  "position": {
+    "x": 16,
+    "y": 208,
+    "z": 4002,
+    "height": 272,
+    "width": 408,
+    "tabOrder": 4002
+  },
+  "visual": {
+    "visualType": "cardVisual",
+    "query": {
+      "queryState": {
+        "Data": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "KPI Total Users"
+                }
+              },
+              "queryRef": "events_v1.KPI Total Users",
+              "nativeQueryRef": "KPI Total Users",
+              "displayName": "Total Users"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "KPI Total Users Change %"
+                }
+              },
+              "queryRef": "events_v1.KPI Total Users Change %",
+              "nativeQueryRef": "KPI Total Users Change %",
+              "displayName": "vs previous period"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Total Users'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "usage-total-users"
+    },
+    {
+      "name": "bqaa.oracle_query",
+      "value": "oracle/queries/usage-total-users.sql"
+    }
+  ]
+}

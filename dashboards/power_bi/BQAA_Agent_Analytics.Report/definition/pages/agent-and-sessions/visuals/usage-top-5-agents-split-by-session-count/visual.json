@@ -1,0 +1,105 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "usage-top-5-agents-split-by-session-count",
+  "position": {
+    "x": 68,
+    "y": 1088,
+    "z": 4008,
+    "height": 352,
+    "width": 1136,
+    "tabOrder": 4008
+  },
+  "visual": {
+    "visualType": "clusteredBarChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "agent"
+                }
+              },
+              "queryRef": "events_v1.agent",
+              "nativeQueryRef": "agent"
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "Top 5 Agents by Sessions"
+                }
+              },
+              "queryRef": "events_v1.Top 5 Agents by Sessions",
+              "nativeQueryRef": "Top 5 Agents by Sessions"
+            }
+          ]
+        }
+      },
+      "sortDefinition": {
+        "sort": [
+          {
+            "field": {
+              "Measure": {
+                "Expression": {
+                  "SourceRef": {
+                    "Entity": "events_v1"
+                  }
+                },
+                "Property": "Top 5 Agents by Sessions"
+              }
+            },
+            "direction": "Descending"
+          }
+        ],
+        "isDefaultSort": false
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Top 5 Agents by Sessions'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "usage-top-5-agents-split-by-session-count"
+    },
+    {
+      "name": "bqaa.oracle_query",
+      "value": "oracle/queries/usage-top-5-agents-split-by-session-count.sql"
+    }
+  ]
+}

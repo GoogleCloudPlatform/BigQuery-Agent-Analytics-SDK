@@ -1,0 +1,105 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "usage-events-by-agent",
+  "position": {
+    "x": 640,
+    "y": 368,
+    "z": 4002,
+    "height": 272,
+    "width": 616,
+    "tabOrder": 4002
+  },
+  "visual": {
+    "visualType": "clusteredBarChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "agent"
+                }
+              },
+              "queryRef": "events_v1.agent",
+              "nativeQueryRef": "agent"
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "Tool Completions by Agent"
+                }
+              },
+              "queryRef": "events_v1.Tool Completions by Agent",
+              "nativeQueryRef": "Tool Completions by Agent"
+            }
+          ]
+        }
+      },
+      "sortDefinition": {
+        "sort": [
+          {
+            "field": {
+              "Measure": {
+                "Expression": {
+                  "SourceRef": {
+                    "Entity": "events_v1"
+                  }
+                },
+                "Property": "Tool Completions by Agent"
+              }
+            },
+            "direction": "Descending"
+          }
+        ],
+        "isDefaultSort": false
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Tool Completions by Agent'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "usage-events-by-agent"
+    },
+    {
+      "name": "bqaa.oracle_query",
+      "value": "oracle/queries/usage-events-by-agent.sql"
+    }
+  ]
+}

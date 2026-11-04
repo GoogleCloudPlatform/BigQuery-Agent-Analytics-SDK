@@ -1,0 +1,14 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/pagesMetadata/1.0.0/schema.json",
+  "pageOrder": [
+    "token-consumption",
+    "agent-and-sessions",
+    "tool-usage",
+    "llm-interactions",
+    "user-analytics",
+    "latency",
+    "errors",
+    "trace-inspector"
+  ],
+  "activePageName": "token-consumption"
+}

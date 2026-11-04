@@ -1,0 +1,18 @@
+{
+  "name": "BQAA",
+  "dataColors": [
+    "#4285F4",
+    "#EA4335",
+    "#FBBC04",
+    "#34A853",
+    "#A142F4",
+    "#24C1E0",
+    "#FA903E"
+  ],
+  "foreground": "#202124",
+  "foregroundNeutralSecondary": "#5F6368",
+  "background": "#FFFFFF",
+  "backgroundLight": "#F8F9FA",
+  "tableAccent": "#4285F4",
+  "bad": "#C5221F"
+}

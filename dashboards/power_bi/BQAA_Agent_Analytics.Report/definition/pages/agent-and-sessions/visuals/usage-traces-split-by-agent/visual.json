@@ -1,0 +1,105 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "usage-traces-split-by-agent",
+  "position": {
+    "x": 640,
+    "y": 408,
+    "z": 4004,
+    "height": 312,
+    "width": 616,
+    "tabOrder": 4004
+  },
+  "visual": {
+    "visualType": "clusteredBarChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "agent"
+                }
+              },
+              "queryRef": "events_v1.agent",
+              "nativeQueryRef": "agent"
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "Traces by Agent"
+                }
+              },
+              "queryRef": "events_v1.Traces by Agent",
+              "nativeQueryRef": "Traces by Agent"
+            }
+          ]
+        }
+      },
+      "sortDefinition": {
+        "sort": [
+          {
+            "field": {
+              "Measure": {
+                "Expression": {
+                  "SourceRef": {
+                    "Entity": "events_v1"
+                  }
+                },
+                "Property": "Traces by Agent"
+              }
+            },
+            "direction": "Descending"
+          }
+        ],
+        "isDefaultSort": false
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Traces by Agent'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "usage-traces-split-by-agent"
+    },
+    {
+      "name": "bqaa.oracle_query",
+      "value": "oracle/queries/usage-traces-split-by-agent.sql"
+    }
+  ]
+}

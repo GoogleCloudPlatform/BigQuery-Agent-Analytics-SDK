@@ -1,0 +1,70 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "performance-average-tool-latency-ms",
+  "position": {
+    "x": 16,
+    "y": 208,
+    "z": 4002,
+    "height": 232,
+    "width": 356,
+    "tabOrder": 4002
+  },
+  "visual": {
+    "visualType": "cardVisual",
+    "query": {
+      "queryState": {
+        "Data": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "Avg Tool Latency (ms)"
+                }
+              },
+              "queryRef": "events_v1.Avg Tool Latency (ms)",
+              "nativeQueryRef": "Avg Tool Latency (ms)",
+              "displayName": "Average Tool Latency (ms)"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Average Tool Latency (ms)'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "performance-average-tool-latency-ms"
+    },
+    {
+      "name": "bqaa.oracle_query",
+      "value": "oracle/queries/performance-average-tool-latency-ms.sql"
+    }
+  ]
+}
