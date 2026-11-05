@@ -1,0 +1,740 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Report visual mapping spec for the Power BI PBIR report.
+# Derived from the Looker Studio chart_manifest.yaml and product_contract.yaml.
+# See spec.md §5 for the normative design.
+
+canvas:
+  page_width: 1280
+  margin: 16
+  gutter: 8
+  column_unit: 52
+  row: 40
+  body_top: 128
+  min_height: 720
+  bottom_padding: 24
+pages:
+- name: token-consumption
+  display_name: Token Consumption
+  looker_page_id: p_70hoa89q5d
+  height: 720
+- name: agent-and-sessions
+  display_name: Agent & Sessions
+  looker_page_id: JjD
+  height: 1464
+- name: tool-usage
+  display_name: Tool Usage
+  looker_page_id: KjD
+  height: 720
+- name: llm-interactions
+  display_name: LLM Interactions
+  looker_page_id: MjD
+  height: 720
+- name: user-analytics
+  display_name: User Analytics
+  looker_page_id: 00IH
+  height: 784
+- name: latency
+  display_name: Latency
+  looker_page_id: p_9om48zps5d
+  height: 1184
+- name: errors
+  display_name: Errors
+  looker_page_id: v0IH
+  height: 720
+- name: trace-inspector
+  display_name: Trace Inspector
+  looker_page_id: BKJH
+  height: 720
+slicers:
+- name: slicer-date
+  field: Date.Date
+  display_name: Date
+  sync_group: bqaa-date
+  mode: Between
+- name: slicer-agent
+  field: events_v1.agent
+  display_name: Agent
+  sync_group: bqaa-agent
+  mode: Dropdown
+- name: slicer-user-id
+  field: events_v1.user_id
+  display_name: User ID
+  sync_group: bqaa-user-id
+  mode: Dropdown
+- name: slicer-trace-id
+  field: events_v1.trace_id
+  display_name: Trace ID
+  sync_group: bqaa-trace-id
+  mode: Dropdown
+- name: slicer-span-id
+  field: events_v1.span_id
+  display_name: Span ID
+  sync_group: bqaa-span-id
+  mode: Dropdown
+report_filters:
+- name: bqaa-report-window
+  field: Date.Window
+  type: Categorical
+  hidden: true
+  locked: true
+  values:
+  - Current
+- name: bqaa-session-id
+  field: events_v1.session_id
+  type: Categorical
+  hidden: false
+  locked: false
+- name: bqaa-model-version
+  field: events_v1.model_version
+  type: Categorical
+  hidden: false
+  locked: false
+
+# 37 parity visuals keyed by chart id.  Each entry maps the manifest
+# chart to a Power BI visual type, roles, measures, and geometry.
+parity_visuals:
+- id: usage-total-tokens
+  page: token-consumption
+  title: Total Tokens
+  visual_type: cardVisual
+  measures:
+  - KPI Total Tokens
+  - KPI Total Tokens Change %
+  geometry:
+    row: 0
+    col: 0
+    width: 9
+    height: 5
+  listens_user_id: true
+- id: usage-total-tokens-consumption-over-the-time
+  page: token-consumption
+  title: Token Consumption Over Time
+  visual_type: areaChart
+  axis: Date.Date
+  measures:
+  - Total Tokens
+  geometry:
+    row: 0
+    col: 9
+    width: 15
+    height: 5
+  listens_user_id: true
+- id: usage-top-5-users-with-most-tokens-consumption
+  page: token-consumption
+  title: Top 5 Users by Token Consumption
+  visual_type: clusteredBarChart
+  category: events_v1.user_id
+  measures:
+  - Top 5 Users by Token Consumption
+  top_n: 5
+  geometry:
+    row: 5
+    col: 0
+    width: 12
+    height: 8
+  listens_user_id: false
+- id: usage-token-usage-split-by-agent
+  page: token-consumption
+  title: Token Usage by Agent
+  visual_type: clusteredBarChart
+  category: events_v1.agent
+  measures:
+  - Token Usage by Agent
+  top_n: 5
+  geometry:
+    row: 5
+    col: 12
+    width: 12
+    height: 8
+  listens_user_id: false
+- id: usage-total-traces
+  page: agent-and-sessions
+  title: Total Traces
+  visual_type: cardVisual
+  measures:
+  - KPI Total Traces
+  - KPI Total Traces Change %
+  geometry:
+    row: 2
+    col: 0
+    width: 9
+    height: 5
+  listens_user_id: true
+- id: usage-total-traces-generation-over-the-time
+  page: agent-and-sessions
+  title: Trace Volume Over Time
+  visual_type: areaChart
+  axis: Date.Date
+  measures:
+  - Total Traces
+  geometry:
+    row: 2
+    col: 9
+    width: 15
+    height: 5
+  listens_user_id: true
+- id: usage-top-5-users-with-most-traces
+  page: agent-and-sessions
+  title: Top 5 Users by Traces
+  visual_type: clusteredBarChart
+  category: events_v1.user_id
+  measures:
+  - Top 5 Users by Traces
+  top_n: 5
+  geometry:
+    row: 7
+    col: 0
+    width: 12
+    height: 8
+  listens_user_id: false
+- id: usage-traces-split-by-agent
+  page: agent-and-sessions
+  title: Traces by Agent
+  visual_type: clusteredBarChart
+  category: events_v1.agent
+  measures:
+  - Traces by Agent
+  top_n: 5
+  geometry:
+    row: 7
+    col: 12
+    width: 12
+    height: 8
+  listens_user_id: false
+- id: usage-total-sessions
+  page: agent-and-sessions
+  title: Total Sessions
+  visual_type: cardVisual
+  measures:
+  - KPI Total Sessions
+  - KPI Total Sessions Change %
+  geometry:
+    row: 17
+    col: 0
+    width: 8
+    height: 7
+  listens_user_id: true
+- id: usage-number-of-sessions-trend
+  page: agent-and-sessions
+  title: Session Volume Over Time
+  visual_type: areaChart
+  axis: Date.Date
+  measures:
+  - Total Sessions
+  geometry:
+    row: 17
+    col: 8
+    width: 16
+    height: 7
+  listens_user_id: true
+- id: usage-top-5-agents-split-by-session-count
+  page: agent-and-sessions
+  title: Top 5 Agents by Sessions
+  visual_type: clusteredBarChart
+  category: events_v1.agent
+  measures:
+  - Top 5 Agents by Sessions
+  top_n: 5
+  geometry:
+    row: 24
+    col: 1
+    width: 22
+    height: 9
+  listens_user_id: true
+- id: usage-tool-calls-over-time
+  page: tool-usage
+  title: Tool Calls Over Time
+  visual_type: areaChart
+  axis: Date.Date
+  series: events_v1.tool_completed_name
+  measures:
+  - Tool Completion Events
+  geometry:
+    row: 0
+    col: 0
+    width: 24
+    height: 6
+  listens_user_id: true
+- id: usage-tool-invocations
+  page: tool-usage
+  title: Tool Invocations
+  visual_type: clusteredBarChart
+  category: events_v1.tool_completed_name
+  measures:
+  - Tool Invocations
+  top_n: 10
+  geometry:
+    row: 6
+    col: 0
+    width: 12
+    height: 7
+  listens_user_id: true
+- id: usage-events-by-agent
+  page: tool-usage
+  title: Tool Completions by Agent
+  visual_type: clusteredBarChart
+  category: events_v1.agent
+  measures:
+  - Tool Completions by Agent
+  top_n: 10
+  geometry:
+    row: 6
+    col: 12
+    width: 12
+    height: 7
+  listens_user_id: true
+- id: usage-total-calls
+  page: llm-interactions
+  title: Total LLM Calls
+  visual_type: cardVisual
+  measures:
+  - KPI Total LLM Calls
+  - KPI Total LLM Calls Change %
+  geometry:
+    row: 0
+    col: 0
+    width: 8
+    height: 6
+  listens_user_id: true
+- id: usage-llm-call-trends
+  page: llm-interactions
+  title: LLM Call Volume Over Time
+  visual_type: areaChart
+  axis: Date.Date
+  measures:
+  - LLM Calls
+  geometry:
+    row: 0
+    col: 8
+    width: 16
+    height: 6
+  listens_user_id: true
+- id: usage-top-5-agents-by-llm-calls
+  page: llm-interactions
+  title: Top 5 Agents by LLM Calls
+  visual_type: clusteredBarChart
+  category: events_v1.agent
+  measures:
+  - Top 5 Agents by LLM Calls
+  top_n: 5
+  geometry:
+    row: 6
+    col: 1
+    width: 21
+    height: 8
+  listens_user_id: true
+- id: usage-total-users
+  page: user-analytics
+  title: Total Users
+  visual_type: cardVisual
+  measures:
+  - KPI Total Users
+  - KPI Total Users Change %
+  geometry:
+    row: 2
+    col: 0
+    width: 8
+    height: 7
+  listens_user_id: true
+- id: usage-user-growth-over-time
+  page: user-analytics
+  title: User Growth Over Time
+  visual_type: areaChart
+  axis: Date.Date
+  measures:
+  - Total Users
+  geometry:
+    row: 2
+    col: 8
+    width: 16
+    height: 7
+  listens_user_id: true
+- id: usage-top-5-users-by-session
+  page: user-analytics
+  title: Top 5 Users by Sessions
+  visual_type: clusteredBarChart
+  category: events_v1.user_id
+  measures:
+  - Top 5 Users by Sessions
+  top_n: 5
+  geometry:
+    row: 9
+    col: 0
+    width: 12
+    height: 7
+  listens_user_id: true
+- id: usage-top-5-users-by-events
+  page: user-analytics
+  title: Top 5 Users by Events
+  visual_type: clusteredBarChart
+  category: events_v1.user_id
+  measures:
+  - Top 5 Users by Events
+  top_n: 5
+  geometry:
+    row: 9
+    col: 12
+    width: 12
+    height: 7
+  listens_user_id: true
+- id: performance-average-tool-latency-ms
+  page: latency
+  title: Average Tool Latency (ms)
+  visual_type: cardVisual
+  measures:
+  - Avg Tool Latency (ms)
+  geometry:
+    row: 2
+    col: 0
+    width: 7
+    height: 6
+  listens_user_id: true
+- id: performance-tool-latency-trend
+  page: latency
+  title: Tool Latency Over Time
+  visual_type: areaChart
+  axis: Date.Date
+  measures:
+  - Avg Tool Latency (ms)
+  geometry:
+    row: 2
+    col: 7
+    width: 17
+    height: 6
+  listens_user_id: true
+- id: performance-p50-tool-latency
+  page: latency
+  title: P50 Tool Latency
+  visual_type: cardVisual
+  measures:
+  - P50 Tool Latency (ms)
+  geometry:
+    row: 10
+    col: 0
+    width: 6
+    height: 3
+  listens_user_id: true
+- id: performance-p75-tool-latency
+  page: latency
+  title: P75 Tool Latency
+  visual_type: cardVisual
+  measures:
+  - P75 Tool Latency (ms)
+  geometry:
+    row: 10
+    col: 6
+    width: 6
+    height: 3
+  listens_user_id: true
+- id: performance-p90-tool-latency
+  page: latency
+  title: P90 Tool Latency
+  visual_type: cardVisual
+  measures:
+  - P90 Tool Latency (ms)
+  geometry:
+    row: 10
+    col: 12
+    width: 6
+    height: 3
+  listens_user_id: true
+- id: performance-p99-tool-latency
+  page: latency
+  title: P99 Tool Latency
+  visual_type: cardVisual
+  measures:
+  - P99 Tool Latency (ms)
+  geometry:
+    row: 10
+    col: 18
+    width: 6
+    height: 3
+  listens_user_id: true
+- id: performance-average-llm-latency-in-ms
+  page: latency
+  title: Average LLM Latency (ms)
+  visual_type: cardVisual
+  measures:
+  - Avg LLM Latency (ms)
+  geometry:
+    row: 15
+    col: 0
+    width: 8
+    height: 6
+  listens_user_id: true
+- id: performance-llm-latency-trend
+  page: latency
+  title: LLM Latency Over Time
+  visual_type: areaChart
+  axis: Date.Date
+  measures:
+  - Avg LLM Latency (ms)
+  geometry:
+    row: 15
+    col: 8
+    width: 16
+    height: 6
+  listens_user_id: true
+- id: performance-p50-llm-latency
+  page: latency
+  title: P50 LLM Latency
+  visual_type: cardVisual
+  measures:
+  - P50 LLM Latency (ms)
+  geometry:
+    row: 23
+    col: 0
+    width: 6
+    height: 3
+  listens_user_id: true
+- id: performance-p75-llm-latency
+  page: latency
+  title: P75 LLM Latency
+  visual_type: cardVisual
+  measures:
+  - P75 LLM Latency (ms)
+  geometry:
+    row: 23
+    col: 6
+    width: 6
+    height: 3
+  listens_user_id: true
+- id: performance-p90-llm-latency
+  page: latency
+  title: P90 LLM Latency
+  visual_type: cardVisual
+  measures:
+  - P90 LLM Latency (ms)
+  geometry:
+    row: 23
+    col: 12
+    width: 6
+    height: 3
+  listens_user_id: true
+- id: performance-p99-llm-latency
+  page: latency
+  title: P99 LLM Latency
+  visual_type: cardVisual
+  measures:
+  - P99 LLM Latency (ms)
+  geometry:
+    row: 23
+    col: 18
+    width: 6
+    height: 3
+  listens_user_id: true
+- id: performance-total-errors
+  page: errors
+  title: Tool Errors
+  visual_type: cardVisual
+  measures:
+  - KPI Tool Errors
+  - KPI Tool Errors Change %
+  geometry:
+    row: 0
+    col: 0
+    width: 8
+    height: 7
+  listens_user_id: true
+- id: performance-tool-errors-trend
+  page: errors
+  title: Tool Errors Over Time
+  visual_type: areaChart
+  axis: Date.Date
+  measures:
+  - Tool Errors
+  geometry:
+    row: 0
+    col: 8
+    width: 16
+    height: 7
+  listens_user_id: true
+- id: performance-top-5-agents-by-errors
+  page: errors
+  title: Top 5 Agents by Tool Errors
+  visual_type: clusteredBarChart
+  category: events_v1.agent
+  measures:
+  - Top 5 Agents by Tool Errors
+  top_n: 5
+  geometry:
+    row: 7
+    col: 0
+    width: 12
+    height: 7
+  listens_user_id: true
+- id: performance-top-5-tools-by-errors
+  page: errors
+  title: Top 5 Tools by Errors
+  visual_type: clusteredBarChart
+  category: events_v1.tool_error_name
+  measures:
+  - Top 5 Tools by Errors
+  top_n: 5
+  geometry:
+    row: 7
+    col: 12
+    width: 12
+    height: 7
+  listens_user_id: true
+
+# 9 non-data elements from the manifest
+non_data_elements:
+- id: usage-nondata-1
+  page: agent-and-sessions
+  visual_type: textbox
+  content:
+    type: h1
+    text: Agent
+    align: center
+  geometry:
+    row: 0
+    col: 0
+    width: 24
+    height: 2
+- id: usage-nondata-2
+  page: agent-and-sessions
+  visual_type: textbox
+  content:
+    type: h1
+    text: Sessions
+    align: center
+  geometry:
+    row: 15
+    col: 0
+    width: 24
+    height: 2
+- id: usage-nondata-3
+  page: user-analytics
+  visual_type: actionButton
+  button_text: Performance Report
+  target_page: latency
+  fill_color: '#E52592'
+  geometry:
+    row: 0
+    col: 19
+    width: 5
+    height: 1
+- id: usage-nondata-4
+  page: user-analytics
+  visual_type: textbox
+  content:
+    type: spacer
+  geometry:
+    row: 1
+    col: 0
+    width: 21
+    height: 1
+- id: performance-nondata-1
+  page: latency
+  visual_type: textbox
+  content:
+    type: h1
+    text: Tool Latency
+    align: center
+  geometry:
+    row: 0
+    col: 6
+    width: 13
+    height: 2
+- id: performance-nondata-2
+  page: latency
+  visual_type: textbox
+  content:
+    type: h1
+    text: LLM Latency
+    align: center
+  geometry:
+    row: 13
+    col: 0
+    width: 24
+    height: 2
+- id: performance-nondata-3
+  page: latency
+  visual_type: actionButton
+  button_text: Usage Report
+  target_page: token-consumption
+  fill_color: '#E52592'
+  geometry:
+    row: 0
+    col: 19
+    width: 5
+    height: 2
+- id: performance-nondata-4
+  page: latency
+  visual_type: textbox
+  content:
+    type: h2
+    text: Tool Latency (in ms)
+    align: center
+    paragraph: The P50, P75, P90, and P99 latency distributions for tool executions.
+      Focus on P99 to identify the worst-case timeouts.
+  geometry:
+    row: 8
+    col: 0
+    width: 24
+    height: 2
+- id: performance-nondata-5
+  page: latency
+  visual_type: textbox
+  content:
+    type: h2
+    text: LLM Latency (in ms)
+    align: center
+    paragraph: The P50, P75, P90, and P99 latency distributions for LLM calls. Crucial
+      for understanding the true user experience delay.
+  geometry:
+    row: 21
+    col: 0
+    width: 24
+    height: 2
+
+# Trace Inspector table on the trace-inspector page
+trace_inspector:
+  name: trace-inspector-table
+  page: trace-inspector
+  columns:
+  - events_v1.timestamp
+  - events_v1.event_type
+  - events_v1.agent
+  - events_v1.user_id
+  - events_v1.trace_id
+  - events_v1.span_id
+  - events_v1.status
+  geometry:
+    row: 0
+    col: 0
+    width: 24
+    height: 14
+  sort:
+    field: events_v1.timestamp
+    direction: Descending
+theme:
+  name: BQAA
+  data_colors:
+  - '#4285F4'
+  - '#EA4335'
+  - '#FBBC04'
+  - '#34A853'
+  - '#A142F4'
+  - '#24C1E0'
+  - '#FA903E'
+  foreground: '#202124'
+  foreground_neutral_secondary: '#5F6368'
+  background: '#FFFFFF'
+  background_light: '#F8F9FA'
+  table_accent: '#4285F4'
+  bad: '#C5221F'

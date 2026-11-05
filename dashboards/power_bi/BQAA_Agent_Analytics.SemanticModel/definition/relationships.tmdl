@@ -1,0 +1,3 @@
+relationship fa048ddb-0671-595e-a9ed-46a3df75ab6f
+	fromColumn: events_v1.event_date
+	toColumn: Date.Date

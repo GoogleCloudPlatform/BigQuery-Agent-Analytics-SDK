@@ -1,0 +1,38 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "usage-nondata-4",
+  "position": {
+    "x": 16,
+    "y": 168,
+    "z": 4001,
+    "height": 32,
+    "width": 1084,
+    "tabOrder": 4001
+  },
+  "visual": {
+    "visualType": "textbox",
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": ""
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "usage-nondata-4"
+    }
+  ]
+}

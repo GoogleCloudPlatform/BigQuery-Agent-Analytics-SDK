@@ -1,0 +1,14 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/page/2.1.0/schema.json",
+  "name": "errors",
+  "displayName": "Errors",
+  "displayOption": "FitToWidth",
+  "height": 720,
+  "width": 1280,
+  "annotations": [
+    {
+      "name": "bqaa.looker_page_id",
+      "value": "v0IH"
+    }
+  ]
+}

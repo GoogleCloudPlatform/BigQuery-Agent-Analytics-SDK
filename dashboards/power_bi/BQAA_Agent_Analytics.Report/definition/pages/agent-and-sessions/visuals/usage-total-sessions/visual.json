@@ -1,0 +1,85 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "usage-total-sessions",
+  "position": {
+    "x": 16,
+    "y": 808,
+    "z": 4006,
+    "height": 272,
+    "width": 408,
+    "tabOrder": 4006
+  },
+  "visual": {
+    "visualType": "cardVisual",
+    "query": {
+      "queryState": {
+        "Data": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "KPI Total Sessions"
+                }
+              },
+              "queryRef": "events_v1.KPI Total Sessions",
+              "nativeQueryRef": "KPI Total Sessions",
+              "displayName": "Total Sessions"
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "KPI Total Sessions Change %"
+                }
+              },
+              "queryRef": "events_v1.KPI Total Sessions Change %",
+              "nativeQueryRef": "KPI Total Sessions Change %",
+              "displayName": "vs previous period"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Total Sessions'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "usage-total-sessions"
+    },
+    {
+      "name": "bqaa.oracle_query",
+      "value": "oracle/queries/usage-total-sessions.sql"
+    }
+  ]
+}
