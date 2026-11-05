@@ -30,7 +30,11 @@ plugins/claude_code/
 [`producers/scripts/build_claude_plugin.py`](../../producers/scripts/build_claude_plugin.py)
 copies the canonical package source into `vendor/` and stamps the
 resolved version into `.claude-plugin/plugin.json` at release time —
-so the wheel and the plugin always ship the same code.
+so the wheel and the plugin always ship the same code (`plugins/claude_code/`
+in this repository remains the build input for `build_claude_plugin.py`
+to produce the `tracing-v*` release tarball, while the Claude Code
+marketplace catalog and served copy live in
+[`GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins)).
 
 ## Runtime model
 
@@ -50,10 +54,11 @@ so the wheel and the plugin always ship the same code.
    spawned process too — no separate wheel install required on
    `BQAA_PYTHON`.
 
-The marketplace catalog installs the copy committed under
-[`plugins/claude_code_dist/`](../claude_code_dist/), which changes only
-when a release is synced, so an installed plugin may predate the
-behavior described here and in
+The marketplace catalog in
+[`GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins)
+installs the copy committed under its `plugins/claude_code_dist/`
+directory, which changes only when a release is synced, so an installed
+plugin may predate the behavior described here and in
 [`commands/bqaa-setup.md`](commands/bqaa-setup.md). If the installed
 `hooks/common.sh` still runs `python -m`, it predates the launcher
 above and puts the working directory first on `sys.path`.
@@ -79,6 +84,12 @@ BigQuery IAM requirements and submission checklist live in
 
 ## Installing the plugin
 
+> **Recommended for Claude Code v2.1.296+:** Use
+> [`bigquery-agent-analytics-mod`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins/tree/main/plugins/claude_code_mod)
+> in [`GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins),
+> which records turns, model requests, and tool calls in-process from
+> the background with zero hook latency.
+>
 > **If you previously installed an older BQAA Claude Code plugin from
 > another marketplace or local path, remove or disable it before
 > installing this catalog version.** Running multiple BQAA tracing
@@ -86,12 +97,12 @@ BigQuery IAM requirements and submission checklist live in
 > existing installs with `/plugin list` and uninstall any duplicates
 > with `/plugin uninstall <name>@<marketplace>` before continuing.
 
-This repo serves a Claude Code marketplace catalog at
-[`/.claude-plugin/marketplace.json`](../../.claude-plugin/marketplace.json).
+The `bqaa-tracing` Claude Code marketplace catalog is hosted in
+[`GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins/blob/main/.claude-plugin/marketplace.json).
 From a Claude Code session:
 
 ```
-/plugin marketplace add GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK
+/plugin marketplace add GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins
 /plugin install bigquery-agent-analytics-tracing@bqaa-tracing
 ```
 
@@ -104,12 +115,11 @@ From a Claude Code session:
 > into. A direct-URL `add` would fetch only the catalog JSON and the
 > plugin install would fail to resolve.
 
-For a faster clone — the SDK repo carries the consumption SDK + tests
-in addition to the plugin tree — use a sparse checkout if your Claude
-Code version supports it:
+For a faster clone, use a sparse checkout if your Claude Code version
+supports it:
 
 ```
-/plugin marketplace add GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK --sparse .claude-plugin plugins/claude_code_dist
+/plugin marketplace add GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins --sparse .claude-plugin plugins/claude_code_dist
 /plugin install bigquery-agent-analytics-tracing@bqaa-tracing
 ```
 
