@@ -7,6 +7,373 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-05
+
+### Release highlights
+
+A patch release. In the wheel: a security audit closes SQL injection
+paths through configuration values. Drift and deep analysis check their
+events table and their project and dataset IDs (#539); `Client` checks
+`project_id` and `dataset_id` on construction and on every assignment,
+and the judge escapes its endpoint and connection (#540); insights and
+the AI/ML integration classes escape their endpoints and check their IDs
+(#541); and table names, the remaining endpoints and the numeric
+generation options are checked, escaped or coerced everywhere else
+(#542). Valid identifiers, endpoints and names render byte for byte as
+before, numeric options are normalized (`0` becomes `0.0`), and labels
+with an apostrophe now parse. Identifier and numeric values that fail the
+checks raise `ValueError` before the query is sent, other failures while
+the query is built (a non-string endpoint) also reach the caller, and a
+few inputs that used to work are refused, notably a wildcard events table
+for drift and deep analysis (see Security and Fixed). Seven modules lose
+an unused logger (#545). No exported or documented name, public
+signature or console script changes, and the wheel's runtime
+dependencies are unchanged; the `dev` extra now needs `jsonschema>=4.18`
+(#567). Around the wheel: the `bqaa-tracing` plugin marketplace moved to
+GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins (#573), with the
+coding-agent mod that joined it here in this cycle (#538) and that mod's
+sanitizer and docs updates (#546, #553, #555, #556); the dashboard
+folders are consolidated under `dashboards/` (#548); a Power BI port of
+the dashboard (#567) and a Grafana efficiency-trial dashboard (#572)
+land; the BQCA Looker Studio template gets report-wide unique column IDs
+(#558, #562), synced to the live template on 2026-11-01 with signed
+capture tooling (#561, #563, #569); the separately released tracing
+plugin and package keep the working directory off `sys.path` (#557,
+#560), honor `BQAA_TRACE_ENABLED=TRUE` (#543) and survive malformed
+numeric settings (#549); the README and the producer docs point to the
+Plugins repository (#568), and other docs are corrected (#544, #551);
+and CI makes the BQCA sync-generation gate a required check that is
+ready for a merge queue (#564, #565), drops the hash-lock drift job
+(#552), loses dead code (#554) and bumps `vite` in the web dashboard
+(#537).
+
+### Security
+
+- **Drift and deep analysis check their events table, project and dataset
+  (#539)** — `compute_drift()` has checked its golden table since 0.6.1,
+  but it formatted the production (events) table into
+  ``FROM `{project}.{dataset}.{table}` `` unchecked.
+  `Client.drift_detection()` and `drift_detection_async()` fill that table
+  from their `dataset=` override, else the client's `table_id`, so a
+  backtick in either closed the quoted path, and the rest ran as SQL with
+  the application's BigQuery credentials (the audit forged production
+  questions with a `UNION`). The events table must now be one table name,
+  by the golden table's rule (Unicode letters, marks and numbers,
+  connectors such as `_`, dashes and spaces), and `compute_drift()` and
+  `compute_question_distribution()`, which `deep_analysis()` and
+  `deep_analysis_async()` call, also check the project ID and the dataset
+  ID (ASCII letters, digits and `_`) before any query. A wildcard events
+  table such as `agent_events_*` is refused here, as a wildcard golden
+  table has been since 0.6.1: consolidate sharded tables into one table
+  in the client's dataset first. `bq-agent-sdk drift` prints the error
+  and exits 2.
+- **`Client` checks its project and dataset IDs (#540)** — `project_id`
+  and `dataset_id` are now properties whose setters run the check, so it
+  covers the constructor, which assigns both before table auto-detection
+  or schema verification queries `INFORMATION_SCHEMA`, and every later
+  assignment; a refused assignment keeps the current value. A project ID
+  is a lowercase letter, then lowercase letters, digits or `-`, not
+  ending in `-`, optionally after a domain and a colon
+  (`example.com:my-project`); a dataset ID is ASCII letters, digits, `_`
+  and `-`, without `--`. The Python API, the CLI, the BigQuery remote
+  function and the streaming-evaluation worker all build their client
+  this way, and the remote function answers HTTP 400 for a bad
+  `userDefinedContext` once it is redeployed from this release. The same
+  change escapes the AI.GENERATE judge's `endpoint` and `connection_id`
+  literals and the legacy ML.GENERATE_TEXT judge's `MODEL` reference
+  through a new private `evaluators._escape_sql_quoted()`, which escapes
+  backslashes, then the quote, then control characters, C-style, so a
+  value can no longer add an argument to the call or end the model
+  reference.
+- **Insights and the AI/ML integration classes (#541)** — insights' facet
+  extraction, which the remote function's `insights` operation also
+  runs, escapes the client's endpoint in its AI.GENERATE literal and
+  `text_model` in its `MODEL` reference. `EmbeddingSearchClient`,
+  `AnomalyDetector` and `BatchEvaluator`, which never build a `Client`,
+  check `project_id` and `dataset_id` with `Client`'s rules on
+  construction and on assignment. Every endpoint and embedding model that
+  `ai_ml_integration` quotes is escaped:
+  `BatchEvaluator.evaluate_recent_sessions()`,
+  `BigQueryAIClient.generate_text()` and `generate_embeddings()`, and
+  `EmbeddingSearchClient.build_embeddings_index()`. A non-string endpoint
+  or model, such as `embedding_endpoint=None`, now raises while the query
+  is built (an `AttributeError` or `TypeError`, not a `ValueError`);
+  before, the text `None` was sent, and the method logged BigQuery's
+  error and returned `False`, `[]` or `""`.
+- **Table names, the remaining endpoints and the numeric options
+  (#542)** — tables a query reads must be one table name or one wildcard
+  read (a name and a single trailing `*`, such as `agent_events_*`):
+  `Client.table_id` (on construction, on assignment, and from the remote
+  function's `userDefinedContext` or `BQ_AGENT_TABLE`, where a bad value
+  now gets HTTP 400), the `dataset=` override of `evaluate()`,
+  `evaluate_categorical()`, `insights()` and `insights_async()`,
+  `AnomalyDetector.table_id`, `BatchEvaluator.table_id`, and
+  `EmbeddingSearchClient.source_table` and `embeddings_table`. A
+  partition decorator, a `*` anywhere else, a dot, a quote, a backslash
+  or a line break raises `ValueError`. Tables a query writes must be one
+  table name: `build_embeddings_index()`'s `{embeddings_table}_indexed`,
+  the categorical `results_table` (checked before any query when
+  `persist_results=True`), every `<view_prefix><view>` name of
+  `CategoricalViewManager` and `create_categorical_views()`
+  (`bq-agent-sdk categorical-views` exits 2), and the events table of
+  the context graph's property-graph DDL. `ContextGraphManager` and
+  `OntologyGraphManager` check their project, dataset and table like
+  `Client`; `ContextGraphConfig` validates its six table names and
+  `graph_name` on construction and on assignment (pydantic's
+  `ValidationError`, a `ValueError`); every method's `graph_name`
+  override is checked; and `get_reasoning_chain_gql()` and
+  `get_causal_chain_gql()` take only a whole number as their effective
+  `max_hops`, so `"5"` is refused there. Drift's semantic comparison
+  (`embedding_model`), deep analysis's semantic grouping (`text_model`,
+  else the client's endpoint), the context graph's two AI.GENERATE
+  extractions and the ontology graph's extraction escape their endpoint
+  or model reference.
+  `BigQueryAIClient.generate_text()` and the categorical
+  `build_ai_generate_query()` take a real number (or a finite `Decimal`)
+  for `temperature` and a whole number for the token limit, and render a
+  plain `float` and `int` (`0` becomes `0.0`, `512.0` becomes `512`); a
+  string, numeric or not, `None`, a `bool`, NaN or an infinity raises
+  `ValueError` naming the field before any query, where `generate_text()`
+  used to log BigQuery's error and return `""`. `Client` and the AI/ML
+  classes still accept a `-` in a dataset ID (`my-ds`); drift and deep
+  analysis do not.
+
+### Fixed
+
+- **Labels with an apostrophe parse (#542)** — the categorical escape
+  helper doubled single quotes, which GoogleSQL reads as two adjacent
+  literals, a syntax error, so a category name or definition, an endpoint
+  or a connection with an apostrophe broke the AI.CLASSIFY or AI.GENERATE
+  query. Deep analysis's custom categories had the same problem, and a
+  context-graph entity type's apostrophe ended its literal. All of them
+  now go through `evaluators._escape_sql_quoted()`, which renders the
+  apostrophe as `\'`.
+
+### Changed
+
+- **The `dev` extra needs `jsonschema>=4.18` (#567)** — up from
+  `jsonschema>=4.0`, for the Power BI schema validator, which builds a
+  `referencing` registry. `all` includes `dev`, so it needs the same; the
+  runtime dependencies are unchanged.
+
+### Removed
+
+- **Unused module loggers (#545)** — `bigframes_evaluator`,
+  `binding_validation`, `eval_suite`, `eval_validator`,
+  `ontology_models`, `ontology_schema_compiler` and `trace` built a
+  module-level `logger` they never logged through; it goes, with the
+  `logging` import that only it used. No log output changes, and none of
+  these names was exported or documented.
+  `multi_trial_performance_evaluator.logger` stays, because `multi_trial`
+  re-exports that module's names with `import *`.
+- **Dead code with no callers (#554, repo side)** — `file_lock()` and
+  the three imports only it used, from the tracing package's private
+  `_utils` module (this ships with the next `tracing-v*` release);
+  `deploy/otlp_receiver/requirements.txt`, which nothing
+  reads (the receiver image installs from `requirements.lock`); and
+  `MODEL_VERSION_EXPR` from `dashboards/streamlit/bqca_queries.py`.
+
+### Plugins and tracing producer (released separately, not in this wheel)
+
+The tracing items change `bigquery-agent-analytics-tracing` under
+`producers/` and the tracing plugin source under `plugins/`, which ship
+on `tracing-vX.Y.Z` tags; no tracing tag includes them yet (the latest is
+`tracing-v0.1.0`). Marketplace installs get them once the served copy in
+GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins is synced to such a
+release.
+
+- **The `bqaa-tracing` marketplace moved to
+  GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins (#573)** — this
+  repository no longer has the catalog manifest, the served copies of the
+  tracing plugin and the mod, the mod's source, tests and docs, or the
+  mod CI and release workflows. The catalog keeps its name and its plugin
+  IDs (`bigquery-agent-analytics-tracing@bqaa-tracing` and
+  `bigquery-agent-analytics-mod@bqaa-tracing`) in the Plugins
+  repository, and a marketplace added from this repository gets no
+  further updates: uninstall the plugins you installed from it, remove
+  the `bqaa-tracing` marketplace, add
+  `GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins`, and install
+  them again. Before you enable the mod on an existing `agent_events`
+  table (the tracing plugin's schema has no `event_id`), add an
+  `event_id STRING` column with the mod's `setup.sh` or
+  `ALTER TABLE ... ADD COLUMN IF NOT EXISTS event_id STRING`: without
+  it, uploads succeed but the event IDs are discarded, and adding the
+  column later does not recover them. The pointer README left in the
+  mod's old folder here has the commands; a `MIGRATION.md` section for
+  this move is still in review in the Plugins repository. The tracing
+  plugin's source stays under `plugins/` as the build input for
+  `tracing-v*` release archives.
+- **The coding-agent mod (#538)** — `bigquery-agent-analytics-mod`, an
+  early-access mod that records turns, model requests and tool calls
+  in-process, joined this repository's catalog with its source, a built
+  served copy, a migration guide, mod CI and a `mod-vX.Y.Z` release
+  workflow, and with redaction of credentials passed as command-line
+  flags (`--password=…`, `--api-key VALUE`). It moved out with the
+  catalog before this release.
+- **Mod sanitizer hardening (#546)** — best-effort free-text redaction
+  covers more spellings of credential names in option and assignment
+  lists (quoted or escaped name fragments, an escaped `=`, declared
+  delimiters), and the mod README lists the known missed and extra
+  redactions.
+- **Mod docs (#553, #555, #556)** — the QUICKSTART and README are
+  rewritten for setup and reference, the README going from 1,817 to 268
+  lines (#553); aligned with the final reference, without the legacy
+  tracer and migration callouts (#555); and given an `event_id` upgrade
+  note before the deduplication query, pointers to `MIGRATION.md` and a
+  dual-writer check in the duplicate-events troubleshooting row (#556).
+  They moved with the mod.
+- **The working directory stays off `sys.path` (#557, #560)** —
+  security: the hook launcher, the `/bqaa-setup` wrapper and its import
+  probes, and the background drainer started Python in the session's
+  working directory, usually a checked-out repository, with that
+  directory on `sys.path`, so a `json.py` or `sitecustomize.py` there ran
+  inside the hooks, which fire on session start without a permission
+  prompt and run with the user's Google credentials. Every Python process
+  the plugin starts now runs its module through a `python -c` runner that
+  drops the working-directory entry, on Python 3.10 too, and
+  `PYTHONPATH` is rebuilt without empty entries (#557). Non-empty
+  `PYTHONPATH` entries are kept as given, so `PYTHONPATH=.` or another
+  relative entry can still import from the working directory; the plugin
+  README and the `/bqaa-setup` doc now say so, state that the three
+  integer settings refuse `5.0` and `1e3`, and note that an installed
+  marketplace copy may predate these launchers (#560).
+- **`BQAA_TRACE_ENABLED=TRUE` is honored, and `/bqaa-setup` reports
+  dry-run (#543)** — the shell hook gate compared the flag with lowercase
+  `true`, while the Python config and `/bqaa-setup` ignore case, so with
+  `TRUE` or `True` the setup check said `READY` while every hook exited
+  before writing a row. The gate now accepts the same spellings, with a
+  POSIX `case` pattern that also works in Bash 3.2. `/bqaa-setup`
+  reports `BQAA_DRY_RUN` and where dry-run events go, or that they are
+  discarded when `BQAA_LOG_FILE` is set but empty, and `--json` gains
+  `dry_run`, `log_file`, `log_file_is_default` and
+  `log_file_is_relative`; dry-run never changes the status or the exit
+  code. The OTLP receiver's and the producer build's hash locks are
+  regenerated.
+- **Malformed numeric settings no longer crash the hooks (#549)** — a
+  numeric `BQAA_*` setting that did not parse (for example
+  `BQAA_MAX_CONTENT_LENGTH=bad`) made every hook exit 1 with a traceback
+  while `/bqaa-setup` said `READY`. The hooks now exit 0 with one line
+  that names the setting but never its value; `/bqaa-setup` reports
+  `[INVALID] BQAA_* settings`, adds `config_error` and `config_ok` to
+  `--json` and exits 1; the drainer exits 1 with one line; and
+  `BQAA_DRAIN_IDLE_SECONDS` and `BQAA_DRAIN_POLL_SECONDS` must be finite
+  and above zero (`0` kept the drainer from going idle, and `nan` made it
+  exit without draining).
+
+### Dashboards (repo side, not in the wheel)
+
+- **One `dashboards/` folder (#548)** — `dashboard/looker_studio/` moves
+  to `dashboards/looker_studio/`, `dashboard_v2/` (the React + TypeScript
+  web app) to `dashboards/web/`, and the `dashboard/` root files
+  (`app.py`, `agent_analytics_dashboard.ipynb`, `requirements.txt`) to
+  `dashboards/legacy_demo/`; `dashboards/streamlit/` and
+  `dashboards/grafana/` stay. `dashboards/README.md` maps the dashboard
+  surfaces, and the CI, Pages and external-access-staleness workflows
+  use the new paths. A Vercel deployment of the web app must change its
+  Root Directory from `dashboard_v2` to `dashboards/web` and deploy a
+  commit that includes the move (`dashboards/web/README.md`).
+- **Power BI port (#567)** — `dashboards/power_bi/` is a generated,
+  text-based Power BI Project (TMDL semantic model and PBIR report) with
+  the dashboard's 8 pages and 37 parity charts, and 50 DAX measures that
+  match the 37 oracle SQL queries, loaded by one Import-mode BigQuery
+  scan per refresh that reuses the `events_v1` SELECT list.
+  `dashboards/power_bi/tools/generate_pbip.py` builds it from the Looker
+  Studio contracts, with a `--check` drift gate and a reviewed
+  `dashboards/power_bi/spec/oracle_lock.json` over every oracle query it
+  cites, and `--output-zip` packages a pre-configured copy; a browser Web
+  Configurator, published with the Pages site under `/power-bi/`,
+  previews the 8 pages and downloads the same archive.
+  `dashboards/power_bi/tools/validate_pbip.py` (offline schema and parity
+  checks), a Fabric deploy helper and a live parity checker against the
+  oracle SQL come with a README, which lists 14 intentional differences
+  from Looker Studio, a user manual and a `Power BI sync check` workflow.
+  Deploying and refreshing needs a Power BI Premium Per User license or a
+  Fabric capacity. Six Looker Studio period-over-period oracle queries
+  also return the prior-window value. The `dev` extra's new `jsonschema`
+  floor is under Changed.
+- **Grafana efficiency-trial dashboard (#572)** —
+  `dashboards/grafana/bqaa-dashboard-efficiency-trial.json`, an
+  experimental copy of `bqaa-dashboard.json` with its own uid. Its LLM
+  calls query also returns `estimated_cost_usd` and `total_tokens`, which
+  the Estimated cost and Total tokens stats read through the
+  `-- Dashboard --` data source, so the three LLM & FinOps stats run one
+  BigQuery job instead of two, and its auto-refresh picker offers only
+  5m, 15m, 30m and 1h. The Grafana query sync check does not cover it
+  yet.
+- **BQCA Looker Studio: report-wide unique column IDs (#558, #562)** —
+  the BQCA template reused generic column IDs (`met`, `dim`, `m0`, `d0`)
+  across its 34 components, so in a report made with the 1-click link the
+  Total, Input, Output and Thinking Tokens scorecards could all sum
+  `total_tokens`. The contracts give each of the 65 column slots a
+  deterministic `qt_` ID that is unique across the report, and
+  `validate_contracts.py --profile bqca` rejects generic, repeated,
+  hand-made or mismatched IDs and dangling references; its new
+  `--live-report-textproto` audits a dump of the live template against
+  the contracts (#558). It also rejects any embedded `spec` block other
+  than the one the component's `chart_type` reads, where a rejected ID
+  could hide (#562).
+- **BQCA Looker Studio: live template sync (#561, #563, #569)** — four
+  tools stage the sync without editing the live template:
+  `gen_bqca_rename_map.py`, `apply_bqca_rename_map.py`, which writes a
+  marked offline preview outside the repository,
+  `sign_live_capture.py`, which signs a receipt of the export command's
+  output with `ssh-keygen -Y sign`, and `finalize_live_sync.py`, which
+  records the verification and commits the receipt only from two trusted
+  captures, before and after the write-back, the later one differing
+  from the preview. `validate_contracts.py` requires that committed
+  receipt, from a listed signer, for a binding that records a finished
+  sync, and checks that the binding's new `sync_generation` never moves
+  back (#561). On 2026-11-01 (revision `1793504835696`) the live
+  template got the 65 `qt_` IDs and its own data source, the binding
+  recorded the signed capture, and the known-issue notes went away; the
+  live template and two fresh copies render all 7 pages, and all 34
+  components matched BigQuery. Reports copied before 2026-11-01 keep
+  their old column IDs: re-create them from the 1-click link. Validating
+  the BQCA contracts now needs OpenSSH 8.2 or later (`ssh-keygen` on
+  `PATH`) (#563). Tests refuse a receipt that differs in either pinned
+  digest alone (#569).
+
+### Documentation
+
+- **Producers and the Plugins repository (#568)** — README.md, the
+  package's PyPI description, lists the coding-agent producers
+  (`bigquery-agent-analytics-mod` and `bigquery-agent-analytics-tracing`
+  from GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins) beside the
+  ADK plugin and the LangChain / LangGraph callback handler, and the
+  quickstart in `producers/README.md` installs both from that
+  marketplace.
+- **Docs drift (#544)** — `docs/sdk_usage_tracking.md` gives the
+  `sdk_version` job label as the installed package version from
+  `importlib.metadata`, made label-safe (`0-6-1`), else `unknown`; the
+  package defines no `__version__`. Broken relative links in
+  `examples/README.md` and `examples/agent_improvement_cycle/README.md`,
+  and two anchors in `scripts/README.md` and
+  `examples/context_graph/periodic_materialization/README.md`, are
+  fixed, and the mod README's redaction claims are narrowed to what its
+  sanitizer does, with the known gaps listed.
+- **Python UDF design doc links (#551)** — 13 source links in
+  `docs/python_udf_support_design.md` pointed into a developer's local
+  checkout; they now use repo-relative `../src/...` paths.
+
+### CI, tests and build locks (repo side, not in the wheel)
+
+- **The `sync_generation` gate is required, and ready for a merge queue
+  (#564, #565)** — the BQCA live-sync generation check runs in the
+  required `Format check` job, with a full-history checkout, and fails
+  instead of skipping when it cannot find the commit to compare with
+  (#564). `ci.yml` also runs on `merge_group` (`checks_requested`), and
+  the gate compares a merge group with its `base_sha` (#565); `main` has
+  no merge queue yet. `tests/test_ci_workflow.py` covers both.
+- **Hash-lock drift job removed (#552)** — `producers-ci.yml` no longer
+  regenerates the three hash locks from PyPI on every PR and push, which
+  turned every open PR red whenever PyPI published a new version of a
+  locked package. Installs still use `--require-hashes` against the
+  committed locks; refresh them with
+  `bash deploy/otlp_receiver/regen-locks.sh`.
+- **Web dashboard lock bump (#537)** — `vite` 8.1.3 → 8.3.4, a dev
+  dependency, in `package.json` and `package-lock.json` (merged under
+  `dashboard_v2/`, now `dashboards/web/`).
+
 ## [0.6.1] - 2026-10-20
 
 ### Release highlights
