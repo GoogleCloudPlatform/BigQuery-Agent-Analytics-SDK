@@ -26,8 +26,12 @@ claude plugin install bigquery-agent-analytics-mod@bqaa-tracing \
   --config dataset=agent_analytics
 ```
 
-See the full documentation and migration guide in [`GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins):
+See the full documentation in [`GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins):
 
 - [Mod README](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins/blob/main/plugins/claude_code_mod/README.md)
 - [Quickstart](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins/blob/main/plugins/claude_code_mod/QUICKSTART.md)
-- [Migration guide (`The earlier location`)](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins/blob/main/plugins/claude_code_mod/MIGRATION.md#the-earlier-location)
+
+Migration guides, by what you are moving from:
+
+- This repository's `bqaa-tracing` marketplace: [Moving from the former SDK marketplace](#moving-from-the-former-sdk-marketplace), above.
+- The earlier `bigquery-agent-analytics-plugin` marketplace, or the settings-hook tracing plugin: the Plugins repository's [migration guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins/blob/main/plugins/claude_code_mod/MIGRATION.md), which also covers managed settings. It does not yet cover this repository's marketplace.
