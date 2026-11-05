@@ -75,7 +75,8 @@ as ` true`, and an empty value. The hooks, the runtime and this report
 all apply the same rule. Upgrade note: earlier versions of this
 plugin's hooks stopped at the shell gate for `BQAA_TRACE_ENABLED=TRUE`
 or `True` and emitted nothing, so an existing uppercase setting now
-starts emission. The sibling `claude_code_mod` plugin parses these
+starts emission. The `bigquery-agent-analytics-mod` plugin in
+`GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins` parses these
 variables differently: it trims and lower-cases the value, turns
 `BQAA_DRY_RUN` on for `true`, `1`, `yes` or `on`, and keeps tracing on
 unless `BQAA_TRACE_ENABLED` is `false`, `0`, `no` or `off`.

@@ -30,4 +30,4 @@ See the full documentation and migration guide in [`GoogleCloudPlatform/BigQuery
 
 - [Mod README](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins/blob/main/plugins/claude_code_mod/README.md)
 - [Quickstart](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins/blob/main/plugins/claude_code_mod/QUICKSTART.md)
-- [Migration guide (`From the SDK repository's marketplace`)](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins/blob/main/plugins/claude_code_mod/MIGRATION.md#from-the-sdk-repositorys-marketplace)
+- [Migration guide (`The earlier location`)](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins/blob/main/plugins/claude_code_mod/MIGRATION.md#the-earlier-location)
