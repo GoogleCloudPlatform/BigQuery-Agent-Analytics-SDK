@@ -41,3 +41,20 @@
 
 Revert commit 3: the commit 1 tests go red again, and nothing else depends on
 the change.
+
+## Fix round 1 (review of 8cd6788)
+
+Review found two problems:
+
+1. **URL query and fragment.** URL extraction searched the whole URL for the
+   last `/models/`, so a `/models/` in the query or fragment replaced the
+   path's model, or named one for a URL whose path has none. The path now
+   ends at the URL's first `?` or `#` before the search (spec S3, A13).
+2. **Non-string models.** S8 promised that every non-string run model fails
+   before the first facet query, but a list, tuple or dict fell through.
+   `_run_insights` now raises `TypeError` before any query for a `text_model`
+   that is neither a string nor `None`, and for a non-string client endpoint
+   (spec S8, A14). This mirrors the `import_version` check in the same file.
+
+The tests were added first; on 8cd6788 they gave 32 failed and 34 passed. The
+34 are the existing 26 plus 8 ordinary-suffix guards. With the fix, 66 pass.

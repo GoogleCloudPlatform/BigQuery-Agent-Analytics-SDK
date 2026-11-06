@@ -23,10 +23,12 @@ failed with 404 NOT_FOUND in a location that does not serve that model.
 
 The run's ``text_model`` wins over the client's ``endpoint`` in every
 step, AI.GENERATE included. A full Vertex AI endpoint URL gives the
-Gemini API the model name at its end. A BigQuery ML model reference
-(``project.dataset.model``) names no Gemini API model, so the Gemini API
-steps skip it, and ``DEFAULT_ENDPOINT`` is used only when neither value
-names one.
+Gemini API the model name at the end of its path; its query and fragment
+name nothing. A BigQuery ML model reference (``project.dataset.model``)
+names no Gemini API model, so the Gemini API steps skip it, and
+``DEFAULT_ENDPOINT`` is used only when neither value names one. A
+``text_model`` that is neither a string nor None, or a client endpoint
+that is not a string, raises TypeError before any query.
 """
 
 import asyncio
@@ -58,6 +60,11 @@ _BQML_MODEL = "proj.ds.text_model"
 _ENDPOINT_URL = (
     "https://aiplatform.googleapis.com/v1/projects/proj/locations/global/"
     "publishers/google/models/gemini-3.8-flash"
+)
+# The full-URL form of _TEXT_MODEL.
+_TEXT_MODEL_URL = (
+    "https://aiplatform.googleapis.com/v1/projects/proj/locations/global/"
+    "publishers/google/models/gemini-3.8-pro"
 )
 
 
@@ -197,6 +204,44 @@ class TestGeminiApiSteps:
   def test_endpoint_url_gives_its_model_name(self, run):
     assert _run(run, endpoint=_ENDPOINT_URL) == _every_step(_ENDPOINT)
 
+  @pytest.mark.parametrize(
+      "text_model,expected",
+      [
+          # Method, query, fragment and trailing-slash suffixes end the
+          # model name.
+          (_TEXT_MODEL_URL + ":generateContent", _TEXT_MODEL),
+          (_TEXT_MODEL_URL + "?alt=sse", _TEXT_MODEL),
+          (_TEXT_MODEL_URL + "#section", _TEXT_MODEL),
+          (_TEXT_MODEL_URL + "/", _TEXT_MODEL),
+          # A "/models/" in the query or the fragment does not replace
+          # the model that the path names.
+          (_TEXT_MODEL_URL + "?next=/models/query-model", _TEXT_MODEL),
+          (_TEXT_MODEL_URL + "#/models/fragment-model", _TEXT_MODEL),
+          # With no model in its path, the URL names nothing, so the
+          # client's endpoint wins.
+          (
+              "https://example.test/v1/predict?next=/models/query-model",
+              _ENDPOINT,
+          ),
+          ("https://example.test/v1/predict#/models/fragment-model", _ENDPOINT),
+      ],
+      ids=[
+          "method_suffix",
+          "query_suffix",
+          "fragment_suffix",
+          "trailing_slash",
+          "models_in_query",
+          "models_in_fragment",
+          "models_only_in_query",
+          "models_only_in_fragment",
+      ],
+  )
+  def test_text_model_url_names_the_model_in_its_path(
+      self, run, text_model, expected
+  ):
+    steps = _run(run, endpoint=_ENDPOINT, text_model=text_model)
+    assert steps == _every_step(expected)
+
   def test_bqml_text_model_leaves_client_endpoint(self, run):
     steps = _run(run, endpoint=_ENDPOINT, text_model=_BQML_MODEL)
     assert steps == _every_step(_ENDPOINT)
@@ -238,6 +283,59 @@ class TestBigQueryFacetModel:
     [(function, sql)] = _facet_queries(bq)
     assert function == "ML.GENERATE_TEXT("
     assert f"MODEL `{_BQML_MODEL}`" in sql
+
+
+def _run_refused(run, endpoint=None, **kwargs):
+  """Runs insights expecting TypeError; returns (error, BigQuery, API)."""
+  bq = _bq_client()
+  client = Client(
+      project_id="p",
+      dataset_id="d",
+      verify_schema=False,
+      bq_client=bq,
+      endpoint=endpoint,
+  )
+  genai_client = _genai_client()
+  with patch("google.genai.Client", return_value=genai_client):
+    with pytest.raises(TypeError) as error:
+      run(client, **kwargs)
+  return error.value, bq, genai_client
+
+
+@pytest.mark.parametrize(
+    "run", list(_ENTRY_POINTS.values()), ids=list(_ENTRY_POINTS)
+)
+class TestNonStringModels:
+  """A model that is not a string fails before any query or API call."""
+
+  @pytest.mark.parametrize(
+      "text_model",
+      [123, True, b"gemini-3.8-pro", ["gemini-3.8-pro"], ("x",), {}, 0, []],
+      ids=["int", "bool", "bytes", "list", "tuple", "dict", "zero", "empty"],
+  )
+  def test_text_model_that_is_not_a_string_raises(self, run, text_model):
+    error, bq, genai_client = _run_refused(
+        run, endpoint=_ENDPOINT, text_model=text_model
+    )
+    assert "text_model must be a string or None" in str(error)
+    assert bq.query.call_count == 0
+    assert genai_client.aio.models.generate_content.call_count == 0
+
+  @pytest.mark.parametrize(
+      "text_model", [None, _TEXT_MODEL], ids=["no_text_model", "text_model"]
+  )
+  @pytest.mark.parametrize(
+      "endpoint", [123, ["gemini-3.8-flash"]], ids=["int", "list"]
+  )
+  def test_endpoint_that_is_not_a_string_raises(
+      self, run, endpoint, text_model
+  ):
+    error, bq, genai_client = _run_refused(
+        run, endpoint=endpoint, text_model=text_model
+    )
+    assert "endpoint must be a string" in str(error)
+    assert bq.query.call_count == 0
+    assert genai_client.aio.models.generate_content.call_count == 0
 
 
 class TestRemoteFunction:

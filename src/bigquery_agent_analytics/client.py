@@ -3880,7 +3880,7 @@ class Client:
             steps that call the Gemini API (the facet fallback, the
             analysis prompts and the executive summary) call it too,
             and take the model name at the end of a full Vertex AI
-            endpoint URL. A BigQuery ML model reference
+            endpoint URL's path. A BigQuery ML model reference
             (``project.dataset.model``) goes straight to ML.GENERATE_TEXT
             and names no Gemini API model, so those steps call the
             client's ``endpoint`` instead, or ``DEFAULT_ENDPOINT`` when
@@ -3893,6 +3893,9 @@ class Client:
         ValueError: If *dataset* is neither one BigQuery table name nor
             one wildcard read, for example a dotted path or a name
             containing a backtick.
+        TypeError: If *text_model* is neither a string nor None, or the
+            client's ``endpoint`` is not a string. Both are checked
+            before any query.
     """
     return _run_sync(
         self._run_insights(
@@ -3914,6 +3917,18 @@ class Client:
     table = self._events_table(dataset)
     filt = filters or TraceFilter()
     cfg = config or InsightsConfig()
+    # The run's model reaches every tier, so refuse a non-string before
+    # any query rather than let a tier's error handling drop it.
+    if text_model is not None and not isinstance(text_model, str):
+      raise TypeError(
+          "text_model must be a string or None, not"
+          f" {type(text_model).__name__}."
+      )
+    if not isinstance(self.endpoint, str):
+      raise TypeError(
+          "The client's endpoint must be a string, not"
+          f" {type(self.endpoint).__name__}."
+      )
     model = text_model or self.endpoint
     api_model = self._insights_api_model(text_model)
 
@@ -3981,16 +3996,19 @@ class Client:
     call the Gemini API, which takes a model name. The run's
     *text_model* wins over the client's ``endpoint``, as it does in
     BigQuery. A full Vertex AI endpoint URL names the model at the end
-    of its path. A BigQuery ML model reference names no Gemini API
-    model, so it is skipped, and ``DEFAULT_ENDPOINT`` is used only when
-    neither value names one.
+    of its path; its query and fragment name nothing. A BigQuery ML
+    model reference names no Gemini API model, so it is skipped, and
+    ``DEFAULT_ENDPOINT`` is used only when neither value names one.
     """
     for value in (text_model, self.endpoint):
       if not isinstance(value, str) or not value:
         continue
       if value.startswith("https://"):
-        _, found, rest = value.rpartition("/models/")
-        name = re.split(r"[:?#/]", rest, maxsplit=1)[0] if found else ""
+        # Only the path names the model: it ends at the first "?" or
+        # "#", so a "/models/" in the query or fragment names nothing.
+        path = re.split(r"[?#]", value, maxsplit=1)[0]
+        _, found, rest = path.rpartition("/models/")
+        name = re.split(r"[:/]", rest, maxsplit=1)[0] if found else ""
         if name:
           return name
       elif not self._is_legacy_model_ref(value):

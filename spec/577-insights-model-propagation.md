@@ -21,8 +21,10 @@
   client's `endpoint`, that names a model:
   - a non-empty string that is neither an endpoint URL nor a BigQuery ML
     reference names itself;
-  - an endpoint URL names the path segment after its last `/models/`, cut at
-    the first `:`, `?`, `#` or `/`; a URL without one names nothing;
+  - an endpoint URL names the segment after the last `/models/` in its path,
+    cut at the first `:` or `/`. The path ends at the URL's first `?` or `#`,
+    so a `/models/` in the query or fragment names nothing, and a URL whose
+    path has no such segment names nothing;
   - a BigQuery ML reference, an empty value, `None` or a non-string names
     nothing.
 
@@ -38,10 +40,16 @@
   ML.GENERATE_TEXT, then the Gemini API), the per-session and per-prompt error
   handling, and the `InsightsReport` shape. The Gemini API client keeps its
   own project and location.
-- **S8. Non-string run model.** A non-string run model fails before the first
-  facet query, as a non-string endpoint already did. A non-string
-  `text_model` used to be dropped by the ML.GENERATE_TEXT tier's error
-  handling instead; S3 skips it for the Gemini API model.
+- **S8. Non-string models fail closed.** Before any query, `insights()` and
+  `insights_async()` raise `TypeError` when `text_model` is neither a string
+  nor `None` (falsy values such as `0` and `[]` included), or when the
+  client's `endpoint` is not a string, whether or not `text_model` is given.
+  On main (674973b), a non-string `text_model` was ignored: AI.GENERATE ran
+  with the endpoint, and only the ML.GENERATE_TEXT tier saw the value, whose
+  error handling dropped it. A non-string endpoint failed with
+  `AttributeError` after the session-metadata query when it was an integer
+  or a boolean, and a list fell through every BigQuery tier to the Gemini
+  API fallback.
 
 ## Acceptance
 
@@ -68,6 +76,14 @@ text_model.
   context: every step calls X (one entry point).
 - **A11.** The three helpers default to `DEFAULT_ENDPOINT`.
 - **A12.** The existing insights, client and Remote Function tests still pass.
+- **A13.** `text_model=<URL>` with endpoint X: the method, query, fragment and
+  trailing-slash suffixes still end the model name. A `/models/` in the query
+  or fragment does not replace the model in the path. A URL whose path names
+  no model leaves every step on X.
+- **A14.** `text_model` of `123`, `True`, `b"..."`, a list, a tuple, a dict,
+  `0` or `[]`, and a client endpoint of `123` or a list, with or without a
+  string `text_model`: `TypeError` before any BigQuery query or Gemini API
+  call.
 
 "Every step" means one facet call per session (when facet extraction reaches
 the Gemini API), one call per analysis prompt and one summary call, and no
