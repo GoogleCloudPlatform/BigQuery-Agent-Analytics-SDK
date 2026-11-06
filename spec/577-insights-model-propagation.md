@@ -37,8 +37,11 @@
 - **S7. Unchanged.** SQL escaping, job labels, tier order (AI.GENERATE, then
   ML.GENERATE_TEXT, then the Gemini API), the per-session and per-prompt error
   handling, and the `InsightsReport` shape. The Gemini API client keeps its
-  own project and location. A non-string run model still fails before the
-  first facet query, as a non-string endpoint already does.
+  own project and location.
+- **S8. Non-string run model.** A non-string run model fails before the first
+  facet query, as a non-string endpoint already did. A non-string
+  `text_model` used to be dropped by the ML.GENERATE_TEXT tier's error
+  handling instead; S3 skips it for the Gemini API model.
 
 ## Acceptance
 
