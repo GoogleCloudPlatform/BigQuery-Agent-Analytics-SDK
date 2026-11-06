@@ -138,7 +138,8 @@ deps are correctly configured before relying on tracing.
 ### Submission to Anthropic's official marketplace
 
 Tracked in [#251](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/251)
-(track B5). Until then, the self-hosted catalog above is the canonical
+(track B5). Until then, the `bqaa-tracing` catalog in
+`GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins` is the canonical
 install path.
 
 ### Manual install from the GitHub release (fallback)
