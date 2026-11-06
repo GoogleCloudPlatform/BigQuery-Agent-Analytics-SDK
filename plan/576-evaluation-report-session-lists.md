@@ -21,6 +21,7 @@
    | `test_session_lists_follow_later_changes_to_session_scores` | after appending a failed row and flipping a passed one, both lists change | `functools.cached_property`, or lists stored when the report is built |
    | `test_count_only_report_has_empty_session_lists` | counts 7/3 with no rows give `[]`, `[]` | rows invented from counts, or a consistency check that raises |
    | `test_session_lists_stay_out_of_serialized_report` | neither name is in `serialize(report)`; a report rebuilt from it gives the same failed ids | `computed_field` or a stored field, which repeats rows in JSON |
+   | `test_session_lists_leave_json_schema_unchanged` (validation and serialization modes; added in review round 1) | the schema `description` is still `Aggregate report from an evaluation run.`; neither name is in the schema properties; both counts are `integer` | an edited class docstring, which pydantic copies into the schema; `computed_field`, which appears in the serialization schema |
 
 3. **RED, end-to-end tests.** In `tests/test_sdk_client.py`, both use a
    mocked BigQuery client:
@@ -39,8 +40,9 @@
    each fails with `AttributeError` on the new names.
 5. **GREEN.** Add the two `@property` methods to `EvaluationReport` in
    `src/bigquery_agent_analytics/system_evaluator.py`, with docstrings that
-   name the counts and say the lists are not serialized. Point the class
-   docstring at them. Use the truthy predicate that `_build_report` uses.
+   name the counts and say the lists are not serialized. Leave the class
+   docstring unchanged, because pydantic copies it into the JSON schema's
+   `description`. Use the truthy predicate that `_build_report` uses.
 6. **Run the new tests**, then the focused and area suites:
    ```
    pytest -q tests/test_system_evaluator.py tests/test_sdk_client.py \
@@ -85,3 +87,19 @@
   `intent/576-….md`, `spec/576-….md` and `plan/576-….md`, as requested, so
   they pass the check. Maintainers may still ask to drop them before merge,
   and dropping them is a one-commit change.
+
+## Review round 1
+
+Both blind reviews found that the first head, `49a28e5`, changed
+`EvaluationReport.model_json_schema()["description"]`, because pydantic
+copies the class docstring into the schema. That broke spec item 7.
+
+The fix:
+
+- Restore the one-line class docstring. The details stay in the property
+  docstrings and `SDK.md`.
+- Add `test_session_lists_leave_json_schema_unchanged`, which runs in both
+  schema modes.
+
+The new test fails on `49a28e5` and passes after the fix. It passes on
+`674973b0` by design, because it pins that schema.

@@ -75,12 +75,7 @@ class SessionScore(BaseModel):
 
 
 class EvaluationReport(BaseModel):
-  """Aggregate report from an evaluation run.
-
-  ``passed_sessions`` and ``failed_sessions`` are counts. The matching
-  ``SessionScore`` rows are ``passed_session_scores`` and
-  ``failed_session_scores``.
-  """
+  """Aggregate report from an evaluation run."""
 
   dataset: str = Field(description="Dataset or filter description.")
   evaluator_name: str = Field(description="Name of evaluator used.")

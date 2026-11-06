@@ -58,7 +58,10 @@ These properties are on `EvaluationReport`, which is importable from
 7. **Not serialized.** `model_dump()`, `model_dump_json()`,
    `model_json_schema()` and `serialize(report)` are unchanged. So are their
    outputs: CLI `--format json`, Remote Function replies and the streaming
-   `report_json` column. `session_scores` is still serialized, so
+   `report_json` column. That includes the schema's top-level
+   `description`: pydantic copies it from the class docstring, so the
+   `EvaluationReport` class docstring stays exactly as it was.
+   `session_scores` is still serialized, so
    `EvaluationReport.model_validate(serialize(report))` yields the same two
    lists.
 8. **Not constructor arguments.** The two names are not fields. If passed to
@@ -101,13 +104,17 @@ only additions:
 - `SDK.md`, "Batch Evaluation via the Client" (section 3): a short snippet
   that reads the failed rows after `client.evaluate(...)`.
 - `CHANGELOG.md`: an entry under `[Unreleased]`, `### Added`.
-- Docstrings on both properties. The `EvaluationReport` class docstring
-  points to them.
+- Docstrings on both properties. The `EvaluationReport` class docstring is
+  unchanged (item 7), so the details live in the property docstrings and
+  `SDK.md`.
 
 ## Done when
 
-1. The new tests in the plan fail on `674973b0` with `AttributeError` on the
-   new names, and pass with the change.
+1. The new property tests in the plan fail on `674973b0` with
+   `AttributeError` on the new names, and pass with the change. The schema
+   regression test pins the `674973b0` schema, so it passes there. It
+   failed on the first head, `49a28e5`, whose class docstring had changed
+   the schema description.
 2. The focused and area suites in the plan pass.
 3. `pytest --tb=short -q`, the full suite as CI runs it, passes.
    `bash autoformat.sh` with CI's tool versions (`pyink>=24.3.0,<26`,

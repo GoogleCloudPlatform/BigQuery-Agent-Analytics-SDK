@@ -530,6 +530,18 @@ class TestEvaluationReportSessionLists:
         "sess-2",
     ]
 
+  @pytest.mark.parametrize("mode", ["validation", "serialization"])
+  def test_session_lists_leave_json_schema_unchanged(self, mode):
+    # Pydantic copies the class docstring into the schema's top-level
+    # description, and a computed_field would show up in the
+    # serialization schema. Both must match the report before #576.
+    schema = EvaluationReport.model_json_schema(mode=mode)
+    assert schema["description"] == "Aggregate report from an evaluation run."
+    assert "failed_session_scores" not in schema["properties"]
+    assert "passed_session_scores" not in schema["properties"]
+    assert schema["properties"]["failed_sessions"]["type"] == "integer"
+    assert schema["properties"]["passed_sessions"]["type"] == "integer"
+
 
 class TestParseJson:
   """Tests for JSON parsing helper."""
