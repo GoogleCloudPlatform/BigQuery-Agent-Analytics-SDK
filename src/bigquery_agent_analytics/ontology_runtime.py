@@ -157,6 +157,24 @@ _MAIN_COLUMNS: tuple[str, ...] = (
 )
 
 
+# Relationship names that carry SKOS hierarchy / association
+# edges. ``gm import-owl`` emits the ``skos_``-prefixed forms:
+# ``skos:broader`` and ``skos:narrower`` triples both become a
+# child -> parent ``skos_broader`` edge, and each ``skos:related``
+# pair becomes one ``skos_related`` edge with its endpoints sorted
+# by name. The colon forms mirror the annotation keys for
+# hand-authored ontologies.
+_SKOS_BROADER_RELATIONSHIPS: frozenset[str] = frozenset(
+    {"skos_broader", "skos:broader"}
+)
+_SKOS_NARROWER_RELATIONSHIPS: frozenset[str] = frozenset(
+    {"skos_narrower", "skos:narrower"}
+)
+_SKOS_RELATED_RELATIONSHIPS: frozenset[str] = frozenset(
+    {"skos_related", "skos:related"}
+)
+
+
 # ------------------------------------------------------------------ #
 # Errors                                                              #
 # ------------------------------------------------------------------ #
@@ -1006,7 +1024,11 @@ class OntologyRuntime:
 
     Matches the kind taxonomy used by the concept-index
     emission so a caller comparing in-memory labels against
-    emitted rows sees the same kind strings.
+    emitted rows sees the same kind strings. Blank SKOS label
+    and notation values are skipped, as the emission skips them
+    (``bigquery_ontology.concept_index._as_list``); ``synonyms``
+    entries are returned as declared, as the emission writes
+    them.
     """
     ent = self.entity(entity_name)
     if ent is None:
@@ -1020,12 +1042,8 @@ class OntologyRuntime:
         kind = _label_kind_for_annotation_key(key)
         if kind is None:
           continue
-        if isinstance(value, list):
-          for v in value:
-            if isinstance(v, str):
-              labels.append((v, kind))
-        elif isinstance(value, str):
-          labels.append((value, kind))
+        for label in _all_string_values(value):
+          labels.append((label, kind))
     # ``skos:notation`` is a first-class label_kind in the
     # concept-index emission, so include every notation value
     # here too. Scalar OR list.
@@ -1034,20 +1052,29 @@ class OntologyRuntime:
     return tuple(labels)
 
   def schemes_for(self, entity_name: str) -> tuple[str, ...]:
-    """Return concept schemes the entity belongs to (the
-    ``skos:inScheme`` annotation values). Empty tuple when the
-    entity isn't in any scheme."""
+    """Return the concept schemes the entity belongs to.
+
+    Membership is the union of the ``skos:inScheme`` and
+    ``skos:topConceptOf`` annotation values (scalar or list).
+    SKOS defines ``skos:topConceptOf`` as a sub-property of
+    ``skos:inScheme``, so a top concept is also a member of its
+    scheme — the same rule the concept-index emission applies
+    (``bigquery_ontology.concept_index._entity_schemes``), so the
+    in-memory answer and a ``scheme`` filter over the emitted
+    rows select the same entities. Values keep first-seen order
+    (``skos:inScheme`` first); duplicates and empty strings are
+    dropped. Empty tuple when the entity isn't in any scheme or
+    doesn't exist.
+    """
     ent = self.entity(entity_name)
-    if ent is None or not ent.annotations:
+    if ent is None:
       return ()
-    raw = ent.annotations.get("skos:inScheme")
-    if raw is None:
-      return ()
-    if isinstance(raw, list):
-      return tuple(v for v in raw if isinstance(v, str))
-    if isinstance(raw, str):
-      return (raw,)
-    return ()
+    return tuple(
+        dict.fromkeys(
+            _entity_annotation_values(ent, "skos:inScheme")
+            + _entity_annotation_values(ent, "skos:topConceptOf")
+        )
+    )
 
   def notation_for(self, entity_name: str) -> Optional[str]:
     """Return the entity's per-row notation **display token**,
@@ -1091,9 +1118,10 @@ class OntologyRuntime:
 
   def in_scheme(self, scheme: str) -> tuple[str, ...]:
     """Return the names of entities that are members of
-    *scheme* (``skos:inScheme`` annotation contains the
-    scheme). Forward map: scheme → entities. Empty tuple
-    when the scheme has no members."""
+    *scheme* — its ``skos:inScheme`` or ``skos:topConceptOf``
+    annotation contains the scheme (see :meth:`schemes_for`).
+    Forward map: scheme → entities, in declared order. Empty
+    tuple when the scheme has no members."""
     if not scheme:
       return ()
     return tuple(
@@ -1103,42 +1131,110 @@ class OntologyRuntime:
     )
 
   def broader(self, entity_name: str) -> tuple[str, ...]:
-    """Return the entity names this concept declares as
-    ``skos:broader``. Direct parents — does not transitively
-    walk the hierarchy. Empty tuple when the entity has no
-    broader concepts or doesn't exist."""
-    return _all_string_values(self._annotation_raw(entity_name, "skos:broader"))
+    """Return the direct broader (parent) concepts of
+    *entity_name*.
+
+    An ontology can state a hierarchy edge four ways, and all
+    of them are read:
+
+    * the entity's own ``skos:broader`` annotation;
+    * another entity's ``skos:narrower`` annotation listing it;
+    * a ``skos_broader`` relationship from it (child → parent —
+      the edge ``gm import-owl`` emits for both ``skos:broader``
+      and ``skos:narrower`` triples);
+    * a ``skos_narrower`` relationship to it (parent → child).
+
+    Direct parents only — does not transitively walk the
+    hierarchy. Results keep first-seen order (the entity's own
+    annotation, then other entities' annotations in declared
+    order, then relationships in declared order) with
+    duplicates dropped. Empty tuple when the entity has no
+    broader concepts or doesn't exist.
+    """
+    if self.entity(entity_name) is None:
+      return ()
+    out = list(
+        _all_string_values(self._annotation_raw(entity_name, "skos:broader"))
+    )
+    for ent in self.ontology.entities:
+      if entity_name in _entity_annotation_values(ent, "skos:narrower"):
+        out.append(ent.name)
+    for rel in self.ontology.relationships:
+      if rel.name in _SKOS_BROADER_RELATIONSHIPS and rel.from_ == entity_name:
+        out.append(rel.to)
+      elif rel.name in _SKOS_NARROWER_RELATIONSHIPS and rel.to == entity_name:
+        out.append(rel.from_)
+    return tuple(dict.fromkeys(out))
 
   def narrower(self, entity_name: str) -> tuple[str, ...]:
-    """Return the entity names that declare this concept as
-    their ``skos:broader`` (direct children).
+    """Return the direct narrower (child) concepts of
+    *entity_name* — the inverse of :meth:`broader`.
 
-    Inverse direction of :meth:`broader` — computed by walking
-    every entity's ``skos:broader`` annotation and returning
-    those whose value(s) include *entity_name*. Does not
-    transitively walk the hierarchy.
+    Reads the same four sources from the other end: the
+    entity's own ``skos:narrower`` annotation, other entities'
+    ``skos:broader`` annotations listing it, ``skos_narrower``
+    relationships from it, and ``skos_broader`` relationships to
+    it. For any two declared entities, ``B in broader(A)`` holds
+    exactly when ``A in narrower(B)``. Does not transitively
+    walk the hierarchy. Results keep first-seen order (the
+    entity's own annotation, then other entities' annotations
+    in declared order, then relationships in declared order)
+    with duplicates dropped. Empty tuple when the entity has no
+    narrower concepts or doesn't exist.
     """
-    if not entity_name:
+    if self.entity(entity_name) is None:
       return ()
-    out: list[str] = []
+    out = list(
+        _all_string_values(self._annotation_raw(entity_name, "skos:narrower"))
+    )
     for ent in self.ontology.entities:
-      if entity_name in _all_string_values(
-          ent.annotations.get("skos:broader") if ent.annotations else None
-      ):
+      if entity_name in _entity_annotation_values(ent, "skos:broader"):
         out.append(ent.name)
-    return tuple(out)
+    for rel in self.ontology.relationships:
+      if rel.name in _SKOS_NARROWER_RELATIONSHIPS and rel.from_ == entity_name:
+        out.append(rel.to)
+      elif rel.name in _SKOS_BROADER_RELATIONSHIPS and rel.to == entity_name:
+        out.append(rel.from_)
+    return tuple(dict.fromkeys(out))
 
   def related(self, entity_name: str) -> tuple[str, ...]:
-    """Return the entity names this concept declares as
-    ``skos:related``. Empty tuple when the entity has none
-    or doesn't exist. The relation is *not* automatically
-    symmetric in this accessor — if A declares related=B but
-    B doesn't declare related=A, then ``related("A")`` returns
-    ``("B",)`` and ``related("B")`` returns ``()``. SKOS
-    treats ``related`` as symmetric; tooling that needs the
-    symmetric closure should combine ``related("A") +
-    related_inverse_walk(...)`` itself."""
-    return _all_string_values(self._annotation_raw(entity_name, "skos:related"))
+    """Return the concepts associated with *entity_name* via
+    ``skos:related``.
+
+    Two sources:
+
+    * The entity's own ``skos:related`` annotation, read as
+      declared. Annotations are *not* auto-symmetrized: if A
+      declares related=B but B doesn't declare related=A, then
+      ``related("A")`` returns ``("B",)`` and ``related("B")``
+      returns ``()``. SKOS treats ``related`` as symmetric;
+      tooling that needs the symmetric closure over annotations
+      should also walk the other entities' ``skos:related``
+      values itself.
+    * ``skos_related`` relationships, matched at **either**
+      endpoint. ``gm import-owl`` emits one edge per related
+      pair with its endpoints sorted by name, so ``from`` /
+      ``to`` order carries no meaning; reading only one end
+      would make the answer depend on how the two names sort.
+
+    Results keep first-seen order (annotation, then
+    relationships in declared order) with duplicates dropped.
+    Empty tuple when the entity has no related concepts or
+    doesn't exist.
+    """
+    if self.entity(entity_name) is None:
+      return ()
+    out = list(
+        _all_string_values(self._annotation_raw(entity_name, "skos:related"))
+    )
+    for rel in self.ontology.relationships:
+      if rel.name not in _SKOS_RELATED_RELATIONSHIPS:
+        continue
+      if rel.from_ == entity_name:
+        out.append(rel.to)
+      if rel.to == entity_name:
+        out.append(rel.from_)
+    return tuple(dict.fromkeys(out))
 
   # -------------------------------------------------------- #
   # Internal: annotation reader                              #
@@ -1160,15 +1256,26 @@ class OntologyRuntime:
 
 
 def _all_string_values(raw: Any) -> tuple[str, ...]:
-  """Return every string from an annotation value, scalar or
-  list. Empty tuple for missing / non-string content."""
+  """Return every non-empty string from an annotation value,
+  scalar or list. Empty strings are dropped, as in
+  ``bigquery_ontology.concept_index._as_list``, so a blank value
+  never surfaces as an entity, scheme, label, or notation. Empty
+  tuple for missing / non-string content."""
   if raw is None:
     return ()
   if isinstance(raw, list):
-    return tuple(v for v in raw if isinstance(v, str))
+    return tuple(v for v in raw if isinstance(v, str) and v)
   if isinstance(raw, str):
-    return (raw,)
+    return (raw,) if raw else ()
   return ()
+
+
+def _entity_annotation_values(entity: Entity, key: str) -> tuple[str, ...]:
+  """Return every non-empty string declared under annotation
+  *key* on *entity* (see :func:`_all_string_values`)."""
+  if not entity.annotations:
+    return ()
+  return _all_string_values(entity.annotations.get(key))
 
 
 def _label_kind_for_annotation_key(key: str) -> Optional[str]:
