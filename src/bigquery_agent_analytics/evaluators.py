@@ -17,8 +17,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import decimal
 import logging
 import math
+import numbers
+import re
 from typing import Any, Optional
 import warnings
 
@@ -439,6 +442,75 @@ def render_ai_generate_judge_query(
   )
 
 
+# Named C-style escapes GoogleSQL accepts inside quoted strings and
+# identifiers. Any other character in the 0x00-0x1F + 0x7F range goes
+# through ``\xHH``.
+_NAMED_CONTROL_ESCAPES = {
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+    "\b": "\\b",
+    "\f": "\\f",
+}
+
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1F\x7F]")
+
+
+def _escape_sql_quoted(value: str, quote: str = "'") -> str:
+  """Escapes *value* to sit between two *quote* characters in GoogleSQL.
+
+  GoogleSQL string literals and backtick-quoted identifiers use C-style
+  escapes, not ANSI quote doubling. Backslashes are escaped first, so the
+  escapes added after them are not escaped again, then *quote*, then
+  control characters. The result can't end the quoted token early, and it
+  decodes back to *value*.
+  """
+  escaped = value.replace("\\", "\\\\").replace(quote, "\\" + quote)
+  return _CONTROL_CHARACTER.sub(
+      lambda match: _NAMED_CONTROL_ESCAPES.get(
+          match.group(0), f"\\x{ord(match.group(0)):02x}"
+      ),
+      escaped,
+  )
+
+
+def _finite_float(value: Any, name: str) -> float:
+  """Returns *value* as a plain finite ``float`` to format into SQL.
+
+  Raises ``ValueError`` naming *name* unless *value* is a real number or
+  a ``Decimal``, and finite: a string, ``None``, ``bool`` (although it
+  subclasses ``int``), NaN or an infinity is refused.
+  """
+  if isinstance(value, bool) or not isinstance(
+      value, (numbers.Real, decimal.Decimal)
+  ):
+    raise ValueError(f"{name} must be a number; got {value!r}")
+  try:
+    number = float(value)
+  except (OverflowError, ValueError):
+    # An int too large for a float, or a signaling-NaN Decimal.
+    number = math.nan
+  if not math.isfinite(number):
+    raise ValueError(f"{name} must be finite; got {value!r}")
+  return number
+
+
+def _whole_int(value: Any, name: str) -> int:
+  """Returns *value* as a plain ``int`` to format into SQL.
+
+  Raises ``ValueError`` naming *name* unless *value* is an integer, or a
+  finite real number or ``Decimal`` without a fractional part; ``bool``
+  is refused. The fraction check is exact, not after rounding to float.
+  """
+  if isinstance(value, numbers.Integral) and not isinstance(value, bool):
+    return int(value)
+  _finite_float(value, name)
+  whole = int(value)
+  if whole != value:
+    raise ValueError(f"{name} must be a whole number; got {value!r}")
+  return whole
+
+
 def _render_ai_generate_judge_query(
     *,
     project: str,
@@ -448,9 +520,16 @@ def _render_ai_generate_judge_query(
     endpoint: str,
     connection_id: Optional[str] = None,
 ) -> str:
-  """Internal implementation used by the supported BigQuery judge path."""
+  """Internal implementation used by the supported BigQuery judge path.
+
+  *endpoint* and *connection_id* are client configuration, which the
+  BigQuery Remote Function takes from the request's
+  ``userDefinedContext``, so both are escaped for their single-quoted
+  literals: a quote or backslash can't end them and add SQL.
+  """
   if connection_id:
-    connection_arg = f"\n      connection_id => '{connection_id}',"
+    escaped_connection_id = _escape_sql_quoted(connection_id)
+    connection_arg = f"\n      connection_id => '{escaped_connection_id}',"
   else:
     connection_arg = ""
   return _AI_GENERATE_JUDGE_BATCH_QUERY_TEMPLATE.format(
@@ -458,7 +537,7 @@ def _render_ai_generate_judge_query(
       dataset=dataset,
       table=table,
       where=where,
-      endpoint=endpoint,
+      endpoint=_escape_sql_quoted(endpoint),
       connection_arg=connection_arg,
   )
 

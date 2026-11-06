@@ -46,12 +46,9 @@ Example usage::
 from __future__ import annotations
 
 import json
-import logging
 from typing import Optional
 
 from .resolved_spec import ResolvedGraph
-
-logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 # ------------------------------------------------------------------ #
 # Type mapping: YAML property types -> BQ JSON Schema types            #

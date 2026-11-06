@@ -10,12 +10,12 @@ plugins/claude_code/
 ├── .claude-plugin/
 │   └── plugin.json          # native Claude Code manifest
 ├── hooks/
-│   ├── common.sh            # shared hook entry (PYTHONPATH + python -m)
+│   ├── common.sh            # shared hook entry (PYTHONPATH + python -c runner)
 │   └── <hook>.sh            # one per Claude Code hook
 ├── commands/
 │   └── bqaa-setup.md        # /bqaa-setup slash command
 ├── scripts/
-│   └── run_setup_check.sh   # /bqaa-setup wrapper (PYTHONPATH + python -m)
+│   └── run_setup_check.sh   # /bqaa-setup wrapper (PYTHONPATH + python -c runner)
 ├── MARKETPLACE.md           # submission checklist + IAM + verification
 └── vendor/                  # generated at build time (git-ignored)
     ├── bigquery_agent_analytics_tracing/
@@ -30,19 +30,38 @@ plugins/claude_code/
 [`producers/scripts/build_claude_plugin.py`](../../producers/scripts/build_claude_plugin.py)
 copies the canonical package source into `vendor/` and stamps the
 resolved version into `.claude-plugin/plugin.json` at release time —
-so the wheel and the plugin always ship the same code.
+so the wheel and the plugin always ship the same code (`plugins/claude_code/`
+in this repository remains the build input for `build_claude_plugin.py`
+to produce the `tracing-v*` release tarball, while the Claude Code
+marketplace catalog and served copy live in
+[`GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins)).
 
 ## Runtime model
 
 1. Claude Code fires a hook (e.g. `PreToolUse`) per the manifest.
 2. The matching `hooks/<hook>.sh` execs `hooks/common.sh <HookName>`.
-3. `common.sh` prepends `${CLAUDE_PLUGIN_ROOT}/vendor` to `PYTHONPATH`
-   and execs
-   `python -m bigquery_agent_analytics_tracing.claude_code <HookName>`.
+3. `common.sh` prepends `${CLAUDE_PLUGIN_ROOT}/vendor` to `PYTHONPATH`,
+   dropping empty entries, and runs
+   `bigquery_agent_analytics_tracing.claude_code <HookName>` like
+   `python -m` does, but without adding the working directory (usually
+   the session's repository) to `sys.path`. Non-empty `PYTHONPATH`
+   entries you set are kept as given, so `.` or another relative entry
+   still resolves against the working directory and can import code
+   from it.
 4. The hook process writes one spool envelope and spawns the drainer
-   subprocess. The drainer inherits the same `PYTHONPATH` via
-   `os.environ.copy()` so the vendored package resolves on the spawned
-   process too — no separate wheel install required on `BQAA_PYTHON`.
+   subprocess the same way. The drainer inherits the same `PYTHONPATH`
+   via `os.environ.copy()` so the vendored package resolves on the
+   spawned process too — no separate wheel install required on
+   `BQAA_PYTHON`.
+
+The marketplace catalog in
+[`GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins)
+installs the copy committed under its `plugins/claude_code_dist/`
+directory, which changes only when a release is synced, so an installed
+plugin may predate the behavior described here and in
+[`commands/bqaa-setup.md`](commands/bqaa-setup.md). If the installed
+`hooks/common.sh` still runs `python -m`, it predates the launcher
+above and puts the working directory first on `sys.path`.
 
 ## Required runtime deps on `BQAA_PYTHON`
 
@@ -65,6 +84,12 @@ BigQuery IAM requirements and submission checklist live in
 
 ## Installing the plugin
 
+> **Recommended for Claude Code v2.1.296+:** Use
+> [`bigquery-agent-analytics-mod`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins/tree/main/plugins/claude_code_mod)
+> in [`GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins),
+> which records turns, model requests, and tool calls in-process from
+> the background with zero hook latency.
+>
 > **If you previously installed an older BQAA Claude Code plugin from
 > another marketplace or local path, remove or disable it before
 > installing this catalog version.** Running multiple BQAA tracing
@@ -72,12 +97,12 @@ BigQuery IAM requirements and submission checklist live in
 > existing installs with `/plugin list` and uninstall any duplicates
 > with `/plugin uninstall <name>@<marketplace>` before continuing.
 
-This repo serves a Claude Code marketplace catalog at
-[`/.claude-plugin/marketplace.json`](../../.claude-plugin/marketplace.json).
+The `bqaa-tracing` Claude Code marketplace catalog is hosted in
+[`GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins/blob/main/.claude-plugin/marketplace.json).
 From a Claude Code session:
 
 ```
-/plugin marketplace add GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK
+/plugin marketplace add GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins
 /plugin install bigquery-agent-analytics-tracing@bqaa-tracing
 ```
 
@@ -90,12 +115,11 @@ From a Claude Code session:
 > into. A direct-URL `add` would fetch only the catalog JSON and the
 > plugin install would fail to resolve.
 
-For a faster clone — the SDK repo carries the consumption SDK + tests
-in addition to the plugin tree — use a sparse checkout if your Claude
-Code version supports it:
+For a faster clone, use a sparse checkout if your Claude Code version
+supports it:
 
 ```
-/plugin marketplace add GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK --sparse .claude-plugin plugins/claude_code_dist
+/plugin marketplace add GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins --sparse .claude-plugin plugins/claude_code_dist
 /plugin install bigquery-agent-analytics-tracing@bqaa-tracing
 ```
 
@@ -114,7 +138,8 @@ deps are correctly configured before relying on tracing.
 ### Submission to Anthropic's official marketplace
 
 Tracked in [#251](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/251)
-(track B5). Until then, the self-hosted catalog above is the canonical
+(track B5). Until then, the `bqaa-tracing` catalog in
+`GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins` is the canonical
 install path.
 
 ### Manual install from the GitHub release (fallback)

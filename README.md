@@ -64,11 +64,11 @@ regressions — all through BigQuery SQL or Python.
 
 Two kinds of components share one `agent_events` table:
 
-- **Producers write it.** The ADK
-  [`BigQueryAgentAnalyticsPlugin`](https://adk.dev/observability/bigquery-agent-analytics/)
-  and the LangChain / LangGraph
-  [`BigQueryCallbackHandler`](https://docs.langchain.com/oss/python/integrations/callbacks/google_bigquery)
-  emit the same schema and can write to the same table side by side.
+- **Producers write it.** Multiple producer frameworks emit the same canonical
+  `agent_events` schema and write to the same table side by side:
+  - Google ADK: [`BigQueryAgentAnalyticsPlugin`](https://adk.dev/observability/bigquery-agent-analytics/)
+  - LangChain / LangGraph: [`BigQueryCallbackHandler`](https://docs.langchain.com/oss/python/integrations/callbacks/google_bigquery)
+  - Claude Code & coding agents: [`GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins) (`bigquery-agent-analytics-mod` and `bigquery-agent-analytics-tracing`)
 - **This SDK consumes it.** Everything here is read-only over that table:
   trace reconstruction, evaluation, insights, the context graph.
 
@@ -278,8 +278,8 @@ with a runnable ADK agent.
 |----------|-------------|
 | [SDK Feature Reference](SDK.md) | Complete API walkthrough with working code examples |
 | [BQCA Prompt & Response Logging Manual](docs/guides/bqca-prompt-response-logging-manual.md) | Self-hosting setup, capability matrix, customization, and self-debugging guide for the [BQCA Customer Starter Notebook](examples/bqca_prompt_response_logging_customer_notebook.ipynb) ([Open in Colab](https://colab.research.google.com/github/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/bqca_prompt_response_logging_customer_notebook.ipynb)) |
-| [Looker Studio Dashboard](dashboard/looker_studio/README.md) | Published 37-chart BQAA observability template with project/dataset/table configurator |
-| [Dashboard User Manual](dashboard/looker_studio/USER_MANUAL.md) | End-user guide to the Looker Studio dashboard: setup in three steps, page guide, sharing, troubleshooting |
+| [Looker Studio Dashboard](dashboards/looker_studio/README.md) | Published 37-chart BQAA observability template with project/dataset/table configurator |
+| [Dashboard User Manual](dashboards/looker_studio/USER_MANUAL.md) | End-user guide to the Looker Studio dashboard: setup in three steps, page guide, sharing, troubleshooting |
 | [Streamlit Dashboard](dashboards/streamlit/README.md) | Self-hosted dashboard with two surfaces: ADK Agents, and BQCA Prompt & Response Logging (turn latency, data agents and personas, prompt/response/SQL explorer, tokens, embedding suggestions, error attribution) |
 | [BQCA Analytics Dashboards](docs/guides/bqca-prompt-response-logging-manual.md#74-visualizing-logs-with-the-bqca-analytics-dashboards-looker-studio--streamlit) | Visualize BQCA Prompt & Response Logging with Looker Studio (`hydrate_dashboard.py --profile bqca`, `/bqca/` configurator) or Streamlit (`?profile=bqca`) |
 | [Agent Context Graph Codelab](docs/codelabs/periodic_materialization.md) | Extract decision traces from your agent's context graph, end to end (~35 min) |

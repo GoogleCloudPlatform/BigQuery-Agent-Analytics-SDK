@@ -18,7 +18,7 @@ load job (`LoadJobConfig.labels`) it submits.
 | Key                | Value                                      | Scope |
 | ------------------ | ------------------------------------------ | ----- |
 | `sdk`              | constant `bigquery-agent-analytics`        | every SDK job |
-| `sdk_version`      | `__version__`, BQ-safe (e.g. `0-4-0`)      | every SDK job |
+| `sdk_version`      | installed package version (`importlib.metadata`), BQ-safe (e.g. `0-6-1`), else `unknown` | every SDK job |
 | `sdk_surface`      | `python` \| `cli` \| `remote-function` \| `langsmith-export` | every SDK job |
 | `sdk_feature`      | `trace-read` \| `eval-code` \| `eval-llm-judge` \| `eval-categorical` \| `eval-performance` \| `evalbench-import` \| `evalbench-score` \| `evalbench-failed-sessions` \| `evalbench-native-import` \| `insights` \| `drift` \| `memory` \| `context-graph` \| `ontology-build` \| `ontology-gql` \| `views` \| `ai-ml` \| `feedback` \| `langsmith-export` | per-call site |
 | `sdk_ai_function`  | `ai-generate` \| `ai-embed` \| `ai-classify` \| `ai-forecast` \| `ai-detect-anomalies` \| `ml-generate-text` \| `ml-generate-embedding` \| `ml-detect-anomalies` \| `ml-forecast` | AI/ML invocations only |

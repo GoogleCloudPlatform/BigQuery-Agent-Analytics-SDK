@@ -2,7 +2,7 @@
 """Fail once the Looker Studio external-access attestation is overdue.
 
 The end-to-end copy canary in
-dashboard/looker_studio/bindings/report_template.yaml is a manual, monthly
+dashboards/looker_studio/bindings/report_template.yaml is a manual, monthly
 protocol (#445): CI's unit tests enforce the attestation's internal
 consistency but deliberately never compare its dates against the wall clock,
 because a unit test that turns red purely by time passing would fail
@@ -29,14 +29,14 @@ import sys
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 ATTESTATION_PATH = (
     REPOSITORY_ROOT
-    / "dashboard"
+    / "dashboards"
     / "looker_studio"
     / "bindings"
     / "report_template.yaml"
 )
 BQCA_ATTESTATION_PATH = (
     REPOSITORY_ROOT
-    / "dashboard"
+    / "dashboards"
     / "looker_studio"
     / "bindings"
     / "bqca_report_template.yaml"

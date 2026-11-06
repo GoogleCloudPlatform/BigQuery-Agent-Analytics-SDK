@@ -1,0 +1,319 @@
+# BQCA Prompt & Response Logging Looker Studio profile.
+#
+# Points at the dedicated 7-page tool-free BQCA Looker Studio report template
+# (`42e79a1f-a979-4de8-911f-80d5a99543d5`, data source alias `ds0`) whose
+# embedded CUSTOM_QUERY is `sql/bqca_events_v1.template.sql` bound to the
+# sentinel identifiers in `bindings/bqca_template_bindings.yaml`.
+#
+# This report is a copy that its owner made on 2026-10-09 of the first
+# published BQCA template, whose organization allowed sharing only inside the
+# organization. `datasource_id` below is the copy's own embedded
+# BlockDatasource, re-recorded on 2026-10-29 from the copy's report
+# configuration, which also maps the `ds0` alias to it. On 2026-11-01 (#559),
+# the copy's 65 component concepts and report-level `datasource_id` were
+# synced from the repository contracts and verified at revision 1793504835696.
+# `published_date`, `product_verification`, and the RPC health checks under
+# `live_template_verification` below were recorded on the source report (the
+# health checks on 2026-10-09); the comments above `live_template_verification`
+# date the checks that ran on this report and on fresh copies of it after the
+# sync.
+report_id: 42e79a1f-a979-4de8-911f-80d5a99543d5
+data_source_alias: ds0
+datasource_id: 70e5ac1e-65bb-4c89-a9df-fa9990cb6029
+product_contract: spec/bqca_product_contract.yaml
+chart_manifest: spec/bqca_chart_manifest.yaml
+dashboard_template_bundle: spec/bqca_dashboard_template.json
+compatibility_profile: spec/bqca_compatibility_profile.json
+default_report_name: BigQuery Conversational Analytics (BQCA)
+default_table: bqca_prompt_response_logs
+datasource_name_prefix: BQCA
+custom_query_template: sql/bqca_events_v1.template.sql
+published_date: "2026-10-08"
+credential_mode: VIEWERS
+generated_report_credential_gate:
+  observed_initial_mode: OWNERS
+  required_before_sharing: VIEWERS
+  verification_path: Resource > Manage added data sources > Edit
+# Owner-side intent, as in bindings/report_template.yaml: on 2026-10-09 the
+# owner turned on link sharing for anyone on the internet with the link. Only
+# external_access_verification below can show that an outside account can
+# actually copy the report.
+link_access: PUBLIC
+publishing_mode: MANUAL
+
+reviewed_template_sql:
+  path: sql/bqca_events_v1.template.sql
+  sha256: c915abe82c9e6d54aac6fffe78e34f90b436e852697c86747632a6c238754096
+
+# Required settings on the published Looker Studio BlockDatasource (`ds0`).
+# `_event_date_`, `_timestamp_`, and `_event_hour_` must keep native date/time
+# types (`use_datetime_type: true`) and both `@DS_START_DATE` / `@DS_END_DATE`
+# parameters must stay enabled; otherwise Looker Studio sends `''` into
+# `PARSE_DATE('%Y%m%d', ...)` and fails with "User Configuration Error".
+block_datasource:
+  use_datetime_type: true
+  parameter_configuration:
+    - DS_START_DATE
+    - DS_END_DATE
+  fields:
+    _event_date_:
+      data_type: DATE
+      semantic_type: YEAR_MONTH_DAY
+    _timestamp_:
+      data_type: TIMESTAMP
+      semantic_type: YEAR_MONTH_DAY_SECOND
+    _event_hour_:
+      data_type: TIMESTAMP
+      semantic_type: YEAR_MONTH_DAY_HOUR
+
+# Live verification of the published external template (`42e79a1f-a979-4de8-911f-80d5a99543d5`).
+# The RPC health checks (`method`, `publish_datasource`, `execute_query`,
+# `render_dashboard_pdf`, and `result`) were recorded on 2026-10-09, on the
+# source report, after publishing the data source with
+# `DS_START_DATE`/`DS_END_DATE` enabled and native date/time types on
+# `_event_date_`, `_timestamp_`, and `_event_hour_`. `verified_date` is the day
+# of the live sync below, not the date of those checks; the post-sync check
+# below gives the dates of the renders and queries that ran on this report and
+# on two fresh copies of it after the sync.
+# `pages_sha256` pins the canonical JSON digest of `contract["pages"]` (all 7
+# pages, 21 scorecards, and 13 charts/tables), `manifest_sha256` pins
+# `spec/bqca_chart_manifest.yaml`, and `template_bundle_sha256` pins
+# `spec/bqca_dashboard_template.json`, so mutating any component or metric fails CI.
+# On 2026-11-01 (`sync_generation: 1`, revision `1793504835696`, #559), the
+# live template was synced from these contracts — renaming all 65 concepts of
+# its 34 components to the derived `qt_` IDs in `spec/bqca_chart_manifest.yaml`
+# and repointing the report-level `datasource_id` to
+# `70e5ac1e-65bb-4c89-a9df-fa9990cb6029` — and verified with
+# `tools/finalize_live_sync.py` against the signed post-write capture receipt
+# committed at `bindings/bqca_live_capture_receipt.json` (`.sig`).
+# `verified_manifest_sha256` and `verified_template_bundle_sha256` match
+# `manifest_sha256` and `template_bundle_sha256`; if either contract changes
+# before the live template is re-synced, `sync_generation` must be incremented
+# and `pending_live_sync` re-added until `tools/finalize_live_sync.py` records
+# the next live sync. Capture receipts carry `sync_generation`, so
+# `tools/validate_contracts.py` rejects a committed receipt of another sync,
+# and CI checks that `sync_generation` only moves forward from the binding on
+# the base branch (`--previous-binding`).
+# Post-sync scorecard check, 2026-11-01 (revision `1793504835696`; dates in US
+# Pacific time): the signed capture gives every scorecard its own `qt_`
+# concept on its own field (all 65 concepts are distinct; Total, Input,
+# Output, Thinking and Cached Tokens are `qt_d779815a`, `qt_c90b69a4`,
+# `qt_893d21f1`, `qt_a6d27140` and `qt_31dd80a8`). On 2026-11-01,
+# `CreateTempReport` with the Linking API, with the options of the 1-click
+# link (`ds.ds0.refreshFields=false`: `creation_type: LINKING_API`,
+# `use_fresh_schema: false`, `fix_fields: false`,
+# `connector_block_config.alias: "t0"` and `use_datetime_type: true`, which
+# keep the template's published `BlockDatasource` schema and its
+# `DS_START_DATE` and `DS_END_DATE` parameters), created fresh copy
+# `920ba558-cc2e-44f9-bc35-96158b3ccb7e` (data source
+# `9663f7a6-a609-431a-ba31-e27f345d8ea6`) for canonical_sentinel_table and
+# fresh copy `35ebd06d-4d15-4ca9-ad23-0631cbb87ca3` (data source
+# `180a6d04-ab80-43c0-bf59-c48f3efa90ee`) for hydrated_bqca_table (13,054 rows
+# from 2026-07-31 to 2026-10-22), each with all 65 distinct `qt_` concepts.
+# `BatchedDataV2` (`VIEW` mode) on each fresh copy returned each page 1-3
+# scorecard's own value, equal to BigQuery over the bound query on the same
+# table and dates: on canonical_sentinel_table for 20200101..20261231 (the
+# live template returned the same values), Total 39,146,504, Input
+# 32,708,861, Output 6,437,643, Thinking and Cached null; on
+# hydrated_bqca_table for 20250101..20261101, Total 59,097,881, Input
+# 57,677,125, Output 364,388, Thinking 1,047,032 and Cached 1,147,570. On
+# 2026-11-02, `RenderDashboardPdf` rendered all 7 pages (`p_539b9240`,
+# `p_a89cfece`, `p_97efe693`, `p_edf06c14`, `p_08774fec`, `p_88bcf5f8` and
+# `p_b87a335e`) of the live template and of both fresh copies with
+# `contains_user_configuration_error: false` (rendered without errors), and
+# `BatchedDataV2` (`VIEW`
+# mode) returned all 34 components of each (the 21 scorecards of pages 1-6
+# and the 13 charts and tables of pages 1-7) without an error, equal to
+# BigQuery over the bound query. "Post-sync scorecard check (2026-11-01)" in
+# docs/dashboard-implementation.md has every value and the size and SHA-256
+# of each request and response. All three reports are
+# 42e79a1f-a979-4de8-911f-80d5a99543d5 (ds0 data source
+# 70e5ac1e-65bb-4c89-a9df-fa9990cb6029) and fresh copies
+# 920ba558-cc2e-44f9-bc35-96158b3ccb7e
+# (9663f7a6-a609-431a-ba31-e27f345d8ea6) and
+# 35ebd06d-4d15-4ca9-ad23-0631cbb87ca3
+# (180a6d04-ab80-43c0-bf59-c48f3efa90ee). The three capture digests of the
+# sync: D0 (revision 1793385843864, 84,190 bytes) SHA-256
+# 90e6f259ec923c2213e99c2a1b4cda79065c13753268bec65c68b51fbd40084a, D0p
+# (offline preview patched export, 86,069 bytes) SHA-256
+# b9be2dae36ecfe21b6867247aa115295622b729db4b0f24b6f6f8c87200b9e92, D1
+# (revision 1793504835696, 86,045 bytes) SHA-256
+# 7d0a64974f20d0412bd56a2e6c4a410bb85f7d7ae7798f434846bcf8358c1f86.
+# The 2026-11-01 fresh-copy run (use_fresh_schema: false, fix_fields: false)
+# supersedes the earlier use_fresh_schema: true / template-query run; the
+# values above were measured on the fresh copies the later run created, and
+# nothing was measured on the earlier run. The signer key fingerprint is
+# SHA256:pum9Cf+yARVa64p0awyJRYegBJJL0AkCBKjAONAwLkY. The successful D1
+# pre-write finalizer check printed: "check: the live audit of /tmp/D1.textproto
+# passed; bindings/bqca_report_template.yaml would change as above, and
+# bindings/bqca_live_capture_receipt.json and its signature would be written;
+# nothing written".
+live_template_verification:
+  sync_generation: 1
+  verified_date: "2026-11-01"
+  repository_sql_sha256: c915abe82c9e6d54aac6fffe78e34f90b436e852697c86747632a6c238754096
+  pages_sha256: b3c14c7dfc8ed51690f7f3e0ac6d24506c31dc63038591f479c51362715a89c4
+  manifest_sha256: c450625ea44b671938587f33589b66d1a3adce00546e43ccae5b6e968428dd44
+  template_bundle_sha256: c2fdbbb49b22333782dca1cfb8fa33aea3cc5d90490cd1b493538f2ccf954b62
+  verified_manifest_sha256: c450625ea44b671938587f33589b66d1a3adce00546e43ccae5b6e968428dd44
+  verified_template_bundle_sha256: c2fdbbb49b22333782dca1cfb8fa33aea3cc5d90490cd1b493538f2ccf954b62
+  verified_revision: "1793504835696"
+  verified_dump_sha256: "7d0a64974f20d0412bd56a2e6c4a410bb85f7d7ae7798f434846bcf8358c1f86"
+  capture_receipt_sha256: "15d5ee06be10fc4a2021dac31cd8fd69245c2bb8258b54115bf5c9c256d243f0"
+  captured_by: "haiyuan-eng-google"
+  method:
+    - data_studio_web_service_publish_datasource
+    - data_studio_web_service_get_block_datasource
+    - lego_midtier_service_execute_query
+    - lego_midtier_service_render_dashboard_pdf
+  publish_datasource:
+    health: HEALTHY
+    versions:
+      hydrated_bqca_table: 1791578476993
+      canonical_sentinel_table: 1791578549613
+  execute_query:
+    # hydrated_bqca_table is a sanitized live BQCA Prompt & Response Logging
+    # table conforming to the 15-column BQAA base schema with recent events
+    # inside the default rolling 90-day window (default_dates).
+    # canonical_sentinel_table is a static historical fixture whose event
+    # timestamps predate the rolling 90-day window, so default_dates returns
+    # 0 bytes while 20200101..20261231 returns 57,891 bytes.
+    hydrated_bqca_table:
+      schema: bqaa_base_table_15_columns
+      date_range: default_dates
+      code: 0
+      pages:
+        - p_539b9240
+        - p_a89cfece
+        - p_97efe693
+        - p_edf06c14
+        - p_08774fec
+        - p_88bcf5f8
+        - p_b87a335e
+      non_empty: true
+    canonical_sentinel_table:
+      - date_range: default_dates
+        code: 0
+        size: 0
+      - date_range: "20200101..20261231"
+        code: 0
+        size: 57891
+  render_dashboard_pdf:
+    hydrated_bqca_table:
+      code: 0
+      contains_user_configuration_error: false
+  result: PASSED
+  limitation: mutable_external_report_requires_reverification_after_changes
+
+# External link-access attestation for the dedicated BQCA report template
+# (`42e79a1f-a979-4de8-911f-80d5a99543d5`), structured identically to
+# `bindings/report_template.yaml` so `scripts/check_external_access_staleness.py`
+# can extract `next_due_date`, `status`, and `tracking_issue` without PyYAML.
+# Neither control has run against this report yet (`NOT_RUN`), so
+# `link_access_verified_date` stays null and `status` stays
+# PENDING_EXTERNAL_IDENTITY_CHECK until a signed-in outside account passes the
+# copy canary. An anonymous HTTP fetch is no substitute: it gets the same
+# sign-in redirect for this report as for a nonexistent report ID.
+external_access_verification:
+  controls:
+    - method: permissions_api_link_role_check
+      protocol: >-
+        Authenticated GET
+        https://datastudio.googleapis.com/v1/assets/{report_id}/permissions
+        must list role LINK_VIEWER with member allUsers. Call it from a
+        Google Workspace or Cloud Identity account holding the
+        datastudio.readonly OAuth scope (least privilege for this read).
+        Treat PERMISSION_DENIED as indeterminate: it can mean a caller
+        constraint (non-org account, missing scope) or lost asset
+        authorization, so verify the principal, its organization
+        authorization, and the scope before reading a denial as either.
+      limitation: does_not_expose_viewer_copy_disable_control
+      last_observed_date: null
+      last_result: NOT_RUN
+    - method: external_identity_link_access_check
+      protocol: >-
+        From a signed-in, non-owner, out-of-domain Google account holding no
+        direct grant on the report — either a personal account, or a managed
+        account whose Workspace policy is recorded as allowing Looker Studio
+        assets from untrusted external domains (recipient-side policy can
+        block a fully public template, which would misread as an owner-side
+        outage) — open
+        /reporting/create?c.reportId={report_id}&c.mode=view&c.explain=true
+        and confirm it reaches the Linking API copy/review flow rather than
+        the terminal "This report isn't shared with you" dialog. Record
+        last_observed_date and last_identity_class on every run, pass or
+        fail. On failure, record privately which Google account the dialog
+        selected before changing any setting; never post account identifiers
+        publicly.
+      last_identity_class: unknown
+      last_observed_date: null
+      link_access_verified_date: null
+      last_result: NOT_RUN
+  cadence: monthly_manual_until_automated
+  # The first canary run against this report is due by this date.
+  next_due_date: "2026-11-08"
+  status: PENDING_EXTERNAL_IDENTITY_CHECK
+  tracking_issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#515
+
+known_live_issues:
+  - issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#515
+    symptom: >-
+      The 1-click Linking API copy of the dedicated 7-page BQCA template was
+      not available to external non-owner identities: the first published
+      report allowed sharing only inside its owner's organization, so public
+      link sharing (`allUsers` LINK_VIEWER) could not be turned on for it.
+    scope: external_non_owner_identities
+    reported_date: "2026-10-08"
+    cause_isolation: >-
+      Owner-side provisioning, 41-field BlockDatasource native date/time
+      remediation, and all 7 pages / 34 components passed live verification
+      on the source report (product_verification 2026-10-08,
+      live_template_verification 2026-10-09). On 2026-10-09 its owner copied
+      it to `42e79a1f-a979-4de8-911f-80d5a99543d5` in an account that permits
+      public sharing and turned on link sharing for anyone with the link. The
+      external-identity copy canary has not run against the copy yet, and
+      transfer to Google-managed ownership is still pending. Until the canary
+      passes, external users who see "This report isn't shared with you" can
+      run the Self-Hosted Streamlit BQCA Dashboard (`dashboards/streamlit/`)
+      or export the bound custom query via
+      `hydrate_dashboard.py --profile bqca --custom-sql-out`.
+    status: OPEN
+
+product_verification:
+  verified_date: "2026-10-08"
+  pages: 7
+  component_count: 34
+  scorecard_count: 21
+  chart_count: 13
+  checks:
+    - expected_seven_page_and_thirty_four_component_titles_present
+    - zero_tool_pages_scorecards_or_charts_present
+    - only_nine_bqca_allowed_event_types_referenced
+    - data_agent_id_and_conversation_id_extracted_from_session_metadata_state
+    - three_condition_error_attribution_enforced
+    - multipart_user_prompt_and_agent_response_preserved_in_order
+    - embedding_suggestion_suggested_columns_prioritized_first
+    - block_datasource_native_datetime_and_date_parameters_enabled
+    - default_date_range_includes_today_on_all_seven_report_pages
+  result: PASSED
+
+source_contract:
+  mode: BASE_TABLE
+  generated_views_required: false
+  replacement_identifiers:
+    - PROJECT
+    - DATASET
+    - TABLE
+
+governance:
+  live_report_owner_class: CONTRIBUTOR_MANAGED
+  sentinel_fixture_owner_class: CONTRIBUTOR_MANAGED
+  target_owner_class: GOOGLE_MANAGED
+  transfer_status: PENDING_MAINTAINER
+
+default_date_range:
+  mode: rolling
+  start_offset_days: 89
+  end_offset_days: 0
+  include_today: true
+  page_scope: all_report_pages

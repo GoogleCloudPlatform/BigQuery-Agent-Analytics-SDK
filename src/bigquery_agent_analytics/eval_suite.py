@@ -40,14 +40,10 @@ from __future__ import annotations
 
 from enum import Enum
 import json
-import logging
 from typing import Any, Optional
 
 from pydantic import BaseModel
 from pydantic import Field
-
-logger = logging.getLogger("bigquery_agent_analytics." + __name__)
-
 
 # ------------------------------------------------------------------ #
 # Data Models                                                          #

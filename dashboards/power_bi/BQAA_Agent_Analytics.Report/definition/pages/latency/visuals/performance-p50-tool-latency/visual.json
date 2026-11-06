@@ -1,0 +1,70 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "performance-p50-tool-latency",
+  "position": {
+    "x": 16,
+    "y": 528,
+    "z": 4005,
+    "height": 112,
+    "width": 304,
+    "tabOrder": 4005
+  },
+  "visual": {
+    "visualType": "cardVisual",
+    "query": {
+      "queryState": {
+        "Data": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "P50 Tool Latency (ms)"
+                }
+              },
+              "queryRef": "events_v1.P50 Tool Latency (ms)",
+              "nativeQueryRef": "P50 Tool Latency (ms)",
+              "displayName": "P50 Tool Latency"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'P50 Tool Latency'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "performance-p50-tool-latency"
+    },
+    {
+      "name": "bqaa.oracle_query",
+      "value": "oracle/queries/performance-p50-tool-latency.sql"
+    }
+  ]
+}

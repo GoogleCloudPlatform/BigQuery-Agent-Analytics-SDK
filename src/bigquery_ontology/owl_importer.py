@@ -593,7 +593,6 @@ def _extract_datatype_properties(
 
 def _extract_relationships(
     g: Graph,
-    entities: dict[str, _ImportedEntity],
     namespaces: list[str],
     drops: _DropSummary,
     language: str = "en",
@@ -909,7 +908,6 @@ def _extract_skos_relationships(
     g: Graph,
     entities: dict[str, _ImportedEntity],
     iri_to_name: dict[str, str],
-    namespaces: list[str],
     drops: _DropSummary,
 ) -> list[_ImportedRelationship]:
   """Extract SKOS graph-shaped predicates as abstract relationships.
@@ -1111,7 +1109,7 @@ def _yaml_scalar(value: str) -> str:
   )
   if not needs_quote:
     try:
-      parsed = float(value)
+      float(value)
       needs_quote = True
     except ValueError:
       pass
@@ -1412,7 +1410,6 @@ def import_owl(
   )
   owl_relationships = _extract_relationships(
       g,
-      entities,
       include_namespaces,
       drops,
       language,
@@ -1424,7 +1421,6 @@ def import_owl(
       g,
       entities,
       iri_to_name,
-      include_namespaces,
       drops,
   )
 

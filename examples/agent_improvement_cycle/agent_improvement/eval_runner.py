@@ -21,13 +21,19 @@ import json
 from typing import Callable, TYPE_CHECKING
 
 from agent_improvement.prompts import JUDGE_PROMPT
+from agent_improvement.prompts import TOOL_USAGE_CATEGORIES
+from agent_improvement.prompts import USEFULNESS_CATEGORIES
 from google import genai
-from google.adk.runners import InMemoryRunner
 from google.genai.types import Content
 from google.genai.types import GenerateContentConfig
 from google.genai.types import HttpOptions
 from google.genai.types import HttpRetryOptions
 from google.genai.types import Part
+
+try:
+  from google.adk.runners import InMemoryRunner
+except ImportError:  # pragma: no cover
+  InMemoryRunner = None  # type: ignore[assignment,misc]
 
 if TYPE_CHECKING:
   from google.adk.agents import Agent
@@ -158,7 +164,39 @@ class EvalRunner:
         ),
     )
     verdict = json.loads(judge_response.text)
-    result["pass"] = verdict.get("pass", False)
+    passed = bool(verdict.get("pass", False))
+    pass_usefulness = USEFULNESS_CATEGORIES[0]
+    fail_usefulness = USEFULNESS_CATEGORIES[1]
+    raw_usefulness = (
+        str(verdict.get("response_usefulness") or "").strip().lower()
+    )
+    usefulness = (
+        raw_usefulness
+        if raw_usefulness in USEFULNESS_CATEGORIES
+        else (pass_usefulness if passed else fail_usefulness)
+    )
+    if not passed and usefulness == pass_usefulness:
+      usefulness = fail_usefulness
+    elif usefulness != pass_usefulness:
+      passed = False
+    tool_ok = not (expected_tool and expected_tool != "unknown") or (
+        expected_tool in tools_called
+    )
+    pass_tool_usage = TOOL_USAGE_CATEGORIES[0]
+    fail_tool_usage = (
+        TOOL_USAGE_CATEGORIES[2]
+        if len(TOOL_USAGE_CATEGORIES) > 2
+        else TOOL_USAGE_CATEGORIES[-1]
+    )
+    raw_tool_usage = str(verdict.get("tool_usage") or "").strip().lower()
+    tool_usage = (
+        raw_tool_usage
+        if raw_tool_usage in TOOL_USAGE_CATEGORIES
+        else (pass_tool_usage if tool_ok else fail_tool_usage)
+    )
+    result["pass"] = passed
+    result["response_usefulness"] = usefulness
+    result["tool_usage"] = tool_usage
     result["reason"] = verdict.get("reason", "")
     return result
 
@@ -198,6 +236,10 @@ class EvalRunner:
       print(f"         Answer: {answer}")
       print(
           f"         Tools called: {tools_called} | Expected: {expected_tool}"
+      )
+      print(
+          f"         response_usefulness: {result['response_usefulness']} | "
+          f"tool_usage: {result['tool_usage']}"
       )
       if not result["pass"]:
         print(f"         Reason: {result['reason']}")

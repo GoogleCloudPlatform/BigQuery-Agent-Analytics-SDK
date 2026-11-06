@@ -68,7 +68,7 @@ DATASOURCE_UID = "bqaa-bigquery"
 # 100 MB billed. The key spelling is significant (see the example file).
 DEFAULT_MAX_BYTES_BILLED = "100000000"
 
-# Identifier rules mirror dashboard/looker_studio/tools/hydrate_dashboard.py
+# Identifier rules mirror dashboards/looker_studio/tools/hydrate_dashboard.py
 # (the repository's source of truth for BigQuery identifier hygiene).
 PROJECT_RE = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
 DATASET_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,1023}$")

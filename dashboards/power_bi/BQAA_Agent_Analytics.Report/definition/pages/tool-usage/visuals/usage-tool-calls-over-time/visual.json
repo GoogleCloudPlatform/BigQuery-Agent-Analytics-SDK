@@ -1,0 +1,105 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "usage-tool-calls-over-time",
+  "position": {
+    "x": 16,
+    "y": 128,
+    "z": 4000,
+    "height": 232,
+    "width": 1240,
+    "tabOrder": 4000
+  },
+  "visual": {
+    "visualType": "areaChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Date"
+                    }
+                  },
+                  "Property": "Date"
+                }
+              },
+              "queryRef": "Date.Date",
+              "nativeQueryRef": "Date"
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "Tool Completion Events"
+                }
+              },
+              "queryRef": "events_v1.Tool Completion Events",
+              "nativeQueryRef": "Tool Completion Events"
+            }
+          ]
+        },
+        "Series": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "tool_completed_name"
+                }
+              },
+              "queryRef": "events_v1.tool_completed_name",
+              "nativeQueryRef": "tool_completed_name"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Tool Calls Over Time'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "usage-tool-calls-over-time"
+    },
+    {
+      "name": "bqaa.oracle_query",
+      "value": "oracle/queries/usage-tool-calls-over-time.sql"
+    }
+  ]
+}

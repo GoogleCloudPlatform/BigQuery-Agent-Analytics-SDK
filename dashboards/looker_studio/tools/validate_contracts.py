@@ -1,0 +1,3839 @@
+#!/usr/bin/env python3
+"""Validate Looker Studio product contracts, chart manifests, and bindings.
+
+Supports ``--profile adk``, ``--profile bqca``, and ``--profile all`` (default).
+Verifies 1:1 alignment between product contracts, chart manifests, and report
+template bindings, checks SHA-256 digests for SQL, pages, and manifests, and
+enforces the BQCA nine-event allowlist (zero tool or LLM_REQUEST events).
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import binascii
+import collections
+from collections.abc import Iterable
+import datetime
+import hashlib
+import json
+import pathlib
+import re
+import shutil
+import sqlite3
+import struct
+import subprocess
+import sys
+import tempfile
+from typing import Any
+
+import yaml
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+BQCA_UNLOGGED_EVENT_TYPES = (
+    "TOOL_STARTING",
+    "TOOL_COMPLETED",
+    "TOOL_ERROR",
+    "LLM_REQUEST",
+)
+
+_DEFAULT_BASE_TABLE_TYPES = {
+    "timestamp": "TIMESTAMP",
+    "event_type": "STRING",
+    "agent": "STRING",
+    "session_id": "STRING",
+    "invocation_id": "STRING",
+    "user_id": "STRING",
+    "trace_id": "STRING",
+    "span_id": "STRING",
+    "parent_span_id": "STRING",
+    "content": "JSON",
+    "attributes": "JSON",
+    "latency_ms": "JSON",
+    "status": "STRING",
+    "error_message": "STRING",
+    "is_truncated": "BOOL",
+}
+
+_SEMANTIC_TYPES_BY_DATA_TYPE = {
+    "INT64": {"NUMBER"},
+    "DOUBLE": {"NUMBER"},
+    "STRING": {"TEXT"},
+    "BOOL": {"BOOLEAN"},
+    "DATE": {"YEAR_MONTH_DAY"},
+    "TIMESTAMP": {"YEAR_MONTH_DAY_SECOND", "YEAR_MONTH_DAY_HOUR"},
+}
+
+_EXPECTED_CHART_METRIC_AGGREGATIONS = {
+    "total_tokens": "SUM",
+    "input_tokens": "SUM",
+    "output_tokens": "SUM",
+    "thoughts_tokens": "SUM",
+    "cached_tokens": "SUM",
+    "similar_queries_count": "SUM",
+    "turn_latency_ms": "AVG",
+    "llm_latency_ms": "AVG",
+    "ttft_ms": "AVG",
+    "total_latency_ms": "AVG",
+    "session_id": "COUNT_DISTINCT",
+    "invocation_id": "COUNT_DISTINCT",
+    "completed_turn_id": "COUNT_DISTINCT",
+    "error_message": "COUNT",
+    "span_id": "COUNT",
+    "extracted_sql": "COUNT",
+}
+
+_SPEC_KIND_BY_CHART_TYPE = {
+    "SCORECARD": "scorecard",
+    "bar_chart": "barChart",
+    "line_chart": "lineChart",
+    "pie_chart": "pieChart",
+    "table": "table",
+}
+
+# The keys under `spec.<kind>.fields` from which each kind reads its columns,
+# as key tuples (a list adds no step to a path).
+_BAR_OR_LINE_REFERENCE_PATHS = frozenset(
+    {
+        ("primaryAxis", "fieldId"),
+        ("metricSeries", "metricIds"),
+        ("primaryAxis", "sort", "sortFieldId"),
+    }
+)
+_SPEC_REFERENCE_PATHS = {
+    "scorecard": frozenset({("primaryMetricId",)}),
+    "barChart": _BAR_OR_LINE_REFERENCE_PATHS,
+    "lineChart": _BAR_OR_LINE_REFERENCE_PATHS,
+    "pieChart": frozenset(
+        {("dimensionId",), ("metricId",), ("sort", "sortFieldId")}
+    ),
+    "table": frozenset(
+        {("dimensionIds",), ("metricIds",), ("sort", "sortFieldId")}
+    ),
+}
+
+# Looker Studio column (concept) IDs. This repository requires every column of
+# the BQCA manifest and bundle to have a `qt_` ID that matches this, is unique
+# across the whole report, and is its slot's derived ID
+# (`bqca_derive_report_column_ids`). Looker Studio itself also accepts generic
+# names: until its generation-1 sync on 2026-11-01, the live template had
+# generic IDs (`met`, `dim`, `m0`, `d0`, ...), with which components on one
+# page of a report created through the 1-click link could show each other's
+# values. Reports copied before that sync must be re-created. Whenever these
+# contracts change ahead of the live template again,
+# `live_template_verification.pending_live_sync` in
+# `bindings/bqca_report_template.yaml` records the reopened sync until
+# `tools/finalize_live_sync.py` finalizes it.
+_QT_COLUMN_ID_RE = re.compile(r"^qt_[a-z0-9]{3,10}$")
+# The digest prefix lengths, in hex digits, that a derived column ID may take.
+_QT_DERIVED_HEX_LENGTHS = (8, 9, 10)
+
+
+def bqca_qt_column_id(
+    component_id: str, slot_index: int, field_name: str
+) -> str:
+  """Return the 8-hex-digit `qt_` ID of one BQCA column slot.
+
+  `bqca_derive_report_column_ids` gives a slot this ID unless another slot of
+  the report shares its first 8 hex digits.
+
+  Args:
+    component_id: The Looker Studio component ID (`cd-...`).
+    slot_index: The column's position in `spec.<kind>.dataset.columns`.
+    field_name: The column's `fieldName` (for example `_total_tokens_`).
+
+  Returns:
+    `qt_` followed by the first 8 hex digits of the SHA-256 of
+    `"{component_id}:{slot_index}:{field_name}"`.
+  """
+  digest = hashlib.sha256(
+      f"{component_id}:{slot_index}:{field_name}".encode("utf-8")
+  ).hexdigest()
+  return f"qt_{digest[:8]}"
+
+
+def bqca_derive_report_column_ids(
+    slots: Iterable[tuple[str, int, str]],
+) -> dict[tuple[str, int, str], str]:
+  """Return the report-wide unique ID of every BQCA column slot.
+
+  A slot is `(component_id, slot_index, field_name)`, as for
+  `bqca_qt_column_id`, and its digest is the SHA-256 of
+  `"{component_id}:{slot_index}:{field_name}"`. Its ID is `qt_` followed by
+  the shortest prefix of its digest, 8, 9 or 10 hex digits long, that no other
+  slot's digest starts with. While no two slots share their first 8 hex
+  digits, every ID is therefore `bqca_qt_column_id`; when two slots do, both
+  IDs grow, so the IDs depend only on the set of slots, never on their order.
+
+  Args:
+    slots: Every column slot of the report. A slot listed twice counts once.
+
+  Returns:
+    The ID of each slot.
+
+  Raises:
+    ValueError: Two slots share their first 10 hex digits, so no `qt_` ID
+      with at most 10 hex digits tells them apart.
+  """
+  name_by_slot = {slot: "{}:{}:{}".format(*slot) for slot in slots}
+  digest_by_name = {
+      name: hashlib.sha256(name.encode("utf-8")).hexdigest()
+      for name in set(name_by_slot.values())
+  }
+  prefix_counts = {
+      length: collections.Counter(
+          digest[:length] for digest in digest_by_name.values()
+      )
+      for length in _QT_DERIVED_HEX_LENGTHS
+  }
+  id_by_name: dict[str, str] = {}
+  for name, digest in sorted(digest_by_name.items()):
+    unique_lengths = [
+        length
+        for length in _QT_DERIVED_HEX_LENGTHS
+        if prefix_counts[length][digest[:length]] == 1
+    ]
+    if not unique_lengths:
+      prefix = digest[: _QT_DERIVED_HEX_LENGTHS[-1]]
+      clashing = sorted(
+          other
+          for other, other_digest in digest_by_name.items()
+          if other_digest.startswith(prefix)
+      )
+      raise ValueError(
+          f"column slots {', '.join(clashing)} share the first {len(prefix)}"
+          f" hex digits {prefix!r} of their SHA-256, so no qt_ ID with at"
+          f" most {len(prefix)} hex digits tells them apart"
+      )
+    id_by_name[name] = f"qt_{digest[:unique_lengths[0]]}"
+  return {slot: id_by_name[name] for slot, name in name_by_slot.items()}
+
+
+def _bqca_spec_columns(comp: dict[str, Any]) -> list[Any]:
+  """Return a component's `spec.<kind>.dataset.columns` list, or []."""
+  spec = comp.get("spec")
+  if not isinstance(spec, dict):
+    return []
+  inner = spec.get(_SPEC_KIND_BY_CHART_TYPE.get(comp.get("chart_type"), ""))
+  if not isinstance(inner, dict):
+    return []
+  dataset = inner.get("dataset")
+  columns = dataset.get("columns") if isinstance(dataset, dict) else None
+  return columns if isinstance(columns, list) else []
+
+
+def _bqca_column_ids(comp: dict[str, Any]) -> list[Any]:
+  """Return a component's embedded spec column IDs in slot order."""
+  return [
+      col.get("id") if isinstance(col, dict) else None
+      for col in _bqca_spec_columns(comp)
+  ]
+
+
+def _bqca_spec_roles(comp: dict[str, Any]) -> dict[str, Any] | None:
+  """Return a component's column IDs by role, in `spec.<kind>.fields` order.
+
+  A scorecard's `primaryMetricId` is its only metric. A bar or line chart
+  reads `primaryAxis.fieldId`, `metricSeries.metricIds`, `primaryAxis.sort`,
+  and `primaryAxis.reverseSortOrder`; a pie chart reads `dimensionId`,
+  `metricId`, `sort`, and `reverseSortOrder`; and a table reads
+  `dimensionIds`, `metricIds`, `sort`, and `reverseSortOrder`. Each sort
+  clause gives one `sortFieldId` and one `sortDir`.
+
+  Returns:
+    The `dimensions` and `metrics` column IDs, the `sort_columns` and
+    `sort_dirs` of the sort clauses, each list in manifest order, and
+    `reverse_sort_order` (False when omitted); or None for a `chart_type`
+    that is none of these kinds, whose references are unknown.
+  """
+  kind = _SPEC_KIND_BY_CHART_TYPE.get(comp.get("chart_type"), "")
+  spec = comp.get("spec")
+  inner = spec.get(kind) if isinstance(spec, dict) else None
+  fields = inner.get("fields") if isinstance(inner, dict) else None
+  fields = fields if isinstance(fields, dict) else {}
+  axis = fields.get("primaryAxis")
+  axis = axis if isinstance(axis, dict) else {}
+  if kind == "scorecard":
+    dimensions, metrics, clauses = [], [fields.get("primaryMetricId")], []
+    reverse_sort_order = False
+  elif kind in ("barChart", "lineChart"):
+    series = fields.get("metricSeries")
+    dimensions = [axis.get("fieldId")]
+    metrics = series.get("metricIds") if isinstance(series, dict) else []
+    clauses = axis.get("sort")
+    reverse_sort_order = axis.get("reverseSortOrder", False)
+  elif kind == "pieChart":
+    dimensions = [fields.get("dimensionId")]
+    metrics = [fields.get("metricId")]
+    clauses = fields.get("sort")
+    reverse_sort_order = fields.get("reverseSortOrder", False)
+  elif kind == "table":
+    dimensions = fields.get("dimensionIds")
+    metrics = fields.get("metricIds")
+    clauses = fields.get("sort")
+    reverse_sort_order = fields.get("reverseSortOrder", False)
+  else:
+    return None
+  clauses = [
+      clause if isinstance(clause, dict) else {}
+      for clause in (clauses if isinstance(clauses, list) else [])
+  ]
+  return {
+      "dimensions": list(dimensions) if isinstance(dimensions, list) else [],
+      "metrics": list(metrics) if isinstance(metrics, list) else [],
+      "sort_columns": [clause.get("sortFieldId") for clause in clauses],
+      "sort_dirs": [clause.get("sortDir") for clause in clauses],
+      "reverse_sort_order": reverse_sort_order,
+  }
+
+
+def _bqca_report_wide_column_id_errors(
+    components: list[dict[str, Any]], source: str
+) -> list[str]:
+  """Name every pair of components that share a column ID."""
+  errors: list[str] = []
+  owner_by_id: dict[str, tuple[int, str]] = {}
+  for position, comp in enumerate(components):
+    owner = f"{comp.get('id')} ({comp.get('component_id')})"
+    for cid in _bqca_column_ids(comp):
+      if not isinstance(cid, str):
+        continue
+      if cid not in owner_by_id:
+        owner_by_id[cid] = (position, owner)
+      elif owner_by_id[cid][0] != position:
+        # A repeat inside one component is reported by
+        # _validate_component_embedded_spec.
+        errors.append(
+            f"bqca {source} column id {cid!r} is used by both"
+            f" {owner_by_id[cid][1]} and {owner}; column IDs must be unique"
+            " across the report"
+        )
+  return errors
+
+
+def _bqca_derived_column_id_errors(
+    components: list[dict[str, Any]], source: str
+) -> list[str]:
+  """Name every `qt_` column ID that is not its slot's derived ID.
+
+  The IDs are derived from every column slot of `components` together
+  (`bqca_derive_report_column_ids`). A column ID that is not a `qt_` ID at all
+  is reported by `_validate_component_embedded_spec` instead.
+  """
+  columns = [
+      (
+          comp,
+          (str(comp.get("component_id")), slot, str(col.get("fieldName"))),
+          col.get("id"),
+      )
+      for comp in components
+      for slot, col in enumerate(_bqca_spec_columns(comp))
+      if isinstance(col, dict)
+  ]
+  try:
+    derived = bqca_derive_report_column_ids(key for _, key, _ in columns)
+  except ValueError as exc:
+    return [f"bqca {source} column IDs cannot be derived: {exc}"]
+  errors: list[str] = []
+  for comp, key, cid in columns:
+    if (
+        isinstance(cid, str)
+        and _QT_COLUMN_ID_RE.fullmatch(cid)
+        and cid != derived[key]
+    ):
+      errors.append(
+          f"bqca {source} component {comp.get('id')}"
+          f" ({comp.get('component_id')}) column {key[1]} id {cid!r} is not"
+          f" its derived ID {derived[key]!r}"
+      )
+  return errors
+
+
+def _spec_field_references(
+    node: Any, path: tuple[str, ...] = ()
+) -> list[tuple[tuple[str, ...], Any]]:
+  """Return `(key path, value)` for each `*Id`/`*Ids` key under `node`.
+
+  A list adds no step to a path, so every sort clause's `sortFieldId` under
+  `primaryAxis.sort` has the path `('primaryAxis', 'sort', 'sortFieldId')`.
+  """
+  found: list[tuple[tuple[str, ...], Any]] = []
+  if isinstance(node, dict):
+    for key, value in node.items():
+      key_path = (*path, str(key))
+      if str(key).endswith(("Id", "Ids")):
+        found.append((key_path, value))
+      else:
+        found.extend(_spec_field_references(value, key_path))
+  elif isinstance(node, list):
+    for item in node:
+      found.extend(_spec_field_references(item, path))
+  return found
+
+
+def _format_key_path(path: tuple[str, ...]) -> str:
+  """Format a tuple of mapping keys for a diagnostic message."""
+  return "".join(
+      f".{step}" if step.isidentifier() else f"[{step!r}]" for step in path
+  )
+
+
+def canonical_pages_sha256(pages: list[dict[str, Any]]) -> str:
+  """Return the deterministic SHA-256 hex digest for a contract pages list."""
+  payload = json.dumps(pages, sort_keys=True, separators=(",", ":")).encode(
+      "utf-8"
+  )
+  return hashlib.sha256(payload).hexdigest()
+
+
+def _split_top_level_csv(select_body: str) -> list[str]:
+  """Split a SQL SELECT list on top-level commas outside parens and strings."""
+  items: list[str] = []
+  buf: list[str] = []
+  depth = 0
+  in_single = False
+  i = 0
+  while i < len(select_body):
+    ch = select_body[i]
+    if in_single:
+      buf.append(ch)
+      if ch == "\\" and i + 1 < len(select_body):
+        buf.append(select_body[i + 1])
+        i += 2
+        continue
+      if ch == "'":
+        in_single = False
+    else:
+      if ch == "'":
+        in_single = True
+        buf.append(ch)
+      elif ch == "(":
+        depth += 1
+        buf.append(ch)
+      elif ch == ")":
+        depth = max(0, depth - 1)
+        buf.append(ch)
+      elif ch == "," and depth == 0:
+        item = "".join(buf).strip()
+        if item:
+          items.append(item)
+        buf = []
+      else:
+        buf.append(ch)
+    i += 1
+  tail = "".join(buf).strip()
+  if tail:
+    items.append(tail)
+  return items
+
+
+def _infer_sql_expr_data_type(expr: str, base_types: dict[str, str]) -> str:
+  """Infer the Looker Studio data_type for a projected SQL expression."""
+  cleaned = expr.strip()
+  if cleaned in base_types:
+    return base_types[cleaned]
+  if re.match(r"^DATE\s*\(", cleaned, re.IGNORECASE):
+    return "DATE"
+  if re.match(r"^TIMESTAMP(?:_TRUNC)?\s*\(", cleaned, re.IGNORECASE):
+    return "TIMESTAMP"
+  if (
+      cleaned == "raw_is_error"
+      or re.search(r"\bLOGICAL_(?:OR|AND)\s*\(", cleaned, re.IGNORECASE)
+      or re.search(r"=\s*'true'\s*,\s*FALSE\s*\)$", cleaned, re.IGNORECASE)
+      or re.search(r"=\s*1\s*,\s*FALSE\s*\)$", cleaned, re.IGNORECASE)
+      or re.search(r">\s*0\s*,\s*FALSE\s*\)$", cleaned, re.IGNORECASE)
+      or re.search(
+          r"ENDS_WITH\s*\([^)]*'_ERROR'\)\s*\)$", cleaned, re.IGNORECASE
+      )
+      or re.search(r"=\s*'INVOCATION_(?:STARTING|COMPLETED)'\s*$", cleaned)
+      or re.search(
+          r"ROW_NUMBER\s*\(\)\s*OVER\s*\(.*\)\s*=\s*1\s*\)$", cleaned, re.S
+      )
+  ):
+    return "BOOL"
+  if re.search(r"\bAS\s+FLOAT64\b", cleaned, re.IGNORECASE):
+    return "DOUBLE"
+  if re.search(r"\bAS\s+INT64\b", cleaned, re.IGNORECASE) or re.search(
+      r"\bARRAY_LENGTH\s*\(", cleaned, re.IGNORECASE
+  ):
+    return "INT64"
+  return "STRING"
+
+
+def extract_sql_projected_columns(
+    sql_text: str,
+    base_table_types: dict[str, str] | None = None,
+) -> list[tuple[str, str]]:
+  """Extract ordered (column_name, data_type) pairs projected by BQCA SQL."""
+  base_types = dict(_DEFAULT_BASE_TABLE_TYPES)
+  if base_table_types:
+    base_types.update(base_table_types)
+
+  cte_match = re.search(
+      r"bqca_fields\s+AS\s*\(\s*SELECT\b(.*?)\bFROM\s+(?:bqca_events|raw_events)\s*\)",
+      sql_text,
+      re.IGNORECASE | re.DOTALL,
+  )
+  outer_match = re.search(
+      r"\)\s*SELECT\b(.*?)\bFROM\s+bqca_fields\b",
+      sql_text,
+      re.IGNORECASE | re.DOTALL,
+  )
+  if not cte_match or not outer_match:
+    raise ValueError("Unable to parse bqca_fields CTE or outer SELECT")
+
+  def _parse_select_items(
+      body: str, known: list[tuple[str, str]]
+  ) -> list[tuple[str, str]]:
+    known_map = dict(known)
+    cols: list[tuple[str, str]] = []
+    for item in _split_top_level_csv(body):
+      if item == "*":
+        cols.extend(known)
+        continue
+      except_match = re.match(
+          r"^\*\s+EXCEPT\s*\(([^)]+)\)\s*$", item, re.IGNORECASE
+      )
+      if except_match:
+        excluded = {
+            c.strip() for c in except_match.group(1).split(",") if c.strip()
+        }
+        cols.extend((k, v) for k, v in known if k not in excluded)
+        continue
+      alias_match = re.search(
+          r"^(.*?)\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\s*$",
+          item,
+          re.IGNORECASE | re.DOTALL,
+      )
+      if alias_match:
+        expr, col_name = alias_match.group(1).strip(), alias_match.group(2)
+        dtype = _infer_sql_expr_data_type(expr, {**base_types, **known_map})
+        cols.append((col_name, dtype))
+      else:
+        col_name = item.strip()
+        dtype = known_map.get(col_name, base_types.get(col_name, "STRING"))
+        cols.append((col_name, dtype))
+    return cols
+
+  cte_cols = _parse_select_items(cte_match.group(1), [])
+  return _parse_select_items(outer_match.group(1), cte_cols)
+
+
+def _validate_component_embedded_spec(
+    comp: dict[str, Any],
+    *,
+    datasource_id: str | None,
+    field_by_name: dict[str, dict[str, Any]],
+    field_by_display: dict[str, dict[str, Any]],
+) -> list[str]:
+  """Validate a manifest component's embedded Looker Studio spec block."""
+  errors: list[str] = []
+  comp_id = comp.get("id", "<unknown>")
+  spec = comp.get("spec")
+  if not isinstance(spec, dict):
+    return [f"component {comp_id} missing embedded spec mapping"]
+
+  if spec.get("id") != comp.get("component_id"):
+    errors.append(
+        f"component {comp_id} spec.id {spec.get('id')!r} !="
+        f" component_id {comp.get('component_id')!r}"
+    )
+
+  chart_type = comp.get("chart_type")
+  spec_kind = _SPEC_KIND_BY_CHART_TYPE.get(chart_type)
+  if not spec_kind or not isinstance(spec.get(spec_kind), dict):
+    errors.append(
+        f"component {comp_id} missing embedded spec.{spec_kind} block for"
+        f" chart_type {chart_type!r}"
+    )
+    return errors
+  # The column-ID checks read `spec.<kind>` alone, so a column in any other
+  # block of the spec would escape them.
+  for key in spec:
+    if key not in ("id", "fixedLayout", spec_kind):
+      errors.append(
+          f"component {comp_id} spec{_format_key_path((str(key),))} is not id,"
+          f" fixedLayout, or the spec.{spec_kind} block that chart_type"
+          f" {chart_type!r} reads"
+      )
+
+  inner = spec[spec_kind]
+  dataset = inner.get("dataset")
+  dataset = dataset if isinstance(dataset, dict) else {}
+  if dataset.get("datasourceId") != datasource_id:
+    errors.append(
+        f"component {comp_id} spec.{spec_kind}.dataset.datasourceId mismatch"
+    )
+
+  spec_cols = dataset.get("columns", [])
+  if (
+      not isinstance(spec_cols, list)
+      or not spec_cols
+      or not all(isinstance(col, dict) for col in spec_cols)
+  ):
+    errors.append(f"component {comp_id} spec.{spec_kind}.dataset.columns empty")
+    return errors
+
+  col_by_id: dict[str, dict[str, Any]] = {}
+  spec_field_names: list[str] = []
+  for col in spec_cols:
+    cid = col.get("id")
+    fname = col.get("fieldName")
+    if not isinstance(cid, str) or not _QT_COLUMN_ID_RE.fullmatch(cid):
+      errors.append(
+          f"component {comp_id} spec.{spec_kind}.dataset.columns id {cid!r} is"
+          " not a qt_ column ID (^qt_[a-z0-9]{3,10}$), which this repository"
+          " requires"
+      )
+    if isinstance(cid, str):
+      if cid in col_by_id:
+        errors.append(
+            f"component {comp_id} repeats column id {cid!r} in"
+            f" spec.{spec_kind}.dataset.columns"
+        )
+      else:
+        col_by_id[cid] = col
+    if isinstance(fname, str):
+      spec_field_names.append(fname)
+    if fname not in field_by_name:
+      errors.append(
+          f"component {comp_id} embedded spec references unknown fieldName"
+          f" {fname!r}"
+      )
+
+  if spec_field_names != comp.get("columns", []):
+    errors.append(
+        f"component {comp_id} embedded spec column fieldNames"
+        f" {spec_field_names} != summary columns {comp.get('columns')}"
+    )
+
+  fields_cfg = inner.get("fields")
+  if not isinstance(fields_cfg, dict):
+    errors.append(
+        f"component {comp_id} missing embedded spec.{spec_kind}.fields mapping"
+    )
+    return errors
+  # Every `*Id`/`*Ids` key must sit where this kind reads its columns, and
+  # every column must be referenced from such a key. A reference there to an
+  # undefined column is reported below, with its role.
+  referenced: set[str] = set()
+  for path, value in _spec_field_references(fields_cfg):
+    if path not in _SPEC_REFERENCE_PATHS[spec_kind]:
+      errors.append(
+          f"component {comp_id}"
+          f" spec.{spec_kind}.fields{_format_key_path(path)} {value!r} is not"
+          f" a column reference a {spec_kind} reads"
+      )
+      continue
+    for ref in value if isinstance(value, list) else [value]:
+      if isinstance(ref, str):
+        referenced.add(ref)
+  for cid in col_by_id:
+    if cid not in referenced:
+      errors.append(
+          f"component {comp_id} spec.{spec_kind}.dataset.columns id {cid!r} is"
+          f" not referenced by spec.{spec_kind}.fields"
+      )
+
+  if comp.get("category") == "scorecard":
+    primary_id = fields_cfg.get("primaryMetricId")
+    primary_col = (
+        col_by_id.get(primary_id) if isinstance(primary_id, str) else None
+    )
+    if not primary_col or len(spec_cols) != 1:
+      errors.append(
+          f"scorecard {comp_id} embedded spec must bind a single primaryMetricId"
+      )
+      return errors
+    expected_field = comp.get("field")
+    expected_ds_field = field_by_display.get(expected_field, {})
+    if primary_col.get("fieldName") != expected_ds_field.get("name"):
+      errors.append(
+          f"scorecard {comp_id} embedded spec fieldName"
+          f" {primary_col.get('fieldName')!r} != _{expected_field}_"
+      )
+    expected_agg = comp.get("aggregation")
+    actual_agg = primary_col.get("aggregation")
+    if actual_agg != expected_agg:
+      errors.append(
+          f"scorecard {comp_id} embedded spec aggregation {actual_agg!r} !="
+          f" {expected_agg!r}"
+      )
+    if expected_ds_field.get("data_type") == "STRING" and actual_agg in {
+        "SUM",
+        "AVG",
+    }:
+      errors.append(
+          f"scorecard {comp_id} cannot apply numeric aggregation {actual_agg!r}"
+          f" to STRING field {expected_field!r}"
+      )
+  else:
+    axis = fields_cfg.get("primaryAxis")
+    axis = axis if isinstance(axis, dict) else {}
+    series = fields_cfg.get("metricSeries")
+    series = series if isinstance(series, dict) else {}
+    if spec_kind in ("barChart", "lineChart"):
+      dim_ids = [axis.get("fieldId")]
+      raw_met_ids = series.get("metricIds", [])
+      met_ids = list(raw_met_ids) if isinstance(raw_met_ids, list) else []
+      sort_clauses = axis.get("sort", [])
+      rev_holder = axis
+    elif spec_kind == "pieChart":
+      dim_ids = [fields_cfg.get("dimensionId")]
+      met_ids = [fields_cfg.get("metricId")]
+      sort_clauses = fields_cfg.get("sort", [])
+      rev_holder = fields_cfg
+    elif spec_kind == "table":
+      raw_dim_ids = fields_cfg.get("dimensionIds", [])
+      raw_met_ids = fields_cfg.get("metricIds", [])
+      dim_ids = list(raw_dim_ids) if isinstance(raw_dim_ids, list) else []
+      met_ids = list(raw_met_ids) if isinstance(raw_met_ids, list) else []
+      sort_clauses = fields_cfg.get("sort", [])
+      rev_holder = fields_cfg
+    else:
+      dim_ids, met_ids, sort_clauses, rev_holder = [], [], [], {}
+
+    if "reverseSortOrder" in rev_holder and not isinstance(
+        rev_holder.get("reverseSortOrder"), bool
+    ):
+      errors.append(
+          f"chart {comp_id} embedded spec reverseSortOrder"
+          f" {rev_holder.get('reverseSortOrder')!r} must be a bool"
+      )
+    if not isinstance(sort_clauses, list):
+      errors.append(f"chart {comp_id} embedded spec sort must be a list")
+      sort_clauses = []
+    for clause in sort_clauses:
+      sort_id = clause.get("sortFieldId") if isinstance(clause, dict) else None
+      if not isinstance(sort_id, str) or sort_id not in col_by_id:
+        errors.append(
+            f"chart {comp_id} embedded spec sort references undefined column"
+            f" id {sort_id!r}"
+        )
+      sort_dir = clause.get("sortDir") if isinstance(clause, dict) else None
+      if sort_dir not in ("ASC", "DESC"):
+        errors.append(
+            f"chart {comp_id} embedded spec sortDir {sort_dir!r} must be"
+            " 'ASC' or 'DESC'"
+        )
+
+    expected_dims = list(comp.get("dimensions", []))
+    actual_dim_fields: list[str] = []
+    for did in dim_ids:
+      dcol = col_by_id.get(did) if isinstance(did, str) else None
+      if not dcol:
+        errors.append(
+            f"chart {comp_id} embedded spec missing dimension column id {did!r}"
+        )
+        continue
+      if "aggregation" in dcol:
+        errors.append(
+            f"chart {comp_id} dimension column {did!r} must not declare"
+            f" aggregation {dcol.get('aggregation')!r}"
+        )
+      ds_f = field_by_name.get(dcol.get("fieldName", ""), {})
+      actual_dim_fields.append(ds_f.get("display_name", ""))
+    if actual_dim_fields != expected_dims:
+      errors.append(
+          f"chart {comp_id} embedded spec dimensions {actual_dim_fields} !="
+          f" {expected_dims}"
+      )
+
+    raw_mets = list(comp.get("metrics", []))
+    expected_met_fields = [
+        m["field"] if isinstance(m, dict) else m for m in raw_mets
+    ]
+    actual_met_fields: list[str] = []
+    for idx, mid in enumerate(met_ids):
+      mcol = col_by_id.get(mid) if isinstance(mid, str) else None
+      if not mcol:
+        errors.append(
+            f"chart {comp_id} embedded spec missing metric column id {mid!r}"
+        )
+        continue
+      ds_f = field_by_name.get(mcol.get("fieldName", ""), {})
+      m_display = ds_f.get("display_name", "")
+      actual_met_fields.append(m_display)
+      actual_agg = mcol.get("aggregation")
+      expected_agg = None
+      if idx < len(raw_mets) and isinstance(raw_mets[idx], dict):
+        expected_agg = raw_mets[idx].get("aggregation")
+      if expected_agg is None:
+        expected_agg = _EXPECTED_CHART_METRIC_AGGREGATIONS.get(m_display)
+      if not actual_agg or (
+          expected_agg is not None and actual_agg != expected_agg
+      ):
+        errors.append(
+            f"chart {comp_id} metric {m_display!r} embedded spec aggregation"
+            f" {actual_agg!r} != expected {expected_agg!r}"
+        )
+      if ds_f.get("data_type") == "STRING" and actual_agg in {"SUM", "AVG"}:
+        errors.append(
+            f"chart {comp_id} cannot apply numeric aggregation {actual_agg!r}"
+            f" to STRING field {m_display!r}"
+        )
+    if actual_met_fields != expected_met_fields:
+      errors.append(
+          f"chart {comp_id} embedded spec metrics {actual_met_fields} !="
+          f" {expected_met_fields}"
+      )
+
+  return errors
+
+
+def _load_yaml(path: pathlib.Path) -> dict[str, Any]:
+  data = yaml.safe_load(path.read_text())
+  if not isinstance(data, dict):
+    raise ValueError(f"{path}: expected YAML mapping")
+  return data
+
+
+def validate_adk(root: pathlib.Path = ROOT) -> list[str]:
+  """Return a list of contract validation errors for the ADK profile."""
+  errors: list[str] = []
+  manifest = _load_yaml(root / "spec/chart_manifest.yaml")
+  contract = _load_yaml(root / "spec/product_contract.yaml")
+  binding = _load_yaml(root / "bindings/report_template.yaml")
+  sql_bytes = (root / "sql/events_v1.template.sql").read_bytes()
+  sql_sha = hashlib.sha256(sql_bytes).hexdigest()
+
+  manifest_charts = manifest.get("charts", [])
+  contract_charts = contract.get("charts", [])
+  if len(manifest_charts) != 37:
+    errors.append(
+        f"adk chart_manifest expected 37 charts, got {len(manifest_charts)}"
+    )
+  if len(contract_charts) != 37:
+    errors.append(
+        f"adk product_contract expected 37 charts, got {len(contract_charts)}"
+    )
+  if {c["id"] for c in manifest_charts} != {c["id"] for c in contract_charts}:
+    errors.append("adk chart_manifest and product_contract chart IDs diverge")
+  if len(contract.get("pages", [])) != 8:
+    errors.append(
+        f"adk product_contract expected 8 pages, got {len(contract.get('pages', []))}"
+    )
+  if binding.get("reviewed_template_sql", {}).get("sha256") != sql_sha:
+    errors.append("adk reviewed_template_sql.sha256 does not match SQL bytes")
+  if (
+      binding.get("live_template_verification", {}).get("repository_sql_sha256")
+      != sql_sha
+  ):
+    errors.append(
+        "adk live_template_verification.repository_sql_sha256 does not match"
+        " SQL bytes"
+    )
+  return errors
+
+
+def _strip_sql_comments(sql_text: str) -> str:
+  """Strip single-line (--) and block (/* */) SQL comments outside quotes."""
+  out: list[str] = []
+  i = 0
+  n = len(sql_text)
+  in_single = False
+  in_backtick = False
+  while i < n:
+    ch = sql_text[i]
+    if in_single:
+      out.append(ch)
+      if ch == "\\" and i + 1 < n:
+        out.append(sql_text[i + 1])
+        i += 2
+        continue
+      if ch == "'":
+        in_single = False
+      i += 1
+    elif in_backtick:
+      out.append(ch)
+      if ch == "`":
+        in_backtick = False
+      i += 1
+    else:
+      if ch == "'":
+        in_single = True
+        out.append(ch)
+        i += 1
+      elif ch == "`":
+        in_backtick = True
+        out.append(ch)
+        i += 1
+      elif ch == "-" and i + 1 < n and sql_text[i + 1] == "-":
+        i += 2
+        while i < n and sql_text[i] != "\n":
+          i += 1
+      elif ch == "/" and i + 1 < n and sql_text[i + 1] == "*":
+        i += 2
+        while i + 1 < n and not (sql_text[i] == "*" and sql_text[i + 1] == "/"):
+          i += 1
+        i += 2
+      else:
+        out.append(ch)
+        i += 1
+  return "".join(out)
+
+
+def _validate_bqca_sql_behavioral_oracle(sql_text: str) -> list[str]:
+  """Execute BQCA SQL against synthetic edge-case turns in SQLite."""
+  try:
+    cols = [c[0] for c in extract_sql_projected_columns(sql_text)]
+  except ValueError as exc:
+    return [f"bqca SQL behavioral oracle parse failure: {exc}"]
+  if len(cols) < 37:
+    return [
+        f"bqca SQL behavioral oracle expected >= 37 bqca_fields columns, got {len(cols)}"
+    ]
+  bqca_cols = cols[:37] + ["raw_agent_response_rn"]
+
+  s = _strip_sql_comments(sql_text)
+  s = re.sub(r"FROM\s+`[^`]+`", "FROM source_events", s)
+  s = s.replace("@DS_START_DATE", "'20260401'").replace(
+      "@DS_END_DATE", "'20260430'"
+  )
+  s = re.sub(
+      r"ARRAY_TO_STRING\s*\(\s*ARRAY\s*\(\s*SELECT\s+JSON_VALUE\s*\(\s*\w+\s*,\s*('[^']+')\s*\)\s*FROM\s+UNNEST\s*\(\s*JSON_QUERY_ARRAY\s*\(\s*content\s*,\s*('[^']+')\s*\)\s*\).*?\)\s*,\s*('[^']*')\s*\)",
+      lambda m: (
+          f"BQ_JSON_PARTS_JOIN(content, {m.group(2)}, {m.group(1)},"
+          f" {m.group(3)})"
+      ),
+      s,
+      flags=re.DOTALL | re.IGNORECASE,
+  )
+  s = re.sub(
+      r"ARRAY_LENGTH\s*\(\s*JSON_QUERY_ARRAY\s*\(\s*content\s*,\s*('[^']+')\s*\)\s*\)",
+      r"BQ_JSON_ARRAY_LENGTH(content, \1)",
+      s,
+      flags=re.IGNORECASE,
+  )
+  s = re.sub(r"\br'", "'", s)
+  s = re.sub(r"\bSAFE_CAST\s*\(", "CAST(", s, flags=re.IGNORECASE)
+  s = re.sub(r"\bAS\s+STRING\b", "AS TEXT", s, flags=re.IGNORECASE)
+  s = re.sub(r"\bAS\s+FLOAT64\b", "AS REAL", s, flags=re.IGNORECASE)
+  s = re.sub(r"\bAS\s+INT64\b", "AS INTEGER", s, flags=re.IGNORECASE)
+  s = re.sub(
+      r"FIRST_VALUE\s*\((.*?)\s+IGNORE\s+NULLS\s*\)\s+OVER\s*\(\s*PARTITION\s+BY\s+(.*?)\s+ORDER\s+BY\s+(.*?)\s+ROWS\s+BETWEEN\s+UNBOUNDED\s+PRECEDING\s+AND\s+UNBOUNDED\s+FOLLOWING\s*\)",
+      lambda m: (
+          f"FIRST_VALUE({m.group(1)}) OVER (PARTITION BY {m.group(2)} ORDER BY"
+          f" CASE WHEN ({m.group(1)}) IS NULL THEN 1 ELSE 0 END ASC,"
+          f" {m.group(3)} ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED"
+          " FOLLOWING)"
+      ),
+      s,
+      flags=re.DOTALL | re.IGNORECASE,
+  )
+  s = re.sub(
+      r"LAST_VALUE\s*\((.*?)\s+IGNORE\s+NULLS\s*\)\s+OVER\s*\(\s*PARTITION\s+BY\s+(.*?)\s+ORDER\s+BY\s+(.*?)\s+ROWS\s+BETWEEN\s+UNBOUNDED\s+PRECEDING\s+AND\s+UNBOUNDED\s+FOLLOWING\s*\)",
+      lambda m: (
+          f"LAST_VALUE({m.group(1)}) OVER (PARTITION BY {m.group(2)} ORDER BY"
+          f" CASE WHEN ({m.group(1)}) IS NULL THEN 0 ELSE 1 END ASC,"
+          f" {m.group(3)} ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED"
+          " FOLLOWING)"
+      ),
+      s,
+      flags=re.DOTALL | re.IGNORECASE,
+  )
+  s = re.sub(
+      r"FIRST_VALUE\s*\((.*?)\s+RESPECT\s+NULLS\s*\)\s+OVER\s*\(",
+      r"FIRST_VALUE(\1) OVER (",
+      s,
+      flags=re.DOTALL | re.IGNORECASE,
+  )
+  s = re.sub(
+      r"LAST_VALUE\s*\((.*?)\s+RESPECT\s+NULLS\s*\)\s+OVER\s*\(",
+      r"LAST_VALUE(\1) OVER (",
+      s,
+      flags=re.DOTALL | re.IGNORECASE,
+  )
+  s = re.sub(
+      r"\bLOGICAL_OR\s*\(([^()]+)\)\s+OVER\s*\(",
+      r"MAX(CASE WHEN (\1) THEN 1 ELSE 0 END) OVER (",
+      s,
+      flags=re.IGNORECASE,
+  )
+  s = re.sub(
+      r"\bLOGICAL_AND\s*\(([^()]+)\)\s+OVER\s*\(",
+      r"MIN(CASE WHEN (\1) IS NULL THEN NULL WHEN (\1) THEN 1 ELSE 0 END) OVER (",
+      s,
+      flags=re.IGNORECASE,
+  )
+  s = re.sub(
+      r"DATE_ADD\s*\((.*?),\s*INTERVAL\s+(\d+)\s+DAY\s*\)",
+      r"DATE_ADD_DAY(\1, \2)",
+      s,
+      flags=re.DOTALL | re.IGNORECASE,
+  )
+  s = re.sub(
+      r"TIMESTAMP_TRUNC\s*\(\s*timestamp\s*,\s*HOUR\s*,\s*'UTC'\s*\)",
+      "TIMESTAMP_TRUNC_HOUR(timestamp, 'UTC')",
+      s,
+      flags=re.IGNORECASE,
+  )
+  s = re.sub(r"\bTIMESTAMP\s*\(", "BQ_TIMESTAMP(", s, flags=re.IGNORECASE)
+  s = re.sub(r"\bDATE\s*\(", "BQ_DATE(", s, flags=re.IGNORECASE)
+  s = re.sub(
+      r"\*\s+EXCEPT\s*\(([^)]+)\)",
+      lambda m: ", ".join(
+          c
+          for c in bqca_cols
+          if c not in {x.strip() for x in m.group(1).split(",")}
+      ),
+      s,
+      flags=re.IGNORECASE,
+  )
+
+  def _resolve_json_path(doc: Any, path: Any) -> Any:
+    if doc is None or path is None:
+      return None
+    try:
+      cur = json.loads(doc) if isinstance(doc, str) else doc
+    except Exception:
+      return None
+    p = str(path)
+    if p.startswith("$"):
+      p = p[1:]
+    tokens = re.findall(r'\."([^"]+)"|\.([A-Za-z0-9_]+)|\[(\d+)\]', p)
+    for quoted, bare, idx in tokens:
+      if quoted or bare:
+        key = quoted or bare
+        if isinstance(cur, dict) and key in cur:
+          cur = cur[key]
+        else:
+          return None
+      elif idx != "":
+        i = int(idx)
+        if isinstance(cur, list) and 0 <= i < len(cur):
+          cur = cur[i]
+        else:
+          return None
+    return cur
+
+  def _bq_json_value(doc: Any, path: Any) -> str | None:
+    val = _resolve_json_path(doc, path)
+    if val is None or isinstance(val, (dict, list)):
+      return None
+    if isinstance(val, bool):
+      return "true" if val else "false"
+    return str(val)
+
+  def _bq_json_parts_join(
+      doc: Any, arr_path: Any, item_path: Any, sep: Any
+  ) -> str | None:
+    arr = _resolve_json_path(doc, arr_path)
+    if not isinstance(arr, list):
+      return None
+    parts = [
+        v for item in arr if (v := _bq_json_value(item, item_path)) is not None
+    ]
+    return str(sep).join(parts)
+
+  def _bq_json_array_length(doc: Any, arr_path: Any) -> int | None:
+    arr = _resolve_json_path(doc, arr_path)
+    return len(arr) if isinstance(arr, list) else None
+
+  def _regexp_extract(val: Any, pat: Any) -> str | None:
+    if val is None or pat is None:
+      return None
+    m = re.search(str(pat), str(val))
+    if not m:
+      return None
+    return m.group(1) if m.lastindex else m.group(0)
+
+  conn = sqlite3.connect(":memory:")
+  conn.row_factory = sqlite3.Row
+  conn.create_function("IF", 3, lambda cond, t, f: t if bool(cond) else f)
+  conn.create_function(
+      "CONCAT",
+      -1,
+      lambda *args: None
+      if any(a is None for a in args)
+      else "".join(str(a) for a in args),
+  )
+  conn.create_function("JSON_VALUE", 2, _bq_json_value)
+  conn.create_function("BQ_JSON_PARTS_JOIN", 4, _bq_json_parts_join)
+  conn.create_function("BQ_JSON_ARRAY_LENGTH", 2, _bq_json_array_length)
+  conn.create_function(
+      "TO_JSON_STRING",
+      1,
+      lambda v: v if (v is None or isinstance(v, str)) else json.dumps(v),
+  )
+  conn.create_function(
+      "SHA256",
+      1,
+      lambda v: None
+      if v is None
+      else hashlib.sha256(str(v).encode("utf-8")).digest(),
+  )
+  conn.create_function(
+      "TO_HEX",
+      1,
+      lambda b: None
+      if b is None
+      else (
+          b.hex()
+          if isinstance(b, (bytes, bytearray))
+          else str(b).encode("utf-8").hex()
+      ),
+  )
+  conn.create_function(
+      "ENDS_WITH",
+      2,
+      lambda s_val, suf: None
+      if (s_val is None or suf is None)
+      else (1 if str(s_val).endswith(str(suf)) else 0),
+  )
+  conn.create_function("REGEXP_EXTRACT", 2, _regexp_extract)
+  conn.create_function(
+      "PARSE_DATE",
+      2,
+      lambda fmt, s_val: f"{s_val[:4]}-{s_val[4:6]}-{s_val[6:8]}"
+      if s_val and len(str(s_val)) == 8
+      else None,
+  )
+  conn.create_function(
+      "DATE_ADD_DAY",
+      2,
+      lambda d, n: f"{d[:8]}{int(d[8:10]) + int(n):02d}" if d else None,
+  )
+  conn.create_function(
+      "BQ_TIMESTAMP", 2, lambda d, tz: f"{d}T00:00:00Z" if d else None
+  )
+  conn.create_function(
+      "BQ_DATE", 2, lambda ts, tz: str(ts)[:10] if ts else None
+  )
+  conn.create_function(
+      "TIMESTAMP_TRUNC_HOUR",
+      2,
+      lambda ts, tz: f"{str(ts)[:13]}:00:00Z" if ts else None,
+  )
+
+  conn.execute(
+      """
+      CREATE TABLE source_events (
+        timestamp TEXT, event_type TEXT, agent TEXT, session_id TEXT,
+        invocation_id TEXT, user_id TEXT, trace_id TEXT, span_id TEXT,
+        parent_span_id TEXT, content TEXT, attributes TEXT, latency_ms TEXT,
+        status TEXT, error_message TEXT, is_truncated INTEGER
+      )
+  """
+  )
+  fixtures = [
+      (
+          "2026-04-05T10:00:00Z",
+          "INVOCATION_STARTING",
+          "root",
+          "sess-1",
+          "inv-edge-1",
+          "  alice@example.com:1  ",
+          "trace-1",
+          "span-1a",
+          None,
+          "{}",
+          json.dumps(
+              {
+                  "fast_path": "true",
+                  "session_metadata": {
+                      "state": {
+                          "conversation-id": "  conv-1  ",
+                          "data-agent-id": "  agent-alpha  ",
+                          "custom_labels": {"persona": "  analyst  "},
+                      }
+                  },
+              }
+          ),
+          None,
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T10:00:01Z",
+          "LLM_RESPONSE",
+          "root",
+          "sess-1",
+          "inv-edge-1",
+          None,
+          "trace-1",
+          "span-1b",
+          None,
+          "{}",
+          json.dumps(
+              {
+                  "usage_metadata": {
+                      "prompt_token_count": 100,
+                      "candidates_token_count": 50,
+                      "total_token_count": 150,
+                  }
+              }
+          ),
+          json.dumps({"total_ms": 400, "time_to_first_token_ms": 80}),
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T10:00:02Z",
+          "INVOCATION_COMPLETED",
+          "root",
+          "sess-1",
+          "inv-edge-1",
+          None,
+          "trace-1",
+          "span-1c",
+          None,
+          "{}",
+          "{}",
+          json.dumps({"total_ms": 1200}),
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T10:00:03Z",
+          "INVOCATION_COMPLETED",
+          "root",
+          "sess-1",
+          "inv-edge-1",
+          None,
+          "trace-1",
+          "span-1d",
+          None,
+          "{}",
+          "{}",
+          json.dumps({"total_ms": 2500}),
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T10:01:00Z",
+          "INVOCATION_STARTING",
+          "root",
+          "sess-1",
+          "inv-edge-1b",
+          None,
+          "trace-1b",
+          "span-1e",
+          None,
+          "{}",
+          "{}",
+          None,
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T10:01:01Z",
+          "AGENT_ERROR",
+          "root",
+          "sess-1",
+          "inv-edge-1b",
+          None,
+          "trace-1b",
+          "span-1f",
+          None,
+          "{}",
+          "{}",
+          None,
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T10:01:02Z",
+          "INVOCATION_COMPLETED",
+          "root",
+          "sess-1",
+          "inv-edge-1b",
+          None,
+          "trace-1b",
+          "span-1g",
+          None,
+          "{}",
+          "{}",
+          json.dumps({"total_ms": 1800}),
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T11:00:00Z",
+          "INVOCATION_STARTING",
+          "root",
+          "sess-2",
+          "inv-late-attr",
+          None,
+          "trace-2",
+          "span-2a",
+          None,
+          "{}",
+          "{}",
+          None,
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T11:00:01Z",
+          "AGENT_RESPONSE",
+          "root",
+          "sess-2",
+          "inv-late-attr",
+          None,
+          "trace-2",
+          "span-2b",
+          None,
+          json.dumps({"text_summary": "```sql\nSELECT 42\n```"}),
+          json.dumps(
+              {
+                  "session_metadata": {
+                      "state": {
+                          "conversation-id": "conv-2",
+                          "data-agent-id": "agent-beta",
+                          "custom_labels": {"persona": "manager"},
+                      }
+                  }
+              }
+          ),
+          None,
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T11:00:02Z",
+          "INVOCATION_COMPLETED",
+          "root",
+          "sess-2",
+          "inv-late-attr",
+          None,
+          "trace-2",
+          "span-2c",
+          None,
+          "{}",
+          json.dumps(
+              {
+                  "session_metadata": {
+                      "state": {
+                          "conversation-id": "conv-2-override",
+                          "data-agent-id": "agent-beta-override",
+                          "custom_labels": {"persona": "override"},
+                      }
+                  }
+              }
+          ),
+          json.dumps({"total_ms": 900}),
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T12:00:00Z",
+          "INVOCATION_STARTING",
+          "root",
+          "sess-3",
+          "   ",
+          None,
+          "trace-partial",
+          "span-3a",
+          None,
+          "{}",
+          json.dumps(
+              {"session_metadata": {"state": {"data-agent-id": "agent-gamma"}}}
+          ),
+          None,
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T12:00:01Z",
+          "INVOCATION_COMPLETED",
+          "root",
+          "sess-3",
+          "inv-partial-3",
+          None,
+          "trace-partial",
+          "span-3b",
+          None,
+          "{}",
+          "{}",
+          json.dumps({"total_ms": 1500}),
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T13:00:00Z",
+          "INVOCATION_STARTING",
+          "root",
+          "sess-4",
+          "  ",
+          None,
+          "trace-fallback-4",
+          "span-4a",
+          None,
+          "{}",
+          "{}",
+          None,
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T14:00:00Z",
+          "INVOCATION_COMPLETED",
+          "root",
+          "sess-5",
+          None,
+          None,
+          "trace-null-5",
+          "span-5a",
+          None,
+          "{}",
+          json.dumps(
+              {
+                  "session_metadata": {
+                      "state": {"data-agent-id": "agent-orphan-a"}
+                  }
+              }
+          ),
+          json.dumps({"total_ms": 9999}),
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T14:00:00Z",
+          "LLM_RESPONSE",
+          "root",
+          "sess-5",
+          None,
+          None,
+          "trace-null-5",
+          "span-5b",
+          None,
+          "{}",
+          json.dumps({"fast_path": "true"}),
+          json.dumps({"total_ms": 100}),
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T15:00:00Z",
+          "AGENT_RESPONSE",
+          "root",
+          "sess-6",
+          None,
+          None,
+          "trace-null-6",
+          None,
+          None,
+          json.dumps({"text_summary": "```sql\nSELECT 101\n```"}),
+          "{}",
+          None,
+          "OK",
+          None,
+          0,
+      ),
+      (
+          "2026-04-05T15:00:00Z",
+          "AGENT_RESPONSE",
+          "root",
+          "sess-6",
+          None,
+          None,
+          "trace-null-6",
+          None,
+          None,
+          json.dumps({"text_summary": "```sql\nSELECT 202\n```"}),
+          "{}",
+          None,
+          "OK",
+          None,
+          0,
+      ),
+  ]
+  conn.executemany(
+      "INSERT INTO source_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      fixtures,
+  )
+  try:
+    all_rows = [dict(r) for r in conn.execute(s).fetchall()]
+  except sqlite3.Error as exc:
+    conn.close()
+    return [f"bqca SQL behavioral oracle execution error: {exc}"]
+  conn.close()
+  by_span = {r["span_id"]: r for r in all_rows if r.get("span_id") is not None}
+
+  errs: list[str] = []
+  orphan_sqls = {
+      r.get("extracted_sql")
+      for r in all_rows
+      if r.get("timestamp") == "2026-04-05T15:00:00Z"
+  }
+  if orphan_sqls != {"SELECT 101", "SELECT 202"}:
+    errs.append(
+        "bqca SQL behavioral oracle: null-invocation AGENT_RESPONSE"
+        f" partition collision ({orphan_sqls!r} != {{'SELECT 101', 'SELECT 202'}})"
+    )
+  for sp in ("span-1a", "span-1b", "span-1c", "span-1d"):
+    r = by_span.get(sp, {})
+    if r.get("data_agent_id") != "agent-alpha":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} data_agent_id={r.get('data_agent_id')!r} != 'agent-alpha'"
+      )
+    if r.get("conversation_id") != "conv-1":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} conversation_id={r.get('conversation_id')!r} != 'conv-1'"
+      )
+    if r.get("persona") != "analyst":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} persona={r.get('persona')!r} != 'analyst'"
+      )
+    if not r.get("fast_path") or r.get("fast_path_label") != "fast_path":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} fast_path={r.get('fast_path')!r}/{r.get('fast_path_label')!r} != 1/'fast_path'"
+      )
+  if (
+      by_span.get("span-1c", {}).get("is_turn_complete")
+      or by_span.get("span-1c", {}).get("completed_turn_id") is not None
+      or by_span.get("span-1c", {}).get("turn_latency_ms") is not None
+  ):
+    errs.append(
+        "bqca SQL behavioral oracle: span-1c duplicate completion was not suppressed"
+    )
+  if (
+      not by_span.get("span-1d", {}).get("is_turn_complete")
+      or by_span.get("span-1d", {}).get("completed_turn_id") != "inv-edge-1"
+      or by_span.get("span-1d", {}).get("turn_latency_ms") != 2500.0
+  ):
+    errs.append(
+        "bqca SQL behavioral oracle: span-1d canonical completion"
+        f" mismatch ({by_span.get('span-1d', {})})"
+    )
+  if (
+      not by_span.get("span-1f", {}).get("is_error")
+      or by_span.get("span-1f", {}).get("error_message")
+      != "[AGENT_ERROR: status=OK]"
+  ):
+    errs.append(
+        "bqca SQL behavioral oracle: span-1f *_ERROR suffix detection"
+        f" mismatch ({by_span.get('span-1f', {})})"
+    )
+  if (
+      not by_span.get("span-1g", {}).get("is_turn_complete")
+      or by_span.get("span-1g", {}).get("completed_turn_id") != "inv-edge-1b"
+      or by_span.get("span-1g", {}).get("turn_latency_ms") != 1800.0
+  ):
+    errs.append(
+        "bqca SQL behavioral oracle: span-1g multi-turn session completion"
+        f" mismatch ({by_span.get('span-1g', {})})"
+    )
+  for sp in ("span-2a", "span-2b", "span-2c"):
+    r = by_span.get(sp, {})
+    if r.get("data_agent_id") != "agent-beta":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} data_agent_id={r.get('data_agent_id')!r} != 'agent-beta'"
+      )
+    if r.get("conversation_id") != "conv-2":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} conversation_id={r.get('conversation_id')!r} != 'conv-2'"
+      )
+    if r.get("persona") != "manager":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} persona={r.get('persona')!r} != 'manager'"
+      )
+    if r.get("fast_path") or r.get("fast_path_label") != "standard_nl2sql":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} fast_path={r.get('fast_path')!r}/{r.get('fast_path_label')!r}"
+      )
+  for sp in ("span-3a", "span-3b"):
+    r = by_span.get(sp, {})
+    if r.get("invocation_id") != "inv-partial-3":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} invocation_id={r.get('invocation_id')!r} != 'inv-partial-3'"
+      )
+    if r.get("data_agent_id") != "agent-gamma":
+      errs.append(
+          f"bqca SQL behavioral oracle: {sp} data_agent_id={r.get('data_agent_id')!r} != 'agent-gamma'"
+      )
+  if (
+      by_span.get("span-3b", {}).get("completed_turn_id") != "inv-partial-3"
+      or by_span.get("span-3b", {}).get("turn_latency_ms") != 1500.0
+  ):
+    errs.append(
+        "bqca SQL behavioral oracle: span-3b partial-blank completion mismatch"
+    )
+  if by_span.get("span-4a", {}).get("invocation_id") != "trace-fallback-4":
+    errs.append(
+        "bqca SQL behavioral oracle: span-4a blank invocation_id did not fall"
+        " back to trace_id"
+    )
+  if (
+      by_span.get("span-5a", {}).get("invocation_id") is not None
+      or by_span.get("span-5a", {}).get("is_turn_complete")
+      or by_span.get("span-5a", {}).get("completed_turn_id") is not None
+      or by_span.get("span-5a", {}).get("turn_latency_ms") is not None
+  ):
+    errs.append(
+        "bqca SQL behavioral oracle: span-5a null invocation_id leaked into"
+        " completed turn metrics"
+    )
+  if (
+      by_span.get("span-5a", {}).get("fast_path")
+      or by_span.get("span-5b", {}).get("data_agent_id") != "unattributed"
+  ):
+    errs.append(
+        "bqca SQL behavioral oracle: span-5a/5b null invocation_id partition"
+        " bleed"
+    )
+  return errs
+
+
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_REPOSITORY_ISSUE_URL_RE = re.compile(
+    r"https://github\.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK"
+    r"/issues/[1-9][0-9]*"
+)
+
+
+def _bqca_pending_live_sync_errors(live: dict[str, Any]) -> list[str]:
+  """Check the record of a live template sync that is still to happen.
+
+  `verified_manifest_sha256` and `verified_template_bundle_sha256` keep the
+  manifest and bundle digests that were pinned when the live template was
+  last verified. While `manifest_sha256` or `template_bundle_sha256` differs
+  from them, the repository describes a template that is not live yet, and
+  `pending_live_sync` must give a non-empty `reason`, a quoted `since_date`
+  (YYYY-MM-DD, not before `verified_date` and not in the future), the
+  `tracking_issue` URL of an issue of this repository and a non-empty list of
+  `required_actions`; any other value (null, empty or of another type) is an
+  error. Once both digests equal the verified ones again,
+  `pending_live_sync` must be removed, whatever its value, and
+  `_bqca_committed_capture_errors` checks the record of the sync.
+  `sync_generation` must be an integer of at least 1, always.
+  """
+  prefix = "bqca live_template_verification"
+  errors: list[str] = []
+  if bqca_sync_generation(live) is None:
+    errors.append(
+        f"{prefix}.sync_generation {live.get('sync_generation')!r} is not an"
+        " integer of at least 1"
+    )
+  today = max(
+      datetime.date.today(),
+      datetime.datetime.now(datetime.timezone.utc).date(),
+  )
+  verified_date = live.get("verified_date")
+  verified_dt: datetime.date | None = None
+  if isinstance(verified_date, str) and _ISO_DATE_RE.fullmatch(verified_date):
+    try:
+      verified_dt = datetime.date.fromisoformat(verified_date)
+    except ValueError:
+      verified_dt = None
+  if verified_dt is None:
+    errors.append(
+        f"{prefix}.verified_date {verified_date!r} is not a quoted YYYY-MM-DD"
+        " date"
+    )
+  elif verified_dt > today:
+    errors.append(f"{prefix}.verified_date {verified_date!r} is in the future")
+  differing: list[str] = []
+  for pinned_key, verified_key in (
+      ("manifest_sha256", "verified_manifest_sha256"),
+      ("template_bundle_sha256", "verified_template_bundle_sha256"),
+  ):
+    verified = live.get(verified_key)
+    if not isinstance(verified, str) or not _SHA256_HEX_RE.fullmatch(verified):
+      errors.append(
+          f"{prefix}.{verified_key} {verified!r} is not a SHA-256 hex digest"
+      )
+    if live.get(pinned_key) != verified:
+      differing.append(f"{pinned_key} != {verified_key}")
+  # A key that is present counts, even when its value is null or empty.
+  present = "pending_live_sync" in live
+  pending = live.get("pending_live_sync")
+  if not differing:
+    if present:
+      errors.append(
+          f"{prefix}.pending_live_sync must be removed: manifest_sha256 and"
+          " template_bundle_sha256 equal their verified digests"
+      )
+    return errors
+  if not present:
+    errors.append(
+        f"{prefix}.pending_live_sync is required while"
+        f" {' and '.join(differing)}"
+    )
+    return errors
+  if not isinstance(pending, dict):
+    return errors + [f"{prefix}.pending_live_sync must be a mapping"]
+  reason = pending.get("reason")
+  if not isinstance(reason, str) or not reason.strip():
+    errors.append(
+        f"{prefix}.pending_live_sync.reason {reason!r} must be a non-empty"
+        " string"
+    )
+  since_date = pending.get("since_date")
+  since_dt: datetime.date | None = None
+  if isinstance(since_date, str) and _ISO_DATE_RE.fullmatch(since_date):
+    try:
+      since_dt = datetime.date.fromisoformat(since_date)
+    except ValueError:
+      since_dt = None
+  if since_dt is None:
+    errors.append(
+        f"{prefix}.pending_live_sync.since_date {since_date!r} is not a quoted"
+        " YYYY-MM-DD date"
+    )
+  else:
+    if (
+        verified_dt is not None
+        and verified_dt <= today
+        and since_dt < verified_dt
+    ):
+      errors.append(
+          f"{prefix}.pending_live_sync.since_date {since_date!r} is before"
+          f" verified_date {verified_date!r}"
+      )
+    if since_dt > today:
+      errors.append(
+          f"{prefix}.pending_live_sync.since_date {since_date!r} is in the"
+          " future"
+      )
+  tracking_issue = pending.get("tracking_issue")
+  if not isinstance(
+      tracking_issue, str
+  ) or not _REPOSITORY_ISSUE_URL_RE.fullmatch(tracking_issue):
+    errors.append(
+        f"{prefix}.pending_live_sync.tracking_issue {tracking_issue!r} is not"
+        " the URL of an issue of this repository"
+    )
+  actions = pending.get("required_actions")
+  if (
+      not isinstance(actions, list)
+      or not actions
+      or not all(isinstance(a, str) and a.strip() for a in actions)
+  ):
+    errors.append(
+        f"{prefix}.pending_live_sync.required_actions {actions!r} must be a"
+        " non-empty list of non-empty strings"
+    )
+  return errors
+
+
+# A BQCA capture receipt: what a maintainer with access to the live template
+# signs for an export of it, right as `tools/sign_live_capture.py` runs the
+# export. It is a JSON object with exactly BQCA_CAPTURE_RECEIPT_FIELDS, signed
+# byte for byte: its signature (`<receipt>.sig`) is an OpenSSH signature in
+# BQCA_CAPTURE_NAMESPACE by a key that BQCA_CAPTURE_SIGNERS_PATH lists for the
+# receipt's `signer`. `tools/finalize_live_sync.py` commits the receipt of the
+# export that verified the live template as BQCA_CAPTURE_RECEIPT_PATH, and a
+# binding without `pending_live_sync` must carry it.
+BQCA_CAPTURE_SIGNERS_PATH = "bindings/bqca_live_capture_signers"
+BQCA_CAPTURE_RECEIPT_PATH = "bindings/bqca_live_capture_receipt.json"
+BQCA_CAPTURE_RECEIPT_FORMAT = "bqca-live-capture-receipt/v3"
+BQCA_CAPTURE_NAMESPACE = "bqca-live-capture-receipt"
+BQCA_CAPTURE_RECEIPT_FIELDS = (
+    "format",
+    "report_id",
+    "revision",
+    "dump_sha256",
+    "signed_at",
+    "signer",
+    "export_command_sha256",
+    "manifest_sha256",
+    "template_bundle_sha256",
+    "pending_since_date",
+    "sync_generation",
+    "before_dump_sha256",
+    "before_revision",
+)
+# A capture taken after the write-back names, in these fields, the capture
+# taken before it; a capture taken before the write-back gives both as null.
+BQCA_CAPTURE_BEFORE_FIELDS = ("before_dump_sha256", "before_revision")
+# How far a receipt's `signed_at` may be ahead of the clock that checks it.
+BQCA_CAPTURE_CLOCK_SKEW = datetime.timedelta(minutes=5)
+BQCA_CAPTURE_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+_BQCA_CAPTURE_TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+# A report ID or revision is a plain token, the same in a receipt, on a
+# command line and in the binding. A signer is also a literal principal of
+# the signers file, never a pattern (`*`, `?`, `!`, `,`).
+BQCA_CAPTURE_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}")
+BQCA_CAPTURE_SIGNER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}")
+# The key types that a line of BQCA_CAPTURE_SIGNERS_PATH may list: plain
+# public keys, never certificates.
+BQCA_CAPTURE_SIGNER_KEY_TYPES = (
+    "ssh-ed25519",
+    "ssh-rsa",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "sk-ssh-ed25519@openssh.com",
+    "sk-ecdsa-sha2-nistp256@openssh.com",
+)
+_BASE64_RE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
+# The NIST curves of the ECDSA key types, by the curve name that a key blob
+# gives: the byte length of a coordinate, the prime p of the field, and the
+# coefficient b of the curve y^2 = x^3 - 3x + b (mod p).
+_ECDSA_CURVES = {
+    "nistp256": (
+        32,
+        2**256 - 2**224 + 2**192 + 2**96 - 1,
+        int(
+            "5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b",
+            16,
+        ),
+    ),
+    "nistp384": (
+        48,
+        2**384 - 2**128 - 2**96 + 2**32 - 1,
+        int(
+            "b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875a"
+            "c656398d8a2ed19d2a85c8edd3ec2aef",
+            16,
+        ),
+    ),
+    "nistp521": (
+        66,
+        2**521 - 1,
+        int(
+            "51953eb9618e1c9a1f929a21a0b68540eea2da725b99b315f3b8b489918ef109"
+            "e156193951ec7e937b1652c0bd3bb1bf073573df883d2c34f1ef451fd46b503f00",
+            16,
+        ),
+    ),
+}
+# The fewest bits of an RSA modulus, and the most bits of any integer, that
+# ssh-keygen reads in a public key.
+_RSA_MIN_MODULUS_BITS = 1024
+_SSH_MAX_MPINT_BITS = 16384
+# What a signer line may hold: printable ASCII and tabs, so that `str.split`
+# splits it into fields where ssh-keygen does (at spaces and tabs).
+_SIGNERS_LINE_RE = re.compile(r"[\t\x20-\x7e]*")
+
+
+def bqca_sync_generation(live: Any) -> int | None:
+  """Return the `sync_generation` of `live_template_verification`, or None.
+
+  It numbers the live syncs of the template: 1 for the first that the
+  binding records as pending, and one more each time a sync is reopened. It
+  stays when a sync is finalized, and capture receipts carry it, so the
+  receipt of one sync cannot record another. None unless it is an integer of
+  at least 1 (not a bool).
+  """
+  value = live.get("sync_generation") if isinstance(live, dict) else None
+  if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+    return None
+  return value
+
+
+def bqca_capture_signature_path(receipt: pathlib.Path) -> pathlib.Path:
+  """Return where the signature of the capture receipt `receipt` is."""
+  return receipt.with_name(f"{receipt.name}.sig")
+
+
+def bqca_capture_time(signed_at: str) -> datetime.datetime:
+  """Return the UTC time that a receipt's `signed_at` gives."""
+  return datetime.datetime.strptime(
+      signed_at, BQCA_CAPTURE_TIME_FORMAT
+  ).replace(tzinfo=datetime.timezone.utc)
+
+
+def parse_bqca_capture_receipt(data: bytes) -> dict[str, Any]:
+  """Return the fields of the capture receipt `data`.
+
+  Raises:
+    ValueError: `data` is not a BQCA_CAPTURE_RECEIPT_FORMAT receipt: a UTF-8
+      JSON object that gives each of BQCA_CAPTURE_RECEIPT_FIELDS, and nothing
+      else, once, in its form (the BQCA_CAPTURE_BEFORE_FIELDS both null or
+      both given).
+  """
+  try:
+    text = data.decode("utf-8")
+  except UnicodeDecodeError as exc:
+    raise ValueError(f"it is not UTF-8 text: {exc}") from exc
+
+  def unique(pairs: list) -> dict:
+    names = [name for name, _ in pairs]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+      raise ValueError(f"it gives {', '.join(repeated)} more than once")
+    return dict(pairs)
+
+  try:
+    receipt = json.loads(text, object_pairs_hook=unique)
+  except json.JSONDecodeError as exc:
+    raise ValueError(f"it is not JSON: {exc}") from exc
+  if not isinstance(receipt, dict):
+    raise ValueError("it is not a JSON object")
+  if sorted(receipt) != sorted(BQCA_CAPTURE_RECEIPT_FIELDS):
+    raise ValueError(
+        f"its fields are {sorted(receipt)}, not"
+        f" {sorted(BQCA_CAPTURE_RECEIPT_FIELDS)}"
+    )
+  digest = (_SHA256_HEX_RE, "a SHA-256 hex digest")
+  forms = {
+      "format": (
+          re.compile(re.escape(BQCA_CAPTURE_RECEIPT_FORMAT)),
+          repr(BQCA_CAPTURE_RECEIPT_FORMAT),
+      ),
+      "report_id": (BQCA_CAPTURE_TOKEN_RE, "a report ID"),
+      "revision": (BQCA_CAPTURE_TOKEN_RE, "a revision"),
+      "dump_sha256": digest,
+      "signed_at": (_BQCA_CAPTURE_TIME_RE, "a UTC time, YYYY-MM-DDTHH:MM:SSZ"),
+      "signer": (BQCA_CAPTURE_SIGNER_RE, "a signer"),
+      "export_command_sha256": digest,
+      "manifest_sha256": digest,
+      "template_bundle_sha256": digest,
+      "pending_since_date": (_ISO_DATE_RE, "a YYYY-MM-DD date"),
+      "before_dump_sha256": digest,
+      "before_revision": (BQCA_CAPTURE_TOKEN_RE, "a revision"),
+  }
+  generation = receipt["sync_generation"]
+  if bqca_sync_generation({"sync_generation": generation}) is None:
+    raise ValueError(
+        f"its sync_generation {generation!r} is not an integer of at least 1"
+    )
+  nulls = [receipt[name] is None for name in BQCA_CAPTURE_BEFORE_FIELDS]
+  if any(nulls) and not all(nulls):
+    raise ValueError(
+        f"it gives one of {' and '.join(BQCA_CAPTURE_BEFORE_FIELDS)} as null,"
+        " not both"
+    )
+  for name, (form, described) in forms.items():
+    value = receipt[name]
+    if value is None and name in BQCA_CAPTURE_BEFORE_FIELDS:
+      continue
+    if not isinstance(value, str) or not form.fullmatch(value):
+      raise ValueError(f"its {name} {value!r} is not {described}")
+  for name, read in (
+      ("signed_at", bqca_capture_time),
+      ("pending_since_date", datetime.date.fromisoformat),
+  ):
+    try:
+      read(receipt[name])
+    except ValueError as exc:
+      raise ValueError(
+          f"its {name} {receipt[name]!r} is not a valid date or time: {exc}"
+      ) from exc
+  return receipt
+
+
+def _is_canonical_base64(value: str) -> bool:
+  """Return whether `value` is canonical base64, as ssh-keygen reads a key.
+
+  `_BASE64_RE` alone accepts `A`, `A=`, `AA`, `AAAAA` and `AB==`, but ssh-keygen
+  refuses them: it takes whole groups of four characters, padded with `=`, and
+  the bits after the last byte must be zero. So `value` must match
+  `_BASE64_RE`, be whole groups of four, decode strictly, and encode back to
+  itself: `AB==` decodes to the same byte as `AA==`, so only that last check
+  refuses it.
+  """
+  if not (_BASE64_RE.fullmatch(value) and len(value) % 4 == 0):
+    return False
+  try:
+    decoded = base64.b64decode(value, validate=True)
+  except (binascii.Error, ValueError):
+    return False
+  return base64.b64encode(decoded).decode("ascii") == value
+
+
+def _read_ssh_bytes(buf: bytes, offset: int) -> tuple[bytes, int] | None:
+  """Return the wire string of `buf` at `offset`, and the offset after it.
+
+  An OpenSSH wire string is a 4-byte big-endian length, then that many bytes.
+  None if `buf` ends before the string does.
+  """
+  if len(buf) - offset < 4:
+    return None
+  (length,) = struct.unpack(">I", buf[offset : offset + 4])
+  start = offset + 4
+  if len(buf) - start < length:
+    return None
+  return buf[start : start + length], start + length
+
+
+def _ssh_mpint(value: bytes) -> int | None:
+  """Return the integer of the OpenSSH mpint `value`, or None.
+
+  None if ssh-keygen refuses it: negative (its first bit is set), or longer
+  than _SSH_MAX_MPINT_BITS (with one leading zero byte at most).
+  """
+  if value and value[0] & 0x80:
+    return None
+  if len(value) > _SSH_MAX_MPINT_BITS // 8 + 1:
+    return None
+  number = int.from_bytes(value, "big")
+  return number if number.bit_length() <= _SSH_MAX_MPINT_BITS else None
+
+
+def _is_ecdsa_point(curve: str, point: bytes) -> bool:
+  """Return whether `point` is a public point on the NIST curve `curve`.
+
+  ssh-keygen reads only an uncompressed point: the byte 0x04, then x and y,
+  each the coordinate length of `curve`, both below its prime p, and on it.
+  """
+  size, prime, b = _ECDSA_CURVES[curve]
+  if len(point) != 1 + 2 * size or point[0] != 0x04:
+    return False
+  x = int.from_bytes(point[1 : 1 + size], "big")
+  y = int.from_bytes(point[1 + size :], "big")
+  return x < prime and y < prime and (y * y - x**3 + 3 * x - b) % prime == 0
+
+
+def _is_valid_ssh_public_key_blob(key_type: str, blob: bytes) -> bool:
+  """Return whether `blob` is the OpenSSH wire form of a `key_type` key.
+
+  `blob` is the decoded key of a signers line. ssh-keygen reads a key only on
+  the line of the signer that it verifies, so this checks the key of every
+  line: canonical base64 such as `AAAA` decodes to bytes that are no key. A
+  key blob is wire strings, and nothing after them: the key type, which must
+  be `key_type`, then the fields of that type, which must be what ssh-keygen
+  reads (RFC 4253, RFC 5656, RFC 8709, and OpenSSH's PROTOCOL.u2f):
+
+  - `ssh-ed25519`: a 32-byte key.
+  - `ssh-rsa`: the exponent e and modulus n, non-negative mpints, e not 0
+    and n of 1024 to 16384 bits.
+  - `ecdsa-sha2-<curve>`: the curve name, then a point on that curve (see
+    `_is_ecdsa_point`).
+  - `sk-ssh-ed25519@openssh.com` and `sk-ecdsa-sha2-nistp256@openssh.com`:
+    the fields of `ssh-ed25519` and of `ecdsa-sha2-nistp256`, then the
+    application of the security key, which is not empty and holds no NUL.
+
+  Two forms that ssh-keygen reads are refused as no signer's key: an RSA
+  exponent of 0 and an empty application.
+  """
+  fields = []
+  offset = 0
+  while offset < len(blob):
+    read = _read_ssh_bytes(blob, offset)
+    if read is None:
+      return False
+    field, offset = read
+    fields.append(field)
+  if not fields or fields[0] != key_type.encode("ascii"):
+    return False
+  rest = fields[1:]
+  if key_type.startswith("sk-"):
+    if not rest:
+      return False
+    *rest, application = rest
+    if not application or b"\0" in application:
+      return False
+  name = key_type.removeprefix("sk-").removesuffix("@openssh.com")
+  if name == "ssh-ed25519":
+    return len(rest) == 1 and len(rest[0]) == 32
+  if name == "ssh-rsa":
+    if len(rest) != 2:
+      return False
+    exponent, modulus = (_ssh_mpint(value) for value in rest)
+    return (
+        exponent is not None
+        and exponent > 0
+        and modulus is not None
+        and modulus.bit_length() >= _RSA_MIN_MODULUS_BITS
+    )
+  if not name.startswith("ecdsa-sha2-"):
+    return False
+  curve = name.removeprefix("ecdsa-sha2-")
+  return (
+      curve in _ECDSA_CURVES
+      and len(rest) == 2
+      and rest[0] == curve.encode("ascii")
+      and _is_ecdsa_point(curve, rest[1])
+  )
+
+
+def bqca_capture_signers_error(signers: bytes) -> str | None:
+  """Return why the signers file `signers` trusts no receipt, or None.
+
+  `signers` is the bytes of BQCA_CAPTURE_SIGNERS_PATH, which `ssh-keygen -Y
+  verify` reads as an allowed signers file. ssh-keygen reads the principal
+  field of a line as a list of patterns (`*`, `?`, `!`, `,`) and takes
+  options that widen the namespaces or the keys that a line trusts, so one
+  line could trust a key for every signer's receipts, and a second line for a
+  listed signer could trust another key in that signer's name. So each line
+  must be blank, a comment (`#` after any spaces or tabs), or exactly
+
+    <signer> namespaces="bqca-live-capture-receipt" <key type> <public key>
+
+  optionally followed by a key comment: one literal principal that
+  BQCA_CAPTURE_SIGNER_RE matches (not quoted), that option and no other, one
+  of BQCA_CAPTURE_SIGNER_KEY_TYPES and a canonical base64 key (see
+  `_is_canonical_base64`) that decodes to the OpenSSH wire form of a key of
+  that type (see `_is_valid_ssh_public_key_blob`): ssh-keygen reads the key
+  of only the line that it verifies, so a key that it refuses on another
+  line would pass it unread. A signer line holds only printable ASCII and
+  tabs, so its fields are the ones that ssh-keygen reads. No principal is
+  listed twice, in any letter case, and at least one is listed. The file must
+  be UTF-8 text; like ssh-keygen, this splits it into lines at each line
+  feed, and drops a carriage return that ends a line.
+  """
+  try:
+    text = signers.decode("utf-8")
+  except UnicodeDecodeError as exc:
+    return (
+        f"{BQCA_CAPTURE_SIGNERS_PATH} is not UTF-8 text ({exc}), so it trusts"
+        " no receipt"
+    )
+  option = f'namespaces="{BQCA_CAPTURE_NAMESPACE}"'
+  listed: dict[str, int] = {}
+  for number, line in enumerate(text.split("\n"), start=1):
+    line = line.removesuffix("\r")
+    content = line.strip(" \t\r")
+    if not content or content.startswith("#"):
+      continue
+    fields = line.split()
+    principal = fields[0].lower() if fields else ""
+    if not _SIGNERS_LINE_RE.fullmatch(line):
+      problem = "it holds a character that is not printable ASCII or a tab"
+    elif not BQCA_CAPTURE_SIGNER_RE.fullmatch(fields[0]):
+      problem = (
+          f"its principal {fields[0]!r} is not the literal name of one signer"
+          " (a pattern, a list or a quoted name is refused)"
+      )
+    elif len(fields) > 1 and fields[1] in BQCA_CAPTURE_SIGNER_KEY_TYPES:
+      problem = f"it has no options, not {option}"
+    elif len(fields) < 4:
+      problem = "it does not have the signer, option, key type and key fields"
+    elif fields[1] != option:
+      problem = f"its options {fields[1]!r} are not exactly {option}"
+    elif fields[2] not in BQCA_CAPTURE_SIGNER_KEY_TYPES:
+      problem = (
+          f"its key type {fields[2]!r} is not one of"
+          f" {', '.join(BQCA_CAPTURE_SIGNER_KEY_TYPES)}"
+      )
+    elif not _is_canonical_base64(fields[3]):
+      problem = "its public key is not canonical base64"
+    elif not _is_valid_ssh_public_key_blob(
+        fields[2], base64.b64decode(fields[3])
+    ):
+      problem = (
+          "its public key is canonical base64 but not the OpenSSH wire form"
+          f" of a valid {fields[2]} key"
+      )
+    elif principal in listed:
+      problem = (
+          f"it lists the signer {fields[0]!r} again (line"
+          f" {listed[principal]} lists it, ignoring letter case)"
+      )
+    else:
+      listed[principal] = number
+      continue
+    return (
+        f"{BQCA_CAPTURE_SIGNERS_PATH} line {number}: {problem}; each signer is"
+        f" listed once, as '<signer> {option} <key type> <public key>', so the"
+        " file trusts no receipt"
+    )
+  if not listed:
+    return (
+        f"{BQCA_CAPTURE_SIGNERS_PATH} lists no signer, so it trusts no receipt"
+    )
+  return None
+
+
+def bqca_capture_signature_error(
+    data: bytes, signature: bytes, signer: str, signers: bytes
+) -> str | None:
+  """Return why `signature` is not a trusted signature of the receipt `data`.
+
+  Checks `signers`, the bytes of BQCA_CAPTURE_SIGNERS_PATH, with
+  `bqca_capture_signers_error` (which needs no OpenSSH), then runs
+  `ssh-keygen -Y verify` in BQCA_CAPTURE_NAMESPACE for the identity
+  `signer`, on private copies of `signature` and of `signers`. Returns None
+  if the signature verifies.
+  """
+  error = bqca_capture_signers_error(signers)
+  if error is not None:
+    return error
+  ssh_keygen = shutil.which("ssh-keygen")
+  if ssh_keygen is None:
+    return (
+        "cannot verify the receipt's signature: ssh-keygen (OpenSSH 8.2 or"
+        " later) is not on PATH"
+    )
+  with tempfile.TemporaryDirectory(prefix="bqca_capture_signature_") as private:
+    signers_copy = pathlib.Path(private) / "allowed_signers"
+    signature_copy = pathlib.Path(private) / "receipt.sig"
+    signers_copy.write_bytes(signers)
+    signature_copy.write_bytes(signature)
+    verified = subprocess.run(
+        [
+            ssh_keygen,
+            "-Y",
+            "verify",
+            "-f",
+            str(signers_copy),
+            "-I",
+            signer,
+            "-n",
+            BQCA_CAPTURE_NAMESPACE,
+            "-s",
+            str(signature_copy),
+        ],
+        input=data,
+        capture_output=True,
+        check=False,
+    )
+    if verified.returncode == 0:
+      return None
+    # The signature is valid, but the signers file does not trust its key for
+    # this signer (ssh-keygen may say why: a malformed line, an expired key, a
+    # key restricted to other namespaces); or it is not a valid receipt
+    # signature at all.
+    details = [
+        line.strip().replace(str(signers_copy), BQCA_CAPTURE_SIGNERS_PATH)
+        for line in verified.stderr.decode("utf-8", "replace").splitlines()
+        if line.strip() and line.strip() != "Could not verify signature."
+    ]
+    valid = subprocess.run(
+        [
+            ssh_keygen,
+            "-Y",
+            "check-novalidate",
+            "-n",
+            BQCA_CAPTURE_NAMESPACE,
+            "-s",
+            str(signature_copy),
+        ],
+        input=data,
+        capture_output=True,
+        check=False,
+    )
+  if valid.returncode == 0:
+    detail = f" ({'; '.join(details)})" if details else ""
+    return (
+        "the receipt is not signed by a key that"
+        f" {BQCA_CAPTURE_SIGNERS_PATH} lists for its signer {signer!r}{detail}"
+    )
+  reason = next(
+      (
+          line.strip()
+          for line in valid.stderr.decode("utf-8", "replace").splitlines()
+          if line.strip()
+      ),
+      f"ssh-keygen exited {valid.returncode}",
+  )
+  return (
+      f"the receipt's signature is not a valid {BQCA_CAPTURE_NAMESPACE}"
+      f" signature of the receipt: {reason}"
+  )
+
+
+def bqca_capture_time_errors(
+    receipt: dict[str, Any], now: datetime.datetime, subject: str
+) -> list[str]:
+  """Return why the receipt `receipt`, named `subject`, is stale or early.
+
+  A capture of the live template for a pending sync is signed on or after the
+  day the sync began (`pending_since_date`, inclusive, in UTC) and not after
+  `now`, give or take BQCA_CAPTURE_CLOCK_SKEW.
+  """
+  errors = []
+  signed = bqca_capture_time(receipt["signed_at"])
+  since = datetime.date.fromisoformat(receipt["pending_since_date"])
+  if signed.date() < since:
+    errors.append(
+        f"{subject} was signed at {receipt['signed_at']}, before the live sync"
+        f" it is for began on {receipt['pending_since_date']}"
+    )
+  if signed > now + BQCA_CAPTURE_CLOCK_SKEW:
+    errors.append(
+        f"{subject} was signed at {receipt['signed_at']}, which is in the"
+        " future"
+    )
+  return errors
+
+
+def _bqca_committed_capture_errors(
+    root: pathlib.Path, binding: dict[str, Any], live: dict[str, Any]
+) -> list[str]:
+  """Check the capture receipt of a binding that records a live sync.
+
+  When its verified digests are the pinned ones, `live_template_verification`
+  records a live sync (and must have no `pending_live_sync`), so
+  BQCA_CAPTURE_RECEIPT_PATH must be the receipt of the export that verified
+  it, and the signers file must trust its signature. The receipt
+  must be of a capture taken after the write-back, for the binding's report,
+  its pinned manifest and bundle digests and its `sync_generation`, and
+  signed on or after the day its sync began and not in the future.
+  `verified_revision`, `verified_dump_sha256`, `capture_receipt_sha256` and
+  `captured_by` must be the receipt's, and `verified_date` must not be before
+  the receipt was signed. That shows the record was copied from a trusted
+  receipt, not that `tools/finalize_live_sync.py` wrote it: a binding
+  assembled by hand from the same receipt passes too, which review must
+  rule out, and a reset generation shows only against the previous binding
+  (`bqca_sync_generation_progress_errors`).
+  """
+  prefix = "bqca live_template_verification"
+  where = BQCA_CAPTURE_RECEIPT_PATH
+  path = root / where
+  contents = {}
+  for name, source in (
+      ("receipt", path),
+      ("signature", bqca_capture_signature_path(path)),
+      ("signers", root / BQCA_CAPTURE_SIGNERS_PATH),
+  ):
+    try:
+      contents[name] = source.read_bytes()
+    except OSError as exc:
+      return [
+          f"{prefix} records a live sync (its verified digests are the pinned"
+          " ones), so it needs the capture receipt that finalized it: cannot"
+          f" read {source.relative_to(root)}: {exc.strerror or exc}"
+      ]
+  data = contents["receipt"]
+  try:
+    receipt = parse_bqca_capture_receipt(data)
+  except ValueError as exc:
+    return [
+        f"{prefix}: {where} is not a {BQCA_CAPTURE_RECEIPT_FORMAT} capture"
+        f" receipt: {exc}"
+    ]
+  errors = []
+  error = bqca_capture_signature_error(
+      data, contents["signature"], receipt["signer"], contents["signers"]
+  )
+  if error is not None:
+    errors.append(f"{prefix}: {where}: {error}")
+  if receipt["before_dump_sha256"] is None:
+    errors.append(
+        f"{prefix}: {where} is the receipt of a capture taken before the"
+        " write-back, not after it"
+    )
+  if receipt["report_id"] != binding.get("report_id"):
+    errors.append(
+        f"{prefix}: {where} is for report {receipt['report_id']!r}, not"
+        f" {binding.get('report_id')!r}"
+    )
+  if receipt["sync_generation"] != live.get("sync_generation"):
+    errors.append(
+        f"{prefix}: {where} is for sync generation"
+        f" {receipt['sync_generation']}, not the binding's"
+        f" {live.get('sync_generation')!r}: it is the receipt of another sync"
+    )
+  for key in ("manifest_sha256", "template_bundle_sha256"):
+    if receipt[key] != live.get(key):
+      errors.append(
+          f"{prefix}: {where} is for {key} {receipt[key]}, not the pinned"
+          f" {live.get(key)}"
+      )
+  recorded = {
+      "verified_revision": receipt["revision"],
+      "verified_dump_sha256": receipt["dump_sha256"],
+      "capture_receipt_sha256": hashlib.sha256(data).hexdigest(),
+      "captured_by": receipt["signer"],
+  }
+  for key, expected in recorded.items():
+    if live.get(key) != expected:
+      errors.append(
+          f"{prefix}.{key} {live.get(key)!r} is not {expected!r}, which {where}"
+          " gives"
+      )
+  errors += bqca_capture_time_errors(
+      receipt,
+      datetime.datetime.now(datetime.timezone.utc),
+      f"{prefix}: {where}",
+  )
+  verified_date = live.get("verified_date")
+  if isinstance(verified_date, str) and _ISO_DATE_RE.fullmatch(verified_date):
+    try:
+      verified = datetime.date.fromisoformat(verified_date)
+    except ValueError:
+      verified = None
+    signed = bqca_capture_time(receipt["signed_at"]).date()
+    if verified is not None and verified < signed:
+      errors.append(
+          f"{prefix}.verified_date {verified_date!r} is before {where} was"
+          f" signed at {receipt['signed_at']}"
+      )
+  return errors
+
+
+def bqca_sync_generation_progress_errors(
+    binding: dict[str, Any], previous: dict[str, Any]
+) -> list[str]:
+  """Check how `sync_generation` moved from the `previous` binding.
+
+  It never goes down, and a sync that `previous` did not have pending (it
+  was finalized, or there was none) and that `binding` has pending again
+  takes a greater one: so a binding cannot go back to a generation whose
+  committed receipt it still holds. A previous binding without one counts as
+  generation 0.
+  """
+  prefix = "bqca live_template_verification.sync_generation"
+  live = binding.get("live_template_verification")
+  before = (
+      previous.get("live_template_verification")
+      if isinstance(previous, dict)
+      else None
+  )
+  current = bqca_sync_generation(live)
+  if current is None:
+    # The binding's own check says why.
+    return []
+  if isinstance(before, dict) and "sync_generation" in before:
+    earlier = bqca_sync_generation(before)
+    if earlier is None:
+      return [
+          f"{prefix} of the previous binding,"
+          f" {before.get('sync_generation')!r}, is not an integer of at least"
+          " 1"
+      ]
+  else:
+    earlier = 0
+  if current < earlier:
+    return [
+        f"{prefix} {current} is less than {earlier}, the previous binding's:"
+        " it only moves forward"
+    ]
+  reopened = isinstance(live, dict) and "pending_live_sync" in live
+  was_pending = isinstance(before, dict) and "pending_live_sync" in before
+  if reopened and not was_pending and current == earlier:
+    return [
+        f"{prefix} is still {current}, the previous binding's, although the"
+        " live sync is pending again: a reopened sync takes the next"
+        " generation"
+    ]
+  return []
+
+
+def validate_bqca(
+    root: pathlib.Path = ROOT,
+    *,
+    contract_override: dict[str, Any] | None = None,
+    manifest_override: dict[str, Any] | None = None,
+    binding_override: dict[str, Any] | None = None,
+    sql_override: str | None = None,
+    compat_override: dict[str, Any] | None = None,
+    bundle_override: dict[str, Any] | None = None,
+) -> list[str]:
+  """Return a list of contract validation errors for the BQCA profile."""
+  errors: list[str] = []
+  manifest_path = root / "spec/bqca_chart_manifest.yaml"
+  contract_path = root / "spec/bqca_product_contract.yaml"
+  binding_path = root / "bindings/bqca_report_template.yaml"
+  sql_path = root / "sql/bqca_events_v1.template.sql"
+  compat_path = root / "spec/bqca_compatibility_profile.json"
+  bundle_path = root / "spec/bqca_dashboard_template.json"
+
+  manifest = (
+      manifest_override
+      if manifest_override is not None
+      else _load_yaml(manifest_path)
+  )
+  contract = (
+      contract_override
+      if contract_override is not None
+      else _load_yaml(contract_path)
+  )
+  binding = (
+      binding_override
+      if binding_override is not None
+      else _load_yaml(binding_path)
+  )
+  sql_text = (
+      sql_override
+      if sql_override is not None
+      else sql_path.read_text(encoding="utf-8")
+  )
+  compat = (
+      compat_override
+      if compat_override is not None
+      else json.loads(compat_path.read_text(encoding="utf-8"))
+  )
+  bundle = (
+      bundle_override
+      if bundle_override is not None
+      else json.loads(bundle_path.read_text(encoding="utf-8"))
+  )
+
+  # 1. Surface & ID parity across binding, contract, manifest, and JSON bundle
+  report_id = binding.get("report_id")
+  datasource_id = binding.get("datasource_id")
+  alias = binding.get("data_source_alias")
+  surface = contract.get("surface", {})
+  meta = manifest.get("meta", {})
+  ds = manifest.get("datasource", {})
+  bundle_ds = bundle.get("datasource", {})
+
+  if (
+      surface.get("canonical_report_id") != report_id
+      or meta.get("report_id") != report_id
+      or bundle.get("report_id") != report_id
+  ):
+    errors.append(
+        "bqca report_id mismatch across binding, contract, manifest, and bundle"
+    )
+  if (
+      surface.get("datasource_id") != datasource_id
+      or meta.get("datasource_id") != datasource_id
+      or ds.get("datasource_id") != datasource_id
+      or bundle.get("datasource_id") != datasource_id
+      or bundle_ds.get("datasource_id") != datasource_id
+  ):
+    errors.append(
+        "bqca datasource_id mismatch across binding, contract, manifest, and"
+        " bundle"
+    )
+  if (
+      surface.get("data_source_alias") != alias
+      or meta.get("data_source_alias") != alias
+      or ds.get("data_source_alias") != alias
+      or bundle.get("data_source_alias") != alias
+      or bundle_ds.get("data_source_alias") != alias
+  ):
+    errors.append(
+        "bqca data_source_alias mismatch across binding, contract, manifest,"
+        " and bundle"
+    )
+  if surface.get("source_parity_contract") != "spec/bqca_chart_manifest.yaml":
+    errors.append(
+        "bqca product_contract surface.source_parity_contract must be"
+        " spec/bqca_chart_manifest.yaml"
+    )
+  if binding.get("chart_manifest") != "spec/bqca_chart_manifest.yaml":
+    errors.append(
+        "bqca_report_template chart_manifest must be"
+        " spec/bqca_chart_manifest.yaml"
+    )
+  if (
+      surface.get("dashboard_template_bundle")
+      != "spec/bqca_dashboard_template.json"
+      or binding.get("dashboard_template_bundle")
+      != "spec/bqca_dashboard_template.json"
+  ):
+    errors.append(
+        "bqca dashboard_template_bundle must be"
+        " spec/bqca_dashboard_template.json"
+    )
+  if (
+      surface.get("compatibility_profile")
+      != "spec/bqca_compatibility_profile.json"
+      or binding.get("compatibility_profile")
+      != "spec/bqca_compatibility_profile.json"
+  ):
+    errors.append(
+        "bqca compatibility_profile must be"
+        " spec/bqca_compatibility_profile.json"
+    )
+
+  # 1b. Compatibility profile parity against base table and event allowlist
+  expected_cols = {
+      col["name"]: col["type"]
+      for col in contract.get("base_table_contract", {}).get(
+          "required_columns", []
+      )
+      if isinstance(col, dict) and "name" in col and "type" in col
+  }
+  if compat.get("source_object") != binding.get("default_table"):
+    errors.append("bqca compatibility_profile.source_object mismatch")
+  if compat.get("source_object_type") != "BASE TABLE":
+    errors.append(
+        "bqca compatibility_profile.source_object_type must be BASE TABLE"
+    )
+  if compat.get("generated_views_required") is not False:
+    errors.append(
+        "bqca compatibility_profile.generated_views_required must be False"
+    )
+  if (
+      compat.get("required_columns") != expected_cols
+      or len(expected_cols) != 15
+  ):
+    errors.append(
+        "bqca compatibility_profile.required_columns does not match 15-column"
+        " base_table_contract"
+    )
+  if compat.get("allowed_event_types") != contract.get(
+      "allowed_event_types", []
+  ):
+    errors.append(
+        "bqca compatibility_profile.allowed_event_types does not match"
+        " product_contract"
+    )
+  if compat.get("excluded_event_types") != list(BQCA_UNLOGGED_EVENT_TYPES):
+    errors.append(
+        "bqca compatibility_profile.excluded_event_types does not match"
+        " BQCA_UNLOGGED_EVENT_TYPES"
+    )
+
+  # 2. Datasource 41-field schema, SQL column projection parity, & native datetime invariants
+  ds_fields = ds.get("fields", [])
+  if ds.get("field_count") != 41 or len(ds_fields) != 41:
+    errors.append(f"bqca manifest expected 41 SQL fields, got {len(ds_fields)}")
+  if ds.get("use_datetime_type") is not True:
+    errors.append("bqca manifest datasource.use_datetime_type must be True")
+  if ds.get("parameter_configuration") != ["DS_START_DATE", "DS_END_DATE"]:
+    errors.append(
+        "bqca manifest parameter_configuration must be [DS_START_DATE, DS_END_DATE]"
+    )
+  if (
+      bundle_ds.get("field_count") != 41
+      or bundle_ds.get("fields") != ds_fields
+      or bundle_ds.get("use_datetime_type") is not True
+      or bundle_ds.get("parameter_configuration")
+      != ["DS_START_DATE", "DS_END_DATE"]
+  ):
+    errors.append(
+        "bqca dashboard_template_bundle datasource schema diverges from"
+        " bqca_chart_manifest"
+    )
+
+  field_by_display = {f["display_name"]: f for f in ds_fields}
+  field_by_name = {f["name"]: f for f in ds_fields}
+  for f in ds_fields:
+    fname = f.get("name")
+    dname = f.get("display_name")
+    dtype = f.get("data_type")
+    stype = f.get("semantic_type")
+    if fname != f"_{dname}_":
+      errors.append(
+          f"bqca manifest field name {fname!r} does not match _{dname}_"
+      )
+    allowed_sem = _SEMANTIC_TYPES_BY_DATA_TYPE.get(dtype, set())
+    if stype not in allowed_sem:
+      errors.append(
+          f"bqca manifest field {dname!r} semantic_type {stype!r} incompatible"
+          f" with data_type {dtype!r}"
+      )
+
+  base_table_types = {
+      col["name"]: col["type"]
+      for col in contract.get("base_table_contract", {}).get(
+          "required_columns", []
+      )
+      if isinstance(col, dict) and "name" in col and "type" in col
+  }
+  try:
+    sql_projected = extract_sql_projected_columns(sql_text, base_table_types)
+  except ValueError as exc:
+    errors.append(f"bqca SQL projection parse error: {exc}")
+    sql_projected = []
+
+  if sql_projected:
+    sql_col_names = [c[0] for c in sql_projected]
+    manifest_col_names = [f.get("display_name") for f in ds_fields]
+    if sql_col_names != manifest_col_names:
+      errors.append(
+          "bqca SQL projected columns do not match manifest datasource.fields:"
+          f" sql={sql_col_names} vs manifest={manifest_col_names}"
+      )
+    for col_name, sql_dtype in sql_projected:
+      mf = field_by_display.get(col_name)
+      if mf is None:
+        errors.append(
+            f"bqca SQL projected column {col_name!r} missing from manifest"
+            " datasource.fields"
+        )
+        continue
+      if mf.get("data_type") != sql_dtype:
+        errors.append(
+            f"bqca manifest field {col_name!r} data_type"
+            f" {mf.get('data_type')!r} does not match SQL projected type"
+            f" {sql_dtype!r}"
+        )
+
+  for name, expected in (
+      binding.get("block_datasource", {}).get("fields", {}).items()
+  ):
+    actual = field_by_name.get(name)
+    if not actual:
+      errors.append(f"bqca manifest missing block_datasource field {name}")
+      continue
+    if actual.get("data_type") != expected.get("data_type") or actual.get(
+        "semantic_type"
+    ) != expected.get("semantic_type"):
+      errors.append(
+          f"bqca manifest field {name} type mismatch: {actual} vs {expected}"
+      )
+
+  # 3. 7 pages and 34 components (21 scorecards + 13 charts/tables) 1:1 parity
+  c_pages = contract.get("pages", [])
+  m_pages = manifest.get("pages", [])
+  m_comps = manifest.get("components", [])
+  b_pages = bundle.get("pages", [])
+  b_comps = bundle.get("components", [])
+  if len(c_pages) != 7 or len(m_pages) != 7 or len(b_pages) != 7:
+    errors.append(
+        f"bqca expected 7 pages, got contract={len(c_pages)},"
+        f" manifest={len(m_pages)}, bundle={len(b_pages)}"
+    )
+  if len(m_comps) != 34 or len(b_comps) != 34:
+    errors.append(
+        f"bqca expected 34 components, got manifest={len(m_comps)},"
+        f" bundle={len(b_comps)}"
+    )
+
+  total_sc = 0
+  total_ch = 0
+  flat_from_pages: list[dict[str, Any]] = []
+  flat_from_bundle_pages: list[dict[str, Any]] = []
+  for c_page, m_page, b_page in zip(c_pages, m_pages, b_pages):
+    if (
+        c_page.get("id") != m_page.get("id")
+        or c_page.get("name") != m_page.get("name")
+        or b_page.get("id") != m_page.get("id")
+        or b_page.get("name") != m_page.get("name")
+    ):
+      errors.append(
+          f"bqca page mismatch: {c_page.get('id')} vs {m_page.get('id')} vs"
+          f" {b_page.get('id')}"
+      )
+    c_scs = c_page.get("scorecards", [])
+    c_chs = c_page.get("charts", [])
+    if len(c_scs) + len(c_chs) != c_page.get("component_count"):
+      errors.append(f"bqca page {c_page.get('id')} component_count mismatch")
+    if m_page.get("component_count") != c_page.get(
+        "component_count"
+    ) or b_page.get("component_count") != c_page.get("component_count"):
+      errors.append(
+          f"bqca manifest/bundle page {m_page.get('id')} component_count"
+          " mismatch"
+      )
+
+    page_m_comps = m_page.get("components", [])
+    page_b_comps = b_page.get("components", [])
+    if len(page_m_comps) != c_page.get("component_count") or len(
+        page_b_comps
+    ) != c_page.get("component_count"):
+      errors.append(
+          f"bqca manifest/bundle page {m_page.get('id')} components length"
+          " mismatch"
+      )
+    flat_from_pages.extend(page_m_comps)
+    flat_from_bundle_pages.extend(page_b_comps)
+
+    occupied_cells: dict[tuple[int, int], str] = {}
+    for m_comp, b_comp in zip(page_m_comps, page_b_comps):
+      for shared_key in (
+          "id",
+          "given_id",
+          "component_id",
+          "page_id",
+          "page_title",
+          "category",
+          "component_type",
+          "chart_type",
+          "label",
+          "title",
+          "field",
+          "aggregation",
+          "datasource_id",
+          "data_source_alias",
+          "dimensions",
+          "metrics",
+          "columns",
+          "geometry",
+          "spec",
+      ):
+        if b_comp.get(shared_key) != m_comp.get(shared_key):
+          errors.append(
+              f"bqca bundle component {m_comp.get('id')} key {shared_key!r}"
+              " diverges from manifest"
+          )
+      m_column_ids = _bqca_column_ids(m_comp)
+      b_column_ids = _bqca_column_ids(b_comp)
+      if b_column_ids != m_column_ids:
+        errors.append(
+            f"bqca bundle component {m_comp.get('id')} column ids"
+            f" {b_column_ids} != manifest column ids {m_column_ids}"
+        )
+      gp = b_comp.get("grid_position")
+      if not b_comp.get("responsive_section") or not isinstance(gp, dict):
+        errors.append(
+            f"bqca bundle component {m_comp.get('id')} missing"
+            " responsive_section or grid_position"
+        )
+      else:
+        row = gp.get("row")
+        row_span = gp.get("row_span")
+        col = gp.get("column")
+        col_span = gp.get("column_span")
+        if (
+            not all(isinstance(v, int) for v in (row, row_span, col, col_span))
+            or row < 1
+            or row_span < 1
+            or col < 1
+            or col_span < 1
+            or col + col_span - 1 > 12
+        ):
+          errors.append(
+              f"bqca bundle component {b_comp.get('id')} invalid"
+              f" grid_position {gp}"
+          )
+        else:
+          for r_idx in range(row, row + row_span):
+            for c_idx in range(col, col + col_span):
+              cell = (r_idx, c_idx)
+              if cell in occupied_cells:
+                errors.append(
+                    f"bqca bundle page {b_page.get('id')} grid cell {cell}"
+                    f" overlap between {occupied_cells[cell]} and"
+                    f" {b_comp.get('id')}"
+                )
+              else:
+                occupied_cells[cell] = str(b_comp.get("id"))
+
+    if all(
+        isinstance(c.get("grid_position"), dict)
+        and isinstance(c.get("geometry"), dict)
+        and all(
+            k in c["grid_position"]
+            for k in ("row", "column", "row_span", "column_span")
+        )
+        and all(k in c["geometry"] for k in ("top", "left"))
+        for c in page_b_comps
+    ):
+      by_grid = [
+          c["id"]
+          for c in sorted(
+              page_b_comps,
+              key=lambda c: (
+                  c["grid_position"]["row"],
+                  c["grid_position"]["column"],
+                  c["id"],
+              ),
+          )
+      ]
+      by_geom = [
+          c["id"]
+          for c in sorted(
+              page_b_comps,
+              key=lambda c: (
+                  c["geometry"]["top"],
+                  c["geometry"]["left"],
+                  c["id"],
+              ),
+          )
+      ]
+      if by_grid != by_geom:
+        errors.append(
+            f"bqca bundle page {b_page.get('id')} grid_position reading order"
+            f" {by_grid} diverges from geometry order {by_geom}"
+        )
+
+    for comp in page_m_comps:
+      errors.extend(
+          _validate_component_embedded_spec(
+              comp,
+              datasource_id=datasource_id,
+              field_by_name=field_by_name,
+              field_by_display=field_by_display,
+          )
+      )
+
+    # Two scorecards on one page must not show the same measure.
+    scorecard_by_measure: dict[tuple[Any, Any], Any] = {}
+    for comp in page_m_comps:
+      if comp.get("category") != "scorecard":
+        continue
+      measure = (comp.get("field"), comp.get("aggregation"))
+      if measure in scorecard_by_measure:
+        errors.append(
+            f"bqca page {m_page.get('id')} scorecards"
+            f" {scorecard_by_measure[measure]} and {comp.get('id')} both show"
+            f" {comp.get('aggregation')}({comp.get('field')})"
+        )
+      else:
+        scorecard_by_measure[measure] = comp.get("id")
+
+    m_sc_by_id = {
+        c["id"]: c for c in page_m_comps if c.get("category") == "scorecard"
+    }
+    m_ch_by_id = {
+        c["id"]: c for c in page_m_comps if c.get("category") == "chart"
+    }
+    if [s["id"] for s in c_scs] != list(m_sc_by_id):
+      errors.append(
+          f"bqca page {c_page.get('id')} scorecard IDs diverge from manifest"
+      )
+    if [ch["id"] for ch in c_chs] != list(m_ch_by_id):
+      errors.append(
+          f"bqca page {c_page.get('id')} chart IDs diverge from manifest"
+      )
+
+    for sc in c_scs:
+      total_sc += 1
+      if sc.get("field") not in field_by_display:
+        errors.append(
+            f"scorecard {sc.get('id')} references unknown field {sc.get('field')!r}"
+        )
+      m_sc = m_sc_by_id.get(sc["id"])
+      if m_sc:
+        if (
+            m_sc.get("label") != sc.get("label")
+            or m_sc.get("field") != sc.get("field")
+            or m_sc.get("aggregation") != sc.get("aggregation")
+        ):
+          errors.append(f"scorecard {sc['id']} contract vs manifest mismatch")
+
+    for ch in c_chs:
+      total_ch += 1
+      dims = list(
+          ch.get("dimensions", [ch["dimension"]] if "dimension" in ch else [])
+      )
+      for d in dims:
+        if d not in field_by_display:
+          errors.append(
+              f"chart {ch.get('id')} references unknown dimension {d!r}"
+          )
+      if "metrics" in ch:
+        c_mets = [dict(m) if isinstance(m, dict) else m for m in ch["metrics"]]
+      elif "metric" in ch:
+        c_mets = [{"field": ch["metric"], "aggregation": ch["aggregation"]}]
+      else:
+        c_mets = []
+      for m in c_mets:
+        mf = m["field"] if isinstance(m, dict) else m
+        if mf not in field_by_display:
+          errors.append(
+              f"chart {ch.get('id')} references unknown metric {mf!r}"
+          )
+      m_ch = m_ch_by_id.get(ch["id"])
+      if m_ch:
+        if (
+            m_ch.get("title") != ch.get("title")
+            or m_ch.get("chart_type") != ch.get("type")
+            or m_ch.get("dimensions") != dims
+            or m_ch.get("metrics") != c_mets
+        ):
+          errors.append(f"chart {ch['id']} contract vs manifest mismatch")
+
+  if total_sc != 21 or total_ch != 13 or (total_sc + total_ch) != 34:
+    errors.append(
+        f"bqca component totals expected 21+13=34, got {total_sc}+{total_ch}"
+    )
+  if flat_from_pages != m_comps:
+    errors.append(
+        "bqca manifest top-level components list does not match page components"
+    )
+  if flat_from_bundle_pages != b_comps:
+    errors.append(
+        "bqca bundle top-level components list does not match page components"
+    )
+  errors.extend(_bqca_report_wide_column_id_errors(flat_from_pages, "manifest"))
+  errors.extend(
+      _bqca_report_wide_column_id_errors(flat_from_bundle_pages, "bundle")
+  )
+  errors.extend(_bqca_derived_column_id_errors(flat_from_pages, "manifest"))
+  errors.extend(
+      _bqca_derived_column_id_errors(flat_from_bundle_pages, "bundle")
+  )
+
+  # 4. SHA-256 digests (SQL, contract pages, manifest, and JSON template bundle)
+  sql_bytes = (
+      sql_override.encode("utf-8")
+      if sql_override is not None
+      else sql_path.read_bytes()
+  )
+  sql_sha = hashlib.sha256(sql_bytes).hexdigest()
+  pages_sha = canonical_pages_sha256(c_pages)
+  if manifest_override is not None:
+    manifest_sha = hashlib.sha256(
+        yaml.safe_dump(manifest_override, sort_keys=False).encode("utf-8")
+    ).hexdigest()
+  else:
+    manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+  if bundle_override is not None:
+    bundle_sha = hashlib.sha256(
+        (json.dumps(bundle_override, indent=2) + "\n").encode("utf-8")
+    ).hexdigest()
+  else:
+    bundle_sha = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
+
+  if bundle_ds.get("sql_sha256") != sql_sha:
+    errors.append(
+        "bqca dashboard_template_bundle datasource.sql_sha256 mismatch"
+    )
+
+  live = binding.get("live_template_verification")
+  if not isinstance(live, dict):
+    errors.append(
+        "bqca live_template_verification is missing"
+        if "live_template_verification" not in binding
+        else "bqca live_template_verification is a"
+        f" {type(live).__name__}, not a mapping"
+    )
+    live = {}
+  if binding.get("reviewed_template_sql", {}).get("sha256") != sql_sha:
+    errors.append("bqca reviewed_template_sql.sha256 mismatch")
+  if live.get("repository_sql_sha256") != sql_sha:
+    errors.append(
+        "bqca live_template_verification.repository_sql_sha256 mismatch"
+    )
+  if live.get("pages_sha256") != pages_sha:
+    errors.append(
+        f"bqca live_template_verification.pages_sha256 mismatch: expected {pages_sha}, got {live.get('pages_sha256')}"
+    )
+  if live.get("manifest_sha256") != manifest_sha:
+    errors.append(
+        f"bqca live_template_verification.manifest_sha256 mismatch: expected {manifest_sha}, got {live.get('manifest_sha256')}"
+    )
+  if live.get("template_bundle_sha256") != bundle_sha:
+    errors.append(
+        "bqca live_template_verification.template_bundle_sha256 mismatch:"
+        f" expected {bundle_sha}, got {live.get('template_bundle_sha256')}"
+    )
+  errors.extend(_bqca_pending_live_sync_errors(live))
+  # A binding whose verified digests are the pinned ones records a live sync,
+  # so it must carry the receipt of its capture, whatever else it says.
+  if (
+      isinstance(live, dict)
+      and live.get("manifest_sha256") == live.get("verified_manifest_sha256")
+      and live.get("template_bundle_sha256")
+      == live.get("verified_template_bundle_sha256")
+  ):
+    errors.extend(_bqca_committed_capture_errors(root, binding, live))
+
+  # 5. Semantic SQL invariants (M03, M04, M07, M14, M15, M16, R4-1..R4-3, R4-N2) & behavioral oracle
+  sql_norm = " ".join(_strip_sql_comments(sql_text).split())
+  required_sql_fragments = {
+      "trace_resolved per-trace invocation_id inheritance": (
+          "IF( invocation_id IS NULL, NULL, COALESCE("
+          " NULLIF(TRIM(invocation_id), ''), IF( NULLIF(TRIM(trace_id), '') IS"
+          " NULL, NULL, FIRST_VALUE(NULLIF(TRIM(invocation_id), '') IGNORE"
+          " NULLS) OVER ( PARTITION BY NULLIF(TRIM(trace_id), '') ORDER BY"
+          " timestamp ASC, event_type ASC, NULLIF(TRIM(invocation_id), '') ASC"
+          " ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING ) ),"
+          " NULLIF(TRIM(trace_id), ''), NULLIF(TRIM(session_id), ''),"
+          " CAST(timestamp AS STRING) ) ) AS turn_id"
+      ),
+      "null invocation_id SHA256 partition isolation": (
+          "IF( turn_id IS NULL, CONCAT( '__null_invocation__:', CAST(timestamp"
+          " AS STRING), ':', IFNULL(span_id, ''), ':', IFNULL(event_type, ''),"
+          " ':', TO_HEX( SHA256( CONCAT( IFNULL(TO_JSON_STRING(attributes),"
+          " ''), '|', IFNULL(TO_JSON_STRING(content), ''), '|', IFNULL(status,"
+          " ''), '|', IFNULL(error_message, '') ) ) ) ), turn_id ) AS"
+          " turn_partition_key"
+      ),
+      "raw_conversation_id whitespace trimming": (
+          "NULLIF( TRIM( JSON_VALUE(attributes,"
+          " '$.session_metadata.state.\"conversation-id\"') ), '' ) AS"
+          " raw_conversation_id"
+      ),
+      "raw_data_agent_id whitespace trimming": (
+          "NULLIF( TRIM( JSON_VALUE(attributes,"
+          " '$.session_metadata.state.\"data-agent-id\"') ), '' ) AS"
+          " raw_data_agent_id"
+      ),
+      "raw_explicit_persona whitespace trimming": (
+          "NULLIF( TRIM( JSON_VALUE( attributes,"
+          " '$.session_metadata.state.custom_labels.persona' ) ), '' ) AS"
+          " raw_explicit_persona"
+      ),
+      "fast_path attribute extraction": (
+          "IFNULL( LOWER(JSON_VALUE(attributes, '$.fast_path')) = 'true', FALSE"
+          " ) AS raw_fast_path"
+      ),
+      "raw_is_error 3-condition error attribution": (
+          "( IFNULL(UPPER(TRIM(status)) = 'ERROR', FALSE) OR"
+          " NULLIF(TRIM(error_message), '') IS NOT NULL OR"
+          " ENDS_WITH(UPPER(TRIM(IFNULL(event_type, ''))), '_ERROR') ) AS"
+          " raw_is_error"
+      ),
+      "INVOCATION_COMPLETED deduplication window": (
+          "IF( event_type = 'INVOCATION_COMPLETED' AND turn_id IS NOT NULL,"
+          " ROW_NUMBER() OVER ( PARTITION BY turn_id, IF(event_type ="
+          " 'INVOCATION_COMPLETED', 1, 0) ORDER BY SAFE_CAST(JSON_VALUE(latency_ms,"
+          " '$.total_ms') AS FLOAT64) DESC NULLS LAST, timestamp DESC, span_id"
+          " DESC ), NULL ) AS raw_turn_complete_rn"
+      ),
+      "data_agent_id turn-window propagation": (
+          "IF( turn_id IS NULL, COALESCE(raw_data_agent_id, 'unattributed'),"
+          " COALESCE( FIRST_VALUE(raw_data_agent_id IGNORE NULLS) OVER ("
+          " PARTITION BY turn_partition_key ORDER BY timestamp ASC, event_type"
+          " ASC, span_id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED"
+          " FOLLOWING ), 'unattributed' ) ) AS data_agent_id"
+      ),
+      "conversation_id turn-window propagation": (
+          "IF( turn_id IS NULL, raw_conversation_id,"
+          " FIRST_VALUE(raw_conversation_id IGNORE NULLS) OVER ( PARTITION BY"
+          " turn_partition_key ORDER BY timestamp ASC, event_type ASC, span_id"
+          " ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING ) )"
+          " AS conversation_id"
+      ),
+      "persona turn-window propagation": (
+          "IF( turn_id IS NULL, COALESCE( raw_explicit_persona,"
+          " raw_email_persona, raw_data_agent_id, 'unattributed' ), COALESCE("
+          " FIRST_VALUE(raw_explicit_persona IGNORE NULLS) OVER ( PARTITION BY"
+          " turn_partition_key ORDER BY timestamp ASC, event_type ASC, span_id"
+          " ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING ),"
+          " FIRST_VALUE(raw_email_persona IGNORE NULLS) OVER ( PARTITION BY"
+          " turn_partition_key ORDER BY timestamp ASC, event_type ASC, span_id"
+          " ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING ),"
+          " FIRST_VALUE(raw_data_agent_id IGNORE NULLS) OVER ( PARTITION BY"
+          " turn_partition_key ORDER BY timestamp ASC, event_type ASC, span_id"
+          " ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING ),"
+          " 'unattributed' ) ) AS persona"
+      ),
+      "fast_path turn-window propagation": (
+          "IF( turn_id IS NULL, raw_fast_path, LOGICAL_OR(raw_fast_path) OVER ("
+          " PARTITION BY turn_partition_key ) ) AS fast_path"
+      ),
+      "is_turn_complete deduplication gate": (
+          "IFNULL(raw_turn_complete_rn = 1, FALSE) AS is_turn_complete"
+      ),
+      "completed_turn_id deduplication gate": (
+          "IF(raw_turn_complete_rn = 1, turn_id, NULL) AS completed_turn_id"
+      ),
+      "turn_latency_ms deduplication gate": (
+          "IF( raw_turn_complete_rn = 1, SAFE_CAST(JSON_VALUE(latency_ms,"
+          " '$.total_ms') AS FLOAT64), NULL ) AS turn_latency_ms"
+      ),
+      "fast_path_label derivation": (
+          "IF(fast_path, 'fast_path', 'standard_nl2sql') AS fast_path_label"
+      ),
+  }
+  for label, fragment in required_sql_fragments.items():
+    if fragment not in sql_norm:
+      errors.append(f"bqca SQL missing required {label} ({fragment!r})")
+
+  errors.extend(_validate_bqca_sql_behavioral_oracle(sql_text))
+
+  ext = binding.get("external_access_verification", {})
+  ext_status = ext.get("status")
+  if ext_status not in {
+      "PASSING",
+      "FAILING",
+      "PENDING_EXTERNAL_IDENTITY_CHECK",
+  }:
+    errors.append(
+        f"bqca external_access_verification.status {ext_status!r} invalid"
+    )
+  elif ext_status == "PASSING":
+    controls = {
+        c.get("method"): c
+        for c in ext.get("controls", [])
+        if isinstance(c, dict)
+    }
+    api_ctrl = controls.get("permissions_api_link_role_check", {})
+    canary_ctrl = controls.get("external_identity_link_access_check", {})
+    open_tracked = any(
+        isinstance(i, dict)
+        and i.get("issue") == ext.get("tracking_issue")
+        and i.get("status") == "OPEN"
+        for i in binding.get("known_live_issues", [])
+    )
+    if (
+        binding.get("link_access") != "PUBLIC"
+        or api_ctrl.get("last_result") != "LINK_VIEWER_ALLUSERS_PRESENT"
+        or canary_ctrl.get("last_result") not in {"PASSED", "PASSING"}
+        or not canary_ctrl.get("link_access_verified_date")
+        or open_tracked
+    ):
+      errors.append(
+          "bqca external_access_verification.status is PASSING without PUBLIC"
+          " link_access, passing controls, link_access_verified_date, and"
+          " resolved known_live_issues"
+      )
+
+  # 6. Forbidden unlogged event types check
+  for rel in (
+      "spec/bqca_chart_manifest.yaml",
+      "spec/bqca_product_contract.yaml",
+      "spec/bqca_dashboard_template.json",
+      "bindings/bqca_report_template.yaml",
+      "sql/bqca_events_v1.template.sql",
+  ):
+    text = (root / rel).read_text()
+    for forbidden in BQCA_UNLOGGED_EVENT_TYPES:
+      if forbidden in text:
+        errors.append(
+            f"{rel} contains forbidden unlogged event type {forbidden}"
+        )
+
+  return errors
+
+
+_TEXTPROTO_TOKEN_RE = re.compile(
+    r"""
+    (?P<skip>\s+|\#[^\n]*)
+  | (?P<string>"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')
+  | (?P<punct>[{}<>:\[\],;])
+  | (?P<word>[^\s{}<>:\[\],;"'\#]+)
+    """,
+    re.VERBOSE,
+)
+_TEXTPROTO_FIELD_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_TEXTPROTO_ESCAPES = {
+    "a": 0x07,
+    "b": 0x08,
+    "f": 0x0C,
+    "n": 0x0A,
+    "r": 0x0D,
+    "t": 0x09,
+    "v": 0x0B,
+    "\\": 0x5C,
+    "'": 0x27,
+    '"': 0x22,
+    "?": 0x3F,
+}
+
+TextprotoMessage = list[tuple[str, Any]]
+
+# The deepest message nesting that `parse_report_textproto` reads.
+_TEXTPROTO_MAX_DEPTH = 64
+
+
+def _decode_textproto_string(literal: str) -> str:
+  """Decode one quoted protobuf text-format string literal."""
+  body = literal[1:-1]
+  out = bytearray()
+  i = 0
+  while i < len(body):
+    ch = body[i]
+    if ch != "\\":
+      out.extend(ch.encode("utf-8"))
+      i += 1
+      continue
+    # The tokenizer guarantees that a character follows every backslash.
+    esc = body[i + 1]
+    if esc in _TEXTPROTO_ESCAPES:
+      out.append(_TEXTPROTO_ESCAPES[esc])
+      i += 2
+    elif esc in "01234567":
+      digits = re.match(r"[0-7]{1,3}", body[i + 1 :]).group()
+      if int(digits, 8) > 0xFF:
+        raise ValueError(f"octal escape \\{digits} does not fit in a byte")
+      out.append(int(digits, 8))
+      i += 1 + len(digits)
+    elif esc in "xX":
+      hex_match = re.match(r"[0-9A-Fa-f]{1,2}", body[i + 2 :])
+      if hex_match is None:
+        raise ValueError("\\x escape without hex digits")
+      out.append(int(hex_match.group(), 16))
+      i += 2 + len(hex_match.group())
+    elif esc in "uU":
+      width = 4 if esc == "u" else 8
+      hex_digits = body[i + 2 : i + 2 + width]
+      if not re.fullmatch(f"[0-9A-Fa-f]{{{width}}}", hex_digits):
+        raise ValueError(f"\\{esc} escape needs {width} hex digits")
+      out.extend(chr(int(hex_digits, 16)).encode("utf-8"))
+      i += 2 + width
+    else:
+      raise ValueError(f"unsupported escape \\{esc}")
+  return out.decode("utf-8", errors="replace")
+
+
+def parse_report_textproto(text: str) -> TextprotoMessage:
+  """Parse protobuf text format into nested `(field, value)` pairs.
+
+  A stdlib-only reader for a Looker Studio report textproto dump (a report
+  configuration saved in protobuf text format). A message becomes a
+  list of `(field, value)` pairs in file order, so repeated fields keep every
+  occurrence; a nested message value is such a list, and a scalar value is a
+  string (quoted strings decoded, enum names and numbers verbatim).
+
+  It reads the subset of the format that a saved report uses: `#` comments, a
+  leading UTF-8 byte order mark, `{}` and `<>` messages, `[...]` lists after a
+  `:`, and `,` or `;` separators. It rejects, as text it cannot read,
+  `[type.googleapis.com/...]` extension or `Any` field names, a message list
+  without a `:` (`field [ {...} ]`), and messages nested more than
+  `_TEXTPROTO_MAX_DEPTH` (64) levels deep.
+
+  Raises:
+    ValueError: The text is not well-formed protobuf text format, or uses
+      syntax outside that subset.
+  """
+  text = text.removeprefix("\ufeff")
+  tokens: list[tuple[str, str]] = []
+  pos = 0
+  while pos < len(text):
+    match = _TEXTPROTO_TOKEN_RE.match(text, pos)
+    if match is None:
+      raise ValueError(f"unexpected character {text[pos]!r} at offset {pos}")
+    pos = match.end()
+    if match.lastgroup != "skip":
+      tokens.append((match.lastgroup, match.group()))
+  index = 0
+
+  def peek() -> tuple[str, str] | None:
+    return tokens[index] if index < len(tokens) else None
+
+  def parse_value(name: str, depth: int) -> Any:
+    nonlocal index
+    token = peek()
+    if token is None:
+      raise ValueError(f"field {name!r} has no value")
+    kind, value = token
+    if kind == "punct" and value in ("{", "<"):
+      if depth >= _TEXTPROTO_MAX_DEPTH:
+        raise ValueError(
+            f"messages nest more than {_TEXTPROTO_MAX_DEPTH} levels deep"
+        )
+      index += 1
+      return parse_message("}" if value == "{" else ">", depth + 1)
+    if kind == "string":
+      parts: list[str] = []
+      while index < len(tokens) and tokens[index][0] == "string":
+        parts.append(_decode_textproto_string(tokens[index][1]))
+        index += 1
+      return "".join(parts)
+    if kind == "word":
+      index += 1
+      return value
+    raise ValueError(f"field {name!r} has unexpected value {value!r}")
+
+  def parse_message(closer: str | None, depth: int) -> TextprotoMessage:
+    nonlocal index
+    fields: TextprotoMessage = []
+    while True:
+      token = peek()
+      if token is None:
+        if closer is None:
+          return fields
+        raise ValueError(f"unterminated message: missing {closer!r}")
+      kind, value = token
+      if kind == "punct" and value == closer:
+        index += 1
+        return fields
+      if kind != "word" or not _TEXTPROTO_FIELD_NAME_RE.fullmatch(value):
+        raise ValueError(f"expected a field name, got {value!r}")
+      name = value
+      index += 1
+      has_colon = peek() == ("punct", ":")
+      if has_colon:
+        index += 1
+      token = peek()
+      opens_message = token in (("punct", "{"), ("punct", "<"))
+      if not has_colon and not opens_message:
+        raise ValueError(f"field {name!r} needs ':' before its value")
+      if has_colon and token == ("punct", "["):
+        index += 1
+        while peek() != ("punct", "]"):
+          fields.append((name, parse_value(name, depth)))
+          if peek() == ("punct", ","):
+            index += 1
+          elif peek() != ("punct", "]"):
+            raise ValueError(f"list field {name!r} is missing ',' or ']'")
+        index += 1
+      else:
+        fields.append((name, parse_value(name, depth)))
+      if peek() in (("punct", ","), ("punct", ";")):
+        index += 1
+
+  return parse_message(None, 0)
+
+
+def _tp_scalar(message: TextprotoMessage, name: str) -> str | None:
+  """Return the first scalar value of field `name`, or None."""
+  for key, value in message:
+    if key == name and isinstance(value, str):
+      return value
+  return None
+
+
+def _tp_message(message: TextprotoMessage, name: str) -> TextprotoMessage:
+  """Return the first message value of field `name`, or []."""
+  for key, value in message:
+    if key == name and isinstance(value, list):
+      return value
+  return []
+
+
+def _tp_messages(
+    message: TextprotoMessage, name: str
+) -> list[TextprotoMessage]:
+  """Return every message value of field `name`, searching depth first."""
+  found: list[TextprotoMessage] = []
+  for key, value in message:
+    if isinstance(value, list):
+      if key == name:
+        found.append(value)
+      found.extend(_tp_messages(value, name))
+  return found
+
+
+def _tp_scalar_paths(
+    message: list[tuple[str, Any]],
+    names: Iterable[str],
+    path: tuple[str, ...] = (),
+) -> list[tuple[tuple[str, ...], str]]:
+  """Return `(path, value)` for every scalar field in `names` in `message`."""
+  found: list[tuple[tuple[str, ...], str]] = []
+  for key, value in message:
+    if isinstance(value, list):
+      found.extend(_tp_scalar_paths(value, names, (*path, key)))
+    elif key in names:
+      found.append(((*path, key), value))
+  return found
+
+
+def _normalized_aggregation(value: Any) -> str:
+  """Map a missing or NONE aggregation (a dimension) to ''."""
+  return "" if value in (None, "", "NONE") else str(value)
+
+
+def _concept_ref(value: str | None) -> str | None:
+  """Return a concept reference without its `t0.` namespace prefix."""
+  return value.removeprefix("t0.") if value is not None else None
+
+
+_LIVE_REFERENCE_PATHS = frozenset(
+    {
+        ("dimensions", "labeled_concepts", "value", "concept_names"),
+        ("metrics", "labeled_concepts", "value", "concept_names"),
+        ("sort", "sort_column"),
+    }
+)
+
+
+def _live_role_entries(
+    component_property: list[tuple[str, Any]], role: str
+) -> list[Any]:
+  """Return `(key, [concept_names, ...])` for each `labeled_concepts` of `role`.
+
+  Any scalar `role` field, any field under `role` other than
+  `labeled_concepts`, or any `labeled_concepts` entry that does not have a
+  single string `key` and a single `value` message of `concept_names` strings
+  is kept as a raw `(name, value)` pair so it cannot compare equal to the
+  manifest's `[('primary', expected_ids)]` or `[]`.
+  """
+  entries: list[Any] = []
+  for key, value in component_property:
+    if key != role:
+      continue
+    if not isinstance(value, list):
+      entries.append((key, value))
+      continue
+    for entry_key, entry_val in value:
+      if entry_key != "labeled_concepts" or not isinstance(entry_val, list):
+        entries.append((entry_key, entry_val))
+        continue
+      keys = [v for k, v in entry_val if k == "key" and isinstance(v, str)]
+      values = [v for k, v in entry_val if k == "value" and isinstance(v, list)]
+      if (
+          len(keys) == 1
+          and len(values) == 1
+          and len(entry_val) == 2
+          and all(
+              k == "concept_names" and isinstance(v, str) for k, v in values[0]
+          )
+      ):
+        entries.append((keys[0], [_concept_ref(v) for _, v in values[0]]))
+      else:
+        entries.append((entry_key, entry_val))
+  return entries
+
+
+def _live_sort_clauses(
+    component_property: list[tuple[str, Any]],
+) -> tuple[list[Any], list[Any]]:
+  """Return `(sort_columns, sort_dirs)` for the `sort` fields of a component.
+
+  Each valid `sort` field is a message with a single string `sort_column` and
+  a single string `sort_dir` and no other fields. A scalar `sort` field or a
+  `sort` message with missing, repeated, or extra fields keeps its raw `(key,
+  value)` pair in the affected list so it cannot compare equal to the
+  manifest's `sortFieldId` or `sortDir` list.
+  """
+  sort_columns: list[Any] = []
+  sort_dirs: list[Any] = []
+  for key, value in component_property:
+    if key != "sort":
+      continue
+    if not isinstance(value, list):
+      sort_columns.append((key, value))
+      continue
+    cols = [
+        _concept_ref(v)
+        for k, v in value
+        if k == "sort_column" and isinstance(v, str)
+    ]
+    dirs = [v for k, v in value if k == "sort_dir" and isinstance(v, str)]
+    if len(cols) == 1 and len(dirs) == 1 and len(value) == 2:
+      sort_columns.append(cols[0])
+      sort_dirs.append(dirs[0])
+    else:
+      sort_columns.append(
+          cols[0]
+          if len(cols) == 1 and len(value) == 1 + len(dirs) and dirs
+          else (key, value)
+      )
+      sort_dirs.append(dirs[0] if len(dirs) == 1 else (key, value))
+  return sort_columns, sort_dirs
+
+
+def validate_live_report_textproto(
+    textproto_path: pathlib.Path,
+    root: pathlib.Path = ROOT,
+    *,
+    manifest_override: dict[str, Any] | None = None,
+    binding_override: dict[str, Any] | None = None,
+) -> list[str]:
+  """Audit a saved BQCA Looker Studio report configuration.
+
+  `textproto_path` holds a Looker Studio report textproto dump of the live
+  report (its configuration in protobuf text format). It is compared with
+  `spec/bqca_chart_manifest.yaml` and `bindings/bqca_report_template.yaml`.
+
+  Returns:
+    One error for: a dump that cannot be read as protobuf text format; a
+    component that appears twice; each `concept_defs` name that is not a
+    `qt_` ID, or whose `id` is not `t0.<name>`; each name that repeats inside
+    its component, or that repeats a name of an earlier component; each
+    `concept_names` or `sort_column` under `component_property` outside
+    `dimensions.labeled_concepts.value.concept_names`,
+    `metrics.labeled_concepts.value.concept_names`, or `sort.sort_column`;
+    each component reference (`concept_names`, `sort_column`) at one of those
+    paths that names no concept of its component, and each concept that no
+    such reference names; each manifest component that is missing; each
+    manifest component whose `(name, source_field_name, aggregation)`
+    concepts are not exactly the manifest's `(id, fieldName, aggregation)`
+    columns; whose `dimensions` or `metrics` `labeled_concepts` entries (each
+    a single `primary` entry of `concept_names`), `sort_column`s, `sort_dir`s,
+    or `reverse_sort_order` differ, in order, from the dimension IDs, metric
+    IDs, `sortFieldId`s, `sortDir`s, or `reverseSortOrder` of its
+    `spec.<kind>.fields`; whose `chart_type` is not a kind whose references
+    the audit can read (it then skips those role and sort comparisons); or
+    whose `datasource_id` or `dataset_id` is missing or is not its manifest
+    `datasource_id`; each component that defines concepts but is not in the
+    manifest; a missing report-level `datasource_id`, or one that is not the
+    binding's `datasource_id`; and a missing `ds0` alias, or one that points
+    at another data source.
+  """
+  label = f"live report {textproto_path}"
+  manifest = (
+      manifest_override
+      if manifest_override is not None
+      else _load_yaml(root / "spec/bqca_chart_manifest.yaml")
+  )
+  binding = (
+      binding_override
+      if binding_override is not None
+      else _load_yaml(root / "bindings/bqca_report_template.yaml")
+  )
+  try:
+    report = parse_report_textproto(
+        pathlib.Path(textproto_path).read_text(encoding="utf-8")
+    )
+  except (OSError, ValueError) as exc:
+    return [f"{label}: cannot read it as protobuf text format: {exc}"]
+
+  errors: list[str] = []
+  components: dict[str, dict[str, Any]] = {}
+  name_owner: dict[str, str] = {}
+  for config in _tp_messages(report, "component_config"):
+    component_id = _tp_scalar(config, "component_id") or "<no component_id>"
+    if component_id in components:
+      errors.append(f"{label}: component {component_id} appears twice")
+    defined: set[str] = set()
+    concept_bindings: list[tuple[str, str, str]] = []
+    concepts = [
+        value
+        for key, value in config
+        if key == "concept_defs" and isinstance(value, list)
+    ]
+    for concept in concepts:
+      name = _tp_scalar(concept, "name")
+      concept_id = _tp_scalar(concept, "id")
+      if name is None or not _QT_COLUMN_ID_RE.fullmatch(name):
+        errors.append(
+            f"{label}: component {component_id} concept_defs name {name!r} is"
+            " not a qt_ column ID (^qt_[a-z0-9]{3,10}$), which this"
+            " repository requires"
+        )
+      if concept_id != f"t0.{name}":
+        errors.append(
+            f"{label}: component {component_id} concept_defs id"
+            f" {concept_id!r} is not 't0.{name}'"
+        )
+      if name is not None:
+        if name in defined:
+          errors.append(
+              f"{label}: component {component_id} repeats concept_defs name"
+              f" {name!r}"
+          )
+        elif name in name_owner:
+          errors.append(
+              f"{label}: concept_defs name {name!r} in component"
+              f" {component_id} repeats the one in {name_owner[name]}; names"
+              " must be unique across the report"
+          )
+        else:
+          name_owner[name] = component_id
+        defined.add(name)
+      transform = _tp_message(
+          _tp_message(concept, "query_time_transformation"),
+          "data_transformation",
+      )
+      concept_bindings.append(
+          (
+              "" if name is None else name,
+              str(_tp_scalar(transform, "source_field_name")),
+              _normalized_aggregation(_tp_scalar(transform, "aggregation")),
+          )
+      )
+    component_property = _tp_message(
+        _tp_message(config, "property_config"), "component_property"
+    )
+    referenced: set[str] = set()
+    for path, ref in _tp_scalar_paths(
+        component_property, ("concept_names", "sort_column")
+    ):
+      if path not in _LIVE_REFERENCE_PATHS:
+        errors.append(
+            f"{label}: component {component_id} {path[-1]} {ref!r} at"
+            f" component_property.{'.'.join(path)} is not a reference the"
+            " audit reads"
+        )
+        continue
+      col_id = _concept_ref(ref)
+      referenced.add(col_id)
+      if col_id not in defined:
+        errors.append(
+            f"{label}: component {component_id} {path[-1]} {ref!r} names none"
+            " of its concept_defs"
+        )
+    for name in sorted(defined - referenced):
+      errors.append(
+          f"{label}: component {component_id} concept_defs name {name!r} is"
+          " not referenced by any concept_names or sort_column"
+      )
+    # A saved report lists a component's dimension and metric concept_names
+    # under `dimensions` and `metrics` (each in one `labeled_concepts` entry
+    # keyed `primary`), each sort clause in its own `sort` message, and
+    # `reverse_sort_order` when set.
+    sort_columns, sort_dirs = _live_sort_clauses(component_property)
+    raw_rev = [
+        value
+        for key, value in component_property
+        if key == "reverse_sort_order"
+    ]
+    if not raw_rev:
+      rev_valid, live_rev = True, False
+    elif len(raw_rev) == 1 and raw_rev[0] in ("true", "false"):
+      rev_valid, live_rev = True, (raw_rev[0] == "true")
+    else:
+      rev_valid, live_rev = False, raw_rev
+    components.setdefault(
+        component_id,
+        {
+            "concepts": sorted(concept_bindings),
+            "dimensions": _live_role_entries(component_property, "dimensions"),
+            "metrics": _live_role_entries(component_property, "metrics"),
+            "sort_columns": sort_columns,
+            "sort_dirs": sort_dirs,
+            "reverse_sort_order": live_rev,
+            "reverse_sort_order_valid": rev_valid,
+            "datasource_id": _tp_scalar(config, "datasource_id"),
+            "dataset_id": _tp_scalar(
+                _tp_message(component_property, "dataset"), "dataset_id"
+            ),
+        },
+    )
+
+  manifest_component_ids: set[Any] = set()
+  for page in manifest.get("pages", []):
+    for comp in page.get("components", []):
+      component_id = comp.get("component_id")
+      manifest_component_ids.add(component_id)
+      where = f"{comp.get('id')} ({component_id})"
+      live = components.get(component_id)
+      if live is None:
+        errors.append(f"{label}: manifest component {where} is missing")
+        continue
+      expected = sorted(
+          (
+              str(col.get("id")),
+              str(col.get("fieldName")),
+              _normalized_aggregation(col.get("aggregation")),
+          )
+          for col in _bqca_spec_columns(comp)
+          if isinstance(col, dict)
+      )
+      if live["concepts"] != expected:
+        live_counts = collections.Counter(live["concepts"])
+        expected_counts = collections.Counter(expected)
+        errors.append(
+            f"{label}: component {where} concept_defs (name,"
+            " source_field_name, aggregation) differ from the manifest's"
+            " (id, fieldName, aggregation): live only"
+            f" {sorted((live_counts - expected_counts).elements())}, manifest"
+            f" only {sorted((expected_counts - live_counts).elements())}"
+        )
+      spec_roles = _bqca_spec_roles(comp)
+      if spec_roles is None:
+        errors.append(
+            f"{label}: component {where} has chart_type"
+            f" {comp.get('chart_type')!r}, whose dimension, metric and sort"
+            " references the audit cannot read"
+        )
+      else:
+        for role, singular in (
+            ("dimensions", "dimension"),
+            ("metrics", "metric"),
+        ):
+          expected_ids = spec_roles[role]
+          expected_entries = [("primary", expected_ids)] if expected_ids else []
+          actual_entries = live[role]
+          if actual_entries != expected_entries:
+            is_single_primary = not actual_entries or (
+                len(actual_entries) == 1
+                and isinstance(actual_entries[0], tuple)
+                and len(actual_entries[0]) == 2
+                and actual_entries[0][0] == "primary"
+                and isinstance(actual_entries[0][1], list)
+            )
+            names = (
+                []
+                if not actual_entries or not is_single_primary
+                else actual_entries[0][1]
+            )
+            if is_single_primary and names != expected_ids:
+              errors.append(
+                  f"{label}: component {where} {role} concept_names {names}"
+                  f" != manifest {singular} IDs {expected_ids}"
+              )
+            else:
+              errors.append(
+                  f"{label}: component {where} {role} labeled_concepts"
+                  f" {actual_entries!r} != manifest {expected_entries!r}"
+              )
+        if live["sort_columns"] != spec_roles["sort_columns"]:
+          errors.append(
+              f"{label}: component {where} sort_column"
+              f" {live['sort_columns']} != manifest sortFieldId"
+              f" {spec_roles['sort_columns']}"
+          )
+        if live["sort_dirs"] != spec_roles["sort_dirs"]:
+          errors.append(
+              f"{label}: component {where} sort_dir {live['sort_dirs']} !="
+              f" manifest sortDir {spec_roles['sort_dirs']}"
+          )
+        if not live["reverse_sort_order_valid"]:
+          errors.append(
+              f"{label}: component {where} reverse_sort_order"
+              f" {live['reverse_sort_order']!r} is not a single true or false"
+          )
+        elif live["reverse_sort_order"] != spec_roles["reverse_sort_order"]:
+          errors.append(
+              f"{label}: component {where} reverse_sort_order"
+              f" {live['reverse_sort_order']!r} != manifest reverseSortOrder"
+              f" {spec_roles['reverse_sort_order']!r}"
+          )
+      if live["datasource_id"] != comp.get("datasource_id"):
+        errors.append(
+            f"{label}: component {where} datasource_id"
+            f" {live['datasource_id']!r} != manifest"
+            f" {comp.get('datasource_id')!r}"
+        )
+      if live["dataset_id"] != comp.get("datasource_id"):
+        errors.append(
+            f"{label}: component {where} dataset_id {live['dataset_id']!r} !="
+            f" manifest {comp.get('datasource_id')!r}"
+        )
+  for component_id, live in components.items():
+    if component_id not in manifest_component_ids and live["concepts"]:
+      errors.append(
+          f"{label}: component {component_id} defines concepts but is not in"
+          " spec/bqca_chart_manifest.yaml"
+      )
+
+  datasource_id = binding.get("datasource_id")
+  alias = binding.get("data_source_alias")
+  report_message = _tp_message(
+      _tp_message(report, "report_config") or report, "report"
+  )
+  report_datasource_id = _tp_scalar(report_message, "datasource_id")
+  if report_datasource_id is None:
+    errors.append(
+        f"{label}: report datasource_id is missing; the binding expects"
+        f" {datasource_id!r}"
+    )
+  elif report_datasource_id != datasource_id:
+    errors.append(
+        f"{label}: report datasource_id {report_datasource_id!r} != binding"
+        f" datasource_id {datasource_id!r}"
+    )
+  alias_entries = [
+      entry
+      for entry in _tp_messages(
+          _tp_message(report_message, "resource"), "datasource_alias"
+      )
+      if _tp_scalar(entry, "alias") == alias
+  ]
+  if not alias_entries:
+    errors.append(
+        f"{label}: report resource has no data source alias {alias!r}; the"
+        f" binding maps it to datasource_id {datasource_id!r}"
+    )
+  for entry in alias_entries:
+    if _tp_scalar(entry, "datasource_id") != datasource_id:
+      errors.append(
+          f"{label}: data source alias {alias!r} points at"
+          f" {_tp_scalar(entry, 'datasource_id')!r}, not binding"
+          f" datasource_id {datasource_id!r}"
+      )
+  return errors
+
+
+def main(argv: list[str] | None = None) -> int:
+  parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+  parser.add_argument(
+      "--profile",
+      choices=("adk", "bqca", "all"),
+      default="all",
+      help="dashboard profile to validate (default: all)",
+  )
+  parser.add_argument(
+      "--previous-binding",
+      type=pathlib.Path,
+      metavar="PATH",
+      help=(
+          "also check that the BQCA binding's live_template_verification"
+          " sync_generation only moves forward from the binding at PATH, such"
+          " as the one on the base branch"
+      ),
+  )
+  parser.add_argument(
+      "--live-report-textproto",
+      type=pathlib.Path,
+      metavar="PATH",
+      help=(
+          "also audit the Looker Studio report textproto dump of the BQCA"
+          " report at PATH against spec/bqca_chart_manifest.yaml"
+      ),
+  )
+  args = parser.parse_args(argv)
+  if args.live_report_textproto is not None and args.profile == "adk":
+    parser.error("--live-report-textproto needs --profile bqca or all")
+  if args.previous_binding is not None and args.profile == "adk":
+    parser.error("--previous-binding needs --profile bqca or all")
+  errors: list[str] = []
+  if args.profile in ("adk", "all"):
+    errors.extend(validate_adk(ROOT))
+  if args.profile in ("bqca", "all"):
+    errors.extend(validate_bqca(ROOT))
+  if args.live_report_textproto is not None:
+    errors.extend(validate_live_report_textproto(args.live_report_textproto))
+  if args.previous_binding is not None:
+    try:
+      previous = yaml.safe_load(
+          args.previous_binding.read_text(encoding="utf-8")
+      )
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+      errors.append(f"cannot read --previous-binding: {exc}")
+    else:
+      errors.extend(
+          bqca_sync_generation_progress_errors(
+              _load_yaml(ROOT / "bindings/bqca_report_template.yaml"),
+              previous if isinstance(previous, dict) else {},
+          )
+      )
+  if errors:
+    for err in errors:
+      print(f"ERROR: {err}", file=sys.stderr)
+    return 1
+  print(f"ok: contracts validated ({args.profile})")
+  if args.live_report_textproto is not None:
+    print(f"ok: live report validated ({args.live_report_textproto})")
+  return 0
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())

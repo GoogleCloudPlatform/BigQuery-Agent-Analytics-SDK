@@ -72,6 +72,13 @@ from pydantic import Field
 from ._telemetry import LabeledBigQueryClient
 from ._telemetry import make_bq_client
 from ._telemetry import with_sdk_labels
+from .client import _CheckedProjectAndDataset
+from .client import _CheckedTableId
+from .evaluators import _escape_sql_quoted
+from .evaluators import _finite_float
+from .evaluators import _whole_int
+from .feedback import _validate_source_table
+from .feedback import _validate_table_name
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -277,10 +284,20 @@ class BigQueryAIClient:
 
     Returns:
         Generated text.
+
+    Raises:
+        ValueError: If *temperature* is not a finite number or
+            *max_tokens* is not a whole number. Checked before any
+            query.
     """
+    # Both are formatted into the model_params JSON literal, so only a
+    # plain float and int may reach it: a string or a subclass's
+    # format() text could close the literal.
+    temperature = _finite_float(temperature, "temperature")
+    max_tokens = _whole_int(max_tokens, "max_tokens")
     ep = endpoint or self.endpoint
     query = self._AI_GENERATE_QUERY.format(
-        endpoint=ep,
+        endpoint=_escape_sql_quoted(ep),
         temperature=temperature,
         max_tokens=max_tokens,
     )
@@ -334,12 +351,12 @@ class BigQueryAIClient:
     # Route: legacy ML.GENERATE_EMBEDDING when a BQ ML model ref is set
     if self.embedding_model and self.embedding_model.count(".") >= 2:
       query = self._LEGACY_GENERATE_EMBEDDING_QUERY.format(
-          model=self.embedding_model,
+          model=_escape_sql_quoted(self.embedding_model, quote="`"),
       )
       ai_function = "ml-generate-embedding"
     else:
       query = self._AI_EMBED_QUERY.format(
-          endpoint=self.embedding_endpoint,
+          endpoint=_escape_sql_quoted(self.embedding_endpoint),
       )
       ai_function = "ai-embed"
 
@@ -421,7 +438,7 @@ Provide your analysis as JSON.
     return {"raw_analysis": result}
 
 
-class EmbeddingSearchClient:
+class EmbeddingSearchClient(_CheckedProjectAndDataset):
   """Client for semantic search using BigQuery embeddings.
 
   Provides vector similarity search over pre-computed embeddings
@@ -528,6 +545,12 @@ class EmbeddingSearchClient:
             is used.  Pass ``None`` (default) to use ``AI.EMBED``.
         embedding_endpoint: Vertex AI endpoint for ``AI.EMBED``
             (default ``text-embedding-005``).
+
+    Raises:
+        ValueError: If *project_id* or *dataset_id* fails the project or
+            dataset ID check that ``Client`` runs, or *embeddings_table*
+            or *source_table* is neither one table name nor one wildcard
+            read.
     """
     self.project_id = project_id
     self.dataset_id = dataset_id
@@ -537,6 +560,33 @@ class EmbeddingSearchClient:
     self._warned_unlabeled_client = False
     self.embedding_model = embedding_model
     self.embedding_endpoint = embedding_endpoint
+
+  @property
+  def embeddings_table(self) -> str:
+    """Table that ``search`` reads.
+
+    Every assignment, the constructor's included, checks that it is one
+    table name or one wildcard read, so any other value raises
+    ``ValueError`` and the client keeps its current table.
+    ``build_embeddings_index`` writes ``{table}_indexed``, so it refuses a
+    wildcard.
+    """
+    return self._embeddings_table
+
+  @embeddings_table.setter
+  def embeddings_table(self, embeddings_table: str) -> None:
+    _validate_source_table(embeddings_table, "embeddings_table")
+    self._embeddings_table = embeddings_table
+
+  @property
+  def source_table(self) -> str:
+    """Events table ``build_embeddings_index`` reads, checked the same way."""
+    return self._source_table
+
+  @source_table.setter
+  def source_table(self, source_table: str) -> None:
+    _validate_source_table(source_table, "source_table")
+    self._source_table = source_table
 
   @property
   def client(self) -> bigquery.Client:
@@ -648,14 +698,20 @@ class EmbeddingSearchClient:
 
     Returns:
         True if successful, False otherwise.
+
+    Raises:
+        ValueError: If ``embeddings_table`` is a wildcard: the index is
+            written to ``{embeddings_table}_indexed``, which must be one
+            table name. Checked before any query.
     """
+    _validate_table_name(self.embeddings_table, "embeddings_table")
     if self.embedding_model and self.embedding_model.count(".") >= 2:
       query = self._LEGACY_INDEX_EMBEDDINGS_QUERY.format(
           project=self.project_id,
           dataset=self.dataset_id,
           table=self.embeddings_table,
           source_table=self.source_table,
-          model=self.embedding_model,
+          model=_escape_sql_quoted(self.embedding_model, quote="`"),
       )
       ai_function = "ml-generate-embedding"
     else:
@@ -664,7 +720,7 @@ class EmbeddingSearchClient:
           dataset=self.dataset_id,
           table=self.embeddings_table,
           source_table=self.source_table,
-          endpoint=self.embedding_endpoint,
+          endpoint=_escape_sql_quoted(self.embedding_endpoint),
       )
       ai_function = "ai-embed"
 
@@ -692,7 +748,7 @@ class EmbeddingSearchClient:
       return False
 
 
-class AnomalyDetector:
+class AnomalyDetector(_CheckedProjectAndDataset, _CheckedTableId):
   """Detects anomalies in agent behavior using BigQuery AI/ML.
 
   Supports two detection modes:
@@ -885,6 +941,11 @@ class AnomalyDetector:
             ``ML.DETECT_ANOMALIES`` path with a pre-trained ARIMA_PLUS
             model for latency detection.  Defaults to False (uses
             ``AI.DETECT_ANOMALIES`` with built-in TimesFM).
+
+    Raises:
+        ValueError: If *project_id* or *dataset_id* fails the project or
+            dataset ID check that ``Client`` runs, or *table_id* is neither
+            one table name nor one wildcard read.
     """
     self.project_id = project_id
     self.dataset_id = dataset_id
@@ -1301,7 +1362,7 @@ class AnomalyDetector:
       return []
 
 
-class BatchEvaluator:
+class BatchEvaluator(_CheckedProjectAndDataset, _CheckedTableId):
   """Batch evaluation of sessions using BigQuery AI.GENERATE.
 
   Leverages BigQuery's high-throughput AI.GENERATE for
@@ -1378,6 +1439,11 @@ class BatchEvaluator:
             backward compatibility.
         endpoint: AI.GENERATE endpoint (default
             ``gemini-2.5-flash``).
+
+    Raises:
+        ValueError: If *project_id* or *dataset_id* fails the project or
+            dataset ID check that ``Client`` runs, or *table_id* is neither
+            one table name nor one wildcard read.
     """
     self.project_id = project_id
     self.dataset_id = dataset_id
@@ -1425,7 +1491,7 @@ class BatchEvaluator:
         project=self.project_id,
         dataset=self.dataset_id,
         table=self.table_id,
-        endpoint=self.endpoint,
+        endpoint=_escape_sql_quoted(self.endpoint),
     )
 
     job_config = bigquery.QueryJobConfig(

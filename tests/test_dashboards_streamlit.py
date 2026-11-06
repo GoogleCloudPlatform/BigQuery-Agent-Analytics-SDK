@@ -32,6 +32,7 @@ if str(DASHBOARDS_DIR) not in sys.path:
   sys.path.insert(0, str(DASHBOARDS_DIR))
 
 import app
+import bqca_queries
 import charts
 import models
 import queries
@@ -712,6 +713,12 @@ def test_run_query_caching_and_deduplication(monkeypatch):
     )
     assert r1.error is None and r1.stats_known is True
 
+    # Calling the cache directly returns the billed run's ID as an int:
+    # eviction sorts these IDs, which must not order as strings
+    *_, run_id = queries._run_query_cached("SELECT 1", f1, "proj-1", 1_000_000)
+    assert mock_client.query.call_count == 2
+    assert isinstance(run_id, int) and queries._SEEN_RUN_IDS == {run_id}
+
     # Identical args: served from @st.cache_data; run_query deduplicates billing
     r2 = queries.run_query("SELECT 1", f1, "proj-1", 1_000_000)
     assert mock_client.query.call_count == 2
@@ -1265,11 +1272,13 @@ def test_color_map():
     assert cm_coll["k1"] == theme.categorical[0]
     assert cm_coll["k2"] == theme.categorical[1]
 
-    # Overflow past 8 slots wraps cleanly via modulo
+    # Overflow past 8 slots wraps modulo the palette size: n_8..n_11 -> 0..3
     cm_over = charts.color_map("overflow", [f"n_{i}" for i in range(12)], theme)
     assert len(cm_over) == 13
     assert cm_over["n_8"] == theme.categorical[0]
     assert cm_over["n_9"] == theme.categorical[1]
+    assert cm_over["n_10"] == theme.categorical[2]
+    assert cm_over["n_11"] == theme.categorical[3]
 
 
 def test_chart_builders_data_shaping(sample_context):
@@ -1447,6 +1456,12 @@ def test_chart_builders_data_shaping(sample_context):
     assert len(fig_five.layout.annotations) == 0
     assert fig_five.layout.showlegend is True
     assert fig_five.layout.margin.r == 8
+    # Every requested series is plotted from its own column, in x order
+    assert len(fig_five.data) == 5
+    assert [t.name for t in fig_five.data] == ["S1", "S2", "S3", "S4", "S5"]
+    assert [
+        [None if pd.isna(v) else v for v in t.y] for t in fig_five.data
+    ] == [[10.0, 20.0], [15.0, None], [20.0, 30.0], [25.0, 35.0], [30.0, 40.0]]
 
 
 def test_panel_branches():
@@ -1560,6 +1575,7 @@ def test_app_helpers_and_sidebar_connection(monkeypatch):
 
   assert app._default_for(all_sentinel) == []
   assert app._default_for(("agent-x",)) == ["agent-x"]
+  assert app._default_for(("agent-x", "agent-y")) == ["agent-x", "agent-y"]
 
   # 1. When BQ_PROJECT_ID is set in env, user input cannot override it
   monkeypatch.setenv("BQ_PROJECT_ID", "env-locked-project")
@@ -2105,11 +2121,16 @@ def test_apptest_sidebar_filters_and_connection_reset():
       df=pd.DataFrame({"session_id": ["sess-init-1"]}), cache_hit=True
   )
   fetched_labels: list[str] = []
+  query_filters: list[models.Filters] = []
   llm_prices: list[tuple[float, float]] = []
 
   def fake_fetch(sql, ctx, label):
     del sql
     fetched_labels.append(label)
+    if label != "Trace detail":
+      # Trace detail pins its own session; every other panel query carries
+      # the effective filters returned by sidebar_filters
+      query_filters.append(ctx.filters)
     if label == "LLM totals":
       llm_prices.append((ctx.price_in, ctx.price_out))
     ctx.scan_log.append(models.ScanEntry(label, 0, 0, True, True, True))
@@ -2124,6 +2145,7 @@ def test_apptest_sidebar_filters_and_connection_reset():
           side_effect=lambda ctx: (opts_state["opts"], opts_state["res"]),
       ),
       mock.patch.object(queries, "fetch", side_effect=fake_fetch),
+      mock.patch.object(bqca_queries, "fetch_bqca", return_value=empty_res),
   ):
     at = _app_test()
     at.run()
@@ -2152,6 +2174,7 @@ def test_apptest_sidebar_filters_and_connection_reset():
 
     # 2. Unsubmitted widget edits do not mutate applied_filters until Apply;
     #    changing applied selection to a second non-empty selection commits new values
+    #    and every panel query then receives all four applied filter fields
     at.sidebar.multiselect(key="flt_agent").select("agent-a")
     at.sidebar.multiselect(key="flt_user_id").select("user-1")
     at.sidebar.multiselect(key="flt_event_type").select("start")
@@ -2159,28 +2182,34 @@ def test_apptest_sidebar_filters_and_connection_reset():
     assert at.session_state["applied_filters"] == models.Filters()
 
     apply_btn = [b for b in at.sidebar.button if b.label == "Apply filters"][0]
+    query_filters.clear()
     apply_btn.click().run()
     assert not at.exception
-    assert at.session_state["applied_filters"] == models.Filters(
+    first = models.Filters(
         agents=("agent-a",),
         user_ids=("user-1",),
         event_types=("start",),
         session_ids=("sess-1",),
     )
+    assert at.session_state["applied_filters"] == first
+    assert set(query_filters) == {first}
 
     at.sidebar.multiselect(key="flt_agent").set_value(["agent-b"])
     at.sidebar.multiselect(key="flt_user_id").set_value(["user-2"])
     at.sidebar.multiselect(key="flt_event_type").set_value(["complete"])
     at.sidebar.multiselect(key="flt_session_id").set_value(["sess-2"])
     apply_btn = [b for b in at.sidebar.button if b.label == "Apply filters"][0]
+    query_filters.clear()
     apply_btn.click().run()
     assert not at.exception
-    assert at.session_state["applied_filters"] == models.Filters(
+    second = models.Filters(
         agents=("agent-b",),
         user_ids=("user-2",),
         event_types=("complete",),
         session_ids=("sess-2",),
     )
+    assert at.session_state["applied_filters"] == second
+    assert set(query_filters) == {second}
 
     # 3. Clear all 4 filter selections while options are unchanged -> resets all to ALL_SENTINEL
     at.sidebar.multiselect(key="flt_agent").unselect("agent-b")
@@ -2285,7 +2314,46 @@ def test_apptest_sidebar_filters_and_connection_reset():
           "agent-a",
       ]
 
-    # 6. Change Dataset ID -> resets filters, cached options, and session selection
+    # 6. Two applied values per filter reach every query, stay selected after
+    #    Apply, and survive a widget re-creation: a run on the BQCA surface
+    #    drops the ADK filter widgets, and returning to ADK re-seeds them from
+    #    applied_filters
+    pairs = {
+        "flt_agent": ["agent-a", "agent-c"],
+        "flt_user_id": ["user-1", "user-2"],
+        "flt_event_type": ["start", "complete"],
+        "flt_session_id": ["sess-1", "sess-2"],
+    }
+    for key, values in pairs.items():
+      at.sidebar.multiselect(key=key).set_value(values)
+    apply_btn = [b for b in at.sidebar.button if b.label == "Apply filters"][0]
+    query_filters.clear()
+    apply_btn.click().run()
+    assert not at.exception
+    pair_filters = models.Filters(
+        agents=("agent-a", "agent-c"),
+        user_ids=("user-1", "user-2"),
+        event_types=("start", "complete"),
+        session_ids=("sess-1", "sess-2"),
+    )
+    assert at.session_state["applied_filters"] == pair_filters
+    assert set(query_filters) == {pair_filters}
+    for key, values in pairs.items():
+      assert at.sidebar.multiselect(key=key).value == values
+
+    at.sidebar.radio(key="_dashboard_surface").set_value(app.BQCA_SURFACE).run()
+    assert not at.exception
+    # A completed run that never draws the ADK filters drops their widget state
+    assert not any(key in at.session_state for key in pairs)
+    query_filters.clear()
+    at.sidebar.radio(key="_dashboard_surface").set_value(app.ADK_SURFACE).run()
+    assert not at.exception
+    assert at.session_state["applied_filters"] == pair_filters
+    assert set(query_filters) == {pair_filters}
+    for key, values in pairs.items():
+      assert at.sidebar.multiselect(key=key).value == values
+
+    # 7. Change Dataset ID -> resets filters, cached options, and session selection
     at.session_state["flt_price_in"] = 2.5
     opts_state["opts"] = {}
     opts_state["res"] = empty_res
@@ -2302,7 +2370,7 @@ def test_apptest_sidebar_filters_and_connection_reset():
     assert "_selected_session_id" not in at.session_state
     assert at.session_state["flt_price_in"] == 2.5
 
-    # 7. Apply custom IDs not in options on the freshly reset form, with
+    # 8. Apply custom IDs not in options on the freshly reset form, with
     #    each dropdown at the 1,000-option bound
     opts_state["opts"] = {
         kind: [f"{kind}-{i:04d}" for i in range(models.FILTER_OPTIONS_LIMIT)]
@@ -2312,13 +2380,16 @@ def test_apptest_sidebar_filters_and_connection_reset():
     at.sidebar.multiselect(key="flt_user_id").set_value(["custom-user-xyz"])
     at.sidebar.multiselect(key="flt_session_id").set_value(["custom-sess-xyz"])
     apply_btn = [b for b in at.sidebar.button if b.label == "Apply filters"][0]
+    query_filters.clear()
     apply_btn.click().run()
     assert not at.exception
-    assert at.session_state["applied_filters"] == models.Filters(
+    custom_filters = models.Filters(
         agents=("custom-agent-xyz",),
         user_ids=("custom-user-xyz",),
         session_ids=("custom-sess-xyz",),
     )
+    assert at.session_state["applied_filters"] == custom_filters
+    assert set(query_filters) == {custom_filters}
     for key, custom in (
         ("flt_agent", "custom-agent-xyz"),
         ("flt_user_id", "custom-user-xyz"),
@@ -2328,8 +2399,9 @@ def test_apptest_sidebar_filters_and_connection_reset():
       assert len(opts) == models.FILTER_OPTIONS_LIMIT + 1
       assert opts[-1] == custom
 
-    # 8. Invalid dataset in sidebar stops main() with st.info prompt;
-    #    reconnecting to test_dataset_2 re-seeds widgets from applied_filters
+    # 9. Invalid dataset in sidebar stops main() with st.info prompt;
+    #    reconnecting to test_dataset_2 keeps the applied filters and their
+    #    widget values (st.stop() leaves widget state in place)
     [ti for ti in at.sidebar.text_input if ti.label == "Dataset ID"][0].input(
         "bad-dataset!"
     )
@@ -2341,13 +2413,11 @@ def test_apptest_sidebar_filters_and_connection_reset():
     [ti for ti in at.sidebar.text_input if ti.label == "Dataset ID"][0].input(
         "test_dataset_2"
     )
+    query_filters.clear()
     [b for b in at.sidebar.button if b.label == "Connect"][0].click().run()
     assert not at.exception
-    assert at.session_state["applied_filters"] == models.Filters(
-        agents=("custom-agent-xyz",),
-        user_ids=("custom-user-xyz",),
-        session_ids=("custom-sess-xyz",),
-    )
+    assert at.session_state["applied_filters"] == custom_filters
+    assert set(query_filters) == {custom_filters}
     assert at.sidebar.multiselect(key="flt_agent").value == ["custom-agent-xyz"]
     assert at.sidebar.multiselect(key="flt_user_id").value == [
         "custom-user-xyz"
@@ -2356,8 +2426,9 @@ def test_apptest_sidebar_filters_and_connection_reset():
         "custom-sess-xyz"
     ]
 
-    # 9. In-progress (not yet applied) custom values stay selectable options
-    #    across a rerun and leave the applied filters untouched
+    # 10. In-progress (not yet applied) custom values stay selectable options
+    #     across a rerun and leave the applied filters, and so the filters
+    #     every query uses, untouched
     pending = {
         "flt_agent": "agent-pending",
         "flt_user_id": "user-pending",
@@ -2365,16 +2436,14 @@ def test_apptest_sidebar_filters_and_connection_reset():
     }
     for key, value in pending.items():
       at.session_state[key] = [value]
+    query_filters.clear()
     at.run()
     assert not at.exception
     for key, value in pending.items():
       assert value in at.sidebar.multiselect(key=key).options
       assert at.sidebar.multiselect(key=key).value == [value]
-    assert at.session_state["applied_filters"] == models.Filters(
-        agents=("custom-agent-xyz",),
-        user_ids=("custom-user-xyz",),
-        session_ids=("custom-sess-xyz",),
-    )
+    assert at.session_state["applied_filters"] == custom_filters
+    assert set(query_filters) == {custom_filters}
 
 
 def test_apptest_lazy_tabs_and_session_trace_preservation(
@@ -2413,6 +2482,24 @@ def test_apptest_lazy_tabs_and_session_trace_preservation(
   current_sess = sess_res1
   fetched_labels: list[str] = []
   trace_filters: list[models.Filters] = []
+  # Every query each lazy tab runs; a tab switch must run exactly these
+  tab_queries = {
+      "Overview": [
+          "Overview stats",
+          "Events over time",
+          "Errors over time",
+          "Events by agent",
+          "Top error messages",
+      ],
+      "LLM & FinOps": [
+          "LLM totals",
+          "Token usage over time",
+          "LLM latency",
+          "Tokens by model",
+      ],
+      "Tools & Execution": ["Tool invocations", "Tool latency", "Tool errors"],
+      "Sessions & Traces": ["Recent sessions", "Trace detail"],
+  }
 
   def fake_fetch(sql, ctx, label):
     del sql
@@ -2445,33 +2532,26 @@ def test_apptest_lazy_tabs_and_session_trace_preservation(
         "Tools & Execution",
         "Sessions & Traces",
     ]
-    assert "Overview stats" in fetched_labels
-    assert not any(
-        lbl in fetched_labels
-        for lbl in ("LLM totals", "Tool invocations", "Recent sessions")
-    )
+    assert sorted(fetched_labels) == sorted(tab_queries["Overview"])
 
-    # 2. Switch across LLM & FinOps and Tools & Execution tabs
+    # 2. Switch across LLM & FinOps and Tools & Execution tabs: each switch
+    #    runs the selected tab's queries and none from an inactive tab
     fetched_labels.clear()
     controls[0].set_value("LLM & FinOps").run()
-    assert (
-        "LLM totals" in fetched_labels
-        and "Tool invocations" not in fetched_labels
-    )
+    assert sorted(fetched_labels) == sorted(tab_queries["LLM & FinOps"])
 
     fetched_labels.clear()
     controls = [c for c in at.segmented_control if c.label == "Dashboard"]
     controls[0].set_value("Tools & Execution").run()
-    assert (
-        "Tool invocations" in fetched_labels
-        and "LLM totals" not in fetched_labels
-    )
+    assert sorted(fetched_labels) == sorted(tab_queries["Tools & Execution"])
 
     # 3. Switch to Sessions & Traces -> selectbox and populated trace table
     at.session_state["applied_filters"] = models.Filters(agents=("agent-x",))
+    fetched_labels.clear()
     controls = [c for c in at.segmented_control if c.label == "Dashboard"]
     controls[0].set_value("Sessions & Traces").run()
     assert not at.exception
+    assert sorted(fetched_labels) == sorted(tab_queries["Sessions & Traces"])
     assert at.session_state["flt_agent"] == []
     sess_box = [s for s in at.selectbox if s.label == "Session"][0]
     assert sess_box.value == "sess-1"
@@ -2528,4 +2608,4 @@ def test_apptest_lazy_tabs_and_session_trace_preservation(
         required=True,
         key="_active_tab",
     )
-    assert "Overview stats" in fetched_labels
+    assert sorted(fetched_labels) == sorted(tab_queries["Overview"])

@@ -36,13 +36,9 @@ from datetime import timedelta
 from datetime import timezone
 from enum import Enum
 import json
-import logging
 import re
 from types import MappingProxyType
 from typing import Any, Optional, Sequence, Union
-
-logger = logging.getLogger("bigquery_agent_analytics." + __name__)
-
 
 _ANSI_RED = "\x1b[31m"
 _ANSI_YELLOW = "\x1b[33m"

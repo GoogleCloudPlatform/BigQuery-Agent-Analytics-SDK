@@ -19,6 +19,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # A merge queue merges a group of pull requests only once the required
+  # checks pass on the group's commit, and only this event runs them there.
+  merge_group:
+    types: [checks_requested]
 
 # Least privilege: no job here needs write access to repo contents.
 permissions:
@@ -33,9 +37,12 @@ jobs:
     name: Format check
     runs-on: ubuntu-22.04
     steps:
+      # Full history: the sync_generation check below reads the binding at
+      # an earlier commit.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Reject SDLC working notes (intent.md / plan.md / spec.md)
         run: |
@@ -68,6 +75,56 @@ jobs:
             docs/codelabs/periodic_materialization.md \
             examples/context_graph/codelab/colab_notebook.ipynb
 
+      - name: Install PyYAML
+        run: pip install "pyyaml>=6.0"
+
+      # A committed receipt records one sync generation. Comparing with the
+      # binding on the base branch (or the merge group's base, or before this
+      # push) keeps a change from moving the generation back to one whose
+      # receipt it still holds. This is the only check that does, so it runs
+      # in this job: Format check is a required status check, and a failure
+      # here blocks the merge. A merge group has neither BASE_REF nor BEFORE,
+      # so it compares with its base_sha, which every group has. The step
+      # skips only a push with nothing before it (BEFORE empty or all zeros)
+      # and a previous commit without the binding; a merge base, a merge
+      # group's base_sha or a BEFORE commit that this clone cannot find fails
+      # it. tests/test_ci_workflow.py runs this script.
+      - name: Check that sync_generation only moves forward
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          binding=dashboards/looker_studio/bindings/bqca_report_template.yaml
+          if [ "$GITHUB_EVENT_NAME" = merge_group ]; then
+            if [ -z "${MERGE_GROUP_BASE//0/}" ] || ! git cat-file -e "$MERGE_GROUP_BASE^{commit}" 2>/dev/null; then
+              echo "::error::cannot compare $binding with the merge group's base: base_sha '$MERGE_GROUP_BASE' is not a commit in this clone"
+              exit 1
+            fi
+            previous="$MERGE_GROUP_BASE"
+          elif [ -n "$BASE_REF" ]; then
+            if ! previous="$(git merge-base HEAD "origin/$BASE_REF")"; then
+              echo "::error::cannot compare $binding with the base branch: no merge base of HEAD and origin/$BASE_REF in this clone"
+              exit 1
+            fi
+          elif [ -z "${BEFORE//0/}" ]; then
+            echo "no previous $binding to compare with"
+            exit 0
+          elif git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            previous="$BEFORE"
+          else
+            echo "::error::cannot compare $binding with the commit before this push: $BEFORE is not in this clone"
+            exit 1
+          fi
+          if ! git cat-file -e "$previous:$binding" 2>/dev/null; then
+            echo "no $binding at $previous to compare with"
+            exit 0
+          fi
+          git show "$previous:$binding" > "$RUNNER_TEMP/previous-binding.yaml"
+          python dashboards/looker_studio/tools/validate_contracts.py --profile bqca \
+            --previous-binding "$RUNNER_TEMP/previous-binding.yaml"
+
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-22.04
@@ -99,10 +156,10 @@ jobs:
           persist-credentials: false
 
       - name: Run the smoke check's own negative fixtures
-        run: bash dashboard/looker_studio/tools/browser_smoke.sh --self-test
+        run: bash dashboards/looker_studio/tools/browser_smoke.sh --self-test
 
       - name: Load the configurator in headless Chrome
-        run: bash dashboard/looker_studio/tools/browser_smoke.sh
+        run: bash dashboards/looker_studio/tools/browser_smoke.sh
 
   build:
     name: Build package

@@ -14,21 +14,93 @@
 
 """Default prompt templates for the improvement cycle."""
 
-JUDGE_PROMPT = """You are evaluating an AI agent's response to a user question.
+from __future__ import annotations
+
+import os
+import sys
+
+_SRC_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "src")
+)
+if _SRC_DIR not in sys.path and os.path.isdir(_SRC_DIR):
+  sys.path.insert(0, _SRC_DIR)
+
+from bigquery_agent_analytics.evaluation_rubrics import build_metrics  # noqa: E402
+
+_JUDGE_PROMPT_TEMPLATE = """You are evaluating an AI agent's response to a user question.
 
 Question: {question}
 Response: {response}
 {tool_check}
-Return JSON with exactly these fields:
+
+Evaluation Rubrics:
+__RUBRICS_BLOCK__
+
+Return JSON with these fields:
 {{
   "pass": true or false,
+  "response_usefulness": __USEFULNESS_CATEGORIES__,
+  "tool_usage": __TOOL_USAGE_CATEGORIES__,
   "reason": "one-sentence explanation"
 }}
 
-A response PASSES if it provides a specific, substantive answer to the question.
-A response FAILS if it says "I don't know", defers elsewhere without answering, or gives vague/generic information without specifics.{tool_fail_rule}
+A response PASSES ("pass": true) when response_usefulness is __PASS_USEFULNESS__.
+A response FAILS ("pass": false) when response_usefulness is __FAIL_USEFULNESS__.{tool_fail_rule}
 Return ONLY the JSON, no other text.
 """
+
+
+def _format_metric_rubric(metric) -> str:
+  lines = [f"- {metric.name}: {metric.definition}"]
+  for cat in metric.categories:
+    lines.append(f"  * {cat.name}: {cat.definition}")
+  return "\n".join(lines)
+
+
+def _format_category_choices(metric) -> str:
+  return " | ".join(f'"{cat.name}"' for cat in metric.categories)
+
+
+def get_rubric_categories() -> tuple[tuple[str, ...], tuple[str, ...]]:
+  """Return canonical (response_usefulness, tool_usage) category names."""
+  metrics_by_name = {m.name: m for m in build_metrics()}
+  usefulness_cats = tuple(
+      c.name for c in metrics_by_name["response_usefulness"].categories
+  )
+  tool_usage_cats = tuple(
+      c.name for c in metrics_by_name["tool_usage"].categories
+  )
+  return usefulness_cats, tool_usage_cats
+
+
+USEFULNESS_CATEGORIES, TOOL_USAGE_CATEGORIES = get_rubric_categories()
+
+
+def build_judge_prompt() -> str:
+  """Build the local golden-eval judge prompt from canonical SDK rubrics."""
+  metrics_by_name = {m.name: m for m in build_metrics()}
+  usefulness = metrics_by_name["response_usefulness"]
+  tool_usage = metrics_by_name["tool_usage"]
+  rubrics_block = (
+      f"{_format_metric_rubric(usefulness)}\n"
+      f"{_format_metric_rubric(tool_usage)}"
+  )
+  pass_cat = f'"{usefulness.categories[0].name}"'
+  fail_cats = " or ".join(f'"{c.name}"' for c in usefulness.categories[1:])
+  return (
+      _JUDGE_PROMPT_TEMPLATE.replace("__RUBRICS_BLOCK__", rubrics_block)
+      .replace(
+          "__USEFULNESS_CATEGORIES__", _format_category_choices(usefulness)
+      )
+      .replace(
+          "__TOOL_USAGE_CATEGORIES__", _format_category_choices(tool_usage)
+      )
+      .replace("__PASS_USEFULNESS__", pass_cat)
+      .replace("__FAIL_USEFULNESS__", fail_cats)
+  )
+
+
+JUDGE_PROMPT = build_judge_prompt()
 
 
 IMPROVER_PROMPT = """You are an agent prompt engineer. Your job is to improve an AI agent's system prompt based on quality evaluation results.

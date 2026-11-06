@@ -1,0 +1,105 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "usage-token-usage-split-by-agent",
+  "position": {
+    "x": 640,
+    "y": 328,
+    "z": 4003,
+    "height": 312,
+    "width": 616,
+    "tabOrder": 4003
+  },
+  "visual": {
+    "visualType": "clusteredBarChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "agent"
+                }
+              },
+              "queryRef": "events_v1.agent",
+              "nativeQueryRef": "agent"
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "Token Usage by Agent"
+                }
+              },
+              "queryRef": "events_v1.Token Usage by Agent",
+              "nativeQueryRef": "Token Usage by Agent"
+            }
+          ]
+        }
+      },
+      "sortDefinition": {
+        "sort": [
+          {
+            "field": {
+              "Measure": {
+                "Expression": {
+                  "SourceRef": {
+                    "Entity": "events_v1"
+                  }
+                },
+                "Property": "Token Usage by Agent"
+              }
+            },
+            "direction": "Descending"
+          }
+        ],
+        "isDefaultSort": false
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Token Usage by Agent'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "usage-token-usage-split-by-agent"
+    },
+    {
+      "name": "bqaa.oracle_query",
+      "value": "oracle/queries/usage-token-usage-split-by-agent.sql"
+    }
+  ]
+}

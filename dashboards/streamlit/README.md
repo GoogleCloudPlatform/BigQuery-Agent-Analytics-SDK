@@ -189,5 +189,5 @@ To verify against your own live Conversational Analytics logging table, connect 
 
 ### Related docs
 
-* [Looker Studio dashboard](../../dashboard/looker_studio/README.md): the Looker Studio flavor of the same logging table (`hydrate_dashboard.py --profile bqca`, or the `/bqca/` configurator link).
+* [Looker Studio dashboard](../looker_studio/README.md): the Looker Studio flavor of the same logging table (`hydrate_dashboard.py --profile bqca`, or the `/bqca/` configurator link).
 * [Section 7.4 of the BQCA Prompt & Response Logging Manual](../../docs/guides/bqca-prompt-response-logging-manual.md#74-visualizing-logs-with-the-bqca-analytics-dashboards-looker-studio--streamlit): setup commands for both dashboards side by side.

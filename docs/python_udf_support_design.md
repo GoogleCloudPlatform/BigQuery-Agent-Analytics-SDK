@@ -97,8 +97,8 @@ These constraints drive several design decisions:
 2. Full `Client` reuse is not the right goal.
    Reason: `Client` is built around issuing BigQuery jobs, loading trace rows,
    and assembling rich Python objects such as `Trace`,
-   [`EvaluationReport`](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/system_evaluator.py),
-   and [`InsightsReport`](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/insights.py).
+   [`EvaluationReport`](../src/bigquery_agent_analytics/system_evaluator.py),
+   and [`InsightsReport`](../src/bigquery_agent_analytics/insights.py).
 
 3. Python UDF support should be built around **small analytical kernels**,
    not around a UDF that internally reimplements the whole SDK client.
@@ -153,14 +153,14 @@ These parts of the SDK map well to Python UDFs:
 
 | SDK area | Current source | Python UDF fit | Design |
 |----------|----------------|----------------|--------|
-| Error detection | [event_semantics.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/event_semantics.py) | Strong | `BOOL` helpers such as `is_error_event` |
-| Tool outcome classification | [event_semantics.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/event_semantics.py) | Strong | `STRING` helpers such as `tool_outcome` |
-| Response text extraction | [event_semantics.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/event_semantics.py) | Good | parse-wrapper plus `STRING` extraction from a JSON-formatted `STRING` payload |
-| Latency scoring | [system_evaluator.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/system_evaluator.py) | Strong | `FLOAT64` score kernel |
-| Turn-count scoring | [system_evaluator.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/system_evaluator.py) | Strong | `FLOAT64` score kernel |
-| Error-rate scoring | [system_evaluator.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/system_evaluator.py) | Strong | `FLOAT64` score kernel |
-| TTFT scoring | [system_evaluator.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/system_evaluator.py) | Strong | `FLOAT64` score kernel |
-| Cost scoring | [system_evaluator.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/system_evaluator.py) | Strong | wider `FLOAT64` score kernel over token and pricing inputs |
+| Error detection | [event_semantics.py](../src/bigquery_agent_analytics/event_semantics.py) | Strong | `BOOL` helpers such as `is_error_event` |
+| Tool outcome classification | [event_semantics.py](../src/bigquery_agent_analytics/event_semantics.py) | Strong | `STRING` helpers such as `tool_outcome` |
+| Response text extraction | [event_semantics.py](../src/bigquery_agent_analytics/event_semantics.py) | Good | parse-wrapper plus `STRING` extraction from a JSON-formatted `STRING` payload |
+| Latency scoring | [system_evaluator.py](../src/bigquery_agent_analytics/system_evaluator.py) | Strong | `FLOAT64` score kernel |
+| Turn-count scoring | [system_evaluator.py](../src/bigquery_agent_analytics/system_evaluator.py) | Strong | `FLOAT64` score kernel |
+| Error-rate scoring | [system_evaluator.py](../src/bigquery_agent_analytics/system_evaluator.py) | Strong | `FLOAT64` score kernel |
+| TTFT scoring | [system_evaluator.py](../src/bigquery_agent_analytics/system_evaluator.py) | Strong | `FLOAT64` score kernel |
+| Cost scoring | [system_evaluator.py](../src/bigquery_agent_analytics/system_evaluator.py) | Strong | wider `FLOAT64` score kernel over token and pricing inputs |
 
 These kernels are exactly the kind of logic that benefits from direct SQL
 invocation with no external deployment surface.
@@ -196,7 +196,7 @@ These SDK capabilities should remain Remote Function or Python-library-only:
 ## 6. Recommended Design Principle
 
 The Python UDF path should not depend on instantiating the full
-[`Client`](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/client.py)
+[`Client`](../src/bigquery_agent_analytics/client.py)
 inside the UDF body.
 
 Instead, the SDK should expose a new internal layer:
@@ -226,7 +226,7 @@ That is maintainable. Reusing the entire client inside a Python UDF is not.
 The current evaluator score math is not implemented as standalone top-level
 functions today. It lives inside factory-method closures such as
 `SystemEvaluator.latency()` and `SystemEvaluator.error_rate()` in
-[system_evaluator.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/system_evaluator.py).
+[system_evaluator.py](../src/bigquery_agent_analytics/system_evaluator.py).
 
 That means the first implementation step is a deliberate refactor:
 
@@ -275,7 +275,7 @@ LANGUAGE python
 
 `bqaa_extract_response_text` is not a direct lift of the current helper.
 The existing
-[`extract_response_text()`](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/event_semantics.py)
+[`extract_response_text()`](../src/bigquery_agent_analytics/event_semantics.py)
 accepts a parsed Python `dict`. The Python UDF version therefore needs a thin
 parse wrapper that accepts `STRING`, calls `json.loads()`, then delegates to
 the shared extraction helper.

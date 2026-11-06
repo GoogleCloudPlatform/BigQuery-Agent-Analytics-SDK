@@ -65,8 +65,16 @@ multiple producers writing to the same dataset.
 
 ## Install path (pre-marketplace)
 
-See [`README.md`](README.md#installing-the-plugin) for the curl-and-extract
-recipe. Until marketplace listing is live this is the official path.
+The canonical install is the `bqaa-tracing` catalog in
+`GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins`: follow
+[Installing the plugin](README.md#installing-the-plugin) in the README.
+Extracting the release tarball is the fallback for when that catalog
+can't be used; see
+[Manual install from the GitHub release (fallback)](README.md#manual-install-from-the-github-release-fallback).
+
+The listing in the official plugin marketplace is a separate submission,
+still pending
+([#251](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/251)).
 
 ## Manual verification before each marketplace bump
 

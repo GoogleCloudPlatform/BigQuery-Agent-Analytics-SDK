@@ -51,6 +51,8 @@ from ._telemetry import LabeledBigQueryClient
 from ._telemetry import make_bq_client
 from ._telemetry import with_sdk_labels
 from .categorical_evaluator import DEFAULT_RESULTS_TABLE
+from .client import _CheckedProjectAndDataset
+from .feedback import _validate_table_name
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -156,7 +158,7 @@ _VIEW_CREATION_ORDER = [
 # ------------------------------------------------------------------ #
 
 
-class CategoricalViewManager:
+class CategoricalViewManager(_CheckedProjectAndDataset):
   """Manages dashboard BigQuery views over categorical evaluation results.
 
   Args:
@@ -166,6 +168,13 @@ class CategoricalViewManager:
       view_prefix: Optional prefix for view names (e.g. ``"adk_"``).
       location: BigQuery location (e.g. ``"US"`` or ``"us-central1"``).
       bq_client: Optional pre-configured BigQuery client.
+
+  Raises:
+      ValueError: If *project_id* or *dataset_id* fails the check
+          ``Client`` runs, or *results_table*, or any view name
+          *view_prefix* forms, is not one table name. The view SQL
+          formats all of them into backtick-quoted paths; every later
+          assignment is checked the same way.
   """
 
   def __init__(
@@ -184,6 +193,29 @@ class CategoricalViewManager:
     self.location = location
     self._bq_client = bq_client
     self._warned_unlabeled_client = False
+
+  @property
+  def results_table(self) -> str:
+    """Table the views read, checked as one table name when set."""
+    return self._results_table
+
+  @results_table.setter
+  def results_table(self, results_table: str) -> None:
+    _validate_table_name(results_table, "results_table")
+    self._results_table = results_table
+
+  @property
+  def view_prefix(self) -> str:
+    """Prefix of every view name; each full name is checked when set."""
+    return self._view_prefix
+
+  @view_prefix.setter
+  def view_prefix(self, view_prefix: str) -> None:
+    if not isinstance(view_prefix, str):
+      raise ValueError(f"view_prefix must be a string; got {view_prefix!r}")
+    for view_name in _VIEW_CREATION_ORDER:
+      _validate_table_name(f"{view_prefix}{view_name}", "view name")
+    self._view_prefix = view_prefix
 
   @property
   def bq_client(self) -> bigquery.Client:
