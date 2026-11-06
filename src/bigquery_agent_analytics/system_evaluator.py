@@ -75,7 +75,12 @@ class SessionScore(BaseModel):
 
 
 class EvaluationReport(BaseModel):
-  """Aggregate report from an evaluation run."""
+  """Aggregate report from an evaluation run.
+
+  ``passed_sessions`` and ``failed_sessions`` are counts. The matching
+  ``SessionScore`` rows are ``passed_session_scores`` and
+  ``failed_session_scores``.
+  """
 
   dataset: str = Field(description="Dataset or filter description.")
   evaluator_name: str = Field(description="Name of evaluator used.")
@@ -107,6 +112,35 @@ class EvaluationReport(BaseModel):
     if self.total_sessions == 0:
       return 0.0
     return self.passed_sessions / self.total_sessions
+
+  @property
+  def passed_session_scores(self) -> list[SessionScore]:
+    """The ``session_scores`` rows that passed, in report order.
+
+    ``passed_sessions`` is the matching count. The elements are the
+    ``SessionScore`` objects in ``session_scores``, not copies, so they
+    filter the same way. Each access builds a new list from the current
+    ``session_scores``; if a caller edits the rows or the counts, the
+    list follows the rows. Like ``pass_rate``, it is not part of
+    ``model_dump()`` or the serialized report.
+    """
+    return [s for s in self.session_scores if s.passed]
+
+  @property
+  def failed_session_scores(self) -> list[SessionScore]:
+    """The ``session_scores`` rows that failed, in report order.
+
+    ``failed_sessions`` is the matching count. The elements are the
+    ``SessionScore`` objects in ``session_scores``, not copies, so they
+    filter the same way and keep ``scores``, ``llm_feedback`` and
+    ``details``: for example ``SystemEvaluator``'s per-metric results, or
+    ``parse_error`` on rows that ``strict=True`` marked failed. Each
+    access builds a new list from the current ``session_scores``; if a
+    caller edits the rows or the counts, the list follows the rows. Like
+    ``pass_rate``, it is not part of ``model_dump()`` or the serialized
+    report.
+    """
+    return [s for s in self.session_scores if not s.passed]
 
   def summary(self) -> str:
     """Returns a human-readable summary.
