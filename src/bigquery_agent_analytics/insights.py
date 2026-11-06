@@ -47,6 +47,7 @@ from pydantic import BaseModel
 from pydantic import Field
 
 from .evaluators import _parse_json_from_text
+from .evaluators import DEFAULT_ENDPOINT
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -1020,13 +1021,14 @@ def build_analysis_context(
 
 async def extract_facets_via_api(
     transcripts: dict[str, str],
-    model: str = "gemini-2.5-flash",
+    model: str = DEFAULT_ENDPOINT,
 ) -> list[SessionFacet]:
   """Extracts facets using the Gemini API (fallback).
 
   Args:
       transcripts: Mapping of session_id to transcript text.
-      model: Model to use for extraction.
+      model: Gemini API model for extraction. Defaults to
+          ``DEFAULT_ENDPOINT``, the client's default endpoint.
 
   Returns:
       List of SessionFacet objects.
@@ -1073,14 +1075,15 @@ async def extract_facets_via_api(
 async def run_analysis_prompt(
     prompt_name: str,
     context: dict[str, Any],
-    model: str = "gemini-2.5-flash",
+    model: str = DEFAULT_ENDPOINT,
 ) -> AnalysisSection:
   """Runs a single analysis prompt.
 
   Args:
       prompt_name: Key from ANALYSIS_PROMPTS.
       context: Template variables dict.
-      model: Model to use.
+      model: Gemini API model to use. Defaults to ``DEFAULT_ENDPOINT``,
+          the client's default endpoint.
 
   Returns:
       AnalysisSection with the analysis result.
@@ -1138,13 +1141,14 @@ async def run_analysis_prompt(
 
 async def generate_executive_summary(
     report: InsightsReport,
-    model: str = "gemini-2.5-flash",
+    model: str = DEFAULT_ENDPOINT,
 ) -> str:
   """Generates an executive summary from analysis sections.
 
   Args:
       report: The insights report with analysis sections.
-      model: Model to use.
+      model: Gemini API model to use. Defaults to ``DEFAULT_ENDPOINT``,
+          the client's default endpoint.
 
   Returns:
       Executive summary string.
