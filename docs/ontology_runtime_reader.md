@@ -87,17 +87,32 @@ candidates = resolver.resolve("California")
 | `relationships()` | `tuple[Relationship, ...]` | Declared order. |
 | `relationships_by_name(name)` | `tuple[Relationship, ...]` | **Always a tuple, never None / singular.** Relationship names are NOT unique per the #58 contract: traversal-style names like `skos_broader` legally repeat across distinct `(from, to)` endpoint pairs (see [entity_resolution_primitives.md §3](entity_resolution_primitives.md)). A singular `relationship(name)` accessor would silently hide duplicates; callers must handle the tuple shape explicitly. |
 | `synonyms_for(entity_name)` | `tuple[str, ...]` | The `synonyms:` YAML field. |
-| `schemes_for(entity_name)` | `tuple[str, ...]` | `skos:inScheme` annotation values (scalar OR list). |
-| `in_scheme(scheme)` | `tuple[str, ...]` | Forward map: entity names that are members of this scheme. |
+| `schemes_for(entity_name)` | `tuple[str, ...]` | Union of the `skos:inScheme` and `skos:topConceptOf` annotation values (scalar OR list). A top concept is a member of its scheme — the same rule the concept-index emission applies (`_entity_schemes()`), so the runtime and a `scheme` filter over the emitted rows agree. First-seen order (`skos:inScheme` first); duplicates and empty strings dropped. |
+| `in_scheme(scheme)` | `tuple[str, ...]` | Forward map: entity names that are members of this scheme (via `skos:inScheme` or `skos:topConceptOf`, as in `schemes_for`), in declared order. |
 | `notation_for(entity_name)` | `str \| None` | **Lex-min display token** when multiple `skos:notation` values are declared (matches PR #92's `_entity_notation()` rule so the runtime and concept-index rows agree). Use `notations_for(...)` for every authored value. |
-| `notations_for(entity_name)` | `tuple[str, ...]` | Every `skos:notation` value (scalar or list normalized). |
-| `broader(entity_name)` | `tuple[str, ...]` | Direct parents from `skos:broader` (not transitive). |
-| `narrower(entity_name)` | `tuple[str, ...]` | Direct children — inverse of `broader`. |
-| `related(entity_name)` | `tuple[str, ...]` | `skos:related` values (not auto-symmetrized). |
-| `labels_for(entity_name)` | `tuple[(label, kind), ...]` | All six kinds the emission produces: name + synonyms + `skos:prefLabel` / `skos:altLabel` / `skos:hiddenLabel` (with or without `@<lang>`) + `skos:notation`. Same vocabulary as the concept-index emission. |
+| `notations_for(entity_name)` | `tuple[str, ...]` | Every `skos:notation` value (scalar or list normalized). Empty strings are dropped, as in the emission. |
+| `broader(entity_name)` | `tuple[str, ...]` | Direct parents (not transitive) from every form a hierarchy edge takes — see [SKOS traversal sources](#skos-traversal-sources). |
+| `narrower(entity_name)` | `tuple[str, ...]` | Direct children — exact inverse of `broader`: for declared entities, `B in broader(A)` iff `A in narrower(B)`. |
+| `related(entity_name)` | `tuple[str, ...]` | `skos:related` annotation values (not auto-symmetrized) plus `skos_related` relationships matched at either endpoint. |
+| `labels_for(entity_name)` | `tuple[(label, kind), ...]` | All six kinds the emission produces: name + synonyms + `skos:prefLabel` / `skos:altLabel` / `skos:hiddenLabel` (with or without `@<lang>`) + `skos:notation`. Same vocabulary as the concept-index emission. Blank SKOS label and notation values are dropped, as in the emission; synonyms are returned as declared, as the emission writes them. |
 | `annotations_for(entity_name)` | `dict[str, AnnotationValue]` | Raw annotations. |
 | `compile_fingerprint` (property) | `str` | Locally-computed full 64-hex sha256. |
 | `compile_id` (property) | `str` | 12-hex display token. |
+
+### SKOS traversal sources
+
+`gm import-owl` turns SKOS edges into abstract relationships rather than annotations (see [owl-import.md §19.3](ontology/owl-import.md#193-skos-mapping-table)): `skos:broader` and `skos:narrower` triples both become a child → parent `skos_broader` relationship, and each `skos:related` pair becomes one `skos_related` relationship with its endpoints sorted by name. Hand-authored ontologies may use annotations instead. `broader` / `narrower` / `related` read every form, so they answer the same way for imported and hand-authored ontologies:
+
+| Edge stated as | `broader(A)` | `narrower(B)` | `related(A)` |
+|----------------|--------------|---------------|--------------|
+| `skos:broader: [B]` annotation on A | B | A | — |
+| `skos:narrower: [A]` annotation on B | B | A | — |
+| `skos_broader` relationship A → B | B | A | — |
+| `skos_narrower` relationship B → A | B | A | — |
+| `skos:related: [B]` annotation on A | — | — | B (not mirrored onto B) |
+| `skos_related` relationship between A and B (either direction) | — | — | B (and `related(B)` includes A) |
+
+Relationships named with the colon forms (`skos:broader`, `skos:narrower`, `skos:related`) are read like their `skos_` counterparts. Results keep first-seen order (the entity's own annotation, then — for `broader` / `narrower` — other entities' annotations in declared order, then relationships in declared order) with duplicates dropped. `schemes_for`, `broader`, `narrower`, and `related` return `()` for an empty or undeclared entity name.
 
 ## `EntityResolver` Protocol
 
@@ -149,7 +164,7 @@ Every method returns `list[ConceptIndexRowView]` carrying the full emission sche
 
 ## Tests
 
-CI suite — `tests/test_ontology_runtime.py` (55 cases) using in-memory fake BigQuery clients:
+CI suite — `tests/test_ontology_runtime.py` (70 cases) using in-memory fake BigQuery clients:
 
 - **`TestOntologyRuntimeConstruction`** (5) — in-memory + from-files factories; `concept_index_table` requires `bq_client`; eager fingerprint verification at construction; matching-fingerprint happy path.
 - **`TestOntologyRuntimeAccessors`** (10) — entity / relationships lookup, declared-order, case-sensitivity, synonyms / annotations / schemes / notation / labels traversal (covers SKOS `inScheme` list + scalar normalization, language-suffixed annotations), provenance properties (compile_fingerprint / compile_id).
@@ -158,7 +173,7 @@ CI suite — `tests/test_ontology_runtime.py` (55 cases) using in-memory fake Bi
 - **`TestExactEntityResolver`** (6) — known entity, missing entity, case-sensitivity (default + opt-in), empty query, `limit=0` / negative limit returns empty (matches `LabelSynonymResolver`'s `limit=0` behavior so callers can disable a resolver branch by passing `limit=0` regardless of which Protocol implementation they hold).
 - **`TestLabelSynonymResolver`** (5) — requires concept index; happy path; label-kind priority re-ranking (`name > pref > alt > hidden > synonym > notation`); limit cap; empty query.
 - **`TestEntityResolverProtocol`** (2) — both reference resolvers satisfy `isinstance(resolver, EntityResolver)`.
-- **`TestRoundOneFindings`** (11) — round-1 reviewer-finding reproducers:
+- **`TestRoundOneFindings`** (13) — round-1 reviewer-finding reproducers:
   - `table_id` rejected at construction: backtick / semicolon / whitespace / `--` / wrong dot count / trailing newline / non-string. Validation flows through `OntologyRuntime.from_models`.
   - `relationships_by_name` returns every matching `Relationship` (locked via direct-model construction since `load_ontology` enforces #62's pre-relaxation uniqueness). The unsafe singular `relationship(name)` accessor is dropped — `hasattr(runtime, "relationship") is False`.
   - SKOS traversal helpers: `in_scheme(scheme)`, `broader(entity)`, `narrower(entity)` (inverse direction), `related(entity)` (non-auto-symmetric).
@@ -166,6 +181,13 @@ CI suite — `tests/test_ontology_runtime.py` (55 cases) using in-memory fake Bi
   - Multiple `__meta` rows → `MetaTableMultipleRowsError`; `verify()` SQL uses `LIMIT 2` so the multi-row case is detected without scanning the whole table.
   - `labels_for()` emits notation as `label_kind='notation'` (matching PR #92's six-kind vocabulary).
   - `notation_for()` returns the **lex-min display token** to match PR #92's `_entity_notation()` rule. Round-3 regression: an entity declaring `skos:notation: ["B", "A", "C"]` returns `"A"` from `notation_for()`, not the first-authored `"B"`; `ExactEntityResolver` candidates carry the same lex-min so both resolver paths agree on the same entity.
+- **`TestSkosParity`** (15) — SKOS parity with `gm import-owl` output and the concept-index emission:
+  - `skos:topConceptOf` counts as scheme membership in `schemes_for()` / `in_scheme()` (unioned with `skos:inScheme`, deduplicated, empty strings dropped); scalar / list / mixed / repeated / blank / whitespace / case-variant declarations are checked entity-by-entity and scheme-by-scheme against `build_rows()`.
+  - `broader()` / `narrower()` read `skos_broader` / `skos_narrower` relationships, `skos:narrower` annotations, and colon-form relationship names; an edge stated several ways is reported once; `b in broader(a)` iff `a in narrower(b)` across all forms.
+  - `related()` reads `skos_related` relationships from both endpoints; annotations stay directional.
+  - Empty / undeclared names return `()` from `schemes_for` / `broader` / `narrower` / `related`.
+  - Blank `skos:prefLabel` / `skos:altLabel` / `skos:hiddenLabel` / `skos:notation` values (scalar or listed, with or without `@<lang>`) are dropped from `labels_for()` / `notations_for()` / `notation_for()` like the emission does; `labels_for()` lists the same `(label, kind)` pairs as the entity's emitted rows.
+  - Import round trip: the reader answers over a frozen `gm import-owl` YAML (always runs), plus Turtle → `import_owl` → `load_ontology_from_string` → `OntologyRuntime`, which also pins the frozen YAML to the importer's current SKOS output (skipped unless the optional `[owl]` extra / `rdflib` is installed).
 
 Live BQ suite — `tests/test_ontology_runtime_live.py` (1 case), gated behind `BQAA_RUN_LIVE_TESTS=1` + `BQAA_RUN_LIVE_ONTOLOGY_RUNTIME_TESTS=1` + `PROJECT_ID` + `DATASET_ID`. **Validated against real BigQuery.** Compiles a tiny ontology with **two notations declared in NON-sorted order** (`skos:notation: ["ZZ-LATE", "CA"]` — first-authored is `"ZZ-LATE"` but lex-min is `"CA"`) to concept-index SQL via PR #92's emission path, executes the DDL to create real BQ tables (main + `__meta`), attaches the runtime, and asserts:
   - `lookup_by_notation("CA")` finds the entity (primary, lex-min notation).

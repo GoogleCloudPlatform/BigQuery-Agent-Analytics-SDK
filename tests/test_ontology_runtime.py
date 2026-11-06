@@ -1481,3 +1481,601 @@ class TestRoundOneFindings:
     )
     candidates = ExactEntityResolver(runtime).resolve("E")
     assert candidates[0].notation == "A"  # lex-min, not first-authored
+
+
+# ------------------------------------------------------------------ #
+# SKOS traversal + scheme membership parity                           #
+# ------------------------------------------------------------------ #
+
+
+_TAXONOMY_NS = "http://example.com/taxonomy#"
+_BANKING_SCHEME = f"{_TAXONOMY_NS}BankingScheme"
+
+
+# A SKOS taxonomy covering every edge shape ``gm import-owl`` maps:
+# a top concept declared only via ``skos:topConceptOf``, one declared
+# via both ``skos:inScheme`` and ``skos:topConceptOf``,
+# ``skos:broader`` triples, a ``skos:narrower`` triple (normalized to
+# a child -> parent ``skos_broader`` edge), and a ``skos:related``
+# pair (one ``skos_related`` edge with its endpoints sorted).
+_SKOS_TAXONOMY_TTL = textwrap.dedent(
+    """\
+    @prefix : <http://example.com/taxonomy#> .
+    @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+
+    :BankingScheme a skos:ConceptScheme .
+
+    :Banking a skos:Concept ;
+        skos:prefLabel "Banking"@en ;
+        skos:topConceptOf :BankingScheme .
+
+    :Payments a skos:Concept ;
+        skos:prefLabel "Payments"@en ;
+        skos:inScheme :BankingScheme ;
+        skos:topConceptOf :BankingScheme .
+
+    :RetailBanking a skos:Concept ;
+        skos:prefLabel "Retail Banking"@en ;
+        skos:inScheme :BankingScheme ;
+        skos:broader :Banking .
+
+    :InvestmentBanking a skos:Concept ;
+        skos:prefLabel "Investment Banking"@en ;
+        skos:inScheme :BankingScheme ;
+        skos:broader :Banking ;
+        skos:related :RetailBanking .
+
+    :WealthManagement a skos:Concept ;
+        skos:prefLabel "Wealth Management"@en ;
+        skos:narrower :InvestmentBanking .
+    """
+)
+
+
+# What ``gm import-owl --include-namespace http://example.com/taxonomy#``
+# emits for ``_SKOS_TAXONOMY_TTL``, frozen so the parity checks also
+# run without the optional ``rdflib`` dependency (``[owl]`` extra).
+# ``test_import_owl_round_trip`` re-imports the Turtle and fails if
+# the importer's SKOS output drifts from this text.
+_IMPORTED_SKOS_TAXONOMY_YAML = textwrap.dedent(
+    """\
+    ontology: taxonomy
+
+    entities:
+      - name: skos_Banking
+        abstract: true
+        synonyms:
+          - Banking
+        annotations:
+          skos:topConceptOf: "http://example.com/taxonomy#BankingScheme"
+      - name: skos_InvestmentBanking
+        abstract: true
+        synonyms:
+          - Investment Banking
+        annotations:
+          skos:inScheme: "http://example.com/taxonomy#BankingScheme"
+      - name: skos_Payments
+        abstract: true
+        synonyms:
+          - Payments
+        annotations:
+          skos:inScheme: "http://example.com/taxonomy#BankingScheme"
+          skos:topConceptOf: "http://example.com/taxonomy#BankingScheme"
+      - name: skos_RetailBanking
+        abstract: true
+        synonyms:
+          - Retail Banking
+        annotations:
+          skos:inScheme: "http://example.com/taxonomy#BankingScheme"
+      - name: skos_WealthManagement
+        abstract: true
+        synonyms:
+          - Wealth Management
+
+    relationships:
+      - name: skos_broader
+        abstract: true
+        from: skos_InvestmentBanking
+        to: skos_Banking
+      - name: skos_broader
+        abstract: true
+        from: skos_InvestmentBanking
+        to: skos_WealthManagement
+      - name: skos_broader
+        abstract: true
+        from: skos_RetailBanking
+        to: skos_Banking
+      - name: skos_related
+        abstract: true
+        from: skos_InvestmentBanking
+        to: skos_RetailBanking
+    """
+)
+
+
+def _skos_concept(
+    name: str,
+    annotations: Optional[dict[str, Any]] = None,
+    synonyms: Optional[list[str]] = None,
+):
+  """Abstract entity, like the concepts ``gm import-owl`` emits —
+  needs no keys, properties, or binding."""
+  from bigquery_ontology.ontology_models import Entity
+
+  return Entity(
+      name=name, abstract=True, annotations=annotations, synonyms=synonyms
+  )
+
+
+def _skos_edge(name: str, from_: str, to: str):
+  from bigquery_ontology.ontology_models import Relationship
+
+  return Relationship(name=name, abstract=True, from_=from_, to=to)
+
+
+def _runtime_for_ontology(ontology):
+  """Runtime over *ontology* with an entity-less binding. Every
+  entity in these tests is abstract, so nothing needs binding and
+  the concept index still emits rows for all of them."""
+  from bigquery_agent_analytics import OntologyRuntime
+  from bigquery_ontology.binding_models import BigQueryTarget
+  from bigquery_ontology.binding_models import Binding
+
+  binding = Binding(
+      binding=f"{ontology.ontology}_bq",
+      ontology=ontology.ontology,
+      target=BigQueryTarget(
+          backend="bigquery", project="test-proj", dataset="test_ds"
+      ),
+  )
+  return OntologyRuntime.from_models(
+      ontology=ontology,
+      binding=binding,
+      compiler_version=_COMPILER_VERSION,
+  )
+
+
+def _skos_runtime(entities, relationships=()):
+  """Runtime over models built directly via Pydantic, so annotation
+  values (including blank strings) reach the runtime as written."""
+  from bigquery_ontology.ontology_models import Ontology
+
+  return _runtime_for_ontology(
+      Ontology(
+          ontology="skos_parity",
+          entities=list(entities),
+          relationships=list(relationships),
+      )
+  )
+
+
+def _concept_index_rows(runtime):
+  from bigquery_ontology.concept_index import build_rows
+
+  return build_rows(
+      runtime.ontology, runtime.binding, compiler_version=_COMPILER_VERSION
+  )
+
+
+def _assert_scheme_parity_with_concept_index(runtime) -> None:
+  """``schemes_for`` / ``in_scheme`` must select exactly the
+  entities a ``scheme`` filter over the emitted concept-index rows
+  selects, without repeating a scheme or a member."""
+  emitted: dict[str, set[str]] = {}
+  for row in _concept_index_rows(runtime):
+    schemes = emitted.setdefault(row.entity_name, set())
+    if row.scheme is not None:
+      schemes.add(row.scheme)
+  assert set(emitted) == {ent.name for ent in runtime.entities()}
+  for name, expected in emitted.items():
+    declared = runtime.schemes_for(name)
+    assert len(declared) == len(set(declared)), name
+    assert set(declared) == expected, name
+  for scheme in set().union(*emitted.values()):
+    members = runtime.in_scheme(scheme)
+    assert len(members) == len(set(members)), scheme
+    assert set(members) == {
+        name for name, expected in emitted.items() if scheme in expected
+    }, scheme
+
+
+def _assert_banking_taxonomy(runtime) -> None:
+  """Reader answers expected for ``_SKOS_TAXONOMY_TTL`` once
+  imported (concept names gain the ``skos_`` prefix)."""
+  # The skos:broader triples and the skos:narrower triple all
+  # arrive as ``skos_broader`` relationships.
+  assert runtime.broader("skos_InvestmentBanking") == (
+      "skos_Banking",
+      "skos_WealthManagement",
+  )
+  assert runtime.broader("skos_RetailBanking") == ("skos_Banking",)
+  assert runtime.broader("skos_Banking") == ()
+  assert runtime.narrower("skos_Banking") == (
+      "skos_InvestmentBanking",
+      "skos_RetailBanking",
+  )
+  assert runtime.narrower("skos_WealthManagement") == (
+      "skos_InvestmentBanking",
+  )
+  assert runtime.narrower("skos_RetailBanking") == ()
+  # One ``skos_related`` edge, visible from both endpoints.
+  assert runtime.related("skos_InvestmentBanking") == ("skos_RetailBanking",)
+  assert runtime.related("skos_RetailBanking") == ("skos_InvestmentBanking",)
+  assert runtime.related("skos_Payments") == ()
+  # ``skos:topConceptOf`` is membership; declaring the same scheme
+  # through both keys reports it once.
+  assert runtime.schemes_for("skos_Banking") == (_BANKING_SCHEME,)
+  assert runtime.schemes_for("skos_Payments") == (_BANKING_SCHEME,)
+  assert runtime.schemes_for("skos_WealthManagement") == ()
+  assert runtime.in_scheme(_BANKING_SCHEME) == (
+      "skos_Banking",
+      "skos_InvestmentBanking",
+      "skos_Payments",
+      "skos_RetailBanking",
+  )
+  _assert_scheme_parity_with_concept_index(runtime)
+
+
+def _skos_shape(ontology):
+  """The parts of an ontology the SKOS accessors read."""
+  keys = (
+      "skos:broader",
+      "skos:narrower",
+      "skos:related",
+      "skos:inScheme",
+      "skos:topConceptOf",
+  )
+  return (
+      [
+          (ent.name, {key: (ent.annotations or {}).get(key) for key in keys})
+          for ent in ontology.entities
+      ],
+      [(rel.name, rel.from_, rel.to) for rel in ontology.relationships],
+  )
+
+
+class TestSkosParity:
+  """``broader`` / ``narrower`` / ``related`` read every form a
+  SKOS edge takes in a loaded ontology — entity annotations and the
+  ``skos_broader`` / ``skos_related`` relationships ``gm
+  import-owl`` emits — and ``schemes_for`` / ``in_scheme`` apply
+  the concept index's membership rule (``skos:inScheme`` or
+  ``skos:topConceptOf``)."""
+
+  # ---------- scheme membership ----------
+
+  def test_schemes_for_includes_top_concept_of(self):
+    runtime = _skos_runtime([_skos_concept("Top", {"skos:topConceptOf": "S"})])
+    assert runtime.schemes_for("Top") == ("S",)
+    assert runtime.in_scheme("S") == ("Top",)
+
+  def test_schemes_for_unions_and_dedupes_in_declared_order(self):
+    runtime = _skos_runtime(
+        [
+            _skos_concept(
+                "Both", {"skos:inScheme": "S", "skos:topConceptOf": "S"}
+            ),
+            _skos_concept(
+                "Overlap",
+                {
+                    "skos:inScheme": ["S1", "S2"],
+                    "skos:topConceptOf": ["S2", "S3"],
+                },
+            ),
+        ]
+    )
+    assert runtime.schemes_for("Both") == ("S",)
+    assert runtime.in_scheme("S") == ("Both",)
+    assert runtime.schemes_for("Overlap") == ("S1", "S2", "S3")
+    assert runtime.in_scheme("S2") == ("Overlap",)
+
+  def test_schemes_for_drops_empty_strings(self):
+    runtime = _skos_runtime(
+        [
+            _skos_concept(
+                "Blank", {"skos:inScheme": "", "skos:topConceptOf": ["", "S"]}
+            ),
+            _skos_concept("OnlyBlank", {"skos:inScheme": [""]}),
+        ]
+    )
+    assert runtime.schemes_for("Blank") == ("S",)
+    assert runtime.schemes_for("OnlyBlank") == ()
+    assert runtime.in_scheme("") == ()
+
+  def test_scheme_membership_matches_concept_index(self):
+    """Scalar, list, mixed, repeated, blank, whitespace, and
+    case-variant declarations select the same entities in memory as
+    a ``scheme`` filter over the emitted rows."""
+    runtime = _skos_runtime(
+        [
+            _skos_concept("Scalar", {"skos:inScheme": "S1"}),
+            _skos_concept("Listed", {"skos:inScheme": ["S1", "S2"]}),
+            _skos_concept("TopOnly", {"skos:topConceptOf": ["S2"]}),
+            _skos_concept(
+                "Mixed", {"skos:inScheme": "S3", "skos:topConceptOf": "S1"}
+            ),
+            _skos_concept(
+                "Repeated",
+                {"skos:inScheme": ["S2", "S2"], "skos:topConceptOf": "S2"},
+            ),
+            _skos_concept(
+                "Blank", {"skos:inScheme": "", "skos:topConceptOf": [""]}
+            ),
+            # Neither side strips whitespace or folds case.
+            _skos_concept("Spaced", {"skos:inScheme": " "}),
+            _skos_concept("CaseVariants", {"skos:inScheme": ["s1", "S1"]}),
+            _skos_concept("OtherAnnotations", {"skos:notation": "X"}),
+            _skos_concept("Unannotated"),
+        ]
+    )
+    _assert_scheme_parity_with_concept_index(runtime)
+
+  # ---------- hierarchy ----------
+
+  def test_broader_narrower_follow_skos_broader_relationships(self):
+    """``gm import-owl`` emits ``skos:broader`` (and
+    ``skos:narrower``) triples as child -> parent ``skos_broader``
+    relationships, not annotations. Multiple parents are kept in
+    declared order."""
+    runtime = _skos_runtime(
+        [
+            _skos_concept("ParentA"),
+            _skos_concept("ParentB"),
+            _skos_concept("Child"),
+            _skos_concept("Sibling"),
+        ],
+        [
+            _skos_edge("skos_broader", "Child", "ParentB"),
+            _skos_edge("skos_broader", "Child", "ParentA"),
+            _skos_edge("skos_broader", "Sibling", "ParentB"),
+        ],
+    )
+    assert runtime.broader("Child") == ("ParentB", "ParentA")
+    assert runtime.broader("Sibling") == ("ParentB",)
+    assert runtime.broader("ParentB") == ()
+    assert runtime.narrower("ParentB") == ("Child", "Sibling")
+    assert runtime.narrower("ParentA") == ("Child",)
+    assert runtime.narrower("Child") == ()
+
+  def test_narrower_declarations_are_read_from_both_ends(self):
+    """A ``skos:narrower`` annotation on the parent and a
+    ``skos_narrower`` relationship (parent -> child) state the same
+    edge as ``skos:broader`` on the child."""
+    runtime = _skos_runtime(
+        [
+            _skos_concept("Parent", {"skos:narrower": ["ChildOne"]}),
+            _skos_concept("ChildOne"),
+            _skos_concept("ChildTwo"),
+        ],
+        [_skos_edge("skos_narrower", "Parent", "ChildTwo")],
+    )
+    assert runtime.narrower("Parent") == ("ChildOne", "ChildTwo")
+    assert runtime.broader("ChildOne") == ("Parent",)
+    assert runtime.broader("ChildTwo") == ("Parent",)
+
+  def test_colon_form_relationship_names_are_read(self):
+    """Relationships named after the SKOS properties themselves
+    (``skos:broader`` / ``skos:narrower`` / ``skos:related``)
+    behave like their ``skos_`` counterparts."""
+    runtime = _skos_runtime(
+        [_skos_concept(name) for name in ("A", "B", "C", "D")],
+        [
+            _skos_edge("skos:broader", "A", "B"),
+            _skos_edge("skos:narrower", "C", "A"),
+            _skos_edge("skos:related", "D", "A"),
+        ],
+    )
+    assert runtime.broader("A") == ("B", "C")
+    assert runtime.narrower("B") == ("A",)
+    assert runtime.narrower("C") == ("A",)
+    assert runtime.related("A") == ("D",)
+    assert runtime.related("D") == ("A",)
+
+  def test_edge_stated_several_ways_is_reported_once(self):
+    runtime = _skos_runtime(
+        [
+            _skos_concept("Child", {"skos:broader": ["Parent", "Parent"]}),
+            _skos_concept("Parent", {"skos:narrower": "Child"}),
+        ],
+        [
+            _skos_edge("skos_broader", "Child", "Parent"),
+            _skos_edge("skos_narrower", "Parent", "Child"),
+        ],
+    )
+    assert runtime.broader("Child") == ("Parent",)
+    assert runtime.narrower("Parent") == ("Child",)
+
+  def test_broader_and_narrower_are_inverses(self):
+    """For declared entities, ``b in broader(a)`` exactly when
+    ``a in narrower(b)``, whichever form states the edge.
+    ``skos_related`` edges are not hierarchy."""
+    names = ("Root", "Mid", "LeafA", "LeafB", "Other")
+    runtime = _skos_runtime(
+        [
+            _skos_concept("Root", {"skos:narrower": ["Mid"]}),
+            _skos_concept("Mid"),
+            _skos_concept("LeafA", {"skos:broader": "Mid"}),
+            _skos_concept("LeafB"),
+            _skos_concept("Other"),
+        ],
+        [
+            _skos_edge("skos_broader", "LeafB", "Mid"),
+            _skos_edge("skos_narrower", "Other", "LeafB"),
+            _skos_edge("skos:broader", "Other", "Root"),
+            _skos_edge("skos_related", "LeafA", "LeafB"),
+        ],
+    )
+    edges = {
+        (child, parent)
+        for child in names
+        for parent in names
+        if parent in runtime.broader(child)
+    }
+    assert edges == {
+        ("Mid", "Root"),
+        ("LeafA", "Mid"),
+        ("LeafB", "Mid"),
+        ("LeafB", "Other"),
+        ("Other", "Root"),
+    }
+    for child in names:
+      for parent in names:
+        assert (parent in runtime.broader(child)) == (
+            child in runtime.narrower(parent)
+        ), (child, parent)
+
+  # ---------- association ----------
+
+  def test_related_relationships_are_read_from_both_endpoints(self):
+    """``gm import-owl`` emits one ``skos_related`` edge per pair
+    with its endpoints sorted by name, so each endpoint sees the
+    other. Annotations stay directional, as declared."""
+    runtime = _skos_runtime(
+        [
+            _skos_concept("Alpha", {"skos:related": ["Beta"]}),
+            _skos_concept("Beta"),
+            _skos_concept("Gamma", {"skos:related": "Alpha"}),
+        ],
+        [
+            _skos_edge("skos_related", "Alpha", "Beta"),
+            _skos_edge("skos_related", "Beta", "Gamma"),
+        ],
+    )
+    # Alpha-Beta is stated twice but reported once; Gamma's
+    # annotation is not mirrored onto Alpha.
+    assert runtime.related("Alpha") == ("Beta",)
+    assert runtime.related("Beta") == ("Alpha", "Gamma")
+    assert runtime.related("Gamma") == ("Alpha", "Beta")
+
+  # ---------- missing names ----------
+
+  def test_unknown_or_empty_names_return_empty(self):
+    runtime = _skos_runtime(
+        [
+            _skos_concept(
+                "Child",
+                {
+                    "skos:broader": ["Ghost"],
+                    "skos:related": ["Ghost"],
+                    "skos:inScheme": "S",
+                },
+            ),
+        ]
+    )
+    for accessor in (
+        runtime.broader,
+        runtime.narrower,
+        runtime.related,
+        runtime.schemes_for,
+    ):
+      assert accessor("") == ()
+      assert accessor("Nope") == ()
+    # Annotation values are returned as written, but a name the
+    # ontology doesn't declare has no hierarchy of its own.
+    assert runtime.broader("Child") == ("Ghost",)
+    assert runtime.narrower("Ghost") == ()
+
+  # ---------- blank labels and notations ----------
+
+  def test_notations_drop_empty_strings_like_concept_index(self):
+    """A blank ``skos:notation`` value emits no concept-index row
+    and never becomes the per-row display token, so the runtime
+    drops it too."""
+    runtime = _skos_runtime(
+        [
+            _skos_concept("Listed", {"skos:notation": ["", "B"]}),
+            _skos_concept("Scalar", {"skos:notation": ""}),
+        ]
+    )
+    assert runtime.notations_for("Listed") == ("B",)
+    assert runtime.notation_for("Listed") == "B"
+    assert ("", "notation") not in runtime.labels_for("Listed")
+    assert runtime.notations_for("Scalar") == ()
+    assert runtime.notation_for("Scalar") is None
+    rows = _concept_index_rows(runtime)
+    for name in ("Listed", "Scalar"):
+      entity_rows = [row for row in rows if row.entity_name == name]
+      assert {row.notation for row in entity_rows} == {
+          runtime.notation_for(name)
+      }
+      assert tuple(
+          row.label for row in entity_rows if row.label_kind == "notation"
+      ) == runtime.notations_for(name)
+
+  def test_labels_drop_empty_strings_like_concept_index(self):
+    """A blank ``skos:prefLabel`` / ``skos:altLabel`` /
+    ``skos:hiddenLabel`` value — scalar or listed, with or without a
+    language suffix — emits no concept-index row, so ``labels_for``
+    drops it too and lists the same ``(label, kind)`` pairs as the
+    emitted rows."""
+    runtime = _skos_runtime(
+        [
+            _skos_concept(
+                "Labelled",
+                {
+                    "skos:prefLabel": "",
+                    "skos:prefLabel@fr": ["", "Libelle"],
+                    "skos:altLabel": ["Alt", ""],
+                    "skos:hiddenLabel@de": "",
+                    "skos:hiddenLabel": [""],
+                    "skos:notation": ["", "N1"],
+                },
+                synonyms=["Syn"],
+            ),
+            _skos_concept(
+                "OnlyBlank",
+                {
+                    "skos:prefLabel": "",
+                    "skos:altLabel": [""],
+                    "skos:hiddenLabel@en": [""],
+                    "skos:notation": "",
+                },
+            ),
+            # The emission writes synonyms as declared, blank
+            # included, so the runtime lists them as declared too.
+            _skos_concept("BlankSynonym", synonyms=["", "Syn"]),
+        ]
+    )
+    assert runtime.labels_for("Labelled") == (
+        ("Labelled", "name"),
+        ("Syn", "synonym"),
+        ("Libelle", "pref"),
+        ("Alt", "alt"),
+        ("N1", "notation"),
+    )
+    assert runtime.labels_for("OnlyBlank") == (("OnlyBlank", "name"),)
+    rows = _concept_index_rows(runtime)
+    for name in ("Labelled", "OnlyBlank", "BlankSynonym"):
+      assert set(runtime.labels_for(name)) == {
+          (row.label, row.label_kind) for row in rows if row.entity_name == name
+      }, name
+
+  # ---------- import-owl round trip ----------
+
+  def test_imported_taxonomy_traversal(self):
+    """Reader answers over ``gm import-owl`` output (the frozen
+    YAML, so this runs without ``rdflib``)."""
+    from bigquery_ontology import load_ontology_from_string
+
+    runtime = _runtime_for_ontology(
+        load_ontology_from_string(_IMPORTED_SKOS_TAXONOMY_YAML)
+    )
+    _assert_banking_taxonomy(runtime)
+
+  def test_import_owl_round_trip(self, tmp_path):
+    """Turtle -> ``import_owl`` -> ``load_ontology_from_string`` ->
+    ``OntologyRuntime``, and the importer's SKOS output still
+    matches the frozen YAML the test above runs on."""
+    pytest.importorskip("rdflib")
+    from bigquery_ontology import load_ontology_from_string
+    from bigquery_ontology.owl_importer import import_owl
+
+    ttl_path = tmp_path / "taxonomy.ttl"
+    ttl_path.write_text(_SKOS_TAXONOMY_TTL, encoding="utf-8")
+    yaml_text, _ = import_owl([ttl_path], include_namespaces=[_TAXONOMY_NS])
+    imported = load_ontology_from_string(yaml_text)
+
+    _assert_banking_taxonomy(_runtime_for_ontology(imported))
+    assert _skos_shape(imported) == _skos_shape(
+        load_ontology_from_string(_IMPORTED_SKOS_TAXONOMY_YAML)
+    )
