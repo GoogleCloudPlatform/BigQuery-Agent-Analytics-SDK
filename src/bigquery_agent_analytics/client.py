@@ -3874,7 +3874,17 @@ class Client:
         dataset: Optional events table override: one table name in this
             client's dataset, or a wildcard read such as
             ``agent_events_*``. Defaults to the client's ``table_id``.
-        text_model: Optional BQML text model.
+        text_model: Optional model for this run, which wins over the
+            client's ``endpoint``. Facet extraction names it as the
+            AI.GENERATE endpoint or the ML.GENERATE_TEXT model. The
+            steps that call the Gemini API (the facet fallback, the
+            analysis prompts and the executive summary) call it too,
+            and take the model name at the end of a full Vertex AI
+            endpoint URL. A BigQuery ML model reference
+            (``project.dataset.model``) goes straight to ML.GENERATE_TEXT
+            and names no Gemini API model, so those steps call the
+            client's ``endpoint`` instead, or ``DEFAULT_ENDPOINT`` when
+            neither names one.
 
     Returns:
         InsightsReport with facets, analysis, and summary.
@@ -3905,6 +3915,7 @@ class Client:
     filt = filters or TraceFilter()
     cfg = config or InsightsConfig()
     model = text_model or self.endpoint
+    api_model = self._insights_api_model(text_model)
 
     where, params = filt.to_sql_conditions()
 
@@ -3926,6 +3937,7 @@ class Client:
         table,
         session_ids,
         model,
+        api_model,
     )
 
     # Step 3: Aggregate
@@ -3943,7 +3955,7 @@ class Client:
       section = await run_analysis_prompt(
           name,
           context,
-          model="gemini-2.5-flash",
+          model=api_model,
       )
       sections.append(section)
 
@@ -3955,9 +3967,35 @@ class Client:
         aggregated=agg,
         analysis_sections=sections,
     )
-    report.executive_summary = await generate_executive_summary(report)
+    report.executive_summary = await generate_executive_summary(
+        report,
+        model=api_model,
+    )
 
     return report
+
+  def _insights_api_model(self, text_model: Optional[str]) -> str:
+    """The Gemini API model for one insights run.
+
+    The facet fallback, the analysis prompts and the executive summary
+    call the Gemini API, which takes a model name. The run's
+    *text_model* wins over the client's ``endpoint``, as it does in
+    BigQuery. A full Vertex AI endpoint URL names the model at the end
+    of its path. A BigQuery ML model reference names no Gemini API
+    model, so it is skipped, and ``DEFAULT_ENDPOINT`` is used only when
+    neither value names one.
+    """
+    for value in (text_model, self.endpoint):
+      if not isinstance(value, str) or not value:
+        continue
+      if value.startswith("https://"):
+        _, found, rest = value.rpartition("/models/")
+        name = re.split(r"[:?#/]", rest, maxsplit=1)[0] if found else ""
+        if name:
+          return name
+      elif not self._is_legacy_model_ref(value):
+        return value
+    return DEFAULT_ENDPOINT
 
   async def _fetch_session_metadata(
       self,
@@ -4041,14 +4079,21 @@ class Client:
       table: str,
       session_ids: list[str],
       text_model: str,
+      api_model: str,
   ) -> list[SessionFacet]:
-    """Extracts facets via AI.GENERATE, BQML, or API fallback."""
+    """Extracts facets via AI.GENERATE, BQML, or API fallback.
+
+    *text_model* is the run's model: the caller's ``text_model``, else
+    the client's ``endpoint``. *api_model* is the model the Gemini API
+    fallback calls (see ``_insights_api_model``).
+    """
     # Try AI.GENERATE first (when not a legacy model ref)
-    if not self._is_legacy_model_ref(self.endpoint):
+    if not self._is_legacy_model_ref(text_model):
       try:
         return await self._extract_facets_ai_generate(
             table,
             session_ids,
+            text_model,
         )
       except Exception as e:
         logger.debug(
@@ -4074,12 +4119,13 @@ class Client:
         table,
         session_ids,
     )
-    return await extract_facets_via_api(transcripts)
+    return await extract_facets_via_api(transcripts, model=api_model)
 
   async def _extract_facets_ai_generate(
       self,
       table: str,
       session_ids: list[str],
+      endpoint: str,
   ) -> list[SessionFacet]:
     """Extracts facets using AI.GENERATE with typed output."""
     from google.cloud import bigquery as bq
@@ -4087,14 +4133,15 @@ class Client:
     loop = asyncio.get_event_loop()
 
     facet_prompt = build_facet_prompt()
-    # The endpoint is client configuration, which the BigQuery Remote
-    # Function takes from the request's userDefinedContext, so keep it
-    # inside its quotes the way the judge's AI.GENERATE query does.
+    # The endpoint is the caller's text_model or the client's endpoint,
+    # which the BigQuery Remote Function takes from the request's
+    # userDefinedContext, so keep it inside its quotes the way the
+    # judge's AI.GENERATE query does.
     query = _AI_GENERATE_FACET_EXTRACTION_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
         table=table,
-        endpoint=_escape_sql_quoted(self.endpoint),
+        endpoint=_escape_sql_quoted(endpoint),
     )
     job_config = bq.QueryJobConfig(
         query_parameters=[

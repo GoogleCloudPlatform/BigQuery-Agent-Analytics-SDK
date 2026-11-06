@@ -35,7 +35,7 @@
   check for `intent.md` / `plan.md` / `spec.md` basenames passes, because
   these notes use the issue name.
 - Scrub the diff and commit messages: no tool or assistant attribution, no
-  `Co-Authored-By`, no local paths; secret scan.
+  co-author trailer, no local paths; secret scan.
 
 ## Rollback
 
