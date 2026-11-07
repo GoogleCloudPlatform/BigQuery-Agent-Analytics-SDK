@@ -518,6 +518,21 @@ print(report.summary())
 #     latency: 0.723
 ```
 
+`passed_sessions` and `failed_sessions` are counts (118 and 24 above). The
+matching `SessionScore` rows are in `passed_session_scores` and
+`failed_session_scores`, in `session_scores` order, so there's no need to
+filter `session_scores` yourself:
+
+```python
+for score in report.failed_session_scores:
+    latency = score.details["metric_latency"]
+    print(score.session_id, latency["observed"], latency["budget"])
+```
+
+Both lists are Python properties only. Serialized reports, such as
+`model_dump()` and the CLI's JSON output, carry the same rows in
+`session_scores`.
+
 ---
 
 ## 4. Deterministic & LLM-Based Performance Metrics

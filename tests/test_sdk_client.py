@@ -322,6 +322,61 @@ class TestClientEvaluate:
     # s1 should pass (1500ms < 5000ms), s2 should fail
     assert report.passed_sessions >= 1
 
+  def test_evaluate_lists_failed_and_passed_session_scores(self):
+    """Issue #576: evaluate() hands back the failed rows, not just a count."""
+    mock_bq = _mock_bq_client()
+    summary_rows = [
+        _make_mock_row(
+            {
+                "session_id": "s1",
+                "total_events": 10,
+                "tool_calls": 3,
+                "tool_errors": 0,
+                "llm_calls": 2,
+                "avg_latency_ms": 1500.0,
+                "max_latency_ms": 3000.0,
+                "total_latency_ms": 5000.0,
+                "turn_count": 2,
+                "has_error": False,
+            }
+        ),
+        _make_mock_row(
+            {
+                "session_id": "s2",
+                "total_events": 20,
+                "tool_calls": 5,
+                "tool_errors": 3,
+                "llm_calls": 4,
+                "avg_latency_ms": 8000.0,
+                "max_latency_ms": 15000.0,
+                "total_latency_ms": 40000.0,
+                "turn_count": 6,
+                "has_error": True,
+            }
+        ),
+    ]
+    mock_job = MagicMock()
+    mock_job.result.return_value = summary_rows
+    mock_bq.query.return_value = mock_job
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+
+    report = client.evaluate(
+        evaluator=SystemEvaluator.latency(threshold_ms=5000)
+    )
+
+    assert [s.session_id for s in report.failed_session_scores] == ["s2"]
+    assert [s.session_id for s in report.passed_session_scores] == ["s1"]
+    latency = report.failed_session_scores[0].details["metric_latency"]
+    assert latency["observed"] == 8000.0
+    assert latency["budget"] == 5000
+    assert report.failed_sessions == len(report.failed_session_scores) == 1
+    assert report.passed_sessions == len(report.passed_session_scores) == 1
+
   def test_evaluate_invalid_evaluator(self):
     mock_bq = _mock_bq_client()
     client = Client(
@@ -1084,6 +1139,42 @@ class TestStrictMode:
     assert report.details["parse_errors"] == 1
     assert report.details["parse_error_rate"] == 0.5
     assert report.aggregate_scores == {"correctness": 0.8}
+
+  def test_strict_mode_failed_session_scores_include_parse_errors(self):
+    """Issue #576: rows strict mode marks failed are in the failed list."""
+    from bigquery_agent_analytics.evaluators import LLMAsJudge
+    from bigquery_agent_analytics.system_evaluator import SessionScore
+
+    mock_bq = _mock_bq_client()
+    mock_bq.query.return_value.result.return_value = [
+        _make_mock_row(row)
+        for sid in ("s1", "s2")
+        for row in _make_event_rows(session_id=sid)
+    ]
+    mock_bq.query.side_effect = [
+        RuntimeError("AI.GENERATE unavailable"),
+        RuntimeError("BQML unavailable"),
+        mock_bq.query.return_value,
+    ]
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    evaluator = LLMAsJudge.correctness(threshold=0.5)
+    scores = [
+        SessionScore(session_id="s1", scores={"correctness": 0.8}, passed=True),
+        SessionScore(session_id="s2", scores={}, passed=True),
+    ]
+    with patch.object(
+        evaluator, "evaluate_session", new=AsyncMock(side_effect=scores)
+    ):
+      report = client.evaluate(evaluator=evaluator, strict=True)
+
+    assert [s.session_id for s in report.failed_session_scores] == ["s2"]
+    assert report.failed_session_scores[0].details["parse_error"] is True
+    assert [s.session_id for s in report.passed_session_scores] == ["s1"]
 
 
 class TestAutoDetectTable:

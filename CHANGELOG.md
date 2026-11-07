@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Failed and passed session rows on `EvaluationReport` (#576)** -
+  `failed_session_scores` and `passed_session_scores` return the
+  `SessionScore` rows of `session_scores` that failed or passed, in report
+  order. After `client.evaluate(...)`, a caller no longer has to filter
+  `session_scores` by hand. `failed_sessions` and `passed_sessions` stay
+  integer counts. The new properties are read-only and not serialized, so
+  `model_dump()`, CLI `--format json` and Remote Function replies are
+  unchanged.
+
 ## [0.6.2] - 2026-11-05
 
 ### Release highlights
