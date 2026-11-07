@@ -14,6 +14,7 @@
 
 """Tests for the SDK evaluators module."""
 
+import json
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -28,6 +29,7 @@ from bigquery_agent_analytics.evaluators import LLM_JUDGE_BATCH_QUERY
 from bigquery_agent_analytics.evaluators import LLMAsJudge
 from bigquery_agent_analytics.evaluators import SESSION_SUMMARY_QUERY
 from bigquery_agent_analytics.evaluators import SessionScore
+from bigquery_agent_analytics.serialization import serialize
 from bigquery_agent_analytics.system_evaluator import CodeEvaluator
 from bigquery_agent_analytics.system_evaluator import SystemEvaluator
 
@@ -416,6 +418,129 @@ class TestEvaluationReport:
     assert "5" in text
     assert "60%" in text
     assert "0.650" in text
+
+
+class TestEvaluationReportSessionLists:
+  """failed/passed_session_scores return the matching rows (issue #576)."""
+
+  @staticmethod
+  def _report():
+    # Ids are deliberately out of sorted order, so an implementation that
+    # reorders rows fails the order assertions.
+    return EvaluationReport(
+        dataset="test",
+        evaluator_name="latency_evaluator",
+        total_sessions=5,
+        passed_sessions=3,
+        failed_sessions=2,
+        session_scores=[
+            SessionScore(session_id="sess-5", scores={"latency": 1.0}),
+            SessionScore(
+                session_id="sess-9",
+                scores={"latency": 0.0},
+                passed=False,
+                details={
+                    "metric_latency": {"observed": 8000.0, "budget": 5000.0}
+                },
+                llm_feedback="slow tool call",
+            ),
+            SessionScore(session_id="sess-1", scores={"latency": 1.0}),
+            SessionScore(
+                session_id="sess-2",
+                passed=False,
+                details={"parse_error": True},
+            ),
+            SessionScore(session_id="sess-7", scores={"latency": 1.0}),
+        ],
+    )
+
+  def test_failed_session_scores_lists_failed_rows_in_order(self):
+    report = self._report()
+    assert [s.session_id for s in report.failed_session_scores] == [
+        "sess-9",
+        "sess-2",
+    ]
+
+  def test_passed_session_scores_lists_passed_rows_in_order(self):
+    report = self._report()
+    assert [s.session_id for s in report.passed_session_scores] == [
+        "sess-5",
+        "sess-1",
+        "sess-7",
+    ]
+
+  def test_session_lists_hold_the_report_rows(self):
+    report = self._report()
+    failed = report.failed_session_scores
+    assert failed[0] is report.session_scores[1]
+    assert failed[1] is report.session_scores[3]
+    # The rows filter like session_scores rows, with every field intact.
+    assert [s.session_id for s in failed if s.details.get("parse_error")] == [
+        "sess-2"
+    ]
+    assert failed[0].llm_feedback == "slow tool call"
+    assert failed[0].details["metric_latency"]["observed"] == 8000.0
+
+  def test_session_lists_follow_later_changes_to_session_scores(self):
+    report = self._report()
+    # Read both lists first, so a cached result would go stale below.
+    assert len(report.failed_session_scores) == 2
+    assert len(report.passed_session_scores) == 3
+
+    report.session_scores[0].passed = False
+    report.session_scores.append(
+        SessionScore(session_id="sess-3", passed=False)
+    )
+
+    assert [s.session_id for s in report.failed_session_scores] == [
+        "sess-5",
+        "sess-9",
+        "sess-2",
+        "sess-3",
+    ]
+    assert [s.session_id for s in report.passed_session_scores] == [
+        "sess-1",
+        "sess-7",
+    ]
+
+  def test_count_only_report_has_empty_session_lists(self):
+    report = EvaluationReport(
+        dataset="test",
+        evaluator_name="test_eval",
+        total_sessions=10,
+        passed_sessions=7,
+        failed_sessions=3,
+    )
+    assert report.failed_session_scores == []
+    assert report.passed_session_scores == []
+
+  def test_session_lists_stay_out_of_serialized_report(self):
+    report = self._report()
+    payload = serialize(report)
+    assert "failed_session_scores" not in payload
+    assert "passed_session_scores" not in payload
+    # The counts stay JSON numbers.
+    assert payload["failed_sessions"] == 2
+    assert payload["passed_sessions"] == 3
+    # session_scores is serialized, so a consumer that rebuilds the
+    # report from JSON gets the same lists back.
+    rebuilt = EvaluationReport.model_validate(json.loads(json.dumps(payload)))
+    assert [s.session_id for s in rebuilt.failed_session_scores] == [
+        "sess-9",
+        "sess-2",
+    ]
+
+  @pytest.mark.parametrize("mode", ["validation", "serialization"])
+  def test_session_lists_leave_json_schema_unchanged(self, mode):
+    # Pydantic copies the class docstring into the schema's top-level
+    # description, and a computed_field would show up in the
+    # serialization schema. Both must match the report before #576.
+    schema = EvaluationReport.model_json_schema(mode=mode)
+    assert schema["description"] == "Aggregate report from an evaluation run."
+    assert "failed_session_scores" not in schema["properties"]
+    assert "passed_session_scores" not in schema["properties"]
+    assert schema["properties"]["failed_sessions"]["type"] == "integer"
+    assert schema["properties"]["passed_sessions"]["type"] == "integer"
 
 
 class TestParseJson:

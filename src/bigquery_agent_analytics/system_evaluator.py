@@ -108,6 +108,35 @@ class EvaluationReport(BaseModel):
       return 0.0
     return self.passed_sessions / self.total_sessions
 
+  @property
+  def passed_session_scores(self) -> list[SessionScore]:
+    """The ``session_scores`` rows that passed, in report order.
+
+    ``passed_sessions`` is the matching count. The elements are the
+    ``SessionScore`` objects in ``session_scores``, not copies, so they
+    filter the same way. Each access builds a new list from the current
+    ``session_scores``; if a caller edits the rows or the counts, the
+    list follows the rows. Like ``pass_rate``, it is not part of
+    ``model_dump()`` or the serialized report.
+    """
+    return [s for s in self.session_scores if s.passed]
+
+  @property
+  def failed_session_scores(self) -> list[SessionScore]:
+    """The ``session_scores`` rows that failed, in report order.
+
+    ``failed_sessions`` is the matching count. The elements are the
+    ``SessionScore`` objects in ``session_scores``, not copies, so they
+    filter the same way and keep ``scores``, ``llm_feedback`` and
+    ``details``: for example ``SystemEvaluator``'s per-metric results, or
+    ``parse_error`` on rows that ``strict=True`` marked failed. Each
+    access builds a new list from the current ``session_scores``; if a
+    caller edits the rows or the counts, the list follows the rows. Like
+    ``pass_rate``, it is not part of ``model_dump()`` or the serialized
+    report.
+    """
+    return [s for s in self.session_scores if not s.passed]
+
   def summary(self) -> str:
     """Returns a human-readable summary.
 
