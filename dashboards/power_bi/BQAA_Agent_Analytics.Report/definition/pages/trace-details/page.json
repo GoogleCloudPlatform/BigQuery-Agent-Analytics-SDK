@@ -1,0 +1,164 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/page/2.1.0/schema.json",
+  "name": "trace-details",
+  "displayName": "Trace Details",
+  "displayOption": "FitToWidth",
+  "height": 720,
+  "width": 1280,
+  "visibility": "HiddenInViewMode",
+  "pageBinding": {
+    "name": "bqaa-trace-details-drillthrough",
+    "type": "Drillthrough",
+    "parameters": [
+      {
+        "name": "bqaa-drillthrough-date-parameter",
+        "boundFilter": "bqaa-drillthrough-date",
+        "fieldExpr": {
+          "Column": {
+            "Expression": {
+              "SourceRef": {
+                "Entity": "Date"
+              }
+            },
+            "Property": "Date"
+          }
+        }
+      },
+      {
+        "name": "bqaa-drillthrough-agent-parameter",
+        "boundFilter": "bqaa-drillthrough-agent",
+        "fieldExpr": {
+          "Column": {
+            "Expression": {
+              "SourceRef": {
+                "Entity": "events_v1"
+              }
+            },
+            "Property": "agent"
+          }
+        }
+      },
+      {
+        "name": "bqaa-drillthrough-user-id-parameter",
+        "boundFilter": "bqaa-drillthrough-user-id",
+        "fieldExpr": {
+          "Column": {
+            "Expression": {
+              "SourceRef": {
+                "Entity": "events_v1"
+              }
+            },
+            "Property": "user_id"
+          }
+        }
+      },
+      {
+        "name": "bqaa-drillthrough-tool-completed-name-parameter",
+        "boundFilter": "bqaa-drillthrough-tool-completed-name",
+        "fieldExpr": {
+          "Column": {
+            "Expression": {
+              "SourceRef": {
+                "Entity": "events_v1"
+              }
+            },
+            "Property": "tool_completed_name"
+          }
+        }
+      },
+      {
+        "name": "bqaa-drillthrough-tool-error-name-parameter",
+        "boundFilter": "bqaa-drillthrough-tool-error-name",
+        "fieldExpr": {
+          "Column": {
+            "Expression": {
+              "SourceRef": {
+                "Entity": "events_v1"
+              }
+            },
+            "Property": "tool_error_name"
+          }
+        }
+      }
+    ]
+  },
+  "filterConfig": {
+    "filters": [
+      {
+        "name": "bqaa-drillthrough-date",
+        "field": {
+          "Column": {
+            "Expression": {
+              "SourceRef": {
+                "Entity": "Date"
+              }
+            },
+            "Property": "Date"
+          }
+        },
+        "type": "Categorical",
+        "howCreated": "Drillthrough"
+      },
+      {
+        "name": "bqaa-drillthrough-agent",
+        "field": {
+          "Column": {
+            "Expression": {
+              "SourceRef": {
+                "Entity": "events_v1"
+              }
+            },
+            "Property": "agent"
+          }
+        },
+        "type": "Categorical",
+        "howCreated": "Drillthrough"
+      },
+      {
+        "name": "bqaa-drillthrough-user-id",
+        "field": {
+          "Column": {
+            "Expression": {
+              "SourceRef": {
+                "Entity": "events_v1"
+              }
+            },
+            "Property": "user_id"
+          }
+        },
+        "type": "Categorical",
+        "howCreated": "Drillthrough"
+      },
+      {
+        "name": "bqaa-drillthrough-tool-completed-name",
+        "field": {
+          "Column": {
+            "Expression": {
+              "SourceRef": {
+                "Entity": "events_v1"
+              }
+            },
+            "Property": "tool_completed_name"
+          }
+        },
+        "type": "Categorical",
+        "howCreated": "Drillthrough"
+      },
+      {
+        "name": "bqaa-drillthrough-tool-error-name",
+        "field": {
+          "Column": {
+            "Expression": {
+              "SourceRef": {
+                "Entity": "events_v1"
+              }
+            },
+            "Property": "tool_error_name"
+          }
+        },
+        "type": "Categorical",
+        "howCreated": "Drillthrough"
+      }
+    ]
+  }
+}

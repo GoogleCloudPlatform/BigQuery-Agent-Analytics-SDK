@@ -41,9 +41,10 @@ An 8-page Power BI report — Token Consumption, Agent & Sessions, Tool
 Usage, LLM Interactions, User Analytics, Latency, Errors, and a Trace
 Inspector — with 37 parity charts, 9 non-data elements, 40 synced
 slicers, and 50 DAX measures that match the 37 oracle SQL queries.
-Every page also has a **Reset filters** button and searchable ID
-slicers, and any bar or day can be drilled through to the 15-column
-Trace Inspector (D12, D15–D17).
+Every report page also has a **Reset filters** button and searchable ID
+slicers, and any bar or day can be drilled through to **Trace Details**:
+a hidden page with the same slicers, a **Back** button, and the
+16-column Trace Inspector table filtered to that member (D12, D15–D17).
 
 ### One BigQuery scan per refresh
 
@@ -343,19 +344,19 @@ receipt.
 | D2 | Date range freedom | Any range | Slicer limited to current window (locked filter) | Exact PoP for every reachable state |
 | D3 | String identity | BigQuery case-sensitive, byte order | VertiPaq case-insensitive, culture-aware | Engine property; tie-aware validation |
 | D4 | NULL-metric categories | SQL may list a NULL category | Not drawn | Power BI omits blank rows |
-| D5 | Scorecard comparison | Comparison arrow | Card with the current value and a second callout bound to `KPI * Change %`, labelled `vs previous period`, stacked under the value; a blank change (no data in the prior window) reads `No prior data` instead of `--`; `KPI * Prior` stays in the model | Native visual; a number, not an arrow |
+| D5 | Scorecard comparison | Comparison arrow | Card with the current value and a second callout bound to `KPI * Change %`, labelled `vs previous period`, stacked under the value; a change that cannot be computed shows Power BI's blank `--` (the previous window's total is 0, or for Total Tokens either window has no tokens); `KPI * Prior` stays in the model | Native visual; a number, not an arrow; card formatting applies to every callout, so a custom blank label would also relabel a blank Total Tokens value |
 | D6 | Layout | Absolute live positions | 1280-px canvas, header band, manifest 24-col geometry | Manifest geometry is complete |
 | D7 | Controls | Filter bar + report date control | 5 synced page slicers + Filters-pane cards | Power BI idiom |
 | D8 | Nav buttons | Link to separate dashboards | Navigate to report pages | Single report |
 | D9 | Font | Inter | Segoe UI (Power BI default) | Availability |
 | D10 | Freshness | Live query per view | Import, as of last refresh | Import mode |
 | D11 | Cost shape | Per-view queries | Per refresh: 2 metadata + one pruned scan | One Import scan |
-| D12 | Trace Inspector | Table, 7 fields | The 7 fields plus `session_id`, `model_version`, tool names, tokens, LLM and tool latency, and `error_message` (15 columns), newest first; a drill-through target on Date, agent, user, and tool names, with a Back button | Debugging needs the error and latency next to the event; drill-through goes from a chart to its events |
+| D12 | Trace Inspector | Table, 7 fields | The 7 fields plus `session_id`, `model_version`, tool names, tokens, LLM latency, tool latency for completed and for failed calls (`tool_error_total_ms`), and `error_message` (16 columns), newest first. Drilling through on Date, agent, user, or a tool name opens **Trace Details**, a page hidden in view mode with the same table, the synced slicers, and a Back button | Debugging needs the error and latency next to the event; Clear all slicers cannot clear drill-through filters, so they only land on a page that is never opened from the tabs |
 | D13 | Tool Calls Over Time rows | `limit: 5000`: the oracle keeps the first 5,000 tool/day rows (tool A→Z, newest day first) | No row cap: every tool/day group is queried, and the live check runs the oracle without `LIMIT` | A cap would drop the oldest days of later tools |
 | D14 | Top 5 Agents by LLM Calls | Bar tile titled Top 5 over up to 500 agents (`limit: 500`) | Top five agents (`TOPN(5)`, with agent ascending as the secondary tie-break); source and oracle keep `LIMIT 500` | Matches the title; the source contract is unchanged |
 | D15 | Chart type | Time series | Line charts for Tool Calls Over Time and both latency trends; other trends stay area charts | Five overlapping translucent areas were unreadable, and a latency axis does not start at zero |
-| D16 | Formatting | Looker defaults | Dark 12pt bold chart titles; data labels on every bar; area charts start at zero; latency cards show exact milliseconds (`4,512`, not `4.5K`) | Readability; an area's fill encodes magnitude |
-| D17 | Header controls | — | A **Reset filters** button (clear all slicers) on every page; searchable Agent, User ID, Trace ID, and Span ID slicers | One click back to the full window; thousands of hex IDs need search |
+| D16 | Formatting | Looker defaults | Dark 12pt bold chart titles; data labels on every bar; area charts start at zero; latency cards show exact milliseconds (`4,512`, not `4.5K`); every button follows Power BI's button template: 44 px tall with an 11pt label (page-navigation buttons centred in their 32 and 72 px manifest cells) | Readability; an area's fill encodes magnitude; a button under 40 px clips its label |
+| D17 | Header controls | — | A **Reset filters** button (clear all slicers) on every report page; searchable Agent, User ID, Trace ID, and Span ID slicers | One click back to the full window; thousands of hex IDs need search |
 
 ## Schema credit
 

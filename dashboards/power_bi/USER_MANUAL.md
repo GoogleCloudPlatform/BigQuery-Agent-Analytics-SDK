@@ -159,11 +159,11 @@ and top tools by errors. A scorecard shows total tool errors.
 
 A table showing all events, newest first: timestamp, event type, agent,
 user, session, trace, span, status, model version, tool name (completed
-or errored), total tokens, LLM latency, tool latency, and error message.
-Filter by date, agent, user, trace ID, or span ID using the slicers at
-the top, or drill through to it from any other page (see
-[Drill-through](#drill-through)). The **Back** button returns to the
-page you came from.
+or errored), total tokens, LLM latency, tool latency (for a completed
+call and for a failed call), and error message. Filter by date, agent,
+user, trace ID, or span ID using the slicers at the top. To see only the
+events behind a chart, drill through from it instead (see
+[Drill-through](#drill-through)).
 
 ---
 
@@ -179,9 +179,9 @@ scrolling.
 
 ### Reset filters
 
-The **Reset filters** button at the top right of every page clears all
-slicers (back to the full date window and every agent, user, trace, and
-span). Filters set in the Filters pane are kept.
+The **Reset filters** button at the top right of every report page clears
+all slicers (back to the full date window and every agent, user, trace,
+and span). Filters set in the Filters pane are kept.
 
 ### Period-over-period
 
@@ -189,11 +189,12 @@ Each KPI card (Total Tokens, Total Traces, Total Sessions, LLM Calls,
 Total Users, or Tool Errors) shows the current value and, as a second
 callout labelled "vs previous period", the percentage change from the
 prior window (the `KPI * Change %` measure). The prior window is the same
-number of days immediately before the current selection. When the prior
-window has no data (for example, a new table), the callout reads
-**No prior data** instead of a number; narrow the Date slicer so that both
-windows have data. The `KPI * Prior` measures stay in the semantic model
-if you want the prior value itself.
+number of days immediately before the current selection. When the change
+cannot be computed, the callout shows `--`: the prior window's total is
+0 (for example, no tool errors before a first failure), or, for Total
+Tokens, either window has no tokens. Narrow the Date slicer to compare
+other windows. The `KPI * Prior` measures stay in the semantic model if
+you want the prior value itself.
 
 ### Date range
 
@@ -212,9 +213,11 @@ Traces, and Traces by Agent).
 ### Drill-through
 
 Right-click a bar (an agent, user, or tool) or a day on a trend chart,
-then choose **Drill through → Trace Inspector** to see the events behind
-it. The current slicers carry over. Use **Back** on the Trace Inspector
-to return.
+then choose **Drill through → Trace Details** to see the events behind
+it in the Trace Inspector table. The current slicers carry over. Trace
+Details is hidden from the page tabs and opens only this way, so a
+drill-through never leaves a filter behind on the Trace Inspector page;
+use **Back** to return to the page you came from.
 
 ---
 

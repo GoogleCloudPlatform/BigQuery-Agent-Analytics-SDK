@@ -73,11 +73,13 @@ HEADER_RECTS: dict[str, dict[str, int]] = {
     "slicer-user-id": {"x": 544, "y": 56, "width": 232, "height": 56},
     "slicer-trace-id": {"x": 784, "y": 56, "width": 232, "height": 56},
     "slicer-span-id": {"x": 1024, "y": 56, "width": 232, "height": 56},
-    # Header buttons (README D12, D17): the free band right of the page
-    # heading, above the slicer row.  The Back button is drawn only on the
-    # drill-through page.
-    "drillthrough-back": {"x": 928, "y": 12, "width": 160, "height": 36},
-    "reset-filters": {"x": 1096, "y": 12, "width": 160, "height": 36},
+    # Header buttons (README D12, D17): the right end of the free band beside
+    # the page heading, above the slicer row.  Reset filters is on every
+    # report page; Back takes its place on the hidden drill-through page.
+    # 44 px tall: Microsoft's actionButton render contract asks for 40-56 px
+    # (44 px for an 11 pt label), as a shorter button clips its label.
+    "drillthrough-back": {"x": 1096, "y": 8, "width": 160, "height": 44},
+    "reset-filters": {"x": 1096, "y": 8, "width": 160, "height": 44},
 }
 
 

@@ -219,6 +219,20 @@
                       "Entity": "events_v1"
                     }
                   },
+                  "Property": "tool_error_total_ms"
+                }
+              },
+              "queryRef": "events_v1.tool_error_total_ms",
+              "nativeQueryRef": "tool_error_total_ms"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
                   "Property": "error_message"
                 }
               },

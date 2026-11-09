@@ -1,0 +1,271 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.13.0/schema.json",
+  "name": "trace-inspector-table",
+  "position": {
+    "x": 16,
+    "y": 128,
+    "z": 4000,
+    "height": 552,
+    "width": 1240,
+    "tabOrder": 4000
+  },
+  "visual": {
+    "visualType": "tableEx",
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "timestamp"
+                }
+              },
+              "queryRef": "events_v1.timestamp",
+              "nativeQueryRef": "timestamp"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "event_type"
+                }
+              },
+              "queryRef": "events_v1.event_type",
+              "nativeQueryRef": "event_type"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "agent"
+                }
+              },
+              "queryRef": "events_v1.agent",
+              "nativeQueryRef": "agent"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "user_id"
+                }
+              },
+              "queryRef": "events_v1.user_id",
+              "nativeQueryRef": "user_id"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "session_id"
+                }
+              },
+              "queryRef": "events_v1.session_id",
+              "nativeQueryRef": "session_id"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "trace_id"
+                }
+              },
+              "queryRef": "events_v1.trace_id",
+              "nativeQueryRef": "trace_id"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "span_id"
+                }
+              },
+              "queryRef": "events_v1.span_id",
+              "nativeQueryRef": "span_id"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "status"
+                }
+              },
+              "queryRef": "events_v1.status",
+              "nativeQueryRef": "status"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "model_version"
+                }
+              },
+              "queryRef": "events_v1.model_version",
+              "nativeQueryRef": "model_version"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "tool_completed_name"
+                }
+              },
+              "queryRef": "events_v1.tool_completed_name",
+              "nativeQueryRef": "tool_completed_name"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "tool_error_name"
+                }
+              },
+              "queryRef": "events_v1.tool_error_name",
+              "nativeQueryRef": "tool_error_name"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "usage_total_tokens"
+                }
+              },
+              "queryRef": "events_v1.usage_total_tokens",
+              "nativeQueryRef": "usage_total_tokens"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "llm_total_ms"
+                }
+              },
+              "queryRef": "events_v1.llm_total_ms",
+              "nativeQueryRef": "llm_total_ms"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "tool_completed_total_ms"
+                }
+              },
+              "queryRef": "events_v1.tool_completed_total_ms",
+              "nativeQueryRef": "tool_completed_total_ms"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "tool_error_total_ms"
+                }
+              },
+              "queryRef": "events_v1.tool_error_total_ms",
+              "nativeQueryRef": "tool_error_total_ms"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "error_message"
+                }
+              },
+              "queryRef": "events_v1.error_message",
+              "nativeQueryRef": "error_message"
+            }
+          ]
+        }
+      },
+      "sortDefinition": {
+        "sort": [
+          {
+            "field": {
+              "Column": {
+                "Expression": {
+                  "SourceRef": {
+                    "Entity": "events_v1"
+                  }
+                },
+                "Property": "timestamp"
+              }
+            },
+            "direction": "Descending"
+          }
+        ],
+        "isDefaultSort": false
+      }
+    }
+  },
+  "annotations": [
+    {
+      "name": "bqaa.chart_id",
+      "value": "trace-inspector-table"
+    }
+  ]
+}

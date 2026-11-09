@@ -15,7 +15,8 @@
 """Tests for the Power BI PBIR report generator (Slice S2).
 
 Per spec.md §7.5, S2 tests cover:
-- 8 pages, 37 + 9 + 40 slicers + 8 headings + 1 table
+- 8 report pages plus the hidden drill-through page, 37 + 9 + 45 slicers +
+  9 headings + 2 trace tables
 - titles, ids <= 50
 - NoFilter set (exactly the F4 pairs)
 - sync groups
@@ -106,24 +107,44 @@ EXPECTED_PAGES = [
     ("errors", "Errors", 720),
     ("trace-inspector", "Trace Inspector", 720),
 ]
+# The drill-through target (README D12): not a Looker Studio page, hidden in
+# view mode, after the 8 report pages.
+DRILLTHROUGH_PAGE = "trace-details"
 
 
 def test_pages_json(generated_files):
-  """pages.json has 8 pages in order with activePageName."""
+  """pages.json lists the 8 pages in order, then the drill-through page."""
   pj = json.loads(
       generated_files["BQAA_Agent_Analytics.Report/definition/pages/pages.json"]
   )
   assert pj["$schema"] == _SCHEMA_PAGES
-  assert pj["pageOrder"] == [p[0] for p in EXPECTED_PAGES]
+  assert pj["pageOrder"] == [p[0] for p in EXPECTED_PAGES] + [DRILLTHROUGH_PAGE]
   assert pj["activePageName"] == "token-consumption"
 
 
 def test_page_count(generated_files):
-  """Exactly 8 page.json files."""
+  """Exactly 9 page.json files: the 8 report pages and the drill-through page."""
   pages = [
       p for p in generated_files if p.endswith("/page.json") and "/pages/" in p
   ]
-  assert len(pages) == 8
+  assert len(pages) == 9
+
+
+def test_drillthrough_page_json(generated_files):
+  """The drill-through page is hidden in view mode and has no Looker id."""
+  pj = json.loads(
+      generated_files[
+          f"BQAA_Agent_Analytics.Report/definition/pages/{DRILLTHROUGH_PAGE}"
+          "/page.json"
+      ]
+  )
+  assert pj["$schema"] == _SCHEMA_PAGE
+  assert pj["name"] == DRILLTHROUGH_PAGE
+  assert pj["displayName"] == "Trace Details"
+  assert pj["displayOption"] == "FitToWidth"
+  assert (pj["width"], pj["height"]) == (1280, 720)
+  assert pj["visibility"] == "HiddenInViewMode"
+  assert "annotations" not in pj
 
 
 def test_page_heights(generated_files):
@@ -170,13 +191,14 @@ def test_page_annotations(generated_files):
 
 
 def test_total_visual_count(generated_files):
-  """104 visuals total.
+  """111 visuals total.
 
-  37 parity + 40 slicers + 8 headings + 9 non-data + 1 table, plus the 8
-  per-page Reset filters buttons and the Trace Inspector Back button.
+  37 parity + 45 slicers + 9 headings + 9 non-data + 2 trace tables, plus the
+  8 Reset filters buttons on the report pages and the Back button on the
+  drill-through page.
   """
   visuals = [p for p in generated_files if p.endswith("/visual.json")]
-  assert len(visuals) == 104
+  assert len(visuals) == 111
 
 
 def test_parity_visual_count(generated_files):
@@ -207,7 +229,7 @@ def test_parity_visual_count(generated_files):
 
 
 def test_slicer_count(generated_files):
-  """40 slicers: 5 per page × 8 pages."""
+  """45 slicers: 5 per page × 9 pages (the drill-through page included)."""
   slicer_count = 0
   for path, content in generated_files.items():
     if not path.endswith("/visual.json"):
@@ -215,11 +237,11 @@ def test_slicer_count(generated_files):
     vc = json.loads(content)
     if vc["name"].startswith("slicer-"):
       slicer_count += 1
-  assert slicer_count == 40
+  assert slicer_count == 45
 
 
 def test_heading_count(generated_files):
-  """8 page headings, one per page."""
+  """9 page headings, one per page."""
   heading_count = 0
   for path, content in generated_files.items():
     if not path.endswith("/visual.json"):
@@ -227,7 +249,7 @@ def test_heading_count(generated_files):
     vc = json.loads(content)
     if vc["name"] == "page-heading":
       heading_count += 1
-  assert heading_count == 8
+  assert heading_count == 9
 
 
 def test_non_data_count(generated_files):
@@ -242,17 +264,22 @@ def test_non_data_count(generated_files):
   assert nondata_count == 9
 
 
-def test_trace_inspector_table(generated_files):
-  """trace-inspector-table with 15 columns sorted by timestamp desc (D12)."""
+@pytest.mark.parametrize("page", ["trace-inspector", DRILLTHROUGH_PAGE])
+def test_trace_inspector_table(generated_files, page):
+  """trace-inspector-table: 16 columns, newest first (D12), on both pages.
+
+  A tool-error row carries its latency in tool_error_total_ms, so both latency
+  columns are shown.
+  """
   ti_path = (
       "BQAA_Agent_Analytics.Report/definition/pages/"
-      "trace-inspector/visuals/trace-inspector-table/visual.json"
+      f"{page}/visuals/trace-inspector-table/visual.json"
   )
   assert ti_path in generated_files
   ti = json.loads(generated_files[ti_path])
   assert ti["visual"]["visualType"] == "tableEx"
   cols = ti["visual"]["query"]["queryState"]["Values"]["projections"]
-  assert len(cols) == 15
+  assert len(cols) == 16
   col_names = [c["queryRef"] for c in cols]
   assert col_names == [
       "events_v1.timestamp",
@@ -269,6 +296,7 @@ def test_trace_inspector_table(generated_files):
       "events_v1.usage_total_tokens",
       "events_v1.llm_total_ms",
       "events_v1.tool_completed_total_ms",
+      "events_v1.tool_error_total_ms",
       "events_v1.error_message",
   ]
   # Every column is a plain (non-summarized) column, one row per event.
@@ -941,16 +969,105 @@ def test_custom_theme_name_matches_its_registered_resource(generated_files):
     ],
 )
 def test_navigation_buttons_show_their_fill_colour(generated_files, page, name):
-  """A2: a button fill is off by default, and a colour needs solid.color."""
+  """A2/P1: the fill is turned on, then coloured, in two separate entries.
+
+  The fill is off by default and a colour needs solid.color.  Power BI reads
+  `show` only from an entry without a selector and the styling only from the
+  {"id": "default"} entry; one entry holding both is ignored.
+  """
   objects = _visual(generated_files, page, name)["visual"]["objects"]
-  fill = _props(objects, "fill", {"id": "default"})
-  assert fill["show"] == _lit("true")
-  assert fill["fillColor"] == _solid("#E52592")
-  assert fill["transparency"] == _lit("0D")
+  assert objects["fill"] == [
+      {"properties": {"show": _lit("true")}},
+      {
+          "properties": {
+              "fillColor": _solid("#E52592"),
+              "transparency": _lit("0D"),
+          },
+          "selector": {"id": "default"},
+      },
+  ]
+  assert _props(objects, "text") == {"show": _lit("true")}
   text = _props(objects, "text", {"id": "default"})
   assert text["fontColor"] == _solid("#FFFFFF")
   assert text["bold"] == _lit("true")
-  assert _props(objects, "outline", {"id": "default"})["show"] == _lit("false")
+  assert objects["outline"] == [{"properties": {"show": _lit("false")}}]
+
+
+def _action_buttons(files):
+  """Yield (path, visual container) for every actionButton."""
+  for path, content in sorted(files.items()):
+    if path.endswith("/visual.json"):
+      vc = json.loads(content)
+      if vc["visual"]["visualType"] == "actionButton":
+        yield path, vc
+
+
+def test_every_button_follows_the_render_contract(generated_files):
+  """P1: all 11 buttons use Microsoft's actionButton template.
+
+  text, icon, fill and a shown outline are each a `show` entry without a
+  selector followed by one {"id": "default"} styling entry without `show`; a
+  hidden outline is a single `show` entry.  The shape names a rounded
+  rectangle in both of its entries, the icon slot sits left of the label, the
+  container draws no background or border, and the button is 44 px tall for
+  its 11 pt label.
+  """
+  buttons = list(_action_buttons(generated_files))
+  # 8 Reset filters, 1 Back and 2 page-navigation buttons.
+  assert len(buttons) == 11
+  for path, vc in buttons:
+    objects = vc["visual"]["objects"]
+    for name in ("text", "icon", "fill", "outline"):
+      entries = objects[name]
+      if name == "outline" and len(entries) == 1:
+        assert entries == [{"properties": {"show": _lit("false")}}], path
+        continue
+      assert len(entries) == 2, (path, name)
+      # Entry 1: no selector, only `show`.
+      assert list(entries[0]) == ["properties"], (path, name)
+      assert list(entries[0]["properties"]) == ["show"], (path, name)
+      # Entry 2: the styling, for the default state.
+      assert entries[1]["selector"] == {"id": "default"}, (path, name)
+      assert "show" not in entries[1]["properties"], (path, name)
+    assert _props(objects, "icon") == {"show": _lit("false")}, path
+    icon = _props(objects, "icon", {"id": "default"})
+    assert icon["placement"] == _lit("'left'"), path
+    text = _props(objects, "text", {"id": "default"})
+    assert text["fontSize"] == _lit("11D"), path
+    assert text["horizontalAlignment"] == _lit("'center'"), path
+    rounded = _lit("'rectangleRounded'")
+    assert objects["shape"] == [
+        {"properties": {"tileShape": rounded, "roundEdge": _lit("8L")}},
+        {"properties": {"tileShape": rounded}, "selector": {"id": "default"}},
+    ], path
+    containers = vc["visual"]["visualContainerObjects"]
+    assert containers["background"] == [
+        {"properties": {"show": _lit("false")}}
+    ], path
+    assert containers["border"] == [{"properties": {"show": _lit("false")}}]
+    assert containers["visualLink"][0]["properties"]["show"] == _lit("true")
+    assert vc["visual"]["drillFilterOtherVisuals"] is True, path
+    assert vc["howCreated"] == "InsertVisualButton", path
+    assert vc["position"]["height"] == 44, path
+
+
+@pytest.mark.parametrize(
+    "page,name",
+    [
+        ("user-analytics", "usage-nondata-3"),
+        ("latency", "performance-nondata-3"),
+    ],
+)
+def test_navigation_buttons_are_centred_in_their_manifest_cell(
+    generated_files, visuals_spec, common, page, name
+):
+  """The 32 and 72 px manifest cells hold a 44 px button at their centre."""
+  ndef = next(n for n in visuals_spec["non_data_elements"] if n["id"] == name)
+  cell = common.canvas_rect(ndef["geometry"])
+  pos = _visual(generated_files, page, name)["position"]
+  assert (pos["x"], pos["width"]) == (cell["x"], cell["width"])
+  assert pos["height"] == 44
+  assert 2 * pos["y"] + pos["height"] == 2 * cell["y"] + cell["height"]
 
 
 def test_latency_cards_show_exact_millisecond_values(
@@ -1033,21 +1150,51 @@ def test_area_charts_start_their_value_axis_at_zero(
 
 
 @pytest.mark.parametrize("chart_id", sorted(_KPI_CARDS))
-def test_kpi_cards_stack_and_explain_a_blank_change(
+def test_kpi_cards_stack_their_callouts(
     generated_files, visuals_spec, chart_id
 ):
-  """B5/C1: callouts stack vertically; a blank Change % reads 'No prior data'."""
-  _, change = _KPI_CARDS[chart_id]
+  """B5: the "vs previous period" callout stacks under the headline value."""
   vdef = _spec_visual(visuals_spec, chart_id)
   objects = json.loads(generated_files[_visual_path(vdef)])["visual"]["objects"]
-  layout = _props(objects, "layout", {"id": "default"})
-  assert layout["orientation"] == _lit("1D")
-  blank = _props(objects, "value", {"metadata": f"events_v1.{change}"})
-  assert blank["showBlankAs"] == _lit("'No prior data'")
-  # Only the change callout is relabelled, never the headline value.
-  for entry in objects["value"]:
-    if "showBlankAs" in entry["properties"]:
-      assert entry["selector"] == {"metadata": f"events_v1.{change}"}
+  assert objects["layout"] == [
+      {
+          "properties": {"orientation": _lit("1D")},
+          "selector": {"id": "default"},
+      }
+  ]
+
+
+def test_card_blanks_keep_power_bis_own_representation(
+    generated_files, visuals_spec
+):
+  """A blank change or headline value is never relabelled (review of C1).
+
+  cardVisual objects take only {"id": ...} selectors (Power BI drops an entry
+  scoped with {"metadata": ...}), and an `id` entry formats every callout of
+  the card.  A custom blank text would therefore also replace a blank
+  headline: KPI Total Tokens has no zero default, so it is blank for a window
+  without tokens.  The text could not say why a change is blank either:
+  DIVIDE also returns BLANK when the previous total is 0, so "no prior data"
+  would be false for a previous window with 0 errors.
+  """
+  cards = _parity(visuals_spec, "cardVisual")
+  assert len(cards) == 16
+  for vdef in cards:
+    vc = json.loads(generated_files[_visual_path(vdef)])
+    for name, entries in vc["visual"].get("objects", {}).items():
+      for entry in entries:
+        assert "showBlankAs" not in entry["properties"], (vdef["id"], name)
+        assert set(entry.get("selector", {"id": None})) == {"id"}, vdef["id"]
+
+
+def test_value_format_is_refused_on_a_card_with_a_change_callout(
+    report_mod, contracts, visuals_spec
+):
+  """value_format would format the change callout too (can fail)."""
+  mutated = copy.deepcopy(visuals_spec)
+  _spec_visual(mutated, "usage-total-tokens")["value_format"] = "exact"
+  with pytest.raises(ValueError, match="single-value cards only"):
+    report_mod.build_report(contracts, mutated)
 
 
 def test_dropdown_slicers_have_a_search_box(generated_files):
@@ -1067,12 +1214,12 @@ def test_dropdown_slicers_have_a_search_box(generated_files):
       searchable += 1
     else:
       assert "general" not in objects, path
-  assert searchable == 32  # 4 dropdown slicers x 8 pages
+  assert searchable == 36  # 4 dropdown slicers x 9 pages
 
 
-def test_trace_inspector_is_a_drillthrough_target(generated_files):
-  """C3: right-click a bar or a day -> Drill through -> Trace Inspector."""
-  pj = _page(generated_files, "trace-inspector")
+def test_trace_details_is_the_drillthrough_target(generated_files):
+  """C3: right-click a bar or a day -> Drill through -> Trace Details."""
+  pj = _page(generated_files, DRILLTHROUGH_PAGE)
   binding = pj["pageBinding"]
   assert binding["type"] == "Drillthrough"
   filters = {f["name"]: f for f in pj["filterConfig"]["filters"]}
@@ -1096,29 +1243,72 @@ def test_trace_inspector_is_a_drillthrough_target(generated_files):
   assert len(names) == len(set(names))
 
 
-def test_only_the_trace_inspector_is_a_drillthrough_target(generated_files):
+def test_report_pages_never_receive_drillthrough_filters(generated_files):
+  """Finding 3: drill-through filters land only on the hidden page.
+
+  Clear all slicers does not clear drill-through filters, so on a page that
+  users also open from the tabs they would stay applied, with no control to
+  remove them.  Every report page is therefore visible and carries no page
+  binding or page filter; the drill-through page is hidden in view mode.
+  """
   for page in _PAGE_NAMES:
     pj = _page(generated_files, page)
-    assert ("pageBinding" in pj) == (page == "trace-inspector"), page
-    assert ("filterConfig" in pj) == (page == "trace-inspector"), page
+    assert "pageBinding" not in pj, page
+    assert "filterConfig" not in pj, page
+    assert "visibility" not in pj, page
+  pj = _page(generated_files, DRILLTHROUGH_PAGE)
+  assert pj["visibility"] == "HiddenInViewMode"
 
 
-def test_trace_inspector_has_a_back_button(generated_files):
-  """C3: drill-through targets need a way back to the source page."""
-  vc = _visual(generated_files, "trace-inspector", "drillthrough-back")
+def test_drillthrough_page_has_back_instead_of_reset(generated_files):
+  """C3: Back returns to the source page; Reset could not clear the filter."""
+  vc = _visual(generated_files, DRILLTHROUGH_PAGE, "drillthrough-back")
   assert vc["visual"]["visualType"] == "actionButton"
   link = vc["visual"]["visualContainerObjects"]["visualLink"][0]["properties"]
   assert link["show"] == _lit("true")
   assert link["type"] == _lit("'Back'")
+  # Back takes the Reset filters slot, in the header band.
+  assert vc["position"]["x"] + vc["position"]["width"] == 1256
+  assert vc["position"]["y"] + vc["position"]["height"] <= 56
+  assert (
+      f"{_REPORT_PAGES}/{DRILLTHROUGH_PAGE}/visuals/reset-filters/visual.json"
+      not in generated_files
+  )
   for page in _PAGE_NAMES:
-    if page != "trace-inspector":
-      assert (
-          f"{_REPORT_PAGES}/{page}/visuals/drillthrough-back/visual.json"
-          not in generated_files
-      )
+    assert (
+        f"{_REPORT_PAGES}/{page}/visuals/drillthrough-back/visual.json"
+        not in generated_files
+    )
 
 
-def test_every_page_has_a_reset_filters_button(generated_files):
+def test_drillthrough_page_repeats_the_slicers_and_the_trace_table(
+    generated_files,
+):
+  """The drill-through page shows the synced slicers and the trace table."""
+  prefix = f"{_REPORT_PAGES}/{DRILLTHROUGH_PAGE}/visuals/"
+  names = sorted(
+      path[len(prefix) :].split("/")[0]
+      for path in generated_files
+      if path.startswith(prefix)
+  )
+  assert names == [
+      "drillthrough-back",
+      "page-heading",
+      "slicer-agent",
+      "slicer-date",
+      "slicer-span-id",
+      "slicer-trace-id",
+      "slicer-user-id",
+      "trace-inspector-table",
+  ]
+  heading = _visual(generated_files, DRILLTHROUGH_PAGE, "page-heading")
+  paragraph = heading["visual"]["objects"]["general"][0]["properties"][
+      "paragraphs"
+  ][0]
+  assert paragraph["textRuns"][0]["value"] == "Trace Details"
+
+
+def test_every_report_page_has_a_reset_filters_button(generated_files):
   """C5: one click clears every (synced) slicer."""
   for page in _PAGE_NAMES:
     vc = _visual(generated_files, page, "reset-filters")

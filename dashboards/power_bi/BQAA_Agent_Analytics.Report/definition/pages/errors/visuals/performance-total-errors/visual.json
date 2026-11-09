@@ -65,22 +65,6 @@
             "id": "default"
           }
         }
-      ],
-      "value": [
-        {
-          "properties": {
-            "showBlankAs": {
-              "expr": {
-                "Literal": {
-                  "Value": "'No prior data'"
-                }
-              }
-            }
-          },
-          "selector": {
-            "metadata": "events_v1.KPI Tool Errors Change %"
-          }
-        }
       ]
     },
     "visualContainerObjects": {

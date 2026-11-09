@@ -3934,8 +3934,8 @@ def test_allow_empty_help_says_a_card_is_never_empty(capsys):
   assert exit_info.value.code == 0
   text = " ".join(capsys.readouterr().out.split())
   assert (
-      "accept grouped visuals (area/bar charts) that are empty on both sides"
-      in text
+      "accept grouped visuals (area, line, or bar charts) that are empty on"
+      " both sides" in text
   )
   assert (
       "a cardVisual must always return exactly one row and is never EMPTY"

@@ -726,8 +726,11 @@ non_data_elements:
     width: 24
     height: 2
 
-# Trace Inspector table on the trace-inspector page.  The first 7 columns are
-# the Looker Studio parity set; the rest are debugging columns (README D12).
+# Trace Inspector table on the trace-inspector page, repeated on the hidden
+# drill-through page.  The first 7 columns are the Looker Studio parity set;
+# the rest are debugging columns (README D12).  A tool-error row has its
+# latency in tool_error_total_ms, a completed tool call in
+# tool_completed_total_ms.
 trace_inspector:
   name: trace-inspector-table
   page: trace-inspector
@@ -746,6 +749,7 @@ trace_inspector:
   - events_v1.usage_total_tokens
   - events_v1.llm_total_ms
   - events_v1.tool_completed_total_ms
+  - events_v1.tool_error_total_ms
   - events_v1.error_message
   geometry:
     row: 0
@@ -756,7 +760,7 @@ trace_inspector:
     field: events_v1.timestamp
     direction: Descending
 
-# Header controls repeated on every page (README D17).  Positions live in
+# Header control on every report page (README D17).  Its position lives in
 # pbip_common.HEADER_RECTS, in the free band right of the page heading.
 header_controls:
   reset_filters:
@@ -768,10 +772,16 @@ header_controls:
     outline_color: '#5F6368'
 
 # Drill-through target (README D12): right-click a bar or a day on any page
-# -> Drill through -> Trace Inspector, filtered to that member.
+# -> Drill through -> Trace Details, the Trace Inspector table filtered to
+# that member.  The page is hidden in view mode and opened only by
+# drill-through: Clear all slicers does not clear drill-through filters, so on
+# a page that users also open from the tabs they would stay applied.  It has
+# the synced slicers and a Back button in place of Reset filters.
 drillthrough:
-  page: trace-inspector
-  binding_name: bqaa-trace-inspector-drillthrough
+  page: trace-details
+  display_name: Trace Details
+  height: 720
+  binding_name: bqaa-trace-details-drillthrough
   fields:
   - Date.Date
   - events_v1.agent

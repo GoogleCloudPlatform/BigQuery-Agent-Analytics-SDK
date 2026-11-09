@@ -259,7 +259,8 @@ NON_DATA_IDS = [
 ]
 
 # Trace Inspector columns (F10): the 7 Looker Studio parity columns plus the
-# debugging columns (README D12).
+# debugging columns (README D12).  A tool-error row has its latency in
+# tool_error_total_ms, a completed tool call in tool_completed_total_ms.
 TRACE_INSPECTOR_COLUMNS = [
     "timestamp",
     "event_type",
@@ -275,17 +276,22 @@ TRACE_INSPECTOR_COLUMNS = [
     "usage_total_tokens",
     "llm_total_ms",
     "tool_completed_total_ms",
+    "tool_error_total_ms",
     "error_message",
 ]
 
-# Header buttons outside the parity layout: Reset filters on every page
-# (README D17) and Back on the drill-through page (README D12).
+# Header buttons outside the parity layout: Reset filters on every report page
+# (README D17) and, in its place, Back on the drill-through page (README D12).
 RESET_FILTERS_ID = "reset-filters"
 DRILLTHROUGH_BACK_ID = "drillthrough-back"
 HEADER_BUTTON_IDS = [RESET_FILTERS_ID, DRILLTHROUGH_BACK_ID]
 
-# The drill-through page and its fields, in order (README D12).
-DRILLTHROUGH_PAGE = "trace-inspector"
+# The drill-through page and its fields, in order (README D12).  It follows
+# the 8 PAGES but is not a Looker Studio page: it is hidden in view mode and
+# opened only by drill-through, because Clear all slicers does not clear
+# drill-through filters and they would otherwise stay on a page that users
+# open from the tabs.
+DRILLTHROUGH_PAGE = "trace-details"
 DRILLTHROUGH_FIELDS = [
     ("Date", "Date"),
     ("events_v1", "agent"),
@@ -293,9 +299,20 @@ DRILLTHROUGH_FIELDS = [
     ("events_v1", "tool_completed_name"),
     ("events_v1", "tool_error_name"),
 ]
+# Pages that draw the Trace Inspector table.
+TRACE_TABLE_PAGES = ["trace-inspector", DRILLTHROUGH_PAGE]
+
+# actionButton render contract, from Microsoft's Power BI report authoring
+# references (microsoft/skills-for-fabric, powerbi-authoring,
+# references/authoring/button.md and button-part-02.md): objects written as
+# a `show` entry plus `{"id": <state>}` styling entries, and the height range
+# in px (a shorter button clips its label).
+BUTTON_DUAL_ENTRY_OBJECTS = ("text", "icon", "fill", "outline")
+BUTTON_MIN_HEIGHT = 40
+BUTTON_MAX_HEIGHT = 56
 
 # PBIP files in the web configurator bundle (docs/pbip-bundle.js).
-PBIP_BUNDLE_FILE_COUNT = 127
+PBIP_BUNDLE_FILE_COUNT = 135
 
 
 # ---------------------------------------------------------------------------
@@ -1131,21 +1148,34 @@ def _visual_link_properties(vobj):
 
 
 def _check_ux_controls(report_dir):
-  """Check the header buttons, the drill-through page and the theme reference.
+  """Check the pages, header buttons, drill-through page and theme reference.
 
-  Every page carries a Reset filters button that clears all slicers (README
-  D17).  Only the Trace Inspector is a drill-through target, on exactly
-  DRILLTHROUGH_FIELDS, and only it carries the Back button (README D12).  The
+  The report has the 8 PAGES in tab order, then the drill-through page, which
+  is hidden in view mode and is the only drill-through target, on exactly
+  DRILLTHROUGH_FIELDS (README D12): Clear all slicers does not clear
+  drill-through filters, so they must not land on a page that users open from
+  the tabs.  Every report page carries a Reset filters button that clears all
+  slicers (README D17); the drill-through page carries Back instead.  The
   custom theme must name a registered CustomTheme resource, otherwise Power BI
   cannot resolve it and draws the default palette.
   """
   errors = []
   pages_dir = report_dir / "definition" / "pages"
+  expected_pages = [name for name, _ in PAGES] + [DRILLTHROUGH_PAGE]
+  page_names = sorted(p.name for p in pages_dir.iterdir() if p.is_dir())
+  if page_names != sorted(expected_pages):
+    errors.append(f"Report pages {page_names} != {sorted(expected_pages)}")
+  pages_json_path = pages_dir / "pages.json"
+  if pages_json_path.exists():
+    page_order = _read_json(pages_json_path).get("pageOrder")
+    if page_order != expected_pages:
+      errors.append(f"pages.json: pageOrder {page_order} != {expected_pages}")
   for page_dir in sorted(p for p in pages_dir.iterdir() if p.is_dir()):
     page = page_dir.name
-    expected_actions = {RESET_FILTERS_ID: "'ClearAllSlicers'"}
     if page == DRILLTHROUGH_PAGE:
-      expected_actions[DRILLTHROUGH_BACK_ID] = "'Back'"
+      expected_actions = {DRILLTHROUGH_BACK_ID: "'Back'"}
+    else:
+      expected_actions = {RESET_FILTERS_ID: "'ClearAllSlicers'"}
     for button_id in HEADER_BUTTON_IDS:
       path = page_dir / "visuals" / button_id / "visual.json"
       if button_id not in expected_actions:
@@ -1170,13 +1200,21 @@ def _check_ux_controls(report_dir):
     page_json_path = page_dir / "page.json"
     page_obj = _read_json(page_json_path) if page_json_path.exists() else {}
     binding = page_obj.get("pageBinding")
+    hidden = page_obj.get("visibility") == "HiddenInViewMode"
     if page != DRILLTHROUGH_PAGE:
       if binding is not None:
         errors.append(
             f"Page '{page}': only '{DRILLTHROUGH_PAGE}' is a drill-through "
             "target"
         )
+      if hidden:
+        errors.append(f"Page '{page}': a report page must not be hidden")
       continue
+    if not hidden:
+      errors.append(
+          f"Page '{page}': the drill-through page must have visibility "
+          "'HiddenInViewMode'"
+      )
     if not isinstance(binding, dict) or binding.get("type") != "Drillthrough":
       errors.append(f"Page '{page}': pageBinding must have type 'Drillthrough'")
       continue
@@ -1235,6 +1273,152 @@ def _check_ux_controls(report_dir):
           f"report.json: customTheme name {theme_name!r} is not a registered "
           f"CustomTheme resource {sorted(map(str, registered))}"
       )
+  return errors
+
+
+def _visual_files(report_dir):
+  """Yield (page name, visual name, visual.json object) for every visual."""
+  pages_dir = report_dir / "definition" / "pages"
+  for path in sorted(pages_dir.glob("*/visuals/*/visual.json")):
+    vobj = _read_json(path)
+    yield path.parents[2].name, vobj.get("name", path.parent.name), vobj
+
+
+def _state_entries_problem(entries):
+  """Return how a button object breaks the dual-entry layout, or None.
+
+  Entry 1 has no selector and holds only `show`; every further entry holds
+  styling (no `show`) under an `{"id": <state>}` selector, one of them
+  `{"id": "default"}`.
+  """
+  if not isinstance(entries, list) or not entries:
+    return "is missing"
+  first, styling = entries[0], entries[1:]
+  if (
+      not isinstance(first, dict)
+      or "selector" in first
+      or set(first.get("properties", {})) != {"show"}
+  ):
+    return "entry 1 must hold only show, without a selector"
+  states = []
+  for entry in styling:
+    selector = entry.get("selector") if isinstance(entry, dict) else None
+    if not isinstance(selector, dict) or set(selector) != {"id"}:
+      return f"styling entry has selector {selector!r}, not {{'id': <state>}}"
+    properties = entry.get("properties", {})
+    if not properties or "show" in properties:
+      return "a styling entry must hold styling and no show"
+    states.append(selector["id"])
+  if states.count("default") != 1:
+    return "needs one styling entry with the {'id': 'default'} selector"
+  return None
+
+
+def _check_action_buttons(report_dir):
+  """Check every actionButton against the button render contract.
+
+  Power BI reads a button formatting object as an entry without a selector
+  that holds only `show`, then styling entries under `{"id": <state>}`
+  selectors.  An entry that mixes `show` and styling, with or without a
+  selector, is ignored and the button renders with its defaults (for example
+  a transparent fill under white text).  A hidden outline is one `show`
+  entry.  The shape names a rounded rectangle in an entry without a selector
+  (with its geometry) and in the `{"id": "default"}` entry; the icon slot is
+  placed beside the label; the container background and border are off; and
+  the button is BUTTON_MIN_HEIGHT to BUTTON_MAX_HEIGHT px tall.  See
+  BUTTON_DUAL_ENTRY_OBJECTS for the reference.
+  """
+  errors = []
+  rounded = "'rectangleRounded'"
+  hidden_outline = [
+      {"properties": {"show": {"expr": {"Literal": {"Value": "false"}}}}}
+  ]
+  for page, name, vobj in _visual_files(report_dir):
+    visual = vobj.get("visual", {})
+    if visual.get("visualType") != "actionButton":
+      continue
+    where = f"Button '{page}/{name}'"
+    objects = visual.get("objects", {})
+    for obj in BUTTON_DUAL_ENTRY_OBJECTS:
+      if obj == "outline" and objects.get(obj) == hidden_outline:
+        continue
+      problem = _state_entries_problem(objects.get(obj))
+      if problem:
+        errors.append(f"{where}: {obj} {problem}")
+    shape = objects.get("shape")
+    if (
+        not isinstance(shape, list)
+        or len(shape) != 2
+        or not all(isinstance(e, dict) for e in shape)
+        or "selector" in shape[0]
+        or _literal_value(shape[0].get("properties", {}).get("tileShape"))
+        != rounded
+        or shape[1].get("selector") != {"id": "default"}
+        or list(shape[1].get("properties", {})) != ["tileShape"]
+        or _literal_value(shape[1]["properties"]["tileShape"]) != rounded
+    ):
+      errors.append(
+          f"{where}: shape must name {rounded} in an entry without a "
+          "selector and in the {'id': 'default'} entry"
+      )
+    icon = objects.get("icon")
+    icon_styles = [
+        e.get("properties", {})
+        for e in (icon[1:] if isinstance(icon, list) else [])
+        if isinstance(e, dict) and e.get("selector") == {"id": "default"}
+    ]
+    if not icon_styles or _literal_value(
+        icon_styles[0].get("placement")
+    ) not in ("'left'", "'right'"):
+      errors.append(f"{where}: icon placement must be 'left' or 'right'")
+    containers = visual.get("visualContainerObjects", {})
+    for obj in ("background", "border"):
+      entries = containers.get(obj)
+      first = entries[0] if isinstance(entries, list) and entries else {}
+      show = (
+          _literal_value(first.get("properties", {}).get("show"))
+          if isinstance(first, dict)
+          else None
+      )
+      if show != "false":
+        errors.append(f"{where}: visualContainerObjects.{obj} must be hidden")
+    height = vobj.get("position", {}).get("height")
+    if not (
+        isinstance(height, (int, float))
+        and BUTTON_MIN_HEIGHT <= height <= BUTTON_MAX_HEIGHT
+    ):
+      errors.append(
+          f"{where}: height {height!r} is outside {BUTTON_MIN_HEIGHT}-"
+          f"{BUTTON_MAX_HEIGHT} px"
+      )
+  return errors
+
+
+def _check_card_selectors(report_dir):
+  """Check that cardVisual formatting objects use only `{"id": ...}` selectors.
+
+  cardVisual objects take an `{"id": "default"}` selector (or none); Power BI
+  silently drops an entry with any other selector, such as `{"metadata":
+  ...}`.  The `id` entry formats every callout of the card alike.
+  """
+  errors = []
+  for page, name, vobj in _visual_files(report_dir):
+    visual = vobj.get("visual", {})
+    if visual.get("visualType") != "cardVisual":
+      continue
+    for obj, entries in visual.get("objects", {}).items():
+      if not isinstance(entries, list):
+        errors.append(f"Card '{page}/{name}': {obj} must be a list of entries")
+        continue
+      for entry in entries:
+        selector = entry.get("selector") if isinstance(entry, dict) else None
+        if selector is not None and (
+            not isinstance(selector, dict) or set(selector) != {"id"}
+        ):
+          errors.append(
+              f"Card '{page}/{name}': {obj} selector {selector!r} is not an "
+              "{'id': ...} selector"
+          )
   return errors
 
 
@@ -1395,45 +1579,47 @@ def validate_parity(power_bi_root=None, looker_root=None):
       if sg not in found_sync:
         errors.append(f"Page '{page_dir.name}': missing sync group '{sg}'")
 
-  # Check Trace Inspector table columns.
-  ti_page = report_pages_dir / "trace-inspector"
-  if ti_page.exists():
-    ti_visuals = ti_page / "visuals"
-    if ti_visuals.exists():
-      for vdir in ti_visuals.iterdir():
-        if not vdir.is_dir():
-          continue
-        visual_json_path = vdir / "visual.json"
-        if not visual_json_path.exists():
-          continue
-        vobj = _read_json(visual_json_path)
-        if vobj.get("name") == "trace-inspector-table":
-          visual_type = vobj.get("visual", {}).get("visualType", "")
-          if visual_type != "tableEx":
-            errors.append(
-                "trace-inspector-table: expected visualType " "'tableEx'"
-            )
-          # Check the 7 columns via projections.
-          projections = (
-              vobj.get("visual", {})
-              .get("query", {})
-              .get("queryState", {})
-              .get("Values", {})
-              .get("projections", [])
-          )
-          col_names = [
-              p.get("nativeQueryRef", "")
-              for p in projections
-              if isinstance(p, dict)
-          ]
-          if col_names != TRACE_INSPECTOR_COLUMNS:
-            errors.append(
-                f"trace-inspector-table: columns {col_names} "
-                f"!= {TRACE_INSPECTOR_COLUMNS}"
-            )
+  # Check the Trace Inspector table on every page that draws it.
+  for page_name in TRACE_TABLE_PAGES:
+    table_path = (
+        report_pages_dir
+        / page_name
+        / "visuals"
+        / "trace-inspector-table"
+        / "visual.json"
+    )
+    if not table_path.exists():
+      errors.append(f"Page '{page_name}': missing trace-inspector-table")
+      continue
+    vobj = _read_json(table_path)
+    visual_type = vobj.get("visual", {}).get("visualType", "")
+    if visual_type != "tableEx":
+      errors.append(
+          f"Page '{page_name}': trace-inspector-table: expected visualType "
+          "'tableEx'"
+      )
+    # Check the TRACE_INSPECTOR_COLUMNS via projections.
+    projections = (
+        vobj.get("visual", {})
+        .get("query", {})
+        .get("queryState", {})
+        .get("Values", {})
+        .get("projections", [])
+    )
+    col_names = [
+        p.get("nativeQueryRef", "") for p in projections if isinstance(p, dict)
+    ]
+    if col_names != TRACE_INSPECTOR_COLUMNS:
+      errors.append(
+          f"Page '{page_name}': trace-inspector-table: columns {col_names} "
+          f"!= {TRACE_INSPECTOR_COLUMNS}"
+      )
 
-  # Header buttons, the drill-through page and the theme reference.
+  # Pages, header buttons, the drill-through page and the theme reference.
   errors.extend(_check_ux_controls(report_dir))
+  # Button render contract and cardVisual selectors.
+  errors.extend(_check_action_buttons(report_dir))
+  errors.extend(_check_card_selectors(report_dir))
 
   # Check oracle files exist for all 37 chart ids.
   for chart_id in manifest_charts:

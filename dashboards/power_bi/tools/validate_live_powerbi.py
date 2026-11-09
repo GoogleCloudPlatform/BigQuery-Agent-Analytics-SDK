@@ -1158,10 +1158,10 @@ def main(argv=None):
       "--allow-empty",
       action="store_true",
       help=(
-          "accept grouped visuals (area/bar charts) that are empty on both"
-          " sides, and a run in which no oracle query returned any row (for"
-          " deliberate empty-window checks); a cardVisual must always return"
-          " exactly one row and is never EMPTY"
+          "accept grouped visuals (area, line, or bar charts) that are empty"
+          " on both sides, and a run in which no oracle query returned any row"
+          " (for deliberate empty-window checks); a cardVisual must always"
+          " return exactly one row and is never EMPTY"
       ),
   )
   parser.add_argument(
