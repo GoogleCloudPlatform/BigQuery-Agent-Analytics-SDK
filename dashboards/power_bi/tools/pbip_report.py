@@ -70,6 +70,45 @@ _REPORT_DIR = "BQAA_Agent_Analytics.Report"
 _DEF_DIR = os.path.join(_REPORT_DIR, "definition")
 _PAGES_DIR = os.path.join(_DEF_DIR, "pages")
 _THEME_DIR = os.path.join(_REPORT_DIR, "StaticResources", "RegisteredResources")
+# The theme's RegisteredResources item name.  report.json references the theme
+# by this name in both themeCollection and resourcePackages.
+_THEME_RESOURCE_NAME = "BQAA.json"
+
+# Formatting applied on top of the Looker Studio parity layout (README D5,
+# D16).  Object and property names follow the Power BI report theme schema
+# (microsoft/powerbi-desktop-samples, reportThemeSchema-2.159.json).
+_TITLE_FONT_COLOR = "#202124"  # theme foreground
+_TITLE_FONT_SIZE = "12D"
+# Per-card value formats selectable with `value_format` in report_visuals.yaml.
+_CARD_VALUE_FORMATS = {
+    # Exact numbers (4,512) instead of Power BI's automatic units (4.5K).
+    "exact": {"labelDisplayUnits": "1D", "labelPrecision": "0L"},
+}
+# cardVisual layout.orientation: 0 = Grid, 1 = Vertical, 2 = Horizontal.
+_CARD_ORIENTATION_VERTICAL = "1D"
+# Every actionButton follows the template and render contract of Microsoft's
+# Power BI report authoring references (microsoft/skills-for-fabric,
+# powerbi-authoring, references/authoring/button.md): a 44 px tall button
+# for an 11 pt label (the contract range is 40-56 px; a shorter button clips
+# its label).
+_BUTTON_HEIGHT = 44
+_BUTTON_FONT_SIZE = "11D"
+
+
+def _lit(value):
+  """Wrap an already-encoded PBIR literal ("true", "'text'", "12D", "0L")."""
+  return {"expr": {"Literal": {"Value": value}}}
+
+
+def _str_lit(text):
+  """Build a single-quoted PBIR string literal, escaping ' as ''."""
+  escaped = str(text).replace("'", "''")
+  return _lit(f"'{escaped}'")
+
+
+def _solid_color(color):
+  """Build a colour property value: PBIR nests colours under solid.color."""
+  return {"solid": {"color": _str_lit(color)}}
 
 
 def _slug(page_name):
@@ -116,22 +155,21 @@ def _projection(entity, prop, kind="Column", display_name=None):
 
 
 def _title_objects(title_text, show=True):
-  """Build the title formatting objects for a visual."""
+  """Build the title formatting objects for a visual.
+
+  A visible title is drawn in the theme foreground, 12pt bold (README D16):
+  Power BI's default light grey title was hard to read.
+  """
   escaped = title_text.replace("'", "''")
-  return {
-      "title": [
-          {
-              "properties": {
-                  "show": {
-                      "expr": {
-                          "Literal": {"Value": "true" if show else "false"}
-                      }
-                  },
-                  "text": {"expr": {"Literal": {"Value": f"'{escaped}'"}}},
-              }
-          }
-      ]
+  properties = {
+      "show": {"expr": {"Literal": {"Value": "true" if show else "false"}}},
+      "text": {"expr": {"Literal": {"Value": f"'{escaped}'"}}},
   }
+  if show:
+    properties["fontColor"] = _solid_color(_TITLE_FONT_COLOR)
+    properties["fontSize"] = _lit(_TITLE_FONT_SIZE)
+    properties["bold"] = _lit("true")
+  return {"title": [{"properties": properties}]}
 
 
 def _annotations(chart_id, is_parity=True):
@@ -152,7 +190,14 @@ def _build_card_visual(vdef, model_spec):
 
   The first measure is the headline value and carries the chart title as its
   display name; any further measure (the period-over-period change) is labelled
-  "vs previous period".
+  "vs previous period", and a card with a change callout stacks its callouts
+  vertically so neither label truncates (README D5).  `value_format` selects a
+  number format for a single-value card (README D16).
+
+  cardVisual formatting objects take only `{"id": ...}` selectors, and their
+  settings apply to every callout of the card.  A blank value therefore keeps
+  Power BI's own blank representation: a custom blank text would also relabel
+  a blank headline (Total Tokens has no zero default).
   """
   measures = vdef.get("measures", [])
   title = vdef.get("title")
@@ -169,11 +214,42 @@ def _build_card_visual(vdef, model_spec):
           for i, m in enumerate(measures)
       ]
   }
+  objects = {}
+  value_format = vdef.get("value_format")
+  if value_format is not None:
+    if value_format not in _CARD_VALUE_FORMATS:
+      raise ValueError(
+          f"{vdef.get('id')}: unknown value_format {value_format!r}; "
+          f"expected one of {sorted(_CARD_VALUE_FORMATS)}"
+      )
+    if len(measures) > 1:
+      raise ValueError(
+          f"{vdef.get('id')}: value_format would format every callout; "
+          "use it on single-value cards only"
+      )
+    objects["value"] = [
+        {
+            "properties": {
+                prop: _lit(value)
+                for prop, value in _CARD_VALUE_FORMATS[value_format].items()
+            },
+            "selector": {"id": "default"},
+        }
+    ]
+  if len(measures) > 1:
+    objects["layout"] = [
+        {
+            "properties": {"orientation": _lit(_CARD_ORIENTATION_VERTICAL)},
+            "selector": {"id": "default"},
+        }
+    ]
   visual = {
       "visualType": "cardVisual",
       "query": {"queryState": {"Data": data_role}},
-      "visualContainerObjects": _title_objects(vdef["title"], show=False),
   }
+  if objects:
+    visual["objects"] = objects
+  visual["visualContainerObjects"] = _title_objects(vdef["title"], show=False)
   return visual
 
 
@@ -205,13 +281,15 @@ def _build_bar_visual(vdef, model_spec):
               "isDefaultSort": False,
           },
       },
+      # Data labels: read each bar's value without hovering (README D16).
+      "objects": {"labels": [{"properties": {"show": _lit("true")}}]},
       "visualContainerObjects": _title_objects(vdef["title"]),
   }
   return visual
 
 
-def _build_area_visual(vdef, model_spec):
-  """Build an areaChart visual.json dict."""
+def _build_time_series_visual(vdef, visual_type):
+  """Build an areaChart or lineChart over Date.Date (optionally by series)."""
   entity = "events_v1"
   axis_field = vdef.get("axis", "Date.Date")
   parts = axis_field.split(".")
@@ -226,7 +304,7 @@ def _build_area_visual(vdef, model_spec):
       "Y": {"projections": [measure_proj]},
   }
 
-  # Series (pivot): one overlapping area per series value, not a stack
+  # Series (pivot): one area or line per series value, not a stack
   series_field = vdef.get("series")
   if series_field:
     sparts = series_field.split(".")
@@ -236,11 +314,25 @@ def _build_area_visual(vdef, model_spec):
     query_state["Series"] = {"projections": [series_proj]}
 
   visual = {
-      "visualType": "areaChart",
+      "visualType": visual_type,
       "query": {"queryState": query_state},
-      "visualContainerObjects": _title_objects(vdef["title"]),
   }
+  if visual_type == "areaChart":
+    # An area's fill encodes magnitude, so its value axis starts at zero
+    # (README D16); Power BI otherwise auto-scales it, exaggerating changes.
+    visual["objects"] = {"valueAxis": [{"properties": {"start": _lit("0D")}}]}
+  visual["visualContainerObjects"] = _title_objects(vdef["title"])
   return visual
+
+
+def _build_area_visual(vdef, model_spec):
+  """Build an areaChart visual.json dict."""
+  return _build_time_series_visual(vdef, "areaChart")
+
+
+def _build_line_visual(vdef, model_spec):
+  """Build a lineChart visual.json dict (README D15)."""
+  return _build_time_series_visual(vdef, "lineChart")
 
 
 def _build_slicer_visual(slicer_def):
@@ -276,6 +368,10 @@ def _build_slicer_visual(slicer_def):
           }
       ],
   }
+  if mode == "Dropdown":
+    # A search box: Trace ID and Span ID list thousands of hex values
+    # (README D17).
+    objects["general"] = [{"properties": {"selfFilterEnabled": _lit("true")}}]
 
   visual = {
       "visualType": "slicer",
@@ -337,57 +433,118 @@ def _build_textbox_visual(ndef):
   }
 
 
-def _build_button_visual(ndef):
-  """Build an actionButton visual.json dict."""
-  text = ndef.get("button_text", "")
-  escaped = text.replace("'", "''")
-  target = ndef.get("target_page", "")
+def _dual_entry(show, styling):
+  """Build an actionButton formatting object: `show`, then the styling.
 
-  fill_color = ndef.get("fill_color", "#E52592")
+  Power BI reads a button object as two entries: one without a selector that
+  holds only `show` (all states), and one with the `{"id": "default"}` state
+  selector that holds the styling.  A single entry that carries both, with or
+  without a selector, is ignored, and the button renders with its defaults.
+  """
+  return [
+      {"properties": {"show": _lit(show)}},
+      {"properties": styling, "selector": {"id": "default"}},
+  ]
 
+
+def _action_button(text, link, fill_color, font_color, outline_color=None):
+  """Build an actionButton visual.json dict.
+
+  `link` holds the visualLink properties besides `show` (the action).  The
+  objects follow Microsoft's actionButton template and render contract (see
+  _BUTTON_HEIGHT): dual-entry text, icon, fill and outline; a rounded
+  rectangle drawn edge to edge; and no container background or border, which
+  would otherwise draw a white box around an inset fill.  The icon stays
+  hidden, but its slot is placed left of the label, as the default slot above
+  the label pushes the text down.
+  """
+  if outline_color:
+    outline = _dual_entry("true", {"lineColor": _solid_color(outline_color)})
+  else:
+    # A hidden outline has nothing to style: one entry without a selector.
+    outline = [{"properties": {"show": _lit("false")}}]
   return {
       "visualType": "actionButton",
       "objects": {
-          "text": [
+          "text": _dual_entry(
+              "true",
+              {
+                  "text": _str_lit(text),
+                  "fontSize": _lit(_BUTTON_FONT_SIZE),
+                  "fontColor": _solid_color(font_color),
+                  "bold": _lit("true"),
+                  "horizontalAlignment": _str_lit("center"),
+              },
+          ),
+          "icon": _dual_entry(
+              "false",
+              {"shapeType": _str_lit("blank"), "placement": _str_lit("left")},
+          ),
+          "fill": _dual_entry(
+              "true",
+              {
+                  "fillColor": _solid_color(fill_color),
+                  "transparency": _lit("0D"),
+              },
+          ),
+          "outline": outline,
+          # The geometry lives in the entry without a selector; Power BI draws
+          # the shape named by the {"id": "default"} entry.
+          "shape": [
               {
                   "properties": {
-                      "show": {"expr": {"Literal": {"Value": "true"}}}
+                      "tileShape": _str_lit("rectangleRounded"),
+                      "roundEdge": _lit("8L"),
                   }
               },
               {
-                  "properties": {
-                      "text": {"expr": {"Literal": {"Value": f"'{escaped}'"}}}
-                  },
+                  "properties": {"tileShape": _str_lit("rectangleRounded")},
                   "selector": {"id": "default"},
               },
-          ],
-          "fill": [
-              {
-                  "properties": {
-                      "fillColor": {
-                          "expr": {"Literal": {"Value": f"'{fill_color}'"}}
-                      }
-                  },
-                  "selector": {"id": "default"},
-              }
           ],
       },
       "visualContainerObjects": {
-          "visualLink": [
-              {
-                  "properties": {
-                      "show": {"expr": {"Literal": {"Value": "true"}}},
-                      "type": {
-                          "expr": {"Literal": {"Value": "'PageNavigation'"}}
-                      },
-                      "navigationSection": {
-                          "expr": {"Literal": {"Value": f"'{target}'"}}
-                      },
-                  }
-              }
-          ]
+          "background": [{"properties": {"show": _lit("false")}}],
+          "border": [{"properties": {"show": _lit("false")}}],
+          "visualLink": [{"properties": {"show": _lit("true"), **link}}],
       },
+      "drillFilterOtherVisuals": True,
   }
+
+
+def _button_rect(cell):
+  """Return a _BUTTON_HEIGHT tall rect centred vertically in a grid cell."""
+  rect = dict(cell)
+  rect["y"] = cell["y"] + (cell["height"] - _BUTTON_HEIGHT) // 2
+  rect["height"] = _BUTTON_HEIGHT
+  return rect
+
+
+def _build_button_visual(ndef):
+  """Build a page-navigation actionButton (white text on the fill colour)."""
+  return _action_button(
+      ndef.get("button_text", ""),
+      {
+          "type": _str_lit("PageNavigation"),
+          "navigationSection": _str_lit(ndef.get("target_page", "")),
+      },
+      fill_color=ndef.get("fill_color", "#E52592"),
+      font_color="#FFFFFF",
+  )
+
+
+def _build_header_button(bdef, action):
+  """Build a header actionButton: Reset filters or drill-through Back."""
+  link = {"type": _str_lit(action)}
+  if bdef.get("tooltip"):
+    link["tooltip"] = _str_lit(bdef["tooltip"])
+  return _action_button(
+      bdef["button_text"],
+      link,
+      fill_color=bdef["fill_color"],
+      font_color=bdef["font_color"],
+      outline_color=bdef.get("outline_color"),
+  )
 
 
 def _build_table_visual(ti_def):
@@ -442,6 +599,9 @@ def _build_visual_container(name, rect, z, tab_order, visual, annotations=None):
   }
   if annotations:
     vc["annotations"] = annotations
+  if visual.get("visualType") == "actionButton":
+    # As Power BI Desktop records an inserted button (button template).
+    vc["howCreated"] = "InsertVisualButton"
   return vc
 
 
@@ -543,10 +703,15 @@ def _theme_json(spec):
 
 
 def _theme_collection():
-  """Build the themeCollection for report.json (spec §5.7)."""
+  """Build the themeCollection for report.json (spec §5.7).
+
+  The customTheme name is the RegisteredResources item name ("BQAA.json"),
+  as Power BI Desktop writes it; the theme does not resolve by its display
+  name ("BQAA"), and the report then falls back to the default palette.
+  """
   return {
       "customTheme": {
-          "name": "BQAA",
+          "name": _THEME_RESOURCE_NAME,
           "reportVersionAtImport": {
               "visual": "2.13.0",
               "page": "2.1.0",
@@ -565,13 +730,49 @@ def _resource_packages():
           "type": "RegisteredResources",
           "items": [
               {
-                  "name": "BQAA.json",
-                  "path": "BQAA.json",
+                  "name": _THEME_RESOURCE_NAME,
+                  "path": _THEME_RESOURCE_NAME,
                   "type": "CustomTheme",
               }
           ],
       }
   ]
+
+
+def _drillthrough_binding(dt_def):
+  """Build the pageBinding and filterConfig of a drill-through page.
+
+  Each drill-through field is a page filter created by drill-through, bound
+  by name to a parameter of the page binding (PBIR page schema 2.1.0).
+  Right-clicking a data point of that field on another page then offers
+  Drill through -> this page, filtered to the point (README D12).
+  """
+  parameters = []
+  filters = []
+  for field in dt_def["fields"]:
+    entity, prop = field.split(".")
+    filter_name = "bqaa-drillthrough-" + prop.lower().replace("_", "-")
+    parameters.append(
+        {
+            "name": f"{filter_name}-parameter",
+            "boundFilter": filter_name,
+            "fieldExpr": _col_expr(entity, prop),
+        }
+    )
+    filters.append(
+        {
+            "name": filter_name,
+            "field": _col_expr(entity, prop),
+            "type": "Categorical",
+            "howCreated": "Drillthrough",
+        }
+    )
+  binding = {
+      "name": dt_def["binding_name"],
+      "type": "Drillthrough",
+      "parameters": parameters,
+  }
+  return binding, {"filters": filters}
 
 
 def _listener_matrix(visuals_spec, page_name=None):
@@ -630,6 +831,28 @@ def _collect_visuals_for_page(page_name, visuals_spec, model_spec, common):
         _build_visual_container(sname, srect, 2000 + i, 2000 + i, svisual)
     )
 
+  # Header button: Reset filters on every report page (README D17).  The
+  # hidden drill-through page has Back instead (README D12): Clear all
+  # slicers does not clear drill-through filters, so a Reset button there
+  # could not bring back the other members.
+  drill = visuals_spec.get("drillthrough")
+  if drill and drill["page"] == page_name:
+    back = drill["back_button"]
+    header_buttons = [(back["name"], _build_header_button(back, "Back"))]
+  else:
+    reset = visuals_spec.get("header_controls", {}).get("reset_filters")
+    header_buttons = []
+    if reset:
+      header_buttons.append(
+          (reset["name"], _build_header_button(reset, "ClearAllSlicers"))
+      )
+  for i, (bname, bvisual) in enumerate(header_buttons):
+    visuals.append(
+        _build_visual_container(
+            bname, common.HEADER_RECTS[bname], 2100 + i, 2100 + i, bvisual
+        )
+    )
+
   # Body visuals: parity charts, non-data, trace inspector
   body_visuals = []
   idx = 0
@@ -646,8 +869,10 @@ def _collect_visuals_for_page(page_name, visuals_spec, model_spec, common):
       visual = _build_bar_visual(vdef, model_spec)
     elif vtype == "areaChart":
       visual = _build_area_visual(vdef, model_spec)
+    elif vtype == "lineChart":
+      visual = _build_line_visual(vdef, model_spec)
     else:
-      continue
+      raise ValueError(f"{vdef['id']}: unsupported visual_type {vtype!r}")
     annotations = _annotations(vdef["id"])
     vc = _build_visual_container(
         vdef["id"],
@@ -670,6 +895,9 @@ def _collect_visuals_for_page(page_name, visuals_spec, model_spec, common):
       visual = _build_textbox_visual(ndef)
     elif vt == "actionButton":
       visual = _build_button_visual(ndef)
+      # The manifest cells are 32 and 72 px tall; the button render contract
+      # needs 40-56 px, so the button is centred in its cell.
+      rect = _button_rect(rect)
     else:
       continue
     vc = _build_visual_container(
@@ -683,9 +911,9 @@ def _collect_visuals_for_page(page_name, visuals_spec, model_spec, common):
     body_visuals.append((ndef["geometry"], vc))
     idx += 1
 
-  # Trace inspector table
+  # Trace Inspector table, repeated on the drill-through page
   ti = visuals_spec.get("trace_inspector")
-  if ti and ti["page"] == page_name:
+  if _shows_trace_table(page_name, visuals_spec):
     rect = common.canvas_rect(ti["geometry"])
     visual = _build_table_visual(ti)
     vc = _build_visual_container(
@@ -709,9 +937,39 @@ def _collect_visuals_for_page(page_name, visuals_spec, model_spec, common):
   return visuals
 
 
+def _report_pages(visuals_spec):
+  """Return the report pages in tab order.
+
+  The 8 Looker Studio parity pages, then the drill-through page (README D12).
+  The drill-through page is not a Looker Studio page: it is hidden in view
+  mode and opened only by drill-through, so its drill-through filters never
+  stay on a page that users open from the page tabs.
+  """
+  pages = list(visuals_spec["pages"])
+  drill = visuals_spec.get("drillthrough")
+  if drill:
+    pages.append(
+        {
+            "name": drill["page"],
+            "display_name": drill["display_name"],
+            "height": drill["height"],
+        }
+    )
+  return pages
+
+
+def _shows_trace_table(page_name, visuals_spec):
+  """Whether the Trace Inspector table is drawn on this page."""
+  ti = visuals_spec.get("trace_inspector")
+  if not ti:
+    return False
+  drill = visuals_spec.get("drillthrough")
+  return ti["page"] == page_name or bool(drill and drill["page"] == page_name)
+
+
 def _page_display_name(page_name, visuals_spec):
   """Get the display name for a page."""
-  for p in visuals_spec["pages"]:
+  for p in _report_pages(visuals_spec):
     if p["name"] == page_name:
       return p["display_name"]
   return page_name
@@ -720,7 +978,7 @@ def _page_display_name(page_name, visuals_spec):
 def _page_heights(visuals_spec, common):
   """Compute page heights from body rects + spec override."""
   heights = {}
-  for p in visuals_spec["pages"]:
+  for p in _report_pages(visuals_spec):
     pname = p["name"]
     # Collect body rects for this page
     rects = []
@@ -730,9 +988,10 @@ def _page_heights(visuals_spec, common):
     for ndef in visuals_spec.get("non_data_elements", []):
       if ndef["page"] == pname:
         rects.append(common.canvas_rect(ndef["geometry"]))
-    ti = visuals_spec.get("trace_inspector")
-    if ti and ti["page"] == pname:
-      rects.append(common.canvas_rect(ti["geometry"]))
+    if _shows_trace_table(pname, visuals_spec):
+      rects.append(
+          common.canvas_rect(visuals_spec["trace_inspector"]["geometry"])
+      )
     # Include header rects
     for hr in common.HEADER_RECTS.values():
       rects.append(hr)
@@ -793,7 +1052,8 @@ def build_report(contracts, visuals_spec, model_spec=None):
   files[os.path.join(_DEF_DIR, "report.json")] = common.dump_json(report_json)
 
   # pages.json
-  page_order = [p["name"] for p in visuals_spec["pages"]]
+  pages = _report_pages(visuals_spec)
+  page_order = [p["name"] for p in pages]
   pages_json = {
       "$schema": _PAGES_SCHEMA,
       "pageOrder": page_order,
@@ -803,8 +1063,9 @@ def build_report(contracts, visuals_spec, model_spec=None):
 
   # Per-page page.json and visual.json files
   page_heights = _page_heights(visuals_spec, common)
+  drill = visuals_spec.get("drillthrough")
 
-  for p in visuals_spec["pages"]:
+  for p in pages:
     pname = p["name"]
     pslug = _slug(pname)
     pdir = os.path.join(_PAGES_DIR, pslug)
@@ -818,15 +1079,21 @@ def build_report(contracts, visuals_spec, model_spec=None):
         "displayOption": "FitToWidth",
         "height": page_heights[pname],
         "width": 1280,
-        "annotations": [
-            {
-                "name": "bqaa.looker_page_id",
-                "value": p["looker_page_id"],
-            }
-        ],
     }
+    if "looker_page_id" in p:
+      page_json["annotations"] = [
+          {
+              "name": "bqaa.looker_page_id",
+              "value": p["looker_page_id"],
+          }
+      ]
     if page_no_filter:
       page_json["visualInteractions"] = page_no_filter
+    if drill and drill["page"] == pname:
+      page_json["visibility"] = "HiddenInViewMode"
+      page_json["pageBinding"], page_json["filterConfig"] = (
+          _drillthrough_binding(drill)
+      )
     files[os.path.join(pdir, "page.json")] = common.dump_json(page_json)
 
     # Visuals
@@ -837,7 +1104,7 @@ def build_report(contracts, visuals_spec, model_spec=None):
       files[os.path.join(vdir, "visual.json")] = common.dump_json(vc)
 
   # Theme JSON
-  files[os.path.join(_THEME_DIR, "BQAA.json")] = common.dump_json(
+  files[os.path.join(_THEME_DIR, _THEME_RESOURCE_NAME)] = common.dump_json(
       _theme_json(visuals_spec)
   )
 

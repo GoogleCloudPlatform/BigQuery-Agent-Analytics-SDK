@@ -349,7 +349,13 @@ def test_load_chart_metadata_returns_37():
 def test_chart_metadata_has_visual_types():
   charts = validate_mod.load_chart_metadata()
   visual_types = {c["visual_type"] for c in charts}
-  assert visual_types == {"cardVisual", "clusteredBarChart", "areaChart"}
+  assert visual_types == {
+      "cardVisual",
+      "clusteredBarChart",
+      "areaChart",
+      "lineChart",
+  }
+  assert validate_mod.TIME_SERIES_VISUAL_TYPES == {"areaChart", "lineChart"}
 
 
 def test_chart_metadata_has_measures():
@@ -413,13 +419,17 @@ def test_chart_metadata_bar_charts_have_top_n():
   assert llm_top5["measure_info"][0]["oracle_column"] == "total_llm_calls"
 
 
-def test_chart_metadata_area_chart_with_series():
+def test_chart_metadata_time_series_chart_with_series():
   charts = validate_mod.load_chart_metadata()
-  series_areas = [
-      c for c in charts if c["visual_type"] == "areaChart" and c["series"]
+  series_charts = [
+      c
+      for c in charts
+      if c["visual_type"] in validate_mod.TIME_SERIES_VISUAL_TYPES
+      and c["series"]
   ]
-  assert len(series_areas) == 1
-  assert series_areas[0]["id"] == "usage-tool-calls-over-time"
+  assert len(series_charts) == 1
+  assert series_charts[0]["id"] == "usage-tool-calls-over-time"
+  assert series_charts[0]["visual_type"] == "lineChart"
 
 
 # ---------------------------------------------------------------------------
@@ -2743,7 +2753,7 @@ def _consistent_pair(chart):
         [{col: 5 for col in cols}],
         _dax_response([{f"[v{i}]": 5 for i in range(len(cols))}]),
     )
-  if chart["visual_type"] == "areaChart":
+  if chart["visual_type"] in validate_mod.TIME_SERIES_VISUAL_TYPES:
     llm_trends = chart["id"] == "usage-llm-call-trends"
     value_col = "total_llm_calls" if llm_trends else cols[0]
     oracle_row = {"timestamp_date": "2026-07-01", value_col: 5}
@@ -3924,8 +3934,8 @@ def test_allow_empty_help_says_a_card_is_never_empty(capsys):
   assert exit_info.value.code == 0
   text = " ".join(capsys.readouterr().out.split())
   assert (
-      "accept grouped visuals (area/bar charts) that are empty on both sides"
-      in text
+      "accept grouped visuals (area, line, or bar charts) that are empty on"
+      " both sides" in text
   )
   assert (
       "a cardVisual must always return exactly one row and is never EMPTY"

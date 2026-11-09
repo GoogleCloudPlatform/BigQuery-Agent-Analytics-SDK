@@ -655,8 +655,10 @@ export function initPowerBIConfigurator(doc = globalThis.document) {
         downloadBtn.disabled = false;
       }
       if (statusEl) {
+        const fileCount = Object.keys(globalThis.window?.BQAA_PBIP_BUNDLE ?? {}).length;
+        const filesNote = fileCount ? ` (${fileCount} files)` : "";
         statusEl.dataset.kind = "ready";
-        statusEl.textContent = `Ready to package BQAA_Agent_Analytics_${valid.project}_${valid.dataset}_${valid.table}.zip (118 files).`;
+        statusEl.textContent = `Ready to package BQAA_Agent_Analytics_${valid.project}_${valid.dataset}_${valid.table}.zip${filesNote}.`;
       }
       if (cliZipCode) {
         cliZipCode.textContent = buildCliZipCommand(valid);

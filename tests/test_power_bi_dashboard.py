@@ -179,7 +179,7 @@ class TestParity:
         "performance-nondata-4",
         "performance-nondata-5",
     }
-    # Also slicer/heading/table visual names.
+    # Also slicer/heading/header-button/table visual names.
     non_parity = non_data_ids | {
         "page-heading",
         "slicer-date",
@@ -187,6 +187,8 @@ class TestParity:
         "slicer-user-id",
         "slicer-trace-id",
         "slicer-span-id",
+        "reset-filters",
+        "drillthrough-back",
         "trace-inspector-table",
     }
     parity_visuals = visual_names - non_parity
@@ -559,8 +561,8 @@ class TestParity:
           f"{found_groups} != {expected_groups}"
       )
 
-  def test_eight_pages_present(self):
-    """Exactly 8 pages must be present in the report."""
+  def test_report_pages_present(self):
+    """The 8 report pages and the hidden drill-through page are present."""
     _skip_if_not_generated()
     pages_dir = (
         POWER_BI / "BQAA_Agent_Analytics.Report" / "definition" / "pages"
@@ -568,7 +570,7 @@ class TestParity:
     if not pages_dir.exists():
       pytest.skip("Report pages not generated")
     page_dirs = [d for d in pages_dir.iterdir() if d.is_dir()]
-    assert len(page_dirs) == 8, f"Expected 8 pages, found {len(page_dirs)}"
+    assert len(page_dirs) == 9, f"Expected 9 pages, found {len(page_dirs)}"
     expected_names = {
         "token-consumption",
         "agent-and-sessions",
@@ -578,39 +580,44 @@ class TestParity:
         "latency",
         "errors",
         "trace-inspector",
+        "trace-details",
     }
     actual_names = {d.name for d in page_dirs}
     assert actual_names == expected_names
+    hidden = {
+        d.name
+        for d in page_dirs
+        if json.loads((d / "page.json").read_text()).get("visibility")
+        == "HiddenInViewMode"
+    }
+    assert hidden == {"trace-details"}
 
-  def test_trace_inspector_columns(self):
-    """Trace Inspector table must have exactly 7 columns."""
+  @pytest.mark.parametrize("page", ["trace-inspector", "trace-details"])
+  def test_trace_inspector_columns(self, page):
+    """The Trace Inspector table is a tableEx with the 16 validator columns."""
     _skip_if_not_generated()
-    ti_page = (
+    val_mod = _load_tool_module("validate_pbip")
+    table_json = (
         POWER_BI
         / "BQAA_Agent_Analytics.Report"
         / "definition"
         / "pages"
-        / "trace-inspector"
+        / page
+        / "visuals"
+        / "trace-inspector-table"
+        / "visual.json"
     )
-    if not ti_page.exists():
-      pytest.skip("Trace Inspector page not generated")
-    visuals_dir = ti_page / "visuals"
-    if not visuals_dir.exists():
-      pytest.skip("Trace Inspector visuals not generated")
-    found_table = False
-    for vdir in visuals_dir.iterdir():
-      if not vdir.is_dir():
-        continue
-      vjson = vdir / "visual.json"
-      if not vjson.exists():
-        continue
-      vobj = json.loads(vjson.read_text())
-      if vobj.get("name") == "trace-inspector-table":
-        found_table = True
-        assert (
-            vobj.get("visual", {}).get("visualType") == "tableEx"
-        ), "Trace Inspector should be tableEx"
-    assert found_table, "trace-inspector-table not found"
+    if not table_json.exists():
+      pytest.skip("Trace Inspector table not generated")
+    vobj = json.loads(table_json.read_text())
+    assert (
+        vobj.get("visual", {}).get("visualType") == "tableEx"
+    ), "Trace Inspector should be tableEx"
+    projections = vobj["visual"]["query"]["queryState"]["Values"]["projections"]
+    assert [p["nativeQueryRef"] for p in projections] == (
+        val_mod.TRACE_INSPECTOR_COLUMNS
+    )
+    assert len(val_mod.TRACE_INSPECTOR_COLUMNS) == 16
 
   def test_no_overlaps_per_page(self):
     """No two visual rects should overlap on any page."""
@@ -745,6 +752,361 @@ class TestCheckCanFail:
     vjson_path.write_text(json.dumps(vobj, indent=2) + "\n")
     errors = val_mod.validate_parity(power_bi_root=tmp_path)
     assert any("Overlap on page" in e for e in errors), errors
+
+  # -- Header buttons, drill-through and theme reference (D12, D17) ----------
+
+  @staticmethod
+  def _copy_report(tmp_path):
+    import shutil
+
+    tmp_report = tmp_path / "BQAA_Agent_Analytics.Report"
+    shutil.copytree(POWER_BI / "BQAA_Agent_Analytics.Report", tmp_report)
+    return tmp_report
+
+  @staticmethod
+  def _rewrite_json(path, mutate):
+    obj = json.loads(path.read_text())
+    mutate(obj)
+    path.write_text(json.dumps(obj, indent=2) + "\n")
+
+  def test_ux_controls_pass_on_the_generated_report(self):
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    report = POWER_BI / "BQAA_Agent_Analytics.Report"
+    assert val_mod._check_ux_controls(report) == []
+    assert val_mod._check_action_buttons(report) == []
+    assert val_mod._check_card_selectors(report) == []
+
+  def test_dropped_reset_filters_button_detected(self, tmp_path):
+    _skip_if_not_generated()
+    import shutil
+
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    shutil.rmtree(pages / "errors" / "visuals" / "reset-filters")
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert "Page 'errors': missing header button 'reset-filters'" in errors
+
+  def test_reset_filters_button_must_clear_all_slicers(self, tmp_path):
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    path = pages / "latency" / "visuals" / "reset-filters" / "visual.json"
+    path.write_text(
+        path.read_text().replace("'ClearAllSlicers'", "'ApplyAllSlicers'")
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert any(
+        "header button 'reset-filters' must be an actionButton with action"
+        " 'ClearAllSlicers'" in e
+        for e in errors
+    ), errors
+
+  def test_back_button_outside_the_drillthrough_page_detected(self, tmp_path):
+    _skip_if_not_generated()
+    import shutil
+
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    shutil.copytree(
+        pages / "trace-details" / "visuals" / "drillthrough-back",
+        pages / "errors" / "visuals" / "drillthrough-back",
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Page 'errors': unexpected header button 'drillthrough-back'" in errors
+    )
+
+  def test_reset_filters_on_the_drillthrough_page_detected(self, tmp_path):
+    """Clear all slicers cannot clear the drill-through filter there."""
+    _skip_if_not_generated()
+    import shutil
+
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    shutil.copytree(
+        pages / "errors" / "visuals" / "reset-filters",
+        pages / "trace-details" / "visuals" / "reset-filters",
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Page 'trace-details': unexpected header button 'reset-filters'"
+        in errors
+    )
+
+  def test_missing_drillthrough_binding_detected(self, tmp_path):
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    self._rewrite_json(
+        pages / "trace-details" / "page.json",
+        lambda page: page.pop("pageBinding"),
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Page 'trace-details': pageBinding must have type 'Drillthrough'"
+        in errors
+    )
+
+  def test_visible_drillthrough_page_detected(self, tmp_path):
+    """A visible drill-through page would keep its filters from the tabs."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    self._rewrite_json(
+        pages / "trace-details" / "page.json",
+        lambda page: page.pop("visibility"),
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Page 'trace-details': the drill-through page must have visibility"
+        " 'HiddenInViewMode'" in errors
+    )
+
+  def test_drillthrough_binding_on_a_report_page_detected(self, tmp_path):
+    """Review finding 3: the visible Trace Inspector took drill-through."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    drill = json.loads((pages / "trace-details" / "page.json").read_text())
+
+    def _add_binding(page):
+      page["pageBinding"] = drill["pageBinding"]
+      page["filterConfig"] = drill["filterConfig"]
+
+    self._rewrite_json(pages / "trace-inspector" / "page.json", _add_binding)
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Page 'trace-inspector': only 'trace-details' is a drill-through target"
+        in errors
+    )
+
+  def test_hidden_report_page_detected(self, tmp_path):
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+
+    def _hide(page):
+      page["visibility"] = "HiddenInViewMode"
+
+    self._rewrite_json(pages / "errors" / "page.json", _hide)
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert "Page 'errors': a report page must not be hidden" in errors
+
+  def test_dropped_drillthrough_page_detected(self, tmp_path):
+    _skip_if_not_generated()
+    import shutil
+
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    shutil.rmtree(pages / "trace-details")
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert any(e.startswith("Report pages [") for e in errors), errors
+    assert "Page 'trace-details': missing trace-inspector-table" in errors
+
+  def test_drillthrough_filter_must_be_created_by_drillthrough(self, tmp_path):
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+
+    def _user_filter(page):
+      page["filterConfig"]["filters"][1]["howCreated"] = "User"
+
+    self._rewrite_json(pages / "trace-details" / "page.json", _user_filter)
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert any(
+        "must have howCreated 'Drillthrough'" in e for e in errors
+    ), errors
+
+  def test_dropped_drillthrough_field_detected(self, tmp_path):
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    self._rewrite_json(
+        pages / "trace-details" / "page.json",
+        lambda page: page["pageBinding"]["parameters"].pop(),
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert any("drill-through fields" in e for e in errors), errors
+
+  def test_dropped_tool_error_latency_column_detected(self, tmp_path):
+    """Review finding 4: a tool-error row needs tool_error_total_ms."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+
+    def _drop_column(vobj):
+      values = vobj["visual"]["query"]["queryState"]["Values"]
+      values["projections"] = [
+          p
+          for p in values["projections"]
+          if p["nativeQueryRef"] != "tool_error_total_ms"
+      ]
+
+    self._rewrite_json(
+        pages
+        / "trace-details"
+        / "visuals"
+        / "trace-inspector-table"
+        / "visual.json",
+        _drop_column,
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert any(
+        e.startswith("Page 'trace-details': trace-inspector-table: columns")
+        for e in errors
+    ), errors
+
+  # -- Button render contract and card selectors (review finding 1, 2) -------
+
+  @staticmethod
+  def _merge_entries(vobj, name):
+    """Fold a button object's show entry into its default styling entry."""
+    objects = vobj["visual"]["objects"]
+    show, style = objects[name]
+    objects[name] = [
+        {
+            "properties": {**show["properties"], **style["properties"]},
+            "selector": {"id": "default"},
+        }
+    ]
+
+  def test_merged_button_fill_entry_detected(self, tmp_path):
+    """The P1 shape: show, fillColor and transparency in one entry."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    self._rewrite_json(
+        pages
+        / "user-analytics"
+        / "visuals"
+        / "usage-nondata-3"
+        / "visual.json",
+        lambda vobj: self._merge_entries(vobj, "fill"),
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Button 'user-analytics/usage-nondata-3': fill entry 1 must hold only"
+        " show, without a selector" in errors
+    )
+
+  def test_merged_button_outline_entry_detected(self, tmp_path):
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    self._rewrite_json(
+        pages / "errors" / "visuals" / "reset-filters" / "visual.json",
+        lambda vobj: self._merge_entries(vobj, "outline"),
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Button 'errors/reset-filters': outline entry 1 must hold only show,"
+        " without a selector" in errors
+    )
+
+  def test_single_entry_button_shape_detected(self, tmp_path):
+    """One selector-less shape entry renders a flat rectangle."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+
+    def _drop_default_shape(vobj):
+      vobj["visual"]["objects"]["shape"].pop()
+
+    self._rewrite_json(
+        pages / "latency" / "visuals" / "performance-nondata-3" / "visual.json",
+        _drop_default_shape,
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert any(
+        e.startswith("Button 'latency/performance-nondata-3': shape must name")
+        for e in errors
+    ), errors
+
+  def test_short_button_detected(self, tmp_path):
+    """A button below 40 px clips its label."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+
+    def _shrink(vobj):
+      vobj["position"]["height"] = 36
+
+    self._rewrite_json(
+        pages / "latency" / "visuals" / "reset-filters" / "visual.json",
+        _shrink,
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Button 'latency/reset-filters': height 36 is outside 40-56 px"
+        in errors
+    )
+
+  def test_button_container_background_detected(self, tmp_path):
+    """The default container background draws a white box around the fill."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    self._rewrite_json(
+        pages
+        / "trace-details"
+        / "visuals"
+        / "drillthrough-back"
+        / "visual.json",
+        lambda vobj: vobj["visual"]["visualContainerObjects"].pop("background"),
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Button 'trace-details/drillthrough-back': "
+        "visualContainerObjects.background must be hidden" in errors
+    )
+
+  def test_card_metadata_selector_detected(self, tmp_path):
+    """The finding 2 shape: Power BI drops a metadata-scoped card entry."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    selector = {"metadata": "events_v1.KPI Total Tokens Change %"}
+
+    def _scope_to_change(vobj):
+      vobj["visual"]["objects"].setdefault("value", []).append(
+          {
+              "properties": {
+                  "showBlankAs": {"expr": {"Literal": {"Value": "'n/a'"}}}
+              },
+              "selector": selector,
+          }
+      )
+
+    self._rewrite_json(
+        pages
+        / "token-consumption"
+        / "visuals"
+        / "usage-total-tokens"
+        / "visual.json",
+        _scope_to_change,
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        f"Card 'token-consumption/usage-total-tokens': value selector "
+        f"{selector!r} is not an {{'id': ...}} selector" in errors
+    )
+
+  def test_unresolvable_custom_theme_detected(self, tmp_path):
+    """The display name "BQAA" does not resolve the registered theme."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    report = self._copy_report(tmp_path)
+
+    def _display_name(rj):
+      rj["themeCollection"]["customTheme"]["name"] = "BQAA"
+
+    self._rewrite_json(report / "definition" / "report.json", _display_name)
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert any(
+        "customTheme name 'BQAA' is not a registered CustomTheme resource" in e
+        for e in errors
+    ), errors
 
   # -- Real declarations, not description lines (F8) -------------------------
 
@@ -1971,7 +2333,7 @@ class TestDocumentation:
       assert "over HTTP" in after or "over local HTTP" in after, path
 
   def test_tool_series_are_not_described_as_stacked(self):
-    """Tool Calls Over Time draws overlapping areas, so no doc says stacked."""
+    """Tool Calls Over Time draws one line per tool, so no doc says stacked."""
     visual = json.loads(
         (
             POWER_BI
@@ -1984,7 +2346,7 @@ class TestDocumentation:
             / "visual.json"
         ).read_text(encoding="utf-8")
     )
-    assert visual["visual"]["visualType"] == "areaChart"
+    assert visual["visual"]["visualType"] == "lineChart"
     for rel in (
         "README.md",
         "USER_MANUAL.md",
@@ -2004,8 +2366,8 @@ class TestDocumentation:
         (POWER_BI / "README.md").read_text(encoding="utf-8").split()
     )
     assert (
-        "A grouped visual (area or bar chart) that is empty on both sides is"
-        " `EMPTY`, because nothing was compared." in readme
+        "A grouped visual (area, line, or bar chart) that is empty on both"
+        " sides is `EMPTY`, because nothing was compared." in readme
     )
     assert (
         "A `cardVisual` is never `EMPTY`: its DAX query must return exactly"
@@ -2124,7 +2486,7 @@ fs.writeFileSync({str(out_zip)!r}, zipBytes);
     with zipfile.ZipFile(out_zip, "r") as zf:
       assert zf.testzip() is None
       names = zf.namelist()
-      assert len(names) == 118
+      assert len(names) == 135
       expr_text = zf.read(
           "BQAA_Agent_Analytics/BQAA_Agent_Analytics.SemanticModel/definition/expressions.tmdl"
       ).decode("utf-8")

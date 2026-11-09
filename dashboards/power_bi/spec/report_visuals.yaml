@@ -257,7 +257,9 @@ parity_visuals:
 - id: usage-tool-calls-over-time
   page: tool-usage
   title: Tool Calls Over Time
-  visual_type: areaChart
+  # Line, not area (README D15): five overlapping translucent areas were
+  # unreadable.
+  visual_type: lineChart
   axis: Date.Date
   series: events_v1.tool_completed_name
   measures:
@@ -396,6 +398,8 @@ parity_visuals:
   visual_type: cardVisual
   measures:
   - Avg Tool Latency (ms)
+  # Exact milliseconds (4,512), not Power BI's auto 4.5K (README D16).
+  value_format: exact
   geometry:
     row: 2
     col: 0
@@ -405,7 +409,8 @@ parity_visuals:
 - id: performance-tool-latency-trend
   page: latency
   title: Tool Latency Over Time
-  visual_type: areaChart
+  # Line, not area (README D15): the latency axis does not start at zero.
+  visual_type: lineChart
   axis: Date.Date
   measures:
   - Avg Tool Latency (ms)
@@ -421,6 +426,8 @@ parity_visuals:
   visual_type: cardVisual
   measures:
   - P50 Tool Latency (ms)
+  # Exact milliseconds (4,512), not Power BI's auto 4.5K (README D16).
+  value_format: exact
   geometry:
     row: 10
     col: 0
@@ -433,6 +440,8 @@ parity_visuals:
   visual_type: cardVisual
   measures:
   - P75 Tool Latency (ms)
+  # Exact milliseconds (4,512), not Power BI's auto 4.5K (README D16).
+  value_format: exact
   geometry:
     row: 10
     col: 6
@@ -445,6 +454,8 @@ parity_visuals:
   visual_type: cardVisual
   measures:
   - P90 Tool Latency (ms)
+  # Exact milliseconds (4,512), not Power BI's auto 4.5K (README D16).
+  value_format: exact
   geometry:
     row: 10
     col: 12
@@ -457,6 +468,8 @@ parity_visuals:
   visual_type: cardVisual
   measures:
   - P99 Tool Latency (ms)
+  # Exact milliseconds (4,512), not Power BI's auto 4.5K (README D16).
+  value_format: exact
   geometry:
     row: 10
     col: 18
@@ -469,6 +482,8 @@ parity_visuals:
   visual_type: cardVisual
   measures:
   - Avg LLM Latency (ms)
+  # Exact milliseconds (4,512), not Power BI's auto 4.5K (README D16).
+  value_format: exact
   geometry:
     row: 15
     col: 0
@@ -478,7 +493,8 @@ parity_visuals:
 - id: performance-llm-latency-trend
   page: latency
   title: LLM Latency Over Time
-  visual_type: areaChart
+  # Line, not area (README D15): the latency axis does not start at zero.
+  visual_type: lineChart
   axis: Date.Date
   measures:
   - Avg LLM Latency (ms)
@@ -494,6 +510,8 @@ parity_visuals:
   visual_type: cardVisual
   measures:
   - P50 LLM Latency (ms)
+  # Exact milliseconds (4,512), not Power BI's auto 4.5K (README D16).
+  value_format: exact
   geometry:
     row: 23
     col: 0
@@ -506,6 +524,8 @@ parity_visuals:
   visual_type: cardVisual
   measures:
   - P75 LLM Latency (ms)
+  # Exact milliseconds (4,512), not Power BI's auto 4.5K (README D16).
+  value_format: exact
   geometry:
     row: 23
     col: 6
@@ -518,6 +538,8 @@ parity_visuals:
   visual_type: cardVisual
   measures:
   - P90 LLM Latency (ms)
+  # Exact milliseconds (4,512), not Power BI's auto 4.5K (README D16).
+  value_format: exact
   geometry:
     row: 23
     col: 12
@@ -530,6 +552,8 @@ parity_visuals:
   visual_type: cardVisual
   measures:
   - P99 LLM Latency (ms)
+  # Exact milliseconds (4,512), not Power BI's auto 4.5K (README D16).
+  value_format: exact
   geometry:
     row: 23
     col: 18
@@ -702,7 +726,11 @@ non_data_elements:
     width: 24
     height: 2
 
-# Trace Inspector table on the trace-inspector page
+# Trace Inspector table on the trace-inspector page, repeated on the hidden
+# drill-through page.  The first 7 columns are the Looker Studio parity set;
+# the rest are debugging columns (README D12).  A tool-error row has its
+# latency in tool_error_total_ms, a completed tool call in
+# tool_completed_total_ms.
 trace_inspector:
   name: trace-inspector-table
   page: trace-inspector
@@ -711,9 +739,18 @@ trace_inspector:
   - events_v1.event_type
   - events_v1.agent
   - events_v1.user_id
+  - events_v1.session_id
   - events_v1.trace_id
   - events_v1.span_id
   - events_v1.status
+  - events_v1.model_version
+  - events_v1.tool_completed_name
+  - events_v1.tool_error_name
+  - events_v1.usage_total_tokens
+  - events_v1.llm_total_ms
+  - events_v1.tool_completed_total_ms
+  - events_v1.tool_error_total_ms
+  - events_v1.error_message
   geometry:
     row: 0
     col: 0
@@ -722,6 +759,43 @@ trace_inspector:
   sort:
     field: events_v1.timestamp
     direction: Descending
+
+# Header control on every report page (README D17).  Its position lives in
+# pbip_common.HEADER_RECTS, in the free band right of the page heading.
+header_controls:
+  reset_filters:
+    name: reset-filters
+    button_text: Reset filters
+    tooltip: Clear all slicers
+    fill_color: '#FFFFFF'
+    font_color: '#202124'
+    outline_color: '#5F6368'
+
+# Drill-through target (README D12): right-click a bar or a day on any page
+# -> Drill through -> Trace Details, the Trace Inspector table filtered to
+# that member.  The page is hidden in view mode and opened only by
+# drill-through: Clear all slicers does not clear drill-through filters, so on
+# a page that users also open from the tabs they would stay applied.  It has
+# the synced slicers and a Back button in place of Reset filters.
+drillthrough:
+  page: trace-details
+  display_name: Trace Details
+  height: 720
+  binding_name: bqaa-trace-details-drillthrough
+  fields:
+  - Date.Date
+  - events_v1.agent
+  - events_v1.user_id
+  - events_v1.tool_completed_name
+  - events_v1.tool_error_name
+  back_button:
+    name: drillthrough-back
+    button_text: Back
+    tooltip: Back to the previous page
+    fill_color: '#FFFFFF'
+    font_color: '#202124'
+    outline_color: '#5F6368'
+
 theme:
   name: BQAA
   data_colors:

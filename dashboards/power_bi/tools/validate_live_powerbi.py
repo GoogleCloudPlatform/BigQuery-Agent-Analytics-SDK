@@ -83,6 +83,9 @@ FIXTURE_WINDOW = ("2026-04-18", "2026-07-16")
 STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
 STATUS_EMPTY = "EMPTY"
+# Date-grouped series visuals.  A line chart queries and compares exactly
+# like an area chart; only its drawing differs (README D15).
+TIME_SERIES_VISUAL_TYPES = frozenset({"areaChart", "lineChart"})
 
 
 def validate_guid(value, label="GUID"):
@@ -815,7 +818,7 @@ def build_dax_query(chart, start, end):
       parts.append(f'"v{i}", CALCULATE([{m}], {win})')
     return f"EVALUATE ROW({', '.join(parts)})\n"
 
-  if visual_type == "areaChart":
+  if visual_type in TIME_SERIES_VISUAL_TYPES:
     measure = chart["measures"][0]
     series = chart.get("series", "")
     if series:
@@ -975,7 +978,7 @@ def _compare_chart(chart, oracle_rows, topn_rows, dax_rows, allow_empty=False):
     )
     return match, False, (None if match else f"{col}: mismatch")
 
-  if visual_type == "areaChart":
+  if visual_type in TIME_SERIES_VISUAL_TYPES:
     if chart["id"] == "usage-llm-call-trends":
       value_col = "total_llm_calls"
     else:
@@ -1117,8 +1120,8 @@ def _run_chart(chart, window, args, billing_project, token):
     return result(STATUS_FAIL, "comparison_error", oracle_rows, dax_rows)
   if not is_match:
     return result(STATUS_FAIL, error, oracle_rows, dax_rows)
-  # A grouped visual (areaChart, clusteredBarChart) that is empty on both
-  # sides is EMPTY: nothing was compared.  A cardVisual is never EMPTY:
+  # A grouped visual (areaChart, lineChart, clusteredBarChart) that is empty
+  # on both sides is EMPTY: nothing was compared.  A cardVisual is never EMPTY:
   # a scalar card always returns exactly one row, so compare_card already
   # rejects zero-row DAX results via "dax_row_count".
   if not oracle_rows and not dax_rows:
@@ -1155,10 +1158,10 @@ def main(argv=None):
       "--allow-empty",
       action="store_true",
       help=(
-          "accept grouped visuals (area/bar charts) that are empty on both"
-          " sides, and a run in which no oracle query returned any row (for"
-          " deliberate empty-window checks); a cardVisual must always return"
-          " exactly one row and is never EMPTY"
+          "accept grouped visuals (area, line, or bar charts) that are empty"
+          " on both sides, and a run in which no oracle query returned any row"
+          " (for deliberate empty-window checks); a cardVisual must always"
+          " return exactly one row and is never EMPTY"
       ),
   )
   parser.add_argument(
