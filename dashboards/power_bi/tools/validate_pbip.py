@@ -258,16 +258,44 @@ NON_DATA_IDS = [
     "performance-nondata-5",
 ]
 
-# Trace Inspector columns (F10).
+# Trace Inspector columns (F10): the 7 Looker Studio parity columns plus the
+# debugging columns (README D12).
 TRACE_INSPECTOR_COLUMNS = [
     "timestamp",
     "event_type",
     "agent",
     "user_id",
+    "session_id",
     "trace_id",
     "span_id",
     "status",
+    "model_version",
+    "tool_completed_name",
+    "tool_error_name",
+    "usage_total_tokens",
+    "llm_total_ms",
+    "tool_completed_total_ms",
+    "error_message",
 ]
+
+# Header buttons outside the parity layout: Reset filters on every page
+# (README D17) and Back on the drill-through page (README D12).
+RESET_FILTERS_ID = "reset-filters"
+DRILLTHROUGH_BACK_ID = "drillthrough-back"
+HEADER_BUTTON_IDS = [RESET_FILTERS_ID, DRILLTHROUGH_BACK_ID]
+
+# The drill-through page and its fields, in order (README D12).
+DRILLTHROUGH_PAGE = "trace-inspector"
+DRILLTHROUGH_FIELDS = [
+    ("Date", "Date"),
+    ("events_v1", "agent"),
+    ("events_v1", "user_id"),
+    ("events_v1", "tool_completed_name"),
+    ("events_v1", "tool_error_name"),
+]
+
+# PBIP files in the web configurator bundle (docs/pbip-bundle.js).
+PBIP_BUNDLE_FILE_COUNT = 127
 
 
 # ---------------------------------------------------------------------------
@@ -1083,6 +1111,133 @@ def _check_oracle_lock(pbi_root, looker_root):
     return [f"oracle lock could not be evaluated: {exc}"]
 
 
+def _literal_value(prop):
+  """Return the Literal Value of a formatting property, or None."""
+  if not isinstance(prop, dict):
+    return None
+  return prop.get("expr", {}).get("Literal", {}).get("Value")
+
+
+def _visual_link_properties(vobj):
+  """Return the properties of a visual's first visualLink, or {}."""
+  links = (
+      vobj.get("visual", {})
+      .get("visualContainerObjects", {})
+      .get("visualLink", [])
+  )
+  if links and isinstance(links[0], dict):
+    return links[0].get("properties", {})
+  return {}
+
+
+def _check_ux_controls(report_dir):
+  """Check the header buttons, the drill-through page and the theme reference.
+
+  Every page carries a Reset filters button that clears all slicers (README
+  D17).  Only the Trace Inspector is a drill-through target, on exactly
+  DRILLTHROUGH_FIELDS, and only it carries the Back button (README D12).  The
+  custom theme must name a registered CustomTheme resource, otherwise Power BI
+  cannot resolve it and draws the default palette.
+  """
+  errors = []
+  pages_dir = report_dir / "definition" / "pages"
+  for page_dir in sorted(p for p in pages_dir.iterdir() if p.is_dir()):
+    page = page_dir.name
+    expected_actions = {RESET_FILTERS_ID: "'ClearAllSlicers'"}
+    if page == DRILLTHROUGH_PAGE:
+      expected_actions[DRILLTHROUGH_BACK_ID] = "'Back'"
+    for button_id in HEADER_BUTTON_IDS:
+      path = page_dir / "visuals" / button_id / "visual.json"
+      if button_id not in expected_actions:
+        if path.exists():
+          errors.append(
+              f"Page '{page}': unexpected header button '{button_id}'"
+          )
+        continue
+      if not path.exists():
+        errors.append(f"Page '{page}': missing header button '{button_id}'")
+        continue
+      vobj = _read_json(path)
+      action = _literal_value(_visual_link_properties(vobj).get("type"))
+      visual_type = vobj.get("visual", {}).get("visualType")
+      if visual_type != "actionButton" or action != expected_actions[button_id]:
+        errors.append(
+            f"Page '{page}': header button '{button_id}' must be an "
+            f"actionButton with action {expected_actions[button_id]}, got "
+            f"{visual_type!r} with {action!r}"
+        )
+
+    page_json_path = page_dir / "page.json"
+    page_obj = _read_json(page_json_path) if page_json_path.exists() else {}
+    binding = page_obj.get("pageBinding")
+    if page != DRILLTHROUGH_PAGE:
+      if binding is not None:
+        errors.append(
+            f"Page '{page}': only '{DRILLTHROUGH_PAGE}' is a drill-through "
+            "target"
+        )
+      continue
+    if not isinstance(binding, dict) or binding.get("type") != "Drillthrough":
+      errors.append(f"Page '{page}': pageBinding must have type 'Drillthrough'")
+      continue
+    filters = {
+        f.get("name"): f
+        for f in page_obj.get("filterConfig", {}).get("filters", [])
+        if isinstance(f, dict)
+    }
+    fields = []
+    for param in binding.get("parameters", []):
+      flt = filters.get(param.get("boundFilter"))
+      if flt is None:
+        errors.append(
+            f"Page '{page}': drill-through parameter '{param.get('name')}' "
+            f"is bound to a missing filter '{param.get('boundFilter')}'"
+        )
+        continue
+      if flt.get("howCreated") != "Drillthrough":
+        errors.append(
+            f"Page '{page}': filter '{flt.get('name')}' must have "
+            "howCreated 'Drillthrough'"
+        )
+      if flt.get("field") != param.get("fieldExpr"):
+        errors.append(
+            f"Page '{page}': filter '{flt.get('name')}' and its drill-through "
+            "parameter target different fields"
+        )
+      column = (flt.get("field") or {}).get("Column", {})
+      fields.append(
+          (
+              column.get("Expression", {}).get("SourceRef", {}).get("Entity"),
+              column.get("Property"),
+          )
+      )
+    if fields != DRILLTHROUGH_FIELDS:
+      errors.append(
+          f"Page '{page}': drill-through fields {fields} != "
+          f"{DRILLTHROUGH_FIELDS}"
+      )
+
+  report_json_path = report_dir / "definition" / "report.json"
+  if report_json_path.exists():
+    report_obj = _read_json(report_json_path)
+    theme_name = (
+        report_obj.get("themeCollection", {}).get("customTheme", {}).get("name")
+    )
+    registered = {
+        item.get("name")
+        for pkg in report_obj.get("resourcePackages", [])
+        if isinstance(pkg, dict) and pkg.get("type") == "RegisteredResources"
+        for item in pkg.get("items", [])
+        if isinstance(item, dict) and item.get("type") == "CustomTheme"
+    }
+    if theme_name not in registered:
+      errors.append(
+          f"report.json: customTheme name {theme_name!r} is not a registered "
+          f"CustomTheme resource {sorted(map(str, registered))}"
+      )
+  return errors
+
+
 def validate_parity(power_bi_root=None, looker_root=None):
   """Check chart_manifest ↔ visuals ↔ measures ↔ oracle parity."""
   errors = []
@@ -1134,16 +1289,21 @@ def validate_parity(power_bi_root=None, looker_root=None):
     visual_by_page[page_dir.name] = page_visuals
 
   # 37 manifest ids == 37 parity visual names.
-  # Standard non-parity visuals (headers, slicers, trace inspector).
-  standard_visuals = set(NON_DATA_IDS) | {
-      "page-heading",
-      "slicer-date",
-      "slicer-agent",
-      "slicer-user-id",
-      "slicer-trace-id",
-      "slicer-span-id",
-      "trace-inspector-table",
-  }
+  # Standard non-parity visuals (headers, slicers, header buttons, trace
+  # inspector).
+  standard_visuals = (
+      set(NON_DATA_IDS)
+      | set(HEADER_BUTTON_IDS)
+      | {
+          "page-heading",
+          "slicer-date",
+          "slicer-agent",
+          "slicer-user-id",
+          "slicer-trace-id",
+          "slicer-span-id",
+          "trace-inspector-table",
+      }
+  )
   manifest_set = set(manifest_charts)
   parity_visuals = manifest_set
   if parity_visuals != visual_names - standard_visuals:
@@ -1271,6 +1431,9 @@ def validate_parity(power_bi_root=None, looker_root=None):
                 f"trace-inspector-table: columns {col_names} "
                 f"!= {TRACE_INSPECTOR_COLUMNS}"
             )
+
+  # Header buttons, the drill-through page and the theme reference.
+  errors.extend(_check_ux_controls(report_dir))
 
   # Check oracle files exist for all 37 chart ids.
   for chart_id in manifest_charts:
@@ -1581,9 +1744,13 @@ def validate_parity(power_bi_root=None, looker_root=None):
       json_body = bundle_text.split(prefix, 1)[1][: -len(suffix)]
       try:
         bundle_map = json.loads(json_body)
-        if not isinstance(bundle_map, dict) or len(bundle_map) != 118:
+        if (
+            not isinstance(bundle_map, dict)
+            or len(bundle_map) != PBIP_BUNDLE_FILE_COUNT
+        ):
           errors.append(
-              "docs/pbip-bundle.js: expected 118 PBIP files in bundle"
+              "docs/pbip-bundle.js: expected "
+              f"{PBIP_BUNDLE_FILE_COUNT} PBIP files in bundle"
           )
         elif (
             "BQAA_Agent_Analytics.SemanticModel/definition/expressions.tmdl"

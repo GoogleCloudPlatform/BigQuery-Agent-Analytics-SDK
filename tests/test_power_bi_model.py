@@ -69,6 +69,8 @@ def test_pbip_common_constants_and_interfaces():
       "slicer-user-id",
       "slicer-trace-id",
       "slicer-span-id",
+      "drillthrough-back",
+      "reset-filters",
   }
 
 
@@ -402,7 +404,7 @@ def test_output_zip_and_rewrite_expressions_parameters(tmp_path):
   with zipfile.ZipFile(out_zip, "r") as zf:
     assert zf.testzip() is None
     names = zf.namelist()
-    assert len(names) == 118
+    assert len(names) == 127
     assert "BQAA_Agent_Analytics/BQAA_Agent_Analytics.pbip" in names
     expr_arc = (
         "BQAA_Agent_Analytics/"
@@ -1470,7 +1472,7 @@ def test_write_pbip_zip_still_writes_a_complete_project(tmp_path):
   out_zip = tmp_path / "complete.zip"
   generate_pbip.write_pbip_zip(out_zip, project="abcde-1")
   with zipfile.ZipFile(out_zip) as zf:
-    assert len(zf.namelist()) == 118
+    assert len(zf.namelist()) == 127
     assert f"BQAA_Agent_Analytics/{_EXPR_KEY}" in zf.namelist()
 
 

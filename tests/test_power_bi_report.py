@@ -170,9 +170,13 @@ def test_page_annotations(generated_files):
 
 
 def test_total_visual_count(generated_files):
-  """95 visuals total: 37 parity + 40 slicers + 8 headings + 9 non-data + 1 table."""
+  """104 visuals total.
+
+  37 parity + 40 slicers + 8 headings + 9 non-data + 1 table, plus the 8
+  per-page Reset filters buttons and the Trace Inspector Back button.
+  """
   visuals = [p for p in generated_files if p.endswith("/visual.json")]
-  assert len(visuals) == 95
+  assert len(visuals) == 104
 
 
 def test_parity_visual_count(generated_files):
@@ -193,6 +197,8 @@ def test_parity_visual_count(generated_files):
             "slicer-trace-id",
             "slicer-span-id",
             "trace-inspector-table",
+            "reset-filters",
+            "drillthrough-back",
         )
         and "nondata" not in name
     ):
@@ -237,7 +243,7 @@ def test_non_data_count(generated_files):
 
 
 def test_trace_inspector_table(generated_files):
-  """trace-inspector-table with 7 columns sorted by timestamp desc."""
+  """trace-inspector-table with 15 columns sorted by timestamp desc (D12)."""
   ti_path = (
       "BQAA_Agent_Analytics.Report/definition/pages/"
       "trace-inspector/visuals/trace-inspector-table/visual.json"
@@ -246,17 +252,27 @@ def test_trace_inspector_table(generated_files):
   ti = json.loads(generated_files[ti_path])
   assert ti["visual"]["visualType"] == "tableEx"
   cols = ti["visual"]["query"]["queryState"]["Values"]["projections"]
-  assert len(cols) == 7
+  assert len(cols) == 15
   col_names = [c["queryRef"] for c in cols]
   assert col_names == [
       "events_v1.timestamp",
       "events_v1.event_type",
       "events_v1.agent",
       "events_v1.user_id",
+      "events_v1.session_id",
       "events_v1.trace_id",
       "events_v1.span_id",
       "events_v1.status",
+      "events_v1.model_version",
+      "events_v1.tool_completed_name",
+      "events_v1.tool_error_name",
+      "events_v1.usage_total_tokens",
+      "events_v1.llm_total_ms",
+      "events_v1.tool_completed_total_ms",
+      "events_v1.error_message",
   ]
+  # Every column is a plain (non-summarized) column, one row per event.
+  assert all("Column" in c["field"] for c in cols)
   sort = ti["visual"]["query"]["sortDefinition"]["sort"][0]
   assert sort["direction"] == "Descending"
 
@@ -501,7 +517,9 @@ def test_report_theme_collection(generated_files):
       generated_files["BQAA_Agent_Analytics.Report/definition/report.json"]
   )
   tc = rj["themeCollection"]
-  assert tc["customTheme"]["name"] == "BQAA"
+  # The name must be the RegisteredResources item name ("BQAA.json"), not the
+  # theme's display name; otherwise the theme does not resolve.
+  assert tc["customTheme"]["name"] == "BQAA.json"
   assert tc["customTheme"]["type"] == "RegisteredResources"
   versions = tc["customTheme"]["reportVersionAtImport"]
   assert versions["visual"] == "2.13.0"
@@ -691,14 +709,15 @@ def test_area_visual_type(generated_files):
   assert "Y" in qs
 
 
-def test_area_with_series(generated_files):
-  """usage-tool-calls-over-time has a Series role (pivot tool_name)."""
+def test_tool_calls_line_chart_with_series(generated_files):
+  """usage-tool-calls-over-time is a lineChart with a Series role (D15)."""
   path = (
       "BQAA_Agent_Analytics.Report/definition/pages/"
       "tool-usage/visuals/"
       "usage-tool-calls-over-time/visual.json"
   )
   vc = json.loads(generated_files[path])
+  assert vc["visual"]["visualType"] == "lineChart"
   qs = vc["visual"]["query"]["queryState"]
   assert "Series" in qs
 
@@ -847,3 +866,267 @@ def test_top_5_agents_by_llm_calls_binds_the_top_five_measure(
   assert [p["nativeQueryRef"] for p in state["Category"]["projections"]] == [
       "agent"
   ]
+
+
+# --- UX enhancements (README D12, D15-D17) ---
+
+_PAGE_NAMES = [p[0] for p in EXPECTED_PAGES]
+_REPORT_PAGES = "BQAA_Agent_Analytics.Report/definition/pages"
+_LINE_CHARTS = {
+    "usage-tool-calls-over-time",
+    "performance-tool-latency-trend",
+    "performance-llm-latency-trend",
+}
+_DRILLTHROUGH_FIELDS = [
+    ("Date", "Date"),
+    ("events_v1", "agent"),
+    ("events_v1", "user_id"),
+    ("events_v1", "tool_completed_name"),
+    ("events_v1", "tool_error_name"),
+]
+
+
+def _lit(value):
+  return {"expr": {"Literal": {"Value": value}}}
+
+
+def _solid(color):
+  return {"solid": {"color": _lit(f"'{color}'")}}
+
+
+def _visual(files, page, name):
+  return json.loads(files[f"{_REPORT_PAGES}/{page}/visuals/{name}/visual.json"])
+
+
+def _page(files, page):
+  return json.loads(files[f"{_REPORT_PAGES}/{page}/page.json"])
+
+
+def _props(objects, name, selector=None):
+  """Return the properties of the `name` object entry with this selector."""
+  for entry in objects.get(name, []):
+    if entry.get("selector") == selector:
+      return entry["properties"]
+  raise AssertionError(f"no {name!r} entry with selector {selector!r}")
+
+
+def _parity(visuals_spec, visual_type):
+  return [
+      v
+      for v in visuals_spec["parity_visuals"]
+      if v["visual_type"] == visual_type
+  ]
+
+
+def test_custom_theme_name_matches_its_registered_resource(generated_files):
+  """A1: the customTheme must name a registered CustomTheme item."""
+  rj = json.loads(
+      generated_files["BQAA_Agent_Analytics.Report/definition/report.json"]
+  )
+  items = {
+      item["name"]
+      for pkg in rj["resourcePackages"]
+      if pkg["type"] == "RegisteredResources"
+      for item in pkg["items"]
+      if item["type"] == "CustomTheme"
+  }
+  assert rj["themeCollection"]["customTheme"]["name"] in items
+
+
+@pytest.mark.parametrize(
+    "page,name",
+    [
+        ("user-analytics", "usage-nondata-3"),
+        ("latency", "performance-nondata-3"),
+    ],
+)
+def test_navigation_buttons_show_their_fill_colour(generated_files, page, name):
+  """A2: a button fill is off by default, and a colour needs solid.color."""
+  objects = _visual(generated_files, page, name)["visual"]["objects"]
+  fill = _props(objects, "fill", {"id": "default"})
+  assert fill["show"] == _lit("true")
+  assert fill["fillColor"] == _solid("#E52592")
+  assert fill["transparency"] == _lit("0D")
+  text = _props(objects, "text", {"id": "default"})
+  assert text["fontColor"] == _solid("#FFFFFF")
+  assert text["bold"] == _lit("true")
+  assert _props(objects, "outline", {"id": "default"})["show"] == _lit("false")
+
+
+def test_latency_cards_show_exact_millisecond_values(
+    generated_files, visuals_spec
+):
+  """A3: latency cards show 4,512 rather than the auto-abbreviated 4.5K."""
+  latency_cards = [
+      v for v in _parity(visuals_spec, "cardVisual") if v["page"] == "latency"
+  ]
+  assert len(latency_cards) == 10
+  for vdef in latency_cards:
+    objects = json.loads(generated_files[_visual_path(vdef)])["visual"][
+        "objects"
+    ]
+    value = _props(objects, "value", {"id": "default"})
+    assert value["labelDisplayUnits"] == _lit("1D"), vdef["id"]
+    assert value["labelPrecision"] == _lit("0L"), vdef["id"]
+  # KPI scorecards keep Power BI's automatic display units (39M, 14K).
+  for chart_id in _KPI_CARDS:
+    vdef = _spec_visual(visuals_spec, chart_id)
+    objects = json.loads(generated_files[_visual_path(vdef)])["visual"][
+        "objects"
+    ]
+    for entry in objects.get("value", []):
+      assert "labelDisplayUnits" not in entry["properties"], chart_id
+
+
+def test_chart_titles_are_dark_and_bold(generated_files, visuals_spec):
+  """B1: visible chart titles use the theme foreground, 12pt, bold."""
+  for vdef in visuals_spec["parity_visuals"]:
+    if vdef["visual_type"] == "cardVisual":
+      continue  # Card titles are hidden; the callout label is the title.
+    vc = json.loads(generated_files[_visual_path(vdef)])
+    title = vc["visual"]["visualContainerObjects"]["title"][0]["properties"]
+    assert title["show"] == _lit("true"), vdef["id"]
+    assert title["fontColor"] == _solid("#202124"), vdef["id"]
+    assert title["fontSize"] == _lit("12D"), vdef["id"]
+    assert title["bold"] == _lit("true"), vdef["id"]
+
+
+def test_bar_charts_show_data_labels(generated_files, visuals_spec):
+  """B2: every bar shows its value without hovering."""
+  bars = _parity(visuals_spec, "clusteredBarChart")
+  assert len(bars) == 12
+  for vdef in bars:
+    objects = json.loads(generated_files[_visual_path(vdef)])["visual"][
+        "objects"
+    ]
+    assert _props(objects, "labels")["show"] == _lit("true"), vdef["id"]
+
+
+def test_tool_calls_and_latency_trends_are_line_charts(
+    generated_files, visuals_spec
+):
+  """B3/B4: overlapping series and non-zero baselines read better as lines."""
+  assert {v["id"] for v in _parity(visuals_spec, "lineChart")} == _LINE_CHARTS
+  for vdef in _parity(visuals_spec, "lineChart"):
+    vc = json.loads(generated_files[_visual_path(vdef)])
+    assert vc["visual"]["visualType"] == "lineChart"
+    qs = vc["visual"]["query"]["queryState"]
+    assert [p["queryRef"] for p in qs["Category"]["projections"]] == [
+        "Date.Date"
+    ]
+    assert [p["nativeQueryRef"] for p in qs["Y"]["projections"]] == vdef[
+        "measures"
+    ]
+
+
+def test_area_charts_start_their_value_axis_at_zero(
+    generated_files, visuals_spec
+):
+  """B4: an area's fill encodes magnitude, so its axis must start at zero."""
+  areas = _parity(visuals_spec, "areaChart")
+  assert len(areas) == 6
+  for vdef in areas:
+    objects = json.loads(generated_files[_visual_path(vdef)])["visual"][
+        "objects"
+    ]
+    assert _props(objects, "valueAxis")["start"] == _lit("0D"), vdef["id"]
+
+
+@pytest.mark.parametrize("chart_id", sorted(_KPI_CARDS))
+def test_kpi_cards_stack_and_explain_a_blank_change(
+    generated_files, visuals_spec, chart_id
+):
+  """B5/C1: callouts stack vertically; a blank Change % reads 'No prior data'."""
+  _, change = _KPI_CARDS[chart_id]
+  vdef = _spec_visual(visuals_spec, chart_id)
+  objects = json.loads(generated_files[_visual_path(vdef)])["visual"]["objects"]
+  layout = _props(objects, "layout", {"id": "default"})
+  assert layout["orientation"] == _lit("1D")
+  blank = _props(objects, "value", {"metadata": f"events_v1.{change}"})
+  assert blank["showBlankAs"] == _lit("'No prior data'")
+  # Only the change callout is relabelled, never the headline value.
+  for entry in objects["value"]:
+    if "showBlankAs" in entry["properties"]:
+      assert entry["selector"] == {"metadata": f"events_v1.{change}"}
+
+
+def test_dropdown_slicers_have_a_search_box(generated_files):
+  """C2: Agent, User ID, Trace ID and Span ID slicers are searchable."""
+  searchable = 0
+  for path, content in generated_files.items():
+    if not path.endswith("/visual.json"):
+      continue
+    vc = json.loads(content)
+    if vc["visual"]["visualType"] != "slicer":
+      continue
+    objects = vc["visual"]["objects"]
+    if objects["data"][0]["properties"]["mode"] == _lit("'Dropdown'"):
+      assert _props(objects, "general")["selfFilterEnabled"] == _lit(
+          "true"
+      ), path
+      searchable += 1
+    else:
+      assert "general" not in objects, path
+  assert searchable == 32  # 4 dropdown slicers x 8 pages
+
+
+def test_trace_inspector_is_a_drillthrough_target(generated_files):
+  """C3: right-click a bar or a day -> Drill through -> Trace Inspector."""
+  pj = _page(generated_files, "trace-inspector")
+  binding = pj["pageBinding"]
+  assert binding["type"] == "Drillthrough"
+  filters = {f["name"]: f for f in pj["filterConfig"]["filters"]}
+  fields = []
+  for param in binding["parameters"]:
+    flt = filters[param["boundFilter"]]
+    assert flt["howCreated"] == "Drillthrough"
+    assert flt["type"] == "Categorical"
+    assert flt["field"] == param["fieldExpr"]
+    column = flt["field"]["Column"]
+    fields.append(
+        (column["Expression"]["SourceRef"]["Entity"], column["Property"])
+    )
+  assert fields == _DRILLTHROUGH_FIELDS
+  assert len(filters) == len(_DRILLTHROUGH_FIELDS)
+  names = [
+      binding["name"],
+      *[p["name"] for p in binding["parameters"]],
+      *filters,
+  ]
+  assert len(names) == len(set(names))
+
+
+def test_only_the_trace_inspector_is_a_drillthrough_target(generated_files):
+  for page in _PAGE_NAMES:
+    pj = _page(generated_files, page)
+    assert ("pageBinding" in pj) == (page == "trace-inspector"), page
+    assert ("filterConfig" in pj) == (page == "trace-inspector"), page
+
+
+def test_trace_inspector_has_a_back_button(generated_files):
+  """C3: drill-through targets need a way back to the source page."""
+  vc = _visual(generated_files, "trace-inspector", "drillthrough-back")
+  assert vc["visual"]["visualType"] == "actionButton"
+  link = vc["visual"]["visualContainerObjects"]["visualLink"][0]["properties"]
+  assert link["show"] == _lit("true")
+  assert link["type"] == _lit("'Back'")
+  for page in _PAGE_NAMES:
+    if page != "trace-inspector":
+      assert (
+          f"{_REPORT_PAGES}/{page}/visuals/drillthrough-back/visual.json"
+          not in generated_files
+      )
+
+
+def test_every_page_has_a_reset_filters_button(generated_files):
+  """C5: one click clears every (synced) slicer."""
+  for page in _PAGE_NAMES:
+    vc = _visual(generated_files, page, "reset-filters")
+    assert vc["visual"]["visualType"] == "actionButton"
+    link = vc["visual"]["visualContainerObjects"]["visualLink"][0]["properties"]
+    assert link["show"] == _lit("true")
+    assert link["type"] == _lit("'ClearAllSlicers'")
+    text = _props(vc["visual"]["objects"], "text", {"id": "default"})
+    assert text["text"] == _lit("'Reset filters'")
+    # The button sits in the header band, above the slicer row.
+    assert vc["position"]["y"] + vc["position"]["height"] <= 56

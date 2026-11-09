@@ -179,7 +179,7 @@ class TestParity:
         "performance-nondata-4",
         "performance-nondata-5",
     }
-    # Also slicer/heading/table visual names.
+    # Also slicer/heading/header-button/table visual names.
     non_parity = non_data_ids | {
         "page-heading",
         "slicer-date",
@@ -187,6 +187,8 @@ class TestParity:
         "slicer-user-id",
         "slicer-trace-id",
         "slicer-span-id",
+        "reset-filters",
+        "drillthrough-back",
         "trace-inspector-table",
     }
     parity_visuals = visual_names - non_parity
@@ -745,6 +747,123 @@ class TestCheckCanFail:
     vjson_path.write_text(json.dumps(vobj, indent=2) + "\n")
     errors = val_mod.validate_parity(power_bi_root=tmp_path)
     assert any("Overlap on page" in e for e in errors), errors
+
+  # -- Header buttons, drill-through and theme reference (D12, D17) ----------
+
+  @staticmethod
+  def _copy_report(tmp_path):
+    import shutil
+
+    tmp_report = tmp_path / "BQAA_Agent_Analytics.Report"
+    shutil.copytree(POWER_BI / "BQAA_Agent_Analytics.Report", tmp_report)
+    return tmp_report
+
+  @staticmethod
+  def _rewrite_json(path, mutate):
+    obj = json.loads(path.read_text())
+    mutate(obj)
+    path.write_text(json.dumps(obj, indent=2) + "\n")
+
+  def test_ux_controls_pass_on_the_generated_report(self):
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    report = POWER_BI / "BQAA_Agent_Analytics.Report"
+    assert val_mod._check_ux_controls(report) == []
+
+  def test_dropped_reset_filters_button_detected(self, tmp_path):
+    _skip_if_not_generated()
+    import shutil
+
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    shutil.rmtree(pages / "errors" / "visuals" / "reset-filters")
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert "Page 'errors': missing header button 'reset-filters'" in errors
+
+  def test_reset_filters_button_must_clear_all_slicers(self, tmp_path):
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    path = pages / "latency" / "visuals" / "reset-filters" / "visual.json"
+    path.write_text(
+        path.read_text().replace("'ClearAllSlicers'", "'ApplyAllSlicers'")
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert any(
+        "header button 'reset-filters' must be an actionButton with action"
+        " 'ClearAllSlicers'" in e
+        for e in errors
+    ), errors
+
+  def test_back_button_outside_the_drillthrough_page_detected(self, tmp_path):
+    _skip_if_not_generated()
+    import shutil
+
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    shutil.copytree(
+        pages / "trace-inspector" / "visuals" / "drillthrough-back",
+        pages / "errors" / "visuals" / "drillthrough-back",
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Page 'errors': unexpected header button 'drillthrough-back'" in errors
+    )
+
+  def test_missing_drillthrough_binding_detected(self, tmp_path):
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    self._rewrite_json(
+        pages / "trace-inspector" / "page.json",
+        lambda page: page.pop("pageBinding"),
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Page 'trace-inspector': pageBinding must have type 'Drillthrough'"
+        in errors
+    )
+
+  def test_drillthrough_filter_must_be_created_by_drillthrough(self, tmp_path):
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+
+    def _user_filter(page):
+      page["filterConfig"]["filters"][1]["howCreated"] = "User"
+
+    self._rewrite_json(pages / "trace-inspector" / "page.json", _user_filter)
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert any(
+        "must have howCreated 'Drillthrough'" in e for e in errors
+    ), errors
+
+  def test_dropped_drillthrough_field_detected(self, tmp_path):
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    self._rewrite_json(
+        pages / "trace-inspector" / "page.json",
+        lambda page: page["pageBinding"]["parameters"].pop(),
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert any("drill-through fields" in e for e in errors), errors
+
+  def test_unresolvable_custom_theme_detected(self, tmp_path):
+    """The display name "BQAA" does not resolve the registered theme."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    report = self._copy_report(tmp_path)
+
+    def _display_name(rj):
+      rj["themeCollection"]["customTheme"]["name"] = "BQAA"
+
+    self._rewrite_json(report / "definition" / "report.json", _display_name)
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert any(
+        "customTheme name 'BQAA' is not a registered CustomTheme resource" in e
+        for e in errors
+    ), errors
 
   # -- Real declarations, not description lines (F8) -------------------------
 
@@ -1971,7 +2090,7 @@ class TestDocumentation:
       assert "over HTTP" in after or "over local HTTP" in after, path
 
   def test_tool_series_are_not_described_as_stacked(self):
-    """Tool Calls Over Time draws overlapping areas, so no doc says stacked."""
+    """Tool Calls Over Time draws one line per tool, so no doc says stacked."""
     visual = json.loads(
         (
             POWER_BI
@@ -1984,7 +2103,7 @@ class TestDocumentation:
             / "visual.json"
         ).read_text(encoding="utf-8")
     )
-    assert visual["visual"]["visualType"] == "areaChart"
+    assert visual["visual"]["visualType"] == "lineChart"
     for rel in (
         "README.md",
         "USER_MANUAL.md",
@@ -2004,8 +2123,8 @@ class TestDocumentation:
         (POWER_BI / "README.md").read_text(encoding="utf-8").split()
     )
     assert (
-        "A grouped visual (area or bar chart) that is empty on both sides is"
-        " `EMPTY`, because nothing was compared." in readme
+        "A grouped visual (area, line, or bar chart) that is empty on both"
+        " sides is `EMPTY`, because nothing was compared." in readme
     )
     assert (
         "A `cardVisual` is never `EMPTY`: its DAX query must return exactly"
@@ -2124,7 +2243,7 @@ fs.writeFileSync({str(out_zip)!r}, zipBytes);
     with zipfile.ZipFile(out_zip, "r") as zf:
       assert zf.testzip() is None
       names = zf.namelist()
-      assert len(names) == 118
+      assert len(names) == 127
       expr_text = zf.read(
           "BQAA_Agent_Analytics/BQAA_Agent_Analytics.SemanticModel/definition/expressions.tmdl"
       ).decode("utf-8")

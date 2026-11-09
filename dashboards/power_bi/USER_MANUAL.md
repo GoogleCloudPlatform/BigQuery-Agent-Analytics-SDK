@@ -129,8 +129,8 @@ sessions. Scorecards show total traces and total sessions.
 
 ### 3. Tool Usage
 
-Tool calls over time (broken down by tool name), tool invocations, and tool
-completions by agent.
+Tool calls over time (broken down by tool name, one line per tool), tool
+invocations, and tool completions by agent.
 
 ### 4. LLM Interactions
 
@@ -146,8 +146,9 @@ users by events. A navigation button links to the Latency page.
 
 Average tool latency, tool latency over time, percentile cards
 (P50–P99) for tool and LLM latency, average LLM latency, and LLM
-latency over time. A navigation button links to the Token Consumption
-page.
+latency over time. Latency cards show exact milliseconds (for example
+`4,512`), and the two trends are line charts. A navigation button links
+to the Token Consumption page.
 
 ### 7. Errors
 
@@ -156,9 +157,13 @@ and top tools by errors. A scorecard shows total tool errors.
 
 ### 8. Trace Inspector
 
-A table showing all events (timestamp, event type, agent, user, trace,
-span, status), sorted by timestamp descending. Filter by date, agent,
-user, trace ID, or span ID using the slicers at the top.
+A table showing all events, newest first: timestamp, event type, agent,
+user, session, trace, span, status, model version, tool name (completed
+or errored), total tokens, LLM latency, tool latency, and error message.
+Filter by date, agent, user, trace ID, or span ID using the slicers at
+the top, or drill through to it from any other page (see
+[Drill-through](#drill-through)). The **Back** button returns to the
+page you came from.
 
 ---
 
@@ -168,7 +173,15 @@ user, trace ID, or span ID using the slicers at the top.
 
 Each page has five slicers at the top: Date, Agent, User ID, Trace ID,
 and Span ID. The slicers sync across pages — selecting an agent on one
-page applies the same filter on all pages.
+page applies the same filter on all pages. The Agent, User ID, Trace ID,
+and Span ID dropdowns have a search box: type part of an ID instead of
+scrolling.
+
+### Reset filters
+
+The **Reset filters** button at the top right of every page clears all
+slicers (back to the full date window and every agent, user, trace, and
+span). Filters set in the Filters pane are kept.
 
 ### Period-over-period
 
@@ -176,9 +189,11 @@ Each KPI card (Total Tokens, Total Traces, Total Sessions, LLM Calls,
 Total Users, or Tool Errors) shows the current value and, as a second
 callout labelled "vs previous period", the percentage change from the
 prior window (the `KPI * Change %` measure). The prior window is the same
-number of days immediately before the current selection. The
-`KPI * Prior` measures stay in the semantic model if you want the prior
-value itself.
+number of days immediately before the current selection. When the prior
+window has no data (for example, a new table), the callout reads
+**No prior data** instead of a number; narrow the Date slicer so that both
+windows have data. The `KPI * Prior` measures stay in the semantic model
+if you want the prior value itself.
 
 ### Date range
 
@@ -193,6 +208,13 @@ Clicking a bar in a bar chart filters the other charts on the page
 (except the four charts that do not listen to the User ID slicer: Top
 5 Users by Token Consumption, Token Usage by Agent, Top 5 Users by
 Traces, and Traces by Agent).
+
+### Drill-through
+
+Right-click a bar (an agent, user, or tool) or a day on a trend chart,
+then choose **Drill through → Trace Inspector** to see the events behind
+it. The current slicers carry over. Use **Back** on the Trace Inspector
+to return.
 
 ---
 

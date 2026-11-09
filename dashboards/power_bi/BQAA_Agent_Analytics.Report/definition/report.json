@@ -2,7 +2,7 @@
   "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/report/3.3.0/schema.json",
   "themeCollection": {
     "customTheme": {
-      "name": "BQAA",
+      "name": "BQAA.json",
       "reportVersionAtImport": {
         "visual": "2.13.0",
         "page": "2.1.0",

@@ -79,6 +79,20 @@
                       "Entity": "events_v1"
                     }
                   },
+                  "Property": "session_id"
+                }
+              },
+              "queryRef": "events_v1.session_id",
+              "nativeQueryRef": "session_id"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
                   "Property": "trace_id"
                 }
               },
@@ -112,6 +126,104 @@
               },
               "queryRef": "events_v1.status",
               "nativeQueryRef": "status"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "model_version"
+                }
+              },
+              "queryRef": "events_v1.model_version",
+              "nativeQueryRef": "model_version"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "tool_completed_name"
+                }
+              },
+              "queryRef": "events_v1.tool_completed_name",
+              "nativeQueryRef": "tool_completed_name"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "tool_error_name"
+                }
+              },
+              "queryRef": "events_v1.tool_error_name",
+              "nativeQueryRef": "tool_error_name"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "usage_total_tokens"
+                }
+              },
+              "queryRef": "events_v1.usage_total_tokens",
+              "nativeQueryRef": "usage_total_tokens"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "llm_total_ms"
+                }
+              },
+              "queryRef": "events_v1.llm_total_ms",
+              "nativeQueryRef": "llm_total_ms"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "tool_completed_total_ms"
+                }
+              },
+              "queryRef": "events_v1.tool_completed_total_ms",
+              "nativeQueryRef": "tool_completed_total_ms"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "events_v1"
+                    }
+                  },
+                  "Property": "error_message"
+                }
+              },
+              "queryRef": "events_v1.error_message",
+              "nativeQueryRef": "error_message"
             }
           ]
         }

@@ -49,6 +49,40 @@
         }
       }
     },
+    "objects": {
+      "layout": [
+        {
+          "properties": {
+            "orientation": {
+              "expr": {
+                "Literal": {
+                  "Value": "1D"
+                }
+              }
+            }
+          },
+          "selector": {
+            "id": "default"
+          }
+        }
+      ],
+      "value": [
+        {
+          "properties": {
+            "showBlankAs": {
+              "expr": {
+                "Literal": {
+                  "Value": "'No prior data'"
+                }
+              }
+            }
+          },
+          "selector": {
+            "metadata": "events_v1.KPI Total LLM Calls Change %"
+          }
+        }
+      ]
+    },
     "visualContainerObjects": {
       "title": [
         {
