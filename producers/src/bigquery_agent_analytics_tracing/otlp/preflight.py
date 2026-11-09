@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import subprocess
 from typing import Callable
 import urllib.request
 

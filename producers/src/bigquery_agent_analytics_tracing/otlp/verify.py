@@ -34,7 +34,7 @@ import dataclasses
 import json
 import re
 import time
-from typing import Any, Callable
+from typing import Callable
 import urllib.error
 import urllib.request
 import uuid
