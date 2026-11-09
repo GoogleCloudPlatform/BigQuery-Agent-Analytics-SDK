@@ -27,7 +27,6 @@ on: ``idempotency_key``, ``source_position`` (incl. ``raw_otlp_request_hash``),
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
 import json
