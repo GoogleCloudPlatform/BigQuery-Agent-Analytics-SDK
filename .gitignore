@@ -54,3 +54,10 @@ dashboards/web/.env
 intent.md
 plan.md
 spec.md
+
+# CodeMender (.github/workflows/codemender.yml, scripts/codemender_pre_commit.sh):
+# the file cm creates to track the repository, and the scan's SARIF report.
+.cm_project
+codemender.sarif
+# Credentials that google-github-actions/auth writes into the workspace.
+gha-creds-*.json
