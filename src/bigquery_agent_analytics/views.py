@@ -407,6 +407,43 @@ WHERE app_name IS NOT NULL
   AND end_seconds >= start_seconds
 """,
     ),
+    # One row per AGENT_TRANSFER (#213). A chain is ordered by timestamp
+    # within an invocation; equal timestamps have no defined order.
+    "agent_transfer_chains": (
+        "agent_transfer_chains",
+        """\
+WITH parsed AS (
+  SELECT
+    NULLIF(JSON_VALUE(attributes, '$.adk.app_name'), '') AS app_name,
+    NULLIF(user_id, '') AS user_id,
+    NULLIF(session_id, '') AS session_id,
+    NULLIF(invocation_id, '') AS invocation_id,
+    timestamp,
+    span_id,
+    NULLIF(JSON_VALUE(content, '$.from_agent'), '') AS from_agent,
+    NULLIF(JSON_VALUE(content, '$.to_agent'), '') AS to_agent
+  FROM `{project}.{dataset}.{table}`
+  WHERE event_type = 'AGENT_TRANSFER'
+)
+SELECT
+  app_name,
+  user_id,
+  session_id,
+  invocation_id,
+  timestamp,
+  from_agent,
+  to_agent,
+  span_id
+FROM parsed
+WHERE app_name IS NOT NULL
+  AND user_id IS NOT NULL
+  AND session_id IS NOT NULL
+  AND invocation_id IS NOT NULL
+  AND timestamp IS NOT NULL
+  AND from_agent IS NOT NULL
+  AND to_agent IS NOT NULL
+""",
+    ),
 }
 
 # ------------------------------------------------------------------ #

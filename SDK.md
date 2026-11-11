@@ -1686,8 +1686,11 @@ created = vm.create_all_views()
   `create_view()` raises `ValueError` for it without issuing a query;
   `get_view_sql()` still returns its SQL. With `denied_columns=["attributes"]`
   that skips the `LLM_REQUEST`, `LLM_RESPONSE`, `TOOL_COMPLETED`,
-  `STATE_DELTA`, `A2A_INTERACTION` and `TOOL_PAUSED` views and the
-  `compaction_windows` cross-event view; the other 19 per-event views deploy.
+  `STATE_DELTA`, `A2A_INTERACTION` and `TOOL_PAUSED` views and every
+  cross-event view, since each groups on `attributes.adk.app_name`; the other
+  19 per-event views deploy. Both cross-event views, `compaction_windows` and
+  `agent_transfer_chains`, also read `content`, so `denied_columns=["content"]`
+  skips them too.
 - `denied_columns` is keyword-only and accepts only `content`,
   `content_parts`, `attributes` and `latency_ms`, matched exactly as the plugin
   matches them: any other name raises `ValueError`, and a bare string raises
@@ -1721,7 +1724,7 @@ still one manager and one deployment path:
 ```python
 # Per-event-type views first, then cross-event views, in one call.
 created = vm.create_all_views()
-# {"LLM_REQUEST": "adk_llm_requests", ..., "compaction_windows": "adk_compaction_windows"}
+# {"LLM_REQUEST": "adk_llm_requests", ..., "compaction_windows": "adk_compaction_windows", ...}
 
 vm.available_cross_event_views          # keys in the cross-event registry
 vm.create_view("compaction_windows")   # single view, same method
@@ -1737,11 +1740,12 @@ bq-agent-sdk views create compaction_windows \
   --project-id=my-project --dataset-id=analytics
 ```
 
-The cross-event registry includes `compaction_windows` (#216). Both
-`create_all_views()` and `views create-all` deploy it after the per-event views.
-The other ADK 2.0 consumer views (`workflow_invocations`, `agent_transfer_chains`,
-`branch_fanout`, `long_running_tool_durations`, `scope_cardinality`) register as
-they land. Existing per-event SQL is unchanged.
+The cross-event registry includes `compaction_windows` (#216) and
+`agent_transfer_chains` (#213). Both `create_all_views()` and
+`views create-all` deploy them after the per-event views. The other ADK 2.0
+consumer views (`workflow_invocations`, `branch_fanout`,
+`long_running_tool_durations`, `scope_cardinality`) register as they land.
+Existing per-event SQL is unchanged.
 
 `adk_compaction_windows` (or `<view_prefix>compaction_windows`) reads
 `EVENT_COMPACTION` rows directly from the configured events table and exposes:
@@ -1771,6 +1775,23 @@ and fails on a table that sets `require_partition_filter`. For time-bounded
 queries, the `adk_event_compactions` per-event view keeps the `timestamp`
 header, but it is not a drop-in replacement: it does not deduplicate windows
 or skip malformed boundaries, and it has `agent` rather than `app_name`.
+
+`adk_agent_transfer_chains` reads `AGENT_TRANSFER` rows from the events table
+and exposes one row per transfer:
+
+| Columns | Type | Meaning |
+|---|---|---|
+| `app_name`, `user_id`, `session_id`, `invocation_id` | STRING | Full telemetry identity |
+| `timestamp` | TIMESTAMP | Event time of the transfer |
+| `from_agent`, `to_agent` | STRING | Transferring agent and target agent, from `content` |
+| `span_id` | STRING | Span of the transfer row |
+
+To follow a chain, order an invocation's rows by `timestamp`: each hop's
+`from_agent` is the previous hop's `to_agent`. The view has no hop index,
+and transfers with equal timestamps have no defined order. Rows without
+`attributes.adk.app_name` (pre-2.0), with null or empty identity fields, or
+missing either agent are excluded. The view keeps the event `timestamp`, so
+a time-bounded query can filter on it as with the per-event views.
 
 A registry entry maps a view key to `(view_suffix, query_sql)`. `query_sql` is
 the full `SELECT` body, rendered with `str.format` (double any literal braces)

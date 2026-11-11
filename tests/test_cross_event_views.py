@@ -26,6 +26,7 @@ each registered view's SQL on it in SQLite.
 """
 
 import collections
+import copy
 import json
 import os
 import pathlib
@@ -498,3 +499,138 @@ class TestCrossEventViewsOnWorkflowFixture:
   def test_pre20_and_callback_only_rows_produce_no_rows(self, vm, view_key):
     events = fixture_events("row-01", "row-02", "row-15", "row-16")
     assert execute_cross_event_view(vm, view_key, events) == []
+
+
+def _set_identity(event, field, value):
+  """Returns a copy of ``event`` with one telemetry identity field set."""
+  event = copy.deepcopy(event)
+  if field == "app_name":
+    event["attributes"]["adk"]["app_name"] = value
+  else:
+    event[field] = value
+  return event
+
+
+def _deploys_with_denied(view_key, column):
+  vm = ViewManager(
+      project_id=PROJECT,
+      dataset_id=DATASET,
+      bq_client=mock.MagicMock(),
+      denied_columns=[column],
+  )
+  return view_key in vm.create_all_views()
+
+
+class TestAgentTransferChainsView:
+  """``agent_transfer_chains``: one row per AGENT_TRANSFER (#213)."""
+
+  _KEY = "agent_transfer_chains"
+
+  def _run(self, vm, events):
+    return execute_cross_event_view(vm, self._KEY, events)
+
+  def test_is_registered_and_deployed(self, vm):
+    assert vm.get_view_name(self._KEY) == "adk_agent_transfer_chains"
+    assert self._KEY in vm.available_cross_event_views
+    assert vm.create_all_views()[self._KEY] == "adk_agent_transfer_chains"
+    assert "WHERE event_type = 'AGENT_TRANSFER'" in vm.get_view_sql(self._KEY)
+
+  def test_fixture_chain_in_timestamp_order(self, vm):
+    rows = sorted(
+        self._run(vm, fixture_events()), key=lambda row: row["timestamp"]
+    )
+    identity = {
+        "app_name": "team_app",
+        "user_id": "user-1",
+        "session_id": "sess-1",
+        "invocation_id": "inv-1",
+    }
+    assert rows == [
+        {
+            **identity,
+            "timestamp": "2026-06-01T10:00:01.100000Z",
+            "from_agent": "coordinator",
+            "to_agent": "planner",
+            "span_id": "span-04",
+        },
+        {
+            **identity,
+            "timestamp": "2026-06-01T10:00:04.100000Z",
+            "from_agent": "planner",
+            "to_agent": "executor",
+            "span_id": "span-09",
+        },
+        {
+            **identity,
+            "timestamp": "2026-06-01T10:00:05.100000Z",
+            "from_agent": "executor",
+            "to_agent": "verifier",
+            "span_id": "span-10",
+        },
+    ]
+    assert list(rows[0]) == [
+        *_IDENTITY,
+        "timestamp",
+        "from_agent",
+        "to_agent",
+        "span_id",
+    ]
+    # Each hop starts where the previous one ended.
+    for previous, current in zip(rows, rows[1:]):
+      assert current["from_agent"] == previous["to_agent"]
+
+  @pytest.mark.parametrize("attributes", [None, {}, {"adk": None}, {"adk": {}}])
+  def test_pre20_transfers_are_excluded(self, vm, attributes):
+    (transfer,) = fixture_events("row-04")
+    transfer["attributes"] = attributes
+    assert self._run(vm, [transfer]) == []
+
+  @pytest.mark.parametrize("field", _IDENTITY)
+  @pytest.mark.parametrize("value", [None, ""])
+  def test_incomplete_identities_are_excluded(self, vm, field, value):
+    (transfer,) = fixture_events("row-04")
+    assert self._run(vm, [_set_identity(transfer, field, value)]) == []
+
+  @pytest.mark.parametrize(
+      "content",
+      [
+          None,
+          {},
+          {"from_agent": "coordinator"},
+          {"to_agent": "planner"},
+          {"from_agent": "", "to_agent": "planner"},
+          {"from_agent": "coordinator", "to_agent": ""},
+      ],
+  )
+  def test_transfers_without_both_agents_are_excluded(self, vm, content):
+    (transfer,) = fixture_events("row-04")
+    transfer["content"] = content
+    assert self._run(vm, [transfer]) == []
+
+  def test_transfers_without_timestamp_are_excluded(self, vm):
+    (transfer,) = fixture_events("row-04")
+    transfer["timestamp"] = None
+    assert self._run(vm, [transfer]) == []
+
+  def test_other_event_types_are_excluded(self, vm):
+    (not_a_transfer,) = fixture_events("row-04")
+    not_a_transfer["event_type"] = "AGENT_RESPONSE"
+    assert self._run(vm, [not_a_transfer]) == []
+
+  def test_same_session_in_another_app_stays_separate(self, vm):
+    (transfer,) = fixture_events("row-04")
+    other = _set_identity(transfer, "app_name", "other_app")
+    rows = self._run(vm, [transfer, other])
+    assert sorted(row["app_name"] for row in rows) == ["other_app", "team_app"]
+
+  @pytest.mark.parametrize(
+      "column, deployed",
+      [
+          ("attributes", False),
+          ("content", False),
+          ("content_parts", True),
+          ("latency_ms", True),
+      ],
+  )
+  def test_denied_columns(self, column, deployed):
+    assert _deploys_with_denied(self._KEY, column) is deployed

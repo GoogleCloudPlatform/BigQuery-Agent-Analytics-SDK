@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   integer counts. The new properties are read-only and not serialized, so
   `model_dump()`, CLI `--format json` and Remote Function replies are
   unchanged.
+- **Agent transfer chains view (#213)** - `ViewManager` and the `views` CLI
+  deploy `agent_transfer_chains`: one row per `AGENT_TRANSFER` with
+  `from_agent`, `to_agent`, the event `timestamp` and `span_id` under the
+  full telemetry identity. Pre-2.0 rows, incomplete identities and
+  transfers missing either agent are excluded.
 
 ## [0.6.2] - 2026-11-05
 
