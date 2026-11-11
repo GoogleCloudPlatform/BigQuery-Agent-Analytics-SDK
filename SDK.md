@@ -188,13 +188,49 @@ from google.adk.plugins.bigquery_agent_analytics_plugin import BigQueryLoggerCon
 plugin = BigQueryAgentAnalyticsPlugin(
     project_id="my-project",
     dataset_id="my_dataset",
-    config=BigQueryLoggerConfig(enable_otel_correlation=True),
+    config=BigQueryLoggerConfig(
+        enable_otel_correlation=True,
+        custom_metadata_allowlist=["team", "citation_metadata", "a2a:*"],
+    ),
 )
 ```
 
 Span-level joins also need the spans themselves, exported to Cloud Trace or to
 an `otel_spans` table (for example by the
 [OTLP receiver](docs/otlp_receiver_design.md)).
+
+#### Querying `attributes.custom_metadata`
+
+When `custom_metadata_allowlist` is set (exact keys or prefixes ending in `*`
+such as `"a2a:*"`), matching `Event.custom_metadata` entries are copied into
+`attributes.custom_metadata` on every row emitted from that `Event` (including
+`AGENT_RESPONSE` and `STATE_DELTA`) and pass through the plugin's truncation
+(`is_truncated`) and sensitive-key redaction pipeline. In BigQuery Standard SQL,
+use unquoted JSONPath for simple identifier keys (`$.custom_metadata.team`),
+double-quoted JSONPath segments (`'$.custom_metadata."<key>"'`) when a key
+contains colons (`:`) or dots (`.`), and `JSON_QUERY` for nested objects or
+arrays:
+
+```sql
+SELECT
+  timestamp,
+  event_type,
+  session_id,
+  invocation_id,
+  JSON_VALUE(attributes, '$.custom_metadata.team') AS team,
+  JSON_VALUE(attributes, '$.custom_metadata."a2a:task_id"') AS a2a_task_id,
+  JSON_QUERY(
+    attributes, '$.custom_metadata."citation_metadata"'
+  ) AS citation_metadata
+FROM `my-project.my_dataset.agent_events`
+WHERE JSON_QUERY(attributes, '$.custom_metadata') IS NOT NULL;
+```
+
+Top-level plugin attributes written directly by the ADK plugin — such as
+`JSON_VALUE(attributes, '$.model_version')` on `adk_llm_responses` — live at
+the root of `attributes` rather than under `attributes.custom_metadata`, and
+built-in `a2a:*` keys continue to be written under `attributes.a2a_metadata`
+(projected on `adk_a2a_interactions`) for backward compatibility.
 
 #### Reading correlation IDs in the SDK
 
