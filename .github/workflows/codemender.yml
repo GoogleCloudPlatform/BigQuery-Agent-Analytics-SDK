@@ -1,0 +1,197 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Scans the changes in each pull request into main with CodeMender
+# (`cm find --diff` against the base branch), uploads the SARIF report to
+# GitHub code scanning (category `codemender`), and fails when CodeMender
+# finds a vulnerability with a severity in FAIL_ON. A manual run
+# (workflow_dispatch) scans the last commit of the branch it runs on.
+#
+# The job authenticates to Google Cloud with Workload Identity Federation,
+# from the repository secrets GCP_PROJECT_ID, GCP_WIF_PROVIDER and
+# GCP_WIF_SERVICE_ACCOUNT. To set them up, see
+# https://docs.cloud.google.com/gemini-enterprise-agent-platform/agents/codemender/integrate-with-cicd#github-wif
+# Until all three are set, the job skips the scan with a notice and passes.
+#
+# Workflows for pull requests from forks and from Dependabot can't read the
+# secrets, so the job doesn't run for them, and GitHub reports a skipped job
+# as successful: even as a required check, it wouldn't block those pull
+# requests. Review them yourself, or scan them locally with `cm find --diff`
+# (see scripts/codemender_pre_commit.sh).
+#
+# tests/test_codemender_workflow.py runs this workflow's scripts.
+
+name: CodeMender
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege: the scan job asks for the permissions it needs.
+permissions: {}
+
+concurrency:
+  group: codemender-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CM_DOWNLOAD_URL: https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3Astable%3Acm-linux-amd64.zip:download?alt=media
+
+jobs:
+  scan:
+    name: CodeMender scan
+    # Workflows for fork and Dependabot pull requests can't read this
+    # repository's secrets, so they can't authenticate to Google Cloud.
+    if: >-
+      (github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository) &&
+      github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write         # Workload Identity Federation
+      security-events: write  # Upload SARIF to code scanning
+      actions: read           # Upload SARIF from a private repository
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0  # cm needs the base branch history
+          persist-credentials: false
+
+      - name: Check Workload Identity Federation configuration
+        id: check_config
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+          GCP_WIF_SERVICE_ACCOUNT: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
+        run: |
+          # A secret that isn't set reads as "". The auth action trims its
+          # inputs, so a secret of only whitespace counts as not set too.
+          missing=()
+          for name in GCP_PROJECT_ID GCP_WIF_PROVIDER GCP_WIF_SERVICE_ACCOUNT; do
+            value="${!name}"
+            if [ -z "${value//[[:space:]]/}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "::notice::CodeMender WIF secrets (GCP_PROJECT_ID, GCP_WIF_PROVIDER, GCP_WIF_SERVICE_ACCOUNT) are not configured; skipping CodeMender scan."
+            printf -v names '%s, ' "${missing[@]}"
+            {
+              echo "## CodeMender scan"
+              echo
+              echo "Skipped: these repository secrets are not set: ${names%, }."
+              echo "To set them up, see [Integrate CodeMender with CI/CD](https://docs.cloud.google.com/gemini-enterprise-agent-platform/agents/codemender/integrate-with-cicd#github-wif)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud
+        if: steps.check_config.outputs.configured == 'true'
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed  # v2.1.13
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
+
+      - name: Install the CodeMender CLI
+        if: steps.check_config.outputs.configured == 'true'
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/cm.zip" "$CM_DOWNLOAD_URL"
+          unzip -q -o "$RUNNER_TEMP/cm.zip" -d "$RUNNER_TEMP/cm"
+          echo "$RUNNER_TEMP/cm" >> "$GITHUB_PATH"
+
+      - name: Scan the pull request
+        id: scan
+        if: steps.check_config.outputs.configured == 'true'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          # Severities that fail the check: CRITICAL, HIGH, MEDIUM and LOW,
+          # comma-separated. "" reports the findings without failing.
+          FAIL_ON: CRITICAL,HIGH
+        run: |
+          # A pull request is compared with its base branch; a manual run with
+          # the commit before HEAD, or with main when HEAD has no parent.
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            diff_ref="origin/$BASE_REF"
+          elif git rev-parse --verify --quiet 'HEAD~1^{commit}' > /dev/null; then
+            diff_ref=HEAD~1
+          else
+            diff_ref=origin/main
+          fi
+          if ! git rev-parse --verify --quiet "$diff_ref^{commit}" > /dev/null; then
+            echo "::error::cannot scan the changes: '$diff_ref' is not a commit in this clone"
+            exit 1
+          fi
+
+          # Only a report that this scan writes is summarized and uploaded.
+          rm -f codemender.sarif
+          cm init
+          status=0
+          cm find . \
+            --diff="$diff_ref" \
+            --diff-workers=16 \
+            --fail-on="$FAIL_ON" \
+            --format=sarif \
+            --output=codemender.sarif \
+            --sandbox=false \
+            --yes \
+            --bypass-warning || status=$?
+
+          # Anyone can read the job summary of a public repository, so it has
+          # the outcome but not the findings. Code scanning has them: it
+          # annotates the pull request, and its alert list needs write access.
+          # (`cm report` would also list findings in code that the change
+          # didn't touch, labeled [LEGACY / UNTOUCHED].)
+          # cm find exits with 1 for a vulnerability with a failing severity;
+          # any other failure, or 1 without a report, is an error.
+          if [ "$status" -eq 0 ]; then
+            outcome="Passed: no vulnerability with a failing severity."
+          elif [ "$status" -eq 1 ] && [ -f codemender.sarif ]; then
+            outcome="Failed (exit status 1): CodeMender reported a vulnerability with a failing severity."
+          elif [ -f codemender.sarif ]; then
+            outcome="Failed (exit status $status): the scan failed after writing its report; see this step's log."
+          else
+            outcome="Failed (exit status $status): the scan wrote no report; see this step's log."
+          fi
+          {
+            echo "## CodeMender scan"
+            echo
+            echo "Compared with \`$diff_ref\`. Failing severities: ${FAIL_ON:-none (findings are only reported)}."
+            echo
+            echo "$outcome"
+            if [ -f codemender.sarif ]; then
+              echo
+              echo "The findings are in [code scanning]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/security/code-scanning) (category \`codemender\`); its alert list needs write access."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      # Code scanning has to be available for the repository; if it isn't,
+      # the upload fails without failing the job.
+      - name: Upload results to code scanning
+        if: ${{ !cancelled() && steps.check_config.outputs.configured == 'true' && hashFiles('codemender.sarif') != '' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066  # v4.39.3
+        with:
+          sarif_file: codemender.sarif
+          category: codemender
