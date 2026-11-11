@@ -361,7 +361,8 @@ _EVENT_VIEW_DEFS: dict[str, tuple[str, str]] = {
 # after every per-event view; a view that reads another cross-event
 # view must come after it.
 #
-# The consumer views register here as they land (#212-#217).
+# The ADK 2.0 consumer views register here as they land (#212-#217);
+# long_running_tool_durations (#215) is still to come.
 
 _CROSS_EVENT_VIEW_DEFS: dict[str, tuple[str, str]] = {
     "compaction_windows": (
@@ -524,6 +525,80 @@ GROUP BY
   session_id,
   invocation_id,
   scope_kind
+""",
+    ),
+    # One row per workflow node and invocation (#212). The producer writes
+    # node.path and node.parent_run_id but no parent path, so parent_path is
+    # derived from node_path (NULL for a single-segment root). The parent is
+    # joined on parent_path plus the full telemetry identity, never on
+    # parent_run_id: run IDs are unique only within one path segment. A
+    # parent with no row in the same invocation, such as one that ran
+    # before a resume, leaves parent_node_run_id NULL.
+    "workflow_invocations": (
+        "workflow_invocations",
+        """\
+WITH parsed AS (
+  SELECT
+    NULLIF(JSON_VALUE(attributes, '$.adk.app_name'), '') AS app_name,
+    NULLIF(user_id, '') AS user_id,
+    NULLIF(session_id, '') AS session_id,
+    NULLIF(invocation_id, '') AS invocation_id,
+    NULLIF(JSON_VALUE(attributes, '$.adk.node.path'), '') AS node_path,
+    NULLIF(JSON_VALUE(attributes, '$.adk.node.run_id'), '') AS node_run_id,
+    NULLIF(
+      JSON_VALUE(attributes, '$.adk.source_event_id'), ''
+    ) AS source_event_id,
+    timestamp
+  FROM `{project}.{dataset}.{table}`
+  WHERE NULLIF(JSON_VALUE(attributes, '$.adk.node.path'), '') IS NOT NULL
+), nodes AS (
+  SELECT
+    app_name,
+    user_id,
+    session_id,
+    invocation_id,
+    node_path,
+    MIN(node_run_id) AS node_run_id,
+    CASE
+      WHEN STRPOS(node_path, '/') = 0 THEN NULL
+      ELSE REGEXP_REPLACE(node_path, r'/[^/]+$', '')
+    END AS parent_path,
+    MIN(timestamp) AS first_seen_ts,
+    MAX(timestamp) AS last_seen_ts,
+    COUNT(DISTINCT source_event_id) AS source_event_count,
+    COUNT(*) AS event_count
+  FROM parsed
+  WHERE app_name IS NOT NULL
+    AND user_id IS NOT NULL
+    AND session_id IS NOT NULL
+    AND invocation_id IS NOT NULL
+  GROUP BY
+    app_name,
+    user_id,
+    session_id,
+    invocation_id,
+    node_path
+)
+SELECT
+  nodes.app_name,
+  nodes.user_id,
+  nodes.session_id,
+  nodes.invocation_id,
+  nodes.node_path,
+  nodes.node_run_id,
+  nodes.parent_path,
+  parent.node_run_id AS parent_node_run_id,
+  nodes.first_seen_ts,
+  nodes.last_seen_ts,
+  nodes.source_event_count,
+  nodes.event_count
+FROM nodes
+LEFT JOIN nodes AS parent
+  ON nodes.app_name = parent.app_name
+  AND nodes.user_id = parent.user_id
+  AND nodes.session_id = parent.session_id
+  AND nodes.invocation_id = parent.invocation_id
+  AND nodes.parent_path = parent.node_path
 """,
     ),
 }

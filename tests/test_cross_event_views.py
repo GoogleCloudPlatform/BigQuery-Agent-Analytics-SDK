@@ -823,3 +823,176 @@ class TestScopeCardinalityView:
   )
   def test_denied_columns(self, column, deployed):
     assert _deploys_with_denied(self._KEY, column) is deployed
+
+
+class TestWorkflowInvocationsView:
+  """``workflow_invocations``: one row per workflow node (#212)."""
+
+  _KEY = "workflow_invocations"
+
+  def _run(self, vm, events):
+    rows = execute_cross_event_view(vm, self._KEY, events)
+    return sorted(
+        rows, key=lambda row: [row[f] for f in (*_IDENTITY, "node_path")]
+    )
+
+  @staticmethod
+  def _dag(rows):
+    return [
+        (
+            row["invocation_id"],
+            row["node_path"],
+            row["node_run_id"],
+            row["parent_path"],
+            row["parent_node_run_id"],
+        )
+        for row in rows
+    ]
+
+  @staticmethod
+  def _at_path(event, path):
+    """Returns ``event`` as written by the node at ``path``."""
+    run_id, parent_run_id = _node_run_ids(path)
+    event["attributes"]["adk"]["node"] = {
+        "path": path,
+        "run_id": run_id,
+        "parent_run_id": parent_run_id,
+    }
+    return event
+
+  def test_is_registered_and_deployed(self, vm):
+    assert vm.get_view_name(self._KEY) == "adk_workflow_invocations"
+    assert self._KEY in vm.available_cross_event_views
+    assert vm.create_all_views()[self._KEY] == "adk_workflow_invocations"
+    sql = vm.get_view_sql(self._KEY)
+    assert (
+        "WHERE NULLIF(JSON_VALUE(attributes, '$.adk.node.path'), '')"
+        " IS NOT NULL" in sql
+    )
+    assert "WHEN STRPOS(node_path, '/') = 0 THEN NULL" in sql
+    assert "ELSE REGEXP_REPLACE(node_path, r'/[^/]+$', '')" in sql
+    # The DAG never joins on the producer's parent_run_id.
+    assert "parent_run_id" not in sql
+
+  def test_fixture_dag(self, vm):
+    rows = self._run(vm, fixture_events())
+    assert self._dag(rows) == [
+        ("inv-1", "planner@1", "1", None, None),
+        ("inv-1", "root@1", "1", None, None),
+        ("inv-1", "root@1/child@2", "2", "root@1", "1"),
+        ("inv-1", "root@1/child@2/grandchild@3", "3", "root@1/child@2", "2"),
+    ]
+    assert rows[2] == {
+        "app_name": "team_app",
+        "user_id": "user-1",
+        "session_id": "sess-1",
+        "invocation_id": "inv-1",
+        "node_path": "root@1/child@2",
+        "node_run_id": "2",
+        "parent_path": "root@1",
+        "parent_node_run_id": "1",
+        "first_seen_ts": "2026-06-01T10:00:02.100000Z",
+        "last_seen_ts": "2026-06-01T10:00:02.100000Z",
+        "source_event_count": 1,
+        "event_count": 1,
+    }
+    assert list(rows[2]) == [
+        *_IDENTITY,
+        "node_path",
+        "node_run_id",
+        "parent_path",
+        "parent_node_run_id",
+        "first_seen_ts",
+        "last_seen_ts",
+        "source_event_count",
+        "event_count",
+    ]
+
+  @pytest.mark.parametrize(
+      "path, parent_path",
+      [
+          ("root@1", None),
+          ("root@1/child@2", "root@1"),
+          ("root@1/child@2/grandchild@3", "root@1/child@2"),
+          ("wf/A@1/B@1", "wf/A@1"),
+      ],
+  )
+  def test_parent_path_strips_the_last_segment(self, vm, path, parent_path):
+    (response,) = fixture_events("row-03")
+    rows = self._run(vm, [self._at_path(response, path)])
+    assert [(row["node_path"], row["parent_path"]) for row in rows] == [
+        (path, parent_path)
+    ]
+
+  def test_non_workflow_rows_are_excluded(self, vm):
+    # Event rows outside a workflow have node.path = "".
+    events = fixture_events(
+        "row-07",
+        "row-08",
+        "row-09",
+        "row-10",
+        "row-11",
+        "row-12",
+        "row-13",
+        "row-14",
+        "row-17",
+    )
+    assert {_adk(e)["node"]["path"] for e in events} == {""}
+    assert self._run(vm, events) == []
+    (no_node,) = fixture_events("row-03")
+    del no_node["attributes"]["adk"]["node"]
+    assert self._run(vm, [no_node]) == []
+
+  def test_parent_in_an_earlier_invocation_leaves_parent_node_run_id_null(
+      self, vm
+  ):
+    """The parent is looked up in the node's own invocation only.
+
+    A child that runs after a resume, in a later invocation, keeps the
+    derived parent_path, but its parent_node_run_id is NULL because the
+    parent wrote no row in that invocation.
+    """
+    root, child = fixture_events("row-03", "row-05")
+    child = self._at_path(child, "root@1/child@9")
+    child["invocation_id"] = "inv-2"
+    child["attributes"]["adk"]["source_event_id"] = "evt-resumed-child"
+    assert self._dag(self._run(vm, [root, child])) == [
+        ("inv-1", "root@1", "1", None, None),
+        ("inv-2", "root@1/child@9", "9", "root@1", None),
+    ]
+
+  @pytest.mark.parametrize("field", _IDENTITY)
+  def test_parent_is_joined_on_the_full_telemetry_identity(self, vm, field):
+    root, child = fixture_events("row-03", "row-05")
+    rows = self._run(vm, [root, _set_identity(child, field, "other")])
+    (orphan,) = [row for row in rows if row["node_path"] == "root@1/child@2"]
+    assert orphan["parent_path"] == "root@1"
+    assert orphan["parent_node_run_id"] is None
+
+  def test_rows_of_one_node_aggregate(self, vm):
+    first, fanned_out, later = fixture_events("row-03", "row-03", "row-03")
+    fanned_out["event_type"] = "STATE_DELTA"
+    later["timestamp"] = "2026-06-01T10:00:09.000000Z"
+    later["attributes"]["adk"]["source_event_id"] = "evt-root-2"
+    (row,) = self._run(vm, [first, fanned_out, later])
+    assert row["first_seen_ts"] == first["timestamp"]
+    assert row["last_seen_ts"] == later["timestamp"]
+    assert (row["source_event_count"], row["event_count"]) == (2, 3)
+
+  @pytest.mark.parametrize("field", _IDENTITY)
+  @pytest.mark.parametrize("value", [None, ""])
+  def test_incomplete_identities_are_excluded(self, vm, field, value):
+    (response,) = fixture_events("row-03")
+    assert self._run(vm, [_set_identity(response, field, value)]) == []
+
+  @pytest.mark.parametrize(
+      "column, deployed",
+      [
+          ("attributes", False),
+          ("content", True),
+          ("content_parts", True),
+          ("latency_ms", True),
+      ],
+  )
+  def test_denied_columns(self, column, deployed):
+    assert _deploys_with_denied(self._KEY, column) is deployed

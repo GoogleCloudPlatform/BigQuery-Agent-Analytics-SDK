@@ -1690,8 +1690,8 @@ created = vm.create_all_views()
   cross-event view, since each groups on `attributes.adk.app_name`; the other
   19 per-event views deploy. With `denied_columns=["content"]`, the
   `compaction_windows` and `agent_transfer_chains` cross-event views are
-  skipped too, and `branch_fanout` and `scope_cardinality`, which read only
-  `attributes`, deploy.
+  skipped too, and `branch_fanout`, `scope_cardinality` and
+  `workflow_invocations`, which read only `attributes`, deploy.
 - `denied_columns` is keyword-only and accepts only `content`,
   `content_parts`, `attributes` and `latency_ms`, matched exactly as the plugin
   matches them: any other name raises `ValueError`, and a bare string raises
@@ -1742,11 +1742,14 @@ bq-agent-sdk views create compaction_windows \
 ```
 
 The cross-event registry includes `compaction_windows` (#216),
-`agent_transfer_chains` (#213), `branch_fanout` (#214) and
-`scope_cardinality` (#217). Both `create_all_views()` and `views create-all`
-deploy them after the per-event views. The other ADK 2.0 consumer views
-(`workflow_invocations`, `long_running_tool_durations`) register as they
-land. Existing per-event SQL is unchanged.
+`agent_transfer_chains` (#213), `branch_fanout` (#214), `scope_cardinality`
+(#217) and `workflow_invocations` (#212). Both `create_all_views()` and
+`views create-all` deploy them after the per-event views, in that order.
+`long_running_tool_durations` (#215) registers when it lands. Existing
+per-event SQL is unchanged. Each of these views keys its rows on the full
+telemetry identity (`attributes.adk.app_name`, `user_id`, `session_id`,
+`invocation_id`) and leaves out rows where any of the four is null or empty,
+so rows from different applications or users never merge.
 
 `adk_compaction_windows` (or `<view_prefix>compaction_windows`) reads
 `EVENT_COMPACTION` rows directly from the configured events table and exposes:
@@ -1825,8 +1828,30 @@ than one row, such as a `STATE_DELTA` and an `AGENT_RESPONSE`, so measure
 volume with `source_event_count`, not `row_count`. The plugin classifies an
 empty or non-string scope as `unknown`, which forms its own bucket.
 
-`adk_branch_fanout` and `adk_scope_cardinality` aggregate over events and
-expose no event `timestamp`, so, like `adk_compaction_windows`, a query
+`adk_workflow_invocations` has one row per workflow node and invocation:
+
+| Columns | Type | Meaning |
+|---|---|---|
+| `app_name`, `user_id`, `session_id`, `invocation_id` | STRING | Full telemetry identity |
+| `node_path` | STRING | `attributes.adk.node.path`, such as `root@1/child@2` |
+| `node_run_id` | STRING | `attributes.adk.node.run_id` |
+| `parent_path` | STRING | `node_path` without its last `/` segment; NULL for a single-segment root such as `root@1` |
+| `parent_node_run_id` | STRING | `node_run_id` of the `parent_path` node in the same invocation; NULL if that node wrote no row there |
+| `first_seen_ts`, `last_seen_ts` | TIMESTAMP | Earliest and latest event time of the node |
+| `source_event_count`, `event_count` | INT64 | Distinct source Events and rows of the node |
+
+Rows with an empty `node.path` (events outside a workflow), pre-2.0 rows and
+callback-only rows are excluded. The plugin writes no parent path, so the
+view derives `parent_path` from `node_path` and joins the parent on it plus
+the full telemetry identity, never on `node.parent_run_id`: run IDs are
+unique only within one path segment. The parent is looked up in the same
+invocation only. When it wrote no row there, for example because it ran in
+an earlier invocation before a resume, `parent_node_run_id` is NULL while
+`parent_path` is still set.
+
+`adk_branch_fanout`, `adk_scope_cardinality` and `adk_workflow_invocations`
+aggregate over events and expose no event `timestamp` (`first_seen_ts` and
+`last_seen_ts` are aggregates), so, like `adk_compaction_windows`, a query
 through them reads every partition of the events table and fails on a table
 that sets `require_partition_filter`.
 
