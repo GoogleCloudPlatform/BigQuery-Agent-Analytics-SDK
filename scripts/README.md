@@ -8,6 +8,7 @@ Standalone scripts for the BigQuery Agent Analytics SDK.
 | [skill_evolution](#skill-evolution) | Turn a scored quality report into an improved, versioned `SKILL.md` |
 | [latency_report](#latency-report) | Timing tree and waterfall for agent traces with A2A stitching |
 | [mutation_testing](../docs/mutation_testing.md) | Report-only mutation testing (mutmut) of the core scoring modules; never gates a merge |
+| [codemender_pre_commit](#codemender-pre-commit-hook) | Opt-in Git pre-commit hook that scans staged changes with CodeMender |
 
 ## Quality Report
 
@@ -727,3 +728,76 @@ Use `--no-stitch` to disable this behavior.
 ### Sample report output
 
 [Sample latency report](sample_latency_report.md)
+
+---
+
+## CodeMender pre-commit hook
+
+`codemender_pre_commit.sh` is an opt-in Git pre-commit hook. It scans your
+staged changes with
+[CodeMender](https://docs.cloud.google.com/gemini-enterprise-agent-platform/agents/codemender/integrate-with-cicd#pre-commit-hook)
+and blocks the commit when CodeMender finds a vulnerability with `CRITICAL` or
+`HIGH` severity. You can skip a hook, so the
+[CodeMender workflow](#ci-workflow) also scans pull requests.
+
+### Prerequisites
+
+- The CodeMender CLI (`cm`) on your `PATH`, set up as described in
+  [Set up your environment](https://docs.cloud.google.com/gemini-enterprise-agent-platform/agents/codemender/set-up-environment),
+  including `gcloud auth application-default login` and `cm init`
+- The Agent Platform User role (`roles/aiplatform.user`) in a Google Cloud
+  project with access to CodeMender. CodeMender uses the project in
+  `GOOGLE_CLOUD_PROJECT`, or else the project of your Application Default
+  Credentials or your gcloud CLI default project.
+
+### Install
+
+From the repository root:
+
+```bash
+ln -s "$PWD/scripts/codemender_pre_commit.sh" "$(git rev-parse --git-path hooks)/pre-commit"
+```
+
+On each `git commit`, the hook runs:
+
+```bash
+cm find . --diff --staged --fail-on=CRITICAL,HIGH --yes --bypass-warning
+```
+
+The scan can take a few minutes. When nothing is staged (an empty commit, or an
+amend that only changes the message), the hook doesn't scan.
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BQAA_CODEMENDER_FAIL_ON` | `CRITICAL,HIGH` | Comma-separated severities that block the commit: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`. An empty value records findings without blocking. |
+| `BQAA_CODEMENDER_REQUIRE` | unset | `1` blocks the commit when `cm` isn't installed. Otherwise the hook prints a notice and skips the scan. |
+
+### When the hook blocks a commit
+
+`cm find` prints its report, or the reason the scan failed, before the hook's
+message. To list the open findings again, run `cm report --status=OPEN`. To
+commit anyway, run `git commit --no-verify`.
+
+`.gitignore` excludes `.cm_project`, the file that CodeMender creates to track
+the repository, and `codemender.sarif`, the workflow's report.
+
+### CI workflow
+
+[`.github/workflows/codemender.yml`](../.github/workflows/codemender.yml) scans
+each pull request into `main` that comes from a branch of this repository, and
+runs on demand from the Actions tab (scanning the branch's last commit). It
+uploads the SARIF report to code scanning (category `codemender`), and fails
+when CodeMender finds a vulnerability with `CRITICAL` or `HIGH` severity in
+the pull request's changes. The job summary shows only the outcome: the
+findings are in code scanning, as annotations on the pull request and, for
+people with write access, in the repository's list of alerts.
+
+The workflow authenticates with Workload Identity Federation. To turn it on, a
+maintainer adds the repository secrets `GCP_PROJECT_ID`, `GCP_WIF_PROVIDER` and
+`GCP_WIF_SERVICE_ACCOUNT`, as described in
+[Integrate CodeMender with CI/CD](https://docs.cloud.google.com/gemini-enterprise-agent-platform/agents/codemender/integrate-with-cicd#github-wif).
+Until all three are set, the job skips the scan with a notice and passes. It
+doesn't run for pull requests from forks or from Dependabot, which can't read
+the secrets.
