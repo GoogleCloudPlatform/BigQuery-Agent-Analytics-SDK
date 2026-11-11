@@ -1119,6 +1119,19 @@ def test_the_hook_does_not_scan_when_nothing_is_staged(workspace):
   assert workspace.calls() == []
 
 
+def test_the_hook_does_not_scan_on_an_unborn_branch_when_nothing_is_staged(
+    workspace,
+):
+  """A fresh repository with no commits and an empty index skips the scan."""
+  workspace.install_cm()
+  repository = workspace.repository()
+
+  result = workspace.run_hook(repository)
+
+  assert result.returncode == 0, result.stderr
+  assert workspace.calls() == []
+
+
 @pytest.mark.parametrize(
     "require",
     [None, "", "0", " 1", "true"],
@@ -1160,6 +1173,20 @@ def test_the_hook_runs_in_a_strict_posix_shell(workspace, find, status):
 
   assert result.returncode == status, result.stderr
   assert [call["args"] for call in workspace.calls()] == [HOOK_SCAN]
+
+
+def _install_hook(workspace, repository):
+  """Installs scripts/codemender_pre_commit.sh as the pre-commit hook."""
+  hook = repository.path / "scripts" / "codemender_pre_commit.sh"
+  hook.parent.mkdir(parents=True, exist_ok=True)
+  shutil.copy(HOOK, hook)
+  (repository.path / ".git" / "hooks").mkdir(exist_ok=True)
+  subprocess.run(
+      ["sh", "-c", _install_command()],
+      cwd=repository.path,
+      env=workspace.env,
+      check=True,
+  )
 
 
 @pytest.mark.parametrize(
@@ -1204,6 +1231,55 @@ def test_the_installed_hook_gates_git_commit(workspace, find, committed):
     repository.git("commit", "--quiet", "--no-verify", "--message", "change")
     assert repository.git("rev-parse", "HEAD") != base
     assert len(workspace.calls()) == 1
+
+
+def test_the_installed_hook_does_not_scan_an_empty_first_commit(workspace):
+  """An unborn HEAD has no commit yet; git commit --allow-empty skips the scan."""
+  workspace.install_cm()
+  repository = workspace.repository()
+  _install_hook(workspace, repository)
+
+  result = subprocess.run(
+      [
+          "git",
+          "commit",
+          "--quiet",
+          "--allow-empty",
+          "--message",
+          "first commit",
+      ],
+      cwd=repository.path,
+      env=workspace.env,
+      capture_output=True,
+      text=True,
+      timeout=120,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert workspace.calls() == []
+  assert repository.git("rev-list", "--count", "HEAD") == "1"
+
+
+def test_the_installed_hook_scans_a_first_commit_with_staged_changes(workspace):
+  """An unborn HEAD with staged changes still triggers a CodeMender scan."""
+  workspace.install_cm()
+  repository = workspace.repository()
+  _install_hook(workspace, repository)
+  (repository.path / "app.py").write_text("print('first')\n", encoding="utf-8")
+  repository.git("add", "app.py")
+
+  result = subprocess.run(
+      ["git", "commit", "--quiet", "--message", "first commit"],
+      cwd=repository.path,
+      env=dict(workspace.env, CM_STUB_FIND="clean"),
+      capture_output=True,
+      text=True,
+      timeout=120,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert [call["args"] for call in workspace.calls()] == [HOOK_SCAN]
+  assert repository.git("rev-list", "--count", "HEAD") == "1"
 
 
 def test_the_readme_documents_the_hook_and_its_settings():

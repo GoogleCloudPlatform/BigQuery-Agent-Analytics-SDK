@@ -47,8 +47,14 @@ fi
 top="$(git rev-parse --show-toplevel)" || exit 1
 cd "$top" || exit 1
 
-# Nothing staged (an empty commit, or an amend that only rewords): no scan.
-if git diff-index --cached --quiet HEAD -- 2> /dev/null; then
+# Nothing staged (an empty commit, an amend that only rewords, or an empty
+# first commit on an unborn branch): no scan.
+if git rev-parse --verify --quiet HEAD > /dev/null 2>&1; then
+  against=HEAD
+else
+  against="$(git hash-object -t tree /dev/null)"
+fi
+if git diff-index --cached --quiet "$against" -- 2> /dev/null; then
   exit 0
 fi
 
