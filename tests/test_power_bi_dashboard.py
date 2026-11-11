@@ -1108,6 +1108,449 @@ class TestCheckCanFail:
         for e in errors
     ), errors
 
+  # -- A missing report file is an error, not a skipped check ----------------
+
+  def test_missing_pages_json_detected(self, tmp_path):
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    (pages / "pages.json").unlink()
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Missing definition/pages/pages.json: cannot check the page order"
+        in errors
+    ), errors
+
+  @pytest.mark.parametrize("page", ["errors", "trace-details"])
+  def test_missing_page_json_detected(self, tmp_path, page):
+    """A report page or the drill-through page without its page.json fails."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    (pages / page / "page.json").unlink()
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        f"Missing definition/pages/{page}/page.json: cannot check the page"
+        " visibility and drill-through binding" in errors
+    ), errors
+
+  def test_missing_report_json_detected(self, tmp_path):
+    """Both checks that read report.json report it missing."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    report = self._copy_report(tmp_path)
+    (report / "definition" / "report.json").unlink()
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Missing definition/report.json: cannot check the custom theme"
+        " reference" in errors
+    ), errors
+    assert (
+        "Missing definition/report.json: cannot check the report filters"
+        in errors
+    ), errors
+
+  # -- Card blanks (README D5) -----------------------------------------------
+
+  @pytest.mark.parametrize("selector", [{"id": "default"}, None])
+  def test_card_blank_label_for_every_callout_detected(
+      self, tmp_path, selector
+  ):
+    """A showBlankAs entry for every callout also relabels a blank headline."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    entry = {
+        "properties": {"showBlankAs": {"expr": {"Literal": {"Value": "'n/a'"}}}}
+    }
+    if selector is not None:
+      entry["selector"] = selector
+
+    self._rewrite_json(
+        pages
+        / "token-consumption"
+        / "visuals"
+        / "usage-total-tokens"
+        / "visual.json",
+        lambda vobj: vobj["visual"]["objects"]
+        .setdefault("value", [])
+        .append(entry),
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Card 'token-consumption/usage-total-tokens': value sets showBlankAs"
+        " for every callout, so a blank headline would be relabelled too"
+        " (README D5)" in errors
+    ), errors
+
+  # -- Web configurator bundle contents --------------------------------------
+
+  _BUNDLE_PREFIX = "window.BQAA_PBIP_BUNDLE = Object.freeze("
+  _BUNDLE_SUFFIX = ");\n"
+
+  @classmethod
+  def _rewrite_bundle(cls, power_bi_root, mutate):
+    """Rewrites the docs/pbip-bundle.js payload, keeping its wrapper.
+
+    Returns the bundle keys before the mutation and the mutated bundle.
+    """
+    path = power_bi_root / "docs" / "pbip-bundle.js"
+    head, body = path.read_text(encoding="utf-8").split(cls._BUNDLE_PREFIX, 1)
+    assert body.endswith(cls._BUNDLE_SUFFIX)
+    bundle = json.loads(body[: -len(cls._BUNDLE_SUFFIX)])
+    keys = sorted(bundle)
+    mutate(bundle)
+    path.write_text(
+        head
+        + cls._BUNDLE_PREFIX
+        + json.dumps(bundle, indent=2, ensure_ascii=False)
+        + cls._BUNDLE_SUFFIX,
+        encoding="utf-8",
+    )
+    return keys, bundle
+
+  @pytest.mark.parametrize(
+      "corrupt",
+      [
+          lambda text: text.replace('"BQAA.json"', '"OTHER.json"'),
+          lambda text: 7,
+      ],
+      ids=["edited", "not-a-string"],
+  )
+  def test_bundle_content_drift_detected(self, tmp_path, corrupt):
+    """The bundle keeps its 135 files and keys, but one file's content differs."""
+    _skip_if_not_generated()
+    pbi, looker = _copy_dashboards(tmp_path)
+    val_mod = _load_tool_module("validate_pbip")
+    key = "BQAA_Agent_Analytics.Report/definition/report.json"
+
+    def _corrupt(bundle):
+      original = bundle[key]
+      bundle[key] = corrupt(original)
+      assert bundle[key] != original
+
+    keys, bundle = self._rewrite_bundle(pbi, _corrupt)
+    assert len(keys) == 135 and sorted(bundle) == keys
+    errors = val_mod.validate_parity(power_bi_root=pbi, looker_root=looker)
+    assert (
+        f"docs/pbip-bundle.js: bundled '{key}' differs from the committed file"
+        in errors
+    ), errors
+
+  def test_bundle_entry_without_a_committed_file_detected(self, tmp_path):
+    """A renamed bundle entry keeps the count but names no committed file."""
+    _skip_if_not_generated()
+    pbi, looker = _copy_dashboards(tmp_path)
+    val_mod = _load_tool_module("validate_pbip")
+    old = "BQAA_Agent_Analytics.Report/definition/version.json"
+    new = "BQAA_Agent_Analytics.Report/definition/versions.json"
+
+    def _rename(bundle):
+      bundle[new] = bundle.pop(old)
+
+    _, bundle = self._rewrite_bundle(pbi, _rename)
+    assert len(bundle) == 135
+    errors = val_mod.validate_parity(power_bi_root=pbi, looker_root=looker)
+    assert (
+        f"docs/pbip-bundle.js: bundled '{new}' has no committed file" in errors
+    ), errors
+
+  # -- Formatting and search settings (README D5, D15-D17) -------------------
+
+  @pytest.mark.parametrize(
+      "page,name,old,new",
+      [
+          (
+              "tool-usage",
+              "usage-tool-calls-over-time",
+              "lineChart",
+              "areaChart",
+          ),
+          (
+              "token-consumption",
+              "usage-total-tokens-consumption-over-the-time",
+              "areaChart",
+              "lineChart",
+          ),
+      ],
+  )
+  def test_visual_type_must_match_the_spec(
+      self, tmp_path, page, name, old, new
+  ):
+    """The live validator reads chart types from report_visuals.yaml (D15).
+
+    Power BI draws the committed visual.json, so the two must agree.
+    """
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+
+    def _retype(vobj):
+      assert vobj["visual"]["visualType"] == old
+      vobj["visual"]["visualType"] = new
+
+    self._rewrite_json(pages / page / "visuals" / name / "visual.json", _retype)
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        f"Visual '{page}/{name}': visualType {new!r} != report_visuals.yaml"
+        f" visual_type {old!r}" in errors
+    ), errors
+
+  @pytest.mark.parametrize("mode", [None, "'Between'"])
+  def test_slicer_without_a_search_box_detected(self, tmp_path, mode):
+    """Trace ID lists thousands of values, whatever its mode says (D17)."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+
+    def _drop_search(vobj):
+      objects = vobj["visual"]["objects"]
+      objects.pop("general")
+      if mode is not None:
+        objects["data"][0]["properties"]["mode"] = {
+            "expr": {"Literal": {"Value": mode}}
+        }
+
+    self._rewrite_json(
+        pages / "errors" / "visuals" / "slicer-trace-id" / "visual.json",
+        _drop_search,
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Slicer 'errors/slicer-trace-id': general selfFilterEnabled None !="
+        " 'true' (search box, README D17)" in errors
+    ), errors
+
+  @pytest.mark.parametrize(
+      "prop,expected",
+      [
+          ("show", "true"),
+          ("fontColor", "'#202124'"),
+          ("fontSize", "12D"),
+          ("bold", "true"),
+      ],
+  )
+  def test_unstyled_chart_title_detected(self, tmp_path, prop, expected):
+    """Chart titles are shown dark, 12pt and bold (D16)."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    name = "usage-tool-invocations"
+
+    def _drop(vobj):
+      title = vobj["visual"]["visualContainerObjects"]["title"][0]
+      title["properties"].pop(prop)
+
+    self._rewrite_json(
+        pages / "tool-usage" / "visuals" / name / "visual.json", _drop
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        f"Visual 'tool-usage/{name}': title {prop} None != {expected!r}"
+        " (README D16)" in errors
+    ), errors
+
+  def test_bar_chart_without_data_labels_detected(self, tmp_path):
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    name = "usage-tool-invocations"
+
+    def _hide_labels(vobj):
+      labels = vobj["visual"]["objects"]["labels"][0]["properties"]
+      labels["show"] = {"expr": {"Literal": {"Value": "false"}}}
+
+    self._rewrite_json(
+        pages / "tool-usage" / "visuals" / name / "visual.json", _hide_labels
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        f"Visual 'tool-usage/{name}': labels show 'false' != 'true'"
+        " (README D16)" in errors
+    ), errors
+
+  def test_area_chart_value_axis_must_start_at_zero(self, tmp_path):
+    """An area's fill encodes magnitude (D16)."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    name = "usage-total-tokens-consumption-over-the-time"
+    self._rewrite_json(
+        pages / "token-consumption" / "visuals" / name / "visual.json",
+        lambda vobj: vobj["visual"]["objects"].pop("valueAxis"),
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        f"Visual 'token-consumption/{name}': valueAxis start None != '0D'"
+        " (README D16)" in errors
+    ), errors
+
+  @pytest.mark.parametrize(
+      "prop,expected",
+      [("labelDisplayUnits", "1D"), ("labelPrecision", "0L")],
+  )
+  def test_latency_card_without_exact_values_detected(
+      self, tmp_path, prop, expected
+  ):
+    """value_format: exact shows 4,512 ms rather than 4.5K (D16)."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    name = "performance-p50-tool-latency"
+    self._rewrite_json(
+        pages / "latency" / "visuals" / name / "visual.json",
+        lambda vobj: vobj["visual"]["objects"]["value"][0]["properties"].pop(
+            prop
+        ),
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        f"Visual 'latency/{name}': value {prop} None != {expected!r}"
+        " (value_format 'exact', README D16)" in errors
+    ), errors
+
+  def test_unknown_card_value_format_detected(self, tmp_path):
+    """A format the validator does not know cannot pass as checked."""
+    _skip_if_not_generated()
+    pbi, looker = _copy_dashboards(tmp_path)
+    val_mod = _load_tool_module("validate_pbip")
+    name = "performance-p50-tool-latency"
+    self._set_entry_field(
+        pbi / "spec" / "report_visuals.yaml",
+        "parity_visuals",
+        name,
+        "value_format",
+        "scientific",
+    )
+    errors = val_mod.validate_parity(power_bi_root=pbi, looker_root=looker)
+    assert (
+        f"Visual 'latency/{name}': unknown value_format 'scientific'" in errors
+    ), errors
+
+  def test_parity_visual_without_a_spec_entry_detected(self, tmp_path):
+    """A visual the spec does not list has no chart type to compare with."""
+    _skip_if_not_generated()
+    pbi, looker = _copy_dashboards(tmp_path)
+    val_mod = _load_tool_module("validate_pbip")
+    name = "usage-tool-calls-over-time"
+    path = pbi / "spec" / "report_visuals.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["parity_visuals"] = [
+        v for v in data["parity_visuals"] if v["id"] != name
+    ]
+    path.write_text(
+        yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    errors = val_mod.validate_parity(power_bi_root=pbi, looker_root=looker)
+    assert (
+        f"Visual 'tool-usage/{name}': no report_visuals.yaml entry" in errors
+    ), errors
+
+  def test_kpi_card_without_stacked_callouts_detected(self, tmp_path):
+    """The change callout stacks under the headline value (D5)."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+    self._rewrite_json(
+        pages
+        / "token-consumption"
+        / "visuals"
+        / "usage-total-tokens"
+        / "visual.json",
+        lambda vobj: vobj["visual"]["objects"].pop("layout"),
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Visual 'token-consumption/usage-total-tokens': layout orientation"
+        " None != '1D' (stacked callouts, README D5)" in errors
+    ), errors
+
+  # -- Drill-through page and header button details (README D12, D17) --------
+
+  @pytest.mark.parametrize(
+      "extra", ["bqaa-drillthrough-extra", "bqaa-drillthrough-agent"]
+  )
+  def test_drillthrough_filter_bound_to_no_parameter_detected(
+      self, tmp_path, extra
+  ):
+    """An added filter fails, also under the name of a bound filter."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+
+    def _extra_filter(page):
+      filters = page["filterConfig"]["filters"]
+      filters.append(dict(filters[1], name=extra))
+
+    self._rewrite_json(pages / "trace-details" / "page.json", _extra_filter)
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        f"Page 'trace-details': filter '{extra}' is bound to no drill-through"
+        " parameter" in errors
+    ), errors
+
+  def test_duplicate_drillthrough_parameter_name_detected(self, tmp_path):
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+
+    def _duplicate(page):
+      parameters = page["pageBinding"]["parameters"]
+      parameters[1]["name"] = parameters[0]["name"]
+
+    self._rewrite_json(pages / "trace-details" / "page.json", _duplicate)
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Page 'trace-details': duplicate drill-through parameter names"
+        " ['bqaa-drillthrough-date-parameter']" in errors
+    ), errors
+
+  def test_drillthrough_display_name_detected(self, tmp_path):
+    """The user manual tells users to pick Drill through -> Trace Details."""
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+
+    def _rename(page):
+      page["displayName"] = "Trace details"
+
+    self._rewrite_json(pages / "trace-details" / "page.json", _rename)
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        "Page 'trace-details': displayName 'Trace details' != 'Trace Details'"
+        in errors
+    ), errors
+
+  @pytest.mark.parametrize(
+      "page,button,label",
+      [
+          ("latency", "reset-filters", "Reset filters"),
+          ("trace-details", "drillthrough-back", "Back"),
+      ],
+  )
+  def test_header_button_label_detected(self, tmp_path, page, button, label):
+    _skip_if_not_generated()
+    val_mod = _load_tool_module("validate_pbip")
+    pages = self._copy_report(tmp_path) / "definition" / "pages"
+
+    def _relabel(vobj):
+      style = vobj["visual"]["objects"]["text"][1]
+      assert style["selector"] == {"id": "default"}
+      assert style["properties"]["text"] == {
+          "expr": {"Literal": {"Value": f"'{label}'"}}
+      }
+      style["properties"]["text"] = {"expr": {"Literal": {"Value": "'Clear'"}}}
+
+    self._rewrite_json(
+        pages / page / "visuals" / button / "visual.json", _relabel
+    )
+    errors = val_mod.validate_parity(power_bi_root=tmp_path)
+    assert (
+        f"Page '{page}': header button '{button}' must be labelled {label!r},"
+        " got \"'Clear'\"" in errors
+    ), errors
+
   # -- Real declarations, not description lines (F8) -------------------------
 
   @staticmethod
@@ -2291,6 +2734,26 @@ class TestDocumentation:
     for stale in ("49 DAX measures", "49 measures"):
       assert stale not in readme
       assert stale not in index_html
+
+  def test_readme_states_the_real_synced_slicer_count(self):
+    """README quotes the synced slicer count of the committed report.
+
+    The hidden drill-through page repeats the five synced slicers of the 8
+    report pages, so the report has 45 of them.
+    """
+    pages = POWER_BI / "BQAA_Agent_Analytics.Report" / "definition" / "pages"
+    count = 0
+    for path in sorted(pages.glob("*/visuals/*/visual.json")):
+      visual = json.loads(path.read_text(encoding="utf-8"))["visual"]
+      if visual.get("visualType") == "slicer" and visual.get(
+          "syncGroup", {}
+      ).get("groupName"):
+        count += 1
+    assert count == 45  # 5 synced slicers on each of the 9 pages
+    readme = " ".join(
+        (POWER_BI / "README.md").read_text(encoding="utf-8").split()
+    )
+    assert re.findall(r"(\d+) synced slicers", readme) == [str(count)]
 
   def test_docs_describe_kpi_change_callout_and_live_gate(self):
     """The docs describe what the six KPI cards and the live validator do."""
