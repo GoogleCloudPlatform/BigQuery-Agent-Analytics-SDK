@@ -22,6 +22,7 @@ Covers:
   P3 - Drift new_questions preserve original casing
   Feature - BigQueryTraceEvaluator include_event_types
   Feature - Docs consistency check for agent_events_v2
+  Issue #503 - Notebook and doc links use the canonical repository
 """
 
 from __future__ import annotations
@@ -599,3 +600,70 @@ class TestSanitizeCategories:
       assert (
           '"agent_events_v2"' not in text
       ), "e2e_notebook_demo.ipynb still references agent_events_v2"
+
+
+# ================================================================== #
+# Issue #503: Canonical GoogleCloudPlatform repository links          #
+# ================================================================== #
+
+
+class TestCanonicalRepositoryLinks:
+  """Notebooks and docs should link to GoogleCloudPlatform (#503)."""
+
+  PRECURSOR_REPO = "haiyuan-eng-google/BigQuery-Agent-Analytics-SDK"
+  # GitHub owner and repository names are case-insensitive, and a Colab,
+  # Vertex AI Workbench, or BigQuery Studio wrapper may URL-encode its inner
+  # URL, so match any case and a "/" or "%2F" separator.
+  PRECURSOR_REPO_RE = re.compile(
+      r"haiyuan-eng-google(?:/|%2F)BigQuery-Agent-Analytics-SDK", re.I
+  )
+  ROOT_FILES = ("README.md", "SDK.md")
+  SCAN_GLOBS = (
+      "docs/**/*.md",
+      "examples/**/*.ipynb",
+      "examples/**/*.md",
+      "dashboards/**/*.ipynb",
+  )
+  # Issue #503: docs/prd_unified_analytics_interface.md cites proposal issue
+  # #22 in the precursor repository, which has no counterpart in this
+  # repository (#22 here is an unrelated PR). Remove this entry if that
+  # proposal issue is ever migrated.
+  ALLOWED_URLS = {
+      "docs/prd_unified_analytics_interface.md": (
+          "https://github.com/haiyuan-eng-google/BigQuery-Agent-Analytics-SDK/issues/22",
+      ),
+  }
+
+  def _scanned_paths(self) -> list[Path]:
+    missing_roots = [
+        name for name in self.ROOT_FILES if not (ROOT / name).is_file()
+    ]
+    assert not missing_roots, f"Root files to scan not found: {missing_roots}"
+    paths = {ROOT / name for name in self.ROOT_FILES}
+    for pattern in self.SCAN_GLOBS:
+      for path in ROOT.glob(pattern):
+        if not path.is_file():
+          continue
+        dirs = path.relative_to(ROOT).parts[:-1]
+        if any(d.startswith(".") for d in dirs):
+          continue
+        paths.add(path)
+    return sorted(paths)
+
+  def test_notebooks_and_docs_use_canonical_repo(self):
+    """Notebooks and docs must not link to the precursor personal repository."""
+    offenders = []
+    for path in self._scanned_paths():
+      rel = path.relative_to(ROOT).as_posix()
+      allowed = self.ALLOWED_URLS.get(rel, ())
+      text = path.read_text(encoding="utf-8")
+      for lineno, line in enumerate(text.splitlines(), 1):
+        for url in allowed:
+          line = re.sub(re.escape(url) + r"(?![\w/.-])", "", line)
+        if self.PRECURSOR_REPO_RE.search(line):
+          offenders.append(f"  {rel}:{lineno}")
+    assert not offenders, (
+        f"Found {self.PRECURSOR_REPO} references (use"
+        " GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK):\n"
+        + "\n".join(offenders)
+    )
