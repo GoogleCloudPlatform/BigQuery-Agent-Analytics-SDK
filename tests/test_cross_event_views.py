@@ -712,3 +712,114 @@ class TestBranchFanoutView:
   )
   def test_denied_columns(self, column, deployed):
     assert _deploys_with_denied(self._KEY, column) is deployed
+
+
+class TestScopeCardinalityView:
+  """``scope_cardinality``: scopes per invocation and scope kind (#217)."""
+
+  _KEY = "scope_cardinality"
+
+  def _run(self, vm, events):
+    rows = execute_cross_event_view(vm, self._KEY, events)
+    return sorted(
+        rows, key=lambda row: [row[f] for f in (*_IDENTITY, "scope_kind")]
+    )
+
+  @staticmethod
+  def _counts(rows):
+    return [
+        (
+            row["invocation_id"],
+            row["scope_kind"],
+            row["distinct_scope_count"],
+            row["source_event_count"],
+            row["row_count"],
+        )
+        for row in rows
+    ]
+
+  def test_is_registered_and_deployed(self, vm):
+    assert vm.get_view_name(self._KEY) == "adk_scope_cardinality"
+    assert self._KEY in vm.available_cross_event_views
+    assert vm.create_all_views()[self._KEY] == "adk_scope_cardinality"
+    sql = vm.get_view_sql(self._KEY)
+    assert (
+        "WHERE JSON_VALUE(attributes, '$.adk.source_event_id') IS NOT NULL"
+        in sql
+    )
+    assert (
+        "COALESCE(JSON_VALUE(attributes, '$.adk.scope.kind'), 'unscoped')"
+        " AS scope_kind" in sql
+    )
+
+  def test_fixture_counts_per_scope_kind(self, vm):
+    rows = self._run(vm, fixture_events())
+    # (invocation, kind, distinct scopes, source Events, rows)
+    assert self._counts(rows) == [
+        # adk-fc-001, call_abc123 (one Event, two rows) and toolu_xyz.
+        ("inv-1", "function_call", 3, 3, 4),
+        # Bare planner@1 and full-path root@1/child@2.
+        ("inv-1", "node_run", 2, 2, 2),
+        # Event rows with scope = null only; callback-only row-02 is out.
+        ("inv-1", "unscoped", 0, 6, 6),
+        # row-17; callback-only TOOL_COMPLETED rows 15 and 16 are out.
+        ("inv-2", "unscoped", 0, 1, 1),
+    ]
+    assert {
+        (row["app_name"], row["user_id"], row["session_id"]) for row in rows
+    } == {("team_app", "user-1", "sess-1")}
+    assert list(rows[0]) == [
+        *_IDENTITY,
+        "scope_kind",
+        "distinct_scope_count",
+        "source_event_count",
+        "row_count",
+    ]
+
+  def test_one_source_event_fanning_out_counts_once(self, vm):
+    rows = self._run(vm, fixture_events("row-07", "row-08"))
+    assert self._counts(rows) == [("inv-1", "function_call", 1, 1, 2)]
+
+  def test_unknown_scope_kind_is_its_own_bucket(self, vm):
+    # The plugin writes kind 'unknown' for an empty or non-string scope.
+    empty, numeric = fixture_events("row-05", "row-06")
+    empty["attributes"]["adk"]["scope"] = {"id": "", "kind": "unknown"}
+    numeric["attributes"]["adk"]["scope"] = {"id": "5", "kind": "unknown"}
+    rows = self._run(vm, [empty, numeric])
+    assert self._counts(rows) == [("inv-1", "unknown", 1, 2, 2)]
+
+  def test_rows_without_source_event_id_are_excluded_even_with_scope(self, vm):
+    (callback_row,) = fixture_events("row-02")
+    callback_row["attributes"]["adk"]["scope"] = {
+        "id": "call_abc123",
+        "kind": "function_call",
+    }
+    (empty_id,) = fixture_events("row-06")
+    empty_id["attributes"]["adk"]["source_event_id"] = ""
+    assert self._run(vm, [callback_row, empty_id]) == []
+
+  @pytest.mark.parametrize("field", _IDENTITY)
+  @pytest.mark.parametrize("value", [None, ""])
+  def test_incomplete_identities_are_excluded(self, vm, field, value):
+    (response,) = fixture_events("row-05")
+    assert self._run(vm, [_set_identity(response, field, value)]) == []
+
+  def test_same_invocation_in_another_app_stays_separate(self, vm):
+    a, b = fixture_events("row-07", "row-08")
+    rows = self._run(vm, [a, _set_identity(b, "app_name", "other_app")])
+    assert [(row["app_name"], row["row_count"]) for row in rows] == [
+        ("other_app", 1),
+        ("team_app", 1),
+    ]
+
+  @pytest.mark.parametrize(
+      "column, deployed",
+      [
+          ("attributes", False),
+          ("content", True),
+          ("content_parts", True),
+          ("latency_ms", True),
+      ],
+  )
+  def test_denied_columns(self, column, deployed):
+    assert _deploys_with_denied(self._KEY, column) is deployed

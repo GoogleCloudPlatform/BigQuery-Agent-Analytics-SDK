@@ -1690,7 +1690,8 @@ created = vm.create_all_views()
   cross-event view, since each groups on `attributes.adk.app_name`; the other
   19 per-event views deploy. With `denied_columns=["content"]`, the
   `compaction_windows` and `agent_transfer_chains` cross-event views are
-  skipped too, and `branch_fanout`, which reads only `attributes`, deploys.
+  skipped too, and `branch_fanout` and `scope_cardinality`, which read only
+  `attributes`, deploy.
 - `denied_columns` is keyword-only and accepts only `content`,
   `content_parts`, `attributes` and `latency_ms`, matched exactly as the plugin
   matches them: any other name raises `ValueError`, and a bare string raises
@@ -1741,11 +1742,11 @@ bq-agent-sdk views create compaction_windows \
 ```
 
 The cross-event registry includes `compaction_windows` (#216),
-`agent_transfer_chains` (#213) and `branch_fanout` (#214). Both
-`create_all_views()` and `views create-all` deploy them after the per-event
-views. The other ADK 2.0 consumer views (`workflow_invocations`,
-`long_running_tool_durations`, `scope_cardinality`) register as they land.
-Existing per-event SQL is unchanged.
+`agent_transfer_chains` (#213), `branch_fanout` (#214) and
+`scope_cardinality` (#217). Both `create_all_views()` and `views create-all`
+deploy them after the per-event views. The other ADK 2.0 consumer views
+(`workflow_invocations`, `long_running_tool_durations`) register as they
+land. Existing per-event SQL is unchanged.
 
 `adk_compaction_windows` (or `<view_prefix>compaction_windows`) reads
 `EVENT_COMPACTION` rows directly from the configured events table and exposes:
@@ -1807,9 +1808,27 @@ rows carry no branch gets a row with `distinct_branch_count = 0` rather than
 no row, so the share of invocations that branch can be computed. Branch
 concurrency is not measured; it needs workflow node intervals (#207).
 
-`adk_branch_fanout` aggregates over events and exposes no event `timestamp`,
-so, like `adk_compaction_windows`, a query through it reads every partition
-of the events table and fails on a table that sets `require_partition_filter`.
+`adk_scope_cardinality` measures isolation scopes per invocation and scope
+kind:
+
+| Columns | Type | Meaning |
+|---|---|---|
+| `app_name`, `user_id`, `session_id`, `invocation_id` | STRING | Full telemetry identity |
+| `scope_kind` | STRING | `attributes.adk.scope.kind` (`node_run`, `function_call` or `unknown`), or `unscoped` when the Event had no scope |
+| `distinct_scope_count` | INT64 | Distinct non-empty `attributes.adk.scope.id` values; 0 for `unscoped` |
+| `source_event_count` | INT64 | Distinct source Events: the volume measure |
+| `row_count` | INT64 | Rows; diagnostic only |
+
+It uses the same Event-row gate as `adk_branch_fanout`, so the `unscoped`
+bucket holds only Event rows whose scope is null. One Event can write more
+than one row, such as a `STATE_DELTA` and an `AGENT_RESPONSE`, so measure
+volume with `source_event_count`, not `row_count`. The plugin classifies an
+empty or non-string scope as `unknown`, which forms its own bucket.
+
+`adk_branch_fanout` and `adk_scope_cardinality` aggregate over events and
+expose no event `timestamp`, so, like `adk_compaction_windows`, a query
+through them reads every partition of the events table and fails on a table
+that sets `require_partition_filter`.
 
 A registry entry maps a view key to `(view_suffix, query_sql)`. `query_sql` is
 the full `SELECT` body, rendered with `str.format` (double any literal braces)

@@ -483,6 +483,49 @@ GROUP BY
   invocation_id
 """,
     ),
+    # Scopes per invocation and scope kind (#217), behind the same
+    # source_event_id gate as branch_fanout. One ADK Event can write several
+    # rows, so source_event_count, not row_count, measures volume.
+    "scope_cardinality": (
+        "scope_cardinality",
+        """\
+WITH parsed AS (
+  SELECT
+    NULLIF(JSON_VALUE(attributes, '$.adk.app_name'), '') AS app_name,
+    NULLIF(user_id, '') AS user_id,
+    NULLIF(session_id, '') AS session_id,
+    NULLIF(invocation_id, '') AS invocation_id,
+    NULLIF(
+      JSON_VALUE(attributes, '$.adk.source_event_id'), ''
+    ) AS source_event_id,
+    COALESCE(JSON_VALUE(attributes, '$.adk.scope.kind'), 'unscoped') AS scope_kind,
+    NULLIF(JSON_VALUE(attributes, '$.adk.scope.id'), '') AS scope_id
+  FROM `{project}.{dataset}.{table}`
+  WHERE JSON_VALUE(attributes, '$.adk.source_event_id') IS NOT NULL
+)
+SELECT
+  app_name,
+  user_id,
+  session_id,
+  invocation_id,
+  scope_kind,
+  COUNT(DISTINCT scope_id) AS distinct_scope_count,
+  COUNT(DISTINCT source_event_id) AS source_event_count,
+  COUNT(*) AS row_count
+FROM parsed
+WHERE app_name IS NOT NULL
+  AND user_id IS NOT NULL
+  AND session_id IS NOT NULL
+  AND invocation_id IS NOT NULL
+  AND source_event_id IS NOT NULL
+GROUP BY
+  app_name,
+  user_id,
+  session_id,
+  invocation_id,
+  scope_kind
+""",
+    ),
 }
 
 # ------------------------------------------------------------------ #

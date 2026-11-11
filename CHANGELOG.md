@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   telemetry identity, counted over rows written from an ADK Event (those
   with `attributes.adk.source_event_id`). An invocation whose Event rows
   carry no branch gets a `0` row rather than none.
+- **Scope cardinality view (#217)** - `ViewManager` and the `views` CLI
+  deploy `scope_cardinality`: per invocation and `scope_kind` (`unscoped`
+  when the Event had no scope), `distinct_scope_count`,
+  `source_event_count` (distinct ADK Events, the volume measure) and a
+  diagnostic `row_count`, over rows written from an ADK Event.
 
 ## [0.6.2] - 2026-11-05
 
