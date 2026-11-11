@@ -444,6 +444,45 @@ WHERE app_name IS NOT NULL
   AND to_agent IS NOT NULL
 """,
     ),
+    # Distinct branches per invocation (#214). Only rows written from an
+    # ADK Event carry a branch, so rows without a source_event_id are left
+    # out. An invocation whose Event rows have no branch keeps its row, with
+    # distinct_branch_count = 0.
+    "branch_fanout": (
+        "branch_fanout",
+        """\
+WITH parsed AS (
+  SELECT
+    NULLIF(JSON_VALUE(attributes, '$.adk.app_name'), '') AS app_name,
+    NULLIF(user_id, '') AS user_id,
+    NULLIF(session_id, '') AS session_id,
+    NULLIF(invocation_id, '') AS invocation_id,
+    NULLIF(
+      JSON_VALUE(attributes, '$.adk.source_event_id'), ''
+    ) AS source_event_id,
+    NULLIF(JSON_VALUE(attributes, '$.adk.branch'), '') AS branch
+  FROM `{project}.{dataset}.{table}`
+  WHERE JSON_VALUE(attributes, '$.adk.source_event_id') IS NOT NULL
+)
+SELECT
+  app_name,
+  user_id,
+  session_id,
+  invocation_id,
+  COUNT(DISTINCT branch) AS distinct_branch_count
+FROM parsed
+WHERE app_name IS NOT NULL
+  AND user_id IS NOT NULL
+  AND session_id IS NOT NULL
+  AND invocation_id IS NOT NULL
+  AND source_event_id IS NOT NULL
+GROUP BY
+  app_name,
+  user_id,
+  session_id,
+  invocation_id
+""",
+    ),
 }
 
 # ------------------------------------------------------------------ #

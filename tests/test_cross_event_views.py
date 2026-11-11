@@ -634,3 +634,81 @@ class TestAgentTransferChainsView:
   )
   def test_denied_columns(self, column, deployed):
     assert _deploys_with_denied(self._KEY, column) is deployed
+
+
+class TestBranchFanoutView:
+  """``branch_fanout``: distinct branches per invocation (#214)."""
+
+  _KEY = "branch_fanout"
+
+  def _run(self, vm, events):
+    rows = execute_cross_event_view(vm, self._KEY, events)
+    return sorted(rows, key=lambda row: [row[field] for field in _IDENTITY])
+
+  def test_is_registered_and_deployed(self, vm):
+    assert vm.get_view_name(self._KEY) == "adk_branch_fanout"
+    assert self._KEY in vm.available_cross_event_views
+    assert vm.create_all_views()[self._KEY] == "adk_branch_fanout"
+    assert (
+        "WHERE JSON_VALUE(attributes, '$.adk.source_event_id') IS NOT NULL"
+        in vm.get_view_sql(self._KEY)
+    )
+
+  def test_fixture_counts_branches_and_keeps_zero_branch_invocation(self, vm):
+    identity = {
+        "app_name": "team_app",
+        "user_id": "user-1",
+        "session_id": "sess-1",
+    }
+    rows = self._run(vm, fixture_events())
+    assert rows == [
+        {**identity, "invocation_id": "inv-1", "distinct_branch_count": 3},
+        {**identity, "invocation_id": "inv-2", "distinct_branch_count": 0},
+    ]
+    assert list(rows[0]) == [*_IDENTITY, "distinct_branch_count"]
+
+  def test_repeated_branch_counts_once(self, vm):
+    rows = self._run(vm, fixture_events("row-07", "row-08"))
+    assert [row["distinct_branch_count"] for row in rows] == [1]
+
+  @pytest.mark.parametrize("branch", [None, ""])
+  def test_event_rows_without_branch_count_zero(self, vm, branch):
+    (response,) = fixture_events("row-05")
+    response["attributes"]["adk"]["branch"] = branch
+    rows = self._run(vm, [response])
+    assert [row["distinct_branch_count"] for row in rows] == [0]
+
+  def test_rows_without_source_event_id_are_excluded_even_with_branch(self, vm):
+    (callback_row,) = fixture_events("row-02")
+    callback_row["attributes"]["adk"]["branch"] = "planner.researcher_a"
+    (empty_id,) = fixture_events("row-05")
+    empty_id["attributes"]["adk"]["source_event_id"] = ""
+    assert self._run(vm, [callback_row, empty_id]) == []
+
+  @pytest.mark.parametrize("field", _IDENTITY)
+  @pytest.mark.parametrize("value", [None, ""])
+  def test_incomplete_identities_are_excluded(self, vm, field, value):
+    (response,) = fixture_events("row-05")
+    assert self._run(vm, [_set_identity(response, field, value)]) == []
+
+  def test_same_invocation_in_another_app_stays_separate(self, vm):
+    a, b = fixture_events("row-05", "row-06")
+    rows = self._run(vm, [a, _set_identity(b, "app_name", "other_app")])
+    assert [
+        (row["app_name"], row["distinct_branch_count"]) for row in rows
+    ] == [
+        ("other_app", 1),
+        ("team_app", 1),
+    ]
+
+  @pytest.mark.parametrize(
+      "column, deployed",
+      [
+          ("attributes", False),
+          ("content", True),
+          ("content_parts", True),
+          ("latency_ms", True),
+      ],
+  )
+  def test_denied_columns(self, column, deployed):
+    assert _deploys_with_denied(self._KEY, column) is deployed

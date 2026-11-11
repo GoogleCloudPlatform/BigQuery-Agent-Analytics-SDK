@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `from_agent`, `to_agent`, the event `timestamp` and `span_id` under the
   full telemetry identity. Pre-2.0 rows, incomplete identities and
   transfers missing either agent are excluded.
+- **Branch fan-out view (#214)** - `ViewManager` and the `views` CLI deploy
+  `branch_fanout`: `distinct_branch_count` per invocation under the full
+  telemetry identity, counted over rows written from an ADK Event (those
+  with `attributes.adk.source_event_id`). An invocation whose Event rows
+  carry no branch gets a `0` row rather than none.
 
 ## [0.6.2] - 2026-11-05
 

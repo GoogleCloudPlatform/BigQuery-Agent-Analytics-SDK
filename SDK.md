@@ -1688,9 +1688,9 @@ created = vm.create_all_views()
   that skips the `LLM_REQUEST`, `LLM_RESPONSE`, `TOOL_COMPLETED`,
   `STATE_DELTA`, `A2A_INTERACTION` and `TOOL_PAUSED` views and every
   cross-event view, since each groups on `attributes.adk.app_name`; the other
-  19 per-event views deploy. Both cross-event views, `compaction_windows` and
-  `agent_transfer_chains`, also read `content`, so `denied_columns=["content"]`
-  skips them too.
+  19 per-event views deploy. With `denied_columns=["content"]`, the
+  `compaction_windows` and `agent_transfer_chains` cross-event views are
+  skipped too, and `branch_fanout`, which reads only `attributes`, deploys.
 - `denied_columns` is keyword-only and accepts only `content`,
   `content_parts`, `attributes` and `latency_ms`, matched exactly as the plugin
   matches them: any other name raises `ValueError`, and a bare string raises
@@ -1740,10 +1740,10 @@ bq-agent-sdk views create compaction_windows \
   --project-id=my-project --dataset-id=analytics
 ```
 
-The cross-event registry includes `compaction_windows` (#216) and
-`agent_transfer_chains` (#213). Both `create_all_views()` and
-`views create-all` deploy them after the per-event views. The other ADK 2.0
-consumer views (`workflow_invocations`, `branch_fanout`,
+The cross-event registry includes `compaction_windows` (#216),
+`agent_transfer_chains` (#213) and `branch_fanout` (#214). Both
+`create_all_views()` and `views create-all` deploy them after the per-event
+views. The other ADK 2.0 consumer views (`workflow_invocations`,
 `long_running_tool_durations`, `scope_cardinality`) register as they land.
 Existing per-event SQL is unchanged.
 
@@ -1792,6 +1792,24 @@ and transfers with equal timestamps have no defined order. Rows without
 `attributes.adk.app_name` (pre-2.0), with null or empty identity fields, or
 missing either agent are excluded. The view keeps the event `timestamp`, so
 a time-bounded query can filter on it as with the per-event views.
+
+`adk_branch_fanout` counts the distinct branches in each invocation:
+
+| Columns | Type | Meaning |
+|---|---|---|
+| `app_name`, `user_id`, `session_id`, `invocation_id` | STRING | Full telemetry identity |
+| `distinct_branch_count` | INT64 | Distinct non-empty `attributes.adk.branch` values |
+
+Only rows written from an ADK `Event` count: the view keeps rows that have an
+`attributes.adk.source_event_id`, which leaves out pre-2.0 rows and
+callback-only rows such as `USER_MESSAGE_RECEIVED`. An invocation whose Event
+rows carry no branch gets a row with `distinct_branch_count = 0` rather than
+no row, so the share of invocations that branch can be computed. Branch
+concurrency is not measured; it needs workflow node intervals (#207).
+
+`adk_branch_fanout` aggregates over events and exposes no event `timestamp`,
+so, like `adk_compaction_windows`, a query through it reads every partition
+of the events table and fails on a table that sets `require_partition_filter`.
 
 A registry entry maps a view key to `(view_suffix, query_sql)`. `query_sql` is
 the full `SELECT` body, rendered with `str.format` (double any literal braces)
