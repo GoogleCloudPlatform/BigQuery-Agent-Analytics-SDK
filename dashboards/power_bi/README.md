@@ -39,7 +39,7 @@ review).
 
 An 8-page Power BI report — Token Consumption, Agent & Sessions, Tool
 Usage, LLM Interactions, User Analytics, Latency, Errors, and a Trace
-Inspector — with 37 parity charts, 9 non-data elements, 40 synced
+Inspector — with 37 parity charts, 9 non-data elements, 45 synced
 slicers, and 50 DAX measures that match the 37 oracle SQL queries.
 Every report page also has a **Reset filters** button and searchable ID
 slicers, and any bar or day can be drilled through to **Trace Details**:
