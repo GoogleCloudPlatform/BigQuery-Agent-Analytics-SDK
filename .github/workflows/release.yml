@@ -18,8 +18,9 @@ on:
   release:
     types: [published]
 
-# Least privilege at workflow level; the publish jobs opt in to
-# `id-token: write` individually for PyPI trusted publishing.
+# Least privilege at workflow level; `publish-pypi` opts in to `id-token: write`
+# for Google Workload Identity Federation (OSS Exit Gate) and `publish-testpypi`
+# opts in to `id-token: write` for TestPyPI trusted publishing.
 permissions:
   contents: read
 
@@ -73,6 +74,9 @@ jobs:
     needs: build
     runs-on: ubuntu-22.04
     environment: pypi
+    concurrency:
+      group: publish-pypi-${{ github.ref_name }}
+      cancel-in-progress: false
     permissions:
       id-token: write
     steps:
@@ -81,42 +85,159 @@ jobs:
           name: dist
           path: dist/
 
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Twine (pinned + hash-verified, BEFORE credentials exist)
+        # Supply-chain guard: install pinned, hash-verified uploader packages
+        # before the auth step mints any Google Cloud credentials.
+        run: |
+          cat <<'EOF' > twine-requirements.lock
+          backports-tarfile==1.2.0 \
+              --hash=sha256:77e284d754527b01fb1e6fa8a1afe577858ebe4e9dad8919e34c862cb399bc34
+          certifi==2025.1.31 \
+              --hash=sha256:ca78db4565a652026a4db2bcdf68f2fb589ea80d0be70e03929ed730746b84fe
+          cffi==1.17.1 \
+              --hash=sha256:b62ce867176a75d03a665bad002af8e6d54644fad99a3c70905c543130e39d93
+          charset-normalizer==3.4.1 \
+              --hash=sha256:bc2722592d8998c870fa4e290c2eec2c1569b87fe58618e67d38b4665dfa680d \
+              --hash=sha256:d98b1668f06378c6dbefec3b92299716b931cd4e6061f3c875a71ced1780ab85
+          cryptography==44.0.2 \
+              --hash=sha256:4973da6ca3db4405c54cd0b26d328be54c7747e89e284fcff166132eb7bccc9c \
+              --hash=sha256:9a1e657c0f4ea2a23304ee3f964db058c9e9e635cc7019c4aa21c330755ef6fd \
+              --hash=sha256:b042d2a275c8cee83a4b7ae30c45a15e6a4baa65a179a0ec2d78ebb90e4f6699 \
+              --hash=sha256:bc821e161ae88bfe8088d11bb39caf2916562e0a2dc7b6d56714a48b784ef0bb \
+              --hash=sha256:c7362add18b416b69d58c910caa217f980c5ef39b23a38a0880dfd87bdf8cd23 \
+              --hash=sha256:f514ef4cd14bb6fb484b4a60203e912cfcb64f2ab139e88c2274511514bf7308
+          docutils==0.21.2 \
+              --hash=sha256:dafca5b9e384f0e419294eb4d2ff9fa826435bf15f15b7bd45723e8ad76811b2
+          id==1.5.0 \
+              --hash=sha256:f1434e1cef91f2cbb8a4ec64663d5a23b9ed43ef44c4c957d02583d61714c658
+          idna==3.10 \
+              --hash=sha256:946d195a0d259cbba61165e88e65941f16e9b36ea6ddb97f00452bae8b1287d3
+          importlib-metadata==8.6.1 \
+              --hash=sha256:02a89390c1e15fdfdc0d7c6b25cb3e62650d0494005c97d6f148bf5b9787525e
+          jaraco-classes==3.4.0 \
+              --hash=sha256:f662826b6bed8cace05e7ff873ce0f9283b5c924470fe664fff1c2f00f581790
+          jaraco-context==6.0.1 \
+              --hash=sha256:f797fc481b490edb305122c9181830a3a5b76d84ef6d1aef2fb9b47ab956f9e4
+          jaraco-functools==4.1.0 \
+              --hash=sha256:ad159f13428bc4acbf5541ad6dec511f91573b90fba04df61dafa2a1231cf649
+          jeepney==0.9.0 \
+              --hash=sha256:97e5714520c16fc0a45695e5365a2e11b81ea79bba796e26f9f1d178cb182683
+          keyring==25.6.0 \
+              --hash=sha256:552a3f7af126ece7ed5c89753650eec89c7eaae8617d0aa4d9ad2b75111266bd
+          markdown-it-py==3.0.0 \
+              --hash=sha256:355216845c60bd96232cd8d8c40e8f9765cc86f46880e43a8fd22dc1a1a8cab1
+          mdurl==0.1.2 \
+              --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8
+          more-itertools==10.6.0 \
+              --hash=sha256:6eb054cb4b6db1473f6e15fcc676a08e4732548acd47c708f0e179c2c7c01e89
+          nh3==0.2.21 \
+              --hash=sha256:a5f77e62aed5c4acad635239ac1290404c7e940c81abe561fd2af011ff59f585
+          packaging==24.2 \
+              --hash=sha256:09abb1bccd265c01f4a3aa3f7a7db064b36514d2cba19a2f694fe6150451a759
+          pkginfo==1.12.1.2 \
+              --hash=sha256:c783ac885519cab2c34927ccfa6bf64b5a704d7c69afaea583dd9b7afe969343
+          pycparser==2.22 \
+              --hash=sha256:c3702b6d3dd8c7abc1afa565d7e63d53a1d0bd86cdc24edd75470f4de499cfcc
+          pygments==2.19.1 \
+              --hash=sha256:9ea1544ad55cecf4b8242fab6dd35a93bbce657034b0611ee383099054ab6d8c
+          readme-renderer==44.0 \
+              --hash=sha256:2fbca89b81a08526aadf1357a8c2ae889ec05fb03f5da67f9769c9a592166151
+          requests==2.32.3 \
+              --hash=sha256:70761cfe03c773ceb22aa2f671b4757976145175cdfca038c02654d061d6dcc6
+          requests-toolbelt==1.0.0 \
+              --hash=sha256:cccfdd665f0a24fcf4726e690f65639d272bb0637b9b92dfd91a5568ccf6bd06
+          rfc3986==2.0.0 \
+              --hash=sha256:50b1502b60e289cb37883f3dfd34532b8873c7de9f49bb546641ce9cbd256ebd
+          rich==13.9.4 \
+              --hash=sha256:6049d5e6ec054bf2779ab3358186963bac2ea89175919d699e378b99738c2a90
+          secretstorage==3.3.3 \
+              --hash=sha256:f356e6628222568e3af06f2eba8df495efa13b3b63081dafd4f7d9a7b7bc9f99
+          twine==6.1.0 \
+              --hash=sha256:a47f973caf122930bf0fbbf17f80b83bc1602c9ce393c7845f289a3001dc5384
+          urllib3==2.3.0 \
+              --hash=sha256:1cee9ad369867bfdbbb48b7dd50374c0967a0bb7710050facf0dd6911440e3df
+          zipp==3.21.0 \
+              --hash=sha256:ac1bbe05fd2991f160ebce24ffbac5f6d11d83dc90891255885223d42b3cd931
+          EOF
+          python -m pip install --require-hashes --no-deps -r twine-requirements.lock
+          rm -f twine-requirements.lock
+
+      - name: Set up Cloud SDK (pinned version, BEFORE credentials exist)
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+        with:
+          version: '509.0.0'
+
       - name: Authenticate to Google Cloud (OSS Exit Gate)
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
           workload_identity_provider: 'projects/305452601764/locations/global/workloadIdentityPools/builders/providers/github'
-      - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
-      - name: Clean up stale releases from staging repo
-        run: |
-          packages=$(gcloud artifacts packages list \
-              --project="oss-exit-gate-prod" \
-              --location="us" \
-              --repository="bigquery-agent-analytics--pypi" \
-              --format="value(name)" 2>/dev/null)
-          echo "${packages}" | xargs -r -I {} sh -c '
-              package_name=$(basename "{}")
-              echo "Deleting package: $package_name..."
-              gcloud artifacts packages delete "{}" \
-                  --project="oss-exit-gate-prod" \
-                  --location="us" \
-                  --repository="bigquery-agent-analytics--pypi" \
-                  --quiet
-          '
-      - name: Stage distributions to OSS Exit Gate and upload manifest
+
+      - name: Clean up failed staging attempt for this exact version (if any)
         env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          # Only clean up this exact version if a prior attempt uploaded to
+          # Artifact Registry and failed before submitting its manifest.
+          # Never delete the package or touch any other release's version.
+          set +e
+          PENDING=$(gcloud storage ls             "gs://oss-exit-gate-prod-projects-bucket/bigquery-agent-analytics/pypi/manifests/manifest-${VERSION}-*.json"             2> ls.err)
+          LS_RC=$?
+          set -e
+          if [ $LS_RC -eq 0 ] && [ -n "${PENDING}" ]; then
+            echo "Manifest for version ${VERSION} already submitted (${PENDING}) — skipping staging cleanup"
+            echo "skip_stage=true" >> "$GITHUB_ENV"
+            exit 0
+          elif [ $LS_RC -ne 0 ] && ! grep -qi "matched no objects\|not found\|404" ls.err; then
+            cat ls.err >&2
+            exit $LS_RC
+          fi
+
+          set +e
+          gcloud artifacts versions describe "${VERSION}"             --package="bigquery-agent-analytics"             --project="oss-exit-gate-prod"             --location="us"             --repository="bigquery-agent-analytics--pypi"             --format="value(name)" > /dev/null 2> describe.err
+          DESC_RC=$?
+          set -e
+          if [ $DESC_RC -eq 0 ]; then
+            echo "Deleting incomplete staged version ${VERSION} before retry..."
+            gcloud artifacts versions delete "${VERSION}"               --package="bigquery-agent-analytics"               --project="oss-exit-gate-prod"               --location="us"               --repository="bigquery-agent-analytics--pypi"               --quiet
+          elif grep -qi "NOT_FOUND\|not found\|404" describe.err; then
+            echo "Version ${VERSION} not present in staging repository — proceeding with fresh upload"
+          else
+            cat describe.err >&2
+            exit $DESC_RC
+          fi
+
+      - name: Stage distributions to OSS Exit Gate and upload manifest
+        if: env.skip_stage != 'true'
+        env:
+          TAG: ${{ github.ref_name }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
-          python -m pip install --upgrade twine
-          python -m twine upload \
-            --repository-url "https://us-python.pkg.dev/oss-exit-gate-prod/bigquery-agent-analytics--pypi/" \
-            -u oauth2accesstoken \
-            -p "$(gcloud auth print-access-token)" \
-            dist/*
-          echo '{"publish_all": true}' > manifest.json
-          gcloud storage cp manifest.json \
-            "gs://oss-exit-gate-prod-projects-bucket/bigquery-agent-analytics/pypi/manifests/manifest-${RUN_ID}-${RUN_ATTEMPT}.json"
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          python -m twine upload             --repository-url "https://us-python.pkg.dev/oss-exit-gate-prod/bigquery-agent-analytics--pypi/"             -u oauth2accesstoken             -p "$(gcloud auth print-access-token)"             dist/*
+          cat <<EOF > manifest.json
+          {
+            "publish_all": false,
+            "publishing_groups": [
+              {
+                "packages": [
+                  {
+                    "name": "bigquery-agent-analytics",
+                    "version": "${VERSION}"
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+          gcloud storage cp manifest.json             "gs://oss-exit-gate-prod-projects-bucket/bigquery-agent-analytics/pypi/manifests/manifest-${VERSION}-${RUN_ID}-${RUN_ATTEMPT}.json"
 
   publish-testpypi:
     name: Publish to TestPyPI
