@@ -193,7 +193,7 @@ jobs:
             echo "Manifest for version ${VERSION} already submitted (${PENDING}) — skipping staging cleanup"
             echo "skip_stage=true" >> "$GITHUB_ENV"
             exit 0
-          elif [ $LS_RC -ne 0 ] && ! grep -qi "matched no objects\|not found\|404" ls.err; then
+          elif [ $LS_RC -ne 0 ] && ! grep -qi "matched no objects" ls.err; then
             cat ls.err >&2
             exit $LS_RC
           fi
@@ -205,7 +205,7 @@ jobs:
           if [ $DESC_RC -eq 0 ]; then
             echo "Deleting incomplete staged version ${VERSION} before retry..."
             gcloud artifacts versions delete "${VERSION}"               --package="bigquery-agent-analytics"               --project="oss-exit-gate-prod"               --location="us"               --repository="bigquery-agent-analytics--pypi"               --quiet
-          elif grep -qi "NOT_FOUND\|not found\|404" describe.err; then
+          elif grep -Eqi "NOT_FOUND:.*(Version|versions/${VERSION}|Package|packages/bigquery-agent-analytics)" describe.err; then
             echo "Version ${VERSION} not present in staging repository — proceeding with fresh upload"
           else
             cat describe.err >&2
