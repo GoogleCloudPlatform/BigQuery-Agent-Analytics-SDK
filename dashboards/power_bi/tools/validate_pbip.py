@@ -228,6 +228,8 @@ SLICER_NAMES = [
     "slicer-trace-id",
     "slicer-span-id",
 ]
+# Slicers with a search box (README D17): all but the date range.
+SEARCHABLE_SLICERS = frozenset(SLICER_NAMES) - {"slicer-date"}
 
 # Sync group names (spec.md §5.4).
 SYNC_GROUPS = [
@@ -285,13 +287,20 @@ TRACE_INSPECTOR_COLUMNS = [
 RESET_FILTERS_ID = "reset-filters"
 DRILLTHROUGH_BACK_ID = "drillthrough-back"
 HEADER_BUTTON_IDS = [RESET_FILTERS_ID, DRILLTHROUGH_BACK_ID]
+# Their labels, as USER_MANUAL.md names them.
+HEADER_BUTTON_LABELS = {
+    RESET_FILTERS_ID: "Reset filters",
+    DRILLTHROUGH_BACK_ID: "Back",
+}
 
 # The drill-through page and its fields, in order (README D12).  It follows
 # the 8 PAGES but is not a Looker Studio page: it is hidden in view mode and
 # opened only by drill-through, because Clear all slicers does not clear
 # drill-through filters and they would otherwise stay on a page that users
-# open from the tabs.
+# open from the tabs.  Its display name is the Drill through menu entry that
+# USER_MANUAL.md tells users to pick.
 DRILLTHROUGH_PAGE = "trace-details"
+DRILLTHROUGH_DISPLAY_NAME = "Trace Details"
 DRILLTHROUGH_FIELDS = [
     ("Date", "Date"),
     ("events_v1", "agent"),
@@ -311,7 +320,20 @@ BUTTON_DUAL_ENTRY_OBJECTS = ("text", "icon", "fill", "outline")
 BUTTON_MIN_HEIGHT = 40
 BUTTON_MAX_HEIGHT = 56
 
-# PBIP files in the web configurator bundle (docs/pbip-bundle.js).
+# Formatting on top of the Looker Studio parity layout (README D5, D16), as
+# PBIR literal values, pinned independently of the generator: chart titles in
+# the theme foreground, 12pt bold; the number format that a card's
+# `value_format` in report_visuals.yaml names; and the vertical layout that
+# stacks a card's change callout under its value.
+TITLE_FONT_COLOR = "'#202124'"
+TITLE_FONT_SIZE = "12D"
+CARD_VALUE_FORMATS = {
+    "exact": {"labelDisplayUnits": "1D", "labelPrecision": "0L"},
+}
+CARD_ORIENTATION_VERTICAL = "1D"
+
+# PBIP files in the web configurator bundle (docs/pbip-bundle.js); each must
+# equal the committed file it packages.
 PBIP_BUNDLE_FILE_COUNT = 135
 
 
@@ -1147,6 +1169,20 @@ def _visual_link_properties(vobj):
   return {}
 
 
+def _button_label(vobj):
+  """Return the label literal of an actionButton's default state, or None."""
+  for entry in vobj.get("visual", {}).get("objects", {}).get("text", []):
+    if isinstance(entry, dict) and entry.get("selector") == {"id": "default"}:
+      return _literal_value(entry.get("properties", {}).get("text"))
+  return None
+
+
+def _missing_report_file(report_dir, path, unchecked):
+  """Report a missing report file instead of skipping the check it feeds."""
+  rel = path.relative_to(report_dir).as_posix()
+  return f"Missing {rel}: cannot check {unchecked}"
+
+
 def _check_ux_controls(report_dir):
   """Check the pages, header buttons, drill-through page and theme reference.
 
@@ -1154,10 +1190,14 @@ def _check_ux_controls(report_dir):
   is hidden in view mode and is the only drill-through target, on exactly
   DRILLTHROUGH_FIELDS (README D12): Clear all slicers does not clear
   drill-through filters, so they must not land on a page that users open from
-  the tabs.  Every report page carries a Reset filters button that clears all
-  slicers (README D17); the drill-through page carries Back instead.  The
-  custom theme must name a registered CustomTheme resource, otherwise Power BI
-  cannot resolve it and draws the default palette.
+  the tabs.  Each of its page filters is bound to a drill-through parameter,
+  the parameter names are unique, and its display name is the Drill through
+  entry that the user manual names.  Every report page carries a Reset filters
+  button that clears all slicers (README D17); the drill-through page carries
+  Back instead; each button shows its label.  The custom theme must name a
+  registered CustomTheme resource, otherwise Power BI cannot resolve it and
+  draws the default palette.  A missing pages.json, page.json or report.json
+  is an error: these checks cannot pass on a file they did not read.
   """
   errors = []
   pages_dir = report_dir / "definition" / "pages"
@@ -1170,6 +1210,10 @@ def _check_ux_controls(report_dir):
     page_order = _read_json(pages_json_path).get("pageOrder")
     if page_order != expected_pages:
       errors.append(f"pages.json: pageOrder {page_order} != {expected_pages}")
+  else:
+    errors.append(
+        _missing_report_file(report_dir, pages_json_path, "the page order")
+    )
   for page_dir in sorted(p for p in pages_dir.iterdir() if p.is_dir()):
     page = page_dir.name
     if page == DRILLTHROUGH_PAGE:
@@ -1196,9 +1240,25 @@ def _check_ux_controls(report_dir):
             f"actionButton with action {expected_actions[button_id]}, got "
             f"{visual_type!r} with {action!r}"
         )
+      label = HEADER_BUTTON_LABELS[button_id]
+      actual_label = _button_label(vobj)
+      if actual_label != "'" + label.replace("'", "''") + "'":
+        errors.append(
+            f"Page '{page}': header button '{button_id}' must be labelled "
+            f"{label!r}, got {actual_label!r}"
+        )
 
     page_json_path = page_dir / "page.json"
-    page_obj = _read_json(page_json_path) if page_json_path.exists() else {}
+    if not page_json_path.exists():
+      errors.append(
+          _missing_report_file(
+              report_dir,
+              page_json_path,
+              "the page visibility and drill-through binding",
+          )
+      )
+      continue
+    page_obj = _read_json(page_json_path)
     binding = page_obj.get("pageBinding")
     hidden = page_obj.get("visibility") == "HiddenInViewMode"
     if page != DRILLTHROUGH_PAGE:
@@ -1215,16 +1275,41 @@ def _check_ux_controls(report_dir):
           f"Page '{page}': the drill-through page must have visibility "
           "'HiddenInViewMode'"
       )
+    display_name = page_obj.get("displayName")
+    if display_name != DRILLTHROUGH_DISPLAY_NAME:
+      errors.append(
+          f"Page '{page}': displayName {display_name!r} != "
+          f"{DRILLTHROUGH_DISPLAY_NAME!r}"
+      )
     if not isinstance(binding, dict) or binding.get("type") != "Drillthrough":
       errors.append(f"Page '{page}': pageBinding must have type 'Drillthrough'")
       continue
-    filters = {
-        f.get("name"): f
+    filter_list = [
+        f
         for f in page_obj.get("filterConfig", {}).get("filters", [])
         if isinstance(f, dict)
-    }
+    ]
+    filters = {f.get("name"): f for f in filter_list}
+    parameters = binding.get("parameters", [])
+    names = [param.get("name") for param in parameters]
+    duplicated = sorted({str(n) for n in names if names.count(n) > 1})
+    if duplicated:
+      errors.append(
+          f"Page '{page}': duplicate drill-through parameter names {duplicated}"
+      )
+    # Each parameter binds one filter.  Any filter left over has no parameter,
+    # including a second filter under the name of a bound one.
+    unbound = [f.get("name") for f in filter_list]
+    for param in parameters:
+      if param.get("boundFilter") in unbound:
+        unbound.remove(param.get("boundFilter"))
+    for filter_name in unbound:
+      errors.append(
+          f"Page '{page}': filter '{filter_name}' is bound to no "
+          "drill-through parameter"
+      )
     fields = []
-    for param in binding.get("parameters", []):
+    for param in parameters:
       flt = filters.get(param.get("boundFilter"))
       if flt is None:
         errors.append(
@@ -1273,6 +1358,12 @@ def _check_ux_controls(report_dir):
           f"report.json: customTheme name {theme_name!r} is not a registered "
           f"CustomTheme resource {sorted(map(str, registered))}"
       )
+  else:
+    errors.append(
+        _missing_report_file(
+            report_dir, report_json_path, "the custom theme reference"
+        )
+    )
   return errors
 
 
@@ -1399,7 +1490,9 @@ def _check_card_selectors(report_dir):
 
   cardVisual objects take an `{"id": "default"}` selector (or none); Power BI
   silently drops an entry with any other selector, such as `{"metadata":
-  ...}`.  The `id` entry formats every callout of the card alike.
+  ...}`.  The `id` entry formats every callout of the card alike, so such an
+  entry must not set `showBlankAs`: it would relabel a blank headline value
+  as well as a blank change (README D5).
   """
   errors = []
   for page, name, vobj in _visual_files(report_dir):
@@ -1419,6 +1512,170 @@ def _check_card_selectors(report_dir):
               f"Card '{page}/{name}': {obj} selector {selector!r} is not an "
               "{'id': ...} selector"
           )
+          continue
+        properties = (
+            entry.get("properties") if isinstance(entry, dict) else None
+        )
+        if isinstance(properties, dict) and "showBlankAs" in properties:
+          errors.append(
+              f"Card '{page}/{name}': {obj} sets showBlankAs for every "
+              "callout, so a blank headline would be relabelled too (README D5)"
+          )
+  return errors
+
+
+def _first_literal(entries, prop):
+  """Return the Literal Value of `prop` in the first entry that sets it."""
+  for entry in entries if isinstance(entries, list) else []:
+    properties = entry.get("properties") if isinstance(entry, dict) else None
+    if isinstance(properties, dict) and prop in properties:
+      return _literal_value(properties[prop])
+  return None
+
+
+def _title_styling(visual):
+  """Return the show/fontColor/fontSize/bold literals of a title, or None."""
+  titles = visual.get("visualContainerObjects", {}).get("title")
+  if not isinstance(titles, list) or not titles:
+    return None  # The parity title check reports a missing title.
+  first = titles[0]
+  props = first.get("properties") if isinstance(first, dict) else None
+  props = props if isinstance(props, dict) else {}
+  color = props.get("fontColor")
+  return {
+      "show": _literal_value(props.get("show")),
+      "fontColor": (
+          _literal_value(color.get("solid", {}).get("color"))
+          if isinstance(color, dict)
+          else None
+      ),
+      "fontSize": _literal_value(props.get("fontSize")),
+      "bold": _literal_value(props.get("bold")),
+  }
+
+
+def _check_readability(report_dir, parity_ids, spec_visuals):
+  """Check the formatting and search settings added to the parity layout.
+
+  Each parity visual has the visualType of its report_visuals.yaml entry: the
+  live validator reads the chart types from that spec (README D15), while
+  Power BI draws the committed visual.json.  Chart titles are shown in the
+  theme foreground, 12pt bold; every bar chart shows data labels; an area
+  chart's value axis starts at zero; a card whose spec entry sets
+  `value_format` carries that number format, and a card with a change
+  callout stacks its callouts (README D5, D16).  The Agent, User ID, Trace ID
+  and Span ID slicers have a search box (README D17).  Only settings that the
+  generator writes are checked.
+  """
+  errors = []
+  expected_title = {
+      "show": "true",
+      "fontColor": TITLE_FONT_COLOR,
+      "fontSize": TITLE_FONT_SIZE,
+      "bold": "true",
+  }
+  for page, name, vobj in _visual_files(report_dir):
+    visual = vobj.get("visual", {})
+    visual_type = visual.get("visualType")
+    objects = visual.get("objects", {})
+    if name in SEARCHABLE_SLICERS:
+      search = _first_literal(objects.get("general"), "selfFilterEnabled")
+      if search != "true":
+        errors.append(
+            f"Slicer '{page}/{name}': general selfFilterEnabled {search!r} != "
+            "'true' (search box, README D17)"
+        )
+      continue
+    if name not in parity_ids:
+      continue
+    where = f"Visual '{page}/{name}'"
+    spec = spec_visuals.get(name)
+    if spec is None:
+      errors.append(f"{where}: no report_visuals.yaml entry")
+      continue
+    if visual_type != spec.get("visual_type"):
+      errors.append(
+          f"{where}: visualType {visual_type!r} != report_visuals.yaml "
+          f"visual_type {spec.get('visual_type')!r}"
+      )
+    if visual_type == "cardVisual":
+      value_format = spec.get("value_format")
+      if value_format is not None and value_format not in CARD_VALUE_FORMATS:
+        errors.append(f"{where}: unknown value_format {value_format!r}")
+      elif value_format is not None:
+        for prop, value in CARD_VALUE_FORMATS[value_format].items():
+          actual = _first_literal(objects.get("value"), prop)
+          if actual != value:
+            errors.append(
+                f"{where}: value {prop} {actual!r} != {value!r} "
+                f"(value_format {value_format!r}, README D16)"
+            )
+      callouts = (
+          visual.get("query", {})
+          .get("queryState", {})
+          .get("Data", {})
+          .get("projections", [])
+      )
+      orientation = _first_literal(objects.get("layout"), "orientation")
+      if len(callouts) > 1 and orientation != CARD_ORIENTATION_VERTICAL:
+        errors.append(
+            f"{where}: layout orientation {orientation!r} != "
+            f"{CARD_ORIENTATION_VERTICAL!r} (stacked callouts, README D5)"
+        )
+      continue
+    styling = _title_styling(visual)
+    if styling is not None:
+      for prop, value in expected_title.items():
+        if styling[prop] != value:
+          errors.append(
+              f"{where}: title {prop} {styling[prop]!r} != {value!r} "
+              "(README D16)"
+          )
+    if visual_type == "clusteredBarChart":
+      show = _first_literal(objects.get("labels"), "show")
+      if show != "true":
+        errors.append(f"{where}: labels show {show!r} != 'true' (README D16)")
+    elif visual_type == "areaChart":
+      start = _first_literal(objects.get("valueAxis"), "start")
+      if start != "0D":
+        errors.append(
+            f"{where}: valueAxis start {start!r} != '0D' (README D16)"
+        )
+  return errors
+
+
+def _bundle_source_path(key, pbi_root, report_dir, model_dir):
+  """Return the committed file that a docs/pbip-bundle.js entry packages."""
+  folder, _, rest = key.partition("/")
+  if rest and folder == REPORT_DIR.name:
+    return report_dir / rest
+  if rest and folder == MODEL_DIR.name:
+    return model_dir / rest
+  return pbi_root / key
+
+
+def _bundle_content_problems(bundle_map, pbi_root, report_dir, model_dir):
+  """Compare every bundled file with the committed file it packages.
+
+  The web configurator zips these strings, so a bundled file that differs from
+  the committed PBIP file would ship content that the other checks never read.
+  """
+
+  def _lf(text):
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+  errors = []
+  for key, content in sorted(bundle_map.items()):
+    path = _bundle_source_path(key, pbi_root, report_dir, model_dir)
+    if not path.is_file():
+      errors.append(
+          f"docs/pbip-bundle.js: bundled '{key}' has no committed file"
+      )
+    elif not isinstance(content, str) or _lf(content) != _lf(_read_text(path)):
+      errors.append(
+          f"docs/pbip-bundle.js: bundled '{key}' differs from the committed "
+          "file"
+      )
   return errors
 
 
@@ -1555,6 +1812,10 @@ def validate_parity(power_bi_root=None, looker_root=None):
           errors.append("Report window filter not hidden")
         if not f.get("isLockedInViewMode"):
           errors.append("Report window filter not locked")
+  else:
+    errors.append(
+        _missing_report_file(report_dir, report_json_path, "the report filters")
+    )
 
   # Check slicer sync groups.
   for page_dir in sorted(report_pages_dir.iterdir()):
@@ -1635,6 +1896,7 @@ def validate_parity(power_bi_root=None, looker_root=None):
       else POWER_BI_ROOT / "spec" / "report_visuals.yaml"
   )
   visual_top_n_by_id = {}
+  spec_visuals = {}
   if rv_path.exists():
     import yaml
 
@@ -1642,8 +1904,12 @@ def validate_parity(power_bi_root=None, looker_root=None):
     for v_entry in (
         rv_data.get("parity_visuals") or rv_data.get("visuals") or []
     ):
+      if isinstance(v_entry, dict) and v_entry.get("id"):
+        spec_visuals[v_entry["id"]] = v_entry
       if isinstance(v_entry, dict) and v_entry.get("top_n") is not None:
         visual_top_n_by_id[v_entry.get("id", "")] = v_entry.get("top_n")
+  # Visual types against the spec, formatting and slicer search (D5, D15-D17).
+  errors.extend(_check_readability(report_dir, manifest_set, spec_visuals))
   manifest_by_id = {
       c["id"]: c
       for c in manifest.get("charts", [])
@@ -1930,6 +2196,9 @@ def validate_parity(power_bi_root=None, looker_root=None):
       json_body = bundle_text.split(prefix, 1)[1][: -len(suffix)]
       try:
         bundle_map = json.loads(json_body)
+      except ValueError as exc:
+        errors.append(f"docs/pbip-bundle.js: invalid JSON payload: {exc}")
+      else:
         if (
             not isinstance(bundle_map, dict)
             or len(bundle_map) != PBIP_BUNDLE_FILE_COUNT
@@ -1945,8 +2214,12 @@ def validate_parity(power_bi_root=None, looker_root=None):
           errors.append(
               "docs/pbip-bundle.js: missing expressions.tmdl in bundle"
           )
-      except ValueError as exc:
-        errors.append(f"docs/pbip-bundle.js: invalid JSON payload: {exc}")
+        if isinstance(bundle_map, dict):
+          errors.extend(
+              _bundle_content_problems(
+                  bundle_map, pbi_root, report_dir, model_dir
+              )
+          )
 
   return errors
 

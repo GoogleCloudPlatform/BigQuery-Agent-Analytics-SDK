@@ -1281,6 +1281,13 @@ def test_drillthrough_page_has_back_instead_of_reset(generated_files):
     )
 
 
+def test_drillthrough_back_button_is_labelled_back(generated_files):
+  """The Back button reads 'Back', as Reset filters reads its own label."""
+  vc = _visual(generated_files, DRILLTHROUGH_PAGE, "drillthrough-back")
+  text = _props(vc["visual"]["objects"], "text", {"id": "default"})
+  assert text["text"] == _lit("'Back'")
+
+
 def test_drillthrough_page_repeats_the_slicers_and_the_trace_table(
     generated_files,
 ):
