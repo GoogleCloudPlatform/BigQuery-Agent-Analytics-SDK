@@ -1,0 +1,449 @@
+{
+  "_comment": "Representative ADK 2.0 workflow fixture shared by the cross-event view tests (#218, parent tracker #190). Rows are laid out as google-adk's BigQuery Agent Analytics plugin writes them (google-adk>=2.4.0): only rows written from an ADK Event carry attributes.adk.source_event_id, node, branch and scope, and callback-only rows (USER_MESSAGE_RECEIVED and the resuming TOOL_COMPLETED) carry only schema_version, app_name and their own keys. Each row keeps the columns the views read; optional enrichments such as root_agent_name and session_metadata are left out. _fixture_id and _synthetic_provenance are fixture metadata, not columns.",
+  "_synthetic_hitl_orphan_provenance": "Row 'row-16-synthetic-hitl-orphan-defensive' (event_type='TOOL_COMPLETED', attributes.adk.pause_kind='hitl_confirmation', attributes.adk.pause_orphan=true) is SYNTHETIC, DIRECT BIGQUERY TEST DATA ONLY and is NEVER emitted by the ADK producer plugin. Per #199, real HITL completions stay on the HITL_*_COMPLETED event flow. The row exists only so consumer view tests (such as #215 long_running_tool_durations) can prove their filters are defensive against malformed or foreign rows.",
+  "events": [
+    {
+      "_fixture_id": "row-01-pre20-legacy",
+      "timestamp": "2026-06-01T09:59:59.000000Z",
+      "event_type": "USER_MESSAGE_RECEIVED",
+      "agent": "legacy_agent",
+      "session_id": "sess-legacy",
+      "invocation_id": "inv-legacy",
+      "user_id": "user-legacy",
+      "span_id": "span-01",
+      "content": {"text_summary": "pre-2.0 event with no attributes.adk block"},
+      "attributes": {}
+    },
+    {
+      "_fixture_id": "row-02-v2-callback-non-event",
+      "timestamp": "2026-06-01T10:00:00.000000Z",
+      "event_type": "USER_MESSAGE_RECEIVED",
+      "agent": "coordinator",
+      "session_id": "sess-1",
+      "invocation_id": "inv-1",
+      "user_id": "user-1",
+      "span_id": "span-02",
+      "content": {"text_summary": "v2 callback row without an originating ADK Event"},
+      "attributes": {
+        "adk": {
+          "schema_version": "1",
+          "app_name": "team_app"
+        }
+      }
+    },
+    {
+      "_fixture_id": "row-03-root-node-unscoped-unbranched",
+      "timestamp": "2026-06-01T10:00:00.500000Z",
+      "event_type": "AGENT_RESPONSE",
+      "agent": "coordinator",
+      "session_id": "sess-1",
+      "invocation_id": "inv-1",
+      "user_id": "user-1",
+      "span_id": "span-03",
+      "content": {"response": "text: 'starting workflow'"},
+      "attributes": {
+        "adk": {
+          "schema_version": "1",
+          "app_name": "team_app",
+          "source_event_id": "evt-root-1",
+          "node": {
+            "path": "root@1",
+            "run_id": "1",
+            "parent_run_id": null
+          },
+          "branch": null,
+          "scope": null
+        }
+      }
+    },
+    {
+      "_fixture_id": "row-04-bare-node-scope-transfer-1",
+      "timestamp": "2026-06-01T10:00:01.100000Z",
+      "event_type": "AGENT_TRANSFER",
+      "agent": "coordinator",
+      "session_id": "sess-1",
+      "invocation_id": "inv-1",
+      "user_id": "user-1",
+      "span_id": "span-04",
+      "content": {
+        "from_agent": "coordinator",
+        "to_agent": "planner"
+      },
+      "attributes": {
+        "adk": {
+          "schema_version": "1",
+          "app_name": "team_app",
+          "source_event_id": "evt-xfer-1",
+          "node": {
+            "path": "planner@1",
+            "run_id": "1",
+            "parent_run_id": null
+          },
+          "branch": null,
+          "scope": {
+            "id": "planner@1",
+            "kind": "node_run"
+          }
+        }
+      }
+    },
+    {
+      "_fixture_id": "row-05-branch-a-full-node-scope",
+      "timestamp": "2026-06-01T10:00:02.100000Z",
+      "event_type": "AGENT_RESPONSE",
+      "agent": "researcher_a",
+      "session_id": "sess-1",
+      "invocation_id": "inv-1",
+      "user_id": "user-1",
+      "span_id": "span-05",
+      "content": {"response": "text: 'branch A findings'"},
+      "attributes": {
+        "adk": {
+          "schema_version": "1",
+          "app_name": "team_app",
+          "source_event_id": "evt-branch-a",
+          "node": {
+            "path": "root@1/child@2",
+            "run_id": "2",
+            "parent_run_id": "1"
+          },
+          "branch": "planner.researcher_a",
+          "scope": {
+            "id": "root@1/child@2",
+            "kind": "node_run"
+          }
+        }
+      }
+    },
+    {
+      "_fixture_id": "row-06-branch-b-adk-fc-scope",
+      "timestamp": "2026-06-01T10:00:02.200000Z",
+      "event_type": "AGENT_RESPONSE",
+      "agent": "researcher_b",
+      "session_id": "sess-1",
+      "invocation_id": "inv-1",
+      "user_id": "user-1",
+      "span_id": "span-06",
+      "content": {"response": "text: 'branch B findings'"},
+      "attributes": {
+        "adk": {
+          "schema_version": "1",
+          "app_name": "team_app",
+          "source_event_id": "evt-branch-b",
+          "node": {
+            "path": "root@1/child@2/grandchild@3",
+            "run_id": "3",
+            "parent_run_id": "2"
+          },
+          "branch": "planner.researcher_b",
+          "scope": {
+            "id": "adk-fc-001",
+            "kind": "function_call"
+          }
+        }
+      }
+    },
+    {
+      "_fixture_id": "row-07-branch-c-model-fc-scope-fanout-1",
+      "timestamp": "2026-06-01T10:00:03.100000Z",
+      "event_type": "STATE_DELTA",
+      "agent": "critic",
+      "session_id": "sess-1",
+      "invocation_id": "inv-1",
+      "user_id": "user-1",
+      "span_id": "span-07",
+      "content": null,
+      "attributes": {
+        "state_delta": {"score": 0.98},
+        "adk": {
+          "schema_version": "1",
+          "app_name": "team_app",
+          "source_event_id": "evt-fanout-shared",
+          "node": {
+            "path": "",
+            "run_id": "",
+            "parent_run_id": null
+          },
+          "branch": "planner.critic",
+          "scope": {
+            "id": "call_abc123",
+            "kind": "function_call"
+          }
+        }
+      }
+    },
+    {
+      "_fixture_id": "row-08-branch-c-model-fc-scope-fanout-2",
+      "timestamp": "2026-06-01T10:00:03.100000Z",
+      "event_type": "AGENT_RESPONSE",
+      "agent": "critic",
+      "session_id": "sess-1",
+      "invocation_id": "inv-1",
+      "user_id": "user-1",
+      "span_id": "span-08",
+      "content": {"response": "text: 'approved'"},
+      "attributes": {
+        "adk": {
+          "schema_version": "1",
+          "app_name": "team_app",
+          "source_event_id": "evt-fanout-shared",
+          "node": {
+            "path": "",
+            "run_id": "",
+            "parent_run_id": null
+          },
+          "branch": "planner.critic",
+          "scope": {
+            "id": "call_abc123",
+            "kind": "function_call"
+          }
+        }
+      }
+    },
+    {
+      "_fixture_id": "row-09-transfer-2-model-toolu-fc-scope",
+      "timestamp": "2026-06-01T10:00:04.100000Z",
+      "event_type": "AGENT_TRANSFER",
+      "agent": "planner",
+      "session_id": "sess-1",
+      "invocation_id": "inv-1",
+      "user_id": "user-1",
+      "span_id": "span-09",
+      "content": {
+        "from_agent": "planner",
+        "to_agent": "executor"
+      },
+      "attributes": {
+        "adk": {
+          "schema_version": "1",
+          "app_name": "team_app",
+          "source_event_id": "evt-xfer-2",
+          "node": {
+            "path": "",
+            "run_id": "",
+            "parent_run_id": null
+          },
+          "branch": null,
+          "scope": {
+            "id": "toolu_xyz",
+            "kind": "function_call"
+          }
+        }
+      }
+    },
+    {
+      "_fixture_id": "row-10-transfer-3",
+      "timestamp": "2026-06-01T10:00:05.100000Z",
+      "event_type": "AGENT_TRANSFER",
+      "agent": "executor",
+      "session_id": "sess-1",
+      "invocation_id": "inv-1",
+      "user_id": "user-1",
+      "span_id": "span-10",
+      "content": {
+        "from_agent": "executor",
+        "to_agent": "verifier"
+      },
+      "attributes": {
+        "adk": {
+          "schema_version": "1",
+          "app_name": "team_app",
+          "source_event_id": "evt-xfer-3",
+          "node": {
+            "path": "",
+            "run_id": "",
+            "parent_run_id": null
+          },
+          "branch": null,
+          "scope": null
+        }
+      }
+    },
+    {
+      "_fixture_id": "row-11-checkpoint-state-dict",
+      "timestamp": "2026-06-01T10:00:06.100000Z",
+      "event_type": "AGENT_STATE_CHECKPOINT",
+      "agent": "executor",
+      "session_id": "sess-1",
+      "invocation_id": "inv-1",
+      "user_id": "user-1",
+      "span_id": "span-11",
+      "content": {
+        "agent_state": {"cursor": "page_2", "step": 1},
+        "end_of_agent": false
+      },
+      "attributes": {
+        "adk": {
+          "schema_version": "1",
+          "app_name": "team_app",
+          "source_event_id": "evt-ckpt-1",
+          "node": {
+            "path": "",
+            "run_id": "",
+            "parent_run_id": null
+          },
+          "branch": null,
+          "scope": null
+        }
+      }
+    },
+    {
+      "_fixture_id": "row-12-checkpoint-end-of-agent",
+      "timestamp": "2026-06-01T10:00:06.200000Z",
+      "event_type": "AGENT_STATE_CHECKPOINT",
+      "agent": "executor",
+      "session_id": "sess-1",
+      "invocation_id": "inv-1",
+      "user_id": "user-1",
+      "span_id": "span-12",
+      "content": {
+        "agent_state": null,
+        "end_of_agent": true
+      },
+      "attributes": {
+        "adk": {
+          "schema_version": "1",
+          "app_name": "team_app",
+          "source_event_id": "evt-ckpt-2",
+          "node": {
+            "path": "",
+            "run_id": "",
+            "parent_run_id": null
+          },
+          "branch": null,
+          "scope": null
+        }
+      }
+    },
+    {
+      "_fixture_id": "row-13-compaction-fractional",
+      "timestamp": "2026-06-01T10:00:07.100000Z",
+      "event_type": "EVENT_COMPACTION",
+      "agent": "verifier",
+      "session_id": "sess-1",
+      "invocation_id": "inv-1",
+      "user_id": "user-1",
+      "span_id": "span-13",
+      "content": {
+        "start_timestamp": 1780308001.234567,
+        "end_timestamp": 1780308001.235891,
+        "compacted_content": "text: 'compacted summary'"
+      },
+      "attributes": {
+        "adk": {
+          "schema_version": "1",
+          "app_name": "team_app",
+          "source_event_id": "evt-compact-1",
+          "node": {
+            "path": "",
+            "run_id": "",
+            "parent_run_id": null
+          },
+          "branch": null,
+          "scope": null
+        }
+      }
+    },
+    {
+      "_fixture_id": "row-14-long-running-tool-paused-inv1",
+      "timestamp": "2026-06-01T10:00:08.000000Z",
+      "event_type": "TOOL_PAUSED",
+      "agent": "verifier",
+      "session_id": "sess-1",
+      "invocation_id": "inv-1",
+      "user_id": "user-1",
+      "span_id": "span-14",
+      "content": {
+        "tool": "async_bigquery_export",
+        "args": {"table": "events"}
+      },
+      "attributes": {
+        "adk": {
+          "schema_version": "1",
+          "app_name": "team_app",
+          "source_event_id": "evt-pause-1",
+          "node": {
+            "path": "",
+            "run_id": "",
+            "parent_run_id": null
+          },
+          "branch": null,
+          "scope": null,
+          "pause_kind": "tool",
+          "function_call_id": "fc-long-1"
+        }
+      }
+    },
+    {
+      "_fixture_id": "row-15-long-running-tool-completed-inv2",
+      "timestamp": "2026-06-01T10:00:18.500000Z",
+      "event_type": "TOOL_COMPLETED",
+      "agent": "verifier",
+      "session_id": "sess-1",
+      "invocation_id": "inv-2",
+      "user_id": "user-1",
+      "span_id": "span-15",
+      "content": {
+        "tool": "async_bigquery_export",
+        "result": {"status": "ok"}
+      },
+      "attributes": {
+        "adk": {
+          "schema_version": "1",
+          "app_name": "team_app",
+          "pause_kind": "tool",
+          "function_call_id": "fc-long-1"
+        }
+      }
+    },
+    {
+      "_fixture_id": "row-16-synthetic-hitl-orphan-defensive",
+      "_synthetic_provenance": "SYNTHETIC / DIRECT BIGQUERY INSERT ONLY: NOT EMITTED BY THE ADK PLUGIN (#199). Real HITL completions stay on HITL_*_COMPLETED; this row tests defensive filtering in consumer views (#215, #218).",
+      "timestamp": "2026-06-01T10:00:19.000000Z",
+      "event_type": "TOOL_COMPLETED",
+      "agent": "verifier",
+      "session_id": "sess-1",
+      "invocation_id": "inv-2",
+      "user_id": "user-1",
+      "span_id": "span-16-synthetic-hitl-orphan",
+      "content": {
+        "tool": "adk_request_confirmation",
+        "result": {"confirmed": true}
+      },
+      "attributes": {
+        "adk": {
+          "schema_version": "1",
+          "app_name": "team_app",
+          "pause_kind": "hitl_confirmation",
+          "function_call_id": "adk-hitl-confirm-99",
+          "pause_orphan": true
+        }
+      }
+    },
+    {
+      "_fixture_id": "row-17-inv2-zero-branch-agent-response",
+      "timestamp": "2026-06-01T10:00:20.000000Z",
+      "event_type": "AGENT_RESPONSE",
+      "agent": "verifier",
+      "session_id": "sess-1",
+      "invocation_id": "inv-2",
+      "user_id": "user-1",
+      "span_id": "span-17",
+      "content": {"response": "text: 'export complete'"},
+      "attributes": {
+        "adk": {
+          "schema_version": "1",
+          "app_name": "team_app",
+          "source_event_id": "evt-inv2-resp-1",
+          "node": {
+            "path": "",
+            "run_id": "",
+            "parent_run_id": null
+          },
+          "branch": null,
+          "scope": null
+        }
+      }
+    }
+  ]
+}
