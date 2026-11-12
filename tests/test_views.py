@@ -428,8 +428,9 @@ class TestDeniedColumns:
         for r in caplog.records
         if r.levelno == logging.WARNING and r.msg.startswith("Skipping view")
     }
-    # compaction_windows reads attributes.adk.app_name, so it is skipped too.
-    assert skipped == _ATTRIBUTE_READERS | {"compaction_windows"}
+    # Every cross-event view reads attributes.adk.app_name, so all of them
+    # are skipped too.
+    assert skipped == _ATTRIBUTE_READERS | set(_CROSS_EVENT_VIEW_DEFS)
 
   @pytest.mark.parametrize("event_type", _ATTRIBUTE_FREE)
   def test_denied_sql_only_drops_the_otel_columns(

@@ -12,15 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for cross-event view deployment plumbing (#210).
+"""Tests for cross-event views (#210) and their shared workflow fixture (#218).
 
 ``ViewManager`` carries two registries: ``_EVENT_VIEW_DEFS`` (one view per
 event type) and ``_CROSS_EVENT_VIEW_DEFS`` (analytical views spanning event
-types). These tests register a fake cross-event definition to prove the
-deployment path — Python and CLI — and pin the per-event SQL so the plumbing
-cannot change it.
+types). The plumbing tests register a fake cross-event definition to prove
+the deployment path — Python and CLI — and pin the per-event SQL so the
+plumbing cannot change it.
+
+The fixture tests check that ``tests/fixtures/adk2_workflow_events.json``
+covers every #218 shape the way the plugin writes it, and the view tests run
+each registered view's SQL on it in SQLite.
 """
 
+import collections
+import copy
 import json
 import os
 import pathlib
@@ -34,6 +40,9 @@ from bigquery_agent_analytics.cli import app
 from bigquery_agent_analytics.views import _CROSS_EVENT_VIEW_DEFS
 from bigquery_agent_analytics.views import _EVENT_VIEW_DEFS
 from bigquery_agent_analytics.views import ViewManager
+from tests.cross_event_view_harness import execute_cross_event_view
+from tests.cross_event_view_harness import fixture_events
+from tests.cross_event_view_harness import load_adk2_workflow_fixture
 
 PROJECT = "test-project"
 DATASET = "analytics"
@@ -262,3 +271,728 @@ class TestCli:
     assert (
         "`proj.ds.adk_fake_session_rollups`" in bq_client.query.call_args[0][0]
     )
+
+
+# ------------------------------------------------------------------ #
+# Shared ADK 2.0 workflow fixture (#218)                               #
+# ------------------------------------------------------------------ #
+
+# Event types the plugin writes from an ADK Event (on_event_callback), so
+# their rows carry the Event envelope keys. USER_MESSAGE_RECEIVED and
+# TOOL_COMPLETED rows here come from callbacks with no source Event.
+_EVENT_ROW_TYPES = frozenset(
+    {
+        "AGENT_RESPONSE",
+        "AGENT_STATE_CHECKPOINT",
+        "AGENT_TRANSFER",
+        "EVENT_COMPACTION",
+        "STATE_DELTA",
+        "TOOL_PAUSED",
+    }
+)
+_CALLBACK_ROW_TYPES = frozenset({"USER_MESSAGE_RECEIVED", "TOOL_COMPLETED"})
+_EVENT_ENVELOPE_KEYS = ["source_event_id", "node", "branch", "scope"]
+_IDENTITY = ("app_name", "user_id", "session_id", "invocation_id")
+
+
+def _adk(event):
+  return (event["attributes"] or {}).get("adk")
+
+
+def _event_rows(events):
+  """Rows written from an ADK Event: they carry a source_event_id."""
+  return [e for e in events if "source_event_id" in (_adk(e) or {})]
+
+
+def _node_run_ids(path):
+  """Returns (run_id, parent_run_id) as google-adk's NodeInfo derives them."""
+  segments = path.split("/") if path else []
+
+  def leaf_run_id(segs):
+    leaf = segs[-1].rsplit("@", 1) if segs else []
+    return leaf[1] if len(leaf) == 2 else None
+
+  parent_run_id = leaf_run_id(segments[:-1]) if len(segments) > 1 else None
+  return leaf_run_id(segments) or "", parent_run_id
+
+
+class TestWorkflowFixtureContract:
+  """The fixture covers every #218 shape, laid out as the plugin writes it."""
+
+  @pytest.fixture
+  def events(self):
+    return fixture_events()
+
+  def test_row_ids_are_sequential(self, events):
+    ids = [event["_fixture_id"][: len("row-NN")] for event in events]
+    assert ids == [f"row-{n:02d}" for n in range(1, len(events) + 1)]
+
+  def test_branch_fanout(self, events):
+    branches = {
+        _adk(e)["branch"]
+        for e in _event_rows(events)
+        if e["invocation_id"] == "inv-1"
+    }
+    assert branches - {None} == {
+        "planner.researcher_a",
+        "planner.researcher_b",
+        "planner.critic",
+    }
+
+  def test_chain_of_three_agent_transfers(self, events):
+    transfers = sorted(
+        (e for e in events if e["event_type"] == "AGENT_TRANSFER"),
+        key=lambda e: e["timestamp"],
+    )
+    assert [
+        (e["content"]["from_agent"], e["content"]["to_agent"])
+        for e in transfers
+    ] == [
+        ("coordinator", "planner"),
+        ("planner", "executor"),
+        ("executor", "verifier"),
+    ]
+    for transfer in transfers:
+      # The plugin writes only these two keys; from_agent is the author.
+      assert set(transfer["content"]) == {"from_agent", "to_agent"}
+      assert transfer["content"]["from_agent"] == transfer["agent"]
+
+  def test_compaction_has_fractional_second_boundaries(self, events):
+    (compaction,) = [e for e in events if e["event_type"] == "EVENT_COMPACTION"]
+    start = compaction["content"]["start_timestamp"]
+    end = compaction["content"]["end_timestamp"]
+    assert not start.is_integer() and not end.is_integer()
+    assert 0 < end - start < 0.01
+
+  def test_checkpoint_has_both_inline_shapes(self, events):
+    payloads = [
+        e["content"]
+        for e in events
+        if e["event_type"] == "AGENT_STATE_CHECKPOINT"
+    ]
+    assert payloads == [
+        {"agent_state": {"cursor": "page_2", "step": 1}, "end_of_agent": False},
+        {"agent_state": None, "end_of_agent": True},
+    ]
+
+  def test_long_running_tool_resumes_in_a_later_invocation(self, events):
+    (paused,) = [e for e in events if e["event_type"] == "TOOL_PAUSED"]
+    (resumed,) = [
+        e
+        for e in events
+        if e["event_type"] == "TOOL_COMPLETED"
+        and _adk(e)["function_call_id"] == _adk(paused)["function_call_id"]
+    ]
+    assert _adk(paused)["pause_kind"] == _adk(resumed)["pause_kind"] == "tool"
+    assert resumed["session_id"] == paused["session_id"]
+    assert (paused["invocation_id"], resumed["invocation_id"]) == (
+        "inv-1",
+        "inv-2",
+    )
+    assert paused["content"] == {
+        "tool": "async_bigquery_export",
+        "args": {"table": "events"},
+    }
+    assert set(resumed["content"]) == {"tool", "result"}
+    # The plugin does not write pause_orphan yet.
+    assert "pause_orphan" not in _adk(resumed)
+
+  def test_synthetic_hitl_orphan_row_is_documented(self):
+    fixture = load_adk2_workflow_fixture()
+    (orphan,) = [
+        e for e in fixture["events"] if (_adk(e) or {}).get("pause_orphan")
+    ]
+    assert orphan["event_type"] == "TOOL_COMPLETED"
+    assert _adk(orphan)["pause_kind"] == "hitl_confirmation"
+    assert _adk(orphan)["pause_orphan"] is True
+    note = fixture["_synthetic_hitl_orphan_provenance"]
+    assert orphan["_fixture_id"] in note
+    for text in (note, orphan["_synthetic_provenance"]):
+      assert "SYNTHETIC" in text
+      assert "#199" in text
+      assert "HITL_*_COMPLETED" in text
+
+  def test_every_scope_shape(self, events):
+    scopes = [_adk(e)["scope"] for e in _event_rows(events)]
+    shapes = {(s["kind"], s["id"]) for s in scopes if s is not None}
+    assert shapes == {
+        ("node_run", "root@1/child@2"),
+        ("node_run", "planner@1"),
+        ("function_call", "adk-fc-001"),
+        ("function_call", "call_abc123"),
+        ("function_call", "toolu_xyz"),
+    }
+    assert None in scopes
+    # The plugin's rule: node_run if the last path segment has "@".
+    for kind, scope_id in shapes:
+      leaf = scope_id.rsplit("/", 1)[-1]
+      assert kind == ("node_run" if "@" in leaf else "function_call")
+
+  def test_one_source_event_writes_two_rows(self, events):
+    rows = _event_rows(events)
+    counts = collections.Counter(_adk(e)["source_event_id"] for e in rows)
+    assert [key for key, n in counts.items() if n > 1] == ["evt-fanout-shared"]
+    fanned_out = [
+        e["event_type"]
+        for e in rows
+        if _adk(e)["source_event_id"] == "evt-fanout-shared"
+    ]
+    assert fanned_out == ["STATE_DELTA", "AGENT_RESPONSE"]
+
+  def test_workflow_node_paths(self, events):
+    assert {_adk(e)["node"]["path"] for e in _event_rows(events)} == {
+        "",
+        "root@1",
+        "planner@1",
+        "root@1/child@2",
+        "root@1/child@2/grandchild@3",
+    }
+
+  def test_pre20_and_callback_only_rows(self, events):
+    (legacy,) = [e for e in events if not _adk(e)]
+    assert legacy["attributes"] == {}
+    callback_rows = [
+        e["_fixture_id"][: len("row-NN")]
+        for e in events
+        if _adk(e) and "source_event_id" not in _adk(e)
+    ]
+    assert callback_rows == ["row-02", "row-15", "row-16"]
+
+  def test_only_event_rows_carry_the_event_envelope(self, events):
+    for event in events:
+      adk = _adk(event)
+      if adk is None:
+        continue
+      assert adk["schema_version"] == "1"
+      assert adk["app_name"] == "team_app"
+      present = [key for key in _EVENT_ENVELOPE_KEYS if key in adk]
+      if event["event_type"] in _EVENT_ROW_TYPES:
+        assert present == _EVENT_ENVELOPE_KEYS, event["_fixture_id"]
+      else:
+        assert event["event_type"] in _CALLBACK_ROW_TYPES
+        assert present == [], event["_fixture_id"]
+
+  def test_node_run_ids_derive_from_path(self, events):
+    for event in _event_rows(events):
+      node = _adk(event)["node"]
+      assert (node["run_id"], node["parent_run_id"]) == _node_run_ids(
+          node["path"]
+      ), event["_fixture_id"]
+
+  def test_state_delta_payload_is_in_attributes(self, events):
+    (state_delta,) = [e for e in events if e["event_type"] == "STATE_DELTA"]
+    assert state_delta["content"] is None
+    assert state_delta["attributes"]["state_delta"] == {"score": 0.98}
+
+
+@pytest.mark.parametrize("view_key", sorted(_CROSS_EVENT_VIEW_DEFS))
+class TestCrossEventViewsOnWorkflowFixture:
+  """Every registered cross-event view runs on the fixture (#218, #219)."""
+
+  def test_rows_have_full_telemetry_identity(self, vm, view_key):
+    rows = execute_cross_event_view(vm, view_key, fixture_events())
+    assert rows
+    for row in rows:
+      assert None not in [row[field] for field in _IDENTITY]
+      assert row["user_id"] != "user-legacy"
+
+  def test_pre20_and_callback_only_rows_produce_no_rows(self, vm, view_key):
+    events = fixture_events("row-01", "row-02", "row-15", "row-16")
+    assert execute_cross_event_view(vm, view_key, events) == []
+
+
+def _set_identity(event, field, value):
+  """Returns a copy of ``event`` with one telemetry identity field set."""
+  event = copy.deepcopy(event)
+  if field == "app_name":
+    event["attributes"]["adk"]["app_name"] = value
+  else:
+    event[field] = value
+  return event
+
+
+def _deploys_with_denied(view_key, column):
+  vm = ViewManager(
+      project_id=PROJECT,
+      dataset_id=DATASET,
+      bq_client=mock.MagicMock(),
+      denied_columns=[column],
+  )
+  return view_key in vm.create_all_views()
+
+
+class TestAgentTransferChainsView:
+  """``agent_transfer_chains``: one row per AGENT_TRANSFER (#213)."""
+
+  _KEY = "agent_transfer_chains"
+
+  def _run(self, vm, events):
+    return execute_cross_event_view(vm, self._KEY, events)
+
+  def test_is_registered_and_deployed(self, vm):
+    assert vm.get_view_name(self._KEY) == "adk_agent_transfer_chains"
+    assert self._KEY in vm.available_cross_event_views
+    assert vm.create_all_views()[self._KEY] == "adk_agent_transfer_chains"
+    assert "WHERE event_type = 'AGENT_TRANSFER'" in vm.get_view_sql(self._KEY)
+
+  def test_fixture_chain_in_timestamp_order(self, vm):
+    rows = sorted(
+        self._run(vm, fixture_events()), key=lambda row: row["timestamp"]
+    )
+    identity = {
+        "app_name": "team_app",
+        "user_id": "user-1",
+        "session_id": "sess-1",
+        "invocation_id": "inv-1",
+    }
+    assert rows == [
+        {
+            **identity,
+            "timestamp": "2026-06-01T10:00:01.100000Z",
+            "from_agent": "coordinator",
+            "to_agent": "planner",
+            "span_id": "span-04",
+        },
+        {
+            **identity,
+            "timestamp": "2026-06-01T10:00:04.100000Z",
+            "from_agent": "planner",
+            "to_agent": "executor",
+            "span_id": "span-09",
+        },
+        {
+            **identity,
+            "timestamp": "2026-06-01T10:00:05.100000Z",
+            "from_agent": "executor",
+            "to_agent": "verifier",
+            "span_id": "span-10",
+        },
+    ]
+    assert list(rows[0]) == [
+        *_IDENTITY,
+        "timestamp",
+        "from_agent",
+        "to_agent",
+        "span_id",
+    ]
+    # Each hop starts where the previous one ended.
+    for previous, current in zip(rows, rows[1:]):
+      assert current["from_agent"] == previous["to_agent"]
+
+  @pytest.mark.parametrize("attributes", [None, {}, {"adk": None}, {"adk": {}}])
+  def test_pre20_transfers_are_excluded(self, vm, attributes):
+    (transfer,) = fixture_events("row-04")
+    transfer["attributes"] = attributes
+    assert self._run(vm, [transfer]) == []
+
+  @pytest.mark.parametrize("field", _IDENTITY)
+  @pytest.mark.parametrize("value", [None, ""])
+  def test_incomplete_identities_are_excluded(self, vm, field, value):
+    (transfer,) = fixture_events("row-04")
+    assert self._run(vm, [_set_identity(transfer, field, value)]) == []
+
+  @pytest.mark.parametrize(
+      "content",
+      [
+          None,
+          {},
+          {"from_agent": "coordinator"},
+          {"to_agent": "planner"},
+          {"from_agent": "", "to_agent": "planner"},
+          {"from_agent": "coordinator", "to_agent": ""},
+      ],
+  )
+  def test_transfers_without_both_agents_are_excluded(self, vm, content):
+    (transfer,) = fixture_events("row-04")
+    transfer["content"] = content
+    assert self._run(vm, [transfer]) == []
+
+  def test_transfers_without_timestamp_are_excluded(self, vm):
+    (transfer,) = fixture_events("row-04")
+    transfer["timestamp"] = None
+    assert self._run(vm, [transfer]) == []
+
+  def test_other_event_types_are_excluded(self, vm):
+    (not_a_transfer,) = fixture_events("row-04")
+    not_a_transfer["event_type"] = "AGENT_RESPONSE"
+    assert self._run(vm, [not_a_transfer]) == []
+
+  def test_same_session_in_another_app_stays_separate(self, vm):
+    (transfer,) = fixture_events("row-04")
+    other = _set_identity(transfer, "app_name", "other_app")
+    rows = self._run(vm, [transfer, other])
+    assert sorted(row["app_name"] for row in rows) == ["other_app", "team_app"]
+
+  @pytest.mark.parametrize(
+      "column, deployed",
+      [
+          ("attributes", False),
+          ("content", False),
+          ("content_parts", True),
+          ("latency_ms", True),
+      ],
+  )
+  def test_denied_columns(self, column, deployed):
+    assert _deploys_with_denied(self._KEY, column) is deployed
+
+
+class TestBranchFanoutView:
+  """``branch_fanout``: distinct branches per invocation (#214)."""
+
+  _KEY = "branch_fanout"
+
+  def _run(self, vm, events):
+    rows = execute_cross_event_view(vm, self._KEY, events)
+    return sorted(rows, key=lambda row: [row[field] for field in _IDENTITY])
+
+  def test_is_registered_and_deployed(self, vm):
+    assert vm.get_view_name(self._KEY) == "adk_branch_fanout"
+    assert self._KEY in vm.available_cross_event_views
+    assert vm.create_all_views()[self._KEY] == "adk_branch_fanout"
+    assert (
+        "WHERE JSON_VALUE(attributes, '$.adk.source_event_id') IS NOT NULL"
+        in vm.get_view_sql(self._KEY)
+    )
+
+  def test_fixture_counts_branches_and_keeps_zero_branch_invocation(self, vm):
+    identity = {
+        "app_name": "team_app",
+        "user_id": "user-1",
+        "session_id": "sess-1",
+    }
+    rows = self._run(vm, fixture_events())
+    assert rows == [
+        {**identity, "invocation_id": "inv-1", "distinct_branch_count": 3},
+        {**identity, "invocation_id": "inv-2", "distinct_branch_count": 0},
+    ]
+    assert list(rows[0]) == [*_IDENTITY, "distinct_branch_count"]
+
+  def test_repeated_branch_counts_once(self, vm):
+    rows = self._run(vm, fixture_events("row-07", "row-08"))
+    assert [row["distinct_branch_count"] for row in rows] == [1]
+
+  @pytest.mark.parametrize("branch", [None, ""])
+  def test_event_rows_without_branch_count_zero(self, vm, branch):
+    (response,) = fixture_events("row-05")
+    response["attributes"]["adk"]["branch"] = branch
+    rows = self._run(vm, [response])
+    assert [row["distinct_branch_count"] for row in rows] == [0]
+
+  def test_rows_without_source_event_id_are_excluded_even_with_branch(self, vm):
+    (callback_row,) = fixture_events("row-02")
+    callback_row["attributes"]["adk"]["branch"] = "planner.researcher_a"
+    (empty_id,) = fixture_events("row-05")
+    empty_id["attributes"]["adk"]["source_event_id"] = ""
+    assert self._run(vm, [callback_row, empty_id]) == []
+
+  @pytest.mark.parametrize("field", _IDENTITY)
+  @pytest.mark.parametrize("value", [None, ""])
+  def test_incomplete_identities_are_excluded(self, vm, field, value):
+    (response,) = fixture_events("row-05")
+    assert self._run(vm, [_set_identity(response, field, value)]) == []
+
+  def test_same_invocation_in_another_app_stays_separate(self, vm):
+    a, b = fixture_events("row-05", "row-06")
+    rows = self._run(vm, [a, _set_identity(b, "app_name", "other_app")])
+    assert [
+        (row["app_name"], row["distinct_branch_count"]) for row in rows
+    ] == [
+        ("other_app", 1),
+        ("team_app", 1),
+    ]
+
+  @pytest.mark.parametrize(
+      "column, deployed",
+      [
+          ("attributes", False),
+          ("content", True),
+          ("content_parts", True),
+          ("latency_ms", True),
+      ],
+  )
+  def test_denied_columns(self, column, deployed):
+    assert _deploys_with_denied(self._KEY, column) is deployed
+
+
+class TestScopeCardinalityView:
+  """``scope_cardinality``: scopes per invocation and scope kind (#217)."""
+
+  _KEY = "scope_cardinality"
+
+  def _run(self, vm, events):
+    rows = execute_cross_event_view(vm, self._KEY, events)
+    return sorted(
+        rows, key=lambda row: [row[f] for f in (*_IDENTITY, "scope_kind")]
+    )
+
+  @staticmethod
+  def _counts(rows):
+    return [
+        (
+            row["invocation_id"],
+            row["scope_kind"],
+            row["distinct_scope_count"],
+            row["source_event_count"],
+            row["row_count"],
+        )
+        for row in rows
+    ]
+
+  def test_is_registered_and_deployed(self, vm):
+    assert vm.get_view_name(self._KEY) == "adk_scope_cardinality"
+    assert self._KEY in vm.available_cross_event_views
+    assert vm.create_all_views()[self._KEY] == "adk_scope_cardinality"
+    sql = vm.get_view_sql(self._KEY)
+    assert (
+        "WHERE JSON_VALUE(attributes, '$.adk.source_event_id') IS NOT NULL"
+        in sql
+    )
+    assert (
+        "COALESCE(JSON_VALUE(attributes, '$.adk.scope.kind'), 'unscoped')"
+        " AS scope_kind" in sql
+    )
+
+  def test_fixture_counts_per_scope_kind(self, vm):
+    rows = self._run(vm, fixture_events())
+    # (invocation, kind, distinct scopes, source Events, rows)
+    assert self._counts(rows) == [
+        # adk-fc-001, call_abc123 (one Event, two rows) and toolu_xyz.
+        ("inv-1", "function_call", 3, 3, 4),
+        # Bare planner@1 and full-path root@1/child@2.
+        ("inv-1", "node_run", 2, 2, 2),
+        # Event rows with scope = null only; callback-only row-02 is out.
+        ("inv-1", "unscoped", 0, 6, 6),
+        # row-17; callback-only TOOL_COMPLETED rows 15 and 16 are out.
+        ("inv-2", "unscoped", 0, 1, 1),
+    ]
+    assert {
+        (row["app_name"], row["user_id"], row["session_id"]) for row in rows
+    } == {("team_app", "user-1", "sess-1")}
+    assert list(rows[0]) == [
+        *_IDENTITY,
+        "scope_kind",
+        "distinct_scope_count",
+        "source_event_count",
+        "row_count",
+    ]
+
+  def test_one_source_event_fanning_out_counts_once(self, vm):
+    rows = self._run(vm, fixture_events("row-07", "row-08"))
+    assert self._counts(rows) == [("inv-1", "function_call", 1, 1, 2)]
+
+  def test_unknown_scope_kind_is_its_own_bucket(self, vm):
+    # The plugin writes kind 'unknown' for an empty or non-string scope.
+    empty, numeric = fixture_events("row-05", "row-06")
+    empty["attributes"]["adk"]["scope"] = {"id": "", "kind": "unknown"}
+    numeric["attributes"]["adk"]["scope"] = {"id": "5", "kind": "unknown"}
+    rows = self._run(vm, [empty, numeric])
+    assert self._counts(rows) == [("inv-1", "unknown", 1, 2, 2)]
+
+  def test_rows_without_source_event_id_are_excluded_even_with_scope(self, vm):
+    (callback_row,) = fixture_events("row-02")
+    callback_row["attributes"]["adk"]["scope"] = {
+        "id": "call_abc123",
+        "kind": "function_call",
+    }
+    (empty_id,) = fixture_events("row-06")
+    empty_id["attributes"]["adk"]["source_event_id"] = ""
+    assert self._run(vm, [callback_row, empty_id]) == []
+
+  @pytest.mark.parametrize("field", _IDENTITY)
+  @pytest.mark.parametrize("value", [None, ""])
+  def test_incomplete_identities_are_excluded(self, vm, field, value):
+    (response,) = fixture_events("row-05")
+    assert self._run(vm, [_set_identity(response, field, value)]) == []
+
+  def test_same_invocation_in_another_app_stays_separate(self, vm):
+    a, b = fixture_events("row-07", "row-08")
+    rows = self._run(vm, [a, _set_identity(b, "app_name", "other_app")])
+    assert [(row["app_name"], row["row_count"]) for row in rows] == [
+        ("other_app", 1),
+        ("team_app", 1),
+    ]
+
+  @pytest.mark.parametrize(
+      "column, deployed",
+      [
+          ("attributes", False),
+          ("content", True),
+          ("content_parts", True),
+          ("latency_ms", True),
+      ],
+  )
+  def test_denied_columns(self, column, deployed):
+    assert _deploys_with_denied(self._KEY, column) is deployed
+
+
+class TestWorkflowInvocationsView:
+  """``workflow_invocations``: one row per workflow node (#212)."""
+
+  _KEY = "workflow_invocations"
+
+  def _run(self, vm, events):
+    rows = execute_cross_event_view(vm, self._KEY, events)
+    return sorted(
+        rows, key=lambda row: [row[f] for f in (*_IDENTITY, "node_path")]
+    )
+
+  @staticmethod
+  def _dag(rows):
+    return [
+        (
+            row["invocation_id"],
+            row["node_path"],
+            row["node_run_id"],
+            row["parent_path"],
+            row["parent_node_run_id"],
+        )
+        for row in rows
+    ]
+
+  @staticmethod
+  def _at_path(event, path):
+    """Returns ``event`` as written by the node at ``path``."""
+    run_id, parent_run_id = _node_run_ids(path)
+    event["attributes"]["adk"]["node"] = {
+        "path": path,
+        "run_id": run_id,
+        "parent_run_id": parent_run_id,
+    }
+    return event
+
+  def test_is_registered_and_deployed(self, vm):
+    assert vm.get_view_name(self._KEY) == "adk_workflow_invocations"
+    assert self._KEY in vm.available_cross_event_views
+    assert vm.create_all_views()[self._KEY] == "adk_workflow_invocations"
+    sql = vm.get_view_sql(self._KEY)
+    assert (
+        "WHERE NULLIF(JSON_VALUE(attributes, '$.adk.node.path'), '')"
+        " IS NOT NULL" in sql
+    )
+    assert "WHEN STRPOS(node_path, '/') = 0 THEN NULL" in sql
+    assert "ELSE REGEXP_REPLACE(node_path, r'/[^/]+$', '')" in sql
+    # The DAG never joins on the producer's parent_run_id.
+    assert "parent_run_id" not in sql
+
+  def test_fixture_dag(self, vm):
+    rows = self._run(vm, fixture_events())
+    assert self._dag(rows) == [
+        ("inv-1", "planner@1", "1", None, None),
+        ("inv-1", "root@1", "1", None, None),
+        ("inv-1", "root@1/child@2", "2", "root@1", "1"),
+        ("inv-1", "root@1/child@2/grandchild@3", "3", "root@1/child@2", "2"),
+    ]
+    assert rows[2] == {
+        "app_name": "team_app",
+        "user_id": "user-1",
+        "session_id": "sess-1",
+        "invocation_id": "inv-1",
+        "node_path": "root@1/child@2",
+        "node_run_id": "2",
+        "parent_path": "root@1",
+        "parent_node_run_id": "1",
+        "first_seen_ts": "2026-06-01T10:00:02.100000Z",
+        "last_seen_ts": "2026-06-01T10:00:02.100000Z",
+        "source_event_count": 1,
+        "event_count": 1,
+    }
+    assert list(rows[2]) == [
+        *_IDENTITY,
+        "node_path",
+        "node_run_id",
+        "parent_path",
+        "parent_node_run_id",
+        "first_seen_ts",
+        "last_seen_ts",
+        "source_event_count",
+        "event_count",
+    ]
+
+  @pytest.mark.parametrize(
+      "path, parent_path",
+      [
+          ("root@1", None),
+          ("root@1/child@2", "root@1"),
+          ("root@1/child@2/grandchild@3", "root@1/child@2"),
+          ("wf/A@1/B@1", "wf/A@1"),
+      ],
+  )
+  def test_parent_path_strips_the_last_segment(self, vm, path, parent_path):
+    (response,) = fixture_events("row-03")
+    rows = self._run(vm, [self._at_path(response, path)])
+    assert [(row["node_path"], row["parent_path"]) for row in rows] == [
+        (path, parent_path)
+    ]
+
+  def test_non_workflow_rows_are_excluded(self, vm):
+    # Event rows outside a workflow have node.path = "".
+    events = fixture_events(
+        "row-07",
+        "row-08",
+        "row-09",
+        "row-10",
+        "row-11",
+        "row-12",
+        "row-13",
+        "row-14",
+        "row-17",
+    )
+    assert {_adk(e)["node"]["path"] for e in events} == {""}
+    assert self._run(vm, events) == []
+    (no_node,) = fixture_events("row-03")
+    del no_node["attributes"]["adk"]["node"]
+    assert self._run(vm, [no_node]) == []
+
+  def test_parent_in_an_earlier_invocation_leaves_parent_node_run_id_null(
+      self, vm
+  ):
+    """The parent is looked up in the node's own invocation only.
+
+    A child that runs after a resume, in a later invocation, keeps the
+    derived parent_path, but its parent_node_run_id is NULL because the
+    parent wrote no row in that invocation.
+    """
+    root, child = fixture_events("row-03", "row-05")
+    child = self._at_path(child, "root@1/child@9")
+    child["invocation_id"] = "inv-2"
+    child["attributes"]["adk"]["source_event_id"] = "evt-resumed-child"
+    assert self._dag(self._run(vm, [root, child])) == [
+        ("inv-1", "root@1", "1", None, None),
+        ("inv-2", "root@1/child@9", "9", "root@1", None),
+    ]
+
+  @pytest.mark.parametrize("field", _IDENTITY)
+  def test_parent_is_joined_on_the_full_telemetry_identity(self, vm, field):
+    root, child = fixture_events("row-03", "row-05")
+    rows = self._run(vm, [root, _set_identity(child, field, "other")])
+    (orphan,) = [row for row in rows if row["node_path"] == "root@1/child@2"]
+    assert orphan["parent_path"] == "root@1"
+    assert orphan["parent_node_run_id"] is None
+
+  def test_rows_of_one_node_aggregate(self, vm):
+    first, fanned_out, later = fixture_events("row-03", "row-03", "row-03")
+    fanned_out["event_type"] = "STATE_DELTA"
+    later["timestamp"] = "2026-06-01T10:00:09.000000Z"
+    later["attributes"]["adk"]["source_event_id"] = "evt-root-2"
+    (row,) = self._run(vm, [first, fanned_out, later])
+    assert row["first_seen_ts"] == first["timestamp"]
+    assert row["last_seen_ts"] == later["timestamp"]
+    assert (row["source_event_count"], row["event_count"]) == (2, 3)
+
+  @pytest.mark.parametrize("field", _IDENTITY)
+  @pytest.mark.parametrize("value", [None, ""])
+  def test_incomplete_identities_are_excluded(self, vm, field, value):
+    (response,) = fixture_events("row-03")
+    assert self._run(vm, [_set_identity(response, field, value)]) == []
+
+  @pytest.mark.parametrize(
+      "column, deployed",
+      [
+          ("attributes", False),
+          ("content", True),
+          ("content_parts", True),
+          ("latency_ms", True),
+      ],
+  )
+  def test_denied_columns(self, column, deployed):
+    assert _deploys_with_denied(self._KEY, column) is deployed
