@@ -5,7 +5,7 @@
 **Related:** [gws CLI](https://github.com/googleworkspace/cli),
 [Agent Skills](https://agentskills.io),
 [BigQuery Conversational Analytics](https://cloud.google.com/bigquery/docs/conversational-analytics),
-[BigQuery Agent Analytics SDK](https://github.com/haiyuan-eng-google/BigQuery-Agent-Analytics-SDK)
+[BigQuery Agent Analytics SDK](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK)
 
 ---
 
