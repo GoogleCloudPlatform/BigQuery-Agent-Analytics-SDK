@@ -1,7 +1,7 @@
 # PRD: Unified Analytics Interface for BigQuery Agent Analytics SDK
 
 **Status:** Draft
-**Issue:** [#22](https://github.com/haiyuan-eng-google/BigQuery-Agent-Analytics-SDK/issues/22)
+**Issue:** [#22 in the precursor repository](https://github.com/haiyuan-eng-google/BigQuery-Agent-Analytics-SDK/issues/22)
 **Author:** SDK Product Team
 **Date:** 2026-03-06
 
@@ -1919,7 +1919,7 @@ bq-agent-sdk get-trace --session-id=sess-001 --format=json
 
 ```bash
 # Clone and deploy
-git clone https://github.com/haiyuan-eng-google/BigQuery-Agent-Analytics-SDK.git
+git clone https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK.git
 cd BigQuery-Agent-Analytics-SDK/deploy/remote_function
 ./deploy.sh --project=myproject --region=us-central1
 

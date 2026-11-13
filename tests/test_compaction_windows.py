@@ -17,12 +17,8 @@
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
-from decimal import Decimal
-from decimal import ROUND_HALF_UP
 import json
-import math
 import os
-import sqlite3
 from unittest import mock
 
 import pytest
@@ -30,6 +26,8 @@ from typer.testing import CliRunner
 
 from bigquery_agent_analytics import views
 from bigquery_agent_analytics.views import ViewManager
+from tests.cross_event_view_harness import execute_cross_event_view
+from tests.cross_event_view_harness import fixture_events
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _SOURCE = "`test-project.analytics.agent_events`"
@@ -56,38 +54,6 @@ def vm():
   )
 
 
-def _json_value(document, path):
-  value = json.loads(document) if document is not None else None
-  for key in path.removeprefix("$.").split("."):
-    value = value.get(key) if isinstance(value, dict) else None
-  if isinstance(value, (dict, list)) or value is None:
-    return None
-  return value if isinstance(value, str) else json.dumps(value)
-
-
-def _safe_float(value):
-  try:
-    return float(value)
-  except (ValueError, TypeError, OverflowError):
-    return None
-
-
-def _safe_int(value):
-  if value is None or not math.isfinite(value):
-    return None
-  result = int(Decimal(value).to_integral_value(rounding=ROUND_HALF_UP))
-  return result if -(2**63) <= result < 2**63 else None
-
-
-def _safe_timestamp_micros(value):
-  if value is None:
-    return None
-  try:
-    return (_EPOCH + timedelta(microseconds=value)).isoformat()
-  except OverflowError:
-    return None
-
-
 @pytest.fixture
 def run_view(vm):
   """Execute the generated SELECT with SQLite shims for BigQuery functions.
@@ -95,51 +61,9 @@ def run_view(vm):
   Filtering, DISTINCT and projection run as SQL, not as a Python copy of the
   view. The opt-in test below checks the same contract in real BigQuery.
   """
-  query = vm.get_view_sql("compaction_windows").split(" AS\n", 1)[1]
-  query = query.replace(_SOURCE, "agent_events")
-  for field in ("start", "end"):
-    query = query.replace(
-        f"SAFE_CAST(JSON_VALUE(content, '$.{field}_timestamp') AS FLOAT64)",
-        f"SAFE_FLOAT(JSON_VALUE(content, '$.{field}_timestamp'))",
-    ).replace(
-        f"SAFE_CAST(SAFE_MULTIPLY({field}_seconds, 1000000) AS INT64)",
-        f"SAFE_INT(SAFE_MULTIPLY({field}_seconds, 1000000))",
-    )
-  query = query.replace("SAFE.TIMESTAMP_MICROS", "SAFE_TIMESTAMP_MICROS")
 
   def run(events):
-    with sqlite3.connect(":memory:") as connection:
-      connection.row_factory = sqlite3.Row
-      connection.create_function("JSON_VALUE", 2, _json_value)
-      connection.create_function("SAFE_FLOAT", 1, _safe_float)
-      connection.create_function("SAFE_INT", 1, _safe_int)
-      connection.create_function(
-          "SAFE_MULTIPLY",
-          2,
-          lambda x, y: x * y if x is not None and y is not None else None,
-      )
-      connection.create_function(
-          "SAFE_TIMESTAMP_MICROS", 1, _safe_timestamp_micros
-      )
-      connection.execute(
-          "CREATE TABLE agent_events (event_type TEXT, attributes TEXT, "
-          "user_id TEXT, session_id TEXT, invocation_id TEXT, content TEXT)"
-      )
-      connection.executemany(
-          "INSERT INTO agent_events VALUES (?, ?, ?, ?, ?, ?)",
-          [
-              (
-                  event["event_type"],
-                  json.dumps(event["attributes"]),
-                  event["user_id"],
-                  event["session_id"],
-                  event["invocation_id"],
-                  json.dumps(event["content"]),
-              )
-              for event in events
-          ],
-      )
-      return [dict(row) for row in connection.execute(query)]
+    return execute_cross_event_view(vm, "compaction_windows", events)
 
   return run
 
@@ -264,6 +188,22 @@ def test_reversed_windows_are_excluded_before_rounding(run_view):
 
 def test_non_compaction_events_are_excluded(run_view):
   assert run_view([_event(event_type="LLM_RESPONSE")]) == []
+
+
+def test_representative_workflow_fixture(run_view):
+  """The shared ADK 2.0 fixture (#218) has one fractional-second window."""
+  assert run_view(fixture_events()) == [
+      {
+          "app_name": "team_app",
+          "user_id": "user-1",
+          "session_id": "sess-1",
+          "invocation_id": "inv-1",
+          "start_ts": "2026-06-01T10:00:01.234567+00:00",
+          "end_ts": "2026-06-01T10:00:01.235891+00:00",
+          "start_seconds": 1780308001.234567,
+          "end_seconds": 1780308001.235891,
+      }
+  ]
 
 
 def test_partition_limitation_is_documented(run_view):

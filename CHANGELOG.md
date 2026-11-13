@@ -17,6 +17,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   integer counts. The new properties are read-only and not serialized, so
   `model_dump()`, CLI `--format json` and Remote Function replies are
   unchanged.
+- **Agent transfer chains view (#213)** - `ViewManager` and the `views` CLI
+  deploy `agent_transfer_chains`: one row per `AGENT_TRANSFER` with
+  `from_agent`, `to_agent`, the event `timestamp` and `span_id` under the
+  full telemetry identity. Pre-2.0 rows, incomplete identities and
+  transfers missing either agent are excluded.
+- **Branch fan-out view (#214)** - `ViewManager` and the `views` CLI deploy
+  `branch_fanout`: `distinct_branch_count` per invocation under the full
+  telemetry identity, counted over rows written from an ADK Event (those
+  with `attributes.adk.source_event_id`). An invocation whose Event rows
+  carry no branch gets a `0` row rather than none.
+- **Scope cardinality view (#217)** - `ViewManager` and the `views` CLI
+  deploy `scope_cardinality`: per invocation and `scope_kind` (`unscoped`
+  when the Event had no scope), `distinct_scope_count`,
+  `source_event_count` (distinct ADK Events, the volume measure) and a
+  diagnostic `row_count`, over rows written from an ADK Event.
+- **Workflow invocations view (#212)** - `ViewManager` and the `views` CLI
+  deploy `workflow_invocations`: one row per workflow node path and
+  invocation with its run ID, a `parent_path` derived from `node.path`
+  (NULL for a root node), the parent's run ID when the parent wrote a row
+  in the same invocation, first and last event times, and source Event and
+  row counts. Rows outside a workflow (empty `node.path`) are excluded.
 
 ## [0.6.2] - 2026-11-05
 
