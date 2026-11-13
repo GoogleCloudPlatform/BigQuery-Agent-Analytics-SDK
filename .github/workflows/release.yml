@@ -182,30 +182,27 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
-          # Only clean up this exact version if a prior attempt uploaded to
-          # Artifact Registry and failed before submitting its manifest.
-          # Never delete the package or touch any other release's version.
+          # Only clean up this exact version if a prior attempt or re-tag
+          # already staged it in Artifact Registry. Never delete the package
+          # resource or touch any other release's version.
           set +e
-          PENDING=$(gcloud storage ls             "gs://oss-exit-gate-prod-projects-bucket/bigquery-agent-analytics/pypi/manifests/manifest-${VERSION}-*.json"             2> ls.err)
-          LS_RC=$?
-          set -e
-          if [ $LS_RC -eq 0 ] && [ -n "${PENDING}" ]; then
-            echo "Manifest for version ${VERSION} already submitted (${PENDING}) — skipping staging cleanup"
-            echo "skip_stage=true" >> "$GITHUB_ENV"
-            exit 0
-          elif [ $LS_RC -ne 0 ] && ! grep -qi "matched no objects" ls.err; then
-            cat ls.err >&2
-            exit $LS_RC
-          fi
-
-          set +e
-          gcloud artifacts versions describe "${VERSION}"             --package="bigquery-agent-analytics"             --project="oss-exit-gate-prod"             --location="us"             --repository="bigquery-agent-analytics--pypi"             --format="value(name)" > /dev/null 2> describe.err
+          gcloud artifacts versions describe "${VERSION}" \
+            --package="bigquery-agent-analytics" \
+            --project="oss-exit-gate-prod" \
+            --location="us" \
+            --repository="bigquery-agent-analytics--pypi" \
+            --format="value(name)" > /dev/null 2> describe.err
           DESC_RC=$?
           set -e
           if [ $DESC_RC -eq 0 ]; then
-            echo "Deleting incomplete staged version ${VERSION} before retry..."
-            gcloud artifacts versions delete "${VERSION}"               --package="bigquery-agent-analytics"               --project="oss-exit-gate-prod"               --location="us"               --repository="bigquery-agent-analytics--pypi"               --quiet
-          elif grep -Eqi "NOT_FOUND:.*(Version|versions/${VERSION}|Package|packages/bigquery-agent-analytics)" describe.err; then
+            echo "Deleting existing staged version ${VERSION} before upload..."
+            gcloud artifacts versions delete "${VERSION}" \
+              --package="bigquery-agent-analytics" \
+              --project="oss-exit-gate-prod" \
+              --location="us" \
+              --repository="bigquery-agent-analytics--pypi" \
+              --quiet
+          elif grep -Eqi "not.found|NOT_FOUND" describe.err; then
             echo "Version ${VERSION} not present in staging repository — proceeding with fresh upload"
           else
             cat describe.err >&2
@@ -213,7 +210,6 @@ jobs:
           fi
 
       - name: Stage distributions to OSS Exit Gate and upload manifest
-        if: env.skip_stage != 'true'
         env:
           TAG: ${{ github.ref_name }}
           RUN_ID: ${{ github.run_id }}
@@ -221,7 +217,11 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
-          python -m twine upload             --repository-url "https://us-python.pkg.dev/oss-exit-gate-prod/bigquery-agent-analytics--pypi/"             -u oauth2accesstoken             -p "$(gcloud auth print-access-token)"             dist/*
+          python -m twine upload \
+            --repository-url "https://us-python.pkg.dev/oss-exit-gate-prod/bigquery-agent-analytics--pypi/" \
+            -u oauth2accesstoken \
+            -p "$(gcloud auth print-access-token)" \
+            dist/*
           cat <<EOF > manifest.json
           {
             "publish_all": false,
@@ -237,7 +237,8 @@ jobs:
             ]
           }
           EOF
-          gcloud storage cp manifest.json             "gs://oss-exit-gate-prod-projects-bucket/bigquery-agent-analytics/pypi/manifests/manifest-${VERSION}-${RUN_ID}-${RUN_ATTEMPT}.json"
+          gcloud storage cp manifest.json \
+            "gs://oss-exit-gate-prod-projects-bucket/bigquery-agent-analytics/pypi/manifests/manifest-${VERSION}-${RUN_ID}-${RUN_ATTEMPT}.json"
 
   publish-testpypi:
     name: Publish to TestPyPI
