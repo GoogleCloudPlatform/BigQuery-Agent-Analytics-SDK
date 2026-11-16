@@ -7,37 +7,241 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-13
+
+### Release highlights
+
+A minor release: it adds public API, and `create_all_views()` and
+`bq-agent-sdk views create-all` now deploy four more views (see Added and
+Changed). In the wheel: `EvaluationReport` returns its failed and passed
+session rows (#581); four ADK 2.0 cross-event views join
+`compaction_windows` (#587); `Client.insights()` calls the configured
+model instead of a fixed `gemini-2.5-flash` in its Gemini API steps, so a
+client or run that names another Gemini API model can get different
+output at a different cost (#580); and `OntologyRuntime` follows the SKOS
+edges that `gm import-owl` writes as relationships and counts
+`skos:topConceptOf` as scheme membership (#579). No exported name,
+signature or serialized field is removed or renamed, and the wheel's
+runtime dependencies, extras, console scripts and embedded README are
+unchanged. Around the wheel: the Power BI report gets a working theme and
+buttons, readability changes and a drill-through page (#583), and its
+validator closes five gaps and its README a stale count (#586); a
+CodeMender pull request scan joins CI and skips its scan until its
+secrets are set (#585); SDK.md shows how to query
+`attributes.custom_metadata` (#589); notebooks and docs link to the
+GoogleCloudPlatform repository (#588); the separately released tracing
+plugin's docs point to the Plugins repository (#575) and its package
+drops three unused imports (#584); and the planning notes that #580 added
+are removed (#582).
+
 ### Added
 
-- **Failed and passed session rows on `EvaluationReport` (#576)** -
+- **Failed and passed session rows on `EvaluationReport` (#581)** —
   `failed_session_scores` and `passed_session_scores` return the
   `SessionScore` rows of `session_scores` that failed or passed, in report
   order. After `client.evaluate(...)`, a caller no longer has to filter
   `session_scores` by hand. `failed_sessions` and `passed_sessions` stay
   integer counts. The new properties are read-only and not serialized, so
-  `model_dump()`, CLI `--format json` and Remote Function replies are
-  unchanged.
-- **Agent transfer chains view (#213)** - `ViewManager` and the `views` CLI
-  deploy `agent_transfer_chains`: one row per `AGENT_TRANSFER` with
-  `from_agent`, `to_agent`, the event `timestamp` and `span_id` under the
-  full telemetry identity. Pre-2.0 rows, incomplete identities and
-  transfers missing either agent are excluded.
-- **Branch fan-out view (#214)** - `ViewManager` and the `views` CLI deploy
-  `branch_fanout`: `distinct_branch_count` per invocation under the full
-  telemetry identity, counted over rows written from an ADK Event (those
-  with `attributes.adk.source_event_id`). An invocation whose Event rows
-  carry no branch gets a `0` row rather than none.
-- **Scope cardinality view (#217)** - `ViewManager` and the `views` CLI
-  deploy `scope_cardinality`: per invocation and `scope_kind` (`unscoped`
-  when the Event had no scope), `distinct_scope_count`,
+  `model_dump()`, CLI `--format json`, Remote Function replies and the
+  report's JSON schema are unchanged. The rows are the `session_scores`
+  objects themselves, not copies, and SDK.md's batch evaluation section
+  shows them. Closes #576.
+- **Agent transfer chains view (#213 / #587)** — `ViewManager` and the
+  `views` CLI deploy `agent_transfer_chains`: one row per
+  `AGENT_TRANSFER` with `from_agent`, `to_agent`, the event `timestamp`
+  and `span_id` under the full telemetry identity
+  (`attributes.adk.app_name`, `user_id`, `session_id` and
+  `invocation_id`). Pre-2.0 rows, incomplete identities and transfers
+  missing either agent are excluded. To follow a chain, order an
+  invocation's rows by `timestamp`; the view has no hop index.
+- **Branch fan-out view (#214 / #587)** — `ViewManager` and the `views`
+  CLI deploy `branch_fanout`: `distinct_branch_count` per invocation under
+  the full telemetry identity, counted over rows written from an ADK Event
+  (those with `attributes.adk.source_event_id`). An invocation whose Event
+  rows carry no branch gets a `0` row rather than none.
+- **Scope cardinality view (#217 / #587)** — `ViewManager` and the
+  `views` CLI deploy `scope_cardinality`: per invocation and `scope_kind`
+  (`unscoped` when the Event had no scope), `distinct_scope_count`,
   `source_event_count` (distinct ADK Events, the volume measure) and a
   diagnostic `row_count`, over rows written from an ADK Event.
-- **Workflow invocations view (#212)** - `ViewManager` and the `views` CLI
-  deploy `workflow_invocations`: one row per workflow node path and
-  invocation with its run ID, a `parent_path` derived from `node.path`
-  (NULL for a root node), the parent's run ID when the parent wrote a row
-  in the same invocation, first and last event times, and source Event and
-  row counts. Rows outside a workflow (empty `node.path`) are excluded.
+- **Workflow invocations view (#212 / #587)** — `ViewManager` and the
+  `views` CLI deploy `workflow_invocations`: one row per workflow node
+  path and invocation with its run ID, a `parent_path` derived from
+  `node.path` (NULL for a root node), the parent's run ID when the parent
+  wrote a row in the same invocation, first and last event times, and
+  source Event and row counts. Rows outside a workflow (empty `node.path`)
+  are excluded.
+
+### Changed
+
+- **`create_all_views()` and `views create-all` deploy the four new views
+  (#587)** — after the per-event views and `compaction_windows`, they also
+  run `CREATE OR REPLACE VIEW` for `adk_agent_transfer_chains`,
+  `adk_branch_fanout`, `adk_scope_cardinality` and
+  `adk_workflow_invocations` (`<view_prefix><key>` with another prefix),
+  which replaces any view of the same name in the dataset. The returned
+  dict and the command's output gain the four keys, and
+  `available_cross_event_views` lists five. With
+  `denied_columns=["attributes"]` (`--denied-column=attributes`) all five
+  cross-event views are skipped with a warning, since each reads
+  `attributes.adk.app_name`; with `denied_columns=["content"]`,
+  `compaction_windows` and `agent_transfer_chains` are. Like
+  `compaction_windows`, `branch_fanout`, `scope_cardinality` and
+  `workflow_invocations` have no event `timestamp` column, so a query
+  through them reads every partition of the events table and fails on a
+  table that sets `require_partition_filter`; `agent_transfer_chains`
+  keeps `timestamp`. Existing per-event view SQL is unchanged. To deploy
+  only some views, call `create_view()` or `views create` for each.
+
+### Fixed
+
+- **Insights uses the configured model instead of a fixed
+  `gemini-2.5-flash` (#580)** — `Client.insights()` and
+  `insights_async()` called the Gemini API with a fixed
+  `gemini-2.5-flash` for the analysis prompts (seven by default), the
+  executive summary and the facet fallback that runs when AI.GENERATE and
+  ML.GENERATE_TEXT fail, whatever `Client(endpoint=...)` or
+  `insights(text_model=...)` named, so in a location that does not serve
+  `gemini-2.5-flash` those steps failed with 404 NOT_FOUND; AI.GENERATE
+  facet extraction also ignored `text_model`. Those Gemini API steps now
+  call the first of `text_model` and `endpoint` that names a Gemini API
+  model (a model name, or an `https://` endpoint URL whose path names a
+  model under `/models/`), else `DEFAULT_ENDPOINT` (`gemini-2.5-flash`).
+  Facet extraction in BigQuery uses `text_model`, else `endpoint`:
+  AI.GENERATE names it, and a BigQuery ML reference
+  (`project.dataset.model`) goes straight to ML.GENERATE_TEXT instead of
+  first trying AI.GENERATE with the endpoint. A BigQuery ML reference
+  names no Gemini API model, so as `text_model` it controls only
+  ML.GENERATE_TEXT. A `text_model` that is neither a string nor `None`,
+  or a non-string client `endpoint`, raises `TypeError` before any query.
+  **Upgrade note:** a default client, a client whose `endpoint` is a
+  BigQuery ML reference or an endpoint URL whose path names no model, and
+  `bq-agent-sdk insights` (which has no `--endpoint` option) still call
+  `gemini-2.5-flash` in the Gemini API steps. When `text_model` or
+  `endpoint` names another Gemini API model, those steps now run on, and
+  are billed for, the first such model (`text_model` before `endpoint`),
+  so report text and the cost of a run can change. Any `text_model` also
+  takes the endpoint's place in facet extraction. The BigQuery Remote
+  Function's `insights` operation follows the `endpoint` in its
+  `userDefinedContext` or `BQ_AGENT_ENDPOINT` once it is redeployed from
+  this release. To keep `gemini-2.5-flash` for the Gemini API steps, pass
+  `text_model="gemini-2.5-flash"`; facet extraction then uses it too.
+  Closes #577.
+- **`OntologyRuntime` SKOS traversal and `topConceptOf` parity (#579)** —
+  `gm import-owl` writes SKOS hierarchy and association edges as
+  `skos_broader` and `skos_related` relationships, but `broader()`,
+  `narrower()` and `related()` read only `skos:*` entity annotations, so
+  on an imported taxonomy they returned `()` for every concept.
+  `broader()` now also reads other entities' `skos:narrower` annotations,
+  `narrower()` reads the entity's own `skos:narrower` annotation, and both
+  read `skos_broader` and `skos_narrower` relationships (colon forms too),
+  so for declared entities `narrower()` is the exact inverse of
+  `broader()`; `related()` also reads `skos_related` relationships at
+  either endpoint. `schemes_for()` and `in_scheme()` count
+  `skos:topConceptOf` as membership, as the concept-index emission
+  already did. **Upgrade note:** these accessors can return more than
+  before, de-duplicated in first-seen order; `narrower()` returns `()` for
+  a name the ontology does not declare (it used to list the entities
+  whose `skos:broader` named it); and `labels_for()`, `notations_for()`
+  and `notation_for()` skip blank SKOS label and notation values.
+  Traversal is still one hop, and no signature or return type changes.
+  `docs/ontology_runtime_reader.md` lists the edge sources.
+
+### Plugins and tracing producer (released separately, not in this wheel)
+
+The tracing plugin source under `plugins/` and
+`bigquery-agent-analytics-tracing` under `producers/` ship on
+`tracing-vX.Y.Z` tags; no tracing tag includes these changes yet (the
+latest is `tracing-v0.1.0`).
+
+- **Plugin doc pointers after the marketplace move (#575)** — the tracing
+  plugin's `MARKETPLACE.md` names the `bqaa-tracing` catalog in
+  GoogleCloudPlatform/BigQuery-Agent-Analytics-Plugins as the canonical
+  install and the release tarball as the fallback, with the official
+  marketplace listing still a separate, pending submission; its README
+  and the `/bqaa-setup` command doc name that catalog and the
+  `bigquery-agent-analytics-mod` plugin's new home. Repo side, the
+  pointer README left in the mod's old folder sends readers of this
+  repository's former marketplace to its local migration steps and labels
+  the Plugins repository's `MIGRATION.md` for the moves it covers.
+  `tests/test_plugin_doc_pointers.py` checks these pointers.
+- **Unused imports in the tracing package (#584)** — `subprocess` from
+  `otlp/preflight.py`, `dataclass` from `otlp/writer.py` and `Any` from
+  `otlp/verify.py`; no function, class or signature changes.
+
+### Dashboards (repo side, not in the wheel)
+
+- **Power BI report: theme, buttons, readability and drill-through
+  (#583)** — `report.json` names the registered theme resource
+  (`BQAA.json`), so the report draws the BQAA palette instead of Power
+  BI's default; navigation buttons render pink with white text instead of
+  a grey outline; and latency cards show exact milliseconds (`4,512`, not
+  `4.5K`). Chart titles are dark, 12 pt and bold, bars carry data labels,
+  Tool Calls Over Time and both latency trends are line charts, area
+  charts start at zero, and KPI cards stack the "vs previous period"
+  callout under the value. The Agent, User ID, Trace ID and Span ID
+  slicers get a search box, the eight main report pages get a Reset
+  filters button, and the Trace Inspector table grows to 16 columns
+  (adding the session, model, tool names, tokens, LLM latency, tool
+  latency for completed and for failed calls, and the error message).
+  Date, agent, user and tool name values drill through to Trace Details,
+  a page hidden in view mode with the same table, the synced slicers and
+  a Back button in place of Reset filters, because clearing the slicers
+  does not clear drill-through filters. Every change goes through the
+  generator; the 37-chart, 50-measure, 8-page parity lock and the oracle
+  lock are unchanged, and the README documents differences D15–D17 and
+  updates D5 and D12. Its screenshots predate these changes.
+- **Power BI validator gaps (#586)** — `validate_pbip.py` now fails when
+  `pages.json`, a `page.json` or `report.json` is missing instead of
+  passing the checks that need it; rejects a `showBlankAs` label on a
+  card, a bundled file that differs from its committed file or has none,
+  a visual type that differs from `spec/report_visuals.yaml`, and a
+  missing slicer search box, title style, bar data label, zero-based area
+  axis, exact latency format or stacked KPI callout; and pins the Reset
+  filters and Back labels and the drill-through page's name and
+  parameters. The README's synced slicer count goes from 40 to 45.
+
+### Documentation
+
+- **Querying `attributes.custom_metadata` (#589)** — SDK.md's producer
+  snippet sets `custom_metadata_allowlist=["team", "citation_metadata",
+  "a2a:*"]`, and a new subsection reads allowlisted keys in BigQuery:
+  unquoted JSONPath for identifier keys, double-quoted path segments for
+  keys with `:` or `.`, and `JSON_QUERY` for nested values. It separates
+  top-level plugin attributes such as `$.model_version`, the built-in
+  `a2a:*` capture under `attributes.a2a_metadata`, and allowlisted keys
+  under `attributes.custom_metadata`. The producer side ships in
+  `google-adk>=2.4.0`.
+- **Links to the GoogleCloudPlatform repository (#588)** — the Colab,
+  GitHub, Vertex AI Workbench and BigQuery Studio badges and the clone and
+  install commands in 11 notebooks under `examples/`, and links in two
+  docs, pointed at the precursor personal repository; they now point at
+  GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK, except one historical
+  issue link that is now labeled as the precursor's, and a regression test
+  fails on any new link to the old repository. Closes #503.
+- **Planning notes removed (#582)** — the `intent/`, `spec/` and `plan/`
+  notes that #580 added are deleted; nothing in the wheel changes.
+
+### CI, tests and build locks (repo side, not in the wheel)
+
+- **CodeMender pull request scan (#585)** —
+  `.github/workflows/codemender.yml` scans each pull request into `main`
+  from a branch of this repository (`cm find --diff` against the base
+  branch), uploads the SARIF report to code scanning (category
+  `codemender`) and fails on a `CRITICAL` or `HIGH` finding; a manual run
+  scans the branch's last commit. It authenticates with Workload Identity
+  Federation from three repository secrets and, until all three are set,
+  skips the scan with a notice and passes. It is separate from `ci.yml`'s
+  required checks, does not run for fork or Dependabot pull requests, and
+  downloads the latest stable CLI without a version pin or checksum.
+  `scripts/codemender_pre_commit.sh` is an opt-in pre-commit hook that
+  scans staged changes. Closes #578.
+- **ADK 2.0 workflow fixture and view harness (#218 / #587)** —
+  `tests/fixtures/adk2_workflow_events.json`, a 17-row ADK 2.0 workflow,
+  and `tests/cross_event_view_harness.py`, which runs a cross-event view's
+  SQL in SQLite, back the view tests: every registered cross-event view
+  must return full-identity rows from the fixture and none from pre-2.0 or
+  callback-only rows.
 
 ## [0.6.2] - 2026-11-05
 
