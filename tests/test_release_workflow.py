@@ -52,9 +52,9 @@ def test_twine_lockfile_pins_twine_7_and_modern_packaging():
   pkg_match = re.search(r"(?m)^packaging==(\d+)\.(\d+)\b", text)
 
   assert twine_match is not None, "twine is not pinned in lockfile"
-  assert int(twine_match.group(1)) >= 7, (
-      f"twine=={twine_match.group(0)} does not support Metadata-Version 2.5"
-  )
+  assert (
+      int(twine_match.group(1)) >= 7
+  ), f"twine=={twine_match.group(0)} does not support Metadata-Version 2.5"
   assert pkg_match is not None, "packaging is not pinned in lockfile"
   assert (int(pkg_match.group(1)), int(pkg_match.group(2))) >= (26, 1)
 
