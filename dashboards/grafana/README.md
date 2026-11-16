@@ -394,9 +394,12 @@ panels easier to read:
   names and colours of LLM p50, LLM p95 and TTFT p50.
 - **Estimated cost** shows four decimals, so small test spend is visible.
 - Clicking a `session_id` in **Recent sessions** opens **Trace detail** for the
-  whole session: the link clears the Agent, User ID and Event Type filters,
-  which only choose the sessions listed. **Trace detail** also shows `trace_id`
-  and, when the producer writes it, `otel_trace_id`.
+  whole session in a new tab: the link clears the Agent, User ID and Event
+  Type filters, which only choose the sessions listed. It keeps the
+  organization and the time window on screen as absolute bounds, so a
+  relative range such as *Last 24 hours* is not re-evaluated in the new tab.
+  **Trace detail** also shows `trace_id` and, when the producer writes it,
+  `otel_trace_id`.
 
 `scripts/check_grafana_queries_sync.py` does not cover this file, so its
 embedded SQL is the source of truth.
