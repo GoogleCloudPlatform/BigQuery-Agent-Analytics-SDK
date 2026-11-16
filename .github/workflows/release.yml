@@ -17,9 +17,22 @@ name: Release to PyPI
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: stop after authentication and index/staging lookups without mutating Artifact Registry or uploading a manifest"
+        required: false
+        default: true
+        type: boolean
+      tag:
+        description: "Optional release tag to validate (e.g. v0.6.2); defaults to v<pyproject.toml version> on workflow_dispatch"
+        required: false
+        default: ""
+        type: string
 
-# Least privilege at workflow level; the publish jobs opt in to
-# `id-token: write` individually for PyPI trusted publishing.
+# Least privilege at workflow level; `publish-pypi` opts in to `id-token: write`
+# for Google Workload Identity Federation (OSS Exit Gate) and `publish-testpypi`
+# opts in to `id-token: write` for TestPyPI trusted publishing.
 permissions:
   contents: read
 
@@ -35,27 +48,42 @@ permissions:
 jobs:
   build:
     name: Build package
-    if: startsWith(github.event.release.tag_name, 'v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
-      - name: Install build tools
-        run: pip install build
+      - name: Install build tools and hash-pinned Twine
+        run: |
+          pip install build
+          python -m pip install --require-hashes --no-deps -r .github/workflows/twine-requirements.lock
 
       - name: Build sdist and wheel
         run: python -m build
 
+      - name: Validate package metadata with Twine
+        run: python -m twine check --strict dist/*
+
       - name: Verify package version matches release tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
+          set -euo pipefail
           VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-          TAG="${GITHUB_REF_NAME#v}"
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ] && [ -z "${INPUT_TAG}" ]; then
+            TAG="${VERSION}"
+          elif [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${INPUT_TAG#v}"
+          else
+            TAG="${GITHUB_REF_NAME#v}"
+          fi
           echo "Package version: ${VERSION}"
           echo "Release tag:     ${TAG}"
           if [ "${VERSION}" != "${TAG}" ]; then
@@ -63,7 +91,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist
           path: dist/
@@ -73,31 +101,190 @@ jobs:
     needs: build
     runs-on: ubuntu-22.04
     environment: pypi
+    concurrency:
+      group: publish-pypi-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+      cancel-in-progress: false
     permissions:
+      contents: read
       id-token: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: dist
           path: dist/
 
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Twine (pinned + hash-verified, BEFORE credentials exist)
+        # Supply-chain guard: install pinned, hash-verified uploader packages
+        # from the checked-in lockfile before the auth step mints any Google Cloud credentials.
+        run: |
+          python -m pip install --require-hashes --no-deps -r .github/workflows/twine-requirements.lock
+          python -m twine check --strict dist/*
+
+      - name: Set up Cloud SDK (pinned version, BEFORE credentials exist)
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+        with:
+          version: '593.0.0'
+
+      - name: Authenticate to Google Cloud (OSS Exit Gate)
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: 'projects/305452601764/locations/global/workloadIdentityPools/builders/providers/github'
+
+      - name: Check public PyPI index and clean up failed staging attempt for this exact version (if any)
+        id: cleanup
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT_NAME:-release}" = "workflow_dispatch" ] && [[ "${TAG}" != v* ]]; then
+            VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          else
+            VERSION="${TAG#v}"
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT:-/dev/null}"
+
+          # 1. Check the public PyPI index for this exact version before mutating staging.
+          #    - 404 (absent): proceed to staging cleanup + upload.
+          #    - 200 with identical SHA-256 digests: skip cleanly (idempotent re-run).
+          #    - 200 with different SHA-256 digests: fail so an existing public release is never silently ignored.
+          set +e
+          HTTP_CODE=$(curl -sS -o pypi_version.json -w "%{http_code}" "https://pypi.org/pypi/bigquery-agent-analytics/${VERSION}/json" 2> pypi_curl.err)
+          CURL_RC=$?
+          set -e
+          if [ "$CURL_RC" -ne 0 ]; then
+            cat pypi_curl.err >&2
+            exit "$CURL_RC"
+          fi
+          if [ "$HTTP_CODE" = "200" ]; then
+            if python - "${VERSION}" <<'PYEOF'
+          import glob, hashlib, json, os, sys
+          data = json.load(open("pypi_version.json", "rb"))
+          pub = {u["filename"]: (u.get("digests") or {}).get("sha256") for u in data.get("urls", []) if "filename" in u}
+          local = {}
+          for p in sorted(glob.glob("dist/*")):
+              if os.path.isfile(p):
+                  local[os.path.basename(p)] = hashlib.sha256(open(p, "rb").read()).hexdigest()
+          if not local or local != pub:
+              sys.stderr.write(f"::error::Version {sys.argv[1]} already exists on PyPI with different artifact digests (local={local}, pypi={pub})\n")
+              sys.exit(1)
+          PYEOF
+            then
+              echo "Version ${VERSION} is already published on PyPI with identical SHA-256 digests — skipping staging."
+              echo "skip_stage=true" >> "${GITHUB_OUTPUT:-/dev/null}"
+              exit 0
+            else
+              exit 1
+            fi
+          elif [ "$HTTP_CODE" != "404" ]; then
+            echo "::error::Unexpected HTTP ${HTTP_CODE} querying PyPI for version ${VERSION}" >&2
+            exit 1
+          fi
+          echo "skip_stage=false" >> "${GITHUB_OUTPUT:-/dev/null}"
+
+          # 2. Only clean up this exact version if a prior unpublished attempt
+          #    already staged it in Artifact Registry. Never delete the package
+          #    resource or touch any other release's version.
+          set +e
+          gcloud artifacts versions describe "${VERSION}" \
+            --package="bigquery-agent-analytics" \
+            --project="oss-exit-gate-prod" \
+            --location="us" \
+            --repository="bigquery-agent-analytics--pypi" \
+            --format="value(name)" > /dev/null 2> describe.err
+          DESC_RC=$?
+          set -e
+          if [ "$DESC_RC" -eq 0 ]; then
+            if [ "${DRY_RUN:-false}" = "true" ]; then
+              echo "[DRY RUN] Version ${VERSION} is currently staged in Artifact Registry; skipping delete."
+            else
+              echo "Deleting existing staged version ${VERSION} before upload..."
+              gcloud artifacts versions delete "${VERSION}" \
+                --package="bigquery-agent-analytics" \
+                --project="oss-exit-gate-prod" \
+                --location="us" \
+                --repository="bigquery-agent-analytics--pypi" \
+                --quiet
+            fi
+          elif [ "$DESC_RC" -eq 1 ] && grep -Eqi "not.found|NOT_FOUND" describe.err; then
+            echo "Version ${VERSION} not present in staging repository — proceeding with fresh upload"
+          else
+            cat describe.err >&2
+            exit "$DESC_RC"
+          fi
+
+      - name: Stage distributions to OSS Exit Gate and upload manifest
+        if: steps.cleanup.outputs.skip_stage != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        env:
+          VERSION: ${{ steps.cleanup.outputs.version }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          SKIP_STAGE: ${{ steps.cleanup.outputs.skip_stage }}
+        run: |
+          set -euo pipefail
+          if [ "${DRY_RUN:-false}" = "true" ] || [ "${SKIP_STAGE:-false}" = "true" ]; then
+            echo "Skipping staging and manifest upload (dry_run=${DRY_RUN:-false}, skip_stage=${SKIP_STAGE:-false})."
+            exit 0
+          fi
+          VERSION="${VERSION:-${TAG#v}}"
+          TWINE_PASSWORD="$(gcloud auth print-access-token)"
+          if [ -z "${TWINE_PASSWORD}" ]; then
+            echo "::error::Failed to obtain Google Cloud access token" >&2
+            exit 1
+          fi
+          python -m twine upload \
+            --repository-url "https://us-python.pkg.dev/oss-exit-gate-prod/bigquery-agent-analytics--pypi/" \
+            -u oauth2accesstoken \
+            -p "${TWINE_PASSWORD}" \
+            dist/*
+          cat <<EOF > manifest.json
+          {
+            "publish_all": false,
+            "publishing_groups": [
+              {
+                "packages": [
+                  {
+                    "name": "bigquery-agent-analytics",
+                    "version": "${VERSION}"
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+          MANIFEST_OBJECT="bigquery-agent-analytics/pypi/manifests/manifest-${VERSION}-${RUN_ID}-${RUN_ATTEMPT}.json"
+          curl --fail-with-body -sS -X POST \
+            -H "Authorization: Bearer ${TWINE_PASSWORD}" \
+            -H "Content-Type: application/json" \
+            --data-binary @manifest.json \
+            "https://storage.googleapis.com/upload/storage/v1/b/oss-exit-gate-prod-projects-bucket/o?uploadType=media&name=${MANIFEST_OBJECT}" > /dev/null
 
   publish-testpypi:
     name: Publish to TestPyPI
+    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v')
     needs: build
     runs-on: ubuntu-22.04
     environment: testpypi
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: dist
           path: dist/
 
       - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           repository-url: https://test.pypi.org/legacy/

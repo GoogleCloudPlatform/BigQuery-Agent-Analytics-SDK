@@ -174,11 +174,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install build tools
-        run: pip install build
+      - name: Install build tools and hash-pinned Twine
+        run: |
+          pip install build
+          python -m pip install --require-hashes --no-deps -r .github/workflows/twine-requirements.lock
 
       - name: Build sdist and wheel
         run: python -m build
+
+      - name: Validate package metadata with Twine
+        run: python -m twine check --strict dist/*
 
       - name: Verify package version
         run: |
