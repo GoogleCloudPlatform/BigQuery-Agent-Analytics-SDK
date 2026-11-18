@@ -913,7 +913,11 @@ def _render_session_link(session_id):
 def test_session_link_opens_the_whole_trace():
   link = _session_link()
   assert link["title"] == "Open session trace (all agents and event types)"
-  assert link["targetBlank"] is False
+  # A new tab, not the same one. In Grafana 12.3 a same-tab click switches
+  # to the single-panel view (viewPanel=19) and cancels the Trace detail
+  # query it has just started, so the table keeps the previous rows until
+  # a refresh.
+  assert link["targetBlank"] is True
 
 
 @pytest.mark.parametrize("session_id", _SESSION_IDS)
