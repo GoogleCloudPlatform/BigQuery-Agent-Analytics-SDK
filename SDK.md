@@ -72,7 +72,7 @@ Trace: trace-abc-123 (12 events, 3420ms)
 ```python
 # Access structured data from the trace
 print(trace.tool_calls)       # List of tool invocations
-print(trace.final_response)   # The agent's final answer
+print(trace.final_response)   # The agent's final answer, or None
 print(trace.error_spans)      # Any errors that occurred
 ```
 
@@ -144,7 +144,7 @@ traces = client.list_traces(
 
 for trace in traces:
     print(f"{trace.session_id}: {len(trace.spans)} events, "
-          f"final: {trace.final_response[:60]}...")
+          f"final: {(trace.final_response or '')[:60]}...")
 ```
 
 ### Filter by Session IDs

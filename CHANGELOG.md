@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`Span.is_truncated`** — `Span.from_bigquery_row()` now keeps the
+  events table's `is_truncated` column, which `get_trace()` and
+  `list_traces()` already selected but dropped. It is `True` when the
+  producer clipped or redacted the row's content (for example a long tool
+  result), and `False` when the column is false, NULL or missing. The
+  field is appended after the existing fields, so positional construction
+  is unchanged.
+
+### Fixed
+
+- **`final_response` no longer returns a tool call or an empty turn as
+  the answer** — the ADK plugin logs a model turn that calls a tool as
+  `call: <tool>` (or `text: '...' | call: <tool>` when the model also
+  wrote text), and a turn with no content as the bare string `None`. When
+  a run stopped on such a turn, for example at a step or call limit or
+  after a malformed function call, `Trace.final_response` and
+  `SessionTrace.extract_final_response()` returned that string, so
+  response matching and LLM judges scored `call: run_python` or `None` as
+  the agent's answer. Empty turns are now skipped, and a last model turn
+  that ends in tool calls holds no text answer: both accessors fall back
+  to AGENT_COMPLETED and return `None` when it has none. Text answers,
+  including ones that mention `call:` or say `None`, are unchanged.
+
 ## [0.7.0] - 2026-11-13
 
 ### Release highlights
