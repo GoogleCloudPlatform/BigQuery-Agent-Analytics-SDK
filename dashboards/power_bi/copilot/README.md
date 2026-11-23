@@ -41,7 +41,8 @@ output of:
 
 ```bash
 bq query --use_legacy_sql=false --format=json --max_rows=5000 \
-  'SELECT * FROM `your-project.your_dataset.agent_events`
+  'SELECT * EXCEPT(content_parts)
+   FROM `your-project.your_dataset.agent_events`
    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
    ORDER BY timestamp DESC'
 ```

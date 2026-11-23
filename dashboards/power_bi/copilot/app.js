@@ -1053,11 +1053,19 @@
     const W = 540, H = 210, padL = 56, padR = 16, padT = 18, padB = 34;
     const plotW = W - padL - padR, plotH = H - padT - padB;
     const hasSec = Boolean(vis.secondaryMetric);
-    const maxVal = Math.max(1, ...series.map((d) => Math.max(
-        d.value, hasSec && isNum(d.secondary) ? d.secondary : 0))) * 1.1;
+    // The axis spans both series; percentage axes stop at 100.
+    const isPctAxis = METRICS[vis.metric] && METRICS[vis.metric].fmt === 'pct' &&
+        (!hasSec ||
+         (METRICS[vis.secondaryMetric] &&
+          METRICS[vis.secondaryMetric].fmt === 'pct'));
+    let maxVal = Math.max(1, ...series.map((d) => Math.max(
+        isNum(d.value) ? d.value : 0,
+        hasSec && isNum(d.secondary) ? d.secondary : 0))) * 1.1;
+    if (isPctAxis) maxVal = Math.min(maxVal, 100);
     const xFor = (i) => padL +
         (series.length === 1 ? plotW / 2 : (i / (series.length - 1)) * plotW);
-    const yFor = (v) => padT + plotH - (v / maxVal) * plotH;
+    const yFor = (v) =>
+        padT + plotH - (Math.min(Math.max(v, 0), maxVal) / maxVal) * plotH;
     const points = (pick) => series
         .map((d, i) => `${xFor(i).toFixed(1)},${yFor(pick(d) || 0).toFixed(1)}`)
         .join(' ');
@@ -1201,13 +1209,35 @@
     bindSeriesEvents(container.querySelectorAll('.chart-bar'), items, vis);
   }
 
+  // True when per-group values can be summed (COUNT(*), COUNTIF, SUM).
+  // Distinct counts, averages, percentiles and rates can't.
+  function isAdditiveMetric(metric) {
+    const m = METRICS[metric];
+    return Boolean(m && /^(COUNT\(\*\)|COUNTIF\(|SUM\()/.test(m.sql));
+  }
+
   function renderDonutChart(container, series, vis) {
-    const items = series.slice(0, 6);
-    if (!items.length) {
+    const MAX_SLICES = 6;
+    const additive = isAdditiveMetric(vis.metric);
+    const positive = series.filter((d) => isNum(d.value) && d.value > 0);
+    if (!positive.length) {
       container.innerHTML = emptyStateHtml();
       return;
     }
-    const total = items.reduce((a, d) => a + Math.max(0, d.value), 0) || 1;
+    // Shares only make sense for additive metrics. The total covers the
+    // full series, and groups past the top slices are folded into "Other".
+    let items = positive.slice(0, MAX_SLICES);
+    if (additive && positive.length > MAX_SLICES) {
+      const rest = positive.slice(MAX_SLICES - 1);
+      items = positive.slice(0, MAX_SLICES - 1);
+      items.push({
+        label: `Other (${rest.length})`,
+        value: rest.reduce((a, d) => a + d.value, 0),
+        isOther: true,
+      });
+    }
+    const total = (additive ? positive : items)
+        .reduce((a, d) => a + d.value, 0) || 1;
     const active = state.crossFilters[vis.dim];
     const R = 64, r = 40, cx = 82, cy = 82;
     let angle = -Math.PI / 2;
@@ -1228,23 +1258,32 @@
               `A ${r} ${r} 0 ${large} 0 ${cx + r * Math.cos(a1)} ${
                   cy + r * Math.sin(a1)} Z`;
       const opacity = active && active !== d.label ? '0.3' : '1';
-      return `<path d="${path}" fill="${CHART_COLORS[i % CHART_COLORS.length]}" ` +
-          `opacity="${opacity}" class="chart-slice" data-idx="${i}"/>`;
+      const fill = d.isOther ? 'var(--muted-foreground)' :
+                               CHART_COLORS[i % CHART_COLORS.length];
+      // "Other" isn't a real group, so it can't be a cross-filter.
+      const cls = d.isOther ? 'chart-slice-other' : 'chart-slice';
+      return `<path d="${path}" fill="${fill}" ` +
+          `opacity="${opacity}" class="${cls}" data-idx="${i}"/>`;
     }).join('');
 
     const legend = items.map((d, i) => {
       const opacity = active && active !== d.label ? '0.4' : '1';
-      return `<div class="donut-legend-row" style="opacity:${opacity}" ` +
+      const swatch = d.isOther ? 'var(--muted-foreground)' :
+                                 CHART_COLORS[i % CHART_COLORS.length];
+      const shown = additive ? `${((d.value / total) * 100).toFixed(1)}%` :
+                               fmtMetric(vis.metric, d.value);
+      const cls = d.isOther ? ' donut-legend-row-other' : '';
+      return `<div class="donut-legend-row${cls}" style="opacity:${opacity}" ` +
           `data-idx="${i}"><div style="display:flex;align-items:center;gap:6px;` +
           'min-width:0;"><span class="legend-swatch" style="background:' +
-          `${CHART_COLORS[i % CHART_COLORS.length]}"></span>` +
+          `${swatch}"></span>` +
           `<span class="truncate" title="${escAttr(d.label)}">${
               escHtml(d.label)}</span></div>` +
           '<span class="mono tabular" style="color:var(--muted-foreground);' +
-          `flex-shrink:0;">${((d.value / total) * 100).toFixed(1)}%</span></div>`;
+          `flex-shrink:0;">${escHtml(shown)}</span></div>`;
     }).join('');
 
-    const centre = METRICS[vis.metric] && METRICS[vis.metric].fmt === 'count' ?
+    const centre = additive && METRICS[vis.metric].fmt === 'count' ?
         `<text x="${cx}" y="${cy - 2}" text-anchor="middle" ` +
             'fill="var(--foreground)" font-size="13" font-weight="700">' +
             `${escHtml(fmtCount(total))}</text><text x="${cx}" y="${cy + 13}" ` +
@@ -1256,7 +1295,9 @@
         `role="img">${slices}${centre}</svg>` +
         `<div class="donut-legend">${legend}</div></div>`;
     bindSeriesEvents(container.querySelectorAll('.chart-slice'), items, vis);
-    bindSeriesEvents(container.querySelectorAll('.donut-legend-row'), items, vis);
+    bindSeriesEvents(
+        container.querySelectorAll('.donut-legend-row:not(.donut-legend-row-other)'),
+        items, vis);
   }
 
   function renderTableVisual(container, rows, vis) {
@@ -1511,6 +1552,7 @@
 
   function renderSchema() {
     const columns = [
+      ['event_id', 'STRING'],
       ['timestamp', 'TIMESTAMP, required'],
       ['event_type', 'STRING, e.g. LLM_RESPONSE'],
       ['agent', 'STRING'],
@@ -1825,12 +1867,35 @@
   });
   $('tableIdInput').addEventListener('input', refreshSql);
   $('btnCloseSql').addEventListener('click', () => $('sqlModal').classList.add('hidden'));
-  $('btnCopySql').addEventListener('click', () => {
-    if (navigator.clipboard) navigator.clipboard.writeText($('sqlModalCode').textContent);
-    $('btnCopySql').textContent = 'Copied';
+  $('btnCopySql').addEventListener('click', async () => {
+    const code = $('sqlModalCode');
+    let copied = false;
+    // The Clipboard API exists only in secure contexts (HTTPS or localhost).
+    if (navigator.clipboard && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(code.textContent);
+        copied = true;
+      } catch (err) {
+        copied = false;
+      }
+    }
+    if (!copied) {
+      // Fall back to selecting the SQL so the user can copy it by hand.
+      const range = document.createRange();
+      range.selectNodeContents(code);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      try {
+        copied = document.execCommand('copy');
+      } catch (err) {
+        copied = false;
+      }
+    }
+    $('btnCopySql').textContent = copied ? 'Copied' : 'Selected: press Ctrl+C';
     setTimeout(() => {
       $('btnCopySql').textContent = 'Copy SQL';
-    }, 1200);
+    }, copied ? 1200 : 4000);
   });
 
   $('btnImport').addEventListener('click', () => $('importModal').classList.remove('hidden'));
