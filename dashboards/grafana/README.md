@@ -77,8 +77,9 @@ still follow the full steps below with a scoped service account.
 3. **Keys → Add Key → Create new key → JSON**, and download it.
 
 > **Keep the key out of the repo.** `.gitignore` only covers new `*.json`
-> files inside `dashboards/grafana/`. A key saved anywhere else can be committed by
-> accident.
+> files directly in `dashboards/grafana/` and in `dashboards/grafana/gallery/`
+> (apart from the tracked `*.gallery.json`). A key saved anywhere else,
+> including other subfolders, can be committed by accident.
 
 ### 3. Prepare the data
 
@@ -412,3 +413,35 @@ the trial in `bqaa-dashboard.json` means updating `queries/*.sql` (which
 `scripts/check_streamlit_queries_sync.py` also compares against the Streamlit
 dashboard), retiring `queries/estimated_cost.sql`, and updating the panel maps
 in the sync script.
+
+### Gallery export
+
+[`gallery/bqaa-dashboard-efficiency-trial.gallery.json`](gallery/bqaa-dashboard-efficiency-trial.gallery.json)
+is the trial as Grafana's **Export for sharing externally** writes it, for the
+grafana.com dashboard gallery. Its `__inputs` make the import screen ask for
+the data source and the six constants. Regenerate it in the same change as any
+edit to the trial file;
+[`tests/test_grafana_gallery_export.py`](../../tests/test_grafana_gallery_export.py)
+fails when the two drift apart.
+
+1. Use Grafana 12.3.4 or later. The quick start pins 12.3.0, whose export
+   fails on this dashboard with `Datasource ${DS_BIGQUERY} was not found`
+   ([grafana/grafana#113319](https://github.com/grafana/grafana/pull/113319)
+   fixed it in 12.3.4).
+2. Import the trial file. If you set the six constants to real values, reset
+   them to the placeholders first (`my-project`, `agent_analytics`,
+   `agent_events`, `adk_`, `1.25`, `5.00`): the export copies whatever they
+   hold.
+3. **Export → Export as code**, model **Classic**, turn on **Export for
+   sharing externally**, and download the file.
+4. Drop the instance `id` and the built-in requirements with an empty
+   `version`, which grafana.com rejects on revision upload:
+
+   ```bash
+   jq 'del(.id) | del(.__requires[] | select(.version == ""))' exported.json \
+     > dashboards/grafana/gallery/bqaa-dashboard-efficiency-trial.gallery.json
+   ```
+
+   Don't commit `exported.json`. `.gitignore` keeps every other `*.json` in
+   `gallery/` out of the repo.
+5. Run `pytest tests/test_grafana_gallery_export.py tests/test_grafana_efficiency_trial.py`.
