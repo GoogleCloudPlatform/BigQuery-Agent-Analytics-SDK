@@ -20,7 +20,6 @@ import shutil
 import subprocess
 
 import pytest
-
 from tests.test_power_bi_dashboard import _FORBIDDEN_VENDOR_NAMES
 
 ROOT = Path(__file__).resolve().parents[1]

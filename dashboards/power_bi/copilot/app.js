@@ -792,6 +792,14 @@
     return null;
   }
 
+  // Unique ids for new pages and visuals. A timestamp alone repeats when two
+  // are created in the same millisecond, which reopened the older page.
+  let idCounter = 0;
+  function newId(prefix) {
+    idCounter += 1;
+    return `${prefix}-${Date.now().toString(36)}-${idCounter.toString(36)}`;
+  }
+
   function compilePrompt(rawPrompt) {
     const prompt = rawPrompt.trim();
     const ql = prompt.toLowerCase();
@@ -827,7 +835,7 @@
 
     if (/^(add|pin|include|append)\b/.test(ql) || state.copilotMode === 'modify') {
       const type = chartType || (dim === 'event_date' ? 'line' : 'hbar');
-      const added = visual('v-' + Date.now().toString(36),
+      const added = visual(newId('v'),
           `${metricLabel(metric)} by ${DIMENSIONS[dim]}`, type, dim, metric, 6,
           {isNew: true});
       steps.push(`New ${type} visual: ${metric} by ${dim}`);
@@ -837,7 +845,7 @@
       };
     }
 
-    const uid = 'page-' + Date.now().toString(36);
+    const uid = newId('page');
     const theme = detectTheme(ql);
     let page;
     if (theme) {
@@ -1928,7 +1936,7 @@
   });
   $('btnDuplicatePage').addEventListener('click', () => {
     const copy = JSON.parse(JSON.stringify(activePage()));
-    copy.id = 'page-' + Date.now().toString(36);
+    copy.id = newId('page');
     copy.title += ' (copy)';
     state.pages.push(copy);
     state.activePageId = copy.id;
