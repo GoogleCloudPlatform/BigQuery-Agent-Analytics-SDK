@@ -58,12 +58,14 @@ class _Session:
 
   def __init__(self, session_id="sess-1"):
     self.session_id = session_id
+    self.invocation_id = None
     self.rows = []
 
   def add(self, event_type, content=None, *, span_id=None, **fields):
     n = len(self.rows) + 1
     row = {
         "session_id": self.session_id,
+        "invocation_id": self.invocation_id,
         "trace_id": "trace-1",
         "span_id": span_id or f"span-{n}",
         "event_id": f"event-{n}",
@@ -122,6 +124,19 @@ class _Session:
 
   def last_span(self):
     return self.rows[-1]["span_id"]
+
+  def end_first(self):
+    """Ties the last call's end row with its start and sorts it first.
+
+    The session query in ``client.py`` breaks timestamp ties by
+    ``event_type``, so TOOL_COMPLETED and TOOL_ERROR come before
+    TOOL_STARTING.
+    """
+    start, end = self.rows[-2], self.rows[-1]
+    assert start["event_type"] == "TOOL_STARTING"
+    end["timestamp"] = start["timestamp"]
+    self.rows[-2:] = [end, start]
+    return self
 
 
 def _rules(session, **kwargs):
@@ -281,6 +296,256 @@ class TestSessionFacts:
     session.rows.insert(session.rows.index(start) + 1, copy)
     assert len(_steps(session)) == 1
 
+  def test_ignores_a_second_end_row_of_a_call(self):
+    session = _Session().start().tool("preview", {"path": "a.csv"}, "x")
+    session.rows.append(
+        dict(
+            session.rows[-1],
+            event_id="another-id",
+            content=json.dumps({"tool": "preview", "result": "y"}),
+        )
+    )
+    assert [(s.status, s.result) for s in _steps(session)] == [("OK", "x")]
+
+  def test_pairs_consecutive_calls_on_one_span_in_order(self):
+    # A writer may stamp every row with the same ambient span id.
+    session = _Session().start()
+    session.tool("run_code", {"code": "a"}, "boom", error=True)
+    session.tool("run_code", {"code": "b"}, "boom", error=True)
+    session.tool("run_code", {"code": "c"}, "exit code 0\n42")
+    session.answer("42")
+    for row in session.rows:
+      row["span_id"] = "ambient"
+    steps = _steps(session)
+    assert [(s.args["code"], s.status) for s in steps] == [
+        ("a", "ERROR"),
+        ("b", "ERROR"),
+        ("c", "OK"),
+    ]
+    assert "TB-UNRECOVERED" not in _by_rule(_rules(session))
+
+  @pytest.mark.parametrize("end_type", ["TOOL_COMPLETED", "TOOL_ERROR"])
+  def test_pairs_an_end_row_sorted_before_its_start(self, end_type):
+    error = end_type == "TOOL_ERROR"
+    session = _Session().start()
+    session.tool("run_code", {"code": "x"}, "boom", error=error).end_first()
+    assert session.rows[-2]["event_type"] == end_type
+    (step,) = _steps(session)
+    assert step.args == {"code": "x"}
+    assert step.status == ("ERROR" if error else "OK")
+    assert step.row == len(session.rows) - 1  # the start row
+
+  def test_pairs_rows_without_a_span_id_by_tool_name(self):
+    session = _Session().start()
+    session.tool("run_code", {"code": "a"}, "exit code 0\n1")
+    session.tool("run_code", {"code": "b"}, "exit code 0\n2")
+    session.answer("2")
+    for row in session.rows:
+      if row["event_type"].startswith("TOOL_"):
+        row["span_id"] = None
+    steps = _steps(session)
+    assert [(s.args, s.status, s.result) for s in steps] == [
+        ({"code": "a"}, "OK", "exit code 0\n1"),
+        ({"code": "b"}, "OK", "exit code 0\n2"),
+    ]
+    # Unpaired, the last call looked unfinished, and TB-UNRECOVERED could
+    # not anchor to it.
+    assert _rules(session) == ()
+
+  def test_pairs_an_end_row_without_a_span_id_with_its_start(self):
+    session = _Session().start().tool("run_code", {"code": "x"}, "1")
+    session.rows[-1]["span_id"] = None
+    (step,) = _steps(session)
+    assert (step.args, step.status, step.span_id) == (
+        {"code": "x"},
+        "OK",
+        session.rows[-2]["span_id"],
+    )
+
+  def test_pairs_rows_with_a_new_span_id_on_every_row(self):
+    # Some writers (e.g. the SDK's seed_events) give every row its own id.
+    session = _Session().start()
+    session.tool("preview", {"path": "a.csv"}, "x")
+    session.tool("preview", {"path": "b.csv"}, "y")
+    for n, row in enumerate(session.rows):
+      row["span_id"] = f"row-{n}"
+    steps = _steps(session)
+    assert [(s.args["path"], s.result) for s in steps] == [
+        ("a.csv", "x"),
+        ("b.csv", "y"),
+    ]
+
+  def test_drops_a_start_stored_twice_when_its_end_sorts_first(self):
+    # The bundled writer has no event_id and writes at least once.
+    session = _Session().start()
+    session.tool("run_code", {"code": "x"}, "exit code 0\n42").end_first()
+    session.rows.append(dict(session.rows[-1]))
+    for row in session.rows:
+      row.pop("event_id")
+    session.answer("42")
+    assert [s.status for s in _steps(session)] == ["OK"]
+    assert _rules(session) == ()
+
+  def test_an_identical_retry_on_one_span_is_a_second_call(self):
+    session = _Session().start()
+    for _ in range(2):
+      session.tool("run_code", {"code": "a"}, "exit code 1\nKeyError")
+    session.answer("1")
+    for row in session.rows:
+      row["span_id"] = "ambient"
+    facts = collect_session_facts(session.rows, profile=_PROFILE)
+    assert (len(facts.steps), facts.repeats) == (2, (2,))
+
+  def test_parallel_calls_on_one_span_pair_by_tool_name(self):
+    session = _Session().start()
+    session.add("TOOL_STARTING", {"tool": "preview", "args": {"path": "a"}})
+    session.add("TOOL_STARTING", {"tool": "run_code", "args": {"code": "x"}})
+    session.add("TOOL_COMPLETED", {"tool": "run_code", "result": "42"})
+    session.add(
+        "TOOL_ERROR",
+        {"tool": "preview"},
+        status="ERROR",
+        error_message="file not found",
+    )
+    for row in session.rows:
+      row["span_id"] = "ambient"
+    assert [(s.tool, s.status) for s in _steps(session)] == [
+        ("preview", "ERROR"),
+        ("run_code", "OK"),
+    ]
+
+  def test_a_span_end_skips_a_later_start(self):
+    # A start-less end on the invocation span must not take the next call.
+    session = _Session().start()
+    session.add("TOOL_COMPLETED", {"tool": "approve", "result": "approved"})
+    session.add("TOOL_STARTING", {"tool": "run_code", "args": {"code": "x"}})
+    session.add(
+        "TOOL_ERROR",
+        {"tool": "run_code"},
+        status="ERROR",
+        error_message="ERROR: down",
+    )
+    for row in session.rows[-3:]:
+      row["span_id"] = "invocation"
+    steps = _steps(session)
+    assert [(s.tool, s.args, s.status) for s in steps] == [
+        ("approve", {}, "OK"),
+        ("run_code", {"code": "x"}, "ERROR"),
+    ]
+
+  def test_pairs_a_tied_end_without_a_span_id(self):
+    session = _Session().start()
+    session.tool("run_code", {"code": "x"}, "exit code 0\n1").end_first()
+    for row in session.rows[-2:]:
+      row["span_id"] = None
+    (step,) = _steps(session)
+    assert (step.args, step.status) == ({"code": "x"}, "OK")
+
+  def test_a_start_less_end_belongs_to_its_invocation(self):
+    session = _Session()
+    session.invocation_id = "inv-1"
+    session.start().tool("preview", {"path": "a"}, "x").answer("1")
+    session.invocation_id = "inv-2"
+    session.start()
+    session.add(
+        "TOOL_COMPLETED", {"tool": "preview", "result": "y"}, span_id="inv"
+    )
+    session.answer("2")
+    facts = collect_session_facts(session.rows, profile=_PROFILE)
+    assert [s.result for s in facts.run_steps] == ["y"]
+
+  def test_resumed_long_running_results_are_not_repeats(self):
+    # The ADK plugin logs a long-running tool's pending result on the call
+    # span, then each result the user sends back as TOOL_COMPLETED on the
+    # invocation span, which no TOOL_STARTING has.
+    session = _Session().start()
+    for order in ("o1", "o2"):
+      session.tool("approve", {"order": order}, "pending")
+    for _ in range(2):
+      session.add(
+          "TOOL_COMPLETED",
+          {"tool": "approve", "result": "approved"},
+          span_id="invocation",
+      )
+    facts = collect_session_facts(session.rows, profile=_PROFILE)
+    assert [(s.args, s.result) for s in facts.steps] == [
+        ({"order": "o1"}, "pending"),
+        ({"order": "o2"}, "pending"),
+        ({}, "approved"),
+        ({}, "approved"),
+    ]
+    assert facts.repeats == ()
+
+  def test_tool_name_fallback_skips_a_later_start(self):
+    session = _Session().start()
+    session.add("TOOL_COMPLETED", {"tool": "preview", "result": "early"})
+    session.add("TOOL_STARTING", {"tool": "preview", "args": {"path": "a"}})
+    for row in session.rows[-2:]:
+      row["span_id"] = None
+    assert [(s.result, s.status) for s in _steps(session)] == [
+        ("early", "OK"),
+        ("", "MISSING"),
+    ]
+
+  def test_tool_name_fallback_skips_a_start_with_its_own_end(self):
+    # The NULL-span end row sorts between the call's start and its own end.
+    session = _Session().start().tool("preview", {"path": "a.csv"}, "x")
+    other = dict(
+        session.rows[-1],
+        span_id=None,
+        event_id="other",
+        content=json.dumps({"tool": "preview", "result": "other"}),
+    )
+    session.rows.insert(len(session.rows) - 1, other)
+    assert [(s.args, s.result) for s in _steps(session)] == [
+        ({"path": "a.csv"}, "x"),
+        ({}, "other"),
+    ]
+
+  def test_end_rows_on_a_span_no_start_has_are_separate_calls(self):
+    # The ADK plugin logs a long-running tool's resumed results on the
+    # invocation span, with no TOOL_STARTING of their own.
+    session = _Session().start()
+    for result in ("approved", "shipped"):
+      session.add(
+          "TOOL_COMPLETED",
+          {"tool": "ask_human", "result": result},
+          span_id="invocation",
+      )
+    assert [s.result for s in _steps(session)] == ["approved", "shipped"]
+
+  def test_pairs_string_timestamps_of_different_precision(self):
+    session = _Session().start().tool("preview", {"path": "a.csv"}, "x")
+    session.rows[-1]["span_id"] = None  # pairs by tool name and time
+    session.rows[-2]["timestamp"] = "2026-01-01T00:00:04Z"
+    session.rows[-1]["timestamp"] = "2026-01-01T00:00:04.000500Z"
+    for row in session.rows[:-2]:
+      row["timestamp"] = row["timestamp"].isoformat()
+    assert [s.status for s in _steps(session)] == ["OK"]
+
+  def test_counts_an_end_row_without_a_start(self):
+    session = _Session().start().tool("preview", {"path": "a.csv"}, "x")
+    session.answer("1")
+    session.rows = [
+        r for r in session.rows if r["event_type"] != "TOOL_STARTING"
+    ]
+    (step,) = _steps(session)
+    assert (step.tool, step.args, step.status, step.result) == (
+        "preview",
+        {},
+        "OK",
+        "x",
+    )
+    assert "TB-NO-TOOLS" not in _by_rule(_rules(session))
+
+  @pytest.mark.parametrize("flagged", ["TOOL_STARTING", "TOOL_COMPLETED"])
+  def test_is_truncated_when_either_row_is(self, flagged):
+    session = _Session().start().tool("run_code", {"code": "x"}, "1")
+    next(r for r in session.rows if r["event_type"] == flagged)[
+        "is_truncated"
+    ] = True
+    assert _steps(session)[0].is_truncated
+
   def test_repeats_ignore_the_purpose_argument(self):
     session = _Session().start()
     for purpose in ("first look", "second look"):
@@ -381,6 +646,290 @@ class TestToolBlockers:
     assert label.span_id == _steps(session)[1].span_id
     assert "sandbox gone" in label.evidence
 
+  def test_abort_skips_an_error_the_run_got_past(self):
+    session = _Session().start()
+    session.add(
+        "LLM_ERROR",
+        status="ERROR",
+        error_message="429 RESOURCE_EXHAUSTED",
+        span_id="early",
+    )
+    session.tool("preview", {"path": "a.csv"}, "x")
+    session.tool("preview", {"path": "b.csv"}, "y")
+    session.add(
+        "AGENT_ERROR",
+        status="ERROR",
+        error_message="sandbox crashed",
+        span_id="late",
+    )
+    label = _by_rule(_rules(session))["TB-ABORT"]
+    assert label.span_id == "late"
+    assert "after 2 tool call(s): sandbox crashed" in label.evidence
+
+  def test_a_tool_call_that_worked_is_progress(self):
+    session = _Session().start()
+    session.llm("call: preview")
+    session.add(
+        "TOOL_STARTING", {"tool": "preview", "args": {}}, span_id="call"
+    )
+    session.add(
+        "LLM_ERROR", status="ERROR", error_message="429", span_id="early"
+    )
+    session.add(
+        "TOOL_COMPLETED", {"tool": "preview", "result": "x"}, span_id="call"
+    )
+    session.add(
+        "AGENT_ERROR", status="ERROR", error_message="boom", span_id="late"
+    )
+    assert _by_rule(_rules(session))["TB-ABORT"].span_id == "late"
+
+  def test_a_model_response_is_progress(self):
+    session = _Session().start()
+    session.add(
+        "LLM_ERROR", status="ERROR", error_message="429", span_id="early"
+    )
+    session.llm("thinking")
+    session.add(
+        "AGENT_ERROR", status="ERROR", error_message="boom", span_id="late"
+    )
+    assert _by_rule(_rules(session))["TB-ABORT"].span_id == "late"
+
+  def test_an_errored_model_response_is_not_progress(self):
+    session = _Session().start()
+    session.add(
+        "LLM_ERROR", status="ERROR", error_message="429", span_id="early"
+    )
+    session.add("LLM_RESPONSE", {"response": "x"}, status="ERROR")
+    session.add("AGENT_ERROR", status="ERROR", error_message="boom")
+    assert _by_rule(_rules(session))["TB-ABORT"].span_id == "early"
+
+  def test_abort_prefers_the_error_after_a_tool_error(self):
+    session = _Session().start()
+    session.tool("run_code", {"code": "x"}, "busy", error=True)
+    session.add(
+        "LLM_ERROR", status="ERROR", error_message="429", span_id="llm-err"
+    )
+    assert _by_rule(_rules(session))["TB-ABORT"].span_id == "llm-err"
+
+  def test_abort_on_parallel_tool_errors_anchors_to_the_last(self):
+    session = _Session().start()
+    session.llm("call: run_code | call: run_code")
+    for span in ("t1", "t2"):
+      session.add(
+          "TOOL_STARTING",
+          {"tool": "run_code", "args": {"code": span}},
+          span_id=span,
+      )
+    for span in ("t1", "t2"):
+      session.add(
+          "TOOL_ERROR",
+          {"tool": "run_code"},
+          span_id=span,
+          status="ERROR",
+          error_message=span,
+      )
+    assert _by_rule(_rules(session))["TB-ABORT"].span_id == "t2"
+
+  def test_a_completed_run_is_not_aborted(self):
+    session = _Session().start()
+    session.llm("text: '1'")
+    session.add("AGENT_ERROR", status="ERROR", error_message="callback")
+    session.add("INVOCATION_COMPLETED")
+    assert "TB-ABORT" not in _by_rule(_rules(session))
+
+  def test_abort_names_the_error_of_a_resumed_invocation(self):
+    session = _Session().start()
+    session.add("LLM_ERROR", status="ERROR", error_message="429")
+    session.add("INVOCATION_ERROR", status="ERROR", error_message="429")
+    session.add("INVOCATION_STARTING")
+    session.add(
+        "LLM_ERROR", status="ERROR", error_message="400 bad", span_id="late"
+    )
+    session.add("INVOCATION_ERROR", status="ERROR", error_message="400 bad")
+    label = _by_rule(_rules(session))["TB-ABORT"]
+    assert label.span_id == "late" and "400 bad" in label.evidence
+
+  def test_no_abort_without_an_error_after_the_last_progress(self):
+    session = _Session().start()
+    session.add("LLM_ERROR", status="ERROR", error_message="429")
+    session.tool("preview", {"path": "a.csv"}, "x")
+    assert "TB-ABORT" not in _by_rule(_rules(session))
+
+  def test_abort_counts_only_the_calls_before_it(self):
+    session = _Session().start().tool("preview", {"path": "a.csv"}, "x")
+    session.add(
+        "LLM_ERROR", status="ERROR", error_message="429", span_id="llm-err"
+    )
+    session.add("TOOL_STARTING", {"tool": "preview", "args": {"path": "b"}})
+    session.add("AGENT_ERROR", status="ERROR", error_message="429")
+    label = _by_rule(_rules(session))["TB-ABORT"]
+    assert label.span_id == "llm-err"
+    assert "after 1 tool call(s)" in label.evidence
+
+  def test_abort_on_a_tool_error_sorted_first_counts_its_call(self):
+    session = _Session().start()
+    session.tool("run_code", {"code": "a"}, "sandbox gone", error=True)
+    label = _by_rule(_rules(session.end_first()))["TB-ABORT"]
+    assert label.span_id == _steps(session)[0].span_id
+    assert "after 1 tool call(s): sandbox gone" in label.evidence
+
+  def test_a_sub_agent_completing_is_not_the_run_completing(self):
+    session = _Session().start()
+    session.add("AGENT_STARTING", agent="helper")
+    session.tool("preview", {"path": "a.csv"}, "x")
+    session.add("AGENT_COMPLETED", agent="helper")
+    session.add(
+        "LLM_ERROR", status="ERROR", error_message="429", span_id="llm-err"
+    )
+    session.add("AGENT_ERROR", status="ERROR", error_message="429")
+    assert not collect_session_facts(session.rows).completed
+    assert _by_rule(_rules(session))["TB-ABORT"].span_id == "llm-err"
+
+  def test_an_earlier_invocation_completing_is_not_the_run_completing(self):
+    session = _Session()
+    session.invocation_id = "inv-1"
+    session.start().tool("preview", {"path": "a.csv"}, "x").answer("1")
+    session.invocation_id = "inv-2"
+    session.start()
+    session.add(
+        "LLM_ERROR", status="ERROR", error_message="429", span_id="llm-err"
+    )
+    session.add("INVOCATION_ERROR", status="ERROR", error_message="429")
+    facts = collect_session_facts(session.rows)
+    assert (facts.invocation_id, facts.completed) == ("inv-2", False)
+    label = _by_rule(_rules(session))["TB-ABORT"]
+    assert label.span_id == "llm-err"
+    assert "after 0 tool call(s)" in label.evidence
+
+  def test_an_earlier_invocation_hitting_the_call_limit(self):
+    session = _Session()
+    session.invocation_id = "inv-1"
+    session.start().tool("preview", {"path": "a.csv"}, "x").call_limit()
+    session.invocation_id = "inv-2"
+    session.start().tool("run_code", {"code": "x"}, "exit code 0\n1")
+    session.answer("1")
+    facts = collect_session_facts(session.rows)
+    assert facts.completed and not facts.call_limit_hit
+    assert _rules(session) == ()
+
+  def test_ids_that_never_repeat_do_not_split_the_run(self):
+    session = _Session().start().tool("preview", {"path": "a.csv"}, "x")
+    session.answer("1")
+    for n, row in enumerate(session.rows):
+      row["invocation_id"] = f"inv-{n}"
+    facts = collect_session_facts(session.rows)
+    assert (facts.invocation_id, facts.completed) == (None, True)
+    assert len(facts.run_steps) == 1
+
+  def test_the_run_is_the_latest_invocation_in_any_row_order(self):
+    session = _Session()
+    session.invocation_id = "inv-1"
+    session.start().add("AGENT_ERROR", status="ERROR", error_message="429")
+    session.invocation_id = "inv-2"
+    session.start().answer("1")
+    session.rows[0]["timestamp"] = None
+    for rows in (session.rows, list(reversed(session.rows))):
+      facts = collect_session_facts(rows)
+      assert (facts.invocation_id, facts.completed) == ("inv-2", True)
+
+  def test_rows_without_a_timestamp_key_do_not_pick_the_run(self):
+    session = _Session()
+    session.invocation_id = "inv-1"
+    session.start().add("AGENT_ERROR", status="ERROR", error_message="429")
+    session.invocation_id = "inv-2"
+    session.start().answer("1")
+    del session.rows[0]["timestamp"]
+    facts = collect_session_facts(session.rows)
+    assert (facts.invocation_id, facts.completed) == ("inv-2", True)
+
+  def test_a_transfer_completes_with_the_agent_that_took_over(self):
+    # After transfer_to_agent, only the specialist logs AGENT_COMPLETED.
+    session = _Session().start()
+    session.tool("transfer_to_agent", {"agent_name": "specialist"}, "")
+    session.add("AGENT_STARTING", agent="specialist")
+    session.tool("run_code", {"code": "x"}, "ERROR: disk full")
+    session.llm("text: 'Sorry, I could not finish.'")
+    session.add("AGENT_COMPLETED", agent="specialist")
+    session.add("INVOCATION_COMPLETED")
+    assert collect_session_facts(session.rows).completed
+    assert "TB-UNRECOVERED" in _by_rule(_rules(session))
+
+  def test_a_resumed_invocation_that_completes(self):
+    session = _Session().start()
+    session.add("INVOCATION_ERROR", status="ERROR", error_message="429")
+    session.add("INVOCATION_STARTING")
+    session.answer("1")
+    assert collect_session_facts(session.rows).completed
+
+  def test_without_invocation_rows_an_agent_completion_counts(self):
+    session = _Session().start().answer("1")
+    session.rows = [
+        r for r in session.rows if not r["event_type"].startswith("INVOC")
+    ]
+    assert collect_session_facts(session.rows).completed
+
+  def test_the_answer_of_an_earlier_invocation_is_not_the_runs(self):
+    session = _Session()
+    session.invocation_id = "inv-1"
+    session.start().answer("The mean was 812.45 mm.")
+    session.invocation_id = "inv-2"
+    session.start()
+    session.add("LLM_ERROR", status="ERROR", error_message="429")
+    session.add("INVOCATION_ERROR", status="ERROR", error_message="429")
+    facts = collect_session_facts(session.rows)
+    assert facts.final_response is None
+    labels = _rules(session, reference_answer="812.45")
+    assert _ids(labels) == ["TB-ABORT"]
+
+  def test_untimed_rows_pick_the_last_invocation(self):
+    session = _Session()
+    session.invocation_id = "inv-1"
+    session.start().add("AGENT_ERROR", status="ERROR", error_message="429")
+    session.invocation_id = "inv-2"
+    session.start().answer("1")
+    for row in session.rows:
+      row["timestamp"] = None
+    assert collect_session_facts(session.rows).invocation_id == "inv-2"
+
+  def test_a_follow_up_turn_without_tools(self):
+    # The last turn only restates a value computed in an earlier turn.
+    session = _Session()
+    session.invocation_id = "inv-1"
+    session.start()
+    session.tool("run_code", {"code": "x"}, "exit code 0\nmean = 812.45")
+    session.answer("812.45")
+    session.invocation_id = "inv-2"
+    session.start().answer("About 800 mm.")
+    labels = _rules(session, reference_answer="812.45")
+    assert _ids(labels) == ["FIN-SEEN-NOT-REPORTED"]
+
+  def test_a_gap_label_anchors_on_the_runs_last_row(self):
+    session = _Session()
+    session.invocation_id = "inv-1"
+    session.start().tool("preview", {"path": "a"}, "x").answer("1")
+    session.invocation_id = "inv-2"
+    session.start().llm("None").add("AGENT_COMPLETED")
+    run_last = session.last_span()
+    session.invocation_id = None
+    session.add("STATE_DELTA")  # e.g. a writer's session-end row
+    label = _by_rule(_rules(session))["FIN-NO-ANSWER"]
+    assert (label.span_id, label.target_kind) == (run_last, "gap_after_span")
+
+  def test_an_invocation_error_means_the_run_did_not_complete(self):
+    session = _Session().start().answer("1")
+    session.add("INVOCATION_ERROR", status="ERROR", error_message="boom")
+    assert not collect_session_facts(session.rows).completed
+
+  def test_unrecovered_looks_at_the_last_call_of_the_run(self):
+    session = _Session()
+    session.invocation_id = "inv-1"
+    session.start()
+    session.tool("run_code", {"code": "x"}, "backend down", error=True)
+    session.answer("unknown")
+    session.invocation_id = "inv-2"
+    session.start().answer("1")
+    assert "TB-UNRECOVERED" not in _by_rule(_rules(session))
+
   def test_call_limit_is_not_an_abort(self):
     session = _Session().start().tool("preview", {"path": "a.csv"}, "x")
     assert _ids(_rules(session.call_limit())) == ["TW-CALL-CAP"]
@@ -449,6 +998,13 @@ class TestFinalization:
         "gap_after_span",
     )
     assert "step 1" in label.evidence and "'790.1'" in label.evidence
+
+  def test_seen_when_the_end_row_sorts_first(self):
+    session = _Session().start()
+    session.tool("run_code", {"code": "x"}, "exit code 0\nmean = 812.45")
+    session.end_first().answer("790.1")
+    labels = _rules(session, reference_answer=812.45)
+    assert _ids(labels) == ["FIN-SEEN-NOT-REPORTED"]
 
   def test_seen_needs_a_reference_answer(self):
     session = _Session().start()
@@ -523,6 +1079,31 @@ class TestReferenceMatching:
           ("The city is Boston", "Boston", "ends with"),
           ("Bostonian", "Boston", None),
           ("True", True, "only in case"),
+          # Large integers are compared exactly, not as floats.
+          ("12345678901234567", 12345678901234567, "0-decimal precision"),
+          ("12345678901234568", 12345678901234567, None),
+          ("12345678901234568", "12345678901234567", None),
+          # A comma is a thousands separator, never a join.
+          ("1,234", 1234, "0-decimal precision"),
+          ("3,5", 35, None),
+          ("Total: 1,234,567 rows", 1234567, "inside prose"),
+          # A short value counts only where a line reports it.
+          ("812.6, computed over 3 files", 3, None),
+          ("The answer is 3.", 3, "inside prose"),
+          ("Answer: 3", 3, "inside prose"),
+          ("The answer is 3 days.", 3, "inside prose"),
+          ("**Answer:** 42", 42, "inside prose"),
+          ("The mean rainfall is 4.5 mm", 4.5, "inside prose"),
+          ("I checked 3 tables.\n\n**Answer:** 42", 42, "inside prose"),
+          ("Based on 3 tables, the answer is **42**.", 42, "inside prose"),
+          ("Across 12 samples, the mean is 4.6 ms.", "4.6", "inside prose"),
+          ("Of 120 users surveyed, retention was 42%.", "42%", "inside prose"),
+          ("In Q3 2023 the store had 15 orders.", 15, "inside prose"),
+          ("812.6, based on 3 files", 3, None),
+          # Other references
+          ('{"a": 1.5}', {"a": 1.5}, "only in case"),
+          ("3,5", 5, None),  # a decimal comma
+          ("[1.0]", "[1.00000000000000001]", None),
       ],
   )
   def test_answer_contains_reference(self, answer, reference, how):
@@ -545,6 +1126,14 @@ class TestReferenceMatching:
           ("city: Boston", "Boston", True),
           ("Bostonian", "Boston", False),
           ("yes", "yes", False),  # too common to count
+          ("id = 12345678901234568", 12345678901234567, False),
+          ("total = 1,234,567", 1234567, True),
+          # In a CSV row, commas separate fields.
+          ("station,812,450", 812450, False),
+          ("station,812,450", 450, True),
+          ("812,450,2001", 812, True),
+          ("[812,450]", 450, True),
+          ("[812,450]", 812450, False),
       ],
   )
   def test_reference_seen_in(self, text, reference, seen):
@@ -571,6 +1160,36 @@ class TestReferenceMatching:
   )
   def test_reports_value(self, line, reports):
     assert _reports_value(line, _parse_reference(2002)) is reports
+
+  @pytest.mark.parametrize(
+      "answer, reference, how",
+      [
+          ("812.6, computed over 3 files", 3, None),
+          ("812.6, computed across 3 files", 3, None),
+          ("812.6, computed from 3 files", 3, None),
+          ("812.6, computed using 3 files", 3, None),
+          ("812.6, computed among 3 files", 3, None),
+          ("812.6, computed over 3.", 3, "inside prose"),
+          ("812.6, computed over 312 files", 312, "inside prose"),
+          ("812.6, computed over 3.5 files", 3.5, "inside prose"),
+      ],
+  )
+  def test_count_in_prose(self, answer, reference, how):
+    found = _answer_contains_reference(answer, _parse_reference(reference))
+    assert found is None if how is None else how in found
+
+  def test_a_huge_reference_does_not_raise(self):
+    reference = _parse_reference("1e1000000")
+    assert _answer_contains_reference("the total is 1e1000000 units", reference)
+
+  @pytest.mark.parametrize(
+      "reference", ["1e-999999999", "1e-9999999999999999999"]
+  )
+  def test_an_extreme_exponent_does_not_raise(self, reference):
+    session = _Session().start()
+    session.tool("run_code", {"code": "x"}, "exit code 0\n5")
+    session.answer("0.5")
+    assert _rules(session, reference_answer=reference) == ()
 
   def test_reports_value_is_fast_on_long_lines(self):
     line = "x" * 100_000 + ":" * 20_000
@@ -616,6 +1235,77 @@ class TestTurnWaste:
     assert label.confidence == 0.65
     assert "5-call limit" in label.evidence
 
+  def test_waste_counts_only_repeats_within_the_run(self):
+    session = _Session()
+    session.invocation_id = "inv-1"
+    session.start()
+    for i in range(6):
+      session.tool("run_code", {"code": f"q{i}", "purpose": f"step {i}"}, "1")
+    session.answer("1")
+    session.invocation_id = "inv-2"
+    session.start()
+    for i in range(6):
+      session.tool("run_code", {"code": f"q{i}", "purpose": f"step {i}"}, "1")
+    session.answer("1")
+    facts = collect_session_facts(session.rows, profile=_PROFILE)
+    assert (facts.repeats, facts.near_duplicates, facts.waste_ratio) == (
+        (),
+        (),
+        0.0,
+    )
+    assert "TW-THRASH" not in _by_rule(_rules(session))
+
+  def test_waste_ratio_reads_the_run(self):
+    session = _Session()
+    session.invocation_id = "inv-1"
+    session.start()
+    for i in range(10):
+      session.tool("preview", {"path": f"{i}"}, "x")
+    session.answer("1")
+    session.invocation_id = "inv-2"
+    session.start()
+    for i in range(6):
+      session.tool("run_code", {"code": f"t{i}"}, "exit code 1\nKeyError")
+    session.answer("2")
+    assert (
+        collect_session_facts(session.rows, profile=_PROFILE).waste_ratio == 1
+    )
+
+  def test_a_run_resumed_after_the_call_limit_that_completes(self):
+    session = _Session().start().tool("preview", {"path": "a"}, "x")
+    session.call_limit()
+    session.add("INVOCATION_STARTING").answer("40 mm")
+    facts = collect_session_facts(session.rows, profile=_PROFILE)
+    assert (facts.completed, facts.call_limit_hit) == (True, False)
+    assert "TW-CALL-CAP" not in _by_rule(_rules(session))
+
+  def test_call_cap_message_comes_from_the_run(self):
+    session = _Session()
+    session.invocation_id = "inv-1"
+    session.start().call_limit(5)
+    session.invocation_id = "inv-2"
+    session.start().tool("preview", {"path": "a.csv"}, "x").call_limit(30)
+    label = _by_rule(_rules(session))["TW-CALL-CAP"]
+    assert "30-call limit" in label.evidence
+
+  def test_call_cap_reads_only_the_run(self):
+    session = _Session()
+    session.invocation_id = "inv-1"
+    session.start()
+    for _ in range(4):
+      session.tool("preview", {"path": "a.csv"}, "x")
+    session.answer("1")
+    session.invocation_id = "inv-2"
+    session.start().tool("run_code", {"code": "x"}, "exit code 0\n1")
+    label = _by_rule(_rules(session.call_limit()))["TW-CALL-CAP"]
+    assert (label.span_id, label.target_kind) == (
+        _steps(session)[-1].span_id,
+        "gap_after_span",
+    )
+    assert label.confidence == 0.65
+    assert "after 1 tool calls" in label.evidence
+    assert "0 of 1 calls were wasted" in label.evidence
+
   @pytest.mark.parametrize(
       "failed, succeeded, fires",
       [
@@ -640,6 +1330,16 @@ class TestTurnWaste:
 
 
 class TestIncompleteEvidence:
+
+  def test_preview_only_reads_the_whole_session(self):
+    # A follow-up turn may only reformat an answer computed earlier.
+    session = _Session()
+    session.invocation_id = "inv-1"
+    session.start().tool("run_code", {"code": "x"}, "exit code 0\n1")
+    session.answer("1")
+    session.invocation_id = "inv-2"
+    session.start().answer("1.0")
+    assert _rules(session) == ()
 
   def test_preview_only(self):
     session = _Session().start()
@@ -732,6 +1432,29 @@ class TestChecksAndPrecedence:
     assert _ids(labels)[-2:] == ["A", "B"]
     assert labels[-1].target_kind == "gap_after_span"
     assert labels[-1].span_id == session.last_span()
+
+  def test_check_label_on_a_row_of_the_session(self):
+    session = _Session().start().answer("1")
+    labels = _rules(session, checks=[lambda facts: _label()])
+    assert labels[-1] == _label()
+
+  def test_check_label_without_a_trace_id(self):
+    session = _Session().start().answer("1")
+    label = _label(trace_id=None)
+    assert _rules(session, checks=[lambda facts: label])[-1] == label
+
+  @pytest.mark.parametrize(
+      "overrides, match",
+      [
+          (dict(session_id="sess-2"), "for session 'sess-2'"),
+          (dict(span_id="span-999"), "no row of session"),
+          (dict(trace_id="trace-2"), "no row of session"),
+      ],
+  )
+  def test_check_label_must_anchor_in_the_session(self, overrides, match):
+    session = _Session().start().answer("1")
+    with pytest.raises(ValueError, match=match):
+      _rules(session, checks=[lambda facts: _label(**overrides)])
 
   def test_check_returning_another_type_fails(self):
     session = _Session().start().answer("1")

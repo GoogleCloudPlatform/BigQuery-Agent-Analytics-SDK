@@ -25,7 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ToolProfile`. An optional `reference_answer` enables the two rules
   that compare against the expected answer. Benchmark-specific checks
   plug in as `checks` callables that read the same `SessionFacts` and
-  return labels. Rows that repeat an `event_id` are counted once. Pure and
+  return labels. Rows that repeat an `event_id` are counted once, and tool
+  calls pair in any row order, as in `extract_tool_trajectory`. In a
+  multi-turn session, how the run ended is read from the last invocation
+  and its own `INVOCATION_COMPLETED` or `INVOCATION_ERROR` row. Pure and
   offline: no BigQuery, LLM or network.
 - **`Span.is_truncated`** — `Span.from_bigquery_row()` now keeps the
   events table's `is_truncated` column, which `get_trace()` and

@@ -56,6 +56,17 @@ Contracts honored:
   callable that reads the same ``SessionFacts`` the built-in rules read.
 * **At-least-once writes.** Rows that repeat an ``event_id`` are dropped
   before anything is counted.
+* **Any row order.** Tool calls are paired in two passes, as in
+  ``SessionTrace.extract_tool_trajectory``, so an end row that sorts
+  before its start still pairs. An end row whose ``span_id`` is NULL, or
+  names no start, pairs by tool name.
+* **The run is the last invocation.** In a multi-turn session, the final
+  response, whether the run completed, hit the call limit or stopped on
+  an error, and its wasted calls come from the last invocation. Its own
+  INVOCATION_COMPLETED or INVOCATION_ERROR row says whether it completed,
+  not an AGENT_COMPLETED of a sub-agent or an earlier turn. Whether the
+  agent ever called a tool, computed or saw a value is read from the
+  whole session.
 * **Offline.** Pure and deterministic: no BigQuery, no LLM, no network.
 """
 
@@ -65,10 +76,14 @@ import ast
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 import dataclasses
+from datetime import datetime
+import decimal
+from decimal import Decimal
 import json
 import re
 from typing import Any, Optional, Union
 
+from .evalbench import _parse_timestamp
 from .evalbench import _usable_text
 from .failure_taxonomy import FROZEN_CATEGORY_NAMES
 from .span_taxonomy import _ordered_single_session
@@ -104,11 +119,17 @@ YEAR_RANGE = (1800, 2100)
 
 _CALL_LIMIT_RE = re.compile(r"Max number of llm calls|LlmCallsLimitExceeded")
 _CALL_LIMIT_SIZE_RE = re.compile(r"limit of `?(\d+)`? exceeded")
-_NUMBER_RE = re.compile(
-    r"(?<![\w.])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?"
-    r"(?![\w])"
+_NUMBER_PATTERN = r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?"
+_NUMBER_RE = re.compile(rf"(?<![\w.]){_NUMBER_PATTERN}(?![\w])")
+_BARE_NUMBER_RE = re.compile(_NUMBER_PATTERN)
+# "3,5": a decimal comma, or two numbers; either way not one value.
+_COMMA_JOINED_RE = re.compile(r"[-+]?\d+(?:,\d+)+")
+# "computed over 3 files": a count of what the answer was computed from.
+_COUNT_BEFORE_RE = re.compile(
+    r"\b(?:over|across|from|using|among|based on)\s+\Z", re.IGNORECASE
 )
-_BARE_NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
+_WORD_AFTER_RE = re.compile(r"\s+[^\W\d_]")
+_COMMA_DIGIT_RE = re.compile(r",\d")
 _LITERAL_RE = re.compile(r"[\[(][^\[\]()]{0,4000}[\])]")
 _WORD_RE = re.compile(r"\w+")
 _IS_TAIL_RE = re.compile(r"\bis\Z")
@@ -231,11 +252,19 @@ class ToolStep:
   """One tool call: a TOOL_STARTING row and its TOOL_COMPLETED/TOOL_ERROR.
 
   ``status`` is ``"OK"``, ``"ERROR"`` (a TOOL_ERROR row or an ERROR
-  status), or ``"MISSING"`` when no end row was logged. ``args`` excludes
-  ``ToolProfile.purpose_arg``, which is in ``purpose``.
+  status), or ``"MISSING"`` when no end row was logged. An end row with no
+  start row is a call with empty ``args``. ``args`` excludes
+  ``ToolProfile.purpose_arg``, which is in ``purpose``. ``row`` and
+  ``end_row`` index ``SessionFacts.rows``: the TOOL_STARTING row (the end
+  row when there is none), and the end row (None when none was logged).
+  ``invocation_id`` is the invocation the call belongs to.
+  ``is_truncated`` is True when the producer flagged either row as clipped
+  or redacted.
   """
 
   index: int
+  row: int
+  end_row: Optional[int]
   tool: Optional[str]
   args: Mapping[str, Any]
   purpose: Optional[str]
@@ -244,6 +273,7 @@ class ToolStep:
   error_message: Optional[str]
   span_id: Optional[str]
   trace_id: Optional[str]
+  invocation_id: Optional[str]
   is_truncated: bool
 
 
@@ -251,10 +281,35 @@ class ToolStep:
 class SessionFacts:
   """What the rules know about one failed session, computed once.
 
-  Built-in rules and ``checks`` callables read the same object. ``steps``
-  are 1-indexed in timestamp order. ``final_response`` is
-  ``Trace.final_response``. ``failed_steps``, ``repeats`` and
-  ``near_duplicates`` hold step indexes; ``wasted`` is their union.
+  Built-in rules and ``checks`` callables read the same object. ``rows``,
+  ``spans`` and ``steps`` cover the whole session; ``steps`` are 1-indexed
+  in order of ``ToolStep.row``.
+
+  The run is the session's last invocation, named by ``invocation_id``.
+  It is None when no ``invocation_id`` is shared by two rows, and then the
+  whole session is the run. How the run ended is read from the run alone:
+
+  * ``final_response`` is ``Trace.final_response`` over the run's rows.
+  * ``completed``: the run's last INVOCATION_COMPLETED/INVOCATION_ERROR
+    row is INVOCATION_COMPLETED, or, when it has neither, an
+    AGENT_COMPLETED row is not followed by an error row.
+  * ``call_limit_hit``: the run did not complete and a run row reports
+    the LLM call limit.
+  * ``abort_row``: the row of the error that stopped a run that neither
+    completed nor hit the call limit. That is the first error, outside the
+    tool rows, after the run's last model response, successful tool call
+    or INVOCATION_STARTING, else the last tool error there; None when no
+    error follows it.
+  * ``failed_steps``, ``repeats`` and ``near_duplicates`` hold the
+    ``ToolStep.index`` of steps in ``run_steps`` (look them up with
+    ``step``); ``wasted`` is their union, ``waste_ratio`` its share of
+    ``run_steps``, and ``top_duplicate`` the run's most repeated purpose.
+    Repeats and near-duplicates compare a call with earlier calls of the
+    run that have a TOOL_STARTING row.
+
+  ``compute_steps`` and the rules that ask whether the agent ever called a
+  tool, computed or saw a value read the whole session: a follow-up turn
+  may only reformat an answer computed earlier.
   """
 
   session_id: str
@@ -262,6 +317,7 @@ class SessionFacts:
   spans: tuple[Span, ...]
   steps: tuple[ToolStep, ...]
   final_response: Optional[str]
+  invocation_id: Optional[str]
   completed: bool
   call_limit_hit: bool
   abort_row: Optional[int]
@@ -275,11 +331,22 @@ class SessionFacts:
 
   @property
   def waste_ratio(self) -> float:
-    return len(self.wasted) / len(self.steps) if self.steps else 0.0
+    steps = self.run_steps
+    return len(self.wasted) / len(steps) if steps else 0.0
 
   @property
   def compute_steps(self) -> tuple[ToolStep, ...]:
+    """The session's calls of ``ToolProfile.compute_tools``."""
     return tuple(s for s in self.steps if s.tool in self.profile.compute_tools)
+
+  @property
+  def run_steps(self) -> tuple[ToolStep, ...]:
+    """The steps of the run (the session's last invocation)."""
+    return tuple(s for s in self.steps if self.in_run(s.invocation_id))
+
+  def in_run(self, invocation_id: Optional[str]) -> bool:
+    """Whether a row or step with this ``invocation_id`` is in the run."""
+    return self.invocation_id is None or invocation_id == self.invocation_id
 
   def step(self, index: Optional[int]) -> Optional[ToolStep]:
     """The step with this 1-based index, or None."""
@@ -300,7 +367,7 @@ class SessionFacts:
   ) -> RuleFailureLabel:
     """A label anchored to ``step``'s span.
 
-    Without a step, the label marks the gap after the session's last row.
+    Without a step, the label marks the gap after the run's last row.
 
     Raises:
       ValueError: the anchor row has no ``span_id``.
@@ -308,7 +375,14 @@ class SessionFacts:
     if step is not None:
       span_id, trace_id = step.span_id, step.trace_id
     else:
-      last = self.rows[-1]
+      last = next(
+          (
+              row
+              for row in reversed(self.rows)
+              if self.in_run(_usable_text(row.get("invocation_id")))
+          ),
+          self.rows[-1],
+      )
       span_id = _usable_text(last.get("span_id"))
       trace_id = _usable_text(last.get("trace_id"))
       target_kind = TARGET_GAP_AFTER_SPAN
@@ -349,6 +423,7 @@ def label_failed_session_rules(
   reads. The caller decides that the session failed (for example with
   ``evalbench.classify_sessions``); the rules only say how.
 
+  The rules diagnose the session's last invocation (see ``SessionFacts``).
   ``reference_answer`` is the expected answer, if the session is scored
   against one (a number, a string, a list, or their JSON text). Without
   it, ``FIN-IN-ANSWER`` and ``FIN-SEEN-NOT-REPORTED`` do not run. With
@@ -357,11 +432,15 @@ def label_failed_session_rules(
   Each built-in category yields at most one label, in the precedence order
   tool blockers, finalization, turn-waste, incomplete evidence. Labels
   from ``checks`` follow, in the order given. Use ``primary_label`` to
-  pick the session's diagnosis.
+  pick the session's diagnosis. A label from ``checks`` must be for this
+  session and on one of its rows' ``span_id`` (and ``trace_id``, if set).
 
   Raises:
-    ValueError: no rows, rows of several sessions, or a label's anchor row
-      has no ``span_id``.
+    ValueError: no rows, rows of several sessions, a label's anchor row
+      has no ``span_id``, or a ``checks`` label is not on a row of this
+      session.
+    TypeError: a ``checks`` callable returned something other than
+      ``RuleFailureLabel``.
   """
   facts = collect_session_facts(
       session_events, profile=profile, reference_answer=reference_answer
@@ -376,18 +455,36 @@ def label_failed_session_rules(
     label = rule(facts)
     if label is not None:
       labels.append(label)
+  anchors = {
+      (_usable_text(row.get("span_id")), _usable_text(row.get("trace_id")))
+      for row in facts.rows
+  }
+  span_ids = {span_id for span_id, _ in anchors}
   for check in checks:
     result = check(facts)
     if result is None:
       continue
     if isinstance(result, RuleFailureLabel):
-      labels.append(result)
-      continue
+      result = (result,)
     for label in result:
       if not isinstance(label, RuleFailureLabel):
         raise TypeError(
             f"check {check!r} returned {type(label).__name__}, not"
             " RuleFailureLabel"
+        )
+      if label.session_id != facts.session_id:
+        raise ValueError(
+            f"check {check!r} returned a label for session"
+            f" {label.session_id!r}, not {facts.session_id!r}"
+        )
+      if label.span_id not in span_ids or (
+          label.trace_id is not None
+          and (label.span_id, label.trace_id) not in anchors
+      ):
+        raise ValueError(
+            f"check {check!r} returned a label on span {label.span_id!r}"
+            f" (trace {label.trace_id!r}), which no row of session"
+            f" {facts.session_id!r} has"
         )
       labels.append(label)
   return tuple(labels)
@@ -422,26 +519,57 @@ def collect_session_facts(
   if not session_id:
     raise ValueError("agent_events rows carry no session_id")
   spans = tuple(Span.from_bigquery_row(dict(row)) for row in rows)
+  # Span.timestamp defaults to the current time when the row has none.
+  times = tuple(_parse_timestamp(row.get("timestamp")) for row in rows)
+  steps = _pair_tool_calls(spans, times, profile)
+
+  invocation_id = _last_invocation(spans, times)
+  run = [
+      span
+      for span in spans
+      if invocation_id is None
+      or _usable_text(span.invocation_id) == invocation_id
+  ]
+  run_steps = [
+      s
+      for s in steps
+      if invocation_id is None or s.invocation_id == invocation_id
+  ]
   trace = Trace(
       trace_id=_usable_text(rows[0].get("trace_id")) or session_id,
       session_id=session_id,
-      spans=list(spans),
+      spans=run,
   )
   final = trace.final_response
   final_response = None if final is None else str(final)
-  steps = _pair_tool_calls(spans, profile)
-
-  completed = any(s.event_type == "AGENT_COMPLETED" for s in spans)
-  call_limit_hit = any(_CALL_LIMIT_RE.search(_message(s)) for s in spans)
+  completed = _run_completed(run)
+  call_limit_hit = not completed and any(
+      _CALL_LIMIT_RE.search(_message(s)) for s in run
+  )
   abort_row = None
   if not completed and not call_limit_hit:
-    errors = [
+    in_run = {id(span) for span in run}
+    run_rows = [i for i, span in enumerate(spans) if id(span) in in_run]
+    # Only errors after the run's last progress (a model response or a
+    # tool call that worked) stopped it; the agent got past earlier ones.
+    progress = [
         i
-        for i, s in enumerate(spans)
-        if s.status == "ERROR" or str(s.event_type or "").endswith("_ERROR")
+        for i in run_rows
+        if spans[i].event_type == "LLM_RESPONSE" and spans[i].status != "ERROR"
     ]
-    # A tool error the agent may have recovered from is not what stopped
-    # the run; prefer the first error outside the tool rows.
+    progress += [
+        s.end_row
+        for s in run_steps
+        if s.end_row is not None and not _tool_failed(s, profile)
+    ]
+    # A resumed invocation starts again at its last INVOCATION_STARTING.
+    progress += [
+        i for i in run_rows if spans[i].event_type == "INVOCATION_STARTING"
+    ]
+    last_progress = max(progress, default=-1)
+    errors = [i for i in run_rows if i > last_progress and _is_error(spans[i])]
+    # Within that cluster, a tool error is what the agent was reacting to;
+    # the first error outside the tool rows is what stopped it.
     non_tool = [i for i in errors if spans[i].event_type not in _TOOL_EVENTS]
     if non_tool:
       abort_row = non_tool[0]
@@ -450,13 +578,15 @@ def collect_session_facts(
 
   failed = sorted(
       s.index
-      for s in steps
+      for s in run_steps
       if (s.tool in profile.compute_tools and _call_failed(s, profile))
       or _tool_failed(s, profile)
   )
+  # An end row with no start has no arguments to compare.
+  started = [s for s in run_steps if s.row != s.end_row]
   repeats = []
   seen_calls: set[tuple[Optional[str], str]] = set()
-  for step in steps:
+  for step in started:
     key = (
         step.tool,
         json.dumps(step.args, sort_keys=True, ensure_ascii=False, default=str),
@@ -468,7 +598,7 @@ def collect_session_facts(
   near_duplicates = []
   earlier: list[tuple[str, set[str]]] = []
   counts: Counter[str] = Counter()
-  for step in steps:
+  for step in started:
     norm = _norm_words(step.purpose)
     if not norm:
       continue
@@ -488,7 +618,7 @@ def collect_session_facts(
     norm, count = counts.most_common(1)[0]
     if count >= 2:
       original = next(
-          s.purpose for s in steps if _norm_words(s.purpose) == norm
+          s.purpose for s in started if _norm_words(s.purpose) == norm
       )
       top_duplicate = (original, count)
 
@@ -498,6 +628,7 @@ def collect_session_facts(
       spans=spans,
       steps=steps,
       final_response=final_response,
+      invocation_id=invocation_id,
       completed=completed,
       call_limit_hit=call_limit_hit,
       abort_row=abort_row,
@@ -511,15 +642,64 @@ def collect_session_facts(
   )
 
 
+def _is_error(span: Span) -> bool:
+  return span.status == "ERROR" or str(span.event_type or "").endswith("_ERROR")
+
+
+def _run_completed(run: Sequence[Span]) -> bool:
+  """Whether the run finished on its own, not on an error.
+
+  The run's last INVOCATION_COMPLETED or INVOCATION_ERROR decides: an
+  invocation that was resumed after an error and then completed counted
+  as completed. Without either row (some writers log no invocation
+  events), an AGENT_COMPLETED that no error row follows counts. Which
+  agent completed does not matter: after ``transfer_to_agent`` only the
+  agent that took over logs AGENT_COMPLETED.
+  """
+  ends = [
+      s.event_type
+      for s in run
+      if s.event_type in ("INVOCATION_COMPLETED", "INVOCATION_ERROR")
+  ]
+  if ends:
+    return ends[-1] == "INVOCATION_COMPLETED"
+  last = max(
+      (i for i, s in enumerate(run) if s.event_type == "AGENT_COMPLETED"),
+      default=None,
+  )
+  return last is not None and not any(_is_error(s) for s in run[last + 1 :])
+
+
 # ---------------------------------------------------------------------------
 # Rules
 # ---------------------------------------------------------------------------
 
 
+def _last_invocation(
+    spans: Sequence[Span], times: Sequence[Optional[datetime]]
+) -> Optional[str]:
+  """The ``invocation_id`` of the session's latest row, or None.
+
+  The latest row is found by timestamp, so rows without one cannot change
+  the answer. None when no ``invocation_id`` is shared by two rows: such
+  ids do not group the rows into runs.
+  """
+  ids = [_usable_text(span.invocation_id) for span in spans]
+  counts = Counter(iid for iid in ids if iid)
+  if not counts or max(counts.values()) < 2:
+    return None
+  timed = [(time, row) for row, time in enumerate(times) if ids[row] and time]
+  if timed:
+    return ids[max(timed)[1]]
+  return next(iid for iid in reversed(ids) if iid)
+
+
 def _rule_tool_blockers(facts: SessionFacts) -> Optional[RuleFailureLabel]:
-  steps = facts.steps
+  run_steps = facts.run_steps
   if facts.abort_row is not None:
     row = facts.spans[facts.abort_row]
+    abort = facts.abort_row
+    before = sum(1 for s in run_steps if s.row < abort or s.end_row == abort)
     summary = _summarize_error(row.error_message) or "no error message logged"
     span_id = _usable_text(row.span_id)
     if not span_id:
@@ -533,23 +713,23 @@ def _rule_tool_blockers(facts: SessionFacts) -> Optional[RuleFailureLabel]:
         span_id=span_id,
         failure_category=TOOL_BLOCKERS,
         evidence=(
-            f"{row.event_type} aborted the run after {len(steps)} tool"
-            f" call(s): {summary}; no AGENT_COMPLETED event follows"
+            f"{row.event_type} aborted the run after {before} tool"
+            f" call(s): {summary}; the run did not complete"
         ),
         confidence=0.95,
         target_kind=TARGET_SPAN,
         rule_id="TB-ABORT",
     )
   profile = facts.profile
-  if not steps and (profile.compute_tools or profile.preview_tools):
+  if not facts.steps and (profile.compute_tools or profile.preview_tools):
     return facts.label(
         TOOL_BLOCKERS,
         "TB-NO-TOOLS",
         "the session ended without a single tool call",
         0.9,
     )
-  if steps and facts.completed:
-    final = steps[-1]
+  if run_steps and facts.completed:
+    final = run_steps[-1]
     if final.status == "MISSING" or _tool_failed(final, profile):
       detail = (
           "no TOOL_COMPLETED was logged"
@@ -569,7 +749,8 @@ def _rule_tool_blockers(facts: SessionFacts) -> Optional[RuleFailureLabel]:
 
 
 def _rule_finalization(facts: SessionFacts) -> Optional[RuleFailureLabel]:
-  last = facts.steps[-1] if facts.steps else None
+  run_steps = facts.run_steps
+  last = run_steps[-1] if run_steps else None
   answer = facts.final_response
   reference = _parse_reference(facts.reference_answer)
   if answer is not None and reference is not None:
@@ -605,7 +786,7 @@ def _rule_finalization(facts: SessionFacts) -> Optional[RuleFailureLabel]:
     return facts.label(
         FINALIZATION,
         "FIN-NO-ANSWER",
-        f"the run completed after {len(facts.steps)} tool call(s) without a"
+        f"the run completed after {len(run_steps)} tool call(s) without a"
         " final response",
         0.85,
         step=last,
@@ -620,7 +801,7 @@ def _waste_summary(facts: SessionFacts) -> str:
     purpose, count = facts.top_duplicate
     example = f", e.g. {_short(purpose, 60)!r} x{count}"
   return (
-      f"{len(facts.wasted)} of {len(facts.steps)} calls were wasted"
+      f"{len(facts.wasted)} of {len(facts.run_steps)} calls were wasted"
       f" ({len(facts.failed_steps)} failed, {len(facts.repeats)} exact"
       f" repeats, {len(facts.near_duplicates)} near-duplicate"
       f" purposes{example})"
@@ -628,12 +809,14 @@ def _waste_summary(facts: SessionFacts) -> str:
 
 
 def _rule_turn_waste(facts: SessionFacts) -> Optional[RuleFailureLabel]:
+  steps = facts.run_steps
   if facts.call_limit_hit:
     message = next(
         (
-            s.error_message
+            _message(s)
             for s in facts.spans
-            if _CALL_LIMIT_RE.search(_message(s))
+            if facts.in_run(_usable_text(s.invocation_id))
+            and _CALL_LIMIT_RE.search(_message(s))
         ),
         "",
     )
@@ -643,12 +826,12 @@ def _rule_turn_waste(facts: SessionFacts) -> Optional[RuleFailureLabel]:
     if facts.wasted:
       step, target = facts.step(facts.wasted[0]), TARGET_SPAN
     else:
-      step = facts.steps[-1] if facts.steps else None
+      step = steps[-1] if steps else None
       target = TARGET_GAP_AFTER_SPAN
     return facts.label(
         TURN_WASTE,
         "TW-CALL-CAP",
-        f"hit the {cap} limit after {len(facts.steps)} tool calls without a"
+        f"hit the {cap} limit after {len(steps)} tool calls without a"
         f" final response; {_waste_summary(facts)}",
         confidence,
         step=step,
@@ -740,54 +923,157 @@ def _rule_incomplete_evidence(
 # ---------------------------------------------------------------------------
 
 
+def _content(span: Span) -> Mapping[str, Any]:
+  return span.content if isinstance(span.content, Mapping) else {}
+
+
+def _not_after(start: Optional[datetime], end: Optional[datetime]) -> bool:
+  """The start is not later than the end (True when either is unknown)."""
+  return start is None or end is None or start <= end
+
+
 def _pair_tool_calls(
-    spans: Sequence[Span], profile: ToolProfile
+    spans: Sequence[Span],
+    times: Sequence[Optional[datetime]],
+    profile: ToolProfile,
 ) -> tuple[ToolStep, ...]:
-  """Pair TOOL_STARTING rows with their end rows by ``span_id``."""
-  pending: list[dict[str, Any]] = []
-  by_span: dict[str, dict[str, Any]] = {}
-  for span in spans:
-    content = span.content if isinstance(span.content, Mapping) else {}
-    if span.event_type == "TOOL_STARTING":
-      args = content.get("args")
-      args = dict(args) if isinstance(args, Mapping) else {}
-      purpose = None
-      if profile.purpose_arg is not None and profile.purpose_arg in args:
-        value = args.pop(profile.purpose_arg)
-        purpose = value if isinstance(value, str) else None
-      step = {
-          "tool": _usable_text(content.get("tool")),
-          "args": args,
-          "purpose": purpose,
-          "result": "",
-          "status": "MISSING",
-          "error_message": None,
-          "span_id": _usable_text(span.span_id),
-          "trace_id": _usable_text(span.trace_id),
+  """Pairs each call's TOOL_STARTING row with its end row, in two passes.
+
+  The session query breaks timestamp ties by ``event_type``, so an end row
+  can sort before its start. As in ``extract_tool_trajectory``, all starts
+  are collected first, then each end row (TOOL_COMPLETED or TOOL_ERROR)
+  finds its start:
+
+  1. A start with the same ``span_id``, in any row order. A writer that
+     reuses one ``span_id`` for several calls gets them paired in order.
+  2. Otherwise (a NULL ``span_id``, or one no start has), the earliest
+     unpaired start of the same tool that is not later than the end row
+     and that no end row names by ``span_id``.
+  3. Otherwise none: the end row is a call of its own, with no arguments.
+
+  Within one ``span_id``, an end row pairs with an unpaired start that is
+  not later than it, preferring one of the same tool. A start row with the
+  ``span_id``, tool, arguments and timestamp of an earlier start, or an end
+  row on a ``span_id`` whose starts are all paired, is a row stored twice
+  (the writers are at-least-once) and is ignored.
+
+  Returns:
+    The steps, ordered by ``ToolStep.row``.
+  """
+  calls: dict[int, dict[str, Any]] = {}
+  by_span: dict[str, list[int]] = {}
+  ended: set[str] = set()
+  stored: set[tuple[Any, ...]] = set()
+  for row, span in enumerate(spans):
+    span_id = _usable_text(span.span_id)
+    if span.event_type in _TOOL_END_EVENTS:
+      if span_id:
+        ended.add(span_id)
+      continue
+    if span.event_type != "TOOL_STARTING":
+      continue
+    content = _content(span)
+    tool = _usable_text(content.get("tool"))
+    args = content.get("args")
+    args = dict(args) if isinstance(args, Mapping) else {}
+    key = (
+        span_id,
+        tool,
+        json.dumps(args, sort_keys=True, ensure_ascii=False, default=str),
+        times[row],
+    )
+    if key in stored:
+      continue
+    stored.add(key)
+    purpose = None
+    if profile.purpose_arg is not None and profile.purpose_arg in args:
+      value = args.pop(profile.purpose_arg)
+      purpose = value if isinstance(value, str) else None
+    calls[row] = {
+        "row": row,
+        "end_row": None,
+        "tool": tool,
+        "args": args,
+        "purpose": purpose,
+        "result": "",
+        "status": "MISSING",
+        "error_message": None,
+        "span_id": span_id,
+        "trace_id": _usable_text(span.trace_id),
+        "invocation_id": _usable_text(span.invocation_id),
+        "is_truncated": span.is_truncated,
+    }
+    if span_id:
+      by_span.setdefault(span_id, []).append(row)
+
+  by_tool: dict[str, list[int]] = {}
+  for row, call in calls.items():
+    if call["span_id"] is None or call["span_id"] not in ended:
+      by_tool.setdefault(call["tool"] or "", []).append(row)
+
+  paired: set[int] = set()
+  for row, span in enumerate(spans):
+    if span.event_type not in _TOOL_END_EVENTS:
+      continue
+    content = _content(span)
+    span_id = _usable_text(span.span_id)
+    tool = _usable_text(content.get("tool"))
+    start = None
+    if span_id in by_span:
+      open_starts = [r for r in by_span[span_id] if r not in paired]
+      if not open_starts:
+        continue  # every start on this span is paired: a repeated end
+      in_time = [r for r in open_starts if _not_after(times[r], times[row])]
+      start = next(
+          (r for r in in_time if calls[r]["tool"] == tool),
+          in_time[0] if in_time else None,
+      )
+    if start is None:
+      start = next(
+          (
+              candidate
+              for candidate in by_tool.get(tool or "", ())
+              if candidate not in paired
+              and _not_after(times[candidate], times[row])
+          ),
+          None,
+      )
+    if start is None:
+      call = calls[row] = {
+          "row": row,
+          "tool": None,
+          "args": {},
+          "purpose": None,
+          "span_id": None,
+          "trace_id": None,
+          "invocation_id": None,
           "is_truncated": False,
       }
-      if step["span_id"] in by_span:
-        continue  # a second start for a call that is still open
-      pending.append(step)
-      if step["span_id"]:
-        by_span[step["span_id"]] = step
-    elif span.event_type in _TOOL_END_EVENTS:
-      step = by_span.pop(_usable_text(span.span_id) or "", None)
-      if step is None:
-        continue
-      result = content.get("result")
-      if result is None and span.event_type == "TOOL_ERROR":
-        result = span.error_message
-      step["result"] = _text(result)
-      step["status"] = (
-          "ERROR"
-          if span.event_type == "TOOL_ERROR" or span.status == "ERROR"
-          else "OK"
-      )
-      step["error_message"] = span.error_message
-      step["is_truncated"] = span.is_truncated
+    else:
+      call = calls[start]
+      paired.add(start)
+    result = content.get("result")
+    if result is None and span.event_type == "TOOL_ERROR":
+      result = span.error_message
+    call["tool"] = call["tool"] or tool
+    call["result"] = _text(result)
+    call["status"] = (
+        "ERROR"
+        if span.event_type == "TOOL_ERROR" or span.status == "ERROR"
+        else "OK"
+    )
+    call["error_message"] = span.error_message
+    call["span_id"] = call["span_id"] or span_id
+    call["trace_id"] = call["trace_id"] or _usable_text(span.trace_id)
+    call["invocation_id"] = call["invocation_id"] or _usable_text(
+        span.invocation_id
+    )
+    call["is_truncated"] = call["is_truncated"] or span.is_truncated
+    call["end_row"] = row
+
+  ordered = [calls[row] for row in sorted(calls)]
   return tuple(
-      ToolStep(index=i, **step) for i, step in enumerate(pending, start=1)
+      ToolStep(index=i, **call) for i, call in enumerate(ordered, start=1)
   )
 
 
@@ -898,8 +1184,16 @@ def _parse_reference(value: Any) -> Optional[_Reference]:
   if isinstance(decoded, bool):
     return _Reference("string", str(decoded).lower(), raw=text)
   if isinstance(decoded, (int, float)):
-    return _Reference("number", float(decoded), _decimals(text), raw=text)
+    # Read the JSON text itself: a float would merge large integers.
+    number = _decimal(text)
+    if number is None:  # NaN, infinity or an exponent out of range
+      return _Reference("string", text, raw=text)
+    return _Reference("number", number[0], number[1], raw=text)
   if isinstance(decoded, list):
+    try:
+      decoded = json.loads(text, parse_float=Decimal)
+    except (ValueError, decimal.DecimalException):
+      pass
     return _Reference("list", tuple(decoded), raw=text)
   if isinstance(decoded, str):
     number = _as_number(decoded)
@@ -909,50 +1203,77 @@ def _parse_reference(value: Any) -> Optional[_Reference]:
   return _Reference("string", str(decoded), raw=text)
 
 
-def _decimals(text: str) -> int:
-  """Decimal places ``text`` is written to; ``4.6e-13`` has 14."""
-  mantissa, _, exponent = text.lower().partition("e")
-  places = len(mantissa.split(".", 1)[1]) if "." in mantissa else 0
+def _decimal(text: str) -> Optional[tuple[Decimal, int]]:
+  """``text`` as (value, decimal places it is written to), exactly.
+
+  ``4.6e-13`` is written to 14 places. NaN and infinity are not numbers.
+  """
   try:
-    places -= int(exponent) if exponent else 0
-  except ValueError:
-    pass
-  return max(places, 0)
+    value = Decimal(text)
+  except (decimal.InvalidOperation, ValueError):
+    return None
+  if not value.is_finite():
+    return None
+  return value, max(-value.as_tuple().exponent, 0)
 
 
-def _as_number(text: Any) -> Optional[tuple[float, int]]:
-  """A bare number (quotes, commas, %, spaces allowed) as (value, decimals)."""
+def _as_number(text: Any) -> Optional[tuple[Decimal, int]]:
+  """A bare number (quotes, %, spaces and thousands commas allowed).
+
+  Returns (value, decimal places), or None. A comma counts only as a
+  thousands separator: ``1,234`` is 1234, and ``3,5`` is not a number.
+  """
   if isinstance(text, bool) or text is None:
     return None
-  if isinstance(text, int):
-    return float(text), 0
+  if isinstance(text, (int, Decimal)):
+    return _decimal(str(text))
   if isinstance(text, float):
-    return text, _decimals(repr(text))
-  candidate = (
-      str(text).strip().strip("'\"`").strip().rstrip("%").replace(",", "")
-  ).strip()
+    return _decimal(repr(text))
+  candidate = str(text).strip().strip("'\"`").strip().rstrip("%").strip()
   if not _BARE_NUMBER_RE.fullmatch(candidate):
     return None
-  try:
-    return float(candidate), _decimals(candidate)
-  except ValueError:
-    return None
+  return _decimal(candidate.replace(",", ""))
 
 
-def _numbers_in(text: str) -> list[tuple[float, int]]:
+def _numbers_in(text: str) -> list[tuple[Decimal, int]]:
+  """The numbers in ``text``, in order.
+
+  ``1,234`` is one number, unless a comma joins it to more digits, as in
+  a CSV row (``2001,812,450``), or it is in a list (``[812,450]``); then
+  each comma separates two numbers. A bare ``812,450`` stays one number.
+  """
   out = []
   for match in _NUMBER_RE.finditer(text):
-    token = match.group(0).replace(",", "")
-    try:
-      out.append((float(token), _decimals(token)))
-    except ValueError:
-      continue
+    token = match.group(0)
+    joined = "," in token and (
+        text[match.start() - 1 : match.start()] in (",", "[")
+        or _COMMA_DIGIT_RE.match(text, match.end())
+    )
+    for part in token.split(",") if joined else (token.replace(",", ""),):
+      number = _decimal(part)
+      if number is not None:
+        out.append(number)
   return out
 
 
-def _close_at(value: float, target: float, decimals: int) -> bool:
+def _close_at(value: Decimal, target: Decimal, decimals: int) -> bool:
   """True when ``value`` rounds to ``target`` at ``decimals`` places."""
-  return abs(value - target) <= 0.5 * 10 ** (-decimals) * (1 + 1e-9)
+  try:
+    with decimal.localcontext() as context:
+      context.prec = 100
+      return abs(value - target) <= Decimal(5).scaleb(-decimals - 1)
+  except decimal.DecimalException:
+    return False  # an exponent too extreme to compare
+
+
+def _similar(value: Decimal, reference: Decimal) -> bool:
+  """``value`` is within a factor of 2 of ``reference``."""
+  if not reference:
+    return False
+  try:
+    return Decimal("0.5") <= value / reference <= 2
+  except decimal.DecimalException:
+    return False
 
 
 def _significant_digits(raw: str) -> int:
@@ -1032,15 +1353,19 @@ def _answer_contains_reference(
             " or formatted as requested"
         )
       return None
+    if _COMMA_JOINED_RE.fullmatch(answer.strip().strip("'\"`")):
+      return None
     numbers = _numbers_in(answer)
-    if numbers and _close_at(
+    if not numbers or not _close_at(
         numbers[-1][0], reference.value, reference.decimals
     ):
-      return (
-          "the answer states the reference value inside prose"
-          f" ({_short(answer, 50)!r})"
-      )
-    return None
+      return None
+    if _is_count_in_prose(answer, reference):
+      return None
+    return (
+        "the answer states the reference value inside prose"
+        f" ({_short(answer, 50)!r})"
+    )
   reference_tokens = _tokens(reference.value)
   if not reference_tokens:
     return None
@@ -1064,6 +1389,27 @@ def _answer_contains_reference(
         f" ({_short(answer, 50)!r})"
     )
   return None
+
+
+def _is_count_in_prose(answer: str, reference: _Reference) -> bool:
+  """Is the answer's last number a small count of what it was computed from?
+
+  As in "812.6, computed over 3 files" for the reference 3: a small whole
+  number after "over", "across", "from", "using", "among" or "based on"
+  and before a word.
+  """
+  if reference.decimals or reference.value.copy_abs() >= 10 ** (
+      SEEN_MIN_SIGNIFICANT_DIGITS - 1
+  ):
+    return False
+  last = None
+  for last in _NUMBER_RE.finditer(answer):
+    pass
+  return (
+      last is not None
+      and _COUNT_BEFORE_RE.search(answer, 0, last.start()) is not None
+      and _WORD_AFTER_RE.match(answer, last.end()) is not None
+  )
 
 
 def _reported_token(line: str) -> Optional[str]:
@@ -1120,11 +1466,7 @@ def _reference_seen_in(text: str, reference: _Reference) -> bool:
         reference.decimals == 0
         and YEAR_RANGE[0] <= reference.value <= YEAR_RANGE[1]
     )
-    similar = sum(
-        1
-        for value, _ in numbers
-        if reference.value and 0.5 <= value / reference.value <= 2
-    )
+    similar = sum(1 for value, _ in numbers if _similar(value, reference.value))
     if year_like or similar >= DENSE_SERIES_MIN:
       # A year is also a row label in any table over the period, and a long
       # series of similar values hits the reference by chance: count those
