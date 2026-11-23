@@ -12,6 +12,11 @@ bigquery-agent-analytics/).
 [User Manual](USER_MANUAL.md) — prerequisites, setup, page guide, and
 troubleshooting, written for dashboard users.
 
+**Prefer to describe a dashboard in words?** [`copilot/`](copilot/README.md)
+is a browser-only preview that turns a prompt into a dashboard page over the
+same `agent_events` table. It is an experiment and is not part of the PBIP
+project.
+
 ## Overview
 
 The project lives under `dashboards/power_bi/` and is generated from the
