@@ -896,7 +896,10 @@ def _render_session_link(session_id):
   url = _session_link()["url"]
   replacements = {
       "${__url.path}": "/d/bqaa-dashboard-efficiency-trial/trial",
-      "${__url_time_range}": "from=now-24h&to=now",
+      "${__org.id}": "3",
+      "${__from}": "1762992000000",
+      "${__to}": "1763078400000",
+      "${__timezone}": "utc",
       "${datasource:queryparam}": "var-datasource=bqaa-bigquery",
       # Grafana's percentencode is encodeURIComponent plus !'()*.
       "${__data.fields.session_id:percentencode}": parse.quote(
@@ -913,7 +916,26 @@ def _render_session_link(session_id):
 def test_session_link_opens_the_whole_trace():
   link = _session_link()
   assert link["title"] == "Open session trace (all agents and event types)"
-  assert link["targetBlank"] is False
+  # A new tab, not the same one. In Grafana 12.3 a same-tab click switches
+  # to the single-panel view (viewPanel=19) and cancels the Trace detail
+  # query it has just started, so the table keeps the previous rows until
+  # a refresh.
+  assert link["targetBlank"] is True
+
+
+def test_session_link_keeps_the_org_and_the_window_on_screen():
+  # The new tab is a fresh page load, so the link has to carry what the
+  # open tab knew: its organization (another tab may have switched the
+  # user to a different one) and the absolute bounds on screen.
+  # ${__url_time_range} would pass a relative range such as now-24h, which
+  # the new tab re-evaluates at click time.
+  url = _session_link()["url"]
+  query = parse.parse_qs(parse.urlsplit(url).query)
+  assert query["orgId"] == ["${__org.id}"]
+  assert query["from"] == ["${__from}"]
+  assert query["to"] == ["${__to}"]
+  assert query["timezone"] == ["${__timezone}"]
+  assert "${__url_time_range}" not in url
 
 
 @pytest.mark.parametrize("session_id", _SESSION_IDS)
@@ -922,8 +944,10 @@ def test_session_link_round_trips_the_session_id(session_id):
   query = parse.parse_qs(url.query, keep_blank_values=True, strict_parsing=True)
   assert url.path == "/d/bqaa-dashboard-efficiency-trial/trial"
   assert query == {
-      "from": ["now-24h"],
-      "to": ["now"],
+      "orgId": ["3"],
+      "from": ["1762992000000"],
+      "to": ["1763078400000"],
+      "timezone": ["utc"],
       "var-datasource": ["bqaa-bigquery"],
       "var-agent": ["$__all"],
       "var-user_id": ["$__all"],
