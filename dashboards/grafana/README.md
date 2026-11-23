@@ -77,9 +77,10 @@ still follow the full steps below with a scoped service account.
 3. **Keys → Add Key → Create new key → JSON**, and download it.
 
 > **Keep the key out of the repo.** `.gitignore` only covers new `*.json`
-> files directly in `dashboards/grafana/` and in `dashboards/grafana/gallery/`
-> (apart from the tracked `*.gallery.json`). A key saved anywhere else,
-> including other subfolders, can be committed by accident.
+> files directly in `dashboards/grafana/` and anywhere under
+> `dashboards/grafana/gallery/` (apart from the tracked `*.gallery.json`). A
+> key saved anywhere else, including other subfolders, can be committed by
+> accident.
 
 ### 3. Prepare the data
 
@@ -433,15 +434,19 @@ fails when the two drift apart.
    `agent_events`, `adk_`, `1.25`, `5.00`): the export copies whatever they
    hold.
 3. **Export → Export as code**, model **Classic**, turn on **Export for
-   sharing externally**, and download the file.
+   sharing externally**, and download the file. Save it as
+   `dashboards/grafana/gallery/exported.json`, which `.gitignore` ignores.
 4. Drop the instance `id` and the built-in requirements with an empty
    `version`, which grafana.com rejects on revision upload:
 
    ```bash
-   jq 'del(.id) | del(.__requires[] | select(.version == ""))' exported.json \
+   jq 'del(.id) | del(.__requires[] | select(.version == ""))' \
+     dashboards/grafana/gallery/exported.json \
      > dashboards/grafana/gallery/bqaa-dashboard-efficiency-trial.gallery.json
+   rm dashboards/grafana/gallery/exported.json
    ```
 
-   Don't commit `exported.json`. `.gitignore` keeps every other `*.json` in
-   `gallery/` out of the repo.
+   `exported.json` can hold real project and dataset names. `.gitignore`
+   ignores every `*.json` under `gallery/` except `*.gallery.json`, so it
+   can't be staged by accident while it's there.
 5. Run `pytest tests/test_grafana_gallery_export.py tests/test_grafana_efficiency_trial.py`.
