@@ -891,7 +891,7 @@ def _session_link():
   return link
 
 
-def _render_session_link(session_id):
+def _render_session_link(session_id, timezone="utc"):
   """Interpolates the link like Grafana, ``percentencode`` included."""
   url = _session_link()["url"]
   replacements = {
@@ -899,9 +899,9 @@ def _render_session_link(session_id):
       "${__org.id}": "3",
       "${__from}": "1762992000000",
       "${__to}": "1763078400000",
-      "${__timezone}": "utc",
       "${datasource:queryparam}": "var-datasource=bqaa-bigquery",
       # Grafana's percentencode is encodeURIComponent plus !'()*.
+      "${__timezone:percentencode}": parse.quote(timezone, safe="-_.~"),
       "${__data.fields.session_id:percentencode}": parse.quote(
           session_id, safe="-_.~"
       ),
@@ -928,13 +928,14 @@ def test_session_link_keeps_the_org_and_the_window_on_screen():
   # open tab knew: its organization (another tab may have switched the
   # user to a different one) and the absolute bounds on screen.
   # ${__url_time_range} would pass a relative range such as now-24h, which
-  # the new tab re-evaluates at click time.
+  # the new tab re-evaluates at click time. The timezone is percent-encoded:
+  # a raw "+" (as in Etc/GMT+5) would reach the new tab as a space.
   url = _session_link()["url"]
   query = parse.parse_qs(parse.urlsplit(url).query)
   assert query["orgId"] == ["${__org.id}"]
   assert query["from"] == ["${__from}"]
   assert query["to"] == ["${__to}"]
-  assert query["timezone"] == ["${__timezone}"]
+  assert query["timezone"] == ["${__timezone:percentencode}"]
   assert "${__url_time_range}" not in url
 
 
@@ -955,6 +956,16 @@ def test_session_link_round_trips_the_session_id(session_id):
       "var-session_id": [session_id],
       "viewPanel": ["19"],
   }
+
+
+@pytest.mark.parametrize(
+    "timezone",
+    ["utc", "Etc/GMT+5", "Etc/GMT-14", "America/Argentina/Buenos_Aires"],
+)
+def test_session_link_round_trips_the_timezone(timezone):
+  url = parse.urlsplit(_render_session_link("sess-1", timezone))
+  query = parse.parse_qs(url.query, keep_blank_values=True, strict_parsing=True)
+  assert query["timezone"] == [timezone]
 
 
 def test_latency_legend_names_real_query_columns():
