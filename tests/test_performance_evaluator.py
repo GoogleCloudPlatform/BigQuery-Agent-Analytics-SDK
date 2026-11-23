@@ -243,6 +243,74 @@ class TestSessionTrace:
 
     assert response == "LLM says hello."
 
+  @staticmethod
+  def _llm_turns(*contents):
+    ts = datetime.now(timezone.utc)
+    return [
+        TraceEvent(
+            event_type="LLM_RESPONSE",
+            agent="agent",
+            timestamp=ts,
+            content=c,
+            attributes={},
+        )
+        for c in contents
+    ]
+
+  @pytest.mark.parametrize(
+      "last_turn",
+      [
+          {"response": "call: run_python"},
+          {"response": "text: 'Let me check the file.' | call: preview_file"},
+          "call: run_python",
+      ],
+  )
+  def test_extract_final_response_skips_tool_call_turn(self, last_turn):
+    """A run that stops on a tool call has no answer to match.
+
+    The earlier text turn was the model thinking aloud, not its answer.
+    """
+    events = self._llm_turns({"response": "I will load the data."}, last_turn)
+    trace = SessionTrace(session_id="sess-1", user_id="user-1", events=events)
+
+    assert trace.extract_final_response() is None
+
+  @pytest.mark.parametrize(
+      "turns, expected",
+      [
+          (("call: run_python", "None"), None),
+          (("text: 'Done.'", "None"), "text: 'Done.'"),
+      ],
+  )
+  def test_extract_final_response_skips_empty_turns(self, turns, expected):
+    """The plugin logs a model turn with no content parts as "None"."""
+    events = self._llm_turns(*({"response": t} for t in turns))
+    trace = SessionTrace(session_id="sess-1", user_id="user-1", events=events)
+
+    assert trace.extract_final_response() == expected
+
+  def test_extract_final_response_tool_call_turn_uses_agent_completed(self):
+    ts = datetime.now(timezone.utc)
+    events = [
+        TraceEvent(
+            event_type="LLM_RESPONSE",
+            agent="agent",
+            timestamp=ts,
+            content={"response": "call: exit_loop"},
+            attributes={},
+        ),
+        TraceEvent(
+            event_type="AGENT_COMPLETED",
+            agent="agent",
+            timestamp=ts,
+            content={"response": "Loop finished."},
+            attributes={},
+        ),
+    ]
+    trace = SessionTrace(session_id="sess-1", user_id="user-1", events=events)
+
+    assert trace.extract_final_response() == "Loop finished."
+
 
 class TestTrajectoryMetrics:
   """Tests for TrajectoryMetrics class."""
