@@ -19,7 +19,10 @@ PBIP dashboard. It does not need a Power BI license.
   built from the metric and dimension the prompt names.
 - **It doesn't connect to BigQuery.** It starts with a synthetic sample of
   `agent_events` rows. Use **Import data** to load your own rows, and
-  **BigQuery SQL** to copy the queries for a page and run them yourself.
+  **BigQuery SQL** to copy the queries for a page and run them yourself. As
+  on the page, the SQL window ends on the newest day with data, the KPI query
+  also returns the previous window for the deltas, and each chart query
+  returns the same top members the chart shows.
 - **Numbers are close to, not identical to, BigQuery.** P95 values use a
   nearest-rank percentile, while the generated SQL uses `APPROX_QUANTILES`.
 
@@ -48,9 +51,18 @@ bq query --use_legacy_sql=false --format=json --max_rows=5000 \
 ```
 
 The importer reads `latency_ms`, `attributes.usage_metadata`, and
-`content.tool` whether they arrive as JSON objects or JSON strings, and
-accepts `timestamp` as ISO 8601 or epoch seconds. Rows without a parseable
-timestamp are skipped and counted. The data stays in the browser tab.
+`content.tool` whether they arrive as JSON objects or JSON strings. Token
+counts are read from the ADK fields (`total_token_count`), the SDK logger
+fields (`total_tokens`), or `content.usage`. `timestamp` can be ISO 8601,
+epoch seconds, or the zone-less UTC form that `bq --format=json` prints
+(`2026-11-19 20:30:00`), which is read as UTC rather than local time. Rows
+that are malformed or have no parseable timestamp are skipped and counted.
+The data stays in the browser tab.
+
+**Export CSV** writes the rows shown in the table view, after slicers,
+cross-filters, and the search box. Text cells that a spreadsheet would run as
+a formula (starting with `=`, `+`, `-`, `@`, a tab, or a CR) get a leading
+`'`, which the importer removes again.
 
 ## Metrics
 

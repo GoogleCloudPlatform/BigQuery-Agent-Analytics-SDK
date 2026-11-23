@@ -21,6 +21,10 @@
 // export. Exits non-zero with a list of failures.
 'use strict';
 
+// Zone-less UTC timestamps must not shift with the browser's time zone, so run
+// in a zone west of UTC where a late-evening event would move to the next day.
+process.env.TZ = 'America/Los_Angeles';
+
 const fs = require('fs');
 const path = require('path');
 
@@ -134,6 +138,9 @@ const sql = els.sqlModalCode.textContent;
 check(sql.includes('CREATE TEMP TABLE events AS'), 'SQL creates the temp table');
 check(sql.includes('FROM `your-project.your_dataset.agent_events`'), 'SQL reads the table');
 check(sql.includes('INTERVAL 7 DAY'), 'SQL uses the selected window');
+check(sql.includes('DECLARE window_end DATE'),
+    'SQL anchors the window on the newest day with data, like the page');
+check(/GROUP BY period/.test(sql), 'KPI SQL returns the previous window too');
 els.tableIdInput.value = 'bad`; DROP TABLE x; --.a.b';
 els.tableIdInput.fire('input');
 check(els.tableIdError.textContent !== '', 'an invalid table id shows an error');
@@ -175,6 +182,90 @@ els.importText.value = csv;
 els.btnApplyImport.fire('click');
 check(/Loaded 2 rows\./.test(els.importStatus.textContent),
     `CSV export re-imports: ${els.importStatus.textContent}`);
+
+// Returns the rows of a CSV export as objects keyed by header.
+const csvRows = (text) => {
+  const [header, ...lines] = text.split('\r\n');
+  const cols = header.split(',');
+  return lines.map((l) => Object.fromEntries(l.split(',').map((v, i) => [cols[i], v])));
+};
+
+// Formula-leading text is neutralized on export and restored on re-import.
+els.importText.value = JSON.stringify([
+  {timestamp: '2026-07-16 23:30:00', event_type: 'TOOL_ERROR', agent: '@SUM(A1)',
+    status: 'ERROR', error_message: '=HYPERLINK("http://x.test","y")'},
+  {timestamp: '2026-07-16 22:00:00 UTC', event_type: 'LLM_RESPONSE', agent: 'a2',
+    error_message: '\tcmd', attributes: {usage_metadata: {total_tokens: 77}}},
+  {timestamp: '2026-07-15T08:00:00Z', event_type: 'LLM_RESPONSE', agent: 'a3',
+    content: {usage: {total: 55}}},
+]);
+els.btnApplyImport.fire('click');
+check(/Loaded 3 rows\./.test(els.importStatus.textContent),
+    `formula rows import: ${els.importStatus.textContent}`);
+els.btnExportCsv.fire('click');
+const guarded = downloads[downloads.length - 1];
+check(guarded.includes('\'@SUM(A1)'), 'an @-leading cell is prefixed on export');
+check(guarded.includes('"\'=HYPERLINK(""http://x.test"",""y"")"'),
+    'an =-leading cell is prefixed before quoting');
+check(guarded.includes('\'\tcmd'), 'a tab-leading cell is prefixed on export');
+check(!/(^|,)[=@+\-]/m.test(guarded.replace(/"[^"]*"/g, '')),
+    'no exported cell starts with a formula character');
+
+// Zone-less timestamps are UTC, whatever the local time zone.
+const exported = csvRows(guarded);
+check(exported.some((r) => r.timestamp === '2026-07-16T23:30:00.000Z' &&
+    r.event_date === '2026-07-16'), 'a zone-less timestamp is read as UTC');
+check(exported.some((r) => r.timestamp === '2026-07-16T22:00:00.000Z'),
+    'a "UTC"-suffixed timestamp is read as UTC');
+
+// Token totals from the SDK logger and from content.usage.
+check(exported.some((r) => r.agent === 'a2' && r.total_tokens === '77'),
+    'usage_metadata.total_tokens is read');
+check(exported.some((r) => r.agent === 'a3' && r.total_tokens === '55'),
+    'content.usage.total is read');
+
+els.importText.value = guarded;
+els.btnApplyImport.fire('click');
+check(/Loaded 3 rows\./.test(els.importStatus.textContent),
+    `guarded CSV re-imports: ${els.importStatus.textContent}`);
+check(els.slicerAgent.innerHTML.includes('@SUM(A1)') &&
+    !els.slicerAgent.innerHTML.includes('\'@SUM'),
+    'the formula guard is removed on re-import');
+
+// Export honours the explorer search box.
+els.tableSearch.value = 'a3';
+els.btnExportCsv.fire('click');
+const searched = csvRows(downloads[downloads.length - 1]);
+check(searched.length === 1 && searched[0].agent === 'a3',
+    `export follows the explorer search: ${searched.length} rows`);
+els.tableSearch.value = '';
+
+// A malformed JSON Lines row is skipped and counted, not fatal.
+els.importText.value = [
+  JSON.stringify({timestamp: '2026-07-16T10:00:00Z', event_type: 'LLM_RESPONSE'}),
+  '{not json',
+].join('\n');
+els.btnApplyImport.fire('click');
+check(/Loaded 1 rows; skipped 1/.test(els.importStatus.textContent),
+    `malformed line import: ${els.importStatus.textContent}`);
+
+// Nearest-rank P95: nineteen 1 ms calls and one 1,000 ms call give 1 ms.
+els.importText.value = JSON.stringify(Array.from({length: 20}, (_, i) => ({
+  timestamp: `2026-07-16T10:00:${String(i).padStart(2, '0')}Z`,
+  event_type: 'LLM_RESPONSE', agent: 'p', latency_ms: {total_ms: i === 19 ? 1000 : 1},
+})));
+els.btnApplyImport.fire('click');
+els.promptInput.value = 'Show p95 LLM latency and time to first token by model';
+els.promptForm.fire('submit');
+check(/>1 ms</.test(els.kpiGrid.innerHTML) && !/1,000 ms</.test(els.kpiGrid.innerHTML),
+    'P95 uses the nearest rank');
+
+// The donut SQL folds the tail into "Other", like the chart.
+els.promptInput.value = 'Compare events by event type as a pie';
+els.promptForm.fire('submit');
+els.btnShowSql.fire('click');
+check(els.sqlModalCode.textContent.includes('CONCAT(\'Other (\''),
+    'donut SQL folds the tail into Other');
 
 if (failures.length) {
   console.error(`FAILED:\n- ${failures.join('\n- ')}`);

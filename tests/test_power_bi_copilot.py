@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Checks for the browser-only Copilot preview in dashboards/power_bi/copilot."""
+"""Tests for the browser-only Copilot preview in dashboards/power_bi/copilot."""
 
 from pathlib import Path
 import re
@@ -72,7 +72,9 @@ def test_every_element_id_the_script_reads_exists():
 def test_whitespace_hygiene(name):
   text = _read(name)
   assert text.endswith("\n") and not text.endswith("\n\n"), name
-  bad = [n for n, line in enumerate(text.splitlines(), 1) if line != line.rstrip()]
+  bad = [
+      n for n, line in enumerate(text.splitlines(), 1) if line != line.rstrip()
+  ]
   assert not bad, f"{name}: trailing whitespace on lines {bad}"
 
 
