@@ -671,7 +671,6 @@ class TestTrace:
           "text: 'Checking the data.' | call: a | call: b",
           "call: mcp.read-file",
           "call: ns:tool",
-          "call: 3d_tool",
           # A function call whose name the model left empty.
           "text: 'Let me check.' | call: ",
       ],
@@ -714,6 +713,8 @@ class TestTrace:
           ("Please call: support", "Please call: support"),
           ("text: 'A | call: b'", "A | call: b"),
           ("text: 'x' | call: b is next", "x' | call: b is next"),
+          # Not a function name, so not the plugin's encoding.
+          ("call: 555-0100", "call: 555-0100"),
       ],
   )
   def test_final_response_keeps_text_that_mentions_call(self, answer, expected):

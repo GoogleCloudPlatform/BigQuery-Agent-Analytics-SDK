@@ -95,7 +95,7 @@ def _bq_client(ai_generate_fails=True, ml_generate_text_fails=True):
       raise RuntimeError("ML.GENERATE_TEXT is unavailable")
     if "LIMIT @max_sessions" in sql:
       rows = [{"session_id": "s1"}]
-    elif "AS final_response" in sql:
+    elif "AS transcript\nFROM" in sql:
       rows = [{"session_id": "s1", "transcript": "USER_MESSAGE_RECEIVED: hi"}]
     elif "AI.GENERATE(" in sql:
       rows = [{"session_id": "s1"}]
