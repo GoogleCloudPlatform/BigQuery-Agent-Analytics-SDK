@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Rule-based span attribution (`rule_taxonomy`, #435)** —
+  `label_failed_session_rules()` reads the `agent_events` rows of one
+  failed session, the same rows `span_taxonomy` reads, and runs
+  deterministic rules for four G1-frozen categories: two the mechanical
+  verdict never emits, turn-waste (`TW-CALL-CAP`, `TW-THRASH`) and
+  incomplete evidence (`IE-PREVIEW-ONLY`, `IE-PASTED-PREVIEW`), and finer
+  diagnoses for two it does, tool blockers (`TB-ABORT`, `TB-NO-TOOLS`,
+  `TB-UNRECOVERED`) and finalization (`FIN-IN-ANSWER`,
+  `FIN-SEEN-NOT-REPORTED`, `FIN-NO-ANSWER`). Each label is a new
+  `RuleFailureLabel`. It has the same `as_tuple()` shape as
+  `SpanFailureLabel`, plus the `rule_id` that fired and a confidence in
+  (0, 1]. `SpanFailureLabel` and its mechanical-only contract are
+  unchanged. Agent-specific tool names and output formats come from a
+  `ToolProfile`. An optional `reference_answer` enables the two rules
+  that compare against the expected answer. Benchmark-specific checks
+  plug in as `checks` callables that read the same `SessionFacts` and
+  return labels. Rows that repeat an `event_id` are counted once. Pure and
+  offline: no BigQuery, LLM or network.
 - **`Span.is_truncated`** — `Span.from_bigquery_row()` now keeps the
   events table's `is_truncated` column, which `get_trace()` and
   `list_traces()` already selected but dropped. It is `True` when the
