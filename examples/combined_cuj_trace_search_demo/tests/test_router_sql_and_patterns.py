@@ -467,7 +467,7 @@ def test_04_verify_contradictions_ai_generate_contract():
   assert "LIMIT @top_k" in sql_text
   assert "AI.GENERATE(" in sql_text
   assert "_ai_index_trajectory" in sql_text
-  assert "thinking_budget" in sql_text
+  assert "thinking_level" in sql_text
   assert "generation_config" in sql_text
   for field in (
       "is_silent_contradiction BOOL",
@@ -485,7 +485,7 @@ def test_04_verify_contradictions_ai_generate_contract():
           "PROJECT_ID": "demo-proj",
           "DATASET_ID": "agent_ops",
           "EVAL_TURNS_TABLE": "eval_turns",
-          "ENDPOINT": "gemini-2.5-flash",
+          "ENDPOINT": "gemini-4-hydrogen",
           "CONNECTION_ARG": "connection_id => 'demo-proj.us.vertex_conn', ",
       },
   )
@@ -673,7 +673,7 @@ def test_layer1_decisions_api_routing_and_v1beta(
   assert low_conf.confidence == pytest.approx(0.61)
 
 
-def test_layer1_vertex_flash_fallback_thinking_budget_zero():
+def test_layer1_vertex_hydrogen_and_flash_fallback():
   calls = []
 
   class FakeModels:
@@ -690,21 +690,37 @@ def test_layer1_vertex_flash_fallback_thinking_budget_zero():
       return SimpleNamespace(
           text=payload,
           usage_metadata=SimpleNamespace(
-              prompt_token_count=42, candidates_token_count=18
+              prompt_token_count=42,
+              candidates_token_count=18,
+              thoughts_token_count=7,
           ),
       )
 
   fake_vertex = SimpleNamespace(models=FakeModels())
   router = QueryRouter(backend="vertex", vertex_client=fake_vertex)
+  assert router.location == "global"
   decision = router.classify(
       "agent got stuck calling the same lookup tool repeatedly"
   )
   assert decision.mode == "NATURAL_LANGUAGE"
-  assert decision.layer == "L1_VERTEX_FLASH"
+  assert decision.layer == "L1_VERTEX_HYDROGEN"
   assert decision.input_tokens == 42
-  assert decision.output_tokens == 18
-  assert calls[0]["model"] == "gemini-2.5-flash"
-  assert calls[0]["config"].thinking_config.thinking_budget == 0
+  assert decision.output_tokens == 25
+  assert calls[0]["model"] == "gemini-4-hydrogen"
+  assert calls[0]["config"].thinking_config.thinking_level.value == "LOW"
+
+  legacy_router = QueryRouter(
+      backend="vertex",
+      vertex_model="gemini-2.5-flash",
+      location="us-central1",
+      vertex_client=fake_vertex,
+  )
+  legacy_decision = legacy_router.classify(
+      "agent got stuck calling the same lookup tool repeatedly"
+  )
+  assert legacy_decision.layer == "L1_VERTEX_FLASH"
+  assert calls[1]["model"] == "gemini-2.5-flash"
+  assert calls[1]["config"].thinking_config.thinking_budget == 0
 
 
 def test_live_router_fails_closed_when_unconfigured(
@@ -728,6 +744,13 @@ def test_live_router_fails_closed_when_unconfigured(
 def test_build_materialize_eval_turns_sql_uses_adk_and_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ):
+  monkeypatch.setattr(
+      "analytics.index_and_search._resolve_adk_eval_turn_builder",
+      lambda: lambda events_fqn, raw_where_clause="": (
+          f"SELECT session_id, invocation_id, trace FROM `{events_fqn}`"
+          + (f" WHERE {raw_where_clause}" if raw_where_clause else "")
+      ),
+  )
   sql_adk, source_adk = build_materialize_eval_turns_sql(
       project_id="demo-proj",
       dataset_id="agent_ops",
@@ -736,9 +759,33 @@ def test_build_materialize_eval_turns_sql_uses_adk_and_fallback(
   )
   assert source_adk == "adk_build_eval_turn_query_sql"
   assert "CREATE OR REPLACE TABLE `demo-proj.agent_ops.eval_turns`" in sql_adk
+  assert (
+      "OPTIONS(labels=[('bqaa_demo', 'combined_cuj_trace_search')])" in sql_adk
+  )
   assert "CAST(NULL AS STRING) AS _ai_index_trajectory" in sql_adk
   assert "BYTE_LENGTH(TO_JSON_STRING(b.trace)) AS raw_trace_bytes" in sql_adk
   assert "error_summary" in sql_adk
+
+  # Real resolver imports package export `google.adk.plugins.build_eval_turn_query_sql`
+  # without requiring bigquery_agent_analytics_plugin / pyarrow.
+  fake_plugins_pkg = SimpleNamespace(
+      build_eval_turn_query_sql=lambda events_fqn, raw_where_clause="": (
+          f"SELECT session_id, invocation_id, trace FROM `{events_fqn}`"
+      )
+  )
+  monkeypatch.undo()
+  monkeypatch.setitem(
+      sys.modules,
+      "google.adk.plugins.bigquery_agent_analytics_plugin",
+      None,
+  )
+  monkeypatch.setitem(sys.modules, "google.adk.plugins", fake_plugins_pkg)
+  from analytics.index_and_search import _resolve_adk_eval_turn_builder  # noqa: PLC0415
+
+  assert (
+      _resolve_adk_eval_turn_builder()
+      is fake_plugins_pkg.build_eval_turn_query_sql
+  )
 
   monkeypatch.setattr(
       "analytics.index_and_search._resolve_adk_eval_turn_builder",
@@ -752,6 +799,9 @@ def test_build_materialize_eval_turns_sql_uses_adk_and_fallback(
   )
   assert source_fb == "sql_01_materialize_eval_turns_fallback"
   assert "CREATE OR REPLACE TABLE `demo-proj.agent_ops.eval_turns`" in sql_fb
+  assert (
+      "OPTIONS(labels=[('bqaa_demo', 'combined_cuj_trace_search')])" in sql_fb
+  )
   assert "CAST(NULL AS STRING) AS _ai_index_trajectory" in sql_fb
 
 
@@ -1074,6 +1124,10 @@ def test_eval_cost_cascade_monotonic_reductions():
   )
   assert len(cascade) == 4
   arm1, arm2, arm3, arm4 = cascade
+  for arm in cascade:
+    assert arm["estimation_mode"] == "MODELED_PROJECTION"
+    assert arm["pricing_model"]["compact_judge_in_per_1m_usd"] == 0.30
+    assert arm["pricing_model"]["compact_judge_out_per_1m_usd"] == 2.50
   assert arm4["tokens_per_1k_evals"] < arm3["tokens_per_1k_evals"]
   assert arm3["tokens_per_1k_evals"] < arm2["tokens_per_1k_evals"]
   assert arm2["tokens_per_1k_evals"] < arm1["tokens_per_1k_evals"]
@@ -1083,6 +1137,19 @@ def test_eval_cost_cascade_monotonic_reductions():
   assert arm2["cost_per_1k_usd"] < arm1["cost_per_1k_usd"]
   assert arm3["latency_ms_p50"] <= arm2["latency_ms_p50"]
   assert arm4["savings_vs_naive_pct"] > 90.0
+
+  # Regression: no artificial avg_s3_tokens * 4.0 S1 inflation when S1 is small.
+  tiny_cascade = compute_eval_cost_cascade(
+      turn_rows=[
+          {
+              "raw_trace_bytes": 400,
+              "_ai_index_trajectory": "x" * 800,
+              "has_error": True,
+          }
+      ]
+  )
+  assert tiny_cascade[0]["measured_inputs"]["avg_s1_tokens"] == 100.0
+  assert tiny_cascade[0]["measured_inputs"]["avg_s3_tokens"] == 200.0
 
 
 def test_run_pattern_to_eval_offline_writes_suite_and_report(tmp_path: Path):
@@ -1127,6 +1194,20 @@ def test_sanitize_search_query_strips_reserved_ops_and_backticks():
   # Only-operators input resolves to empty string so caller uses metadata filter.
   assert sanitize_search_query_for_bq("AND OR NOT", mode=ROUTE_KEYWORD) == ""
   assert sanitize_search_query_for_bq("AND OR NOT", mode=ROUTE_HYBRID) == ""
+
+  # BigQuery SEARCH reserved keywords IN and NEAR are quoted cleanly so
+  # queries like 'error IN billing NEAR timeout' never trigger parser errors.
+  kw_in_near = sanitize_search_query_for_bq(
+      "error IN billing NEAR timeout", mode=ROUTE_KEYWORD
+  )
+  assert '"IN"' in kw_in_near.split()
+  assert '"NEAR"' in kw_in_near.split()
+
+  hyb_in_near = sanitize_search_query_for_bq(
+      "CARD_EXPIRED IN billing NEAR timeout", mode=ROUTE_HYBRID
+  )
+  assert '"IN"' in hyb_in_near
+  assert '"NEAR"' in hyb_in_near
 
 
 def test_query_router_handles_null_confidence():
@@ -1506,12 +1587,152 @@ def test_healthy_multitool_live_turns_stay_balanced_above_9k_tokens():
 def test_shell_scripts_offline_permissions_and_scale_cleanup():
   setup_text = (_DEMO_DIR / "setup.sh").read_text(encoding="utf-8")
   assert setup_text.count('chmod 600 "$ENV_FILE"') == 2
+  assert "google-adk[bigquery-analytics]" in setup_text
+  assert "bigquery_agent_analytics_plugin" in setup_text
+  assert "${EXISTING_LOC,,}" not in setup_text
+  assert "tr '[:upper:]' '[:lower:]'" in setup_text
+  assert "bqaa_demo=combined_cuj_trace_search" in setup_text
 
   e2e_text = (_DEMO_DIR / "run_e2e_demo.sh").read_text(encoding="utf-8")
   assert 'if [[ "$OFFLINE_MODE" != "true" ]]; then' in e2e_text
   assert '--location "$BQ_LOCATION"' in e2e_text
+  assert "load_safe_env" in e2e_text
+  assert "umask 077" in e2e_text
 
   reset_text = (_DEMO_DIR / "reset.sh").read_text(encoding="utf-8")
   assert "STARTS_WITH(session_id, 'scale_synth_')" in reset_text
   assert "--delete-scale-rows" in reset_text
-  assert "${EVAL_TURNS_TABLE}_scale" in reset_text
+  assert "${EVAL_TURNS_TABLE}_scale" not in reset_text
+  assert "load_safe_env" in reset_text
+  assert "check_table_owned_by_demo" in reset_text
+  assert "FAILURES" in reset_text
+
+
+def test_staging_ownership_verifier_error_and_partial_embeddings(
+    tmp_path: Path,
+):
+  from analytics.index_and_search import assert_demo_table_ownership_or_absent  # noqa: PLC0415
+  from analytics.index_and_search import populate_trajectories_in_bigquery  # noqa: PLC0415
+
+  # Ownership check rejects unrelated pre-existing tables without demo label.
+  unowned_client = MagicMock()
+  unowned_client.get_table.return_value = SimpleNamespace(
+      labels={"env": "prod"}
+  )
+  with pytest.raises(RuntimeError, match="missing demo ownership label"):
+    assert_demo_table_ownership_or_absent(
+        unowned_client, "demo-proj", "agent_ops", "eval_turns"
+    )
+
+  owned_client = MagicMock()
+  owned_client.get_table.return_value = SimpleNamespace(
+      labels={"bqaa_demo": "combined_cuj_trace_search"}
+  )
+  assert_demo_table_ownership_or_absent(
+      owned_client, "demo-proj", "agent_ops", "eval_turns"
+  )
+
+  # populate_trajectories_in_bigquery creates unique per-run __stage_<hex> tables.
+  stage_names = []
+  pop_client = MagicMock()
+
+  def _fake_pop_query(sql_text, job_config=None):
+    del job_config
+    job = MagicMock()
+    if "WHERE _ai_index_trajectory IS NULL" in sql_text:
+      job.result.return_value = [
+          {
+              "session_id": "s1",
+              "invocation_id": "i1",
+              "root_agent": "a",
+              "has_error": False,
+              "tool_call_count": 0,
+              "tool_error_count": 0,
+              "has_tool_loop": False,
+              "turn_latency_ms": 10,
+              "error_summary": "",
+              "trace": {},
+          }
+      ]
+    else:
+      job.result.return_value = []
+    return job
+
+  def _fake_load(staged, stage_fqn, job_config=None):
+    del staged, job_config
+    stage_names.append(stage_fqn)
+    return MagicMock()
+
+  pop_client.query.side_effect = _fake_pop_query
+  pop_client.load_table_from_json.side_effect = _fake_load
+  populate_trajectories_in_bigquery(
+      pop_client, project_id="demo-proj", dataset_id="agent_ops"
+  )
+  populate_trajectories_in_bigquery(
+      pop_client, project_id="demo-proj", dataset_id="agent_ops"
+  )
+  assert len(stage_names) == 2
+  assert stage_names[0] != stage_names[1]
+  assert "__stage_" in stage_names[0]
+
+  # Partial embeddings emit explicit warning + L3 error emits VERIFIER_ERROR.
+  def fake_partial_and_verifier_err(sql_text, job_config=None):
+    del job_config
+    job = MagicMock()
+    job.total_bytes_processed = 128
+    job.slot_millis = 4
+    job._properties = {"statistics": {"query": {}}}
+    if "COUNT(*)" in sql_text:
+      job.result.return_value = [{"row_count": 8, "ready": 3}]
+    elif "AI.GENERATE(" in sql_text:
+      job.result.return_value = [
+          {
+              "session_id": "s_err",
+              "invocation_id": "i_err",
+              "is_silent_contradiction": False,
+              "pattern_label": None,
+              "confidence": None,
+              "evidence_snippet": None,
+              "ai_generate_status": "QUOTA_EXCEEDED",
+          }
+      ]
+    elif "KeywordRanked" in sql_text:
+      job.result.return_value = [
+          {
+              "session_id": "s_err",
+              "invocation_id": "i_err",
+              "turn_index": 0,
+              "root_agent": "a",
+              "has_error": True,
+              "turn_latency_ms": 100,
+              "_ai_index_trajectory": "err",
+              "rrf_score": 0.03,
+          }
+      ]
+    else:
+      job.result.return_value = []
+    return job
+
+  bq_err = MagicMock()
+  bq_err.query.side_effect = fake_partial_and_verifier_err
+  bq_err.get_table.return_value = SimpleNamespace(num_bytes=512)
+  with pytest.warns(RuntimeWarning, match="Partial embeddings ready"):
+    rep = run_index_and_search(
+        project_id="demo-proj",
+        dataset_id="agent_ops",
+        output_json=tmp_path / "partial_err.json",
+        embed_wait_seconds=0,
+        offline=False,
+        bq_client=bq_err,
+        router=QueryRouter(backend="offline", offline=True),
+    )
+  assert any(
+      "Partial embeddings ready: 3/8" in w
+      for w in rep["index_status"]["warnings"]
+  )
+  q5_res = next(q for q in rep["queries"] if q["query_id"] == "q5_hybrid_mixed")
+  assert q5_res["layer3_verifications"][0]["pattern_label"] == "VERIFIER_ERROR"
+  assert (
+      q5_res["layer3_verifications"][0]["ai_generate_status"]
+      == "QUOTA_EXCEEDED"
+  )

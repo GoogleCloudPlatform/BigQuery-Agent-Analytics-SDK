@@ -28,7 +28,8 @@
 
 CREATE OR REPLACE TABLE `{PROJECT_ID}.{DATASET_ID}.{EVAL_TURNS_TABLE}`
 PARTITION BY DATE(turn_start_timestamp)
-CLUSTER BY root_agent, has_error, session_id AS
+CLUSTER BY root_agent, has_error, session_id
+OPTIONS(labels=[('bqaa_demo', 'combined_cuj_trace_search')]) AS
 WITH
   RawEvents AS (
     SELECT

@@ -39,6 +39,7 @@ from analytics.index_and_search import assert_pure_ascii_sql
 from analytics.index_and_search import render_sql_tokens
 from analytics.seed_scale_benchmark import generate_synthetic_eval_turns
 from analytics.seed_scale_benchmark import validate_bq_identifiers
+from analytics.trajectory_extractor import write_owner_only_text
 
 from bigquery_agent_analytics import EvalCategory
 from bigquery_agent_analytics import EvalSuite
@@ -420,7 +421,12 @@ def compute_eval_cost_cascade(
     search_report: dict[str, Any] | None = None,
     top_k: int = 5,
 ) -> list[dict[str, Any]]:
-  """Computes the 4-arm 8-lever cost cascade ablation table."""
+  """Computes the modeled 4-arm 8-lever cost-cascade projection table.
+
+  Uses measured trajectory token/byte sizes and observed L0/L1 router latency
+  when provided, combined with transparent analytical assumptions for 1,000
+  evaluations, judge pricing, and modeled recall/p50 latencies across arms.
+  """
   rows = turn_rows or []
   n_turns = max(1, len(rows))
   if rows:
@@ -443,7 +449,6 @@ def compute_eval_cost_cascade(
     avg_s1_tokens = 3200.0
     avg_s3_tokens = 95.0
 
-  avg_s1_tokens = max(avg_s1_tokens, avg_s3_tokens * 4.0)
   anomaly_count = sum(
       1
       for r in rows
@@ -456,27 +461,42 @@ def compute_eval_cost_cascade(
       0.05, min(anomaly_frac * 0.55, (top_k / max(5, n_turns)) * 0.35)
   )
 
-  # Reference model pricing (per 1M tokens) for cascade comparison:
-  # Frontier judge ($3.00 in / $15.00 out), Flash judge ($0.30 in / $2.50 out),
-  # Decision prefill ($0.046 / 1K queries), Flash no-think output ($0.60 / 1M).
+  # Uniform reference pricing (per 1M tokens) across all arms:
+  # Frontier baseline judge (Arm 1: $3.00 in / $15.00 out).
+  # Compact verifier model across Arms 2, 3, and 4: $0.30 in / $2.50 out
+  # (gemini-4-hydrogen pricing; savings between Arms 2->3->4 come purely from
+  # fewer escalated turns and lower thinking_level="LOW" output token budgets).
+  frontier_in_per_1m = 3.00
+  frontier_out_per_1m = 15.00
+  compact_in_per_1m = 0.30
+  compact_out_per_1m = 2.50
+  router_prefill_per_1k = 0.046
+  router_cascade_prefill_per_1k = 0.023
+
   arm1_tokens = int(round((avg_s1_tokens + 450.0) * 1000.0))
   arm1_cost = round(
-      1000.0 * (avg_s1_tokens * 3.00 + 450.0 * 15.00) / 1_000_000.0, 4
+      1000.0
+      * (avg_s1_tokens * frontier_in_per_1m + 450.0 * frontier_out_per_1m)
+      / 1_000_000.0,
+      4,
   )
 
   arm2_tokens = int(round((avg_s3_tokens + 180.0) * 1000.0))
   arm2_cost = round(
-      1000.0 * (avg_s3_tokens * 0.30 + 180.0 * 2.50) / 1_000_000.0, 4
+      1000.0
+      * (avg_s3_tokens * compact_in_per_1m + 180.0 * compact_out_per_1m)
+      / 1_000_000.0,
+      4,
   )
 
   arm3_tokens = int(
       round(1000.0 * (60.0 + anomaly_frac * (avg_s3_tokens + 120.0)))
   )
   arm3_cost = round(
-      0.046
+      router_prefill_per_1k
       + 1000.0
       * anomaly_frac
-      * (avg_s3_tokens * 0.30 + 120.0 * 2.50)
+      * (avg_s3_tokens * compact_in_per_1m + 120.0 * compact_out_per_1m)
       / 1_000_000.0,
       4,
   )
@@ -485,23 +505,13 @@ def compute_eval_cost_cascade(
       round(1000.0 * (30.0 + cascade_frac * (avg_s3_tokens + 64.0)))
   )
   arm4_cost = round(
-      0.023
+      router_cascade_prefill_per_1k
       + 1000.0
       * cascade_frac
-      * (avg_s3_tokens * 0.30 + 64.0 * 0.60)
+      * (avg_s3_tokens * compact_in_per_1m + 64.0 * compact_out_per_1m)
       / 1_000_000.0,
       4,
   )
-
-  # Guard strict monotonicity even on tiny custom synthetic inputs.
-  if arm3_tokens >= arm2_tokens:
-    arm3_tokens = max(1, int(arm2_tokens * 0.65))
-  if arm4_tokens >= arm3_tokens:
-    arm4_tokens = max(1, int(arm3_tokens * 0.55))
-  if arm3_cost >= arm2_cost:
-    arm3_cost = round(arm2_cost * 0.60, 4)
-  if arm4_cost >= arm3_cost:
-    arm4_cost = round(arm3_cost * 0.45, 4)
 
   router_latencies = [
       float(q.get("router_decision", {}).get("latency_ms", 0.0))
@@ -517,20 +527,41 @@ def compute_eval_cost_cascade(
       return 0.0
     return round((1.0 - cost / arm1_cost) * 100.0, 2)
 
+  shared_measured_inputs = {
+      "turn_count": len(rows),
+      "avg_s1_tokens": round(avg_s1_tokens, 2),
+      "avg_s3_tokens": round(avg_s3_tokens, 2),
+      "anomaly_fraction": round(anomaly_frac, 4),
+      "cascade_escalation_fraction": round(cascade_frac, 4),
+      "measured_router_median_ms": round(median_router_ms, 2),
+  }
+  shared_pricing = {
+      "frontier_in_per_1m_usd": frontier_in_per_1m,
+      "frontier_out_per_1m_usd": frontier_out_per_1m,
+      "compact_judge_in_per_1m_usd": compact_in_per_1m,
+      "compact_judge_out_per_1m_usd": compact_out_per_1m,
+  }
+
   return [
       {
           "arm_id": "arm_1_naive_raw_judge",
-          "name": "Arm 1: Naive Raw Trace Frontier Judge",
+          "name": "Arm 1: Naive Raw Trace Frontier Judge (Modeled)",
+          "estimation_mode": "MODELED_PROJECTION",
           "levers_applied": [],
           "tokens_per_1k_evals": arm1_tokens,
           "cost_per_1k_usd": arm1_cost,
           "latency_ms_p50": 2400.0,
+          "latency_model": "analytical_projection",
           "contradiction_recall": 0.88,
+          "recall_model": "analytical_projection",
           "savings_vs_naive_pct": 0.0,
+          "measured_inputs": shared_measured_inputs,
+          "pricing_model": shared_pricing,
       },
       {
           "arm_id": "arm_2_scoped_s3_trim",
-          "name": "Arm 2: Turn Scope + Deterministic S3 Trim",
+          "name": "Arm 2: Turn Scope + Deterministic S3 Trim (Modeled)",
+          "estimation_mode": "MODELED_PROJECTION",
           "levers_applied": [
               "1_code_first",
               "3_turn_scope",
@@ -539,12 +570,17 @@ def compute_eval_cost_cascade(
           "tokens_per_1k_evals": arm2_tokens,
           "cost_per_1k_usd": arm2_cost,
           "latency_ms_p50": 620.0,
+          "latency_model": "analytical_projection",
           "contradiction_recall": 0.94,
+          "recall_model": "analytical_projection",
           "savings_vs_naive_pct": _pct(arm2_cost),
+          "measured_inputs": shared_measured_inputs,
+          "pricing_model": shared_pricing,
       },
       {
           "arm_id": "arm_3_routed_prefilter",
-          "name": "Arm 3: + L0/L1 Router + SQL Cohort Prefilter",
+          "name": "Arm 3: + L0/L1 Router + SQL Cohort Prefilter (Modeled)",
+          "estimation_mode": "MODELED_PROJECTION",
           "levers_applied": [
               "1_code_first",
               "2_targeted_sampling",
@@ -556,12 +592,17 @@ def compute_eval_cost_cascade(
           "tokens_per_1k_evals": arm3_tokens,
           "cost_per_1k_usd": arm3_cost,
           "latency_ms_p50": l1_p50,
+          "latency_model": "analytical_projection_from_router_median",
           "contradiction_recall": 0.96,
+          "recall_model": "analytical_projection",
           "savings_vs_naive_pct": _pct(arm3_cost),
+          "measured_inputs": shared_measured_inputs,
+          "pricing_model": shared_pricing,
       },
       {
           "arm_id": "arm_4_full_cascade",
-          "name": "Arm 4: Full 4-Layer Cascade + Scoped AI.GENERATE",
+          "name": "Arm 4: Full 4-Layer Cascade + Scoped AI.GENERATE (Modeled)",
+          "estimation_mode": "MODELED_PROJECTION",
           "levers_applied": [
               "1_code_first",
               "2_targeted_sampling",
@@ -569,14 +610,18 @@ def compute_eval_cost_cascade(
               "4_boilerplate_trim",
               "5_decision_model",
               "6_storing_projection",
-              "7_thinking_budget_zero",
+              "7_thinking_level_low",
               "8_cascade_top_k_escalation",
           ],
           "tokens_per_1k_evals": arm4_tokens,
           "cost_per_1k_usd": arm4_cost,
           "latency_ms_p50": 145.0,
+          "latency_model": "analytical_projection",
           "contradiction_recall": 0.98,
+          "recall_model": "analytical_projection",
           "savings_vs_naive_pct": _pct(arm4_cost),
+          "measured_inputs": shared_measured_inputs,
+          "pricing_model": shared_pricing,
       },
   ]
 
@@ -643,8 +688,7 @@ def run_pattern_to_eval(
   )
 
   suite_path = Path(eval_suite_output)
-  suite_path.parent.mkdir(parents=True, exist_ok=True)
-  suite_path.write_text(suite.to_json(), encoding="utf-8")
+  write_owner_only_text(suite_path, suite.to_json())
 
   cascade = compute_eval_cost_cascade(
       turn_rows=turn_rows,
@@ -655,14 +699,14 @@ def run_pattern_to_eval(
   report = {
       "generated_at_utc": datetime.now(timezone.utc).isoformat(),
       "offline": offline,
+      "cost_cascade_methodology": "MODELED_PROJECTION_FROM_LIVE_BYTES_AND_ROUTING",
       "discovered_patterns": patterns,
       "eval_suite_path": str(suite_path),
       "suite_health": health.model_dump(mode="json"),
       "cost_cascade_ablation": cascade,
   }
   out_path = Path(output_json)
-  out_path.parent.mkdir(parents=True, exist_ok=True)
-  out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+  write_owner_only_text(out_path, json.dumps(report, indent=2))
   return report
 
 

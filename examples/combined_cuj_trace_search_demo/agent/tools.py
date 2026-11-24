@@ -17,42 +17,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import re
+from pathlib import Path
+import sys
 from typing import Any
 
-_SCRUB_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (
-        re.compile(
-            r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?"
-            r"-----END [A-Z0-9 ]*PRIVATE KEY-----"
-        ),
-        "[REDACTED]",
-    ),
-    (
-        re.compile(r"(Authorization\s*:\s*Bearer\s+)\S+", re.IGNORECASE),
-        r"\1[REDACTED]",
-    ),
-    (
-        re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{6,}"),
-        "Bearer [REDACTED]",
-    ),
-    (
-        re.compile(r"\bya29\.[A-Za-z0-9._-]+\b"),
-        "[REDACTED]",
-    ),
-    (
-        re.compile(r"\bAIza[A-Za-z0-9_-]{12,}\b"),
-        "[REDACTED]",
-    ),
-    (
-        re.compile(
-            r"""((?:api_key|password|client_secret|access_token|refresh_token)"""
-            r"""\s*[:=]\s*["']?)[^\s"',}]+""",
-            re.IGNORECASE,
-        ),
-        r"\1[REDACTED]",
-    ),
-)
+_DEMO_DIR = Path(__file__).resolve().parents[1]
+if str(_DEMO_DIR) not in sys.path:
+  sys.path.insert(0, str(_DEMO_DIR))
+
+from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: E402
+from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -65,10 +39,7 @@ class _FallbackToolClassification:
 
 def scrub_secrets(text: str) -> str:
   """Redacts credential tokens while preserving uppercase error codes."""
-  out = str(text)
-  for pattern, replacement in _SCRUB_PATTERNS:
-    out = pattern.sub(replacement, out)
-  return out
+  return scrub_sensitive_text(text)
 
 
 def lookup_order(order_id: str) -> dict[str, Any]:
@@ -404,11 +375,12 @@ def sanitized_tool_classifier(
   )
   if not is_err:
     return None
+  safe_result = scrub_sensitive_data(result)
   parts: list[str] = []
-  error_code = result.get("error_code") or result.get("error")
+  error_code = safe_result.get("error_code") or safe_result.get("error")
   if error_code:
     parts.append(str(error_code))
-  message = result.get("message")
+  message = safe_result.get("message")
   if message:
     parts.append(str(message))
   raw_msg = ": ".join(parts) if parts else "Tool reported failure"

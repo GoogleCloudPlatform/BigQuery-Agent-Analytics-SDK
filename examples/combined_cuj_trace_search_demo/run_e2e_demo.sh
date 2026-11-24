@@ -73,12 +73,29 @@ PY
   exit 1
 fi
 
+load_safe_env() {
+  local env_file="$1"
+  while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+    local line
+    line="${raw_line#"${raw_line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    [[ "$line" != *=* ]] && continue
+    local key="${line%%=*}"
+    local val="${line#*=}"
+    val="${val#\"}"; val="${val%\"}"
+    val="${val#\'}"; val="${val%\'}"
+    case "$key" in
+      PROJECT_ID|GOOGLE_CLOUD_QUOTA_PROJECT|DATASET_ID|TABLE_ID|EVAL_TURNS_TABLE|BQ_LOCATION|AGENT_LOCATION|MODEL_NAME|BQML_CONNECTION_ID|GEMINI_API_KEY|GOOGLE_GENAI_USE_VERTEXAI|DEMO_OFFLINE)
+        export "$key=$val"
+        ;;
+    esac
+  done < "$env_file"
+}
+
 if [[ "$OFFLINE_MODE" != "true" ]]; then
   if [[ -f "$SCRIPT_DIR/.env" ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    source "$SCRIPT_DIR/.env"
-    set +a
+    load_safe_env "$SCRIPT_DIR/.env"
   else
     echo "ERROR: .env not found. Run ./setup.sh first or pass --offline." >&2
     exit 1
@@ -94,11 +111,12 @@ DATASET_ID="${DATASET_ID:-combined_cuj_trace_search_demo}"
 TABLE_ID="${TABLE_ID:-agent_events}"
 EVAL_TURNS_TABLE="${EVAL_TURNS_TABLE:-eval_turns}"
 BQ_LOCATION="${BQ_LOCATION:-US}"
-AGENT_LOCATION="${AGENT_LOCATION:-us-central1}"
-MODEL_NAME="${MODEL_NAME:-gemini-2.5-flash}"
+AGENT_LOCATION="${AGENT_LOCATION:-global}"
+MODEL_NAME="${MODEL_NAME:-gemini-4-hydrogen}"
 
 RUN_ID="$(date -u +%Y%m%d_%H%M%S)"
 REPORTS_DIR="${REPORTS_DIR:-$SCRIPT_DIR/reports/run_${RUN_ID}}"
+umask 077
 mkdir -p "$REPORTS_DIR"
 
 LIVE_JSON="$REPORTS_DIR/live_demo_results.json"
@@ -142,6 +160,7 @@ STAGE2_ARGS=(
   --eval-turns-table "$EVAL_TURNS_TABLE"
   --location "$BQ_LOCATION"
   --vertex-location "$AGENT_LOCATION"
+  --ai-generate-endpoint "$MODEL_NAME"
   --input-json "$LIVE_JSON"
   --output-json "$SEARCH_JSON"
 )

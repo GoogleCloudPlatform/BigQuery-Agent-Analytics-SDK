@@ -21,7 +21,7 @@
 -- Required query parameters per statement:
 --   @start_ts TIMESTAMP, @end_ts TIMESTAMP, @has_error BOOL (nullable),
 --   @min_latency_ms INT64 (nullable), @search_query STRING,
---   @keyword_query STRING, @top_k INT64;
+--   @keyword_query STRING, @top_k INT64, and @candidate_k INT64 (for PATH_C);
 --   and @session_id STRING, @invocation_id STRING for STEP2_LAZY_TRACE_HYDRATION.
 
 -- [QUERY: PATH_A_KEYWORD]
@@ -222,7 +222,7 @@ WITH
         (_ai_index_trajectory, session_id, invocation_id, error_summary, root_agent),
         @keyword_query
       )
-    LIMIT @top_k
+    LIMIT @candidate_k
   ),
   SemanticRanked AS (
     SELECT
@@ -259,7 +259,7 @@ WITH
       ),
       '_ai_index_trajectory',
       @search_query,
-      top_k => @top_k,
+      top_k => @candidate_k,
       distance_type => 'COSINE',
       rerank => TRUE,
       options => '{"fraction_lists_to_search": 0.02}'
@@ -311,7 +311,7 @@ WITH
         (_ai_index_trajectory, session_id, invocation_id, error_summary, root_agent),
         @keyword_query
       )
-    LIMIT @top_k
+    LIMIT @candidate_k
   ),
   SemanticRanked AS (
     SELECT
@@ -348,7 +348,7 @@ WITH
       ),
       '_ai_index_trajectory',
       @search_query,
-      top_k => @top_k,
+      top_k => @candidate_k,
       distance_type => 'COSINE',
       rerank => FALSE,
       options => '{"fraction_lists_to_search": 0.02}'

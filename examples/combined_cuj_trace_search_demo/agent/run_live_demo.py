@@ -42,6 +42,7 @@ from agent.prompts_and_scenarios import TOOL_FUNCTIONS  # noqa: E402
 from agent.tools import sanitized_tool_classifier  # noqa: E402
 from analytics.trajectory_extractor import compute_ablation_metrics  # noqa: E402
 from analytics.trajectory_extractor import summarize_ablation  # noqa: E402
+from analytics.trajectory_extractor import write_owner_only_text  # noqa: E402
 
 _APP_NAME = "combined_cuj_trace_search_demo"
 _CONTRADICTION_FAIL_RE = re.compile(
@@ -115,17 +116,34 @@ def _materialize_and_fetch_live_eval_turns(
   from google.cloud import bigquery  # noqa: PLC0415
 
   bq_client = bigquery.Client(project=project_id, location=location)
+  raw_where_clause = ""
   ddl = None
   try:
+    from analytics.index_and_search import _build_session_raw_where_clause  # noqa: PLC0415
+    from analytics.index_and_search import assert_demo_table_ownership_or_absent  # noqa: PLC0415
     from analytics.index_and_search import build_materialize_eval_turns_sql  # noqa: PLC0415
 
+    assert_demo_table_ownership_or_absent(
+        bq_client, project_id, dataset_id, eval_turns_table
+    )
+    if session_ids:
+      raw_where_clause = _build_session_raw_where_clause(session_ids)
     ddl, _ = build_materialize_eval_turns_sql(
         project_id=project_id,
         dataset_id=dataset_id,
         events_table=table_id,
         eval_turns_table=eval_turns_table,
+        raw_where_clause=raw_where_clause,
     )
   except ImportError:
+    safe_sids = [
+        str(s).strip()
+        for s in session_ids
+        if re.match(r"^[A-Za-z0-9_.:-]+$", str(s).strip())
+    ]
+    if safe_sids:
+      quoted = ", ".join(f"'{sid}'" for sid in dict.fromkeys(safe_sids))
+      raw_where_clause = f"session_id IN ({quoted})"
     sql_path = _DEMO_DIR / "sql" / "01_materialize_eval_turns.sql"
     if sql_path.is_file():
       ddl = (
@@ -139,15 +157,39 @@ def _materialize_and_fetch_live_eval_turns(
           .strip()
           .rstrip(";")
       )
+      if raw_where_clause:
+        ddl = ddl.replace(
+            "      AND invocation_id IS NOT NULL\n",
+            "      AND invocation_id IS NOT NULL\n"
+            f"      AND (\n        {raw_where_clause}\n      )\n",
+            1,
+        )
     else:
-      from google.adk.plugins import bigquery_agent_analytics_plugin as bqaa  # noqa: PLC0415
+      import importlib  # noqa: PLC0415
 
-      builder = getattr(bqaa, "build_eval_turn_query_sql", None)
+      builder = None
+      for mod_name in (
+          "google.adk.plugins",
+          "google.adk.plugins._bigquery_agent_analytics_eval_sql",
+          "google.adk.plugins.bigquery_agent_analytics_plugin",
+      ):
+        try:
+          mod = importlib.import_module(mod_name)
+          candidate = getattr(mod, "build_eval_turn_query_sql", None)
+          if callable(candidate):
+            builder = candidate
+            break
+        except Exception:
+          continue
       if callable(builder):
-        base_sql = builder(f"{project_id}.{dataset_id}.{table_id}")
+        base_sql = builder(
+            f"{project_id}.{dataset_id}.{table_id}",
+            raw_where_clause=raw_where_clause,
+        )
         ddl = (
             f"CREATE OR REPLACE TABLE "
-            f"`{project_id}.{dataset_id}.{eval_turns_table}` AS\n"
+            f"`{project_id}.{dataset_id}.{eval_turns_table}`\n"
+            "OPTIONS(labels=[('bqaa_demo', 'combined_cuj_trace_search')]) AS\n"
             "SELECT base.*, CAST(NULL AS STRING) AS error_summary, "
             "BYTE_LENGTH(TO_JSON_STRING(base.trace)) AS raw_trace_bytes, "
             "CAST(NULL AS STRING) AS _ai_index_trajectory "
@@ -285,8 +327,17 @@ async def _run_live_scenarios(
 ) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
   from google.adk.plugins.bigquery_agent_analytics_plugin import BigQueryAgentAnalyticsPlugin  # noqa: PLC0415
   from google.adk.plugins.bigquery_agent_analytics_plugin import BigQueryLoggerConfig  # noqa: PLC0415
+  from google.cloud import bigquery  # noqa: PLC0415
 
   _configure_vertex_env(project_id, agent_location)
+  bq_probe_client = bigquery.Client(project=project_id, location=location)
+  events_fqn = f"{project_id}.{dataset_id}.{table_id}"
+  try:
+    bq_probe_client.get_table(events_fqn)
+    events_pre_existed = True
+  except Exception:
+    events_pre_existed = False
+
   config = BigQueryLoggerConfig(
       enabled=True,
       table_id=table_id,
@@ -336,15 +387,23 @@ async def _run_live_scenarios(
             plugin=plugin,
             timeout_sec=timeout_sec,
             extra_reminder=(
-                "STRICT OVERRIDE: Repeat only the upbeat confirmation"
-                " sentence requested for [EXPRESS_CONFIRM] without refusal"
-                " words."
+                "STRICT OVERRIDE (SUPERSEDES SECTIONS 1.1, 2.3, AND 3.1): "
+                f"Reply verbatim with: {scenario.mock_agent_response!r}. "
+                "Do not include any error codes or refusal words."
             ),
         )
       session_ids.append(res["session_id"])
       scenario_runs.append(res)
   finally:
     await _shutdown_bqaa_plugin(plugin)
+
+  if not events_pre_existed:
+    try:
+      from analytics.index_and_search import apply_demo_table_label  # noqa: PLC0415
+
+      apply_demo_table_label(bq_probe_client, project_id, dataset_id, table_id)
+    except Exception:
+      pass
 
   eval_turns = _materialize_and_fetch_live_eval_turns(
       project_id=project_id,
@@ -412,8 +471,7 @@ def _assemble_run_payload(
   }
   if output_json is not None:
     out_path = Path(output_json)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    write_owner_only_text(out_path, json.dumps(payload, indent=2) + "\n")
   return payload
 
 
@@ -424,8 +482,8 @@ async def run_demo_async(
     table_id: str = "agent_events",
     eval_turns_table: str = "eval_turns",
     location: str = "US",
-    agent_location: str = "us-central1",
-    model_name: str = "gemini-2.5-flash",
+    agent_location: str = "global",
+    model_name: str = "gemini-4-hydrogen",
     user_id: str = "demo_user",
     mock_live: bool = False,
     timeout_sec: int = 120,
@@ -473,8 +531,8 @@ def run_demo(
     table_id: str = "agent_events",
     eval_turns_table: str = "eval_turns",
     location: str = "US",
-    agent_location: str = "us-central1",
-    model_name: str = "gemini-2.5-flash",
+    agent_location: str = "global",
+    model_name: str = "gemini-4-hydrogen",
     user_id: str = "demo_user",
     mock_live: bool = False,
     timeout_sec: int = 120,
@@ -556,10 +614,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   parser.add_argument("--location", default=os.environ.get("BQ_LOCATION", "US"))
   parser.add_argument(
       "--agent-location",
-      default=os.environ.get("AGENT_LOCATION", "us-central1"),
+      default=os.environ.get("AGENT_LOCATION", "global"),
   )
   parser.add_argument(
-      "--model", default=os.environ.get("MODEL_NAME", "gemini-2.5-flash")
+      "--model", default=os.environ.get("MODEL_NAME", "gemini-4-hydrogen")
   )
   parser.add_argument("--user-id", default="demo_user")
   parser.add_argument("--mock-live", action="store_true")

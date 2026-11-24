@@ -23,7 +23,8 @@ Layer 0 settles empty, quoted, session/invocation ID, error constant, and
 explicitly mixed queries at 0 ms and $0 model cost. Ambiguous natural-language
 queries fall through to Layer 1, supporting both Developer API
 ``client.decisions.create(model="gemini-decision-1", ...)`` (``v1beta``,
-0 output tokens) and Vertex AI ``gemini-2.5-flash`` (``thinking_budget=0``).
+0 output tokens) and Vertex AI ``gemini-4-hydrogen`` (``thinking_level="LOW"``
+on ``global``, or ``thinking_budget=0`` for ``gemini-2.5-*`` overrides).
 """
 
 from __future__ import annotations
@@ -170,8 +171,23 @@ def _build_decisions_client(api_key: str) -> Any:
   )
 
 
+def model_uses_thinking_level(model_name: str | None) -> bool:
+  """Returns True when a Vertex Gemini model uses thinking_level (Gemini 4+)."""
+  low = str(model_name or "").strip().lower()
+  return (
+      "gemini-4" in low or "hydrogen" in low or "neon" in low or "carbon" in low
+  )
+
+
+def thinking_config_for_model(model_name: str, types_mod: Any) -> Any:
+  """Returns ThinkingConfig matching Gemini 4 Hydrogen (LOW) or 2.5 (budget=0)."""
+  if model_uses_thinking_level(model_name):
+    return types_mod.ThinkingConfig(thinking_level="LOW")
+  return types_mod.ThinkingConfig(thinking_budget=0)
+
+
 def _build_vertex_client(
-    *, project_id: str | None = None, location: str = "us-central1"
+    *, project_id: str | None = None, location: str = "global"
 ) -> Any:
   """Constructs a Vertex AI genai.Client using Application Default Creds."""
   from google import genai
@@ -194,10 +210,10 @@ class QueryRouter:
       *,
       backend: str = "auto",
       project_id: str | None = None,
-      location: str = "us-central1",
+      location: str = "global",
       api_key: str | None = None,
       decisions_model: str = "gemini-decision-1",
-      vertex_model: str = "gemini-2.5-flash",
+      vertex_model: str = "gemini-4-hydrogen",
       hybrid_threshold: float = 0.70,
       offline: bool = False,
       decisions_client: Any = None,
@@ -241,7 +257,7 @@ class QueryRouter:
 
     if self.backend in {"auto", "vertex"}:
       v_client = self._get_vertex_client()
-      return self._classify_via_vertex_flash(v_client, text)
+      return self._classify_via_vertex(v_client, text)
 
     raise RuntimeError(f"Unable to route query with backend={self.backend!r}")
 
@@ -320,9 +336,7 @@ class QueryRouter:
         probabilities=probabilities,
     )
 
-  def _classify_via_vertex_flash(
-      self, client: Any, query: str
-  ) -> RouteDecision:
+  def _classify_via_vertex(self, client: Any, query: str) -> RouteDecision:
     from google.genai import types
 
     schema = {
@@ -341,13 +355,14 @@ class QueryRouter:
         },
         "required": ["route", "confidence", "reason"],
     }
+    is_hydrogen = model_uses_thinking_level(self.vertex_model)
     config = types.GenerateContentConfig(
         system_instruction=_ROUTER_SYSTEM_INSTRUCTION,
         temperature=0.0,
-        max_output_tokens=128,
+        max_output_tokens=1024 if is_hydrogen else 256,
         response_mime_type="application/json",
         response_schema=schema,
-        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        thinking_config=thinking_config_for_model(self.vertex_model, types),
     )
     t0 = time.perf_counter()
     response = client.models.generate_content(
@@ -373,7 +388,8 @@ class QueryRouter:
     except (TypeError, ValueError):
       confidence = 0.5
     confidence = max(0.0, min(1.0, confidence))
-    reason = str(parsed.get("reason") or f"vertex_flash:{raw_choice}")
+    reason_prefix = "vertex_hydrogen" if is_hydrogen else "vertex_flash"
+    reason = str(parsed.get("reason") or f"{reason_prefix}:{raw_choice}")
 
     mode = ROUTE_HYBRID if confidence < self.hybrid_threshold else raw_choice
     if mode == ROUTE_HYBRID and raw_choice != ROUTE_HYBRID:
@@ -385,7 +401,9 @@ class QueryRouter:
     in_tok = int(
         getattr(usage, "prompt_token_count", 0) or _estimate_tokens(query) + 60
     )
-    out_tok = int(getattr(usage, "candidates_token_count", 0) or 18)
+    cand_tok = int(getattr(usage, "candidates_token_count", 0) or 0)
+    thoughts_tok = int(getattr(usage, "thoughts_token_count", 0) or 0)
+    out_tok = (cand_tok + thoughts_tok) or 18
     cost_usd = round(
         (in_tok * _FLASH_INPUT_USD_PER_M + out_tok * _FLASH_OUTPUT_USD_PER_M)
         / 1_000_000.0,
@@ -393,7 +411,7 @@ class QueryRouter:
     )
     return RouteDecision(
         mode=mode,
-        layer="L1_VERTEX_FLASH",
+        layer="L1_VERTEX_HYDROGEN" if is_hydrogen else "L1_VERTEX_FLASH",
         confidence=confidence,
         reason=reason,
         latency_ms=latency_ms,
@@ -455,8 +473,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
       help="Layer 1 classifier backend.",
   )
   parser.add_argument("--project-id", default=None, help="Vertex project ID.")
+  parser.add_argument("--location", default="global", help="Vertex region.")
   parser.add_argument(
-      "--location", default="us-central1", help="Vertex region."
+      "--vertex-model",
+      default="gemini-4-hydrogen",
+      help="Vertex Gemini model ID for Layer 1 fallback.",
   )
   parser.add_argument(
       "--offline",
@@ -472,6 +493,7 @@ def main(argv: list[str] | None = None) -> int:
       backend=args.backend,
       project_id=args.project_id,
       location=args.location,
+      vertex_model=args.vertex_model,
       offline=args.offline,
   )
   decision = router.classify(args.query)

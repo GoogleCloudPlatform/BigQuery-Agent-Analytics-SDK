@@ -15,7 +15,7 @@
 -- Layer-3 scoped `AI.GENERATE` contradiction verification over `top_k`
 -- candidate turns (`UNNEST(@candidate_keys)`). Reads only compact
 -- `_ai_index_trajectory` strings (0 bytes of raw `trace` JSON) with
--- `thinking_budget = 0` for minimum cost and latency.
+-- `thinking_level = "LOW"` on `gemini-4-hydrogen` for low cost and latency.
 --
 -- Substitution contract: replace the PROJECT_ID, DATASET_ID, EVAL_TURNS_TABLE,
 -- ENDPOINT, and CONNECTION_ARG placeholders in the query body below literally
@@ -52,7 +52,7 @@ WITH
           COALESCE(t._ai_index_trajectory, '')
         ),
         endpoint => '{ENDPOINT}',
-        {CONNECTION_ARG}model_params => JSON '{"generation_config": {"temperature": 0.0, "max_output_tokens": 256, "thinking_config": {"thinking_budget": 0}}}',
+        {CONNECTION_ARG}model_params => JSON '{"generation_config": {"temperature": 0.0, "max_output_tokens": 1024, "thinking_config": {"thinking_level": "LOW"}}}',
         output_schema => 'is_silent_contradiction BOOL, pattern_label STRING, confidence FLOAT64, evidence_snippet STRING'
       ) AS ai_result
     FROM `{PROJECT_ID}.{DATASET_ID}.{EVAL_TURNS_TABLE}` AS t

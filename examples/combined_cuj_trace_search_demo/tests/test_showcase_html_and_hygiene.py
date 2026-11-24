@@ -235,6 +235,7 @@ class ShowcaseHtmlAndHygieneTest(unittest.TestCase):
       search_json = tmp_dir / "search.json"
       pattern_json = tmp_dir / "pattern.json"
       out_html = tmp_dir / "showcase.html"
+      os.chmod(tmp_dir, 0o755)
 
       live_json.write_text(
           json.dumps(
@@ -244,7 +245,7 @@ class ShowcaseHtmlAndHygieneTest(unittest.TestCase):
                   "dataset_id": "demo_dataset",
                   "table_id": "agent_events",
                   "location": "US",
-                  "model_name": "gemini-2.5-flash",
+                  "model_name": "gemini-4-hydrogen",
                   "mock_live": True,
                   "eval_turns": [
                       {
@@ -259,6 +260,11 @@ class ShowcaseHtmlAndHygieneTest(unittest.TestCase):
                           "error_summary": f"CARD_EXPIRED {secret_token}",
                           "trace": {
                               "agents": {"a": {"instruction": "secret"}},
+                              "password": "nested_plain_password_leak",
+                              "nested": {
+                                  "client_secret": "nested_client_secret_leak",
+                                  "apikey": "nested_apikey_leak",
+                              },
                               "turns": [],
                           },
                           "ablation": {
@@ -356,6 +362,46 @@ class ShowcaseHtmlAndHygieneTest(unittest.TestCase):
       self.assertNotIn(img_probe, html_text)
       self.assertNotIn(secret_token, html_text)
       self.assertNotIn(oauth_token, html_text)
+      self.assertNotIn("nested_plain_password_leak", html_text)
+      self.assertNotIn("nested_client_secret_leak", html_text)
+      self.assertNotIn("nested_apikey_leak", html_text)
+      # Caller's pre-existing directory permissions must remain untouched.
+      self.assertEqual(stat.S_IMODE(tmp_dir.stat().st_mode), 0o755)
+      self.assertEqual(stat.S_IMODE(out_html.stat().st_mode), 0o600)
+
+  def test_merge_inputs_does_not_leak_fixture_into_live_run(self) -> None:
+    from report.build_showcase_html import _merge_inputs  # noqa: PLC0415
+
+    with tempfile.TemporaryDirectory() as tmp:
+      tmp_dir = Path(tmp)
+      live_json = tmp_dir / "live.json"
+      live_json.write_text(
+          json.dumps(
+              {
+                  "generated_at_utc": "2026-11-24T00:00:00Z",
+                  "project_id": "user-project",
+                  "dataset_id": "ds",
+                  "table_id": "agent_events",
+                  "location": "US",
+                  "model_name": "gemini-4-hydrogen",
+                  "mock_live": False,
+                  "eval_turns": [],
+                  "ablation_summary": {"turn_count": 0},
+              }
+          ),
+          encoding="utf-8",
+      )
+      merged = _merge_inputs(
+          live_json=live_json,
+          search_json=None,
+          pattern_json=None,
+          eval_suite_json=None,
+          demo_fixture=False,
+      )
+      self.assertEqual(merged["mode"], "Live BigQuery Run")
+      self.assertEqual(merged["queries"], [])
+      self.assertEqual(merged["cost_cascade_ablation"], [])
+      self.assertEqual(merged["eval_suite"], {})
 
   def test_shell_scripts_exist_valid_bash_and_portable(self) -> None:
     for name in ("setup.sh", "run_e2e_demo.sh", "reset.sh"):
@@ -488,9 +534,14 @@ class ShowcaseHtmlAndHygieneTest(unittest.TestCase):
         fpath = reports_dir / fname
         self.assertTrue(fpath.is_file(), f"Missing output artifact: {fname}")
         self.assertGreater(fpath.stat().st_size, 100, f"Empty file: {fname}")
+        self.assertEqual(
+            stat.S_IMODE(fpath.stat().st_mode),
+            0o600,
+            f"Expected 0600 on {fname}",
+        )
+      self.assertEqual(stat.S_IMODE(reports_dir.stat().st_mode), 0o700)
 
       showcase_path = reports_dir / "showcase.html"
-      self.assertEqual(stat.S_IMODE(showcase_path.stat().st_mode), 0o600)
       showcase_text = showcase_path.read_text(encoding="utf-8")
       self.assertIn("Offline Runner Execution", showcase_text)
       self.assertIn("CARD_EXPIRED", showcase_text)

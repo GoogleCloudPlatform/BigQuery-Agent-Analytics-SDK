@@ -70,13 +70,14 @@ DATASET_ID="${DATASET_ID:-combined_cuj_trace_search_demo}"
 TABLE_ID="${TABLE_ID:-agent_events}"
 EVAL_TURNS_TABLE="${EVAL_TURNS_TABLE:-eval_turns}"
 BQ_LOCATION="${BQ_LOCATION:-US}"
-AGENT_LOCATION="${AGENT_LOCATION:-us-central1}"
-MODEL_NAME="${MODEL_NAME:-gemini-2.5-flash}"
+AGENT_LOCATION="${AGENT_LOCATION:-global}"
+MODEL_NAME="${MODEL_NAME:-gemini-4-hydrogen}"
 BQML_CONNECTION_ID="${BQML_CONNECTION_ID:-}"
 GEMINI_API_KEY="${GEMINI_API_KEY:-}"
 
 if [[ "$OFFLINE_MODE" == "true" ]]; then
   PROJECT_ID="${PROJECT_ID:-demo-project}"
+  umask 077
   cat > "$ENV_FILE" <<EOF
 # Combined CUJ Trace Search Demo (Offline Mode)
 PROJECT_ID=$PROJECT_ID
@@ -119,25 +120,46 @@ fi
 echo "Enabling BigQuery and Vertex AI APIs on $PROJECT_ID..."
 gcloud services enable bigquery.googleapis.com aiplatform.googleapis.com --project="$PROJECT_ID" >/dev/null
 
-if ! "$PYTHON_BIN" -c "import bigquery_agent_analytics, google.adk, google.genai" 2>/dev/null; then
-  echo "Installing editable SDK + LLM extras..."
-  "$PYTHON_BIN" -m pip install -e "$REPO_ROOT[llm]" --quiet
+if ! "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1; then
+import bigquery_agent_analytics
+import google.adk
+import google.genai
+from google.adk.plugins import bigquery_agent_analytics_plugin  # noqa: F401
+PY
+  echo "Installing editable SDK + LLM + ADK bigquery-analytics extras..."
+  "$PYTHON_BIN" -m pip install -e "${REPO_ROOT}[llm]" "google-adk[bigquery-analytics]" --quiet
 fi
 
 if ! bq show "${PROJECT_ID}:${DATASET_ID}" &>/dev/null 2>&1; then
   echo "Creating BigQuery dataset ${PROJECT_ID}:${DATASET_ID} in ${BQ_LOCATION}..."
-  bq mk --dataset --location="$BQ_LOCATION" "${PROJECT_ID}:${DATASET_ID}" >/dev/null
+  bq mk --dataset --location="$BQ_LOCATION" --label=bqaa_demo:combined_cuj_trace_search "${PROJECT_ID}:${DATASET_ID}" >/dev/null
 else
   EXISTING_LOC="$(
     bq show --format=prettyjson "${PROJECT_ID}:${DATASET_ID}" \
       | "$PYTHON_BIN" -c 'import json, sys; print(json.load(sys.stdin).get("location", ""))'
   )"
-  if [[ "${EXISTING_LOC,,}" != "${BQ_LOCATION,,}" ]]; then
+  EXISTING_LOC_LC="$(printf '%s' "$EXISTING_LOC" | tr '[:upper:]' '[:lower:]')"
+  BQ_LOCATION_LC="$(printf '%s' "$BQ_LOCATION" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$EXISTING_LOC_LC" != "$BQ_LOCATION_LC" ]]; then
     echo "ERROR: Existing dataset ${DATASET_ID} is in ${EXISTING_LOC}, expected ${BQ_LOCATION}." >&2
     exit 1
   fi
+  for CHECK_TBL in "$TABLE_ID" "$EVAL_TURNS_TABLE"; do
+    if bq show "${PROJECT_ID}:${DATASET_ID}.${CHECK_TBL}" &>/dev/null 2>&1; then
+      OWNED_LABEL="$(
+        bq show --format=prettyjson "${PROJECT_ID}:${DATASET_ID}.${CHECK_TBL}" \
+          | "$PYTHON_BIN" -c 'import json, sys; print(json.load(sys.stdin).get("labels", {}).get("bqaa_demo", ""))'
+      )"
+      if [[ "$OWNED_LABEL" != "combined_cuj_trace_search" ]]; then
+        echo "ERROR: Existing table ${PROJECT_ID}.${DATASET_ID}.${CHECK_TBL} is not owned by this demo (missing label bqaa_demo=combined_cuj_trace_search)." >&2
+        echo "Point DATASET_ID, TABLE_ID, or EVAL_TURNS_TABLE at dedicated demo resources before running setup." >&2
+        exit 1
+      fi
+    fi
+  done
 fi
 
+umask 077
 cat > "$ENV_FILE" <<EOF
 # Combined CUJ Trace Search Demo Configuration
 PROJECT_ID=$PROJECT_ID

@@ -27,47 +27,22 @@ from collections.abc import Mapping
 import datetime
 import html
 import json
-import os
 from pathlib import Path
 import re
-import tempfile
+import sys
 from typing import Any
 
-_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (
-        re.compile(
-            r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
-        ),
-        "[REDACTED:PRIVATE_KEY]",
-    ),
-    (re.compile(r"\bya29\.[A-Za-z0-9._-]+\b"), "[REDACTED:OAUTH_TOKEN]"),
-    (re.compile(r"\bAIza[A-Za-z0-9_-]{16,}\b"), "[REDACTED:API_KEY]"),
-    (
-        re.compile(r"(Authorization\s*:\s*Bearer\s+)\S+", re.IGNORECASE),
-        r"\1[REDACTED:BEARER]",
-    ),
-    (
-        re.compile(
-            r"""((?:api_key|password|client_secret|access_token|refresh_token)\s*[:=]\s*["']?)[^\s"',}]+""",
-            re.IGNORECASE,
-        ),
-        r"\1[REDACTED]",
-    ),
-)
+_DEMO_DIR = Path(__file__).resolve().parents[1]
+if str(_DEMO_DIR) not in sys.path:
+  sys.path.insert(0, str(_DEMO_DIR))
+
+from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: E402
+from analytics.trajectory_extractor import write_owner_only_text  # noqa: E402
 
 
 def _redact_secrets(value: Any) -> Any:
-  """Recursively scrubs credential patterns from strings and containers."""
-  if isinstance(value, str):
-    out = value
-    for pat, repl in _SECRET_PATTERNS:
-      out = pat.sub(repl, out)
-    return out
-  if isinstance(value, list):
-    return [_redact_secrets(item) for item in value]
-  if isinstance(value, dict):
-    return {str(k): _redact_secrets(v) for k, v in value.items()}
-  return value
+  """Recursively scrubs credential keys/patterns from strings and containers."""
+  return scrub_sensitive_data(value)
 
 
 def _ascii_code(text: str) -> str:
@@ -565,7 +540,7 @@ def build_demo_fixture_payload() -> dict[str, Any]:
           "query_text": "agent repeated the same tool call in a retry loop after timeout",
           "router_decision": {
               "mode": "NATURAL_LANGUAGE",
-              "layer": "L1_VERTEX_FLASH",
+              "layer": "L1_VERTEX_HYDROGEN",
               "confidence": 0.89,
               "latency_ms": 115.0,
               "input_tokens": 162,
@@ -641,7 +616,8 @@ def build_demo_fixture_payload() -> dict[str, Any]:
   cost_cascade_ablation = [
       {
           "arm_id": "arm_1",
-          "name": "Arm 1: Naive Raw Trace Frontier Judge",
+          "name": "Arm 1: Naive Raw Trace Frontier Judge (Modeled)",
+          "estimation_mode": "MODELED_PROJECTION",
           "levers_applied": "None (full raw JSON, reasoning on, 100% traffic)",
           "tokens_per_1k_evals": 3713250,
           "cost_per_1k_usd": 16.5398,
@@ -651,7 +627,8 @@ def build_demo_fixture_payload() -> dict[str, Any]:
       },
       {
           "arm_id": "arm_2",
-          "name": "Arm 2: Turn Scope + Deterministic S3 Trim",
+          "name": "Arm 2: Turn Scope + Deterministic S3 Trim (Modeled)",
+          "estimation_mode": "MODELED_PROJECTION",
           "levers_applied": "Levers 1, 3, 4 (eval_turns + S3 <1.2K tokens, $0 ingest)",
           "tokens_per_1k_evals": 368000,
           "cost_per_1k_usd": 0.5064,
@@ -661,7 +638,8 @@ def build_demo_fixture_payload() -> dict[str, Any]:
       },
       {
           "arm_id": "arm_3",
-          "name": "Arm 3: + L0/L1 Router + SQL Cohort Prefilter",
+          "name": "Arm 3: + L0/L1 Router + SQL Cohort Prefilter (Modeled)",
+          "estimation_mode": "MODELED_PROJECTION",
           "levers_applied": "Levers 1-6 (0 ms L0 + prefill L1 + STORING projection)",
           "tokens_per_1k_evals": 229400,
           "cost_per_1k_usd": 0.242,
@@ -671,13 +649,14 @@ def build_demo_fixture_payload() -> dict[str, Any]:
       },
       {
           "arm_id": "arm_4",
-          "name": "Arm 4: Full 8-Lever Cascade + Scoped AI.GENERATE",
-          "levers_applied": "All 8 levers (thinking_budget=0 + top_k AI.GENERATE escalation)",
-          "tokens_per_1k_evals": 85125,
-          "cost_per_1k_usd": 0.0437,
+          "name": "Arm 4: Full 8-Lever Cascade + Scoped AI.GENERATE (Modeled)",
+          "estimation_mode": "MODELED_PROJECTION",
+          "levers_applied": "All 8 levers (thinking_level=LOW + top_k AI.GENERATE escalation)",
+          "tokens_per_1k_evals": 60608,
+          "cost_per_1k_usd": 0.0593,
           "latency_ms_p50": 145.0,
           "contradiction_recall": 0.98,
-          "savings_vs_naive_pct": 99.74,
+          "savings_vs_naive_pct": 99.64,
       },
   ]
 
@@ -783,7 +762,7 @@ def build_demo_fixture_payload() -> dict[str, Any]:
       "dataset_id": "combined_cuj_trace_search_demo",
       "table_id": "agent_events",
       "location": "US",
-      "model_name": "gemini-2.5-flash",
+      "model_name": "gemini-4-hydrogen",
       "eval_turns": eval_turns,
       "ablation_summary": {
           "turn_count": len(eval_turns),
@@ -833,19 +812,48 @@ def _merge_inputs(
     eval_suite_json: Path | None,
     demo_fixture: bool,
 ) -> dict[str, Any]:
-  """Builds unified showcase payload from live/offline run artifacts or fixture."""
-  data = build_demo_fixture_payload()
+  """Builds unified showcase payload without leaking fixture data into live runs."""
   live_data = _load_json_if_exists(live_json)
   search_data = _load_json_if_exists(search_json)
   pattern_data = _load_json_if_exists(pattern_json)
   eval_suite_data = _load_json_if_exists(eval_suite_json)
 
-  if not demo_fixture and (live_data or search_data or pattern_data):
-    data["mode"] = (
-        "Offline Runner Execution"
-        if (live_data or {}).get("mock_live", False)
-        else "Live BigQuery Run"
+  has_run_artifacts = bool(
+      live_data or search_data or pattern_data or eval_suite_data
+  )
+  if demo_fixture or not has_run_artifacts:
+    data = build_demo_fixture_payload()
+  else:
+    is_mock = (
+        bool((live_data or {}).get("mock_live", False))
+        or bool((search_data or {}).get("offline", False))
+        or bool((pattern_data or {}).get("offline", False))
     )
+    meta_src = live_data or search_data or {}
+    data = {
+        "mode": (
+            "Offline Runner Execution" if is_mock else "Live BigQuery Run"
+        ),
+        "generated_at_utc": meta_src.get(
+            "generated_at_utc",
+            datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        ),
+        "project_id": meta_src.get("project_id", "demo-project"),
+        "dataset_id": meta_src.get(
+            "dataset_id", "combined_cuj_trace_search_demo"
+        ),
+        "table_id": meta_src.get("table_id", "agent_events"),
+        "location": meta_src.get("location", "US"),
+        "model_name": meta_src.get("model_name", "gemini-4-hydrogen"),
+        "eval_turns": [],
+        "ablation_summary": {},
+        "index_status": {},
+        "queries": [],
+        "cost_cascade_ablation": [],
+        "discovered_patterns": [],
+        "suite_health": {},
+        "eval_suite": {},
+    }
 
   if live_data:
     for key in (
@@ -862,9 +870,12 @@ def _merge_inputs(
         data[key] = live_data[key]
 
   if search_data:
-    if "index_status" in search_data:
+    if (
+        "index_status" in search_data
+        and search_data["index_status"] is not None
+    ):
       data["index_status"] = search_data["index_status"]
-    if search_data.get("queries"):
+    if "queries" in search_data and search_data["queries"] is not None:
       data["queries"] = search_data["queries"]
 
   if pattern_data:
@@ -873,7 +884,11 @@ def _merge_inputs(
         data[key] = pattern_data[key]
     if not eval_suite_data and pattern_data.get("eval_suite_path"):
       candidate = Path(str(pattern_data["eval_suite_path"]))
-      if candidate.exists():
+      same_run_dir = (
+          pattern_json is None
+          or candidate.resolve().parent == pattern_json.resolve().parent
+      )
+      if same_run_dir and candidate.exists():
         eval_suite_data = _load_json_if_exists(candidate)
 
   if eval_suite_data:
@@ -885,11 +900,13 @@ def _merge_inputs(
 def _render_html(payload: dict[str, Any]) -> str:
   """Renders the self-contained Adaptive Workbench HTML document."""
   ablation = payload.get("ablation_summary") or {}
-  s1_tok = max(1, int(ablation.get("s1_avg_tokens") or 3531))
-  s3_tok = max(1, int(ablation.get("s3_avg_tokens") or 126))
-  s1_bytes = max(1, int(ablation.get("s1_avg_bytes") or 14124))
-  s3_bytes = max(1, int(ablation.get("s3_avg_bytes") or 505))
-  reduction_pct = max(0.0, (1.0 - (s3_bytes / s1_bytes)) * 100.0)
+  s1_tok = int(ablation.get("s1_avg_tokens") or 0)
+  s3_tok = int(ablation.get("s3_avg_tokens") or 0)
+  s1_bytes = int(ablation.get("s1_avg_bytes") or 0)
+  s3_bytes = int(ablation.get("s3_avg_bytes") or 0)
+  reduction_pct = (
+      max(0.0, (1.0 - (s3_bytes / s1_bytes)) * 100.0) if s1_bytes > 0 else 0.0
+  )
 
   queries = payload.get("queries") or []
   l0_count = sum(
@@ -905,15 +922,13 @@ def _render_html(payload: dict[str, Any]) -> str:
 
   cascade = payload.get("cost_cascade_ablation") or []
   arm1_cost = (
-      float(cascade[0].get("cost_per_1k_usd", 16.5398)) if cascade else 16.5398
+      float(cascade[0].get("cost_per_1k_usd") or 0.0) if cascade else 0.0
   )
   arm4_cost = (
-      float(cascade[-1].get("cost_per_1k_usd", 0.0437)) if cascade else 0.0437
+      float(cascade[-1].get("cost_per_1k_usd") or 0.0) if cascade else 0.0
   )
   cascade_savings = (
-      float(cascade[-1].get("savings_vs_naive_pct", 99.74))
-      if cascade
-      else 99.74
+      float(cascade[-1].get("savings_vs_naive_pct") or 0.0) if cascade else 0.0
   )
 
   # Pre-render initial ablation bars (server-rendered fallback + JS hydrated).
@@ -1017,7 +1032,7 @@ def _render_html(payload: dict[str, Any]) -> str:
       payload.get("dataset_id", "combined_cuj_trace_search_demo")
   )
   location = _escape_code_text(payload.get("location", "US"))
-  model_name = _escape_code_text(payload.get("model_name", "gemini-2.5-flash"))
+  model_name = _escape_code_text(payload.get("model_name", "gemini-4-hydrogen"))
 
   return f"""<!doctype html>
 <html lang="en" data-theme="dark">
@@ -1319,16 +1334,17 @@ td.mono {{ font-family: var(--mono); font-size: 12px; }}
       <a href="#overview" id="tab-overview" class="active">1. Overview &amp; Pipeline</a>
       <a href="#ablation-lab" id="tab-ablation-lab">2. S1/S2/S3 Ablation Lab</a>
       <a href="#search-studio" id="tab-search-studio">3. Dual-Index Search Studio</a>
-      <a href="#cost-cascade" id="tab-cost-cascade">4. 8-Lever Cost Cascade</a>
+      <a href="#cost-cascade" id="tab-cost-cascade">4. Modeled Cost Cascade</a>
       <a href="#patterns-eval" id="tab-patterns-eval">5. Patterns &amp; EvalSuite</a>
     </nav>
     <div class="sidebar-divider"></div>
     <div class="sidebar-title">BigQuery Index State</div>
     <div style="font-size:12px;color:var(--muted);">
-      <div>AI.EMBED: <code>{_escape_code_text(index_status.get("ai_embed_column", "MOCK"))}</code></div>
-      <div style="margin-top:4px;">SEARCH INDEX: <code>{_escape_code_text(index_status.get("search_index", "SCAN_FALLBACK_BELOW_10GIB"))}</code></div>
-      <div style="margin-top:4px;">VECTOR INDEX: <code>{_escape_code_text(index_status.get("vector_index", "SKIPPED_BELOW_5000_ROWS"))}</code></div>
+      <div>AI.EMBED: <code>{_escape_code_text(index_status.get("ai_embed_column", "NONE"))}</code></div>
+      <div style="margin-top:4px;">SEARCH INDEX: <code>{_escape_code_text(index_status.get("search_index", "NONE"))}</code></div>
+      <div style="margin-top:4px;">VECTOR INDEX: <code>{_escape_code_text(index_status.get("vector_index", "NONE"))}</code></div>
       <div style="margin-top:4px;">Rows: <strong>{int(index_status.get("row_count") or len(eval_turns))}</strong></div>
+      <div style="margin-top:4px;">Embedded: <strong>{int(index_status.get("embeddings_ready") or 0)}</strong></div>
     </div>
   </aside>
 
@@ -1361,9 +1377,9 @@ td.mono {{ font-family: var(--mono); font-size: 12px; }}
         <div class="kpi-sub">{l0_count}/{len(queries)} queries resolved at 0 ms &amp; $0.00</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">8-Lever Eval Cost Cascade</div>
+        <div class="kpi-label">Modeled 8-Lever Cascade Projection</div>
         <div class="kpi-value">-{cascade_savings:.1f}%</div>
-        <div class="kpi-sub">${arm1_cost:.2f} -&gt; ${arm4_cost:.2f} per 1K evals</div>
+        <div class="kpi-sub">${arm1_cost:.2f} -&gt; ${arm4_cost:.2f} per 1K evals (analytical model)</div>
       </div>
     </div>
 
@@ -1485,11 +1501,15 @@ td.mono {{ font-family: var(--mono); font-size: 12px; }}
     </section>
 
     <section id="cost-cascade" class="panel">
-      <h2>4. 8-Lever Eval Cost Cascade Simulator &amp; Benchmark Arms</h2>
+      <h2>4. 8-Lever Eval Cost Cascade Projection (Modeled) &amp; Simulator</h2>
+      <p style="margin-top:0;color:var(--ink-secondary);font-size:12.5px;">
+        <span class="badge info">MODELED PROJECTION</span>
+        Costs/1K evals are parameterized from observed S1/S3 token sizes and L0/L1 router latency under uniform compact judge pricing ($0.30/1M in, $2.50/1M out for Arms 2-4 vs $3.00/$15.00 frontier Arm 1); arm p50 latencies and recall values are analytical projections, not live 1,000-eval runs.
+      </p>
       <div id="lever-toggles" class="lever-grid"></div>
       <div style="margin-bottom:12px;padding:10px 14px;background:var(--surface-subtle);border:1px solid var(--line);border-radius:var(--radius-sm);display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;">
-        <span>Simulated Cost per 1,000 Evals: <strong id="sim-cost-readout" class="mono">${arm4_cost:.2f}</strong></span>
-        <span>Savings vs Naive Judge ($<span id="sim-baseline-readout">{arm1_cost:.2f}</span>/1K): <strong id="sim-savings-readout" class="mono badge ok">-{cascade_savings:.1f}%</strong></span>
+        <span>Modeled Cost per 1,000 Evals: <strong id="sim-cost-readout" class="mono">${arm4_cost:.2f}</strong></span>
+        <span>Projected Savings vs Naive Judge ($<span id="sim-baseline-readout">{arm1_cost:.2f}</span>/1K): <strong id="sim-savings-readout" class="mono badge ok">-{cascade_savings:.1f}%</strong></span>
       </div>
       <div class="table-wrap">
         <table id="cascade-table">
@@ -1726,8 +1746,8 @@ td.mono {{ font-family: var(--mono); font-size: 12px; }}
 
   // Section 4: 8-Lever Simulator (anchored dynamically to cascade arms)
   const cascadeArms = DATA.cost_cascade_ablation || [];
-  const simArm1Cost = cascadeArms.length ? Number(cascadeArms[0].cost_per_1k_usd ?? 16.5398) : 16.5398;
-  const simArm4Cost = cascadeArms.length ? Number(cascadeArms[cascadeArms.length - 1].cost_per_1k_usd ?? 0.0437) : 0.0437;
+  const simArm1Cost = cascadeArms.length ? Number(cascadeArms[0].cost_per_1k_usd ?? 0) : 0;
+  const simArm4Cost = cascadeArms.length ? Number(cascadeArms[cascadeArms.length - 1].cost_per_1k_usd ?? 0) : 0;
   const totalTargetRatio = simArm1Cost > 0 ? Math.max(0.0005, simArm4Cost / simArm1Cost) : 0.0026;
   const LEVERS = [
     {{ id: 'l1', label: '1. Deterministic Code Prefilter', weight: 0.48 }},
@@ -1735,8 +1755,8 @@ td.mono {{ font-family: var(--mono); font-size: 12px; }}
     {{ id: 'l3', label: '3. Turn-Level Scope (eval_turns)', weight: 0.60 }},
     {{ id: 'l4', label: '4. Deterministic S3 Trace Trim', weight: 2.15 }},
     {{ id: 'l5', label: '5. Decision / Prefill Router (0 decode tok)', weight: 0.35 }},
-    {{ id: 'l6', label: '6. Cheaper Flash Judge', weight: 1.45 }},
-    {{ id: 'l7', label: '7. thinking_budget=0 + Strict Schema', weight: 0.30 }},
+    {{ id: 'l6', label: '6. Cheaper Hydrogen / Flash Judge', weight: 1.45 }},
+    {{ id: 'l7', label: '7. thinking_level=LOW + Strict Schema', weight: 0.30 }},
     {{ id: 'l8', label: '8. Top-K Cascade Escalation Only', weight: 0.95 }}
   ];
   const totalWeight = LEVERS.reduce((acc, lv) => acc + lv.weight, 0);
@@ -1820,24 +1840,7 @@ td.mono {{ font-family: var(--mono); font-size: 12px; }}
 
 
 def _write_owner_only_atomic(output_path: Path, content: str) -> None:
-  output_path.parent.mkdir(parents=True, exist_ok=True)
-  try:
-    os.chmod(output_path.parent, 0o700)
-  except OSError:
-    pass
-  fd, tmp_name = tempfile.mkstemp(
-      prefix=".showcase_", suffix=".html.tmp", dir=str(output_path.parent)
-  )
-  try:
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-      handle.write(content)
-    os.chmod(tmp_name, 0o600)
-    os.replace(tmp_name, output_path)
-    os.chmod(output_path, 0o600)
-  except Exception:
-    if os.path.exists(tmp_name):
-      os.unlink(tmp_name)
-    raise
+  write_owner_only_text(output_path, content)
 
 
 def build_showcase_html(

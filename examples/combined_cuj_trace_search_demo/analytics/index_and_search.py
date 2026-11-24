@@ -28,9 +28,11 @@ Supports both:
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+import importlib
 import json
 import os
 from pathlib import Path
@@ -38,7 +40,10 @@ import re
 import sys
 import time
 from typing import Any, Callable
+import uuid
+import warnings
 
+from analytics.query_router import model_uses_thinking_level
 from analytics.query_router import QueryRouter
 from analytics.query_router import ROUTE_HYBRID
 from analytics.query_router import ROUTE_KEYWORD
@@ -46,6 +51,10 @@ from analytics.query_router import ROUTE_NATURAL_LANGUAGE
 from analytics.seed_scale_benchmark import generate_synthetic_eval_turns
 from analytics.seed_scale_benchmark import seed_scale_rows_to_bigquery
 from analytics.seed_scale_benchmark import validate_bq_identifiers
+from analytics.trajectory_extractor import write_owner_only_text
+
+DEMO_OWNERSHIP_LABEL_KEY = "bqaa_demo"
+DEMO_OWNERSHIP_LABEL_VALUE = "combined_cuj_trace_search"
 
 _IVF_MIN_ROWS = 5000
 _TEN_GIB_BYTES = 10 * 1024 * 1024 * 1024
@@ -108,6 +117,7 @@ _HYBRID_STOPWORDS = frozenset(
     }
 )
 _SEARCH_RESERVED_OPS = frozenset({"AND", "OR", "NOT"})
+_SEARCH_RESERVED_QUOTE_WORDS = frozenset({"IN", "NEAR"})
 _CONTRADICTION_FAIL_MARKER_RE = re.compile(
     r"\b(error|sorry|failed|unable|expired|cannot|declined|denied|restricted|"
     r"unauthorized)\b",
@@ -267,7 +277,10 @@ def sanitize_search_query_for_bq(
       )
       if not is_ident and (len(clean_tok) < 3 or low in _HYBRID_STOPWORDS):
         continue
-      formatted = f'"{clean_tok}"' if "-" in clean_tok else clean_tok
+      must_quote = (
+          "-" in clean_tok or clean_tok.upper() in _SEARCH_RESERVED_QUOTE_WORDS
+      )
+      formatted = f'"{clean_tok}"' if must_quote else clean_tok
       key = formatted.lower()
       if key not in seen_lower:
         seen_lower.add(key)
@@ -275,26 +288,27 @@ def sanitize_search_query_for_bq(
     if hybrid_terms:
       return " OR ".join(hybrid_terms)
     fallback_tokens = [
-        t
+        f'"{t}"' if t.upper() in _SEARCH_RESERVED_QUOTE_WORDS else t
         for t in re.findall(r"[A-Za-z0-9_]+", raw)
         if t.upper() not in _SEARCH_RESERVED_OPS
     ]
     return " OR ".join(dict.fromkeys(fallback_tokens))
 
-  # KEYWORD mode: preserve quoted phrases + non-operator tokens safely.
+  # KEYWORD mode: preserve quoted phrases + non-operator tokens safely,
+  # quoting BigQuery SEARCH reserved words IN/NEAR so they match text safely.
   parts: list[str] = list(quoted_phrases)
   for tok in raw_tokens:
     clean_tok = tok.strip("-")
     if not clean_tok or clean_tok.upper() in _SEARCH_RESERVED_OPS:
       continue
-    if "-" in clean_tok:
+    if "-" in clean_tok or clean_tok.upper() in _SEARCH_RESERVED_QUOTE_WORDS:
       parts.append(f'"{clean_tok}"')
     else:
       parts.append(clean_tok)
   if parts:
     return " ".join(parts)
   fallback_kw = [
-      t
+      f'"{t}"' if t.upper() in _SEARCH_RESERVED_QUOTE_WORDS else t
       for t in re.findall(r"[A-Za-z0-9_]+", raw)
       if t.upper() not in _SEARCH_RESERVED_OPS
   ]
@@ -324,14 +338,67 @@ _validate_bq_identifiers = validate_bq_identifiers
 
 
 def _resolve_adk_eval_turn_builder() -> Callable[..., str] | None:
-  """Returns ADK's ``build_eval_turn_query_sql`` if exported, else None."""
-  try:
-    from google.adk.plugins import bigquery_agent_analytics_plugin as bqaa
+  """Returns ADK's ``build_eval_turn_query_sql`` without storage-write deps."""
+  for module_name in (
+      "google.adk.plugins",
+      "google.adk.plugins._bigquery_agent_analytics_eval_sql",
+      "google.adk.plugins.bigquery_agent_analytics_plugin",
+  ):
+    try:
+      mod = importlib.import_module(module_name)
+      builder = getattr(mod, "build_eval_turn_query_sql", None)
+      if callable(builder):
+        return builder
+    except Exception:
+      continue
+  return None
 
-    builder = getattr(bqaa, "build_eval_turn_query_sql", None)
-    return builder if callable(builder) else None
+
+def assert_demo_table_ownership_or_absent(
+    bq_client: Any,
+    project_id: str,
+    dataset_id: str,
+    table_name: str,
+) -> None:
+  """Refuses to overwrite or drop a pre-existing non-demo BigQuery table."""
+  table_fqn = f"{project_id}.{dataset_id}.{table_name}"
+  try:
+    table_meta = bq_client.get_table(table_fqn)
   except Exception:
-    return None
+    return
+  labels = getattr(table_meta, "labels", None)
+  if (
+      table_meta is not None
+      and isinstance(labels, Mapping)
+      and labels.get(DEMO_OWNERSHIP_LABEL_KEY) != DEMO_OWNERSHIP_LABEL_VALUE
+  ):
+    raise RuntimeError(
+        f"Refusing to modify pre-existing table `{table_fqn}`: missing demo "
+        f"ownership label {DEMO_OWNERSHIP_LABEL_KEY}={DEMO_OWNERSHIP_LABEL_VALUE}."
+    )
+
+
+def apply_demo_table_label(
+    bq_client: Any,
+    project_id: str,
+    dataset_id: str,
+    table_name: str,
+) -> None:
+  """Tags a newly created BigQuery table with the demo ownership label."""
+  table_fqn = f"{project_id}.{dataset_id}.{table_name}"
+  try:
+    table_meta = bq_client.get_table(table_fqn)
+  except Exception:
+    return
+  labels = getattr(table_meta, "labels", None)
+  if table_meta is None or not isinstance(labels, Mapping):
+    return
+  if labels.get(DEMO_OWNERSHIP_LABEL_KEY) == DEMO_OWNERSHIP_LABEL_VALUE:
+    return
+  updated = dict(labels)
+  updated[DEMO_OWNERSHIP_LABEL_KEY] = DEMO_OWNERSHIP_LABEL_VALUE
+  table_meta.labels = updated
+  bq_client.update_table(table_meta, ["labels"])
 
 
 def build_materialize_eval_turns_sql(
@@ -367,7 +434,9 @@ def build_materialize_eval_turns_sql(
     ddl = (
         f"CREATE OR REPLACE TABLE `{eval_turns_fqn}`\n"
         "PARTITION BY DATE(turn_start_timestamp)\n"
-        "CLUSTER BY root_agent, has_error, session_id AS\n"
+        "CLUSTER BY root_agent, has_error, session_id\n"
+        f"OPTIONS(labels=[('{DEMO_OWNERSHIP_LABEL_KEY}', "
+        f"'{DEMO_OWNERSHIP_LABEL_VALUE}')]) AS\n"
         "WITH\n"
         "  BaseEvalTurns AS (\n"
         f"{base_sql}\n"
@@ -542,7 +611,10 @@ def populate_trajectories_in_bigquery(
         }
     )
 
-  stage_fqn = f"{project_id}.{dataset_id}.{eval_turns_table}_traj_stage"
+  stage_fqn = (
+      f"{project_id}.{dataset_id}.{eval_turns_table}"
+      f"__stage_{uuid.uuid4().hex[:8]}"
+  )
   stage_schema = [
       bigquery.SchemaField("session_id", "STRING", mode="REQUIRED"),
       bigquery.SchemaField("invocation_id", "STRING", mode="REQUIRED"),
@@ -640,12 +712,22 @@ def setup_dual_indexes(
   except Exception:
     pass
 
+  status_warnings: list[str] = []
+  if row_count > 0 and ready_count < row_count:
+    msg = (
+        f"Partial embeddings ready: {ready_count}/{row_count} rows have "
+        "populated embeddings; AI.SEARCH only covers embedded rows."
+    )
+    status_warnings.append(msg)
+    warnings.warn(msg, RuntimeWarning, stacklevel=2)
+
   return {
       "ai_embed_column": "OK",
       "search_index": search_status,
       "vector_index": vector_status,
       "row_count": row_count,
       "embeddings_ready": ready_count,
+      "warnings": status_warnings,
   }
 
 
@@ -904,6 +986,7 @@ def _execute_hybrid_python_fallback(
     kw_text: str,
     sem_job_cfg: Any,
     top_k: int,
+    candidate_k: int,
 ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
   from google.cloud import bigquery
 
@@ -916,8 +999,20 @@ def _execute_hybrid_python_fallback(
           bigquery.ScalarQueryParameter("has_error", "BOOL", None),
           bigquery.ScalarQueryParameter("min_latency_ms", "INT64", None),
           bigquery.ScalarQueryParameter("search_query", "STRING", kw_text),
-          bigquery.ScalarQueryParameter("top_k", "INT64", top_k),
+          bigquery.ScalarQueryParameter("top_k", "INT64", candidate_k),
       ],
+      use_query_cache=False,
+  )
+  sem_params = [
+      (
+          bigquery.ScalarQueryParameter("top_k", "INT64", candidate_k)
+          if getattr(p, "name", "") == "top_k"
+          else p
+      )
+      for p in (getattr(sem_job_cfg, "query_parameters", None) or [])
+  ]
+  expanded_sem_cfg = bigquery.QueryJobConfig(
+      query_parameters=sem_params,
       use_query_cache=False,
   )
   sem_sql = render_sql_tokens(
@@ -925,7 +1020,7 @@ def _execute_hybrid_python_fallback(
   )
   kw_job = bq_client.query(kw_sql, job_config=kw_cfg)
   kw_rows = [_normalize_bq_row(r) for r in kw_job.result()]
-  sem_job = bq_client.query(sem_sql, job_config=sem_job_cfg)
+  sem_job = bq_client.query(sem_sql, job_config=expanded_sem_cfg)
   sem_rows = [_normalize_bq_row(r) for r in sem_job.result()]
   combined_stats = _combine_job_stats(
       _extract_job_stats(kw_job), _extract_job_stats(sem_job)
@@ -973,6 +1068,11 @@ def _run_live_bigquery_search(
       "CONNECTION_ARG": conn_arg,
   }
   rendered_verify = render_sql_tokens(verify_template, replacements)
+  if not model_uses_thinking_level(endpoint):
+    rendered_verify = rendered_verify.replace(
+        '{"thinking_level": "LOW"}',
+        '{"thinking_budget": 0}',
+    )
 
   # Measure dry-run raw trace baseline bytes once for comparison.
   table_fqn = f"{project_id}.{dataset_id}.{eval_turns_table}"
@@ -1022,6 +1122,7 @@ def _run_live_bigquery_search(
             else "PATH_B_AI_SEARCH_NO_RERANK"
         )
 
+    candidate_k = max(top_k * 10, 100)
     search_param_val = kw_text if mode == ROUTE_KEYWORD else qtext
     params = [
         bigquery.ScalarQueryParameter("start_ts", "TIMESTAMP", start_ts),
@@ -1033,6 +1134,7 @@ def _run_live_bigquery_search(
         ),
         bigquery.ScalarQueryParameter("keyword_query", "STRING", kw_text),
         bigquery.ScalarQueryParameter("top_k", "INT64", top_k),
+        bigquery.ScalarQueryParameter("candidate_k", "INT64", candidate_k),
     ]
     job_cfg = bigquery.QueryJobConfig(
         query_parameters=params, use_query_cache=False
@@ -1047,6 +1149,7 @@ def _run_live_bigquery_search(
           kw_text=kw_text,
           sem_job_cfg=job_cfg,
           top_k=top_k,
+          candidate_k=candidate_k,
       )
     else:
       sql_stmt = render_sql_tokens(search_queries[qname], replacements)
@@ -1074,6 +1177,7 @@ def _run_live_bigquery_search(
               kw_text=kw_text,
               sem_job_cfg=job_cfg,
               top_k=top_k,
+              candidate_k=candidate_k,
           )
         else:
           raise
@@ -1109,18 +1213,38 @@ def _run_live_bigquery_search(
       v_rows = list(bq_client.query(rendered_verify, job_config=v_cfg).result())
       for vr in v_rows:
         vd = dict(vr)
-        verifications.append(
-            {
-                "session_id": str(vd["session_id"]),
-                "invocation_id": str(vd["invocation_id"]),
-                "is_silent_contradiction": bool(
-                    vd.get("is_silent_contradiction")
-                ),
-                "pattern_label": str(vd.get("pattern_label") or "HEALTHY"),
-                "confidence": float(vd.get("confidence") or 0.0),
-                "evidence_snippet": str(vd.get("evidence_snippet") or ""),
-            }
-        )
+        ai_status = str(vd.get("ai_generate_status") or "").strip()
+        raw_label = str(vd.get("pattern_label") or "").strip()
+        if ai_status or not raw_label:
+          verifications.append(
+              {
+                  "session_id": str(vd["session_id"]),
+                  "invocation_id": str(vd["invocation_id"]),
+                  "is_silent_contradiction": False,
+                  "pattern_label": "VERIFIER_ERROR",
+                  "confidence": 0.0,
+                  "evidence_snippet": str(
+                      vd.get("evidence_snippet")
+                      or ai_status
+                      or "AI.GENERATE returned empty or error output"
+                  ),
+                  "ai_generate_status": ai_status or "EMPTY_OUTPUT",
+              }
+          )
+        else:
+          verifications.append(
+              {
+                  "session_id": str(vd["session_id"]),
+                  "invocation_id": str(vd["invocation_id"]),
+                  "is_silent_contradiction": bool(
+                      vd.get("is_silent_contradiction")
+                  ),
+                  "pattern_label": raw_label,
+                  "confidence": float(vd.get("confidence") or 0.0),
+                  "evidence_snippet": str(vd.get("evidence_snippet") or ""),
+                  "ai_generate_status": "",
+              }
+          )
 
     results.append(
         {
@@ -1189,9 +1313,9 @@ def run_index_and_search(
     events_table: str = "agent_events",
     eval_turns_table: str = "eval_turns",
     location: str = "US",
-    vertex_location: str = "us-central1",
+    vertex_location: str = "global",
     connection_id: str | None = None,
-    ai_generate_endpoint: str = "gemini-2.5-flash",
+    ai_generate_endpoint: str = "gemini-4-hydrogen",
     input_json: str | Path | None = None,
     output_json: str | Path = "search_results.json",
     top_k: int = _DEFAULT_TOP_K,
@@ -1208,6 +1332,7 @@ def run_index_and_search(
       backend="offline" if offline else "auto",
       project_id=project_id,
       location=vertex_location,
+      vertex_model=ai_generate_endpoint,
       offline=offline,
   )
 
@@ -1350,6 +1475,9 @@ def run_index_and_search(
         raw_where_clause = _build_session_raw_where_clause(session_ids)
 
     client = bq_client or bigquery.Client(project=project_id, location=location)
+    assert_demo_table_ownership_or_absent(
+        client, project_id, dataset_id, eval_turns_table
+    )
     materialize_ddl, mat_source = build_materialize_eval_turns_sql(
         project_id=project_id,
         dataset_id=dataset_id,
@@ -1405,8 +1533,7 @@ def run_index_and_search(
     }
 
   out_path = Path(output_json)
-  out_path.parent.mkdir(parents=True, exist_ok=True)
-  out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+  write_owner_only_text(out_path, json.dumps(report, indent=2))
   return report
 
 
@@ -1422,9 +1549,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   parser.add_argument("--events-table", default="agent_events")
   parser.add_argument("--eval-turns-table", default="eval_turns")
   parser.add_argument("--location", default="US")
-  parser.add_argument("--vertex-location", default="us-central1")
+  parser.add_argument("--vertex-location", default="global")
   parser.add_argument("--connection-id", default=None)
-  parser.add_argument("--ai-generate-endpoint", default="gemini-2.5-flash")
+  parser.add_argument("--ai-generate-endpoint", default="gemini-4-hydrogen")
   parser.add_argument("--input-json", default=None)
   parser.add_argument("--output-json", default="search_results.json")
   parser.add_argument("--top-k", type=int, default=_DEFAULT_TOP_K)

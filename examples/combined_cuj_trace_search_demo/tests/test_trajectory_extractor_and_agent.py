@@ -434,6 +434,78 @@ class ToolsAndClassifierTest(unittest.TestCase):
     self.assertNotIn("hunter2", verdict.error_message)
     self.assertIn("[REDACTED]", verdict.error_message)
 
+  def test_key_aware_redaction_and_basic_auth(self) -> None:
+    from agent.tools import sanitized_tool_classifier  # noqa: PLC0415
+    from analytics.trajectory_extractor import extract_s3_outcome_first  # noqa: PLC0415
+
+    trace = {
+        "turns": [
+            {
+                "turn_index": 0,
+                "events": [
+                    {
+                        "author": "customer_ops_agent",
+                        "content": {
+                            "role": "model",
+                            "parts": [
+                                {
+                                    "function_call": {
+                                        "name": "auth_probe",
+                                        "args": {
+                                            "password": "plain_password_val",
+                                            "nested": {
+                                                "client_secret": (
+                                                    "plain_client_secret"
+                                                ),
+                                                "auth_token": "plain_auth_tok",
+                                                "secret_key": "plain_sec_key",
+                                                "apikey": "plain_api_key_val",
+                                                "header": (
+                                                    "Authorization: Basic"
+                                                    " dXNlcjpwYXNz"
+                                                ),
+                                            },
+                                            "total_tokens": 1234,
+                                        },
+                                    }
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    s3 = extract_s3_outcome_first(trace)
+    for leaked in (
+        "plain_password_val",
+        "plain_client_secret",
+        "plain_auth_tok",
+        "plain_sec_key",
+        "plain_api_key_val",
+        "dXNlcjpwYXNz",
+    ):
+      self.assertNotIn(leaked, s3)
+    self.assertIn("total_tokens=1234", s3)
+
+    verdict = sanitized_tool_classifier(
+        tool=SimpleNamespace(name="auth_probe"),
+        tool_args={},
+        tool_context=SimpleNamespace(),
+        result={
+            "ok": False,
+            "error_code": "AUTH_FAILED",
+            "message": (
+                "Authorization: Basic QWxhZGRpbjpvcGVu apikey=raw_key_99 "
+                "auth_token=tok_xyz secret_key=sec_123"
+            ),
+        },
+    )
+    self.assertIsNotNone(verdict)
+    self.assertIn("AUTH_FAILED", verdict.error_message)
+    for leaked in ("QWxhZGRpbjpvcGVu", "raw_key_99", "tok_xyz", "sec_123"):
+      self.assertNotIn(leaked, verdict.error_message)
+
 
 class PromptsScenariosAndRunnerTest(unittest.TestCase):
   """Tests scenarios, mock 17-col/22-col schemas, and run_live_demo CLI."""
@@ -465,7 +537,7 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
 
     events, eval_turns = build_mock_live_artifacts(
         user_id="demo_user",
-        model_name="gemini-2.5-flash",
+        model_name="gemini-4-hydrogen",
     )
     self.assertEqual(len(eval_turns), 8)
     self.assertGreaterEqual(len(events), 32)
@@ -564,9 +636,9 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
               "--location",
               "US",
               "--agent-location",
-              "us-central1",
+              "global",
               "--model",
-              "gemini-2.5-flash",
+              "gemini-4-hydrogen",
               "--mock-live",
               "--output-json",
               str(out_json),
@@ -652,7 +724,7 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
     from agent.prompts_and_scenarios import build_mock_live_artifacts  # noqa: PLC0415
 
     _, sample_turns = build_mock_live_artifacts(
-        user_id="demo_user", model_name="gemini-2.5-flash"
+        user_id="demo_user", model_name="gemini-4-hydrogen"
     )
     sample_turn = sample_turns[:1]
     seen_threads: list[int] = []

@@ -19,13 +19,25 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 import html
 import json
+import os
+from pathlib import Path
 import re
+import tempfile
 from typing import Any
 
 DEFAULT_S3_MAX_CHARS = 4800
 _EMBED_TOKEN_LIMIT = 2048
 
-# Step 1: Secret redaction runs first so split tokens never leak.
+_SENSITIVE_KEY_RE = re.compile(
+    r"(?:password|passwd|pwd|client[-_]?secret|secret[-_]?key|"
+    r"(?:^|[_-])secret(?:$|[_-])|private[-_]?key|api[-_]?key|apikey|"
+    r"(?:auth|access|refresh|id|bearer|session|oauth|csrf|secret|api)[-_]?token|"
+    r"^token$|authorization|auth[-_]?header|credentials?)",
+    re.IGNORECASE,
+)
+
+# Step 1: Secret redaction runs first (key-aware + string patterns) so split
+# tokens never leak into _ai_index_trajectory or downstream HTML reports.
 _SECRET_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
@@ -35,24 +47,109 @@ _SECRET_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
         "[REDACTED]",
     ),
     (
-        re.compile(r"(Authorization\s*:\s*Bearer\s+)\S+", re.IGNORECASE),
+        re.compile(
+            r"(Authorization\s*:\s*(?:Bearer|Basic|Token)\s+)\S+",
+            re.IGNORECASE,
+        ),
         r"\1[REDACTED]",
     ),
     (
-        re.compile(r"\b(Bearer\s+)[A-Za-z0-9._~+/=-]{6,}\b", re.IGNORECASE),
-        r"\1[REDACTED]",
+        re.compile(
+            r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{6,}=*\b",
+            re.IGNORECASE,
+        ),
+        r"\1 [REDACTED]",
     ),
     (re.compile(r"\bya29\.[A-Za-z0-9._-]+\b"), "[REDACTED]"),
     (re.compile(r"\bAIza[A-Za-z0-9_-]{12,}\b"), "[REDACTED]"),
     (
         re.compile(
-            r"""(["']?(?:api_key|password|client_secret|access_token|"""
-            r"""refresh_token|private_key)["']?\s*[:=]\s*["']?)[^\s"',}\]]+""",
+            r"\b(?:gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|"
+            r"sk-[A-Za-z0-9_-]{16,})\b"
+        ),
+        "[REDACTED]",
+    ),
+    (
+        re.compile(
+            r"""(["']?(?:api[-_]?key|apikey|password|passwd|pwd|"""
+            r"""client[-_]?secret|secret[-_]?key|secret|auth[-_]?token|"""
+            r"""access[-_]?token|refresh[-_]?token|id[-_]?token|"""
+            r"""bearer[-_]?token|session[-_]?token|authorization|"""
+            r"""private[-_]?key)["']?\s*[:=]\s*["']?)[^\s"',}\]]+""",
             re.IGNORECASE,
         ),
         r"\1[REDACTED]",
     ),
 )
+
+
+def is_sensitive_key(key_name: str) -> bool:
+  """Returns True when a dict/field name represents a credential or secret."""
+  return bool(key_name and _SENSITIVE_KEY_RE.search(str(key_name).strip()))
+
+
+def scrub_sensitive_text(text: str) -> str:
+  """Redacts credential tokens from raw strings while keeping error codes."""
+  out = str(text)
+  for pat, repl in _SECRET_RULES:
+    out = pat.sub(repl, out)
+  return out
+
+
+def scrub_sensitive_data(value: Any, *, key_name: str = "") -> Any:
+  """Key-aware recursive scrubber for dicts, lists, bytes, and strings."""
+  if isinstance(value, Mapping):
+    return {
+        str(k): scrub_sensitive_data(v, key_name=str(k))
+        for k, v in value.items()
+    }
+  if isinstance(value, Sequence) and not isinstance(
+      value, (str, bytes, bytearray)
+  ):
+    return [scrub_sensitive_data(item, key_name=key_name) for item in value]
+  if isinstance(value, (bytes, bytearray)):
+    text_val = value.decode("utf-8", errors="replace")
+    if is_sensitive_key(key_name) and text_val.strip():
+      return "[REDACTED]"
+    return scrub_sensitive_text(text_val)
+  if isinstance(value, str):
+    if is_sensitive_key(key_name) and value.strip():
+      return "[REDACTED]"
+    return scrub_sensitive_text(value)
+  if (
+      value is not None
+      and not isinstance(value, bool)
+      and is_sensitive_key(key_name)
+  ):
+    return "[REDACTED]"
+  return value
+
+
+def ensure_owner_only_dir(dir_path: Path) -> None:
+  """Creates missing directory hierarchy with 0700 without chmodding callers."""
+  dir_path.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+
+def write_owner_only_text(output_path: Path, content: str) -> None:
+  """Writes text atomically via a pre-0600 temp file without altering caller dir."""
+  ensure_owner_only_dir(output_path.parent)
+  fd, tmp_name = tempfile.mkstemp(
+      prefix=f".{output_path.name}.",
+      suffix=".tmp",
+      dir=str(output_path.parent),
+  )
+  try:
+    os.chmod(tmp_name, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+      handle.write(content)
+    os.chmod(tmp_name, 0o600)
+    os.replace(tmp_name, output_path)
+    os.chmod(output_path, 0o600)
+  except Exception:
+    if os.path.exists(tmp_name):
+      os.unlink(tmp_name)
+    raise
+
 
 # Step 2: Critical error markers captured before boilerplate stripping/clamping.
 _CRITICAL_ERROR_MARKERS_RE = re.compile(
@@ -130,10 +227,7 @@ def _to_ascii_single_line(text: str) -> str:
 
 
 def _redact_secrets_first(text: str) -> str:
-  out = str(text)
-  for pattern, repl in _SECRET_RULES:
-    out = pattern.sub(repl, out)
-  return out
+  return scrub_sensitive_text(text)
 
 
 def _extract_error_markers(text: str) -> list[str]:
@@ -187,8 +281,11 @@ def _strip_boilerplate(text: str) -> str:
   return _to_ascii_single_line(out)
 
 
-def _flatten_structured_value(val: Any, *, depth: int = 0) -> str:
-  """Flattens dicts/lists into compact k=v text, hoisting error keys last."""
+def _flatten_structured_value(
+    val: Any, *, depth: int = 0, key_name: str = ""
+) -> str:
+  """Flattens dicts/lists into compact k=v text with key-aware redaction."""
+  val = scrub_sensitive_data(val, key_name=key_name)
   if isinstance(val, Mapping):
     if depth >= 4:
       return _strip_boilerplate(json.dumps(val, separators=(",", ":")))
@@ -202,21 +299,29 @@ def _flatten_structured_value(val: Any, *, depth: int = 0) -> str:
         normal_items.append((key_str, val[key]))
     ordered = normal_items + tail_items
     parts = [
-        f"{k}={_flatten_structured_value(v, depth=depth + 1)}"
+        f"{k}={_flatten_structured_value(v, depth=depth + 1, key_name=k)}"
         for k, v in ordered
     ]
     return " ".join(parts)
   if isinstance(val, Sequence) and not isinstance(val, (str, bytes, bytearray)):
     items = list(val)
     if len(items) > 4:
-      head = [_flatten_structured_value(x, depth=depth + 1) for x in items[:2]]
-      tail = _flatten_structured_value(items[-1], depth=depth + 1)
+      head = [
+          _flatten_structured_value(x, depth=depth + 1, key_name=key_name)
+          for x in items[:2]
+      ]
+      tail = _flatten_structured_value(
+          items[-1], depth=depth + 1, key_name=key_name
+      )
       return " ".join(head + [f"...[{len(items) - 3}_more]...", tail])
     return " ".join(
-        _flatten_structured_value(x, depth=depth + 1) for x in items
+        _flatten_structured_value(x, depth=depth + 1, key_name=key_name)
+        for x in items
     )
   if isinstance(val, (bytes, bytearray)):
     val = val.decode("utf-8", errors="replace")
+  if is_sensitive_key(key_name) and str(val).strip():
+    return "[REDACTED]"
   return _strip_boilerplate(str(val))
 
 
@@ -487,9 +592,10 @@ def extract_s3_outcome_first(
           elif isinstance(part.get("function_call"), Mapping):
             fc = part["function_call"]
             tname = _to_ascii_single_line(str(fc.get("name") or "tool"))
-            raw_args = json.dumps(fc.get("args") or {}, sort_keys=True)
-            markers = _record_markers(_redact_secrets_first(raw_args))
-            flat_args = _flatten_structured_value(fc.get("args") or {})
+            safe_args = scrub_sensitive_data(fc.get("args") or {})
+            raw_args = json.dumps(safe_args, sort_keys=True)
+            markers = _record_markers(scrub_sensitive_text(raw_args))
+            flat_args = _flatten_structured_value(safe_args)
             clamped_args = _head_tail_clamp(
                 flat_args,
                 max_len=240,
@@ -502,13 +608,13 @@ def extract_s3_outcome_first(
           elif isinstance(part.get("function_response"), Mapping):
             fr = part["function_response"]
             tname = _to_ascii_single_line(str(fr.get("name") or "tool"))
-            resp_obj = fr.get("response") or {}
+            resp_obj = scrub_sensitive_data(fr.get("response") or {})
             raw_resp = (
                 json.dumps(resp_obj, sort_keys=True)
                 if isinstance(resp_obj, (Mapping, list))
                 else str(resp_obj)
             )
-            markers = _record_markers(_redact_secrets_first(raw_resp))
+            markers = _record_markers(scrub_sensitive_text(raw_resp))
             flat_resp = _flatten_structured_value(resp_obj)
             clamped_resp = _head_tail_clamp(
                 flat_resp,
