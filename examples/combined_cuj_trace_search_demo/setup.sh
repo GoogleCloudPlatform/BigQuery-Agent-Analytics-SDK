@@ -68,6 +68,7 @@ fi
 
 DATASET_ID="${DATASET_ID:-combined_cuj_trace_search_demo}"
 TABLE_ID="${TABLE_ID:-agent_events}"
+EVAL_TURNS_TABLE_EXPLICIT="${EVAL_TURNS_TABLE:-}"
 EVAL_TURNS_TABLE="${EVAL_TURNS_TABLE:-eval_turns}"
 BQ_LOCATION="${BQ_LOCATION:-US}"
 AGENT_LOCATION="${AGENT_LOCATION:-global}"
@@ -77,6 +78,11 @@ GEMINI_API_KEY="${GEMINI_API_KEY:-}"
 
 if [[ "$OFFLINE_MODE" == "true" ]]; then
   PROJECT_ID="${PROJECT_ID:-demo-project}"
+  if [[ -n "$EVAL_TURNS_TABLE_EXPLICIT" ]]; then
+    EVAL_TURNS_ENV_LINE="EVAL_TURNS_TABLE=$EVAL_TURNS_TABLE_EXPLICIT"
+  else
+    EVAL_TURNS_ENV_LINE="# EVAL_TURNS_TABLE=eval_turns  # unset -> run-scoped eval_turns_<RUN_ID>"
+  fi
   umask 077
   cat > "$ENV_FILE" <<EOF
 # Combined CUJ Trace Search Demo (Offline Mode)
@@ -84,7 +90,7 @@ PROJECT_ID=$PROJECT_ID
 GOOGLE_CLOUD_QUOTA_PROJECT=$PROJECT_ID
 DATASET_ID=$DATASET_ID
 TABLE_ID=$TABLE_ID
-EVAL_TURNS_TABLE=$EVAL_TURNS_TABLE
+$EVAL_TURNS_ENV_LINE
 BQ_LOCATION=$BQ_LOCATION
 AGENT_LOCATION=$AGENT_LOCATION
 MODEL_NAME=$MODEL_NAME
@@ -130,13 +136,22 @@ PY
   "$PYTHON_BIN" -m pip install -e "${REPO_ROOT}[llm]" "google-adk[bigquery-analytics]" --quiet
 fi
 
-if ! bq show "${PROJECT_ID}:${DATASET_ID}" &>/dev/null 2>&1; then
-  echo "Creating BigQuery dataset ${PROJECT_ID}:${DATASET_ID} in ${BQ_LOCATION}..."
-  bq mk --dataset --location="$BQ_LOCATION" --label=bqaa_demo:combined_cuj_trace_search "${PROJECT_ID}:${DATASET_ID}" >/dev/null
+set +e
+DS_SHOW_OUT="$(bq show --format=prettyjson "${PROJECT_ID}:${DATASET_ID}" 2>&1)"
+DS_SHOW_RC=$?
+set -e
+if [[ "$DS_SHOW_RC" -ne 0 ]]; then
+  if [[ "$DS_SHOW_OUT" == *"Not found"* ]]; then
+    echo "Creating BigQuery dataset ${PROJECT_ID}:${DATASET_ID} in ${BQ_LOCATION}..."
+    bq mk --dataset --location="$BQ_LOCATION" --label=bqaa_demo:combined_cuj_trace_search "${PROJECT_ID}:${DATASET_ID}" >/dev/null
+  else
+    echo "ERROR: Failed to inspect BigQuery dataset ${PROJECT_ID}:${DATASET_ID}: ${DS_SHOW_OUT}" >&2
+    exit 1
+  fi
 else
   EXISTING_LOC="$(
-    bq show --format=prettyjson "${PROJECT_ID}:${DATASET_ID}" \
-      | "$PYTHON_BIN" -c 'import json, sys; print(json.load(sys.stdin).get("location", ""))'
+    printf '%s' "$DS_SHOW_OUT" \
+      | "$PYTHON_BIN" -c 'import json, sys; print((json.load(sys.stdin) or {}).get("location", ""))'
   )"
   EXISTING_LOC_LC="$(printf '%s' "$EXISTING_LOC" | tr '[:upper:]' '[:lower:]')"
   BQ_LOCATION_LC="$(printf '%s' "$BQ_LOCATION" | tr '[:upper:]' '[:lower:]')"
@@ -144,29 +159,45 @@ else
     echo "ERROR: Existing dataset ${DATASET_ID} is in ${EXISTING_LOC}, expected ${BQ_LOCATION}." >&2
     exit 1
   fi
-  for CHECK_TBL in "$TABLE_ID" "$EVAL_TURNS_TABLE"; do
-    if bq show "${PROJECT_ID}:${DATASET_ID}.${CHECK_TBL}" &>/dev/null 2>&1; then
+  CHECK_TABLES=("$TABLE_ID")
+  if [[ -n "$EVAL_TURNS_TABLE_EXPLICIT" ]]; then
+    CHECK_TABLES+=("$EVAL_TURNS_TABLE_EXPLICIT")
+  fi
+  for CHECK_TBL in "${CHECK_TABLES[@]}"; do
+    set +e
+    TBL_SHOW_OUT="$(bq show --format=prettyjson "${PROJECT_ID}:${DATASET_ID}.${CHECK_TBL}" 2>&1)"
+    TBL_SHOW_RC=$?
+    set -e
+    if [[ "$TBL_SHOW_RC" -eq 0 ]]; then
       OWNED_LABEL="$(
-        bq show --format=prettyjson "${PROJECT_ID}:${DATASET_ID}.${CHECK_TBL}" \
-          | "$PYTHON_BIN" -c 'import json, sys; print(json.load(sys.stdin).get("labels", {}).get("bqaa_demo", ""))'
+        printf '%s' "$TBL_SHOW_OUT" \
+          | "$PYTHON_BIN" -c 'import json, sys; print(((json.load(sys.stdin) or {}).get("labels") or {}).get("bqaa_demo", ""))'
       )"
       if [[ "$OWNED_LABEL" != "combined_cuj_trace_search" ]]; then
         echo "ERROR: Existing table ${PROJECT_ID}.${DATASET_ID}.${CHECK_TBL} is not owned by this demo (missing label bqaa_demo=combined_cuj_trace_search)." >&2
         echo "Point DATASET_ID, TABLE_ID, or EVAL_TURNS_TABLE at dedicated demo resources before running setup." >&2
         exit 1
       fi
+    elif [[ "$TBL_SHOW_OUT" != *"Not found"* ]]; then
+      echo "ERROR: Failed to inspect table ${PROJECT_ID}.${DATASET_ID}.${CHECK_TBL}: ${TBL_SHOW_OUT}" >&2
+      exit 1
     fi
   done
 fi
 
 umask 077
+if [[ -n "$EVAL_TURNS_TABLE_EXPLICIT" ]]; then
+  EVAL_TURNS_ENV_LINE="EVAL_TURNS_TABLE=$EVAL_TURNS_TABLE_EXPLICIT"
+else
+  EVAL_TURNS_ENV_LINE="# EVAL_TURNS_TABLE=eval_turns  # unset -> run-scoped eval_turns_<RUN_ID>"
+fi
 cat > "$ENV_FILE" <<EOF
 # Combined CUJ Trace Search Demo Configuration
 PROJECT_ID=$PROJECT_ID
 GOOGLE_CLOUD_QUOTA_PROJECT=$GOOGLE_CLOUD_QUOTA_PROJECT
 DATASET_ID=$DATASET_ID
 TABLE_ID=$TABLE_ID
-EVAL_TURNS_TABLE=$EVAL_TURNS_TABLE
+$EVAL_TURNS_ENV_LINE
 BQ_LOCATION=$BQ_LOCATION
 AGENT_LOCATION=$AGENT_LOCATION
 MODEL_NAME=$MODEL_NAME

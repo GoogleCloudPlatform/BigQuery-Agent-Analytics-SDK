@@ -519,6 +519,15 @@ def test_05_pattern_discovery_uses_agent_line_and_no_not_search():
   assert "EXACT_ERROR_SPIKE" in sql_text
   assert "TOKEN_BLOAT" in sql_text
   assert "denied|restricted|unauthorized" in sql_text
+  for extra_marker in (
+      "unfortunately",
+      "dispatched",
+      "rejected",
+      r"could\s+not",
+      "couldn't",
+      "can't",
+  ):
+    assert extra_marker in sql_text
   assert not re.search(r"\bstatus\b", sql_text)
   assert not re.search(r"\broot_agent_name\b", sql_text)
 
@@ -1560,7 +1569,9 @@ def test_sanitize_search_query_for_bq_and_live_session_filter(tmp_path: Path):
 
   bq_client = MagicMock()
   bq_client.query.side_effect = fake_query
-  bq_client.get_table.return_value = SimpleNamespace(num_bytes=2048)
+  bq_client.get_table.return_value = SimpleNamespace(
+      num_bytes=2048, labels={"bqaa_demo": "combined_cuj_trace_search"}
+  )
 
   live_input = tmp_path / "live_demo_results.json"
   live_input.write_text(
@@ -1858,7 +1869,9 @@ def test_hybrid_no_rerank_and_embeddings_zero_fallback(tmp_path: Path):
 
   bq_no_rerank = MagicMock()
   bq_no_rerank.query.side_effect = fake_no_rerank_query
-  bq_no_rerank.get_table.return_value = SimpleNamespace(num_bytes=512)
+  bq_no_rerank.get_table.return_value = SimpleNamespace(
+      num_bytes=512, labels={"bqaa_demo": "combined_cuj_trace_search"}
+  )
   router = QueryRouter(backend="offline", offline=True)
   rep_no_rerank = run_index_and_search(
       project_id="demo-proj",
@@ -1941,7 +1954,9 @@ def test_hybrid_no_rerank_and_embeddings_zero_fallback(tmp_path: Path):
 
   bq_zero = MagicMock()
   bq_zero.query.side_effect = fake_zero_ready_query
-  bq_zero.get_table.return_value = SimpleNamespace(num_bytes=512)
+  bq_zero.get_table.return_value = SimpleNamespace(
+      num_bytes=512, labels={"bqaa_demo": "combined_cuj_trace_search"}
+  )
   rep_zero = run_index_and_search(
       project_id="demo-proj",
       dataset_id="agent_ops",
@@ -1976,7 +1991,9 @@ def test_hybrid_no_rerank_and_embeddings_zero_fallback(tmp_path: Path):
 
   bq_exc = MagicMock()
   bq_exc.query.side_effect = fake_raise_hybrid_query
-  bq_exc.get_table.return_value = SimpleNamespace(num_bytes=512)
+  bq_exc.get_table.return_value = SimpleNamespace(
+      num_bytes=512, labels={"bqaa_demo": "combined_cuj_trace_search"}
+  )
   rep_exc = run_index_and_search(
       project_id="demo-proj",
       dataset_id="agent_ops",
@@ -2083,7 +2100,9 @@ def test_seed_scale_rows_uses_recent_default_timestamp():
 
   captured_chunks = []
   client = MagicMock()
-  client.get_table.return_value = SimpleNamespace(schema=[])
+  client.get_table.return_value = SimpleNamespace(
+      schema=[], labels={"bqaa_demo": "combined_cuj_trace_search"}
+  )
   client.load_table_from_json.side_effect = (
       lambda chunk, table_fqn, job_config=None: (
           captured_chunks.extend(chunk),
@@ -2296,7 +2315,9 @@ def test_staging_ownership_verifier_error_and_partial_embeddings(
 
   bq_err = MagicMock()
   bq_err.query.side_effect = fake_partial_and_verifier_err
-  bq_err.get_table.return_value = SimpleNamespace(num_bytes=512)
+  bq_err.get_table.return_value = SimpleNamespace(
+      num_bytes=512, labels={"bqaa_demo": "combined_cuj_trace_search"}
+  )
   with pytest.warns(RuntimeWarning, match="Partial embeddings ready"):
     rep = run_index_and_search(
         project_id="demo-proj",
@@ -2317,3 +2338,716 @@ def test_staging_ownership_verifier_error_and_partial_embeddings(
       q5_res["layer3_verifications"][0]["ai_generate_status"]
       == "QUOTA_EXCEEDED"
   )
+
+
+# ---------------------------------------------------------------------------
+# 6. PR Review Hardening Tests (Redaction, Ownership, Router, Scoring, Scale)
+# ---------------------------------------------------------------------------
+
+
+def test_fallback_extractor_and_populate_scrub_nested_secrets_and_error_summary():
+  from analytics.index_and_search import _extract_s3_text  # noqa: PLC0415
+  from analytics.index_and_search import populate_trajectories_in_bigquery  # noqa: PLC0415
+
+  trace = {
+      "turns": [
+          {
+              "events": [
+                  {
+                      "content": {
+                          "role": "model",
+                          "parts": [
+                              {
+                                  "function_call": {
+                                      "name": "vault_login",
+                                      "args": {
+                                          "credentials": {
+                                              "value": "fb_nested_cred"
+                                          },
+                                          "password": {
+                                              "nested": "fb_nested_pw"
+                                          },
+                                          "auth": ["fb_auth_item"],
+                                          "author": "customer_ops_agent",
+                                      },
+                                  }
+                              },
+                              {
+                                  "function_response": {
+                                      "name": "vault_login",
+                                      "response": {
+                                          "signing_key": "fb_sign_key",
+                                          "detail": (
+                                              "the password is fb_free_pw"
+                                              " CARD_EXPIRED"
+                                          ),
+                                      },
+                                  }
+                              },
+                              {
+                                  "text": (
+                                      "connection string is"
+                                      " postgres://u:fb_db_pw@h/db"
+                                  )
+                              },
+                          ],
+                      }
+                  }
+              ]
+          }
+      ]
+  }
+  s3_fb = _extract_s3_text(
+      trace, row={"root_agent": "customer_ops_agent", "has_error": True}
+  )
+  for secret in (
+      "fb_nested_cred",
+      "fb_nested_pw",
+      "fb_auth_item",
+      "fb_sign_key",
+      "fb_free_pw",
+      "fb_db_pw",
+  ):
+    assert secret not in s3_fb
+  assert "CARD_EXPIRED" in s3_fb
+  assert "customer_ops_agent" in s3_fb
+
+  staged_rows: list[dict] = []
+  executed_sql: list[str] = []
+  pop_client = MagicMock()
+
+  def _fake_query(sql_text, job_config=None):
+    del job_config
+    executed_sql.append(sql_text)
+    job = MagicMock()
+    if "WHERE _ai_index_trajectory IS NULL" in sql_text:
+      job.result.return_value = [
+          {
+              "session_id": "s1",
+              "invocation_id": "i1",
+              "root_agent": "a",
+              "has_error": True,
+              "tool_call_count": 1,
+              "tool_error_count": 1,
+              "has_tool_loop": False,
+              "turn_latency_ms": 10,
+              "error_summary": "the password is bq_err_secret CARD_EXPIRED",
+              "trace": {},
+          }
+      ]
+    else:
+      job.result.return_value = []
+    return job
+
+  def _fake_load(staged, stage_fqn, job_config=None):
+    del stage_fqn, job_config
+    staged_rows.extend(staged)
+    return MagicMock()
+
+  pop_client.query.side_effect = _fake_query
+  pop_client.load_table_from_json.side_effect = _fake_load
+  populate_trajectories_in_bigquery(
+      pop_client, project_id="demo-proj", dataset_id="agent_ops"
+  )
+  assert len(staged_rows) == 1
+  assert "bq_err_secret" not in str(staged_rows[0]["error_summary"])
+  assert "CARD_EXPIRED" in str(staged_rows[0]["error_summary"])
+  assert any("t.error_summary = s.error_summary" in s for s in executed_sql)
+
+
+def test_ownership_guard_fail_closed_and_scale_seeder_validation():
+  from analytics.index_and_search import assert_demo_table_ownership_or_absent  # noqa: PLC0415
+
+  class _Forbidden(Exception):
+    code = 403
+
+  class _NotFound(Exception):
+    code = 404
+
+  # Forbidden/non-404 errors must re-raise, never pass as absent.
+  err_client = MagicMock()
+  err_client.get_table.side_effect = _Forbidden("access denied")
+  with pytest.raises(_Forbidden):
+    assert_demo_table_ownership_or_absent(
+        err_client, "demo-proj", "agent_ops", "eval_turns"
+    )
+
+  # labels=None must fail closed.
+  none_labels_client = MagicMock()
+  none_labels_client.get_table.return_value = SimpleNamespace(labels=None)
+  with pytest.raises(RuntimeError, match="missing demo ownership label"):
+    assert_demo_table_ownership_or_absent(
+        none_labels_client, "demo-proj", "agent_ops", "eval_turns"
+    )
+
+  # Confirmed 404 NotFound passes as absent.
+  nf_client = MagicMock()
+  nf_client.get_table.side_effect = _NotFound("missing")
+  assert_demo_table_ownership_or_absent(
+      nf_client, "demo-proj", "agent_ops", "eval_turns"
+  )
+
+  # seed_scale_rows_to_bigquery rejects count < 0 and unowned tables BEFORE DELETE.
+  bad_count_client = MagicMock()
+  with pytest.raises(ValueError, match="non-negative"):
+    seed_scale_rows_to_bigquery(
+        bad_count_client,
+        project_id="demo-proj",
+        dataset_id="agent_ops",
+        count=-1,
+    )
+  bad_count_client.get_table.assert_not_called()
+  bad_count_client.query.assert_not_called()
+
+  unowned_seed_client = MagicMock()
+  unowned_seed_client.get_table.return_value = SimpleNamespace(
+      schema=[], labels={"owner": "other_team"}
+  )
+  with pytest.raises(RuntimeError, match="missing demo ownership label"):
+    seed_scale_rows_to_bigquery(
+        unowned_seed_client,
+        project_id="demo-proj",
+        dataset_id="agent_ops",
+        count=5,
+    )
+  unowned_seed_client.query.assert_not_called()
+
+
+def test_router_hardening_timeouts_host_allowlist_offline_auto_fallback_and_cost(
+    monkeypatch: pytest.MonkeyPatch,
+):
+  from http.server import BaseHTTPRequestHandler  # noqa: PLC0415
+  from http.server import ThreadingHTTPServer  # noqa: PLC0415
+  import threading  # noqa: PLC0415
+
+  from analytics.query_router import _build_decisions_client  # noqa: PLC0415
+  from analytics.query_router import _build_vertex_client  # noqa: PLC0415
+  from analytics.query_router import _parse_decisions_api_base  # noqa: PLC0415
+
+  # 1. Client builders set vertexai=False (decisions) and 60_000 ms timeouts.
+  client_kwargs: list[dict] = []
+
+  class _FakeGenai:
+
+    @staticmethod
+    def Client(**kwargs):
+      client_kwargs.append(kwargs)
+      return SimpleNamespace(**kwargs)
+
+  monkeypatch.setitem(sys.modules, "google.genai", _FakeGenai)
+  monkeypatch.setattr("google.genai", _FakeGenai, raising=False)
+  _build_decisions_client("k-test")
+  _build_vertex_client(project_id="demo-proj", location="global")
+  assert client_kwargs[0]["vertexai"] is False
+  assert client_kwargs[0]["http_options"] == {
+      "api_version": "v1beta",
+      "timeout": 60_000,
+  }
+  assert client_kwargs[1]["vertexai"] is True
+  assert client_kwargs[1]["http_options"] == {"timeout": 60_000}
+
+  # 2. HTTPS base allowlist rejects non-googleapis hosts.
+  with pytest.raises(ValueError, match="googleapis.com"):
+    _parse_decisions_api_base("https://evil.example.com/v1beta")
+
+  # 3. Offline mode ignores stale/invalid GEMINI_DECISIONS_API_BASE.
+  monkeypatch.setenv("GEMINI_DECISIONS_API_BASE", "not a valid url")
+  offline_router = QueryRouter(backend="offline", offline=True)
+  assert offline_router.classify("agent repeated tool calls").layer == (
+      "L1_OFFLINE_HEURISTIC"
+  )
+  monkeypatch.delenv("GEMINI_DECISIONS_API_BASE", raising=False)
+
+  # 4. Straddling API key at byte 295-315 of HTTP 400 body leaks ZERO prefix.
+  straddle_key = "STRADDLE_KEY_ABCDEF1234567890"
+  body_400 = ("X" * 295) + straddle_key + " tail"
+
+  class _Err400Handler(BaseHTTPRequestHandler):
+
+    def do_POST(self) -> None:
+      length = int(self.headers.get("Content-Length", "0"))
+      _ = self.rfile.read(length)
+      payload = body_400.encode("utf-8")
+      self.send_response(400)
+      self.send_header("Content-Type", "text/plain")
+      self.send_header("Content-Length", str(len(payload)))
+      self.end_headers()
+      self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: object) -> None:
+      del format, args
+
+  server = ThreadingHTTPServer(("127.0.0.1", 0), _Err400Handler)
+  thread = threading.Thread(target=server.serve_forever, daemon=True)
+  thread.start()
+  base_url = f"http://127.0.0.1:{server.server_address[1]}/v1beta"
+  try:
+    strict_router = QueryRouter(
+        backend="decisions",
+        api_key=straddle_key,
+        decisions_api_base=base_url,
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+      strict_router.classify("agent got stuck calling lookup repeatedly")
+    err_msg = str(exc_info.value)
+    assert "STRAD" not in err_msg
+    assert "STRADDLE_KEY" not in err_msg
+    assert "[REDA" in err_msg
+
+    # 5. backend="auto" degrades cleanly from Decisions error -> Vertex -> HYBRID.
+    monkeypatch.setattr(
+        "analytics.query_router._build_vertex_client",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("vertex down")),
+    )
+    auto_router = QueryRouter(
+        backend="auto",
+        api_key=straddle_key,
+        decisions_api_base=base_url,
+    )
+    with pytest.warns(RuntimeWarning):
+      degraded = auto_router.classify(
+          "agent got stuck calling lookup repeatedly"
+      )
+    assert degraded.mode == ROUTE_HYBRID
+    assert degraded.layer == "L1_FALLBACK_HYBRID"
+    assert degraded.confidence == pytest.approx(0.5)
+    assert degraded.model == "fallback_hybrid"
+  finally:
+    server.shutdown()
+    server.server_close()
+
+  # 6. Dynamic cost_usd scales with reported input_tokens.
+  token_counts = [0, 128, 1000]
+
+  class _TokenDecisions:
+
+    def create(self, *, model, input, questions):
+      del model, input, questions
+      return SimpleNamespace(
+          answers={
+              "route": SimpleNamespace(
+                  choice="NATURAL_LANGUAGE",
+                  confidence=0.95,
+                  probabilities={"KEYWORD": 0.05, "NATURAL_LANGUAGE": 0.95},
+              )
+          },
+          usage=SimpleNamespace(total_input_tokens=token_counts.pop(0)),
+      )
+
+  cost_router = QueryRouter(
+      backend="decisions",
+      decisions_client=SimpleNamespace(decisions=_TokenDecisions()),
+  )
+  d0 = cost_router.classify("agent repeated tool calls after timeout")
+  d128 = cost_router.classify("agent repeated tool calls after timeout")
+  d1000 = cost_router.classify("agent repeated tool calls after timeout")
+  assert d0.cost_usd == 0.0
+  assert d128.cost_usd == pytest.approx(0.000046)
+  assert d1000.cost_usd == pytest.approx(0.00036)
+
+
+def test_scale_session_filter_synthetic_exclusion_hybrid_order_and_suite_eval(
+    tmp_path: Path,
+):
+  from analytics.pattern_to_eval import evaluate_suite_against_turns  # noqa: PLC0415
+
+  # 1. Hybrid SQL CTEs enforce ORDER BY kw_rank ASC before LIMIT @candidate_k.
+  search_queries = load_named_sql_queries(
+      _SQL_DIR / "03_search_keyword_and_semantic.sql"
+  )
+  for qname in ("PATH_C_HYBRID_RRF", "PATH_C_HYBRID_RRF_NO_RERANK"):
+    assert "ORDER BY kw_rank ASC" in search_queries[qname]
+
+  # 2. sql/05_pattern_discovery.sql excludes scale_synth_* rows.
+  pat_sql = (_SQL_DIR / "05_pattern_discovery.sql").read_text(encoding="utf-8")
+  assert "NOT STARTS_WITH(session_id, 'scale_synth_')" in pat_sql
+
+  # 3. run_index_and_search applies session_ids filter even with scale seeding.
+  recorded_sql: list[str] = []
+
+  def _fake_scale_query(sql_text, job_config=None):
+    del job_config
+    recorded_sql.append(sql_text)
+    job = MagicMock()
+    job.total_bytes_processed = 128
+    job.slot_millis = 2
+    job._properties = {"statistics": {"query": {}}}
+    if "COUNT(*)" in sql_text:
+      job.result.return_value = [{"row_count": 5002, "ready": 5002}]
+    else:
+      job.result.return_value = []
+    return job
+
+  bq_scale = MagicMock()
+  bq_scale.query.side_effect = _fake_scale_query
+  bq_scale.get_table.return_value = SimpleNamespace(
+      num_bytes=512,
+      schema=[],
+      labels={"bqaa_demo": "combined_cuj_trace_search"},
+  )
+  live_in = tmp_path / "live_scale.json"
+  live_in.write_text(
+      json.dumps({"session_ids": ["sess_real_1", "sess_real_2"]}),
+      encoding="utf-8",
+  )
+  run_index_and_search(
+      project_id="demo-proj",
+      dataset_id="agent_ops",
+      input_json=live_in,
+      output_json=tmp_path / "scale_search.json",
+      with_vector_index_scale=True,
+      embed_wait_seconds=0,
+      offline=False,
+      bq_client=bq_scale,
+      router=QueryRouter(backend="offline", offline=True),
+  )
+  assert "session_id IN ('sess_real_1', 'sess_real_2')" in recorded_sql[0]
+
+  # 4. Synthetic scale_synth_* rows are excluded from pattern discovery & EvalSuite.
+  mixed_rows = _sample_turn_rows() + generate_synthetic_eval_turns(
+      count=15, prefix="scale_synth"
+  )
+  patterns = discover_patterns_offline(mixed_rows)
+  suite, _ = build_eval_suite_from_patterns(
+      patterns=patterns, turn_rows=mixed_rows
+  )
+  assert not any(
+      t.session_id.startswith("scale_synth_") for t in suite.get_tasks()
+  )
+
+  # 5. Real EvalSuite threshold scoring catches silent contradictions and passes
+  #    explicit error acknowledgments.
+  from bigquery_agent_analytics import EvalCategory  # noqa: PLC0415
+  from bigquery_agent_analytics import EvalTaskDef  # noqa: PLC0415
+
+  scoring_suite = EvalSuite(name="scoring_check")
+  scoring_suite.add_task(
+      EvalTaskDef(
+          task_id="t_contradiction",
+          session_id="sess_bad_claim",
+          description="Must acknowledge error",
+          category=EvalCategory.REGRESSION,
+          thresholds={
+              "error_acknowledgment_rate": 1.0,
+              "contradiction_rate": 0.0,
+          },
+          is_positive_case=False,
+      )
+  )
+  scoring_suite.add_task(
+      EvalTaskDef(
+          task_id="t_honest_err",
+          session_id="sess_good_err",
+          description="Acknowledged error passes",
+          category=EvalCategory.REGRESSION,
+          thresholds={
+              "error_acknowledgment_rate": 1.0,
+              "contradiction_rate": 0.0,
+          },
+          is_positive_case=False,
+      )
+  )
+  eval_res = evaluate_suite_against_turns(
+      scoring_suite,
+      [
+          {
+              "session_id": "sess_bad_claim",
+              "has_error": True,
+              "error_summary": "CARD_EXPIRED",
+              "_ai_index_trajectory": (
+                  "TOOL_RES: issue_refund -> CARD_EXPIRED\n"
+                  "AGENT: Great news, your refund succeeded!"
+              ),
+          },
+          {
+              "session_id": "sess_good_err",
+              "has_error": True,
+              "error_summary": "CARD_EXPIRED",
+              "_ai_index_trajectory": (
+                  "TOOL_RES: issue_refund -> CARD_EXPIRED\n"
+                  "AGENT: Sorry, your refund failed because the card expired."
+              ),
+          },
+      ],
+  )
+  by_tid = {r["task_id"]: r for r in eval_res["task_results"]}
+  assert by_tid["t_contradiction"]["passed"] is False
+  assert (
+      by_tid["t_contradiction"]["metrics"]["error_acknowledgment_rate"] == 0.0
+  )
+  assert by_tid["t_contradiction"]["metrics"]["contradiction_rate"] == 1.0
+  assert by_tid["t_honest_err"]["passed"] is True
+  assert by_tid["t_honest_err"]["metrics"]["error_acknowledgment_rate"] == 1.0
+  assert by_tid["t_honest_err"]["metrics"]["contradiction_rate"] == 0.0
+
+  # 6. Modeled cost cascade responds to observed L0/L1 route split.
+  all_l0_report = {
+      "queries": [
+          {"router_decision": {"layer": "L0_RULE", "latency_ms": 0.0}}
+          for _ in range(5)
+      ]
+  }
+  all_l1_report = {
+      "queries": [
+          {
+              "router_decision": {
+                  "layer": "L1_DECISIONS_API",
+                  "latency_ms": 80.0,
+                  "input_tokens": 128,
+              }
+          }
+          for _ in range(5)
+      ]
+  }
+  c_l0 = compute_eval_cost_cascade(
+      turn_rows=_sample_turn_rows(), search_report=all_l0_report
+  )
+  c_l1 = compute_eval_cost_cascade(
+      turn_rows=_sample_turn_rows(), search_report=all_l1_report
+  )
+  assert c_l0[2]["measured_inputs"]["observed_l0_fraction"] == 1.0
+  assert c_l1[2]["measured_inputs"]["observed_l1_fraction"] == 1.0
+  assert c_l1[2]["cost_per_1k_usd"] > c_l0[2]["cost_per_1k_usd"]
+  assert c_l1[3]["cost_per_1k_usd"] > c_l0[3]["cost_per_1k_usd"]
+  assert c_l1[2]["tokens_per_1k_evals"] > c_l0[2]["tokens_per_1k_evals"]
+  assert c_l1[3]["tokens_per_1k_evals"] > c_l0[3]["tokens_per_1k_evals"]
+
+
+def test_round3b_table_guard_toctou_router_allowlist_and_polarity_eval(
+    monkeypatch: pytest.MonkeyPatch,
+):
+  from analytics.index_and_search import apply_demo_table_label  # noqa: PLC0415
+  from analytics.index_and_search import build_materialize_eval_turns_sql  # noqa: PLC0415
+  from analytics.pattern_to_eval import evaluate_suite_against_turns  # noqa: PLC0415
+  from analytics.query_router import _parse_decisions_api_base  # noqa: PLC0415
+
+  from bigquery_agent_analytics import EvalCategory  # noqa: PLC0415
+  from bigquery_agent_analytics import EvalTaskDef  # noqa: PLC0415
+
+  # 1. apply_demo_table_label stamps table_meta.labels even when initially None.
+  meta = SimpleNamespace(labels=None)
+  lbl_client = MagicMock()
+  lbl_client.get_table.return_value = meta
+  assert (
+      apply_demo_table_label(lbl_client, "demo-proj", "agent_ops", "eval_turns")
+      is True
+  )
+  assert meta.labels == {"bqaa_demo": "combined_cuj_trace_search"}
+  lbl_client.update_table.assert_called_once_with(meta, ["labels"])
+
+  # 2. build_materialize_eval_turns_sql(replace_existing=False) omits OR REPLACE.
+  ddl_create, _ = build_materialize_eval_turns_sql(
+      project_id="demo-proj",
+      dataset_id="agent_ops",
+      eval_turns_table="eval_turns_new",
+      replace_existing=False,
+  )
+  assert "CREATE TABLE" in ddl_create
+  assert "CREATE OR REPLACE TABLE" not in ddl_create
+
+  # 3. seed_scale_rows_to_bigquery raises clear RuntimeError on 404 before DELETE.
+  class _NotFound(Exception):
+    code = 404
+
+  nf_seed_client = MagicMock()
+  nf_seed_client.get_table.side_effect = _NotFound("table absent")
+  with pytest.raises(RuntimeError, match="does not exist yet"):
+    seed_scale_rows_to_bigquery(
+        nf_seed_client,
+        project_id="demo-proj",
+        dataset_id="agent_ops",
+        eval_turns_table="eval_turns_missing",
+        count=5,
+    )
+  nf_seed_client.query.assert_not_called()
+
+  # 4. Exact HTTPS host allowlist + IPv6 loopback + vertex ignores invalid base.
+  with pytest.raises(ValueError, match="generativelanguage.googleapis.com"):
+    _parse_decisions_api_base("https://storage.googleapis.com/v1beta")
+  assert (
+      _parse_decisions_api_base("http://[::1]:8080/v1beta/")
+      == "http://[::1]:8080/v1beta"
+  )
+  monkeypatch.setenv("GEMINI_DECISIONS_API_BASE", "https://evil.example.com")
+  vertex_router = QueryRouter(backend="vertex", offline=False)
+  assert (
+      vertex_router.decisions_api_base
+      == "https://generativelanguage.googleapis.com/v1beta"
+  )
+  monkeypatch.delenv("GEMINI_DECISIONS_API_BASE", raising=False)
+
+  # 5. Polarity-aware suite evaluation & expanded _FAIL_MARKER_RE.
+  suite = EvalSuite(name="polarity_check")
+  suite.add_task(
+      EvalTaskDef(
+          task_id="pos_ok",
+          session_id="s_pos",
+          description="Healthy turn",
+          category=EvalCategory.CAPABILITY,
+          thresholds={"task_completion": 1.0},
+          is_positive_case=True,
+      )
+  )
+  suite.add_task(
+      EvalTaskDef(
+          task_id="neg_caught",
+          session_id="s_neg_bad",
+          description="Silent contradiction caught",
+          category=EvalCategory.REGRESSION,
+          thresholds={"contradiction_rate": 0.0},
+          is_positive_case=False,
+      )
+  )
+  suite.add_task(
+      EvalTaskDef(
+          task_id="neg_ack_unfortunately",
+          session_id="s_neg_ack",
+          description="Explicit refusal with unfortunately/dispatched",
+          category=EvalCategory.REGRESSION,
+          thresholds={"error_acknowledgment_rate": 1.0},
+          is_positive_case=False,
+      )
+  )
+  ev = evaluate_suite_against_turns(
+      suite,
+      [
+          {
+              "session_id": "s_pos",
+              "has_error": False,
+              "_ai_index_trajectory": "AGENT: Refund complete.",
+          },
+          {
+              "session_id": "s_neg_bad",
+              "has_error": True,
+              "error_summary": "CARD_EXPIRED",
+              "_ai_index_trajectory": "AGENT: Refund succeeded!",
+          },
+          {
+              "session_id": "s_neg_ack",
+              "has_error": True,
+              "error_summary": "SHIPMENT_ALREADY_DISPATCHED",
+              "_ai_index_trajectory": (
+                  "AGENT: Unfortunately we couldn't cancel because the package"
+                  " was already dispatched."
+              ),
+          },
+      ],
+  )
+  assert ev["positive_tasks_total"] == 1
+  assert ev["positive_tasks_passed"] == 1
+  assert ev["negative_tasks_total"] == 2
+  assert ev["negative_regressions_caught"] == 1
+  assert ev["suite_signal_accuracy"] == pytest.approx(round(2 / 3, 4))
+  by_id = {r["task_id"]: r for r in ev["task_results"]}
+  assert by_id["pos_ok"]["category"] == "capability"
+  assert by_id["pos_ok"]["expected_outcome"] == "PASS"
+  assert by_id["neg_caught"]["category"] == "regression"
+  assert by_id["neg_caught"]["expected_outcome"] == "FAIL_ON_BUGGY_TURN"
+  assert by_id["neg_ack_unfortunately"]["passed"] is True
+
+
+def test_pinned_cost_cascade_numbers_match_docs_and_live_artifact():
+  # Inline parity fixture matching the recorded 20261124_200850 live run
+  # (runs in CI even though reports/ is gitignored).
+  live_turn_specs = [
+      (11654, 1076, False, False),
+      (11056, 797, True, False),
+      (11479, 709, True, False),
+      (12617, 759, True, True),
+      (25066, 1045, False, False),
+      (12422, 1490, False, False),
+      (10476, 533, True, False),
+      (11295, 687, True, False),
+  ]
+  inline_turns = [
+      {
+          "session_id": f"sess_live_{idx}",
+          "has_error": has_err,
+          "has_tool_loop": has_loop,
+          "error_summary": "ERR" if has_err else None,
+          "raw_trace_bytes": raw_b,
+          "_ai_index_trajectory": "x" * s3_b,
+      }
+      for idx, (raw_b, s3_b, has_err, has_loop) in enumerate(live_turn_specs)
+  ]
+  inline_search = {
+      "queries": [
+          {"router_decision": {"layer": "L0_RULE", "latency_ms": 0.0}},
+          {"router_decision": {"layer": "L0_RULE", "latency_ms": 0.0}},
+          {
+              "router_decision": {
+                  "layer": "L1_DECISIONS_API",
+                  "latency_ms": 80.0,
+                  "input_tokens": 128,
+              }
+          },
+          {
+              "router_decision": {
+                  "layer": "L1_DECISIONS_API",
+                  "latency_ms": 85.0,
+                  "input_tokens": 127,
+              }
+          },
+          {"router_decision": {"layer": "L0_RULE", "latency_ms": 0.0}},
+      ]
+  }
+  cascade = compute_eval_cost_cascade(
+      turn_rows=inline_turns, search_report=inline_search
+  )
+  expected = [
+      (3764125, 16.6924, 0.0),
+      (401375, 0.5164, 96.91),
+      (238756, 0.2199, 98.68),
+      (87926, 0.0587, 99.65),
+  ]
+  for arm, (exp_tok, exp_cost, exp_save) in zip(cascade, expected):
+    assert arm["tokens_per_1k_evals"] == exp_tok
+    assert arm["cost_per_1k_usd"] == pytest.approx(exp_cost)
+    assert arm["savings_vs_naive_pct"] == pytest.approx(exp_save)
+    assert "decisions_router_in_per_1m_usd" in arm["pricing_model"]
+    assert arm["assumptions"]["arm4_l1_router_call_multiplier"] == 0.5
+
+  # Verify README.md, VERIFICATION.md, and DEMO_NARRATION.md stay synced.
+  for doc_name in ("README.md", "VERIFICATION.md"):
+    doc_text = (_DEMO_DIR / doc_name).read_text(encoding="utf-8")
+    for token in (
+        "$16.6924",
+        "$0.5164",
+        "$0.2199",
+        "$0.0587",
+        "98.68%",
+        "99.65%",
+        "238,756",
+        "87,926",
+    ):
+      assert (
+          token in doc_text
+      ), f"{doc_name} missing synced cascade value {token}"
+  narration_text = (_DEMO_DIR / "DEMO_NARRATION.md").read_text(encoding="utf-8")
+  for token in ("$16.69", "$0.06", "99.65%", "238,756", "87,926"):
+    assert token in narration_text, f"DEMO_NARRATION.md missing {token}"
+
+  # When local reports/final_live_run/ artifacts exist, verify exact live sync.
+  live_dir = _DEMO_DIR / "reports" / "final_live_run"
+  if (
+      (live_dir / "live_demo_results.json").is_file()
+      and (live_dir / "search_results.json").is_file()
+      and (live_dir / "pattern_eval_report.json").is_file()
+  ):
+    live_data = json.loads(
+        (live_dir / "live_demo_results.json").read_text(encoding="utf-8")
+    )
+    search_data = json.loads(
+        (live_dir / "search_results.json").read_text(encoding="utf-8")
+    )
+    pat_data = json.loads(
+        (live_dir / "pattern_eval_report.json").read_text(encoding="utf-8")
+    )
+    recomputed = compute_eval_cost_cascade(
+        turn_rows=live_data["eval_turns"], search_report=search_data
+    )
+    assert pat_data["cost_cascade_ablation"] == recomputed
+    for arm, (exp_tok, exp_cost, exp_save) in zip(recomputed, expected):
+      assert arm["tokens_per_1k_evals"] == exp_tok
+      assert arm["cost_per_1k_usd"] == pytest.approx(exp_cost)
+      assert arm["savings_vs_naive_pct"] == pytest.approx(exp_save)

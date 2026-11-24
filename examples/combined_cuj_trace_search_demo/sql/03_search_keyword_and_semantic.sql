@@ -222,6 +222,7 @@ WITH
         (_ai_index_trajectory, session_id, invocation_id, error_summary, root_agent),
         @keyword_query
       )
+    ORDER BY kw_rank ASC
     LIMIT @candidate_k
   ),
   SemanticRanked AS (
@@ -311,6 +312,7 @@ WITH
         (_ai_index_trajectory, session_id, invocation_id, error_summary, root_agent),
         @keyword_query
       )
+    ORDER BY kw_rank ASC
     LIMIT @candidate_k
   ),
   SemanticRanked AS (

@@ -32,6 +32,12 @@ import re
 import sys
 from typing import Any
 
+from analytics.table_guard import _is_bq_not_found_error
+from analytics.table_guard import apply_demo_table_label
+from analytics.table_guard import assert_demo_table_ownership_or_absent
+from analytics.table_guard import DEMO_OWNERSHIP_LABEL_KEY
+from analytics.table_guard import DEMO_OWNERSHIP_LABEL_VALUE
+
 _PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _DATASET_TABLE_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -250,7 +256,20 @@ def seed_scale_rows_to_bigquery(
   from google.cloud import bigquery
 
   validate_bq_identifiers(project_id, dataset_id, eval_turns_table)
+  if isinstance(count, bool) or count < 0:
+    raise ValueError("count must be non-negative")
+  if not prefix or not _DATASET_TABLE_ID_RE.match(prefix):
+    raise ValueError(f"Invalid synthetic row prefix: {prefix!r}")
   _ = location  # Caller initializes BigQuery client in the target location.
+  existed_owned = assert_demo_table_ownership_or_absent(
+      bq_client, project_id, dataset_id, eval_turns_table
+  )
+  if not existed_owned:
+    raise RuntimeError(
+        f"Target table `{project_id}.{dataset_id}.{eval_turns_table}` does not "
+        "exist yet. Materialize eval_turns via Stage 1/2 before seeding "
+        "synthetic scale rows."
+    )
   effective_base_ts = (
       base_timestamp
       if base_timestamp is not None
@@ -314,6 +333,8 @@ def main(argv: list[str] | None = None) -> int:
   validate_bq_identifiers(
       args.project_id, args.dataset_id, args.eval_turns_table
   )
+  if args.count < 0:
+    raise ValueError("count must be non-negative")
   if args.dry_run:
     rows = generate_synthetic_eval_turns(count=args.count)
     print(json.dumps({"generated_rows": len(rows), "dry_run": True}, indent=2))

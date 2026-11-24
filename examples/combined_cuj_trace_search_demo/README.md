@@ -36,7 +36,7 @@ flowchart TD
    - **Layer 2 & Layer 3:** Step-1 retrieval reads `0` bytes of raw `trace` JSON; Step-2 lazy hydration loads `trace` only for an expanded `(session_id, invocation_id)`; Layer 3 runs scoped `AI.GENERATE` (`thinking_level="LOW"`) strictly on `top_k` candidates to verify silent contradictions.
 
 4. **Continuous Pattern Discovery -> `EvalSuite`**
-   - Groups anomalous turns (`SILENT_CONTRADICTION`, `TOOL_LOOP`, `TOKEN_BLOAT`, `EXACT_ERROR_SPIKE`) and exports a balanced `bigquery_agent_analytics.EvalSuite` JSON (`eval_dataset_generated.json`) verified with `suite.check_health()`.
+   - Groups anomalous turns (`SILENT_CONTRADICTION`, `TOOL_LOOP`, `TOKEN_BLOAT`, `EXACT_ERROR_SPIKE`), exports a balanced `bigquery_agent_analytics.EvalSuite` JSON (`eval_dataset_generated.json`) verified with `suite.check_health()`, and writes a demo-local deterministic threshold evaluation (`suite_evaluation`) into `pattern_eval_report.json` alongside the suite health check (for full LLM/trajectory evaluation against live traces, run the SDK evaluator against the exported `EvalSuite` JSON).
 
 ## Observed Live Benchmark Snapshot
 
@@ -45,8 +45,8 @@ Verified against live BigQuery (`US` multi-region), Vertex AI (`gemini-4-hydroge
 - **`S1` -> `S2` -> `S3` Trajectory Compression (`$0.00` ingest LLM):** Aggregate payload shrank `93.3%` (`106,049 B -> 7,096 B`). Average turn size dropped from `13,256 B` (`3,314` est. tokens, `8/8 > 2,048`) in `S1` and `3,023 B` (`756` est. tokens, `1/8 > 2,048`) in `S2` to **`887 B` (`222` est. tokens, `0/8 > 2,048`)** in `S3`; bloated audit outlier `scn_05` shrank from `25,066 B` (`6,267` tokens) to `1,045 B` (`262` tokens) while preserving `AUDIT_SYNC_WARNING` and `CHECKSUM_MISMATCH`, and silent contradiction `scn_03` (`sess_03_silent_contradiction_refund_20261124_200850`) shrank from `11,477 B` to `709 B` (`-93.8%`).
 - **BigQuery Query Scan Reduction & Scale `IVF` Proof:**
   - `8`-row live run (`8/8` `AI.EMBED` ready): `KEYWORD` Step-1 scan `8,634 B` (`-90.2%`, `10.2x` reduction vs `88,194 B` raw `trace` baseline), `AI.SEARCH` (`rerank_score DESC`) `57,802 B` (`-34.5%`).
-  - `5,091`-row `--with-vector-index-scale` run (`1,000/5,091` initial async ready): `CREATE VECTOR INDEX ... IVF` (`CREATED` live, `PENDING_INDEX_CREATION` during async build), `KEYWORD` scan `1,966,485 B` (`1.97 MB`, `-94.7%` / `18.7x`) and `AI.SEARCH` `14,258,485 B` (`14.26 MB`, `-61.3%`) vs `36,828,878 B` (`36.83 MB`) raw baseline.
-- **4-Layer Routing, Scoped `AI.GENERATE` & Modeled 8-Lever Cost Cascade:** Layer 0 resolved `q1`/`q2`/`q5` in `0.0 ms` (`$0.00`); Layer 1 (`L1_DECISIONS_API`, `gemini-decision-1`, `0` output tokens, `$0.000046`/call) routed `q3` (`conf=0.9976`, `in_tok=128`, top=`sess_03`, `dist=0.4460`, `rerank=0.3822`) and `q4` (`conf=0.9991`, `in_tok=127`, top=`sess_04`, `dist=0.4980`, `rerank=0.3476`), with `--no-rerank` (`PATH_B_AI_SEARCH_NO_RERANK` & `PATH_C_HYBRID_RRF_NO_RERANK`) also verified live; scoped `AI.GENERATE` confirmed `sess_03` (`SILENT_CONTRADICTION`, `conf=1.0`); parameterized from live `S1`/`S3` byte counts under uniform `$0.30/$2.50` compact judge pricing, the modeled 8-lever cascade (`MODELED_PROJECTION`) projects `$16.69` (`Arm 1`, `$16.6924`) -> `$0.52` (`Arm 2`) -> `$0.25` (`Arm 3`) -> `$0.07` (`Arm 4`, `$0.0725`, `-99.57%` per `1K` evals); `pattern_to_eval.py` exported a balanced `6`-task `EvalSuite` across `4` cohorts backed by 100% real BigQuery session IDs (`balance_ratio=0.333`, `0` health warnings).
+  - `5,091`-row `--with-vector-index-scale` historical measurement (measured prior to session-scoped `eval_turns` filtering, which now materializes `8 + 5,000 = 5,008` rows in scale mode; `1,000/5,091` initial async ready): `CREATE VECTOR INDEX ... IVF` (`CREATED` live, `PENDING_INDEX_CREATION` during async build), `KEYWORD` scan `1,966,485 B` (`1.97 MB`, `-94.7%` / `18.7x`) and `AI.SEARCH` `14,258,485 B` (`14.26 MB`, `-61.3%`) vs `36,828,878 B` (`36.83 MB`) raw baseline.
+- **4-Layer Routing, Scoped `AI.GENERATE` & Modeled 8-Lever Cost Cascade:** Layer 0 resolved `q1`/`q2`/`q5` in `0.0 ms` (`$0.00`); Layer 1 (`L1_DECISIONS_API`, `gemini-decision-1`, `0` output tokens, illustrative assumed estimate of `$0.000046`/call at `$0.36/1M` input tokens — not a published list price) routed `q3` (`conf=0.9976`, `in_tok=128`, top=`sess_03`, `dist=0.4460`, `rerank=0.3822`) and `q4` (`conf=0.9991`, `in_tok=127`, top=`sess_04`, `dist=0.4980`, `rerank=0.3476`), with `--no-rerank` (`PATH_B_AI_SEARCH_NO_RERANK` & `PATH_C_HYBRID_RRF_NO_RERANK`) also verified live; scoped `AI.GENERATE` confirmed `sess_03` (`SILENT_CONTRADICTION`, `conf=1.0`); parameterized from live `S1`/`S3` byte counts and the observed `60%`/`40%` `L0`/`L1` split under uniform `$0.30/$2.50` compact judge pricing (assuming an illustrative `$0.36/1M` Decisions prefill rate and Arm 4 expanded `L0` rules / router caching halving `L1` calls, `0.5x`), the modeled 8-lever cascade (`MODELED_PROJECTION`) projects `$16.69` (`Arm 1`, `$16.6924`, `3,764,125` tok) -> `$0.52` (`Arm 2`, `$0.5164`, `401,375` tok, `-96.91%`) -> `$0.22` (`Arm 3`, `$0.2199`, `238,756` tok, `-98.68%`) -> `$0.06` (`Arm 4`, `$0.0587`, `87,926` tok, `-99.65%` per `1K` evals); `pattern_to_eval.py` exported a balanced `6`-task `EvalSuite` across `4` cohorts backed by 100% real BigQuery session IDs (`balance_ratio=0.333`, `0` health warnings).
 
 ## Layout
 
@@ -57,6 +57,7 @@ combined_cuj_trace_search_demo/
     prompts_and_scenarios.py   # 8 deterministic/live demo scenarios
     run_live_demo.py           # ADK + BQAA Plugin runner (--mock-live supported)
   analytics/
+    table_guard.py             # Shared BigQuery ownership-label & 404 guards
     trajectory_extractor.py    # Pure-Python S1/S2/S3 extractors & token accounting
     query_router.py            # Layer 0 rules + Layer 1 Decisions/Flash router
     index_and_search.py        # Dual-index setup, Path A/B/C search, Layer 3 verify
@@ -100,12 +101,14 @@ export PROJECT_ID="your-gcp-project-id"
 ```
 
 Optional flags and router configuration:
+- `--live`: Overrides `DEMO_OFFLINE=true` from an offline `.env` to force a live run (mutually exclusive with `--offline`).
+- Run-scoped `eval_turns_<RUN_ID>`: By default in live mode (when `EVAL_TURNS_TABLE` is unset or commented out in `.env`), `./run_e2e_demo.sh` and the notebook materialize into a unique `eval_turns_<RUN_ID>` table labeled `bqaa_demo=combined_cuj_trace_search` so parallel runs never clobber each other. Export `EVAL_TURNS_TABLE=<name>` to pin a specific table name.
 - `--with-vector-index-scale`: Seeds `5,000` synthetic rows so `CREATE VECTOR INDEX ... IVF` executes against live BigQuery.
 - `--no-rerank`: Uses cosine `distance ASC` ordering without requiring `roles/discoveryengine.viewer`.
 - Layer 1 Decisions API overrides (`analytics.index_and_search` CLI flags or exported env vars before `./run_e2e_demo.sh`):
   - `--router-backend` / `ROUTER_BACKEND`: Selects the Layer 1 router (`auto`, `decisions`, `vertex`, or `offline`; defaults to `auto`).
   - `--decisions-model` / `DECISIONS_MODEL`: Sets the Gemini Decisions API model ID (defaults to `gemini-decision-1`).
-  - `--decisions-api-base` / `GEMINI_DECISIONS_API_BASE`: Optional `https://` base URL override for the Decisions REST endpoint (defaults to `https://generativelanguage.googleapis.com/v1beta`). Set `GEMINI_API_KEY` to authenticate against the Developer API.
+  - `--decisions-api-base` / `GEMINI_DECISIONS_API_BASE`: Optional `https://generativelanguage.googleapis.com` (or local loopback `http://127.0.0.1:<port>`) base URL override for the Decisions REST endpoint (defaults to `https://generativelanguage.googleapis.com/v1beta`). Set `GEMINI_API_KEY` to authenticate against the Developer API.
 
 ### 3. Build Showcase HTML Directly from Fixture
 
@@ -125,5 +128,6 @@ pytest --tb=short -q tests/examples/test_combined_cuj_trace_search_demo.py
 
 ```bash
 ./reset.sh                     # Remove local reports/ and caches
-./reset.sh --drop-demo-tables  # Also drop demo BigQuery tables in .env
+./reset.sh --delete-scale-rows # Delete scale_synth_* rows in demo-owned eval_turns* tables
+./reset.sh --drop-demo-tables  # Drop demo-owned agent_events, eval_turns, and eval_turns_* tables in .env
 ```

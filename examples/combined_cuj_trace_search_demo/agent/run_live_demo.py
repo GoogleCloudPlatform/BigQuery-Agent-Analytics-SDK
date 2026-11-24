@@ -26,6 +26,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import sys
 from typing import Any
 
@@ -40,7 +41,11 @@ from agent.prompts_and_scenarios import DemoScenario  # noqa: E402
 from agent.prompts_and_scenarios import ROOT_AGENT_NAME  # noqa: E402
 from agent.prompts_and_scenarios import TOOL_FUNCTIONS  # noqa: E402
 from agent.tools import sanitized_tool_classifier  # noqa: E402
+from analytics.table_guard import _is_bq_not_found_error  # noqa: E402
+from analytics.table_guard import apply_demo_table_label  # noqa: E402
+from analytics.table_guard import assert_demo_table_ownership_or_absent  # noqa: E402
 from analytics.trajectory_extractor import compute_ablation_metrics  # noqa: E402
+from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: E402
 from analytics.trajectory_extractor import summarize_ablation  # noqa: E402
 from analytics.trajectory_extractor import write_owner_only_text  # noqa: E402
 
@@ -116,16 +121,17 @@ def _materialize_and_fetch_live_eval_turns(
   from google.cloud import bigquery  # noqa: PLC0415
 
   bq_client = bigquery.Client(project=project_id, location=location)
+  existed_owned = assert_demo_table_ownership_or_absent(
+      bq_client, project_id, dataset_id, eval_turns_table
+  )
+  create_clause = "CREATE OR REPLACE TABLE" if existed_owned else "CREATE TABLE"
+
   raw_where_clause = ""
   ddl = None
   try:
     from analytics.index_and_search import _build_session_raw_where_clause  # noqa: PLC0415
-    from analytics.index_and_search import assert_demo_table_ownership_or_absent  # noqa: PLC0415
     from analytics.index_and_search import build_materialize_eval_turns_sql  # noqa: PLC0415
 
-    assert_demo_table_ownership_or_absent(
-        bq_client, project_id, dataset_id, eval_turns_table
-    )
     if session_ids:
       raw_where_clause = _build_session_raw_where_clause(session_ids)
     ddl, _ = build_materialize_eval_turns_sql(
@@ -134,6 +140,7 @@ def _materialize_and_fetch_live_eval_turns(
         events_table=table_id,
         eval_turns_table=eval_turns_table,
         raw_where_clause=raw_where_clause,
+        replace_existing=existed_owned,
     )
   except ImportError:
     safe_sids = [
@@ -157,6 +164,8 @@ def _materialize_and_fetch_live_eval_turns(
           .strip()
           .rstrip(";")
       )
+      if not existed_owned:
+        ddl = ddl.replace("CREATE OR REPLACE TABLE", "CREATE TABLE", 1)
       if raw_where_clause:
         ddl = ddl.replace(
             "      AND invocation_id IS NOT NULL\n",
@@ -187,7 +196,7 @@ def _materialize_and_fetch_live_eval_turns(
             raw_where_clause=raw_where_clause,
         )
         ddl = (
-            f"CREATE OR REPLACE TABLE "
+            f"{create_clause} "
             f"`{project_id}.{dataset_id}.{eval_turns_table}`\n"
             "OPTIONS(labels=[('bqaa_demo', 'combined_cuj_trace_search')]) AS\n"
             "SELECT base.*, CAST(NULL AS STRING) AS error_summary, "
@@ -227,6 +236,8 @@ def _materialize_and_fetch_live_eval_turns(
     else:
       trace_obj = {}
     row["trace"] = trace_obj
+    if row.get("error_summary") is not None:
+      row["error_summary"] = scrub_sensitive_text(str(row["error_summary"]))
     if row.get("distinct_tools_used") is None:
       row["distinct_tools_used"] = []
     else:
@@ -331,17 +342,24 @@ async def _run_live_scenarios(
 
   _configure_vertex_env(project_id, agent_location)
   bq_probe_client = bigquery.Client(project=project_id, location=location)
+  # Fail fast before spending LLM calls if eval_turns_table is pre-existing & unowned.
+  assert_demo_table_ownership_or_absent(
+      bq_probe_client, project_id, dataset_id, eval_turns_table
+  )
   events_fqn = f"{project_id}.{dataset_id}.{table_id}"
   try:
     bq_probe_client.get_table(events_fqn)
     events_pre_existed = True
-  except Exception:
-    events_pre_existed = False
+  except Exception as exc:
+    if _is_bq_not_found_error(exc):
+      events_pre_existed = False
+    else:
+      raise
 
   config = BigQueryLoggerConfig(
       enabled=True,
       table_id=table_id,
-      create_views=True,
+      create_views=False,
       batch_size=1,
       batch_flush_interval=0.5,
       shutdown_timeout=20.0,
@@ -356,7 +374,10 @@ async def _run_live_scenarios(
       location=location,
   )
 
-  run_tag = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+  run_tag = (
+      f"{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+      f"_{os.getpid()}_{secrets.token_hex(2)}"
+  )
   session_ids: list[str] = []
   scenario_runs: list[dict[str, Any]] = []
   try:
@@ -398,12 +419,7 @@ async def _run_live_scenarios(
     await _shutdown_bqaa_plugin(plugin)
 
   if not events_pre_existed:
-    try:
-      from analytics.index_and_search import apply_demo_table_label  # noqa: PLC0415
-
-      apply_demo_table_label(bq_probe_client, project_id, dataset_id, table_id)
-    except Exception:
-      pass
+    apply_demo_table_label(bq_probe_client, project_id, dataset_id, table_id)
 
   eval_turns = _materialize_and_fetch_live_eval_turns(
       project_id=project_id,
@@ -425,6 +441,9 @@ def _prepare_mock_live_runs(
   events, eval_turns = build_mock_live_artifacts(
       user_id=user_id, model_name=model_name
   )
+  for turn in eval_turns:
+    if turn.get("error_summary") is not None:
+      turn["error_summary"] = scrub_sensitive_text(str(turn["error_summary"]))
   session_ids = [t["session_id"] for t in eval_turns]
   scenario_runs = [
       {

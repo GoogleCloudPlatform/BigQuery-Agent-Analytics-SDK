@@ -15,7 +15,7 @@
 
 # End-to-end Combined CUJ demo runner.
 # Usage:
-#   ./run_e2e_demo.sh [--offline] [--with-vector-index-scale] [--no-rerank]
+#   ./run_e2e_demo.sh [--offline | --live] [--with-vector-index-scale] [--no-rerank]
 
 set -euo pipefail
 
@@ -23,6 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 OFFLINE_MODE=false
+FORCE_LIVE=false
 WITH_SCALE=false
 NO_RERANK=false
 
@@ -31,6 +32,9 @@ for arg in "$@"; do
     --offline)
       OFFLINE_MODE=true
       ;;
+    --live)
+      FORCE_LIVE=true
+      ;;
     --with-vector-index-scale)
       WITH_SCALE=true
       ;;
@@ -38,7 +42,7 @@ for arg in "$@"; do
       NO_RERANK=true
       ;;
     -h|--help)
-      echo "Usage: ./run_e2e_demo.sh [--offline] [--with-vector-index-scale] [--no-rerank]"
+      echo "Usage: ./run_e2e_demo.sh [--offline | --live] [--with-vector-index-scale] [--no-rerank]"
       exit 0
       ;;
     *)
@@ -47,6 +51,11 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+if [[ "$OFFLINE_MODE" == "true" && "$FORCE_LIVE" == "true" ]]; then
+  echo "ERROR: --offline and --live are mutually exclusive." >&2
+  exit 2
+fi
 
 resolve_python() {
   if [[ -n "${PYTHON_BIN:-}" ]]; then
@@ -95,10 +104,19 @@ load_safe_env() {
   done < "$env_file"
 }
 
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+  load_safe_env "$SCRIPT_DIR/.env"
+fi
+
+if [[ "$OFFLINE_MODE" != "true" && "$FORCE_LIVE" != "true" ]]; then
+  DEMO_OFFLINE_LC="$(printf '%s' "${DEMO_OFFLINE:-}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$DEMO_OFFLINE_LC" == "true" || "$DEMO_OFFLINE_LC" == "1" || "$DEMO_OFFLINE_LC" == "yes" ]]; then
+    OFFLINE_MODE=true
+  fi
+fi
+
 if [[ "$OFFLINE_MODE" != "true" ]]; then
-  if [[ -f "$SCRIPT_DIR/.env" ]]; then
-    load_safe_env "$SCRIPT_DIR/.env"
-  else
+  if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
     echo "ERROR: .env not found. Run ./setup.sh first or pass --offline." >&2
     exit 1
   fi
@@ -108,15 +126,22 @@ export PYTHONDONTWRITEBYTECODE=1
 export PYTHONSAFEPATH=1
 export PYTHONPATH="$SCRIPT_DIR:${REPO_ROOT}/src:${PYTHONPATH:-}"
 
+RUN_RAND="$("$PYTHON_BIN" -c 'import secrets; print(secrets.token_hex(2))')"
+RUN_ID="$(date -u +%Y%m%d_%H%M%S)_$$_${RUN_RAND}"
 PROJECT_ID="${PROJECT_ID:-demo-project}"
 DATASET_ID="${DATASET_ID:-combined_cuj_trace_search_demo}"
 TABLE_ID="${TABLE_ID:-agent_events}"
-EVAL_TURNS_TABLE="${EVAL_TURNS_TABLE:-eval_turns}"
+if [[ -z "${EVAL_TURNS_TABLE:-}" ]]; then
+  if [[ "$OFFLINE_MODE" == "true" ]]; then
+    EVAL_TURNS_TABLE="eval_turns"
+  else
+    EVAL_TURNS_TABLE="eval_turns_${RUN_ID}"
+  fi
+fi
 BQ_LOCATION="${BQ_LOCATION:-US}"
 AGENT_LOCATION="${AGENT_LOCATION:-global}"
 MODEL_NAME="${MODEL_NAME:-gemini-4-hydrogen}"
 
-RUN_ID="$(date -u +%Y%m%d_%H%M%S)"
 REPORTS_DIR="${REPORTS_DIR:-$SCRIPT_DIR/reports/run_${RUN_ID}}"
 umask 077
 mkdir -p "$REPORTS_DIR"

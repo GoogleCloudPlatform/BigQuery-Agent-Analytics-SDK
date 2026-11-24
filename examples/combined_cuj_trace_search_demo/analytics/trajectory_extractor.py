@@ -28,11 +28,23 @@ from typing import Any
 DEFAULT_S3_MAX_CHARS = 4800
 _EMBED_TOKEN_LIMIT = 2048
 
+_CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
+_SAFE_DIAGNOSTIC_SUFFIX_RE = re.compile(
+    r"(?:^|_)(?:error|status|type|reason|mode|method|scheme|provider|"
+    r"count|enabled|required|result|state)$"
+)
 _SENSITIVE_KEY_RE = re.compile(
-    r"(?:password|passwd|pwd|client[-_]?secret|secret[-_]?key|"
-    r"(?:^|[_-])secret(?:$|[_-])|private[-_]?key|api[-_]?key|apikey|"
-    r"(?:auth|access|refresh|id|bearer|session|oauth|csrf|secret|api)[-_]?token|"
-    r"^token$|authorization|auth[-_]?header|credentials?)",
+    r"(?:passwords?|passwd|(?:^|_)pwd(?:$|_)|passphrase|"
+    r"client_?secret|secret_?key|secret_?access_?key|aws_?secret_?access_?key|"
+    r"(?:^|_)secrets?(?:$|_)|private_?key|api_?key|apikey|"
+    r"signing_?key|encryption_?key|master_?key|"
+    r"connection_?string|database_?url|(?:^|_)dsn(?:$|_)|"
+    r"(?:set_?)?cookie|(?:^|_)jwt(?:$|_)|(?:^|_)oauth(?:$|_)|"
+    r"(?:auth|access|refresh|id|bearer|session|oauth|csrf|secret|api|github)"
+    r"_?token|^token$|authorization|auth_?header|auth_?key|auth_?secret|"
+    r"auth_?code|auth_?response_?uri|auth_?credentials?|"
+    r"(?:^|_)auth$|^auth_(?:data|info|value|payload)$|"
+    r"(?:^|_)credentials?(?:$|_))",
     re.IGNORECASE,
 )
 
@@ -71,11 +83,17 @@ _SECRET_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (
         re.compile(
-            r"""(["']?(?:api[-_]?key|apikey|password|passwd|pwd|"""
-            r"""client[-_]?secret|secret[-_]?key|secret|auth[-_]?token|"""
-            r"""access[-_]?token|refresh[-_]?token|id[-_]?token|"""
-            r"""bearer[-_]?token|session[-_]?token|authorization|"""
-            r"""private[-_]?key)["']?\s*[:=]\s*["']?)[^\s"',}\]]+""",
+            r"""(["']?(?:(?:aws[-_\s]?secret[-_\s]?access[-_\s]?key|"""
+            r"""secret[-_\s]?access[-_\s]?key|client[-_\s]?secret|"""
+            r"""secret[-_\s]?key|private[-_\s]?key|signing[-_\s]?key|"""
+            r"""encryption[-_\s]?key|master[-_\s]?key|api[-_\s]?key|apikey|"""
+            r"""passwords?|passwd|passphrase|secrets?|"""
+            r"""(?:auth|access|refresh|id|bearer|session|oauth|csrf|secret|api|github)"""
+            r"""[-_\s]?token|authorization|connection[-_\s]?string|"""
+            r"""database[-_\s]?url|(?:set[-_\s]?)?cookie|credentials?)|"""
+            r"""(?<![A-Za-z0-9])(?:pwd|dsn|jwt)|\btoken)\b["']?"""
+            r"""(?:\s*[:=]\s*|\s+(?:is|are)\s*:?\s*)["']?)"""
+            r"""[^\s"',;)}\]]+""",
             re.IGNORECASE,
         ),
         r"\1[REDACTED]",
@@ -83,14 +101,137 @@ _SECRET_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 
+def _normalize_key_name(key_name: str) -> str:
+  raw = str(key_name).strip().replace("-", "_")
+  return _CAMEL_BOUNDARY_RE.sub(r"\1_\2", raw).lower()
+
+
 def is_sensitive_key(key_name: str) -> bool:
   """Returns True when a dict/field name represents a credential or secret."""
-  return bool(key_name and _SENSITIVE_KEY_RE.search(str(key_name).strip()))
+  if not key_name:
+    return False
+  norm = _normalize_key_name(key_name)
+  if not norm:
+    return False
+  if _SAFE_DIAGNOSTIC_SUFFIX_RE.search(norm) and not re.search(
+      r"(?:password|passwd|passphrase|private_?key|api_?key|apikey|"
+      r"signing_?key|encryption_?key|master_?key|connection_?string|"
+      r"database_?url|cookie|token|secret_?key|client_?secret|"
+      r"secret_?access_?key|jwt)",
+      norm,
+  ):
+    return False
+  return bool(_SENSITIVE_KEY_RE.search(norm))
+
+
+_MAX_EMBEDDED_JSON_DEPTH = 32
+_MAX_EMBEDDED_JSON_SPAN = 16384
+_MAX_EMBEDDED_JSON_FAIL_BUDGET = 32768
+
+
+def _find_balanced_json_end(
+    text: str,
+    start: int,
+    *,
+    max_len: int = _MAX_EMBEDDED_JSON_SPAN,
+    max_depth: int = _MAX_EMBEDDED_JSON_DEPTH,
+) -> tuple[int | None, int, bool]:
+  """Finds balanced closing index for JSON object/array starting at ``start``.
+
+  Returns ``(end_idx, scanned_pos, depth_exceeded)``. ``end_idx`` is exclusive
+  when balanced within limits, else ``None``.
+  """
+  limit = min(len(text), start + max_len)
+  depth = 0
+  in_string = False
+  escaped = False
+  pos = start
+  while pos < limit:
+    ch = text[pos]
+    if in_string:
+      if escaped:
+        escaped = False
+      elif ch == "\\":
+        escaped = True
+      elif ch == '"':
+        in_string = False
+    else:
+      if ch == '"':
+        in_string = True
+      elif ch in "{[":
+        depth += 1
+        if depth > max_depth:
+          return None, pos + 1, True
+      elif ch in "}]":
+        depth -= 1
+        if depth == 0:
+          return pos + 1, pos + 1, False
+        if depth < 0:
+          return None, pos + 1, False
+    pos += 1
+  return None, pos, False
+
+
+def _scrub_embedded_json_containers(text: str) -> str:
+  """Scrubs balanced JSON objects/arrays embedded inside free text safely.
+
+  Bounds parsing to depth <= 32, span <= 16 KiB, and <= 32 decoded containers
+  (falling back cleanly to `_SECRET_RULES` regex redaction beyond those limits).
+  """
+  if "{" not in text and "[" not in text:
+    return text
+  decoder = json.JSONDecoder()
+  out: list[str] = []
+  idx = 0
+  n = len(text)
+  decoded_count = 0
+  fail_scanned = 0
+  while idx < n:
+    ch = text[idx]
+    if (
+        ch in "{["
+        and decoded_count < 32
+        and fail_scanned < _MAX_EMBEDDED_JSON_FAIL_BUDGET
+    ):
+      end_idx, scanned_pos, depth_exceeded = _find_balanced_json_end(text, idx)
+      if depth_exceeded:
+        out.append(text[idx:scanned_pos])
+        idx = scanned_pos
+        continue
+      if end_idx is None:
+        fail_scanned += scanned_pos - idx
+        out.append(ch)
+        idx += 1
+        continue
+      snippet = text[idx:end_idx]
+      try:
+        parsed, local_end = decoder.raw_decode(snippet, 0)
+      except (json.JSONDecodeError, RecursionError, ValueError):
+        fail_scanned += len(snippet)
+        out.append(ch)
+        idx += 1
+        continue
+      decoded_count += 1
+      abs_end = idx + local_end
+      if isinstance(parsed, (Mapping, list)):
+        scrubbed = scrub_sensitive_data(parsed)
+        if scrubbed != parsed:
+          out.append(
+              json.dumps(scrubbed, separators=(",", ":"), ensure_ascii=False)
+          )
+          idx = abs_end
+          continue
+      out.append(text[idx:abs_end])
+      idx = abs_end
+      continue
+    out.append(ch)
+    idx += 1
+  return "".join(out)
 
 
 def scrub_sensitive_text(text: str) -> str:
   """Redacts credential tokens from raw strings while keeping error codes."""
-  out = str(text)
+  out = _scrub_embedded_json_containers(str(text))
   for pat, repl in _SECRET_RULES:
     out = pat.sub(repl, out)
   return out
@@ -98,6 +239,21 @@ def scrub_sensitive_text(text: str) -> str:
 
 def scrub_sensitive_data(value: Any, *, key_name: str = "") -> Any:
   """Key-aware recursive scrubber for dicts, lists, bytes, and strings."""
+  if (
+      is_sensitive_key(key_name)
+      and value is not None
+      and not isinstance(value, bool)
+  ):
+    if isinstance(value, (bytes, bytearray)):
+      text_val = value.decode("utf-8", errors="replace")
+      return "[REDACTED]" if text_val.strip() else ""
+    if isinstance(value, str):
+      return "[REDACTED]" if value.strip() else value
+    if isinstance(value, Mapping):
+      return "[REDACTED]" if value else {}
+    if isinstance(value, Sequence):
+      return "[REDACTED]" if value else []
+    return "[REDACTED]"
   if isinstance(value, Mapping):
     return {
         str(k): scrub_sensitive_data(v, key_name=str(k))
@@ -109,19 +265,9 @@ def scrub_sensitive_data(value: Any, *, key_name: str = "") -> Any:
     return [scrub_sensitive_data(item, key_name=key_name) for item in value]
   if isinstance(value, (bytes, bytearray)):
     text_val = value.decode("utf-8", errors="replace")
-    if is_sensitive_key(key_name) and text_val.strip():
-      return "[REDACTED]"
     return scrub_sensitive_text(text_val)
   if isinstance(value, str):
-    if is_sensitive_key(key_name) and value.strip():
-      return "[REDACTED]"
     return scrub_sensitive_text(value)
-  if (
-      value is not None
-      and not isinstance(value, bool)
-      and is_sensitive_key(key_name)
-  ):
-    return "[REDACTED]"
   return value
 
 

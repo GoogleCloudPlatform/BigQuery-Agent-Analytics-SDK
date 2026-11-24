@@ -72,6 +72,7 @@ WITH
       CURRENT_TIMESTAMP(),
       INTERVAL @lookback_days DAY
     )
+      AND NOT STARTS_WITH(session_id, 'scale_synth_')
   ),
   ClassifiedTurns AS (
     SELECT
@@ -81,7 +82,7 @@ WITH
         AND agent_text != ''
         AND NOT REGEXP_CONTAINS(
           LOWER(agent_text),
-          r'\b(error|sorry|failed|unable|expired|cannot|declined|denied|restricted|unauthorized)\b'
+          r"(?:\b(?:error|sorry|failed|unable|expired|cannot|declined|denied|restricted|unauthorized|unfortunately|dispatched|rejected)\b|\bcould\s+not\b|\bcouldn't\b|\bcan't\b)"
         )
       ) AS is_silent_contradiction_candidate,
       CASE
@@ -91,7 +92,7 @@ WITH
           AND agent_text != ''
           AND NOT REGEXP_CONTAINS(
             LOWER(agent_text),
-            r'\b(error|sorry|failed|unable|expired|cannot|declined|denied|restricted|unauthorized)\b'
+            r"(?:\b(?:error|sorry|failed|unable|expired|cannot|declined|denied|restricted|unauthorized|unfortunately|dispatched|rejected)\b|\bcould\s+not\b|\bcouldn't\b|\bcan't\b)"
           )
           THEN 'SILENT_CONTRADICTION_CANDIDATE'
         WHEN effective_has_error

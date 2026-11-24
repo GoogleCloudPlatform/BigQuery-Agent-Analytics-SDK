@@ -10,7 +10,7 @@
 
 ## 30-Second Elevator Pitch
 
-> "Teams love logging ADK traces to BigQuery for IAM and Row-Level Security, but evaluating raw multi-megabyte trace JSON with frontier judges breaks the bank and overflows embedding windows. In this demo, a zero-LLM deterministic extractor shrinks raw traces by `93.3%` (`13,256 B -> 887 B`, averaging `222` tokens) so zero turns overflow `2,048` tokens, indexes them with BigQuery `SEARCH INDEX` and autonomous `AI.EMBED`, routes simple lookups for `$0` in `0 ms` and behavioral queries via `gemini-decision-1` (`0` output tokens, `0.998`–`0.999` confidence), verifies silent contradictions only on `top_k` hits with `AI.GENERATE`, and graduates discovered failure cohorts straight into a balanced `6`-task `EvalSuite` backed by 100% real BigQuery session IDs—projecting a `99.57%` eval spend drop (`$16.69 -> $0.07` per `1K` evals)."
+> "Teams love logging ADK traces to BigQuery for IAM and Row-Level Security, but evaluating raw multi-megabyte trace JSON with frontier judges breaks the bank and overflows embedding windows. In this demo, a zero-LLM deterministic extractor shrinks raw traces by `93.3%` (`13,256 B -> 887 B`, averaging `222` tokens) so zero turns overflow `2,048` tokens, indexes them with BigQuery `SEARCH INDEX` and autonomous `AI.EMBED`, routes simple lookups for `$0` in `0 ms` and behavioral queries via `gemini-decision-1` (`0` output tokens, `0.998`–`0.999` confidence), verifies silent contradictions only on `top_k` hits with `AI.GENERATE`, and graduates discovered failure cohorts straight into a balanced `6`-task `EvalSuite` backed by 100% real BigQuery session IDs—projecting a `99.65%` eval spend drop (`$16.69 -> $0.06` per `1K` evals)."
 
 ---
 
@@ -22,7 +22,7 @@
 | `s02` | S1 vs S2 vs S3 Ablation Lab | `#tab-ablation-lab`, `#btn-s1`, `#btn-s2`, `#btn-s3` | `1.15` | Click `#btn-s1` (`8/8` red `>2,048` bars), `#btn-s2`, then `#btn-s3` (`0/8` overflow, `222` avg tokens, trailing error preserved) |
 | `s03` | Search Studio: Layer 0 Exact Rule | `#tab-search-studio`, `#query-chip-1` | `1.15` | Click `#query-chip-1` (`CARD_EXPIRED`) -> `L0_RULE`, `0 ms`, `$0`, `8,634 B` vs `88,194 B` raw baseline (`10.2x` smaller) |
 | `s04` | Search Studio: Layer 1 Semantic & Hybrid RRF + Lazy Trace | `#query-chip-3`, `#query-chip-5`, `#search-results-table`, `#expand-trace-btn` | `1.20` | Click `#query-chip-3` (`L1_DECISIONS_API`, `0` decode tokens, `AI.SEARCH` `rerank_score`), then `#query-chip-5` (`HYBRID` RRF), then click `#expand-trace-btn` |
-| `s05` | Modeled 8-Lever Eval Cost Cascade | `#tab-cost-cascade`, `#lever-toggles`, `#cascade-table` | `1.15` | Toggle levers in `#lever-toggles` and highlight modeled `Arm 1` (`$16.69`) vs `Arm 4` (`$0.07`) savings in `#cascade-table` |
+| `s05` | Modeled 8-Lever Eval Cost Cascade | `#tab-cost-cascade`, `#lever-toggles`, `#cascade-table` | `1.15` | Toggle levers in `#lever-toggles` and highlight modeled `Arm 1` (`$16.69`) vs `Arm 4` (`$0.06`) savings in `#cascade-table` |
 | `s06` | Continuous Pattern Discovery & Scoped `AI.GENERATE` | `#tab-patterns-eval`, `#patterns-eval` | `1.15` | Inspect `SILENT_CONTRADICTION_CANDIDATE`, `EXACT_ERROR_SPIKE`, `TOOL_LOOP`, and `TOKEN_BLOAT` cohorts + `conf=1.0` `AI.GENERATE` badges |
 | `s07` | `EvalSuite` Export & Health Check | `#export-eval-btn` | `1.10` | Click `#export-eval-btn` to reveal balanced `6`-task `EvalSuite` JSON (`balance_ratio=0.33`, `0` warnings) |
 
@@ -32,7 +32,7 @@
 
 ### `s01` — Overview & Pipeline (`0:00–0:30`)
 **Action:** Open `showcase.html` at `#overview` (`zoom_scale: 1.0`).
-> "Everything starts inside BigQuery. Our ADK customer-operations agent streams every turn through `BigQueryAgentAnalyticsPlugin` into `agent_events`, then materializes a 25-column `eval_turns` table (22 core `v_eval_turn` columns plus 3 demo extraction and summary columns). Look at the top KPI strip: deterministic extraction cuts trajectory size by `93.3%` at zero ingest LLM cost, Step-1 keyword searches cut scan bytes `10.2x` (`8,634 B` vs `88,194 B` raw `trace`), and our modeled eight-lever cascade projects a drop in evaluation cost from `$16.69` down to `$0.07` per thousand turns."
+> "Everything starts inside BigQuery. Our ADK customer-operations agent streams every turn through `BigQueryAgentAnalyticsPlugin` into `agent_events`, then materializes a 25-column `eval_turns` table (22 core `v_eval_turn` columns plus 3 demo extraction and summary columns). Look at the top KPI strip: deterministic extraction cuts trajectory size by `93.3%` at zero ingest LLM cost, Step-1 keyword searches cut scan bytes `10.2x` (`8,634 B` vs `88,194 B` raw `trace`), and our modeled eight-lever cascade projects a drop in evaluation cost from `$16.69` down to `$0.06` per thousand turns."
 
 ### `s02` — Deterministic Trajectory Extraction Ablation (`0:30–1:15`)
 **Action:** Click `#tab-ablation-lab`, then step `#btn-s1` -> `#btn-s2` -> `#btn-s3` (`zoom_scale: 1.15`).
@@ -44,11 +44,11 @@
 
 ### `s04` — Search Studio: Layer 1 Semantic, Hybrid RRF & Lazy Trace (`1:45–2:30`)
 **Action:** Click `#query-chip-3`, then `#query-chip-5`, then `#expand-trace-btn` (`zoom_scale: 1.20`).
-> "Conceptual queries like 'agent claimed refund succeeded even though tool failed' hit our Layer 1 router—powered by `gemini-decision-1` (`L1_DECISIONS_API`, `0` output tokens, `0.998`–`0.999` confidence, `$0.000046` per call) with Vertex `gemini-4-hydrogen` (`thinking_level="LOW"`) as fallback—and execute `AI.SEARCH` over `_ai_index_trajectory` sorted by `rerank_score DESC`, putting `sess_03` (`rerank=0.3822`, `dist=0.4460`) right at the top. Mixed queries like `Q5` combine keyword and semantic rankings via Reciprocal Rank Fusion. Only when a human drills into a specific turn does Step 2 lazy-load the full `trace` JSON."
+> "Conceptual queries like 'agent claimed refund succeeded even though tool failed' hit our Layer 1 router—powered by `gemini-decision-1` (`L1_DECISIONS_API`, `0` output tokens, `0.998`–`0.999` confidence, illustrative assumed estimate of `$0.000046` per call at `$0.36/1M` input tokens — not a published list price) with Vertex `gemini-4-hydrogen` (`thinking_level="LOW"`) as fallback—and execute `AI.SEARCH` over `_ai_index_trajectory` sorted by `rerank_score DESC`, putting `sess_03` (`rerank=0.3822`, `dist=0.4460`) right at the top. Mixed queries like `Q5` combine keyword and semantic rankings via Reciprocal Rank Fusion. Only when a human drills into a specific turn does Step 2 lazy-load the full `trace` JSON."
 
 ### `s05` — Modeled 8-Lever Eval Cost Cascade (`2:30–3:10`)
 **Action:** Click `#tab-cost-cascade`, toggle checkboxes in `#lever-toggles` (`zoom_scale: 1.15`).
-> "Eval cost is a design choice, not a fixed tax. Parameterized from our live `S1` and `S3` byte counts under uniform `$0.30` input and `$2.50` output per-million judge pricing, stacking code prefilters, turn scoping, `S3` trimming, decision routing, `thinking_level="LOW"`, and top-K cascade escalation projects a `99.57%` cost drop—from `$16.69` (`3,764,125` tokens) per thousand evals in Arm 1 down to `$0.07` (`92,426` tokens) in Arm 4."
+> "Eval cost is a design choice, not a fixed tax. Parameterized from our live `S1` and `S3` byte counts and observed `60%`/`40%` `L0`/`L1` split under uniform `$0.30` input and `$2.50` output per-million judge pricing (assuming an illustrative `$0.36/1M` Decisions prefill rate and Arm 4 expanded `L0` rules / router caching halving `L1` invocations at `0.5x`), stacking code prefilters, turn scoping, `S3` trimming, decision routing, `thinking_level="LOW"`, and top-K cascade escalation projects a `99.65%` cost drop—from `$16.69` (`3,764,125` tokens) per thousand evals in Arm 1 down to `$0.52` (`401,375` tokens) in Arm 2, `$0.22` (`238,756` tokens) in Arm 3, and `$0.06` (`87,926` tokens) in Arm 4."
 
 ### `s06` & `s07` — Pattern Discovery & `EvalSuite` Export (`3:10–4:00`)
 **Action:** Click `#tab-patterns-eval`, inspect the 4 discovered cohorts, then click `#export-eval-btn` (`zoom_scale: 1.10`).

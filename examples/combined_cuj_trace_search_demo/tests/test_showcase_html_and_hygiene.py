@@ -339,13 +339,25 @@ class ShowcaseHtmlAndHygieneTest(unittest.TestCase):
                           "has_tool_loop": False,
                           "turn_latency_ms": 420,
                           "total_tokens": 900,
-                          "error_summary": f"CARD_EXPIRED {secret_token}",
+                          "error_summary": (
+                              f"CARD_EXPIRED {secret_token} "
+                              "the password is freetext_pw_leak"
+                          ),
                           "trace": {
                               "agents": {"a": {"instruction": "secret"}},
-                              "password": "nested_plain_password_leak",
+                              "password": {
+                                  "nested": "nested_container_pw_leak"
+                              },
+                              "credentials": {
+                                  "value": "nested_container_cred_leak"
+                              },
+                              "auth": ["nested_auth_list_leak"],
+                              "passphrase": "nested_passphrase_leak",
+                              "signing_key": "nested_signing_key_leak",
                               "nested": {
                                   "client_secret": "nested_client_secret_leak",
                                   "apikey": "nested_apikey_leak",
+                                  "cookie": "nested_cookie_leak",
                               },
                               "turns": [],
                           },
@@ -444,7 +456,13 @@ class ShowcaseHtmlAndHygieneTest(unittest.TestCase):
       self.assertNotIn(img_probe, html_text)
       self.assertNotIn(secret_token, html_text)
       self.assertNotIn(oauth_token, html_text)
-      self.assertNotIn("nested_plain_password_leak", html_text)
+      self.assertNotIn("nested_container_pw_leak", html_text)
+      self.assertNotIn("nested_container_cred_leak", html_text)
+      self.assertNotIn("nested_auth_list_leak", html_text)
+      self.assertNotIn("nested_passphrase_leak", html_text)
+      self.assertNotIn("nested_signing_key_leak", html_text)
+      self.assertNotIn("nested_cookie_leak", html_text)
+      self.assertNotIn("freetext_pw_leak", html_text)
       self.assertNotIn("nested_client_secret_leak", html_text)
       self.assertNotIn("nested_apikey_leak", html_text)
       # Caller's pre-existing directory permissions must remain untouched.
@@ -631,6 +649,50 @@ class ShowcaseHtmlAndHygieneTest(unittest.TestCase):
       self.assertIn("Offline Runner Execution", showcase_text)
       self.assertIn("CARD_EXPIRED", showcase_text)
 
+  def test_run_e2e_demo_honors_dotenv_demo_offline_true_without_flag(
+      self,
+  ) -> None:
+    import shutil  # noqa: PLC0415
+
+    with tempfile.TemporaryDirectory() as tmp:
+      fake_root = Path(tmp) / "repo"
+      fake_demo = fake_root / "examples" / "combined_cuj_trace_search_demo"
+      fake_demo.mkdir(parents=True)
+      os.symlink(REPO_ROOT / "src", fake_root / "src")
+      for sub in ("agent", "analytics", "report", "sql"):
+        os.symlink(DEMO_DIR / sub, fake_demo / sub)
+      shutil.copy2(DEMO_DIR / "run_e2e_demo.sh", fake_demo / "run_e2e_demo.sh")
+      (fake_demo / ".env").write_text(
+          "PROJECT_ID=demo-project\nDEMO_OFFLINE=true\n",
+          encoding="utf-8",
+      )
+      reports_dir = Path(tmp) / "dotenv_offline_reports"
+      env = {
+          "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+          "PYTHON_BIN": sys.executable,
+          "REPORTS_DIR": str(reports_dir),
+          "PYTHONDONTWRITEBYTECODE": "1",
+          "PYTHONSAFEPATH": "1",
+      }
+      proc = subprocess.run(
+          ["bash", str(fake_demo / "run_e2e_demo.sh")],
+          cwd=str(fake_demo),
+          env=env,
+          capture_output=True,
+          text=True,
+          check=False,
+      )
+      self.assertEqual(
+          proc.returncode,
+          0,
+          f"DEMO_OFFLINE=true run failed:\n{proc.stdout}\n{proc.stderr}",
+      )
+      self.assertTrue((reports_dir / "showcase.html").is_file())
+      self.assertIn(
+          "Offline Runner Execution",
+          (reports_dir / "showcase.html").read_text(encoding="utf-8"),
+      )
+
   def test_notebook_executes_cleanly_offline_with_real_modules(self) -> None:
     try:
       import ipykernel  # noqa: F401, PLC0415
@@ -677,6 +739,171 @@ class ShowcaseHtmlAndHygieneTest(unittest.TestCase):
   def test_demo_directory_has_zero_oss_hygiene_violations(self) -> None:
     violations = scan_directory_for_oss_hygiene(DEMO_DIR)
     self.assertEqual(violations, [], f"Hygiene violations: {violations}")
+
+  def test_run_e2e_demo_rejects_mutually_exclusive_offline_and_live(
+      self,
+  ) -> None:
+    proc = subprocess.run(
+        ["bash", str(DEMO_DIR / "run_e2e_demo.sh"), "--offline", "--live"],
+        cwd=str(DEMO_DIR),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    self.assertEqual(proc.returncode, 2)
+    self.assertIn("mutually exclusive", proc.stderr)
+
+  def test_reset_sh_hermetic_bq_ownership_empty_array_503_and_scale_cleanup(
+      self,
+  ) -> None:
+    import shutil  # noqa: PLC0415
+
+    def _run_reset(
+        *,
+        args: list[str],
+        dotenv_text: str,
+        bq_script: str,
+    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+      with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        fake_demo = tmp_path / "repo" / "examples" / "demo"
+        fake_demo.mkdir(parents=True)
+        shutil.copy2(DEMO_DIR / "reset.sh", fake_demo / "reset.sh")
+        (fake_demo / ".env").write_text(dotenv_text, encoding="utf-8")
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        log_file = tmp_path / "bq_calls.log"
+        bq_stub = bin_dir / "bq"
+        bq_stub.write_text(bq_script, encoding="utf-8")
+        bq_stub.chmod(0o755)
+        env = {
+            "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+            "PYTHON_BIN": sys.executable,
+            "BQ_LOG_FILE": str(log_file),
+        }
+        proc = subprocess.run(
+            ["bash", str(fake_demo / "reset.sh"), *args],
+            cwd=str(fake_demo),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        calls = (
+            log_file.read_text(encoding="utf-8").splitlines()
+            if log_file.is_file()
+            else []
+        )
+        return proc, calls
+
+    base_env = (
+        "PROJECT_ID=demo-project\n"
+        "DATASET_ID=demo_ds\n"
+        "TABLE_ID=agent_events\n"
+        "# EVAL_TURNS_TABLE=eval_turns\n"
+        "BQ_LOCATION=US\n"
+    )
+
+    # 1. Empty RUN_SCOPED_TABLES under set -u succeeds cleanly.
+    bq_empty = (
+        "#!/usr/bin/env bash\n"
+        'echo "$*" >> "$BQ_LOG_FILE"\n'
+        'if [[ "$1" == "ls" ]]; then echo "[]"; exit 0; fi\n'
+        'if [[ "$1" == "show" ]]; then echo "Not found: table" >&2; exit 1; fi\n'
+        "exit 0\n"
+    )
+    proc1, _ = _run_reset(
+        args=["--drop-demo-tables"], dotenv_text=base_env, bq_script=bq_empty
+    )
+    self.assertEqual(proc1.returncode, 0, proc1.stderr)
+
+    # 2. Owned eval_turns_<run> dropped; unowned / labels:null preserved;
+    #    unpinned default eval_turns with labels:null does not fail.
+    bq_mixed = (
+        "#!/usr/bin/env bash\n"
+        'echo "$*" >> "$BQ_LOG_FILE"\n'
+        'if [[ "$1" == "ls" ]]; then\n'
+        '  echo \'[{"tableReference":{"tableId":"eval_turns_run1"}},'
+        '{"tableReference":{"tableId":"eval_turns_other"}}]\'\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [[ "$1" == "show" ]]; then\n'
+        '  case "$*" in\n'
+        '    *".agent_events") echo \'{"labels":{"bqaa_demo":"combined_cuj_trace_search"}}\'; exit 0 ;;\n'
+        '    *".eval_turns") echo \'{"labels":null}\'; exit 0 ;;\n'
+        '    *".eval_turns_run1") echo \'{"labels":{"bqaa_demo":"combined_cuj_trace_search"}}\'; exit 0 ;;\n'
+        '    *".eval_turns_other") echo \'{"labels":null}\'; exit 0 ;;\n'
+        "  esac\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    proc2, calls2 = _run_reset(
+        args=["--drop-demo-tables"], dotenv_text=base_env, bq_script=bq_mixed
+    )
+    self.assertEqual(proc2.returncode, 0, proc2.stderr)
+    rm_calls2 = [c for c in calls2 if c.startswith("rm ")]
+    self.assertTrue(any("eval_turns_run1" in c for c in rm_calls2))
+    self.assertTrue(any("agent_events" in c for c in rm_calls2))
+    self.assertFalse(any("eval_turns_other" in c for c in rm_calls2))
+    self.assertFalse(any(c.endswith(".eval_turns") for c in rm_calls2))
+
+    # 3. bq show 503/auth error exits non-zero and never drops table.
+    bq_503 = (
+        "#!/usr/bin/env bash\n"
+        'echo "$*" >> "$BQ_LOG_FILE"\n'
+        'if [[ "$1" == "ls" ]]; then\n'
+        '  echo \'[{"tableReference":{"tableId":"eval_turns_run1"}}]\'\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [[ "$1" == "show" ]]; then\n'
+        '  echo "BigQuery error: 503 Service Unavailable" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    proc3, calls3 = _run_reset(
+        args=["--drop-demo-tables"], dotenv_text=base_env, bq_script=bq_503
+    )
+    self.assertNotEqual(proc3.returncode, 0)
+    self.assertFalse(any(c.startswith("rm ") for c in calls3))
+    self.assertNotIn("Preserved non-demo table", proc3.stdout)
+
+    # 4. --delete-scale-rows deletes scale_synth_* on owned eval_turns_<run>.
+    proc4, calls4 = _run_reset(
+        args=["--delete-scale-rows"], dotenv_text=base_env, bq_script=bq_mixed
+    )
+    self.assertEqual(proc4.returncode, 0, proc4.stderr)
+    del_calls = [c for c in calls4 if c.startswith("query ")]
+    self.assertTrue(any("eval_turns_run1" in c for c in del_calls))
+    self.assertFalse(any("eval_turns_other" in c for c in del_calls))
+
+    # 5. Harmless stderr warnings from bq ls / bq show do NOT corrupt stdout
+    #    JSON parsing.
+    bq_stderr_warn = (
+        "#!/usr/bin/env bash\n"
+        'echo "$*" >> "$BQ_LOG_FILE"\n'
+        'if [[ "$1" == "ls" ]]; then\n'
+        '  echo "WARNING: benign CLI deprecation notice" >&2\n'
+        '  echo \'[{"tableReference":{"tableId":"eval_turns_warn1"}}]\'\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [[ "$1" == "show" ]]; then\n'
+        '  echo "WARNING: benign show stderr warning" >&2\n'
+        '  case "$*" in\n'
+        '    *".eval_turns") echo \'{"labels":null}\'; exit 0 ;;\n'
+        '    *) echo \'{"labels":{"bqaa_demo":"combined_cuj_trace_search"}}\'; exit 0 ;;\n'
+        "  esac\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    proc5, calls5 = _run_reset(
+        args=["--drop-demo-tables"],
+        dotenv_text=base_env,
+        bq_script=bq_stderr_warn,
+    )
+    self.assertEqual(proc5.returncode, 0, proc5.stderr)
+    rm_calls5 = [c for c in calls5 if c.startswith("rm ")]
+    self.assertTrue(any("eval_turns_warn1" in c for c in rm_calls5))
 
 
 if __name__ == "__main__":

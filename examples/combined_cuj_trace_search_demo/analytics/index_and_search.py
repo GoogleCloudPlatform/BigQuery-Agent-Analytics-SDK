@@ -28,7 +28,6 @@ Supports both:
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -51,10 +50,13 @@ from analytics.query_router import ROUTE_NATURAL_LANGUAGE
 from analytics.seed_scale_benchmark import generate_synthetic_eval_turns
 from analytics.seed_scale_benchmark import seed_scale_rows_to_bigquery
 from analytics.seed_scale_benchmark import validate_bq_identifiers
+from analytics.table_guard import apply_demo_table_label
+from analytics.table_guard import assert_demo_table_ownership_or_absent
+from analytics.table_guard import DEMO_OWNERSHIP_LABEL_KEY
+from analytics.table_guard import DEMO_OWNERSHIP_LABEL_VALUE
+from analytics.trajectory_extractor import extract_s3_outcome_first
+from analytics.trajectory_extractor import scrub_sensitive_text
 from analytics.trajectory_extractor import write_owner_only_text
-
-DEMO_OWNERSHIP_LABEL_KEY = "bqaa_demo"
-DEMO_OWNERSHIP_LABEL_VALUE = "combined_cuj_trace_search"
 
 _IVF_MIN_ROWS = 5000
 _TEN_GIB_BYTES = 10 * 1024 * 1024 * 1024
@@ -354,53 +356,6 @@ def _resolve_adk_eval_turn_builder() -> Callable[..., str] | None:
   return None
 
 
-def assert_demo_table_ownership_or_absent(
-    bq_client: Any,
-    project_id: str,
-    dataset_id: str,
-    table_name: str,
-) -> None:
-  """Refuses to overwrite or drop a pre-existing non-demo BigQuery table."""
-  table_fqn = f"{project_id}.{dataset_id}.{table_name}"
-  try:
-    table_meta = bq_client.get_table(table_fqn)
-  except Exception:
-    return
-  labels = getattr(table_meta, "labels", None)
-  if (
-      table_meta is not None
-      and isinstance(labels, Mapping)
-      and labels.get(DEMO_OWNERSHIP_LABEL_KEY) != DEMO_OWNERSHIP_LABEL_VALUE
-  ):
-    raise RuntimeError(
-        f"Refusing to modify pre-existing table `{table_fqn}`: missing demo "
-        f"ownership label {DEMO_OWNERSHIP_LABEL_KEY}={DEMO_OWNERSHIP_LABEL_VALUE}."
-    )
-
-
-def apply_demo_table_label(
-    bq_client: Any,
-    project_id: str,
-    dataset_id: str,
-    table_name: str,
-) -> None:
-  """Tags a newly created BigQuery table with the demo ownership label."""
-  table_fqn = f"{project_id}.{dataset_id}.{table_name}"
-  try:
-    table_meta = bq_client.get_table(table_fqn)
-  except Exception:
-    return
-  labels = getattr(table_meta, "labels", None)
-  if table_meta is None or not isinstance(labels, Mapping):
-    return
-  if labels.get(DEMO_OWNERSHIP_LABEL_KEY) == DEMO_OWNERSHIP_LABEL_VALUE:
-    return
-  updated = dict(labels)
-  updated[DEMO_OWNERSHIP_LABEL_KEY] = DEMO_OWNERSHIP_LABEL_VALUE
-  table_meta.labels = updated
-  bq_client.update_table(table_meta, ["labels"])
-
-
 def build_materialize_eval_turns_sql(
     *,
     project_id: str,
@@ -408,19 +363,26 @@ def build_materialize_eval_turns_sql(
     events_table: str = "agent_events",
     eval_turns_table: str = "eval_turns",
     raw_where_clause: str = "",
+    replace_existing: bool = True,
 ) -> tuple[str, str]:
-  """Builds the ``CREATE OR REPLACE TABLE ... eval_turns`` DDL statement.
+  """Builds the ``CREATE [OR REPLACE] TABLE ... eval_turns`` DDL statement.
 
   Uses ``google.adk.plugins.bigquery_agent_analytics_plugin``'s
   ``build_eval_turn_query_sql`` when available, wrapping it with the three
   demo columns (``error_summary``, ``raw_trace_bytes``,
   ``_ai_index_trajectory``). Falls back cleanly to
-  ``sql/01_materialize_eval_turns.sql`` on older ADK versions.
+  ``sql/01_materialize_eval_turns.sql`` on older ADK versions. When
+  ``replace_existing`` is ``False`` (target table was confirmed absent),
+  emits ``CREATE TABLE`` without ``OR REPLACE`` so concurrent creation of an
+  unowned table fails closed instead of overwriting it.
   """
   _validate_bq_identifiers(project_id, dataset_id, events_table)
   _validate_bq_identifiers(project_id, dataset_id, eval_turns_table)
   events_fqn = f"{project_id}.{dataset_id}.{events_table}"
   eval_turns_fqn = f"{project_id}.{dataset_id}.{eval_turns_table}"
+  create_clause = (
+      "CREATE OR REPLACE TABLE" if replace_existing else "CREATE TABLE"
+  )
 
   builder = _resolve_adk_eval_turn_builder()
   if builder is not None:
@@ -432,7 +394,7 @@ def build_materialize_eval_turns_sql(
         cond = cond[6:].strip()
       extra_raw_filter = f"\n      AND (\n        {cond}\n      )"
     ddl = (
-        f"CREATE OR REPLACE TABLE `{eval_turns_fqn}`\n"
+        f"{create_clause} `{eval_turns_fqn}`\n"
         "PARTITION BY DATE(turn_start_timestamp)\n"
         "CLUSTER BY root_agent, has_error, session_id\n"
         f"OPTIONS(labels=[('{DEMO_OWNERSHIP_LABEL_KEY}', "
@@ -503,6 +465,8 @@ def build_materialize_eval_turns_sql(
       EVENTS_TABLE=events_table,
       EVAL_TURNS_TABLE=eval_turns_table,
   )
+  if not replace_existing:
+    rendered = rendered.replace("CREATE OR REPLACE TABLE", "CREATE TABLE", 1)
   if raw_where_clause.strip():
     cond = raw_where_clause.strip()
     if cond.upper().startswith("WHERE "):
@@ -515,50 +479,15 @@ def build_materialize_eval_turns_sql(
   return rendered.strip().rstrip(";"), "sql_01_materialize_eval_turns_fallback"
 
 
-def _extract_s3_trajectory_fallback(
-    trace_obj: dict[str, Any], *, row: dict[str, Any], max_chars: int = 4800
-) -> str:
-  """Deterministic outcome-first fallback when trajectory_extractor is absent."""
-  root_agent = str(row.get("root_agent") or "support_agent")
-  has_error = str(bool(row.get("has_error"))).lower()
-  tool_calls = int(row.get("tool_call_count") or 0)
-  tool_errors = int(row.get("tool_error_count") or 0)
-  has_loop = str(bool(row.get("has_tool_loop"))).lower()
-  latency_ms = int(row.get("turn_latency_ms") or 0)
-  lines = [
-      f"[OUTCOME: root_agent={root_agent} has_error={has_error} "
-      f"tool_calls={tool_calls} tool_errors={tool_errors} "
-      f"loop={has_loop} latency_ms={latency_ms}]"
-  ]
-  turns = trace_obj.get("turns") if isinstance(trace_obj, dict) else []
-  for turn in turns or []:
-    for ev in turn.get("events", []):
-      content = ev.get("content") or {}
-      role = content.get("role")
-      for part in content.get("parts", []):
-        if "text" in part and part["text"]:
-          label = "USER" if role == "user" else "AGENT"
-          txt = re.sub(r"<[^>]+>", " ", str(part["text"]))
-          txt = re.sub(r"\s+", " ", txt).strip()
-          lines.append(f"{label}: {txt[:400]}")
-        elif "function_call" in part:
-          fc = part["function_call"]
-          args_str = json.dumps(fc.get("args") or {}, sort_keys=True)
-          lines.append(f"TOOL_CALL: {fc.get('name')}({args_str[:180]})")
-        elif "function_response" in part:
-          fr = part["function_response"]
-          resp_str = json.dumps(fr.get("response") or {}, sort_keys=True)
-          if len(resp_str) > 360:
-            resp_str = f"{resp_str[:140]} ...[truncated]... {resp_str[-180:]}"
-          lines.append(f"TOOL_RES: {fr.get('name')} -> {resp_str}")
-  out = "\n".join(lines)
-  if len(out) > max_chars:
-    out = out[: max_chars - 24] + "\n...[truncated]..."
-  return out
+def _scrub_error_summary(value: Any) -> str | None:
+  """Scrubs sensitive credentials from an error_summary string if present."""
+  if value is None:
+    return None
+  return scrub_sensitive_text(str(value))
 
 
 def _extract_s3_text(trace_obj: Any, row: dict[str, Any]) -> str:
-  """Uses Slice 1's trajectory_extractor lazily when present, else fallback."""
+  """Extracts deterministic redacted S3 trajectory text."""
   if isinstance(trace_obj, str):
     try:
       trace_dict = json.loads(trace_obj)
@@ -568,13 +497,7 @@ def _extract_s3_text(trace_obj: Any, row: dict[str, Any]) -> str:
     trace_dict = trace_obj
   else:
     trace_dict = {}
-
-  try:
-    from analytics.trajectory_extractor import extract_s3_outcome_first
-
-    return extract_s3_outcome_first(trace_dict, metrics=row)
-  except ImportError:
-    return _extract_s3_trajectory_fallback(trace_dict, row=row)
+  return extract_s3_outcome_first(trace_dict, metrics=row)
 
 
 def populate_trajectories_in_bigquery(
@@ -584,7 +507,7 @@ def populate_trajectories_in_bigquery(
     dataset_id: str,
     eval_turns_table: str = "eval_turns",
 ) -> int:
-  """Populates NULL ``_ai_index_trajectory`` values via staging load + MERGE."""
+  """Populates NULL ``_ai_index_trajectory`` and scrubs ``error_summary``."""
   from google.cloud import bigquery
 
   _validate_bq_identifiers(project_id, dataset_id, eval_turns_table)
@@ -599,15 +522,18 @@ def populate_trajectories_in_bigquery(
   if not rows:
     return 0
 
-  staged: list[dict[str, str]] = []
+  staged: list[dict[str, Any]] = []
   for r in rows:
     row_dict = dict(r)
+    scrubbed_err = _scrub_error_summary(row_dict.get("error_summary"))
+    row_dict["error_summary"] = scrubbed_err
     s3_text = _extract_s3_text(row_dict.get("trace"), row_dict)
     staged.append(
         {
             "session_id": str(row_dict["session_id"]),
             "invocation_id": str(row_dict["invocation_id"]),
             "_ai_index_trajectory": s3_text,
+            "error_summary": scrubbed_err,
         }
     )
 
@@ -619,6 +545,7 @@ def populate_trajectories_in_bigquery(
       bigquery.SchemaField("session_id", "STRING", mode="REQUIRED"),
       bigquery.SchemaField("invocation_id", "STRING", mode="REQUIRED"),
       bigquery.SchemaField("_ai_index_trajectory", "STRING"),
+      bigquery.SchemaField("error_summary", "STRING"),
   ]
   load_cfg = bigquery.LoadJobConfig(
       schema=stage_schema,
@@ -633,7 +560,9 @@ def populate_trajectories_in_bigquery(
         f"USING `{stage_fqn}` AS s\n"
         "ON t.session_id = s.session_id AND t.invocation_id = s.invocation_id\n"
         "WHEN MATCHED THEN\n"
-        "  UPDATE SET t._ai_index_trajectory = s._ai_index_trajectory"
+        "  UPDATE SET\n"
+        "    t._ai_index_trajectory = s._ai_index_trajectory,\n"
+        "    t.error_summary = s.error_summary"
     )
     bq_client.query(merge_sql).result()
   finally:
@@ -931,6 +860,8 @@ def _normalize_bq_row(row: Any) -> dict[str, Any]:
   ts = out.get("turn_start_timestamp")
   if isinstance(ts, datetime):
     out["turn_start_timestamp"] = ts.isoformat()
+  if out.get("error_summary") is not None:
+    out["error_summary"] = _scrub_error_summary(out.get("error_summary"))
   return out
 
 
@@ -1350,6 +1281,8 @@ def run_index_and_search(
       turn_rows = _default_offline_turn_rows()
 
     for row in turn_rows:
+      if row.get("error_summary") is not None:
+        row["error_summary"] = _scrub_error_summary(row.get("error_summary"))
       if not row.get("_ai_index_trajectory"):
         row["_ai_index_trajectory"] = _extract_s3_text(row.get("trace"), row)
 
@@ -1463,11 +1396,7 @@ def run_index_and_search(
     from google.cloud import bigquery
 
     raw_where_clause = ""
-    if (
-        not with_vector_index_scale
-        and input_json is not None
-        and Path(input_json).is_file()
-    ):
+    if input_json is not None and Path(input_json).is_file():
       payload = json.loads(Path(input_json).read_text(encoding="utf-8"))
       session_ids = [str(s) for s in (payload.get("session_ids") or []) if s]
       if not session_ids:
@@ -1480,7 +1409,7 @@ def run_index_and_search(
         raw_where_clause = _build_session_raw_where_clause(session_ids)
 
     client = bq_client or bigquery.Client(project=project_id, location=location)
-    assert_demo_table_ownership_or_absent(
+    existed_owned = assert_demo_table_ownership_or_absent(
         client, project_id, dataset_id, eval_turns_table
     )
     materialize_ddl, mat_source = build_materialize_eval_turns_sql(
@@ -1489,6 +1418,7 @@ def run_index_and_search(
         events_table=events_table,
         eval_turns_table=eval_turns_table,
         raw_where_clause=raw_where_clause,
+        replace_existing=existed_owned,
     )
     client.query(materialize_ddl).result()
     populate_trajectories_in_bigquery(

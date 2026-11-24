@@ -45,6 +45,7 @@ from typing import Any
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 
 ROUTE_KEYWORD = "KEYWORD"
 ROUTE_NATURAL_LANGUAGE = "NATURAL_LANGUAGE"
@@ -69,8 +70,8 @@ _NL_BEHAVIOR_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Reference per-token pricing used for transparent cost reporting.
-_DECISIONS_COST_PER_CALL_USD = 0.000046
+# Reference per-token pricing used for transparent cost estimation.
+_DECISIONS_INPUT_USD_PER_M = 0.36
 _FLASH_INPUT_USD_PER_M = 0.30
 _FLASH_OUTPUT_USD_PER_M = 2.50
 
@@ -196,15 +197,16 @@ def _parse_decisions_api_base(value: str) -> str:
     raise ValueError("GEMINI_DECISIONS_API_BASE has an invalid port.") from exc
   host = (parsed.hostname or "").lower()
   if parsed.scheme == "https":
-    if not host:
+    if host != "generativelanguage.googleapis.com":
       raise ValueError(
-          "GEMINI_DECISIONS_API_BASE https URL must include a hostname."
+          "GEMINI_DECISIONS_API_BASE https URL must target "
+          "generativelanguage.googleapis.com."
       )
   elif parsed.scheme == "http":
-    if host not in {"127.0.0.1", "localhost"} or port is None:
+    if host not in {"127.0.0.1", "localhost", "::1"} or port is None:
       raise ValueError(
           "GEMINI_DECISIONS_API_BASE http URL is restricted to loopback "
-          "(127.0.0.1 or localhost) with an explicit port."
+          "(127.0.0.1, localhost, or ::1) with an explicit port."
       )
   else:
     raise ValueError(
@@ -237,9 +239,15 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _scrub_api_key(message: str, api_key: str | None) -> str:
-  if api_key and api_key in message:
-    return message.replace(api_key, "[REDACTED]")
-  return message
+  out = message
+  if api_key and api_key in out:
+    out = out.replace(api_key, "[REDACTED]")
+  try:
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+
+    return scrub_sensitive_text(out)
+  except ImportError:
+    return out
 
 
 def _decisions_questions_payload() -> dict[str, Any]:
@@ -266,8 +274,9 @@ def _build_decisions_client(api_key: str) -> Any:
   from google import genai
 
   return genai.Client(
+      vertexai=False,
       api_key=api_key,
-      http_options={"api_version": "v1beta"},
+      http_options={"api_version": "v1beta", "timeout": 60_000},
   )
 
 
@@ -292,7 +301,11 @@ def _build_vertex_client(
   """Constructs a Vertex AI genai.Client using Application Default Creds."""
   from google import genai
 
-  kwargs: dict[str, Any] = {"vertexai": True, "location": location}
+  kwargs: dict[str, Any] = {
+      "vertexai": True,
+      "location": location,
+      "http_options": {"timeout": 60_000},
+  }
   if project_id:
     kwargs["project"] = project_id
   return genai.Client(**kwargs)
@@ -401,6 +414,7 @@ class QueryRouter:
     if backend not in {"auto", "decisions", "vertex", "offline"}:
       raise ValueError(f"Unsupported backend: {backend!r}")
     self.backend = backend
+    self.offline = offline or backend == "offline"
     self.project_id = project_id
     self.location = location
     raw_key = api_key if api_key is not None else os.getenv("GEMINI_API_KEY")
@@ -410,20 +424,23 @@ class QueryRouter:
         else None
     )
     self.decisions_model = decisions_model
-    raw_base = (
-        decisions_api_base
-        if decisions_api_base is not None
-        else os.getenv("GEMINI_DECISIONS_API_BASE")
-    )
-    self._has_custom_decisions_api_base = bool((raw_base or "").strip())
-    self.decisions_api_base = _parse_decisions_api_base(
-        raw_base
-        if self._has_custom_decisions_api_base
-        else _DEFAULT_DECISIONS_API_BASE
-    )
+    if self.offline or self.backend == "vertex":
+      self._has_custom_decisions_api_base = False
+      self.decisions_api_base = _DEFAULT_DECISIONS_API_BASE
+    else:
+      raw_base = (
+          decisions_api_base
+          if decisions_api_base is not None
+          else os.getenv("GEMINI_DECISIONS_API_BASE")
+      )
+      self._has_custom_decisions_api_base = bool((raw_base or "").strip())
+      self.decisions_api_base = _parse_decisions_api_base(
+          raw_base
+          if self._has_custom_decisions_api_base
+          else _DEFAULT_DECISIONS_API_BASE
+      )
     self.vertex_model = vertex_model
     self.hybrid_threshold = float(hybrid_threshold)
-    self.offline = offline or backend == "offline"
     self._decisions_client = decisions_client
     self._vertex_client = vertex_client
 
@@ -437,18 +454,29 @@ class QueryRouter:
     if self.offline:
       return self._classify_offline_heuristic(text)
 
+    t_auto_start = time.perf_counter()
     if self.backend in {"auto", "decisions"}:
-      if self._decisions_client is not None and hasattr(
-          self._decisions_client, "decisions"
-      ):
-        return self._classify_via_decisions_api(self._decisions_client, text)
-      if self._has_custom_decisions_api_base:
-        return self._classify_via_decisions_rest(text)
-      dec_client = self._get_decisions_client()
-      if dec_client is not None and hasattr(dec_client, "decisions"):
-        return self._classify_via_decisions_api(dec_client, text)
-      if self.api_key:
-        return self._classify_via_decisions_rest(text)
+      try:
+        if self._decisions_client is not None and hasattr(
+            self._decisions_client, "decisions"
+        ):
+          return self._classify_via_decisions_api(self._decisions_client, text)
+        if self._has_custom_decisions_api_base:
+          return self._classify_via_decisions_rest(text)
+        dec_client = self._get_decisions_client()
+        if dec_client is not None and hasattr(dec_client, "decisions"):
+          return self._classify_via_decisions_api(dec_client, text)
+        if self.api_key:
+          return self._classify_via_decisions_rest(text)
+      except Exception as exc:
+        if self.backend == "decisions":
+          raise
+        warnings.warn(
+            "Decisions API routing failed in auto mode; falling back to "
+            f"Vertex/HYBRID: {_scrub_api_key(str(exc), self.api_key)}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
       if self.backend == "decisions":
         raise RuntimeError(
             "Decisions API backend selected, but GEMINI_API_KEY is unset and "
@@ -457,8 +485,30 @@ class QueryRouter:
         )
 
     if self.backend in {"auto", "vertex"}:
-      v_client = self._get_vertex_client()
-      return self._classify_via_vertex(v_client, text)
+      try:
+        v_client = self._get_vertex_client()
+        return self._classify_via_vertex(v_client, text)
+      except Exception as exc:
+        if self.backend == "vertex":
+          raise
+        warnings.warn(
+            "Vertex routing failed in auto mode; falling back to HYBRID: "
+            f"{_scrub_api_key(str(exc), self.api_key)}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return RouteDecision(
+            mode=ROUTE_HYBRID,
+            layer="L1_FALLBACK_HYBRID",
+            confidence=0.5,
+            reason="auto_backend_fallback_hybrid",
+            latency_ms=round((time.perf_counter() - t_auto_start) * 1000.0, 2),
+            input_tokens=0,
+            output_tokens=0,
+            cost_usd=0.0,
+            raw_choice=ROUTE_HYBRID,
+            model="fallback_hybrid",
+        )
 
     raise RuntimeError(f"Unable to route query with backend={self.backend!r}")
 
@@ -520,6 +570,10 @@ class QueryRouter:
         if mode == ROUTE_HYBRID and raw_choice != ROUTE_HYBRID
         else f"decisions_choice:{raw_choice}"
     )
+    cost_usd = round(
+        (max(0, int(input_tokens)) / 1_000_000.0) * _DECISIONS_INPUT_USD_PER_M,
+        6,
+    )
     return RouteDecision(
         mode=mode,
         layer="L1_DECISIONS_API",
@@ -528,7 +582,7 @@ class QueryRouter:
         latency_ms=latency_ms,
         input_tokens=input_tokens,
         output_tokens=0,
-        cost_usd=_DECISIONS_COST_PER_CALL_USD,
+        cost_usd=cost_usd,
         raw_choice=raw_choice,
         probabilities=probabilities,
         model=self.decisions_model,
@@ -578,14 +632,12 @@ class QueryRouter:
         raw_body = resp.read(1_048_576).decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
       try:
-        err_detail = exc.read().decode("utf-8", errors="replace")[:300]
+        raw_err = exc.read(65_536).decode("utf-8", errors="replace")
       except Exception:
-        err_detail = str(exc.reason)
+        raw_err = str(exc.reason)
+      err_detail = _scrub_api_key(raw_err, self.api_key)[:300]
       raise RuntimeError(
-          _scrub_api_key(
-              f"Decisions REST API failed (HTTP {exc.code}): {err_detail}",
-              self.api_key,
-          )
+          f"Decisions REST API failed (HTTP {exc.code}): {err_detail}"
       ) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
       raise RuntimeError(

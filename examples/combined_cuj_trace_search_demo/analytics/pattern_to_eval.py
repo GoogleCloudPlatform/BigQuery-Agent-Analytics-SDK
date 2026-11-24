@@ -48,13 +48,20 @@ from bigquery_agent_analytics import SuiteHealth
 
 _AGENT_LINE_RE = re.compile(r"(?m)^AGENT:\s*(.+)$")
 _FAIL_MARKER_RE = re.compile(
-    r"\b(error|sorry|failed|unable|expired|cannot|declined|denied|restricted|"
-    r"unauthorized)\b",
+    r"(?:\b(?:error|sorry|failed|unable|expired|cannot|declined|denied|"
+    r"restricted|unauthorized|unfortunately|dispatched|rejected)\b|"
+    r"\bcould\s+not\b|\bcouldn't\b|\bcan't\b)",
     re.IGNORECASE,
 )
 
 _DEFAULT_TOKEN_BLOAT_BYTES = 18000
 _DEFAULT_TOKEN_BLOAT_TOKENS = 12000
+_SYNTHETIC_SCALE_PREFIX = "scale_synth_"
+
+
+def _is_synthetic_scale_session(session_id: Any) -> bool:
+  return str(session_id or "").strip().startswith(_SYNTHETIC_SCALE_PREFIX)
+
 
 _PATTERN_DESCRIPTIONS = {
     "SILENT_CONTRADICTION_CANDIDATE": (
@@ -111,6 +118,8 @@ def discover_patterns_offline(
   grouped: dict[tuple[str, str], dict[str, Any]] = {}
 
   for row in turn_rows:
+    if _is_synthetic_scale_session(row.get("session_id")):
+      continue
     root_agent = str(row.get("root_agent") or "unknown_agent")
     has_error = bool(row.get("has_error"))
     has_loop = bool(row.get("has_tool_loop"))
@@ -299,6 +308,7 @@ def build_eval_suite_from_patterns(
       r
       for r in (turn_rows or [])
       if r.get("session_id")
+      and not _is_synthetic_scale_session(r.get("session_id"))
       and not bool(r.get("has_error"))
       and not bool(r.get("has_tool_loop"))
       and not str(r.get("error_summary") or "").strip()
@@ -312,7 +322,11 @@ def build_eval_suite_from_patterns(
   for s_idx in range(2):
     for cohort in patterns:
       pclass = str(cohort.get("pattern_class") or "EXACT_ERROR_SPIKE")
-      samples = list(cohort.get("sample_turns") or [])
+      samples = [
+          s
+          for s in (cohort.get("sample_turns") or [])
+          if not _is_synthetic_scale_session(s.get("session_id"))
+      ]
       if s_idx >= len(samples):
         continue
       sample = samples[s_idx]
@@ -415,6 +429,161 @@ def build_eval_suite_from_patterns(
   return suite, health
 
 
+def evaluate_suite_against_turns(
+    suite: EvalSuite,
+    turn_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+  """Scores every exported EvalSuite task threshold against observed turns."""
+  by_session: dict[str, list[dict[str, Any]]] = {}
+  for row in turn_rows:
+    sid = str(row.get("session_id") or "").strip()
+    if sid:
+      by_session.setdefault(sid, []).append(row)
+
+  task_results: list[dict[str, Any]] = []
+  passed_tasks = 0
+  positive_tasks_total = 0
+  positive_tasks_passed = 0
+  negative_tasks_total = 0
+  negative_regressions_caught = 0
+  for task in suite.get_tasks():
+    is_positive = bool(getattr(task, "is_positive_case", False))
+    expected_outcome = "PASS" if is_positive else "FAIL_ON_BUGGY_TURN"
+    category_str = str(getattr(task.category, "value", str(task.category)))
+    if is_positive:
+      positive_tasks_total += 1
+    else:
+      negative_tasks_total += 1
+    matched = by_session.get(task.session_id, [])
+    if not matched:
+      task_results.append(
+          {
+              "task_id": task.task_id,
+              "session_id": task.session_id,
+              "category": category_str,
+              "is_positive_case": is_positive,
+              "expected_outcome": expected_outcome,
+              "passed": False,
+              "status": "MISSING_TURN",
+              "metrics": {},
+              "threshold_results": {},
+          }
+      )
+      continue
+
+    err_turns = 0
+    ack_turns = 0
+    contradiction_turns = 0
+    healthy_turns = 0
+    max_consec = 0.0
+    max_traj_tokens = 0.0
+    for row in matched:
+      has_err = bool(row.get("has_error")) or bool(
+          str(row.get("error_summary") or "").strip()
+      )
+      has_loop = bool(row.get("has_tool_loop"))
+      traj = str(row.get("_ai_index_trajectory") or "")
+      agent_matches = _AGENT_LINE_RE.findall(traj)
+      agent_text = agent_matches[-1].strip() if agent_matches else ""
+      acknowledged = bool(agent_text and _FAIL_MARKER_RE.search(agent_text))
+      if has_err:
+        err_turns += 1
+        if acknowledged:
+          ack_turns += 1
+        elif agent_text:
+          contradiction_turns += 1
+      elif not has_loop:
+        healthy_turns += 1
+
+      row_consec = float(row.get("max_consecutive_identical_tool_calls") or 0)
+      if has_loop and row_consec < 3.0:
+        row_consec = 3.0
+      if row_consec > max_consec:
+        max_consec = row_consec
+
+      traj_bytes = len(traj.encode("utf-8"))
+      traj_tok = float(max(1, (traj_bytes + 3) // 4)) if traj_bytes > 0 else 0.0
+      if traj_tok > max_traj_tokens:
+        max_traj_tokens = traj_tok
+
+    n_matched = len(matched)
+    observed: dict[str, float] = {
+        "error_acknowledgment_rate": (
+            ack_turns / err_turns if err_turns > 0 else 1.0
+        ),
+        "contradiction_rate": contradiction_turns / n_matched,
+        "max_consecutive_identical_tool_calls": max_consec,
+        "max_trajectory_tokens": max_traj_tokens,
+        "task_completion": healthy_turns / n_matched,
+    }
+
+    threshold_results: dict[str, dict[str, Any]] = {}
+    task_passed = True
+    for key, limit in (task.thresholds or {}).items():
+      target = float(limit)
+      if key in ("error_acknowledgment_rate", "task_completion"):
+        val = observed[key]
+        ok = val >= target
+        op = ">="
+      elif key in (
+          "contradiction_rate",
+          "max_consecutive_identical_tool_calls",
+          "max_trajectory_tokens",
+      ):
+        val = observed[key]
+        ok = val <= target
+        op = "<="
+      else:
+        val = None
+        ok = False
+        op = "unsupported"
+      if not ok:
+        task_passed = False
+      threshold_results[key] = {
+          "observed": val,
+          "threshold": target,
+          "operator": op,
+          "passed": ok,
+      }
+
+    if task_passed:
+      passed_tasks += 1
+      if is_positive:
+        positive_tasks_passed += 1
+    elif not is_positive:
+      negative_regressions_caught += 1
+    task_results.append(
+        {
+            "task_id": task.task_id,
+            "session_id": task.session_id,
+            "category": category_str,
+            "is_positive_case": is_positive,
+            "expected_outcome": expected_outcome,
+            "passed": task_passed,
+            "status": "PASS" if task_passed else "FAIL",
+            "metrics": observed,
+            "threshold_results": threshold_results,
+        }
+    )
+
+  total = len(task_results)
+  signal_hits = positive_tasks_passed + negative_regressions_caught
+  return {
+      "total_tasks": total,
+      "passed_tasks": passed_tasks,
+      "failed_tasks": total - passed_tasks,
+      "pass_rate": round(passed_tasks / total, 4) if total > 0 else 0.0,
+      "positive_tasks_total": positive_tasks_total,
+      "positive_tasks_passed": positive_tasks_passed,
+      "negative_tasks_total": negative_tasks_total,
+      "negative_regressions_caught": negative_regressions_caught,
+      "suite_signal_accuracy": (
+          round(signal_hits / total, 4) if total > 0 else 0.0
+      ),
+      "task_results": task_results,
+  }
+
+
 def compute_eval_cost_cascade(
     *,
     turn_rows: list[dict[str, Any]] | None = None,
@@ -423,11 +592,16 @@ def compute_eval_cost_cascade(
 ) -> list[dict[str, Any]]:
   """Computes the modeled 4-arm 8-lever cost-cascade projection table.
 
-  Uses measured trajectory token/byte sizes and observed L0/L1 router latency
-  when provided, combined with transparent analytical assumptions for 1,000
-  evaluations, judge pricing, and modeled recall/p50 latencies across arms.
+  Uses measured trajectory token/byte sizes, observed L0/L1 route split, and
+  observed L0/L1 router latency when provided, combined with transparent
+  analytical assumptions for 1,000 evaluations, judge pricing, and modeled
+  recall/p50 latencies across arms.
   """
-  rows = turn_rows or []
+  rows = [
+      r
+      for r in (turn_rows or [])
+      if not _is_synthetic_scale_session(r.get("session_id"))
+  ]
   n_turns = max(1, len(rows))
   if rows:
     avg_s1_tokens = (
@@ -461,17 +635,58 @@ def compute_eval_cost_cascade(
       0.05, min(anomaly_frac * 0.55, (top_k / max(5, n_turns)) * 0.35)
   )
 
+  queries = list((search_report or {}).get("queries") or [])
+  routed_queries = [
+      q
+      for q in queries
+      if str((q.get("router_decision") or {}).get("layer") or "").strip()
+  ]
+  if routed_queries:
+    l0_count = sum(
+        1
+        for q in routed_queries
+        if str(q["router_decision"]["layer"]).startswith("L0")
+    )
+    l0_fraction = l0_count / len(routed_queries)
+    l1_fraction = 1.0 - l0_fraction
+    l1_in_tokens = [
+        int(q["router_decision"].get("input_tokens") or 0)
+        for q in routed_queries
+        if not str(q["router_decision"]["layer"]).startswith("L0")
+        and int(q["router_decision"].get("input_tokens") or 0) > 0
+    ]
+    l1_avg_input_tokens = (
+        sum(l1_in_tokens) / len(l1_in_tokens) if l1_in_tokens else 128.0
+    )
+  else:
+    l0_fraction = 0.60
+    l1_fraction = 0.40
+    l1_avg_input_tokens = 128.0
+
   # Uniform reference pricing (per 1M tokens) across all arms:
   # Frontier baseline judge (Arm 1: $3.00 in / $15.00 out).
   # Compact verifier model across Arms 2, 3, and 4: $0.30 in / $2.50 out
   # (gemini-4-hydrogen pricing; savings between Arms 2->3->4 come purely from
   # fewer escalated turns and lower thinking_level="LOW" output token budgets).
+  # Layer 1 prefill router rate: $0.36 / 1M input tokens (0 output tokens) is an
+  # illustrative assumed estimate (not a published billing list price).
+  # Arm 4 models expanded L0 rules / router caching halving L1 invocations
+  # (router_tokens_arm4 = router_tokens_arm3 * 0.5).
   frontier_in_per_1m = 3.00
   frontier_out_per_1m = 15.00
   compact_in_per_1m = 0.30
   compact_out_per_1m = 2.50
-  router_prefill_per_1k = 0.046
-  router_cascade_prefill_per_1k = 0.023
+  decisions_in_per_1m = 0.36
+  arm4_router_scale_factor = 0.5
+
+  router_tokens_arm3 = l1_fraction * l1_avg_input_tokens
+  router_prefill_per_1k = (
+      1000.0 * router_tokens_arm3 * decisions_in_per_1m / 1_000_000.0
+  )
+  router_tokens_arm4 = router_tokens_arm3 * arm4_router_scale_factor
+  router_cascade_prefill_per_1k = (
+      1000.0 * router_tokens_arm4 * decisions_in_per_1m / 1_000_000.0
+  )
 
   arm1_tokens = int(round((avg_s1_tokens + 450.0) * 1000.0))
   arm1_cost = round(
@@ -490,7 +705,9 @@ def compute_eval_cost_cascade(
   )
 
   arm3_tokens = int(
-      round(1000.0 * (60.0 + anomaly_frac * (avg_s3_tokens + 120.0)))
+      round(
+          1000.0 * (router_tokens_arm3 + anomaly_frac * (avg_s3_tokens + 120.0))
+      )
   )
   arm3_cost = round(
       router_prefill_per_1k
@@ -502,7 +719,9 @@ def compute_eval_cost_cascade(
   )
 
   arm4_tokens = int(
-      round(1000.0 * (30.0 + cascade_frac * (avg_s3_tokens + 64.0)))
+      round(
+          1000.0 * (router_tokens_arm4 + cascade_frac * (avg_s3_tokens + 64.0))
+      )
   )
   arm4_cost = round(
       router_cascade_prefill_per_1k
@@ -515,7 +734,7 @@ def compute_eval_cost_cascade(
 
   router_latencies = [
       float(q.get("router_decision", {}).get("latency_ms", 0.0))
-      for q in (search_report or {}).get("queries", [])
+      for q in queries
   ]
   median_router_ms = (
       float(statistics.median(router_latencies)) if router_latencies else 82.0
@@ -533,6 +752,9 @@ def compute_eval_cost_cascade(
       "avg_s3_tokens": round(avg_s3_tokens, 2),
       "anomaly_fraction": round(anomaly_frac, 4),
       "cascade_escalation_fraction": round(cascade_frac, 4),
+      "observed_l0_fraction": round(l0_fraction, 4),
+      "observed_l1_fraction": round(l1_fraction, 4),
+      "observed_l1_avg_input_tokens": round(l1_avg_input_tokens, 2),
       "measured_router_median_ms": round(median_router_ms, 2),
   }
   shared_pricing = {
@@ -540,6 +762,18 @@ def compute_eval_cost_cascade(
       "frontier_out_per_1m_usd": frontier_out_per_1m,
       "compact_judge_in_per_1m_usd": compact_in_per_1m,
       "compact_judge_out_per_1m_usd": compact_out_per_1m,
+      "decisions_router_in_per_1m_usd": decisions_in_per_1m,
+      "decisions_router_pricing_note": (
+          "Illustrative assumed estimate ($0.36 / 1M input tokens, 0 output "
+          "tokens; not a published billing list price)."
+      ),
+  }
+  shared_assumptions = {
+      "arm4_l1_router_call_multiplier": arm4_router_scale_factor,
+      "arm4_l1_router_note": (
+          "Arm 4 assumes expanded L0 deterministic rules and router caching "
+          "halve L1 router invocations relative to Arm 3."
+      ),
   }
 
   return [
@@ -557,6 +791,7 @@ def compute_eval_cost_cascade(
           "savings_vs_naive_pct": 0.0,
           "measured_inputs": shared_measured_inputs,
           "pricing_model": shared_pricing,
+          "assumptions": shared_assumptions,
       },
       {
           "arm_id": "arm_2_scoped_s3_trim",
@@ -576,6 +811,7 @@ def compute_eval_cost_cascade(
           "savings_vs_naive_pct": _pct(arm2_cost),
           "measured_inputs": shared_measured_inputs,
           "pricing_model": shared_pricing,
+          "assumptions": shared_assumptions,
       },
       {
           "arm_id": "arm_3_routed_prefilter",
@@ -598,6 +834,7 @@ def compute_eval_cost_cascade(
           "savings_vs_naive_pct": _pct(arm3_cost),
           "measured_inputs": shared_measured_inputs,
           "pricing_model": shared_pricing,
+          "assumptions": shared_assumptions,
       },
       {
           "arm_id": "arm_4_full_cascade",
@@ -622,6 +859,7 @@ def compute_eval_cost_cascade(
           "savings_vs_naive_pct": _pct(arm4_cost),
           "measured_inputs": shared_measured_inputs,
           "pricing_model": shared_pricing,
+          "assumptions": shared_assumptions,
       },
   ]
 
@@ -674,18 +912,33 @@ def run_pattern_to_eval(
       # Fetch compact metadata only (never raw trace JSON) for cascade sizing.
       meta_sql = (
           "SELECT session_id, invocation_id, root_agent, has_error, "
-          "has_tool_loop, error_summary, total_tokens, raw_trace_bytes, "
+          "has_tool_loop, max_consecutive_identical_tool_calls, "
+          "error_summary, total_tokens, raw_trace_bytes, "
           "_ai_index_trajectory "
           f"FROM `{project_id}.{dataset_id}.{eval_turns_table}` "
+          "WHERE turn_start_timestamp >= TIMESTAMP_SUB("
+          "CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY) "
+          "AND NOT STARTS_WITH(session_id, 'scale_synth_') "
+          "ORDER BY turn_start_timestamp DESC "
           "LIMIT 500"
       )
-      turn_rows = [dict(r) for r in client.query(meta_sql).result()]
+      meta_cfg = bigquery.QueryJobConfig(
+          query_parameters=[
+              bigquery.ScalarQueryParameter(
+                  "lookback_days", "INT64", lookback_days
+              )
+          ]
+      )
+      turn_rows = [
+          dict(r) for r in client.query(meta_sql, job_config=meta_cfg).result()
+      ]
 
   suite, health = build_eval_suite_from_patterns(
       patterns=patterns,
       turn_rows=turn_rows,
       verifications=verifications,
   )
+  suite_evaluation = evaluate_suite_against_turns(suite, turn_rows)
 
   suite_path = Path(eval_suite_output)
   write_owner_only_text(suite_path, suite.to_json())
@@ -703,6 +956,7 @@ def run_pattern_to_eval(
       "discovered_patterns": patterns,
       "eval_suite_path": str(suite_path),
       "suite_health": health.model_dump(mode="json"),
+      "suite_evaluation": suite_evaluation,
       "cost_cascade_ablation": cascade,
   }
   out_path = Path(output_json)
