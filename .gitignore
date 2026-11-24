@@ -43,6 +43,10 @@ dashboards/grafana/.local/
 # Service-account credentials (never commit downloaded JSON keys).
 grafana/*.json
 dashboards/grafana/*.json
+# Gallery exports: track only the reviewed *.gallery.json copies. A raw
+# export (exported.json) can hold real project and dataset names.
+dashboards/grafana/gallery/**/*.json
+!dashboards/grafana/gallery/**/*.gallery.json
 dashboards/streamlit/*.json
 dashboards/legacy_demo/*.json
 dashboards/web/node_modules/

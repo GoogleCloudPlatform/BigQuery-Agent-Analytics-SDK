@@ -62,6 +62,8 @@ from bigquery_agent_analytics.utils import strip_markdown_fences
 
 from ._telemetry import LabeledBigQueryClient
 from ._telemetry import make_bq_client
+from .trace import _EMPTY_TURN
+from .trace import _is_tool_call_response
 from .trace import Trace
 from .trace import TraceIdentity
 from .trace import TraceScope
@@ -240,15 +242,24 @@ class SessionTrace:
     """Extracts the final agent response from events.
 
     Checks LLM_RESPONSE first (most reliable response source),
-    then falls back to AGENT_COMPLETED.
+    then falls back to AGENT_COMPLETED. Model turns with no content
+    (logged as ``None``) are skipped. If the last model turn with
+    content ends in a tool call, it holds no text answer, so only
+    AGENT_COMPLETED is consulted.
     """
     # Prefer the last LLM_RESPONSE (most reliable response source)
     for event in reversed(self.events):
       if event.event_type == "LLM_RESPONSE":
         content = event.content
         if isinstance(content, dict):
-          return content.get("response") or content.get("text_summary")
-        return str(content) if content else None
+          response = content.get("response") or content.get("text_summary")
+        else:
+          response = str(content) if content else None
+        if _is_tool_call_response(response):
+          break
+        if response == _EMPTY_TURN:
+          continue
+        return response
 
     # Fallback to AGENT_COMPLETED
     for event in reversed(self.events):

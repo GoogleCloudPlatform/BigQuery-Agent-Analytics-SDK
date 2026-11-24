@@ -77,7 +77,9 @@ still follow the full steps below with a scoped service account.
 3. **Keys → Add Key → Create new key → JSON**, and download it.
 
 > **Keep the key out of the repo.** `.gitignore` only covers new `*.json`
-> files inside `dashboards/grafana/`. A key saved anywhere else can be committed by
+> files directly in `dashboards/grafana/` and anywhere under
+> `dashboards/grafana/gallery/` (apart from the tracked `*.gallery.json`). A
+> key saved anywhere else, including other subfolders, can be committed by
 > accident.
 
 ### 3. Prepare the data
@@ -394,9 +396,12 @@ panels easier to read:
   names and colours of LLM p50, LLM p95 and TTFT p50.
 - **Estimated cost** shows four decimals, so small test spend is visible.
 - Clicking a `session_id` in **Recent sessions** opens **Trace detail** for the
-  whole session: the link clears the Agent, User ID and Event Type filters,
-  which only choose the sessions listed. **Trace detail** also shows `trace_id`
-  and, when the producer writes it, `otel_trace_id`.
+  whole session in a new tab: the link clears the Agent, User ID and Event
+  Type filters, which only choose the sessions listed. It keeps the
+  organization and the time window on screen as absolute bounds, so a
+  relative range such as *Last 24 hours* is not re-evaluated in the new tab.
+  **Trace detail** also shows `trace_id` and, when the producer writes it,
+  `otel_trace_id`.
 
 `scripts/check_grafana_queries_sync.py` does not cover this file, so its
 embedded SQL is the source of truth.
@@ -409,3 +414,39 @@ the trial in `bqaa-dashboard.json` means updating `queries/*.sql` (which
 `scripts/check_streamlit_queries_sync.py` also compares against the Streamlit
 dashboard), retiring `queries/estimated_cost.sql`, and updating the panel maps
 in the sync script.
+
+### Gallery export
+
+[`gallery/bqaa-dashboard-efficiency-trial.gallery.json`](gallery/bqaa-dashboard-efficiency-trial.gallery.json)
+is the trial as Grafana's **Export for sharing externally** writes it, for the
+grafana.com dashboard gallery. Its `__inputs` make the import screen ask for
+the data source and the six constants. Regenerate it in the same change as any
+edit to the trial file;
+[`tests/test_grafana_gallery_export.py`](../../tests/test_grafana_gallery_export.py)
+fails when the two drift apart.
+
+1. Use Grafana 12.3.4 or later. The quick start pins 12.3.0, whose export
+   fails on this dashboard with `Datasource ${DS_BIGQUERY} was not found`
+   ([grafana/grafana#113319](https://github.com/grafana/grafana/pull/113319)
+   fixed it in 12.3.4).
+2. Import the trial file. If you set the six constants to real values, reset
+   them to the placeholders first (`my-project`, `agent_analytics`,
+   `agent_events`, `adk_`, `1.25`, `5.00`): the export copies whatever they
+   hold.
+3. **Export → Export as code**, model **Classic**, turn on **Export for
+   sharing externally**, and download the file. Save it as
+   `dashboards/grafana/gallery/exported.json`, which `.gitignore` ignores.
+4. Drop the instance `id` and the built-in requirements with an empty
+   `version`, which grafana.com rejects on revision upload:
+
+   ```bash
+   jq 'del(.id) | del(.__requires[] | select(.version == ""))' \
+     dashboards/grafana/gallery/exported.json \
+     > dashboards/grafana/gallery/bqaa-dashboard-efficiency-trial.gallery.json
+   rm dashboards/grafana/gallery/exported.json
+   ```
+
+   `exported.json` can hold real project and dataset names. `.gitignore`
+   ignores every `*.json` under `gallery/` except `*.gallery.json`, so it
+   can't be staged by accident while it's there.
+5. Run `pytest tests/test_grafana_gallery_export.py tests/test_grafana_efficiency_trial.py`.

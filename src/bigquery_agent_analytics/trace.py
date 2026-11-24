@@ -76,6 +76,42 @@ def _unwrap_text_field(value: str) -> str:
   return inner[1:]
 
 
+# The ADK plugin logs a model turn as its parts joined by " | ": a text
+# part as ``text: '...'`` and a function call as ``call: <tool name>``.
+# The name is whatever the model emitted, so it may be empty. A text part
+# always ends in its closing quote, so a name never contains one.
+_TOOL_CALL_TAIL_RE = re.compile(
+    r"(?:\A| \| )call: [^\s|'\"]*(?: \| call: [^\s|'\"]*)*\Z"
+)
+
+# The plugin logs a model turn with no content parts as the bare string
+# "None". Model text "None" is logged as ``text: 'None'`` instead.
+_EMPTY_TURN = "None"
+
+
+def _is_tool_call_response(value: Any) -> bool:
+  """Returns True if an LLM_RESPONSE ``response`` ends in tool calls.
+
+  A turn that ends in function calls (``call: run_python``, or
+  ``text: '...' | call: run_python``) asks for a tool; it is not a text
+  answer. When a run stops there, for example at a step limit, its last
+  model turn holds no answer.
+  """
+  return isinstance(value, str) and bool(_TOOL_CALL_TAIL_RE.search(value))
+
+
+def _flag(value: Any) -> bool:
+  """A BOOL column value as a bool; NULL and unreadable values are False."""
+  if value is None:
+    return False
+  if isinstance(value, str):
+    return value.strip().lower() == "true"
+  try:
+    return bool(value)
+  except (TypeError, ValueError):
+    return False
+
+
 def _str_or_none(value: Any) -> Optional[str]:
   """Returns ``value`` if it is a string, else ``None``.
 
@@ -166,6 +202,10 @@ class Span:
 
   Fields of layers 2 and 3 are ``None`` when the producer did not
   record them or recorded a non-string value in ``attributes``.
+
+  ``is_truncated`` mirrors the events table column: True when the
+  producer clipped or redacted this row's content (for example a long
+  tool result), so the content is not exactly what the agent saw.
   """
 
   event_type: str
@@ -188,6 +228,7 @@ class Span:
   otel_span_id: Optional[str] = None
   otel_trace_id: Optional[str] = None
   source_event_id: Optional[str] = None
+  is_truncated: bool = False
 
   @classmethod
   def from_bigquery_row(cls, row: dict[str, Any]) -> Span:
@@ -289,6 +330,7 @@ class Span:
         otel_span_id=otel_span_id,
         otel_trace_id=otel_trace_id,
         source_event_id=source_event_id,
+        is_truncated=_flag(row.get("is_truncated")),
     )
 
   @property
@@ -2928,21 +2970,30 @@ class Trace(_WeakrefableSlotted):
 
     Checks LLM_RESPONSE first (the ADK plugin always populates
     ``content.response`` there), then falls back to
-    AGENT_COMPLETED for backward compatibility.
+    AGENT_COMPLETED for backward compatibility. Model turns with no
+    content (logged as ``None``) are skipped. If the last model turn
+    with content ends in a tool call, it holds no text answer, so only
+    AGENT_COMPLETED is consulted.
     """
     for span in reversed(self.spans):
       if span.event_type == "LLM_RESPONSE":
         c = span.content
         if isinstance(c, dict):
           result = c.get("response")
-          if result:
+          if _is_tool_call_response(result):
+            break
+          if result and result != _EMPTY_TURN:
             return (
                 _unwrap_text_field(result)
                 if isinstance(result, str)
                 else result
             )
         elif c:
-          return _unwrap_text_field(str(c))
+          text = str(c)
+          if _is_tool_call_response(text):
+            break
+          if text != _EMPTY_TURN:
+            return _unwrap_text_field(text)
 
     for span in reversed(self.spans):
       if span.event_type == "AGENT_COMPLETED":

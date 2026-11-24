@@ -649,6 +649,104 @@ class TestTrace:
     trace = Trace(trace_id="t", session_id="s", spans=spans)
     assert trace.final_response == "From LLM"
 
+  @staticmethod
+  def _llm_turns(*responses):
+    ts = datetime.now(timezone.utc)
+    return [
+        Span(
+            event_type="LLM_RESPONSE",
+            agent="agent",
+            timestamp=ts,
+            content={"response": r},
+        )
+        for r in responses
+    ]
+
+  @pytest.mark.parametrize(
+      "last_turn",
+      [
+          "call: run_python",
+          "call: list_files | call: preview_file | call: preview_file",
+          "text: 'Let me load the file.\n\n' | call: run_python",
+          "text: 'Checking the data.' | call: a | call: b",
+          "call: mcp.read-file",
+          "call: ns:tool",
+          "call: 3d_tool",
+          # A function call whose name the model left empty.
+          "text: 'Let me check.' | call: ",
+      ],
+  )
+  def test_final_response_none_when_run_ends_on_tool_call(self, last_turn):
+    """A run cut off mid-tool-use (e.g. at a step limit) has no answer.
+
+    The ADK plugin logs a function-call turn as ``call: <tool>``; that
+    text is the model asking for a tool, not the agent's answer.
+    """
+    spans = self._llm_turns("text: 'Here is my plan.'", last_turn)
+    trace = Trace(trace_id="t", session_id="s", spans=spans)
+    assert trace.final_response is None
+
+  def test_final_response_tool_call_turn_falls_back_to_agent_completed(self):
+    spans = self._llm_turns("call: exit_loop") + [
+        Span(
+            event_type="AGENT_COMPLETED",
+            agent="agent",
+            timestamp=datetime.now(timezone.utc),
+            content={"response": "Done."},
+        )
+    ]
+    trace = Trace(trace_id="t", session_id="s", spans=spans)
+    assert trace.final_response == "Done."
+
+  def test_final_response_text_after_tool_calls(self):
+    spans = self._llm_turns("call: search", "text: 'The answer is 42.'")
+    trace = Trace(trace_id="t", session_id="s", spans=spans)
+    assert trace.final_response == "The answer is 42."
+
+  @pytest.mark.parametrize(
+      "answer, expected",
+      [
+          (
+              "text: 'Use the call: run_python tool next time.'",
+              "Use the call: run_python tool next time.",
+          ),
+          ("Please call: 555-0100", "Please call: 555-0100"),
+          ("Please call: support", "Please call: support"),
+          ("text: 'A | call: b'", "A | call: b"),
+          ("text: 'x' | call: b is next", "x' | call: b is next"),
+      ],
+  )
+  def test_final_response_keeps_text_that_mentions_call(self, answer, expected):
+    spans = self._llm_turns(answer)
+    trace = Trace(trace_id="t", session_id="s", spans=spans)
+    assert trace.final_response == expected
+
+  def test_final_response_string_content_ending_in_tool_call(self):
+    spans = [
+        Span(
+            event_type="LLM_RESPONSE",
+            agent="agent",
+            timestamp=datetime.now(timezone.utc),
+            content="call: run_python",
+        )
+    ]
+    trace = Trace(trace_id="t", session_id="s", spans=spans)
+    assert trace.final_response is None
+
+  @pytest.mark.parametrize(
+      "turns, expected",
+      [
+          # The plugin logs a turn with no content parts as "None".
+          (("call: run_python", "None"), None),
+          (("text: 'Done.'", "None"), "Done."),
+          # Model text "None" is wrapped, so it is a real answer.
+          (("call: run_python", "text: 'None'"), "None"),
+      ],
+  )
+  def test_final_response_skips_empty_turns(self, turns, expected):
+    trace = Trace(trace_id="t", session_id="s", spans=self._llm_turns(*turns))
+    assert trace.final_response == expected
+
   def test_tool_calls_includes_tool_origin(self):
     """tool_origin from content is included in tool_calls."""
     ts = datetime.now(timezone.utc)
@@ -931,6 +1029,47 @@ class TestSpanNewFields:
     }
     span = Span.from_bigquery_row(row)
     assert span.trace_id == "trace-abc-123"
+
+  @pytest.mark.parametrize(
+      "value, expected",
+      [
+          (True, True),
+          (False, False),
+          (None, False),
+          ("true", True),
+          ("false", False),
+      ],
+  )
+  def test_from_bigquery_row_is_truncated(self, value, expected):
+    row = {
+        "event_type": "TOOL_COMPLETED",
+        "agent": "agent",
+        "timestamp": datetime.now(timezone.utc),
+        "content": '{"result": "partial"}',
+        "attributes": "{}",
+        "is_truncated": value,
+    }
+    span = Span.from_bigquery_row(row)
+    assert span.is_truncated is expected
+
+  def test_from_bigquery_row_is_truncated_missing_column(self):
+    row = {
+        "event_type": "TOOL_COMPLETED",
+        "agent": "agent",
+        "timestamp": datetime.now(timezone.utc),
+    }
+    assert Span.from_bigquery_row(row).is_truncated is False
+
+  def test_from_bigquery_row_is_truncated_numpy_bool(self):
+    # DataFrame-backed rows carry numpy booleans.
+    np = pytest.importorskip("numpy")
+    row = {
+        "event_type": "TOOL_COMPLETED",
+        "agent": "agent",
+        "timestamp": datetime.now(timezone.utc),
+        "is_truncated": np.bool_(True),
+    }
+    assert Span.from_bigquery_row(row).is_truncated is True
 
   def test_from_bigquery_row_time_to_first_token_json_string(self):
     row = {
@@ -1232,11 +1371,12 @@ class TestSpanOtelCorrelation:
 
   def test_new_fields_are_appended_after_existing_fields(self):
     names = [f.name for f in dataclasses.fields(Span)]
-    assert names[-4:] == [
+    assert names[-5:] == [
         "time_to_first_token_ms",
         "otel_span_id",
         "otel_trace_id",
         "source_event_id",
+        "is_truncated",
     ]
 
   def test_positional_construction_still_works(self):
