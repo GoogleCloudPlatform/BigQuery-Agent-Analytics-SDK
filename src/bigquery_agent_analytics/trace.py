@@ -574,11 +574,11 @@ fr_rows AS (
     NULLIF(JSON_VALUE(attributes, '$.adk.parent_invocation_id'), '')
       AS parent_invocation,
     COALESCE(
-      LEFT(TO_JSON_STRING(JSON_QUERY(attributes, '$.writer')), 1) = CHR(123),
+      SUBSTR(TO_JSON_STRING(JSON_QUERY(attributes, '$.writer')), 1, 1) = CHR(123),
       FALSE
     ) AS writer,
     COALESCE(
-      LEFT(TO_JSON_STRING(JSON_QUERY(attributes, '$.adk')), 1) = CHR(123),
+      SUBSTR(TO_JSON_STRING(JSON_QUERY(attributes, '$.adk')), 1, 1) = CHR(123),
       FALSE
     ) AS adk,
     COALESCE(
@@ -616,7 +616,7 @@ fr_text AS (
       WHEN response IS NULL OR TRIM(response) = '' THEN COALESCE(
         CASE WHEN TRIM(summary) != '' THEN summary END,
         CASE
-          WHEN LEFT(response_json, 1) IN (CHR(123), '[') THEN response_json
+          WHEN SUBSTR(response_json, 1, 1) IN (CHR(123), '[') THEN response_json
         END
       )
       -- Verbatim producers: see _writes_verbatim.
