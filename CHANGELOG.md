@@ -11,26 +11,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`Span.is_truncated`** — `Span.from_bigquery_row()` now keeps the
   events table's `is_truncated` column, which `get_trace()` and
-  `list_traces()` already selected but dropped. It is `True` when the
-  producer clipped or redacted the row's content (for example a long tool
-  result), and `False` when the column is false, NULL or missing. The
-  field is appended after the existing fields, so positional construction
-  is unchanged.
+  `list_traces()` already selected but dropped. It is the producer's
+  row-level flag: `True` when the producer marked the row as clipped (for
+  example a content, attribute or metadata value over its size limit),
+  and `False` when the column is false, NULL, NaN or missing. Key-based
+  redaction can leave it `False`. The field is appended after the existing
+  fields, so positional construction is unchanged.
 
 ### Fixed
 
-- **`final_response` no longer returns a tool call or an empty turn as
-  the answer** — the ADK plugin logs a model turn that calls a tool as
-  `call: <tool>` (or `text: '...' | call: <tool>` when the model also
-  wrote text), and a turn with no content as the bare string `None`. When
-  a run stopped on such a turn, for example at a step or call limit or
-  after a malformed function call, `Trace.final_response` and
+- **`final_response` no longer returns a tool call, an empty turn or an
+  earlier turn's answer** — the ADK plugin logs a model turn as its parts
+  joined by ` | `: `text: '...'`, `call: <tool>` and others, or the bare
+  string `None` when the turn has no parts. When a run stopped on a tool
+  call or an empty turn, for example at a step or call limit or after a
+  malformed function call, `Trace.final_response` and
   `SessionTrace.extract_final_response()` returned that string, so
   response matching and LLM judges scored `call: run_python` or `None` as
-  the agent's answer. Empty turns are now skipped, and a last model turn
-  that ends in tool calls holds no text answer: both accessors fall back
-  to AGENT_COMPLETED and return `None` when it has none. Text answers,
-  including ones that mention `call:` or say `None`, are unchanged.
+  the agent's answer. Both accessors now share one implementation (#595):
+  - Only the session's latest invocation is read, so a turn that never
+    answered no longer returns the previous turn's answer. A nested
+    invocation (an agent called as a tool) is part of the run, but its
+    turns are not the run's answer; an AgentTool session read on its own
+    (without the caller's rows) is a run of its own.
+  - `AGENT_RESPONSE` rows are read as model turns too: the plugin writes
+    them for a final response (its text without thoughts, or the
+    arguments of a tool in `final_response_tool_names`), and BQCA
+    compatibility views answer there. A non-blank `text_summary` (the
+    plugin's `response_text_key`) is read first, as the plugin's own eval
+    views do. `PerformanceEvaluator` now fetches `AGENT_RESPONSE` by
+    default, so these rows also appear in the trace text it gives custom
+    rubrics and in its replays.
+  - Turns are parsed part by part. A turn that calls a tool holds no
+    answer, wherever the call is; turns with no text are skipped; text
+    parts are unwrapped and joined with newlines, and a text part cut by
+    truncation keeps its visible text, also when the cut follows
+    `' | c`. A ` | ` inside model text is kept as text unless the rest of
+    the turn parses as parts. Parsing takes O(n log n) time.
+  - Answers stored verbatim are returned as written, losing only a
+    `text: '...'` wrapper: rows of the bundled tracing writer, and
+    AGENT_COMPLETED rows without `attributes.adk` (the plugin never fills
+    AGENT_COMPLETED; EvalBench imports do). `call: <x>` counts as a tool
+    call only when `<x>` is a function name.
+  - The result is always a string or `None`: a structured response or
+    completion becomes its `text_summary`, or JSON text.
+  - `SessionTrace.extract_final_response()` now also unwraps
+    `text: '...'`, skips usage-only turns, and reads only the
+    AGENT_COMPLETED rows of that invocation, like `Trace.final_response`.
+  - The SQL judge (`AI.GENERATE` and `ML.GENERATE_TEXT`) picks the
+    final answer with the same rules. Its regexes look one part ahead,
+    so it can still split model text that itself contains `' | ` and a
+    part prefix differently. The insights transcript query no longer
+    computes a `final_response` column that no caller read.
 
 ## [0.7.0] - 2026-11-13
 

@@ -28,6 +28,8 @@ Example usage::
 
 from __future__ import annotations
 
+import bisect
+import collections
 import collections.abc
 from dataclasses import dataclass
 from dataclasses import field
@@ -35,6 +37,7 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from enum import Enum
+import functools
 import json
 import re
 from types import MappingProxyType
@@ -76,37 +79,695 @@ def _unwrap_text_field(value: str) -> str:
   return inner[1:]
 
 
-# The ADK plugin logs a model turn as its parts joined by " | ": a text
-# part as ``text: '...'`` and a function call as ``call: <tool name>``.
-# The name is whatever the model emitted, so it may be empty. A text part
-# always ends in its closing quote, so a name never contains one.
-_TOOL_CALL_TAIL_RE = re.compile(
-    r"(?:\A| \| )call: [^\s|'\"]*(?: \| call: [^\s|'\"]*)*\Z"
+# The ADK plugin logs a model turn as its parts joined by " | " (see its
+# ``_format_content``): ``text: '<text>'``, ``call: <tool name>``,
+# ``resp: <tool name>``, ``Executable code (<language>): <code>``,
+# ``Code execution result (<outcome>): <output>`` or ``other``. A turn
+# with no parts is the bare string "None". Text is not escaped, and a
+# payload over the size limit is cut anywhere and ends in
+# ``...[TRUNCATED]``. Other producers (the bundled tracing writer, which
+# names itself in ``attributes.writer``) store the answer verbatim.
+_EMPTY_TURN = "None"
+_TRUNCATION_MARK = "...[TRUNCATED]"
+_TEXT_PART = "text: '"
+_CALL_PART = "call: "
+_PART_PREFIXES = (
+    _TEXT_PART,
+    _CALL_PART,
+    "resp: ",
+    "Executable code (",
+    "Code execution result (",
+    "other",
+)
+_SEPARATOR = " | "
+# A function name. Gemini names start with a letter or "_"; other model
+# APIs also allow a leading digit, so a name needs a letter or "_"
+# somewhere ("call: 555-0100" is prose). Some formatters add arguments.
+_TOOL_NAME_RE = re.compile(
+    r"(?:[0-9][0-9.:\-]*)?[A-Za-z_][A-Za-z0-9_.:\-]*"
+    r"(?:\s*[(\x7B].*[)\x7D])?"
+)
+_TOOL_NAME_PREFIX_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:\-]*")
+_CODE_PART_RE = re.compile(
+    r"(?:Executable code|Code execution result) \([^()]*\):(?: |\Z)"
+)
+_CUT_CODE_HEADER_RE = re.compile(
+    r"(?:Executable code|Code execution result) \([^()]*(?:\):?)?"
 )
 
-# The plugin logs a model turn with no content parts as the bare string
-# "None". Model text "None" is logged as ``text: 'None'`` instead.
-_EMPTY_TURN = "None"
+
+@dataclass(frozen=True)
+class _ModelTurn:
+  """A model turn in the plugin's part encoding: its text and its calls."""
+
+  texts: tuple[str, ...]
+  has_call: bool
 
 
-def _is_tool_call_response(value: Any) -> bool:
-  """Returns True if an LLM_RESPONSE ``response`` ends in tool calls.
+class _TurnParser:
+  """Parses the plugin's part encoding of one model turn.
 
-  A turn that ends in function calls (``call: run_python``, or
-  ``text: '...' | call: run_python``) asks for a tool; it is not a text
-  answer. When a run stops there, for example at a step limit, its last
-  model turn holds no answer.
+  Model text is not escaped, so a separator `` | `` may also be text. A
+  text part ends at the first ``' | `` after which the rest still parses
+  as parts, and a code part at the first `` | `` after which it does. A
+  last part cut by truncation never ends a text part, since the cut may
+  as well have landed in the text. Text that itself spells out a whole
+  valid turn (``x' | call: f | text: 'y``) reads as those parts; nothing
+  in the encoding tells the two apart. Separators are visited from the
+  right, once each, so parsing takes O(n log n) time.
   """
-  return isinstance(value, str) and bool(_TOOL_CALL_TAIL_RE.search(value))
+
+  def __init__(self, text: str):
+    self.text = text
+    self.clipped = text.endswith(_TRUNCATION_MARK)
+    self.valid: dict[int, bool] = {}
+    # Starts of a last part that runs into the cut ("...' | c...[TRUNCATED]").
+    # Such a tail may as well be the end of the text, so it never closes one.
+    self._clipped_tail: set[int] = set()
+    # Negated positions of separators followed by a valid part, ascending
+    # (all, and those right after a closing quote).
+    self._after_part: list[int] = []
+    self._after_quote: list[int] = []
+    # Separators may overlap ("2 | | text: ..."), so match them by lookahead.
+    separators = [m.start() for m in re.finditer(r"(?= \| )", text)]
+    for separator in reversed(separators):
+      start = separator + len(_SEPARATOR)
+      if self._valid_from(start):
+        self._after_part.append(-separator)
+        closes_text = start not in self._clipped_tail
+        if closes_text and separator and text[separator - 1] == "'":
+          self._after_quote.append(-separator)
+
+  def _first(self, separators: list[int], position: int) -> Optional[int]:
+    """The first separator at or after ``position`` in ``separators``."""
+    index = bisect.bisect_right(separators, -position) - 1
+    return -separators[index] if index >= 0 else None
+
+  def _kind(self, start: int) -> Optional[str]:
+    text = self.text
+    if text.startswith(_TEXT_PART, start):
+      return "text"
+    if text.startswith("call:", start):
+      return "call"
+    if text.startswith("resp:", start):
+      return "resp"
+    if _CODE_PART_RE.match(text, start):
+      return "code"
+    if text.startswith("other", start):
+      end = start + len("other")
+      if end == len(text) or text.startswith(_SEPARATOR, end):
+        return "other"
+    longest = max(len(p) for p in _PART_PREFIXES) + 64  # a cut code header
+    if self.clipped and len(text) - start <= longest + len(_TRUNCATION_MARK):
+      # The cut landed inside the part's prefix, or right at its start.
+      visible = text[start : len(text) - len(_TRUNCATION_MARK)]
+      if any(p.startswith(visible) for p in _PART_PREFIXES):
+        return "cut"
+      if _CUT_CODE_HEADER_RE.fullmatch(visible):
+        return "cut"
+    return None
+
+  def _extent(self, start: int) -> Optional[tuple[str, int, int]]:
+    """The kind of the part at ``start``, its body and its end, if valid."""
+    kind, text = self._kind(start), self.text
+    if kind == "text":
+      body = start + len(_TEXT_PART)
+      # The closing quote comes after the opening one.
+      separator = self._first(self._after_quote, body + 1)
+      if separator is not None:
+        return kind, body, separator - 1
+      if text.endswith("'") and len(text) > body:
+        return kind, body, len(text) - 1
+      if self.clipped:
+        return kind, body, len(text)
+      return None
+    if kind == "code":
+      separator = self._first(self._after_part, start)
+      return kind, start, len(text) if separator is None else separator
+    if kind is None:
+      return None
+    end = text.find(_SEPARATOR, start)
+    end = len(text) if end == -1 else end
+    if kind in ("call", "resp"):
+      # A function name, or the start of one where the payload was cut.
+      name = text[start + len(kind) + 1 : end].lstrip(" ")
+      if end == len(text) and self.clipped:
+        # The cut may also land in the separator after the name.
+        name = name[: -len(_TRUNCATION_MARK)].rstrip(" |")
+        if name and not _TOOL_NAME_PREFIX_RE.fullmatch(name):
+          return None
+      elif name and not _TOOL_NAME_RE.fullmatch(name):
+        return None
+    if kind == "cut" and end != len(text):
+      return None
+    if end != len(text) and not self.valid.get(end + len(_SEPARATOR)):
+      return None
+    if end == len(text) and self.clipped and kind != "text":
+      self._clipped_tail.add(start)
+    return kind, start, end
+
+  def _valid_from(self, start: int) -> bool:
+    self.valid[start] = self._extent(start) is not None
+    return self.valid[start]
+
+  def parse(self) -> Optional[_ModelTurn]:
+    if not self._valid_from(0):
+      return None
+    texts: list[str] = []
+    has_call = False
+    position = 0
+    while position < len(self.text):
+      kind, body, end = self._extent(position)
+      if kind == "text":
+        texts.append(self.text[body:end])
+        end += 1 if end < len(self.text) else 0  # the closing quote
+      elif kind == "call":
+        has_call = True
+      elif kind == "cut":
+        visible = self.text[position : len(self.text) - len(_TRUNCATION_MARK)]
+        has_call = has_call or bool(visible) and _CALL_PART.startswith(visible)
+      if end >= len(self.text):
+        break
+      position = end + len(_SEPARATOR)
+    return _ModelTurn(tuple(texts), has_call)
+
+
+@functools.lru_cache(maxsize=256)
+def _parse_model_turn(value: str) -> Optional[_ModelTurn]:
+  """Parses an LLM_RESPONSE ``response`` in the ADK plugin's encoding.
+
+  Returns None when ``value`` is not in that encoding. Cached, because
+  ``Trace.final_response`` is a property that callers read repeatedly.
+  """
+  text = value.rstrip()
+  if text == _EMPTY_TURN:
+    return _ModelTurn((), False)
+  return _TurnParser(text).parse()
+
+
+def _writes_verbatim(event: Any) -> bool:
+  """Is this row's answer stored as written, not in the plugin's encoding?
+
+  The bundled tracing writer names itself in ``attributes.writer`` and
+  stores answers verbatim. The ADK plugin writes ``attributes.adk`` (older
+  versions write neither) and never fills AGENT_COMPLETED, so an
+  AGENT_COMPLETED answer without ``attributes.adk`` comes from another
+  producer (for example an EvalBench import) and is verbatim too.
+  """
+  attributes = getattr(event, "attributes", None)
+  if not isinstance(attributes, collections.abc.Mapping):
+    attributes = {}
+  if isinstance(attributes.get("writer"), collections.abc.Mapping):
+    return True
+  return getattr(event, "event_type", None) == "AGENT_COMPLETED" and (
+      not isinstance(attributes.get("adk"), collections.abc.Mapping)
+  )
+
+
+def _answer_text(value: Any) -> str:
+  """A non-string answer value as text (compact JSON, as BigQuery prints it)."""
+  if isinstance(value, (dict, list)):
+    return json.dumps(
+        value, ensure_ascii=False, separators=(",", ":"), default=str
+    )
+  return str(value)
+
+
+def _turn_answer(event: Any) -> tuple[str, Optional[str]]:
+  """Classifies an LLM_RESPONSE or AGENT_COMPLETED row.
+
+  Returns ``("answer", text)``, ``("call", None)`` for a turn that calls
+  a tool, or ``("empty", None)`` for a row with no answer text.
+  """
+  content = getattr(event, "content", None)
+  summary = None
+  if isinstance(content, collections.abc.Mapping):
+    value = content.get("response")
+    if value is None and set(content) == {"raw"}:
+      value = content["raw"]  # a scalar JSON string, as the loader wraps it
+    summary = content.get("text_summary")
+    summary = summary if isinstance(summary, str) and summary.strip() else None
+  else:
+    value = content
+  if summary and getattr(event, "event_type", None) == "AGENT_RESPONSE":
+    # The plugin's response_text_key fills it with the answer's text, and
+    # its own eval views read it first.
+    return "answer", summary
+  if isinstance(value, (bool, int, float)):
+    value = json.dumps(value)  # a JSON scalar reads as its text, as in SQL
+  if isinstance(value, str) and not value.strip():
+    value = None
+  if value is None:
+    return ("answer", summary) if summary else ("empty", None)
+  if not isinstance(value, str):
+    return "answer", summary or _answer_text(value)
+  if _writes_verbatim(event):
+    answer = _unwrap_text_field(value)
+  elif (turn := _parse_model_turn(value)) is None:
+    answer = _unwrap_text_field(value.rstrip())
+  elif turn.has_call:
+    return "call", None
+  else:
+    answer = "\n".join(turn.texts)
+  return ("answer", answer) if answer.strip() else ("empty", None)
+
+
+def _invocation_of(event: Any) -> Optional[str]:
+  return _str_or_none(getattr(event, "invocation_id", None)) or None
+
+
+def _parent_invocation(event: Any) -> Optional[str]:
+  attributes = getattr(event, "attributes", None)
+  adk = (
+      attributes.get("adk")
+      if isinstance(attributes, collections.abc.Mapping)
+      else None
+  )
+  if isinstance(adk, collections.abc.Mapping):
+    return _str_or_none(adk.get("parent_invocation_id")) or None
+  return None
+
+
+def _is_adk_row(event: Any) -> bool:
+  attributes = getattr(event, "attributes", None)
+  return isinstance(attributes, collections.abc.Mapping) and isinstance(
+      attributes.get("adk"), collections.abc.Mapping
+  )
+
+
+def _current_invocation(events: Sequence[Any]) -> list[Any]:
+  """The rows of the session's latest invocation.
+
+  A nested invocation (an agent called as a tool) belongs to its parent.
+  The ADK plugin (rows with ``attributes.adk``) stamps every row with its
+  invocation, so the latest row's invocation is the one, even when an
+  event-type filter left one row of it. Other producers may give rows
+  ids that do not group them (one per row, or a fresh one on a stray
+  row), so there ids count only when some id is shared by two rows, and
+  the invocation is the latest id that is shared, or that a response row
+  carries. Otherwise, the rows after the last USER_MESSAGE_RECEIVED are
+  the invocation.
+  """
+  parents = {}
+  for event in events:
+    invocation, parent = _invocation_of(event), _parent_invocation(event)
+    if invocation and parent and parent != invocation:
+      parents[invocation] = parent
+
+  def root(invocation: str) -> str:
+    seen = {invocation}
+    while invocation in parents and parents[invocation] not in seen:
+      invocation = parents[invocation]
+      seen.add(invocation)
+    return invocation
+
+  roots = [
+      root(invocation) if (invocation := _invocation_of(event)) else None
+      for event in events
+  ]
+  counts = collections.Counter(r for r in roots if r)
+  adk = any(_is_adk_row(event) for event in events)
+  last = None
+  if adk or any(count >= 2 for count in counts.values()):
+    last = next(
+        (
+            r
+            for event, r in zip(reversed(events), reversed(roots))
+            if r
+            and (
+                adk
+                or counts[r] >= 2
+                or getattr(event, "event_type", None) in _RESPONSE_ROWS
+            )
+        ),
+        None,
+    )
+  if last is not None:
+    first = roots.index(last)
+    return [
+        event
+        for index, (event, r) in enumerate(zip(events, roots))
+        if r == last or (r is None and index > first)
+    ]
+  start = 0
+  for index, event in enumerate(events):
+    if getattr(event, "event_type", None) == "USER_MESSAGE_RECEIVED":
+      start = index + 1
+  return list(events[start:])
+
+
+# Rows that hold a model turn. The ADK plugin writes AGENT_RESPONSE for a
+# final response (its visible text, or the arguments of a tool named in
+# ``final_response_tool_names``); compatibility views over other logs use
+# it for the answer too.
+_ANSWER_TURNS = ("LLM_RESPONSE", "AGENT_RESPONSE")
+_RESPONSE_ROWS = _ANSWER_TURNS + ("AGENT_COMPLETED",)
+
+
+def _final_answer(events: Sequence[Any]) -> Optional[str]:
+  """The answer of the session's latest invocation, or None.
+
+  Reads the invocation's last LLM_RESPONSE or AGENT_RESPONSE with answer
+  text, skipping turns with none. If the last turn with content calls a
+  tool, the model never answered, so only AGENT_COMPLETED rows are read.
+  """
+  # A nested invocation (an agent called as a tool) belongs to the run,
+  # but its turns are not the run's answer, when the run's own rows are
+  # here. AgentTool runs in a session of its own, read alone it is the run.
+  run = _current_invocation(events)
+  present = {_invocation_of(event) for event in run}
+  rows = [
+      event
+      for event in run
+      if _parent_invocation(event) in (None, _invocation_of(event))
+      or _parent_invocation(event) not in present
+  ]
+  for event in reversed(rows):
+    if getattr(event, "event_type", None) not in _ANSWER_TURNS:
+      continue
+    kind, text = _turn_answer(event)
+    if kind == "answer":
+      return text
+    if kind == "call":
+      break
+  for event in reversed(rows):
+    if getattr(event, "event_type", None) == "AGENT_COMPLETED":
+      kind, text = _turn_answer(event)
+      if kind == "answer":
+        return text
+  return None
+
+
+# The SQL judge queries pick each session's final answer
+# with the rules ``_final_answer`` applies in Python. RE2 has no
+# lookahead, so the part encoding is matched with regexes that agree with
+# ``_parse_model_turn`` on the shapes the producers write (see
+# tests/test_final_response_sql.py). CHR(123) is "{", spelled so the SQL
+# can go through str.format.
+# The parts of the encoding, as RE2 patterns that mirror _TurnParser.
+_SQL_CODE_PART = (
+    r"(?:Executable code|Code execution result) \([^()]*\):(?: (?s:.*?))?"
+)
+_SQL_TOOL_NAME = (
+    r"(?:[0-9][0-9.:-]*)?[A-Za-z_][A-Za-z0-9_.:-]*" r"(?:\s*[(\x7B].*[)\x7D])?"
+)
+_SQL_NON_TEXT_PART = (
+    r"(?:resp: *(?:" + _SQL_TOOL_NAME + r")?|other|" + _SQL_CODE_PART + ")"
+)
+_SQL_CALL_PART = r"call: *(?:" + _SQL_TOOL_NAME + ")?"
+_SQL_CHAIN = r"(?:" + _SQL_CALL_PART + "|" + _SQL_NON_TEXT_PART + r") \| "
+# The start of a well-formed next part (one part ahead: RE2 cannot check
+# the rest of the turn the way _TurnParser does).
+_SQL_PART_START = (
+    r"(?:text: '|(?:call|resp): *(?:" + _SQL_TOOL_NAME + r")?(?: \| |$)"
+    r"|other(?: \| |$)|(?:Executable code|Code execution result) \()"
+)
+# A payload cut inside a part's prefix ("te...[TRUNCATED]"), inside a
+# code part's header or a function name, or right where a part starts.
+_SQL_CUT_PREFIX = (
+    "(?:"
+    + "|".join(
+        sorted(
+            {
+                prefix[:length].replace("(", r"\(")
+                for prefix in _PART_PREFIXES
+                for length in range(1, len(prefix) + 1)
+                if prefix[:length] != _TEXT_PART
+            },
+            key=lambda text: (-len(text), text),
+        )
+    )
+    + r"|(?:Executable code|Code execution result) \([^()|]*(?:\):?)?"
+    + r"|resp: *[A-Za-z0-9_][A-Za-z0-9_.:-]*[ |]*)?"
+    + r"\.\.\.\[TRUNCATED\]$"
+)
+# A call part, or a cut one. A cut part right after a text part may as
+# well be text (see _TurnParser), so it needs another part in between.
+_SQL_CALL_RE = (
+    r"(?:^|' \| )(?:"
+    + _SQL_CHAIN
+    + r")*"
+    + _SQL_CALL_PART
+    + r"(?: \| (?:"
+    + _SQL_PART_START
+    + "|"
+    + _SQL_CUT_PREFIX
+    + ")|$)"
+    + r"|(?:^(?:"
+    + _SQL_CHAIN
+    + r")*|' \| (?:"
+    + _SQL_CHAIN
+    + r")+)"
+    + r"(?:call: *(?:[A-Za-z0-9_][A-Za-z0-9_.:-]*)?[ |]*"
+    + r"|c(?:a(?:l(?:l(?::(?: )?)?)?)?)?)\.\.\.\[TRUNCATED\]$"
+)
+_SQL_NO_TEXT_RE = (
+    r"^(?:" + _SQL_NON_TEXT_PART + "|" + _SQL_CUT_PREFIX + r")"
+    r"(?: \| (?:" + _SQL_NON_TEXT_PART + "|" + _SQL_CUT_PREFIX + r"))*$"
+)
+# Non-text parts before the first text part, or right after a text
+# part's closing quote. What follows them is captured and put back (RE2
+# has no lookahead), so the replacement is \1\2\3.
+_SQL_DROP_NON_TEXT_RE = (
+    "^(?:"
+    + _SQL_NON_TEXT_PART
+    + r" \| )+(text: ')"
+    + r"|(')(?: \| "
+    + _SQL_NON_TEXT_PART
+    + r")+(?: \| "
+    + _SQL_CUT_PREFIX
+    + r"|( \| "
+    + _SQL_PART_START
+    + r"|$))"
+)
+
+
+def _sql_unwrap_text_field(expression: str) -> str:
+  """SQL for ``_unwrap_text_field``; CHR(39) and CHR(34) are the quotes."""
+  e = expression
+  return f"""CASE
+        WHEN NOT STARTS_WITH({e}, 'text: ') THEN {e}
+        WHEN SUBSTR({e}, 7, 1) NOT IN (CHR(39), CHR(34)) THEN SUBSTR({e}, 7)
+        WHEN LENGTH({e}) >= 8 AND SUBSTR({e}, LENGTH({e}), 1) = SUBSTR({e}, 7, 1)
+          THEN SUBSTR({e}, 8, LENGTH({e}) - 8)
+        ELSE SUBSTR({e}, 8)
+      END"""
+
+
+def _final_response_sql(source: str, where: str) -> str:
+  """CTEs ending in ``final_responses(session_id, final_response)``.
+
+  ``source`` is the events table and ``where`` filters its rows. The text
+  is meant to sit inside a ``WITH`` clause, followed by a comma.
+  """
+  return f"""\
+fr_rows AS (
+  SELECT
+    session_id,
+    timestamp,
+    event_type,
+    COALESCE(
+      NULLIF(JSON_VALUE(attributes, '$.adk.parent_invocation_id'), ''),
+      NULLIF(invocation_id, '')
+    ) AS invocation,
+    NULLIF(invocation_id, '') AS own_invocation,
+    NULLIF(JSON_VALUE(attributes, '$.adk.parent_invocation_id'), '')
+      AS parent_invocation,
+    COALESCE(
+      SUBSTR(TO_JSON_STRING(JSON_QUERY(attributes, '$.writer')), 1, 1) = CHR(123),
+      FALSE
+    ) AS writer,
+    COALESCE(
+      SUBSTR(TO_JSON_STRING(JSON_QUERY(attributes, '$.adk')), 1, 1) = CHR(123),
+      FALSE
+    ) AS adk,
+    COALESCE(
+      JSON_VALUE(content, '$.response'), JSON_VALUE(content, '$')
+    ) AS response,
+    TO_JSON_STRING(JSON_QUERY(content, '$.response')) AS response_json,
+    JSON_VALUE(content, '$.text_summary') AS summary
+  FROM {source}
+  WHERE {where}
+),
+fr_nested AS (
+  -- A row of a nested invocation whose parent's rows are here too.
+  SELECT
+    fr_row.*,
+    COALESCE(
+      fr_row.parent_invocation != fr_row.own_invocation
+        AND fr_parent.own_invocation IS NOT NULL,
+      FALSE
+    ) AS nested
+  FROM fr_rows AS fr_row
+  LEFT JOIN (
+    SELECT DISTINCT session_id, own_invocation
+    FROM fr_rows
+    WHERE own_invocation IS NOT NULL
+  ) AS fr_parent
+    ON fr_parent.session_id = fr_row.session_id
+      AND fr_parent.own_invocation = fr_row.parent_invocation
+),
+fr_text AS (
+  SELECT
+    *,
+    CASE
+      WHEN event_type = 'AGENT_RESPONSE' AND TRIM(summary) != ''
+        THEN summary
+      WHEN response IS NULL OR TRIM(response) = '' THEN COALESCE(
+        CASE WHEN TRIM(summary) != '' THEN summary END,
+        CASE
+          WHEN SUBSTR(response_json, 1, 1) IN (CHR(123), '[') THEN response_json
+        END
+      )
+      -- Verbatim producers: see _writes_verbatim.
+      WHEN writer OR (NOT adk AND event_type = 'AGENT_COMPLETED')
+        THEN {_sql_unwrap_text_field("response")}
+      WHEN RTRIM(response) = 'None' THEN NULL
+      WHEN STARTS_WITH(
+        REGEXP_REPLACE(
+          RTRIM(response), r"{_SQL_DROP_NON_TEXT_RE}", r"\\1\\2\\3"
+        ),
+        'text: '
+      ) THEN REGEXP_REPLACE(
+        REGEXP_REPLACE(
+          REGEXP_REPLACE(
+            RTRIM(response), r"{_SQL_DROP_NON_TEXT_RE}", r"\\1\\2\\3"
+          ),
+          r"' \\| text: '", CHR(10)
+        ),
+        r"^text: '|'$", ''
+      )
+      WHEN REGEXP_CONTAINS(RTRIM(response), r"{_SQL_NO_TEXT_RE}") THEN NULL
+      ELSE RTRIM(response)
+    END AS text,
+    NOT writer
+      AND NOT (NOT adk AND event_type = 'AGENT_COMPLETED')
+      AND NOT (
+        event_type = 'AGENT_RESPONSE' AND COALESCE(TRIM(summary) != '', FALSE)
+      )
+      AND TRIM(COALESCE(response, '')) != ''
+      AND REGEXP_CONTAINS(RTRIM(response), r"{_SQL_CALL_RE}") AS is_call
+  FROM fr_nested
+),
+fr_scoped AS (
+  -- The run is the latest invocation (see _current_invocation).
+  SELECT
+    *,
+    MAX(CASE WHEN eligible THEN 1 ELSE 0 END)
+      OVER (PARTITION BY session_id) = 1 AS grouped,
+    FIRST_VALUE(invocation) OVER (
+      PARTITION BY session_id
+      ORDER BY NOT eligible, timestamp DESC
+      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS last_invocation,
+    MAX(
+      CASE WHEN event_type = 'USER_MESSAGE_RECEIVED' THEN timestamp END
+    ) OVER (PARTITION BY session_id) AS last_user_message
+  FROM (
+    SELECT
+      *,
+      invocation IS NOT NULL AND ids_group AND (
+        adk_session
+        OR invocation_rows >= 2
+        OR event_type IN ('LLM_RESPONSE', 'AGENT_RESPONSE', 'AGENT_COMPLETED')
+      ) AS eligible
+    FROM (
+      SELECT
+        *,
+        adk_session
+          OR MAX(invocation_rows) OVER (PARTITION BY session_id) >= 2
+          AS ids_group
+      FROM (
+        SELECT
+          *,
+          MAX(CASE WHEN adk THEN 1 ELSE 0 END)
+            OVER (PARTITION BY session_id) = 1 AS adk_session,
+          CASE
+            WHEN invocation IS NOT NULL
+            THEN COUNT(*) OVER (PARTITION BY session_id, invocation)
+            ELSE 0
+          END AS invocation_rows
+        FROM fr_text
+      )
+    )
+  )
+),
+fr_run AS (
+  SELECT
+    *,
+    CASE
+      WHEN is_call THEN 'call'
+      WHEN text IS NULL OR TRIM(text) = '' THEN 'empty'
+      ELSE 'answer'
+    END AS kind
+  FROM (
+    SELECT
+      *,
+      MIN(CASE WHEN invocation = last_invocation THEN timestamp END)
+        OVER (PARTITION BY session_id) AS run_start
+    FROM fr_scoped
+  )
+  WHERE event_type IN ('LLM_RESPONSE', 'AGENT_RESPONSE', 'AGENT_COMPLETED')
+    AND CASE
+      WHEN grouped THEN invocation = last_invocation
+        OR (invocation IS NULL AND timestamp > run_start)
+      ELSE last_user_message IS NULL OR timestamp > last_user_message
+    END
+),
+fr_last_turn AS (
+  SELECT
+    session_id,
+    kind,
+    text,
+    ROW_NUMBER() OVER (
+      PARTITION BY session_id ORDER BY timestamp DESC
+    ) AS recency
+  FROM fr_run
+  WHERE event_type IN ('LLM_RESPONSE', 'AGENT_RESPONSE')
+    AND kind != 'empty'
+    AND NOT nested
+),
+fr_last_completion AS (
+  SELECT
+    session_id,
+    text,
+    ROW_NUMBER() OVER (
+      PARTITION BY session_id ORDER BY timestamp DESC
+    ) AS recency
+  FROM fr_run
+  WHERE event_type = 'AGENT_COMPLETED' AND kind = 'answer' AND NOT nested
+),
+final_responses AS (
+  SELECT
+    sessions.session_id,
+    CASE
+      WHEN turn.kind = 'answer' THEN turn.text
+      ELSE completion.text
+    END AS final_response
+  FROM (SELECT DISTINCT session_id FROM fr_rows) AS sessions
+  LEFT JOIN fr_last_turn AS turn
+    ON turn.session_id = sessions.session_id AND turn.recency = 1
+  LEFT JOIN fr_last_completion AS completion
+    ON completion.session_id = sessions.session_id
+      AND completion.recency = 1
+)"""
 
 
 def _flag(value: Any) -> bool:
-  """A BOOL column value as a bool; NULL and unreadable values are False."""
+  """A BOOL column value as a bool; NULL and unreadable values are False.
+
+  A missing value can arrive as NaN or NaT (for example from a DataFrame),
+  and a value can arrive as bytes.
+  """
   if value is None:
     return False
+  if isinstance(value, bytes):
+    value = value.decode("utf-8", "replace")
   if isinstance(value, str):
     return value.strip().lower() == "true"
   try:
+    if value != value:  # NaN, NaT
+      return False
     return bool(value)
   except (TypeError, ValueError):
     return False
@@ -203,9 +864,11 @@ class Span:
   Fields of layers 2 and 3 are ``None`` when the producer did not
   record them or recorded a non-string value in ``attributes``.
 
-  ``is_truncated`` mirrors the events table column: True when the
-  producer clipped or redacted this row's content (for example a long
-  tool result), so the content is not exactly what the agent saw.
+  ``is_truncated`` is the producer's row-level flag from the events
+  table: True when the producer marked the row as clipped, for example a
+  content, attribute or metadata value over its size limit. A row can be
+  clipped without the content changing, and key-based redaction can
+  leave it False.
   """
 
   event_type: str
@@ -2966,49 +3629,26 @@ class Trace(_WeakrefableSlotted):
 
   @property
   def final_response(self) -> Optional[str]:
-    """Extracts the final agent response text.
+    """The agent's answer in the trace's latest invocation, or None.
 
-    Checks LLM_RESPONSE first (the ADK plugin always populates
-    ``content.response`` there), then falls back to
-    AGENT_COMPLETED for backward compatibility. Model turns with no
-    content (logged as ``None``) are skipped. If the last model turn
-    with content ends in a tool call, it holds no text answer, so only
-    AGENT_COMPLETED is consulted.
+    Reads the invocation's last LLM_RESPONSE or AGENT_RESPONSE that holds
+    answer text, then its AGENT_COMPLETED rows. Rows of earlier
+    invocations are never read. A nested invocation (an agent called as a
+    tool) is part of the run, but its turns are not the answer. Which
+    invocation is latest is described in ``_current_invocation``.
+
+    In the ADK plugin's encoding (``text: '...' | call: <tool>``), a model
+    turn with no parts (``None``) or only non-text parts is skipped, and a
+    turn that calls a tool holds no answer: if the last turn with content
+    calls one, only AGENT_COMPLETED is read. Text parts are unwrapped and
+    joined with newlines, and a text part cut by truncation keeps its
+    visible text. Answers stored verbatim (the bundled tracing writer, and
+    AGENT_COMPLETED rows that the plugin did not write) only lose a
+    ``text: '...'`` wrapper. A non-string response is returned as its
+    ``text_summary`` or as JSON text, so the result is always a string or
+    None.
     """
-    for span in reversed(self.spans):
-      if span.event_type == "LLM_RESPONSE":
-        c = span.content
-        if isinstance(c, dict):
-          result = c.get("response")
-          if _is_tool_call_response(result):
-            break
-          if result and result != _EMPTY_TURN:
-            return (
-                _unwrap_text_field(result)
-                if isinstance(result, str)
-                else result
-            )
-        elif c:
-          text = str(c)
-          if _is_tool_call_response(text):
-            break
-          if text != _EMPTY_TURN:
-            return _unwrap_text_field(text)
-
-    for span in reversed(self.spans):
-      if span.event_type == "AGENT_COMPLETED":
-        c = span.content
-        if isinstance(c, dict):
-          result = c.get("response") or c.get("text_summary")
-          if result:
-            return (
-                _unwrap_text_field(result)
-                if isinstance(result, str)
-                else result
-            )
-        elif c:
-          return _unwrap_text_field(str(c))
-    return None
+    return _final_answer(self.spans)
 
   @property
   def error_spans(self) -> list[Span]:
