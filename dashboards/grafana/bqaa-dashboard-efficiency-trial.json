@@ -1625,7 +1625,7 @@
                 "value": [
                   {
                     "title": "Open session trace (all agents and event types)",
-                    "url": "${__url.path}?orgId=${__org.id}&from=${__from}&to=${__to}&timezone=${__timezone}&${datasource:queryparam}&var-agent=%24__all&var-user_id=%24__all&var-event_type=%24__all&var-session_id=${__data.fields.session_id:percentencode}&viewPanel=19",
+                    "url": "${__url.path}?orgId=${__org.id}&from=${__from}&to=${__to}&timezone=${__timezone:percentencode}&${datasource:queryparam}&var-agent=%24__all&var-user_id=%24__all&var-event_type=%24__all&var-session_id=${__data.fields.session_id:percentencode}&viewPanel=19",
                     "targetBlank": true
                   }
                 ]
