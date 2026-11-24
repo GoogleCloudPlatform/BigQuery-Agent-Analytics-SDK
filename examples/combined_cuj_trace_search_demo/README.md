@@ -32,7 +32,7 @@ flowchart TD
 
 3. **4-Layer Cost-Aware Routing & Modeled 8-Lever Eval Cascade**
    - **Layer 0 (`$0`, `0 ms`):** Deterministic rules classify empty queries, quoted `"..."` phrases, session/invocation IDs, and `UPPER_SNAKE_CASE` constants (`CARD_EXPIRED`) to `KEYWORD`, and mixed tool + behavioral queries to `HYBRID`.
-   - **Layer 1 (Ambiguous Queries):** Uses Developer API `client.decisions.create(model="gemini-decision-1", ...)` (`0` decode tokens) when `GEMINI_API_KEY` and `client.decisions` are available, or Vertex AI `gemini-4-hydrogen` (`location="global"`, `thinking_level="LOW"`, structured JSON) as the zero-key-friction default, escalating low-confidence (`< 0.70`) predictions to `HYBRID`.
+   - **Layer 1 (Ambiguous Queries):** Uses Gemini Decisions API (`gemini-decision-1`, `0` output tokens, via SDK `client.decisions.create` when available or direct `POST /decisions` REST fallback when `GEMINI_API_KEY` or `GEMINI_DECISIONS_API_BASE` is configured), or falls back to Vertex AI `gemini-4-hydrogen` (`location="global"`, `thinking_level="LOW"`, structured JSON) when no Decisions credentials are set, escalating low-confidence (`< 0.70`) predictions to `HYBRID`.
    - **Layer 2 & Layer 3:** Step-1 retrieval reads `0` bytes of raw `trace` JSON; Step-2 lazy hydration loads `trace` only for an expanded `(session_id, invocation_id)`; Layer 3 runs scoped `AI.GENERATE` (`thinking_level="LOW"`) strictly on `top_k` candidates to verify silent contradictions.
 
 4. **Continuous Pattern Discovery -> `EvalSuite`**
@@ -40,13 +40,13 @@ flowchart TD
 
 ## Observed Live Benchmark Snapshot
 
-Verified against live BigQuery (`US` multi-region) and Vertex AI (`gemini-4-hydrogen` in `global`, `thinking_level="LOW"`, session batch `20261124_174855`); see [`VERIFICATION.md`](VERIFICATION.md) for the full ledger:
+Verified against live BigQuery (`US` multi-region), Vertex AI (`gemini-4-hydrogen` in `global`, `thinking_level="LOW"`), and Gemini Decisions API (`gemini-decision-1`, `L1_DECISIONS_API`, `0` output tokens, session batch `20261124_200850`); see [`VERIFICATION.md`](VERIFICATION.md) for the full ledger:
 
-- **`S1` -> `S2` -> `S3` Trajectory Compression (`$0.00` ingest LLM):** Aggregate payload shrank `93.2%` (`106,185 B -> 7,218 B`). Average turn size dropped from `13,273 B` (`3,318` est. tokens, `8/8 > 2,048`) in `S1` and `3,018 B` (`755` est. tokens, `1/8 > 2,048`) in `S2` to **`902 B` (`226` est. tokens, `0/8 > 2,048`)** in `S3`; bloated audit outlier `scn_05` shrank from `24,996 B` (`6,249` tokens) to `977 B` (`245` tokens) while preserving `AUDIT_SYNC_WARNING` and `CHECKSUM_MISMATCH`.
+- **`S1` -> `S2` -> `S3` Trajectory Compression (`$0.00` ingest LLM):** Aggregate payload shrank `93.3%` (`106,049 B -> 7,096 B`). Average turn size dropped from `13,256 B` (`3,314` est. tokens, `8/8 > 2,048`) in `S1` and `3,023 B` (`756` est. tokens, `1/8 > 2,048`) in `S2` to **`887 B` (`222` est. tokens, `0/8 > 2,048`)** in `S3`; bloated audit outlier `scn_05` shrank from `25,066 B` (`6,267` tokens) to `1,045 B` (`262` tokens) while preserving `AUDIT_SYNC_WARNING` and `CHECKSUM_MISMATCH`, and silent contradiction `scn_03` (`sess_03_silent_contradiction_refund_20261124_200850`) shrank from `11,477 B` to `709 B` (`-93.8%`).
 - **BigQuery Query Scan Reduction & Scale `IVF` Proof:**
-  - `8`-row live run (`8/8` `AI.EMBED` ready): `KEYWORD` Step-1 scan `8,759 B` (`-90.1%`, `10.1x` reduction vs `88,331 B` raw `trace` baseline), `AI.SEARCH` (`rerank_score DESC`) `57,927 B` (`-34.4%`).
-  - `5,074`-row `--with-vector-index-scale` run (`2,000/5,074` initial async ready): `CREATE VECTOR INDEX ... IVF` (`CREATED` live), `KEYWORD` scan `1,948,168 B` (`1.95 MB`, `-94.7%` / `18.8x`) and `AI.SEARCH` `14,240,168 B` (`14.24 MB`, `-61.1%`) vs `36,642,883 B` raw baseline.
-- **4-Layer Routing, Scoped `AI.GENERATE` & Modeled 8-Lever Cost Cascade:** Layer 0 resolved `q1`/`q2`/`q5` in `0.0 ms` (`$0.00`); Layer 1 (`gemini-4-hydrogen`, `thinking_level="LOW"`) routed `q3` (`2,534.82 ms`) and `q4` (`1,511.00 ms`); scoped `AI.GENERATE` flagged `sess_03` (`SILENT_CONTRADICTION`, `conf=1.0`) while correctly classifying `sess_08` (`EXACT_ERROR`, `conf=0.99`) when the agent obeyed cancellation policy; parameterized from live `S1`/`S3` byte counts under uniform `$0.30/$2.50` compact judge pricing, the modeled 8-lever cascade (`MODELED_PROJECTION`) projects `$16.7051` (`Arm 1`) down to `$0.0728` (`Arm 4`, `-99.56%` per `1K` evals); `pattern_to_eval.py` exported a balanced `6`-task `EvalSuite` backed by 100% real BigQuery session IDs (`balance_ratio=0.333`, `0` health warnings).
+  - `8`-row live run (`8/8` `AI.EMBED` ready): `KEYWORD` Step-1 scan `8,634 B` (`-90.2%`, `10.2x` reduction vs `88,194 B` raw `trace` baseline), `AI.SEARCH` (`rerank_score DESC`) `57,802 B` (`-34.5%`).
+  - `5,091`-row `--with-vector-index-scale` run (`1,000/5,091` initial async ready): `CREATE VECTOR INDEX ... IVF` (`CREATED` live, `PENDING_INDEX_CREATION` during async build), `KEYWORD` scan `1,966,485 B` (`1.97 MB`, `-94.7%` / `18.7x`) and `AI.SEARCH` `14,258,485 B` (`14.26 MB`, `-61.3%`) vs `36,828,878 B` (`36.83 MB`) raw baseline.
+- **4-Layer Routing, Scoped `AI.GENERATE` & Modeled 8-Lever Cost Cascade:** Layer 0 resolved `q1`/`q2`/`q5` in `0.0 ms` (`$0.00`); Layer 1 (`L1_DECISIONS_API`, `gemini-decision-1`, `0` output tokens, `$0.000046`/call) routed `q3` (`conf=0.9976`, `in_tok=128`, top=`sess_03`, `dist=0.4460`, `rerank=0.3822`) and `q4` (`conf=0.9991`, `in_tok=127`, top=`sess_04`, `dist=0.4980`, `rerank=0.3476`), with `--no-rerank` (`PATH_B_AI_SEARCH_NO_RERANK` & `PATH_C_HYBRID_RRF_NO_RERANK`) also verified live; scoped `AI.GENERATE` confirmed `sess_03` (`SILENT_CONTRADICTION`, `conf=1.0`); parameterized from live `S1`/`S3` byte counts under uniform `$0.30/$2.50` compact judge pricing, the modeled 8-lever cascade (`MODELED_PROJECTION`) projects `$16.69` (`Arm 1`, `$16.6924`) -> `$0.52` (`Arm 2`) -> `$0.25` (`Arm 3`) -> `$0.07` (`Arm 4`, `$0.0725`, `-99.57%` per `1K` evals); `pattern_to_eval.py` exported a balanced `6`-task `EvalSuite` across `4` cohorts backed by 100% real BigQuery session IDs (`balance_ratio=0.333`, `0` health warnings).
 
 ## Layout
 
@@ -99,9 +99,13 @@ export PROJECT_ID="your-gcp-project-id"
 ./run_e2e_demo.sh
 ```
 
-Optional flags:
+Optional flags and router configuration:
 - `--with-vector-index-scale`: Seeds `5,000` synthetic rows so `CREATE VECTOR INDEX ... IVF` executes against live BigQuery.
 - `--no-rerank`: Uses cosine `distance ASC` ordering without requiring `roles/discoveryengine.viewer`.
+- Layer 1 Decisions API overrides (`analytics.index_and_search` CLI flags or exported env vars before `./run_e2e_demo.sh`):
+  - `--router-backend` / `ROUTER_BACKEND`: Selects the Layer 1 router (`auto`, `decisions`, `vertex`, or `offline`; defaults to `auto`).
+  - `--decisions-model` / `DECISIONS_MODEL`: Sets the Gemini Decisions API model ID (defaults to `gemini-decision-1`).
+  - `--decisions-api-base` / `GEMINI_DECISIONS_API_BASE`: Optional `https://` base URL override for the Decisions REST endpoint (defaults to `https://generativelanguage.googleapis.com/v1beta`). Set `GEMINI_API_KEY` to authenticate against the Developer API.
 
 ### 3. Build Showcase HTML Directly from Fixture
 

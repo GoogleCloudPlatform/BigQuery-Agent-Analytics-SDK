@@ -97,6 +97,10 @@ _BANNED_REGEXES: tuple[tuple[str, re.Pattern[str]], ...] = (
         "internal_bug_link",
         re.compile(r"(?<![A-Za-z0-9_./:-])" + "b" + r"/\d{6,}"),
     ),
+    (
+        "internal_decisions_codename",
+        re.compile(r"\b" + "j" + r"ev\b", re.IGNORECASE),
+    ),
 )
 
 _FORBIDDEN_FILENAMES = frozenset({"intent.md", "spec.md", "plan.md"})
@@ -220,6 +224,84 @@ class ShowcaseHtmlAndHygieneTest(unittest.TestCase):
       self.assertIn("turns.forEach(", html_text)
       self.assertNotIn("arize", html_text.lower())
       self.assertNotIn("braintrust", html_text.lower())
+      self.assertIn("L1 Router:", html_text)
+      self.assertIn("gemini-decision-1", html_text)
+      self.assertIn("(Decisions API)", html_text)
+      self.assertNotIn("j" + "ev", html_text.lower())
+      self.assertIn("Probs:", html_text)
+      self.assertIn("Model:", html_text)
+
+      # Verify fixture queries stamp model metadata consistently inside embedded JSON.
+      match = re.search(
+          r'<script id="showcase-data" type="application/json">(.*?)</script>',
+          html_text,
+          re.DOTALL,
+      )
+      self.assertIsNotNone(match)
+      embedded = json.loads(match.group(1))
+      q_by_id = {q["query_id"]: q for q in embedded["queries"]}
+      self.assertEqual(
+          q_by_id["Q1"]["router_decision"]["model"], "deterministic_rules"
+      )
+      self.assertEqual(
+          q_by_id["Q2"]["router_decision"]["model"], "deterministic_rules"
+      )
+      self.assertEqual(
+          q_by_id["Q3"]["router_decision"]["model"], "gemini-decision-1"
+      )
+      self.assertEqual(
+          q_by_id["Q4"]["router_decision"]["model"], "gemini-decision-1"
+      )
+      self.assertEqual(
+          q_by_id["Q5"]["router_decision"]["model"], "deterministic_rules"
+      )
+
+  def test_build_showcase_html_l1_router_meta_bar_vertex_fallback(self) -> None:
+    from report.build_showcase_html import build_showcase_html  # noqa: PLC0415
+
+    with tempfile.TemporaryDirectory() as tmp:
+      tmp_dir = Path(tmp)
+      search_json = tmp_dir / "search.json"
+      out_html = tmp_dir / "showcase.html"
+      search_json.write_text(
+          json.dumps(
+              {
+                  "index_status": {
+                      "ai_embed_column": "MOCK",
+                      "search_index": "READY",
+                      "vector_index": "SKIPPED_BELOW_5000_ROWS",
+                      "row_count": 2,
+                      "embeddings_ready": 2,
+                  },
+                  "queries": [
+                      {
+                          "query_id": "Q3",
+                          "query_text": "agent claimed refund succeeded",
+                          "router_decision": {
+                              "mode": "NATURAL_LANGUAGE",
+                              "layer": "L1_VERTEX_HYDROGEN",
+                              "confidence": 0.9,
+                              "latency_ms": 110.0,
+                              "input_tokens": 80,
+                              "output_tokens": 18,
+                              "cost_usd": 0.00005,
+                              "model": "gemini-4-hydrogen",
+                          },
+                          "step1_bytes_processed": 100,
+                          "raw_trace_baseline_bytes_processed": 12000,
+                          "step1_hits": [],
+                          "layer3_verifications": [],
+                      }
+                  ],
+              }
+          ),
+          encoding="utf-8",
+      )
+      build_showcase_html(search_json=search_json, output_path=out_html)
+      html_text = out_html.read_text(encoding="utf-8")
+      self.assertIn("L1 Router: <code>gemini-4-hydrogen</code>", html_text)
+      self.assertNotIn("(Decisions API)", html_text)
+      self.assertNotIn("j" + "ev", html_text.lower())
 
   def test_build_showcase_html_xss_and_secret_redaction(self) -> None:
     from report.build_showcase_html import build_showcase_html  # noqa: PLC0415
@@ -490,11 +572,14 @@ class ShowcaseHtmlAndHygieneTest(unittest.TestCase):
           + 'VAULT = ".gemini/'
           + 'vault"\n'
           + 'AGENT = "demo_worker_'
-          + 'manage_bot"\n',
+          + 'manage_bot"\n'
+          + 'CODENAME = "'
+          + "J"
+          + 'ev"\n',
           encoding="utf-8",
       )
       violations = scan_directory_for_oss_hygiene(bad_dir)
-      self.assertGreaterEqual(len(violations), 8)
+      self.assertGreaterEqual(len(violations), 9)
 
   def test_run_e2e_demo_offline_produces_all_artifacts(self) -> None:
     if not (DEMO_DIR / "agent" / "run_live_demo.py").is_file():

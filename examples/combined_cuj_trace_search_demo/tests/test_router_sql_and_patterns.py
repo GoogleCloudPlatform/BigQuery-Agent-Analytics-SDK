@@ -649,6 +649,7 @@ def test_layer1_decisions_api_routing_and_v1beta(
   fake = FakeDecisionsClient(
       api_key="test-key", http_options={"api_version": "v1beta"}
   )
+  monkeypatch.delenv("GEMINI_DECISIONS_API_BASE", raising=False)
   monkeypatch.setenv("GEMINI_API_KEY", "test-key")
   monkeypatch.setattr(
       "analytics.query_router._build_decisions_client",
@@ -727,6 +728,7 @@ def test_live_router_fails_closed_when_unconfigured(
     monkeypatch: pytest.MonkeyPatch,
 ):
   monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+  monkeypatch.delenv("GEMINI_DECISIONS_API_BASE", raising=False)
   monkeypatch.setattr(
       "analytics.query_router._build_vertex_client",
       lambda **kwargs: (_ for _ in ()).throw(RuntimeError("no adc")),
@@ -734,6 +736,585 @@ def test_live_router_fails_closed_when_unconfigured(
   router = QueryRouter(backend="vertex", offline=False)
   with pytest.raises(RuntimeError, match="no adc"):
     router.classify("agent got stuck calling lookup repeatedly")
+
+  decisions_router = QueryRouter(backend="decisions", offline=False)
+  with pytest.raises(RuntimeError, match="Decisions API"):
+    decisions_router.classify("agent got stuck calling lookup repeatedly")
+
+
+def test_parse_decisions_api_base_validates_schemes_and_loopback():
+  from analytics.query_router import _parse_decisions_api_base  # noqa: PLC0415
+
+  assert (
+      _parse_decisions_api_base(
+          "https://generativelanguage.googleapis.com/v1beta/"
+      )
+      == "https://generativelanguage.googleapis.com/v1beta"
+  )
+  assert (
+      _parse_decisions_api_base("http://127.0.0.1:8080/v1beta/")
+      == "http://127.0.0.1:8080/v1beta"
+  )
+  assert (
+      _parse_decisions_api_base("http://localhost:9001")
+      == "http://localhost:9001"
+  )
+
+  for bad_url in (
+      "",
+      "   ",
+      "http://example.com/v1beta",
+      "http://127.0.0.1/v1beta",
+      "https://user:pass@generativelanguage.googleapis.com/v1beta",
+      "https://generativelanguage.googleapis.com/v1beta?key=123",
+      "https://generativelanguage.googleapis.com/v1beta#frag",
+      "ftp://generativelanguage.googleapis.com/v1beta",
+      "https://bad host/v1beta",
+      "https://generativelanguage.googleapis.com/v1beta\x00",
+  ):
+    with pytest.raises(ValueError):
+      _parse_decisions_api_base(bad_url)
+
+
+def test_routedecision_model_populated_and_positional_compat():
+  from analytics.query_router import RouteDecision  # noqa: PLC0415
+
+  positional = RouteDecision("KEYWORD", "L0_RULE", 1.0, "rule", 0.0)
+  assert positional.model == ""
+
+  l0 = classify_layer0("CARD_EXPIRED")
+  assert l0 is not None
+  assert l0.model == "deterministic_rules"
+
+  offline_router = QueryRouter(backend="offline", offline=True)
+  l1_off = offline_router.classify(
+      "why did the agent loop silently without reporting failure"
+  )
+  assert l1_off.layer == "L1_OFFLINE_HEURISTIC"
+  assert l1_off.model == "offline_heuristic"
+
+
+def test_layer1_decisions_rest_fallback_when_sdk_lacks_decisions(
+    monkeypatch: pytest.MonkeyPatch,
+):
+  from http.server import BaseHTTPRequestHandler  # noqa: PLC0415
+  from http.server import ThreadingHTTPServer  # noqa: PLC0415
+  import threading  # noqa: PLC0415
+
+  captured: list[dict[str, object]] = []
+  response_queue: list[dict[str, object]] = [
+      {
+          "answers": {
+              "route": {
+                  "choice": "NATURAL_LANGUAGE",
+                  "confidence": 0.96,
+                  "probabilities": {
+                      "KEYWORD": 0.04,
+                      "NATURAL_LANGUAGE": 0.96,
+                  },
+              }
+          },
+          "usage": {"total_input_tokens": 125},
+      },
+      {
+          "answers": {
+              "route": {
+                  "choice": "NATURAL_LANGUAGE",
+                  "probabilities": {
+                      "KEYWORD": 0.39,
+                      "NATURAL_LANGUAGE": 0.61,
+                  },
+              }
+          },
+          "usage": {"total_input_tokens": 98},
+      },
+      {
+          "answers": {
+              "route": {
+                  "choice": "NATURAL_LANGUAGE",
+                  "confidence": 0.91,
+                  "probabilities": {
+                      "KEYWORD": 0.09,
+                      "NATURAL_LANGUAGE": 0.91,
+                  },
+              }
+          },
+          "usage": {"total_input_tokens": 110},
+      },
+  ]
+
+  class _Handler(BaseHTTPRequestHandler):
+
+    def do_POST(self) -> None:
+      length = int(self.headers.get("Content-Length", "0"))
+      body = json.loads(self.rfile.read(length).decode("utf-8"))
+      captured.append(
+          {
+              "path": self.path,
+              "api_key": self.headers.get("x-goog-api-key"),
+              "content_type": self.headers.get("Content-Type"),
+              "body": body,
+          }
+      )
+      payload = json.dumps(response_queue.pop(0)).encode("utf-8")
+      self.send_response(200)
+      self.send_header("Content-Type", "application/json")
+      self.send_header("Content-Length", str(len(payload)))
+      self.end_headers()
+      self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: object) -> None:
+      del format, args
+
+  server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+  thread = threading.Thread(target=server.serve_forever, daemon=True)
+  thread.start()
+  base_url = f"http://127.0.0.1:{server.server_address[1]}/v1beta"
+  try:
+    # Simulate google-genai 2.34.0 where client has no `.decisions` attribute.
+    monkeypatch.setenv("GEMINI_API_KEY", "test-rest-key")
+    monkeypatch.setenv("GEMINI_DECISIONS_API_BASE", base_url)
+    monkeypatch.setattr(
+        "analytics.query_router._build_decisions_client",
+        lambda api_key: SimpleNamespace(models=SimpleNamespace()),
+    )
+
+    router_auto = QueryRouter(backend="auto")
+    d1 = router_auto.classify(
+        "agent claimed refund succeeded even though tool failed"
+    )
+    assert d1.mode == "NATURAL_LANGUAGE"
+    assert d1.layer == "L1_DECISIONS_API"
+    assert d1.model == "gemini-decision-1"
+    assert d1.input_tokens == 125
+    assert d1.output_tokens == 0
+    assert d1.confidence == pytest.approx(0.96)
+    assert d1.probabilities == pytest.approx(
+        {"KEYWORD": 0.04, "NATURAL_LANGUAGE": 0.96}
+    )
+    assert captured[0]["path"] == "/v1beta/decisions"
+    assert captured[0]["api_key"] == "test-rest-key"
+    assert captured[0]["content_type"] == "application/json"
+    req_body = captured[0]["body"]
+    assert isinstance(req_body, dict)
+    assert req_body["model"] == "gemini-decision-1"
+    assert req_body["input"] == [
+        {
+            "type": "text",
+            "text": "agent claimed refund succeeded even though tool failed",
+        }
+    ]
+    assert req_body["questions"]["route"]["type"] == "choice"
+
+    # Missing confidence falls back to max(probabilities) and <0.70 -> HYBRID.
+    router_dec = QueryRouter(backend="decisions")
+    d2 = router_dec.classify("refund issue on user account")
+    assert d2.mode == "HYBRID"
+    assert d2.raw_choice == "NATURAL_LANGUAGE"
+    assert d2.confidence == pytest.approx(0.61)
+    assert d2.model == "gemini-decision-1"
+
+    # Custom base without api_key still runs REST without x-goog-api-key header.
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    router_nokey = QueryRouter(backend="decisions", decisions_api_base=base_url)
+    d3 = router_nokey.classify("agent repeated lookup in a loop")
+    assert d3.mode == "NATURAL_LANGUAGE"
+    assert captured[2]["api_key"] is None
+  finally:
+    server.shutdown()
+    server.server_close()
+
+
+def test_layer1_decisions_rest_fails_closed_on_block_redirect_and_errors():
+  from http.server import BaseHTTPRequestHandler  # noqa: PLC0415
+  from http.server import ThreadingHTTPServer  # noqa: PLC0415
+  import threading  # noqa: PLC0415
+
+  secret_key = "test-secret-rest-key-xyz"
+  redirect_hits: list[str] = []
+
+  class _EvilTarget(BaseHTTPRequestHandler):
+
+    def do_POST(self) -> None:
+      redirect_hits.append(self.headers.get("x-goog-api-key") or "")
+      self.send_response(200)
+      self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:
+      del format, args
+
+  evil_server = ThreadingHTTPServer(("127.0.0.1", 0), _EvilTarget)
+  evil_thread = threading.Thread(target=evil_server.serve_forever, daemon=True)
+  evil_thread.start()
+  evil_url = (
+      f"http://127.0.0.1:{evil_server.server_address[1]}/v1beta/decisions"
+  )
+
+  scenarios: list[tuple[int, dict[str, str], str]] = [
+      (302, {"Location": evil_url}, "{}"),
+      (200, {}, json.dumps({"promptFeedback": {"blockReason": "SAFETY"}})),
+      (200, {}, json.dumps({"prompt_feedback": {"block_reason": "OTHER"}})),
+      (500, {}, f"upstream error echoing {secret_key}"),
+      (200, {}, json.dumps({"answers": {"route": {"choice": "BOGUS"}}})),
+  ]
+
+  class _FailHandler(BaseHTTPRequestHandler):
+
+    def do_POST(self) -> None:
+      length = int(self.headers.get("Content-Length", "0"))
+      _ = self.rfile.read(length)
+      status, extra_headers, body_str = scenarios.pop(0)
+      body_bytes = body_str.encode("utf-8")
+      self.send_response(status)
+      for hk, hv in extra_headers.items():
+        self.send_header(hk, hv)
+      self.send_header("Content-Type", "application/json")
+      self.send_header("Content-Length", str(len(body_bytes)))
+      self.end_headers()
+      self.wfile.write(body_bytes)
+
+    def log_message(self, format: str, *args: object) -> None:
+      del format, args
+
+  server = ThreadingHTTPServer(("127.0.0.1", 0), _FailHandler)
+  thread = threading.Thread(target=server.serve_forever, daemon=True)
+  thread.start()
+  base_url = f"http://127.0.0.1:{server.server_address[1]}/v1beta"
+  try:
+    router = QueryRouter(
+        backend="decisions",
+        api_key=secret_key,
+        decisions_api_base=base_url,
+        decisions_client=SimpleNamespace(),
+    )
+    # 1. Redirect blocked, no key leaked to evil target.
+    with pytest.raises(RuntimeError, match="redirect|HTTP 302"):
+      router.classify("agent got stuck calling lookup repeatedly")
+    assert redirect_hits == []
+
+    # 2. promptFeedback.blockReason fails closed.
+    with pytest.raises(RuntimeError, match="blocked"):
+      router.classify("agent got stuck calling lookup repeatedly")
+
+    # 3. prompt_feedback.block_reason fails closed.
+    with pytest.raises(RuntimeError, match="blocked"):
+      router.classify("agent got stuck calling lookup repeatedly")
+
+    # 4. HTTP 500 scrubs api_key from raised RuntimeError.
+    with pytest.raises(RuntimeError) as exc_info:
+      router.classify("agent got stuck calling lookup repeatedly")
+    assert secret_key not in str(exc_info.value)
+
+    # 5. Malformed answers fails closed.
+    with pytest.raises(RuntimeError, match="malformed"):
+      router.classify("agent got stuck calling lookup repeatedly")
+  finally:
+    server.shutdown()
+    server.server_close()
+    evil_server.shutdown()
+    evil_server.server_close()
+
+
+def test_index_and_search_cli_threads_router_backend_and_decisions_args(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+  from analytics import index_and_search  # noqa: PLC0415
+
+  captured: dict[str, object] = {}
+
+  def _fake_run(**kwargs):
+    captured.update(kwargs)
+    return {
+        "index_status": {"ai_embed_column": "MOCK"},
+        "queries": [],
+    }
+
+  monkeypatch.setattr(index_and_search, "run_index_and_search", _fake_run)
+  rc = index_and_search.main(
+      [
+          "--offline",
+          "--router-backend",
+          "decisions",
+          "--decisions-model",
+          "gemini-decision-1",
+          "--decisions-api-base",
+          "http://127.0.0.1:8080/v1beta",
+          "--output-json",
+          str(tmp_path / "out.json"),
+      ]
+  )
+  assert rc == 0
+  assert captured["router_backend"] == "decisions"
+  assert captured["decisions_model"] == "gemini-decision-1"
+  assert captured["decisions_api_base"] == "http://127.0.0.1:8080/v1beta"
+
+
+def test_layer1_decisions_sdk_parity_usage_blocking_and_malformed():
+  responses: list[object] = [
+      SimpleNamespace(
+          answers={
+              "route": SimpleNamespace(
+                  choice="NATURAL_LANGUAGE",
+                  confidence=0.94,
+                  probabilities={"KEYWORD": 0.06, "NATURAL_LANGUAGE": 0.94},
+              )
+          },
+          usage=SimpleNamespace(total_input_tokens=77),
+      ),
+      SimpleNamespace(
+          answers={
+              "route": SimpleNamespace(
+                  choice="NATURAL_LANGUAGE",
+                  confidence=0.88,
+                  probabilities={"KEYWORD": 0.12, "NATURAL_LANGUAGE": 0.88},
+              )
+          },
+          usage=SimpleNamespace(total_input_tokens=0, prompt_token_count=99),
+      ),
+      SimpleNamespace(
+          prompt_feedback=SimpleNamespace(block_reason="SAFETY"),
+          answers=None,
+      ),
+      SimpleNamespace(
+          promptFeedback={"blockReason": "OTHER"},
+          answers=None,
+      ),
+      SimpleNamespace(answers=None),
+      SimpleNamespace(answers={}),
+      SimpleNamespace(answers={"route": SimpleNamespace(choice="BOGUS")}),
+  ]
+
+  class _FakeDecisions:
+
+    def create(self, *, model, input, questions):
+      del model, input, questions
+      return responses.pop(0)
+
+  router = QueryRouter(
+      backend="decisions",
+      decisions_client=SimpleNamespace(decisions=_FakeDecisions()),
+  )
+  query = "agent falsely told the user a refund succeeded"
+
+  d_usage = router.classify(query)
+  assert d_usage.mode == "NATURAL_LANGUAGE"
+  assert d_usage.input_tokens == 77
+  assert d_usage.model == "gemini-decision-1"
+
+  d_zero = router.classify(query)
+  assert d_zero.mode == "NATURAL_LANGUAGE"
+  assert d_zero.input_tokens == 0
+
+  with pytest.raises(RuntimeError, match="blocked.*SAFETY"):
+    router.classify(query)
+
+  with pytest.raises(RuntimeError, match="blocked.*OTHER"):
+    router.classify(query)
+
+  with pytest.raises(RuntimeError, match="malformed"):
+    router.classify(query)
+
+  with pytest.raises(RuntimeError, match="malformed"):
+    router.classify(query)
+
+  with pytest.raises(RuntimeError, match="malformed"):
+    router.classify(query)
+
+
+def test_finalize_decisions_route_guards_nan_inf_and_zero_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+):
+  from http.server import BaseHTTPRequestHandler  # noqa: PLC0415
+  from http.server import ThreadingHTTPServer  # noqa: PLC0415
+  import math  # noqa: PLC0415
+  import threading  # noqa: PLC0415
+
+  sdk_payloads = [
+      SimpleNamespace(
+          answers={
+              "route": SimpleNamespace(
+                  choice="NATURAL_LANGUAGE",
+                  confidence="NaN",
+                  probabilities={
+                      "KEYWORD": float("nan"),
+                      "NATURAL_LANGUAGE": float("inf"),
+                  },
+              )
+          },
+          usage=SimpleNamespace(total_input_tokens=64),
+      ),
+      SimpleNamespace(
+          answers={
+              "route": SimpleNamespace(
+                  choice="NATURAL_LANGUAGE",
+                  confidence="inf",
+                  probabilities={"KEYWORD": 0.1, "NATURAL_LANGUAGE": 0.9},
+              )
+          },
+          usage=SimpleNamespace(total_input_tokens=64),
+      ),
+      SimpleNamespace(
+          answers={
+              "route": SimpleNamespace(
+                  choice="NATURAL_LANGUAGE",
+                  confidence=None,
+                  probabilities={
+                      "KEYWORD": 0.25,
+                      "NATURAL_LANGUAGE": float("nan"),
+                  },
+              )
+          },
+          usage=SimpleNamespace(total_input_tokens=64),
+      ),
+  ]
+
+  class _FakeDecisions:
+
+    def create(self, *, model, input, questions):
+      del model, input, questions
+      return sdk_payloads.pop(0)
+
+  sdk_router = QueryRouter(
+      backend="decisions",
+      decisions_client=SimpleNamespace(decisions=_FakeDecisions()),
+  )
+  query = "agent claimed refund succeeded even though tool failed"
+
+  d_nan = sdk_router.classify(query)
+  assert math.isfinite(d_nan.confidence)
+  assert d_nan.confidence == pytest.approx(0.5)
+  assert d_nan.probabilities == {}
+  assert d_nan.mode == "HYBRID"
+
+  d_inf = sdk_router.classify(query)
+  assert math.isfinite(d_inf.confidence)
+  assert d_inf.confidence == pytest.approx(0.5)
+  assert d_inf.mode == "HYBRID"
+
+  d_partial = sdk_router.classify(query)
+  assert d_partial.probabilities == pytest.approx({"KEYWORD": 0.25})
+  assert d_partial.confidence == pytest.approx(0.25)
+  assert d_partial.mode == "HYBRID"
+
+  rest_responses = [
+      {
+          "answers": {
+              "route": {
+                  "choice": "NATURAL_LANGUAGE",
+                  "confidence": "NaN",
+                  "probabilities": {
+                      "KEYWORD": "inf",
+                      "NATURAL_LANGUAGE": "-inf",
+                  },
+              }
+          },
+          "usage": {"total_input_tokens": 0, "prompt_token_count": 99},
+      }
+  ]
+
+  class _RestHandler(BaseHTTPRequestHandler):
+
+    def do_POST(self) -> None:
+      length = int(self.headers.get("Content-Length", "0"))
+      _ = self.rfile.read(length)
+      payload = json.dumps(rest_responses.pop(0)).encode("utf-8")
+      self.send_response(200)
+      self.send_header("Content-Type", "application/json")
+      self.send_header("Content-Length", str(len(payload)))
+      self.end_headers()
+      self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: object) -> None:
+      del format, args
+
+  server = ThreadingHTTPServer(("127.0.0.1", 0), _RestHandler)
+  thread = threading.Thread(target=server.serve_forever, daemon=True)
+  thread.start()
+  base_url = f"http://127.0.0.1:{server.server_address[1]}/v1beta"
+  try:
+    # Even if SDK exposes `.decisions`, a custom decisions_api_base must use REST.
+    monkeypatch.setattr(
+        "analytics.query_router._build_decisions_client",
+        lambda api_key: SimpleNamespace(
+            decisions=SimpleNamespace(
+                create=lambda **kwargs: (_ for _ in ()).throw(
+                    AssertionError("custom base must not bypass REST")
+                )
+            )
+        ),
+    )
+    rest_router = QueryRouter(
+        backend="decisions",
+        api_key="test-rest-key",
+        decisions_api_base=base_url,
+    )
+    d_rest = rest_router.classify(query)
+    assert d_rest.input_tokens == 0
+    assert math.isfinite(d_rest.confidence)
+    assert d_rest.confidence == pytest.approx(0.5)
+    assert d_rest.probabilities == {}
+    assert d_rest.mode == "HYBRID"
+  finally:
+    server.shutdown()
+    server.server_close()
+
+
+def test_run_e2e_demo_load_safe_env_preserves_caller_overrides(tmp_path: Path):
+  import os  # noqa: PLC0415
+  import subprocess  # noqa: PLC0415
+
+  script_text = (_DEMO_DIR / "run_e2e_demo.sh").read_text(encoding="utf-8")
+  match = re.search(r"(load_safe_env\(\)\s*\{.*?\n\})", script_text, re.DOTALL)
+  assert match is not None
+  env_file = tmp_path / ".env"
+  env_file.write_text(
+      "\n".join(
+          [
+              "PROJECT_ID=dotenv-project",
+              "GEMINI_API_KEY=",
+              "ROUTER_BACKEND=vertex",
+              "GEMINI_DECISIONS_API_BASE=https://dotenv.example.com/v1beta",
+              "DECISIONS_MODEL=gemini-decision-1",
+              "UNSAFE_VAR=ignored",
+          ]
+      )
+      + "\n",
+      encoding="utf-8",
+  )
+  bash_cmd = (
+      match.group(1)
+      + '\nload_safe_env "$1"\n'
+      + 'printf "%s\\n" '
+      + '"${PROJECT_ID:-}" '
+      + '"${GEMINI_API_KEY:-}" '
+      + '"${ROUTER_BACKEND:-}" '
+      + '"${GEMINI_DECISIONS_API_BASE:-}" '
+      + '"${DECISIONS_MODEL:-}" '
+      + '"${UNSAFE_VAR:-}"\n'
+  )
+  env = {
+      "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+      "GEMINI_API_KEY": "caller-api-key",
+      "ROUTER_BACKEND": "decisions",
+      "GEMINI_DECISIONS_API_BASE": "http://127.0.0.1:8080/v1beta",
+  }
+  proc = subprocess.run(
+      ["bash", "-euo", "pipefail", "-c", bash_cmd, "_", str(env_file)],
+      env=env,
+      capture_output=True,
+      text=True,
+      check=False,
+  )
+  assert proc.returncode == 0, proc.stderr
+  assert proc.stdout.splitlines() == [
+      "dotenv-project",
+      "caller-api-key",
+      "decisions",
+      "http://127.0.0.1:8080/v1beta",
+      "gemini-decision-1",
+      "",
+  ]
 
 
 # ---------------------------------------------------------------------------

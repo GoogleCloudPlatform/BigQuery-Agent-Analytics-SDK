@@ -1316,6 +1316,9 @@ def run_index_and_search(
     vertex_location: str = "global",
     connection_id: str | None = None,
     ai_generate_endpoint: str = "gemini-4-hydrogen",
+    router_backend: str = "auto",
+    decisions_model: str = "gemini-decision-1",
+    decisions_api_base: str | None = None,
     input_json: str | Path | None = None,
     output_json: str | Path = "search_results.json",
     top_k: int = _DEFAULT_TOP_K,
@@ -1329,9 +1332,11 @@ def run_index_and_search(
   """Runs materialization, dual indexing, 5-query search, and L3 verify."""
   queries = [dict(q) for q in DEFAULT_BENCHMARK_QUERIES]
   active_router = router or QueryRouter(
-      backend="offline" if offline else "auto",
+      backend="offline" if offline else router_backend,
       project_id=project_id,
       location=vertex_location,
+      decisions_model=decisions_model,
+      decisions_api_base=decisions_api_base,
       vertex_model=ai_generate_endpoint,
       offline=offline,
   )
@@ -1552,6 +1557,22 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   parser.add_argument("--vertex-location", default="global")
   parser.add_argument("--connection-id", default=None)
   parser.add_argument("--ai-generate-endpoint", default="gemini-4-hydrogen")
+  parser.add_argument(
+      "--router-backend",
+      default="auto",
+      choices=["auto", "decisions", "vertex", "offline"],
+      help="Layer 1 query router backend.",
+  )
+  parser.add_argument(
+      "--decisions-model",
+      default="gemini-decision-1",
+      help="Gemini Decisions API model ID for Layer 1 routing.",
+  )
+  parser.add_argument(
+      "--decisions-api-base",
+      default=None,
+      help="Optional base URL override for Gemini Decisions REST API.",
+  )
   parser.add_argument("--input-json", default=None)
   parser.add_argument("--output-json", default="search_results.json")
   parser.add_argument("--top-k", type=int, default=_DEFAULT_TOP_K)
@@ -1573,6 +1594,9 @@ def main(argv: list[str] | None = None) -> int:
       vertex_location=args.vertex_location,
       connection_id=args.connection_id,
       ai_generate_endpoint=args.ai_generate_endpoint,
+      router_backend=args.router_backend,
+      decisions_model=args.decisions_model,
+      decisions_api_base=args.decisions_api_base,
       input_json=args.input_json,
       output_json=args.output_json,
       top_k=args.top_k,

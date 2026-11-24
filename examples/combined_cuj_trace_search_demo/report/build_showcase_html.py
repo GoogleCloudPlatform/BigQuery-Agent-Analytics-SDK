@@ -416,6 +416,7 @@ def build_demo_fixture_payload() -> dict[str, Any]:
               "output_tokens": 0,
               "cost_usd": 0.0,
               "reason": "UPPER_SNAKE_CASE error constant matched deterministic rule",
+              "model": "deterministic_rules",
           },
           "step1_bytes_processed": 0,
           "raw_trace_baseline_bytes_processed": 113000,
@@ -463,6 +464,7 @@ def build_demo_fixture_payload() -> dict[str, Any]:
               "output_tokens": 0,
               "cost_usd": 0.0,
               "reason": "Quoted identifier matched deterministic fast path",
+              "model": "deterministic_rules",
           },
           "step1_bytes_processed": 0,
           "raw_trace_baseline_bytes_processed": 113000,
@@ -492,6 +494,8 @@ def build_demo_fixture_payload() -> dict[str, Any]:
               "output_tokens": 0,
               "cost_usd": 0.000046,
               "reason": "Behavioral contradiction question routed via prefill-only classifier",
+              "probabilities": {"KEYWORD": 0.08, "NATURAL_LANGUAGE": 0.92},
+              "model": "gemini-decision-1",
           },
           "step1_bytes_processed": 0,
           "raw_trace_baseline_bytes_processed": 113000,
@@ -540,13 +544,15 @@ def build_demo_fixture_payload() -> dict[str, Any]:
           "query_text": "agent repeated the same tool call in a retry loop after timeout",
           "router_decision": {
               "mode": "NATURAL_LANGUAGE",
-              "layer": "L1_VERTEX_HYDROGEN",
+              "layer": "L1_DECISIONS_API",
               "confidence": 0.89,
-              "latency_ms": 115.0,
+              "latency_ms": 94.0,
               "input_tokens": 162,
-              "output_tokens": 18,
-              "cost_usd": 0.000058,
+              "output_tokens": 0,
+              "cost_usd": 0.000046,
               "reason": "Behavioral retry-loop search routed to AI.SEARCH + rerank",
+              "probabilities": {"KEYWORD": 0.11, "NATURAL_LANGUAGE": 0.89},
+              "model": "gemini-decision-1",
           },
           "step1_bytes_processed": 0,
           "raw_trace_baseline_bytes_processed": 113000,
@@ -585,6 +591,7 @@ def build_demo_fixture_payload() -> dict[str, Any]:
               "output_tokens": 0,
               "cost_usd": 0.0,
               "reason": "Mixed exact tool/error token + >=4 behavioral words -> RRF fusion",
+              "model": "deterministic_rules",
           },
           "step1_bytes_processed": 0,
           "raw_trace_baseline_bytes_processed": 113000,
@@ -1032,7 +1039,28 @@ def _render_html(payload: dict[str, Any]) -> str:
       payload.get("dataset_id", "combined_cuj_trace_search_demo")
   )
   location = _escape_code_text(payload.get("location", "US"))
-  model_name = _escape_code_text(payload.get("model_name", "gemini-4-hydrogen"))
+  raw_model_name = str(payload.get("model_name") or "gemini-4-hydrogen")
+  model_name = _escape_code_text(raw_model_name)
+  decisions_models = [
+      str((q.get("router_decision") or {}).get("model") or "gemini-decision-1")
+      for q in queries
+      if (q.get("router_decision") or {}).get("layer") == "L1_DECISIONS_API"
+  ]
+  if decisions_models:
+    l1_router_html = (
+        f"<span>L1 Router: <code>{_escape_code_text(decisions_models[0])}</code>"
+        " (Decisions API)</span>"
+    )
+  else:
+    l1_models = [
+        str((q.get("router_decision") or {}).get("model") or raw_model_name)
+        for q in queries
+        if str((q.get("router_decision") or {}).get("layer", "")).startswith(
+            "L1"
+        )
+    ]
+    l1_label = _escape_code_text(l1_models[0] if l1_models else raw_model_name)
+    l1_router_html = f"<span>L1 Router: <code>{l1_label}</code></span>"
 
   return f"""<!doctype html>
 <html lang="en" data-theme="dark">
@@ -1357,6 +1385,7 @@ td.mono {{ font-family: var(--mono); font-size: 12px; }}
         <span>Generated: <strong>{date_utc}</strong></span>
         <span>Target: <code>{project_id}.{dataset_id}</code> (<code>{location}</code>)</span>
         <span>Agent Model: <code>{model_name}</code></span>
+        {l1_router_html}
       </div>
     </header>
 
@@ -1680,8 +1709,16 @@ td.mono {{ font-family: var(--mono); font-size: 12px; }}
     if (modePill) modePill.textContent = rd.mode || 'KEYWORD';
     if (layerPill) layerPill.textContent = rd.layer || 'L0_RULE';
     if (metricsEl) {{
+      const probObj = (rd.probabilities && typeof rd.probabilities === 'object' && !Array.isArray(rd.probabilities)) ? rd.probabilities : {{}};
+      const probEntries = Object.entries(probObj).filter(([, v]) => typeof v === 'number' && Number.isFinite(v));
+      const probText = probEntries.length
+        ? ' | Probs: ' + probEntries.map(([k, v]) => k + '=' + Number(v).toFixed(2)).join(', ')
+        : '';
+      const modelText = rd.model ? (' | Model: ' + rd.model) : '';
       metricsEl.textContent =
         'Confidence: ' + Number(rd.confidence ?? 1).toFixed(2) +
+        probText +
+        modelText +
         ' | Router Latency: ' + Number(rd.latency_ms ?? 0).toFixed(0) + ' ms' +
         ' | Decode Tokens: ' + Number(rd.output_tokens ?? 0) +
         ' | Raw Baseline Scan: ' + Number(q.raw_trace_baseline_bytes_processed ?? 0).toLocaleString() + ' B' +

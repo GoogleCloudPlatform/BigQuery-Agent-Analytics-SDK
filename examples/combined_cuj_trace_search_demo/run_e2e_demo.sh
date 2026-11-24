@@ -86,8 +86,10 @@ load_safe_env() {
     val="${val#\"}"; val="${val%\"}"
     val="${val#\'}"; val="${val%\'}"
     case "$key" in
-      PROJECT_ID|GOOGLE_CLOUD_QUOTA_PROJECT|DATASET_ID|TABLE_ID|EVAL_TURNS_TABLE|BQ_LOCATION|AGENT_LOCATION|MODEL_NAME|BQML_CONNECTION_ID|GEMINI_API_KEY|GOOGLE_GENAI_USE_VERTEXAI|DEMO_OFFLINE)
-        export "$key=$val"
+      PROJECT_ID|GOOGLE_CLOUD_QUOTA_PROJECT|DATASET_ID|TABLE_ID|EVAL_TURNS_TABLE|BQ_LOCATION|AGENT_LOCATION|MODEL_NAME|BQML_CONNECTION_ID|GEMINI_API_KEY|GEMINI_DECISIONS_API_BASE|DECISIONS_MODEL|ROUTER_BACKEND|GOOGLE_GENAI_USE_VERTEXAI|DEMO_OFFLINE)
+        if [[ -z "${!key:-}" ]]; then
+          export "$key=$val"
+        fi
         ;;
     esac
   done < "$env_file"
@@ -177,6 +179,15 @@ if [[ "$NO_RERANK" == "true" ]]; then
 fi
 if [[ -n "${BQML_CONNECTION_ID:-}" ]]; then
   STAGE2_ARGS+=(--connection-id "$BQML_CONNECTION_ID")
+fi
+if [[ -n "${ROUTER_BACKEND:-}" ]]; then
+  STAGE2_ARGS+=(--router-backend "$ROUTER_BACKEND")
+fi
+if [[ -n "${DECISIONS_MODEL:-}" ]]; then
+  STAGE2_ARGS+=(--decisions-model "$DECISIONS_MODEL")
+fi
+if [[ -n "${GEMINI_DECISIONS_API_BASE:-}" ]]; then
+  STAGE2_ARGS+=(--decisions-api-base "$GEMINI_DECISIONS_API_BASE")
 fi
 "$PYTHON_BIN" -m analytics.index_and_search "${STAGE2_ARGS[@]}"
 

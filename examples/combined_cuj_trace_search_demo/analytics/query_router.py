@@ -21,29 +21,36 @@ Routes incoming trace search queries across:
 
 Layer 0 settles empty, quoted, session/invocation ID, error constant, and
 explicitly mixed queries at 0 ms and $0 model cost. Ambiguous natural-language
-queries fall through to Layer 1, supporting both Developer API
-``client.decisions.create(model="gemini-decision-1", ...)`` (``v1beta``,
-0 output tokens) and Vertex AI ``gemini-4-hydrogen`` (``thinking_level="LOW"``
-on ``global``, or ``thinking_budget=0`` for ``gemini-2.5-*`` overrides).
+queries fall through to Layer 1, supporting both Developer API Decisions
+(``gemini-decision-1`` on ``v1beta``, via SDK ``client.decisions.create`` when
+exposed or direct ``POST /decisions`` REST fallback, 0 output tokens) and
+Vertex AI ``gemini-4-hydrogen`` (``thinking_level="LOW"`` on ``global``, or
+``thinking_budget=0`` for ``gemini-2.5-*`` overrides).
 """
 
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field
 import json
+import math
 import os
 import re
 import sys
 import time
 from typing import Any
+import urllib.error
+import urllib.parse
+import urllib.request
 
 ROUTE_KEYWORD = "KEYWORD"
 ROUTE_NATURAL_LANGUAGE = "NATURAL_LANGUAGE"
 ROUTE_HYBRID = "HYBRID"
 _VALID_ROUTES = frozenset({ROUTE_KEYWORD, ROUTE_NATURAL_LANGUAGE, ROUTE_HYBRID})
+_DEFAULT_DECISIONS_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 _QUOTED_PHRASE_RE = re.compile(r'"[^"]+"')
 _ID_TOKEN_RE = re.compile(
@@ -89,6 +96,7 @@ class RouteDecision:
   cost_usd: float = 0.0
   raw_choice: str | None = None
   probabilities: dict[str, float] = field(default_factory=dict)
+  model: str = ""
 
   def to_dict(self) -> dict[str, Any]:
     return asdict(self)
@@ -123,6 +131,7 @@ def classify_layer0(query: str | None) -> RouteDecision | None:
         reason="empty_or_metadata_only",
         latency_ms=0.0,
         raw_choice=ROUTE_KEYWORD,
+        model="deterministic_rules",
     )
 
   if _QUOTED_PHRASE_RE.search(text):
@@ -136,6 +145,7 @@ def classify_layer0(query: str | None) -> RouteDecision | None:
           reason="quoted_phrase",
           latency_ms=0.0,
           raw_choice=ROUTE_KEYWORD,
+          model="deterministic_rules",
       )
 
   code_tokens, nl_words = _extract_code_spans_and_nl_words(text)
@@ -148,6 +158,7 @@ def classify_layer0(query: str | None) -> RouteDecision | None:
           reason="mixed_code_token_and_natural_language",
           latency_ms=0.0,
           raw_choice=ROUTE_HYBRID,
+          model="deterministic_rules",
       )
     return RouteDecision(
         mode=ROUTE_KEYWORD,
@@ -156,9 +167,98 @@ def classify_layer0(query: str | None) -> RouteDecision | None:
         reason="exact_identifier_or_error_constant",
         latency_ms=0.0,
         raw_choice=ROUTE_KEYWORD,
+        model="deterministic_rules",
     )
 
   return None
+
+
+def _parse_decisions_api_base(value: str) -> str:
+  """Validates and normalizes the Gemini Decisions REST API base URL."""
+  raw = str(value or "").strip()
+  if not raw or any(ch.isspace() for ch in raw) or "\x00" in raw:
+    raise ValueError(
+        "GEMINI_DECISIONS_API_BASE must be a non-empty URL without "
+        "whitespace or NUL bytes."
+    )
+  if "?" in raw or "#" in raw:
+    raise ValueError(
+        "GEMINI_DECISIONS_API_BASE must not contain a query string or fragment."
+    )
+  parsed = urllib.parse.urlsplit(raw)
+  if parsed.username is not None or parsed.password is not None:
+    raise ValueError(
+        "GEMINI_DECISIONS_API_BASE must not contain userinfo credentials."
+    )
+  try:
+    port = parsed.port
+  except ValueError as exc:
+    raise ValueError("GEMINI_DECISIONS_API_BASE has an invalid port.") from exc
+  host = (parsed.hostname or "").lower()
+  if parsed.scheme == "https":
+    if not host:
+      raise ValueError(
+          "GEMINI_DECISIONS_API_BASE https URL must include a hostname."
+      )
+  elif parsed.scheme == "http":
+    if host not in {"127.0.0.1", "localhost"} or port is None:
+      raise ValueError(
+          "GEMINI_DECISIONS_API_BASE http URL is restricted to loopback "
+          "(127.0.0.1 or localhost) with an explicit port."
+      )
+  else:
+    raise ValueError(
+        "GEMINI_DECISIONS_API_BASE must use https:// or loopback "
+        "http://127.0.0.1:<port>."
+    )
+  return raw.rstrip("/")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+  """Blocks HTTP redirects so x-goog-api-key cannot leak across hosts."""
+
+  def redirect_request(
+      self,
+      req: urllib.request.Request,
+      fp: Any,
+      code: int,
+      msg: str,
+      headers: Any,
+      newurl: str,
+  ) -> None:
+    del msg, newurl
+    raise urllib.error.HTTPError(
+        req.full_url,
+        code,
+        f"Decisions REST API redirect blocked ({code})",
+        headers,
+        fp,
+    )
+
+
+def _scrub_api_key(message: str, api_key: str | None) -> str:
+  if api_key and api_key in message:
+    return message.replace(api_key, "[REDACTED]")
+  return message
+
+
+def _decisions_questions_payload() -> dict[str, Any]:
+  return {
+      "route": {
+          "type": "choice",
+          "instructions": "Classify the agent trace search query.",
+          "criteria": {
+              ROUTE_KEYWORD: (
+                  "Exact error code, session/tool identifier, or "
+                  "literal log token lookup"
+              ),
+              ROUTE_NATURAL_LANGUAGE: (
+                  "Conceptual or behavioral description of an agent "
+                  "interaction or failure pattern"
+              ),
+          },
+      }
+  }
 
 
 def _build_decisions_client(api_key: str) -> Any:
@@ -202,6 +302,84 @@ def _estimate_tokens(text: str) -> int:
   return max(1, (len(text) + 3) // 4) if text else 0
 
 
+def _get_field(obj: Any, *names: str) -> Any:
+  """Returns the first non-None attribute or mapping entry across names."""
+  if obj is None:
+    return None
+  if isinstance(obj, Mapping):
+    for name in names:
+      if name in obj and obj[name] is not None:
+        return obj[name]
+    return None
+  for name in names:
+    val = getattr(obj, name, None)
+    if val is not None:
+      return val
+  return None
+
+
+def _extract_decisions_route_answer(
+    response: Any, *, source: str
+) -> tuple[str, Any, Any]:
+  """Validates a Decisions API SDK or REST response and extracts route data."""
+  prompt_feedback = _get_field(response, "promptFeedback", "prompt_feedback")
+  if prompt_feedback is not None:
+    block_reason_raw = _get_field(
+        prompt_feedback, "blockReason", "block_reason"
+    )
+    block_reason = str(
+        getattr(block_reason_raw, "value", block_reason_raw) or ""
+    ).strip()
+    if block_reason:
+      raise RuntimeError(f"{source} blocked prompt: {block_reason}")
+
+  answers = _get_field(response, "answers")
+  if not isinstance(answers, Mapping):
+    raise RuntimeError(f"{source} returned malformed answers payload.")
+  ans = answers.get("route")
+  if ans is None or isinstance(
+      ans, (str, bytes, int, float, bool, list, tuple)
+  ):
+    raise RuntimeError(f"{source} returned malformed answers payload.")
+
+  raw_choice_val = _get_field(ans, "choice")
+  raw_choice = (
+      str(getattr(raw_choice_val, "value", raw_choice_val) or "")
+      .strip()
+      .upper()
+  )
+  if raw_choice not in _VALID_ROUTES:
+    raise RuntimeError(
+        f"{source} returned malformed route choice: {raw_choice!r}"
+    )
+
+  return (
+      raw_choice,
+      _get_field(ans, "confidence"),
+      _get_field(ans, "probabilities"),
+  )
+
+
+def _extract_decisions_input_tokens(response: Any, query: str) -> int:
+  """Extracts non-negative input token usage without skipping explicit 0."""
+  usage = _get_field(response, "usage", "usage_metadata", "usageMetadata")
+  raw_in_tok = _get_field(
+      usage,
+      "total_input_tokens",
+      "totalInputTokens",
+      "prompt_token_count",
+      "promptTokenCount",
+  )
+  if raw_in_tok is not None and not isinstance(raw_in_tok, bool):
+    try:
+      val = int(raw_in_tok)
+      if val >= 0:
+        return val
+    except (TypeError, ValueError):
+      pass
+  return _estimate_tokens(query) + 45
+
+
 class QueryRouter:
   """Dual-backend 4-layer trace search query router."""
 
@@ -213,6 +391,7 @@ class QueryRouter:
       location: str = "global",
       api_key: str | None = None,
       decisions_model: str = "gemini-decision-1",
+      decisions_api_base: str | None = None,
       vertex_model: str = "gemini-4-hydrogen",
       hybrid_threshold: float = 0.70,
       offline: bool = False,
@@ -224,10 +403,24 @@ class QueryRouter:
     self.backend = backend
     self.project_id = project_id
     self.location = location
+    raw_key = api_key if api_key is not None else os.getenv("GEMINI_API_KEY")
     self.api_key = (
-        api_key if api_key is not None else os.getenv("GEMINI_API_KEY")
+        raw_key.strip()
+        if isinstance(raw_key, str) and raw_key.strip()
+        else None
     )
     self.decisions_model = decisions_model
+    raw_base = (
+        decisions_api_base
+        if decisions_api_base is not None
+        else os.getenv("GEMINI_DECISIONS_API_BASE")
+    )
+    self._has_custom_decisions_api_base = bool((raw_base or "").strip())
+    self.decisions_api_base = _parse_decisions_api_base(
+        raw_base
+        if self._has_custom_decisions_api_base
+        else _DEFAULT_DECISIONS_API_BASE
+    )
     self.vertex_model = vertex_model
     self.hybrid_threshold = float(hybrid_threshold)
     self.offline = offline or backend == "offline"
@@ -245,14 +438,22 @@ class QueryRouter:
       return self._classify_offline_heuristic(text)
 
     if self.backend in {"auto", "decisions"}:
+      if self._decisions_client is not None and hasattr(
+          self._decisions_client, "decisions"
+      ):
+        return self._classify_via_decisions_api(self._decisions_client, text)
+      if self._has_custom_decisions_api_base:
+        return self._classify_via_decisions_rest(text)
       dec_client = self._get_decisions_client()
       if dec_client is not None and hasattr(dec_client, "decisions"):
         return self._classify_via_decisions_api(dec_client, text)
+      if self.api_key:
+        return self._classify_via_decisions_rest(text)
       if self.backend == "decisions":
         raise RuntimeError(
-            "Decisions API backend selected, but client.decisions is not "
-            "available in the active google-genai installation or GEMINI_API_KEY "
-            "is unset."
+            "Decisions API backend selected, but GEMINI_API_KEY is unset and "
+            "no decisions_client or custom GEMINI_DECISIONS_API_BASE is "
+            "configured."
         )
 
     if self.backend in {"auto", "vertex"}:
@@ -266,7 +467,10 @@ class QueryRouter:
       return self._decisions_client
     if not self.api_key:
       return None
-    self._decisions_client = _build_decisions_client(self.api_key)
+    try:
+      self._decisions_client = _build_decisions_client(self.api_key)
+    except ImportError:
+      return None
     return self._decisions_client
 
   def _get_vertex_client(self) -> Any:
@@ -278,45 +482,38 @@ class QueryRouter:
     )
     return self._vertex_client
 
-  def _classify_via_decisions_api(
-      self, client: Any, query: str
+  def _finalize_decisions_route(
+      self,
+      *,
+      raw_choice: str,
+      raw_conf: Any,
+      raw_probs: Any,
+      input_tokens: int,
+      latency_ms: float,
   ) -> RouteDecision:
-    t0 = time.perf_counter()
-    response = client.decisions.create(
-        model=self.decisions_model,
-        input=query,
-        questions={
-            "route": {
-                "type": "choice",
-                "instructions": "Classify the agent trace search query.",
-                "criteria": {
-                    ROUTE_KEYWORD: (
-                        "Exact error code, session/tool identifier, or "
-                        "literal log token lookup"
-                    ),
-                    ROUTE_NATURAL_LANGUAGE: (
-                        "Conceptual or behavioral description of an agent "
-                        "interaction or failure pattern"
-                    ),
-                },
-            }
-        },
-    )
-    latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
-    ans = response.answers["route"]
-    raw_choice = str(ans.choice).strip().upper()
-    if raw_choice not in _VALID_ROUTES:
-      raw_choice = ROUTE_HYBRID
-    raw_conf = getattr(ans, "confidence", None)
-    try:
-      confidence = float(0.5 if raw_conf is None else raw_conf)
-    except (TypeError, ValueError):
+    probabilities: dict[str, float] = {}
+    if isinstance(raw_probs, Mapping):
+      for k, v in raw_probs.items():
+        if isinstance(v, bool):
+          continue
+        try:
+          fv = float(v)
+        except (TypeError, ValueError):
+          continue
+        if not math.isfinite(fv):
+          continue
+        probabilities[str(k).strip().upper()] = fv
+    if raw_conf is None:
+      confidence = max(probabilities.values()) if probabilities else 0.5
+    elif isinstance(raw_conf, bool):
       confidence = 0.5
+    else:
+      try:
+        parsed_conf = float(raw_conf)
+        confidence = parsed_conf if math.isfinite(parsed_conf) else 0.5
+      except (TypeError, ValueError):
+        confidence = 0.5
     confidence = max(0.0, min(1.0, confidence))
-    probabilities = {
-        str(k): float(v)
-        for k, v in (getattr(ans, "probabilities", None) or {}).items()
-    }
     mode = ROUTE_HYBRID if confidence < self.hybrid_threshold else raw_choice
     reason = (
         f"decisions_low_confidence({confidence:.2f}<{self.hybrid_threshold:.2f})"
@@ -329,11 +526,98 @@ class QueryRouter:
         confidence=confidence,
         reason=reason,
         latency_ms=latency_ms,
-        input_tokens=_estimate_tokens(query) + 45,
+        input_tokens=input_tokens,
         output_tokens=0,
         cost_usd=_DECISIONS_COST_PER_CALL_USD,
         raw_choice=raw_choice,
         probabilities=probabilities,
+        model=self.decisions_model,
+    )
+
+  def _classify_via_decisions_api(
+      self, client: Any, query: str
+  ) -> RouteDecision:
+    t0 = time.perf_counter()
+    response = client.decisions.create(
+        model=self.decisions_model,
+        input=query,
+        questions=_decisions_questions_payload(),
+    )
+    latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+    raw_choice, raw_conf, raw_probs = _extract_decisions_route_answer(
+        response, source="Decisions API"
+    )
+    in_tok = _extract_decisions_input_tokens(response, query)
+    return self._finalize_decisions_route(
+        raw_choice=raw_choice,
+        raw_conf=raw_conf,
+        raw_probs=raw_probs,
+        input_tokens=in_tok,
+        latency_ms=latency_ms,
+    )
+
+  def _classify_via_decisions_rest(self, query: str) -> RouteDecision:
+    payload = {
+        "model": self.decisions_model,
+        "input": [{"type": "text", "text": query}],
+        "questions": _decisions_questions_payload(),
+    }
+    headers = {"Content-Type": "application/json"}
+    if self.api_key:
+      headers["x-goog-api-key"] = self.api_key
+    req = urllib.request.Request(
+        url=f"{self.decisions_api_base}/decisions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    opener = urllib.request.build_opener(_NoRedirect())
+    t0 = time.perf_counter()
+    try:
+      with opener.open(req, timeout=60.0) as resp:
+        raw_body = resp.read(1_048_576).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+      try:
+        err_detail = exc.read().decode("utf-8", errors="replace")[:300]
+      except Exception:
+        err_detail = str(exc.reason)
+      raise RuntimeError(
+          _scrub_api_key(
+              f"Decisions REST API failed (HTTP {exc.code}): {err_detail}",
+              self.api_key,
+          )
+      ) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+      raise RuntimeError(
+          _scrub_api_key(
+              f"Decisions REST API transport error: {exc}",
+              self.api_key,
+          )
+      ) from exc
+    latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+
+    try:
+      data = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+      raise RuntimeError(
+          f"Decisions REST API returned invalid JSON: {exc}"
+      ) from exc
+    if not isinstance(data, Mapping):
+      raise RuntimeError(
+          "Decisions REST API returned non-object JSON response."
+      )
+
+    raw_choice, raw_conf, raw_probs = _extract_decisions_route_answer(
+        data, source="Decisions REST API"
+    )
+    in_tok = _extract_decisions_input_tokens(data, query)
+
+    return self._finalize_decisions_route(
+        raw_choice=raw_choice,
+        raw_conf=raw_conf,
+        raw_probs=raw_probs,
+        input_tokens=in_tok,
+        latency_ms=latency_ms,
     )
 
   def _classify_via_vertex(self, client: Any, query: str) -> RouteDecision:
@@ -383,10 +667,14 @@ class QueryRouter:
     if raw_choice not in _VALID_ROUTES:
       raw_choice = ROUTE_HYBRID
     raw_conf = parsed.get("confidence")
-    try:
-      confidence = float(0.5 if raw_conf is None else raw_conf)
-    except (TypeError, ValueError):
+    if raw_conf is None or isinstance(raw_conf, bool):
       confidence = 0.5
+    else:
+      try:
+        parsed_conf = float(raw_conf)
+        confidence = parsed_conf if math.isfinite(parsed_conf) else 0.5
+      except (TypeError, ValueError):
+        confidence = 0.5
     confidence = max(0.0, min(1.0, confidence))
     reason_prefix = "vertex_hydrogen" if is_hydrogen else "vertex_flash"
     reason = str(parsed.get("reason") or f"{reason_prefix}:{raw_choice}")
@@ -419,6 +707,7 @@ class QueryRouter:
         output_tokens=out_tok,
         cost_usd=cost_usd,
         raw_choice=raw_choice,
+        model=self.vertex_model,
     )
 
   def _classify_offline_heuristic(self, query: str) -> RouteDecision:
@@ -435,6 +724,7 @@ class QueryRouter:
           output_tokens=0,
           cost_usd=0.0,
           raw_choice=ROUTE_NATURAL_LANGUAGE,
+          model="offline_heuristic",
       )
     if len(words) >= 2:
       return RouteDecision(
@@ -447,6 +737,7 @@ class QueryRouter:
           output_tokens=0,
           cost_usd=0.0,
           raw_choice=ROUTE_NATURAL_LANGUAGE,
+          model="offline_heuristic",
       )
     return RouteDecision(
         mode=ROUTE_KEYWORD,
@@ -458,6 +749,7 @@ class QueryRouter:
         output_tokens=0,
         cost_usd=0.0,
         raw_choice=ROUTE_KEYWORD,
+        model="offline_heuristic",
     )
 
 
@@ -474,6 +766,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   )
   parser.add_argument("--project-id", default=None, help="Vertex project ID.")
   parser.add_argument("--location", default="global", help="Vertex region.")
+  parser.add_argument(
+      "--decisions-model",
+      default="gemini-decision-1",
+      help="Gemini Decisions API model ID.",
+  )
+  parser.add_argument(
+      "--decisions-api-base",
+      default=None,
+      help="Optional base URL override for Gemini Decisions REST API.",
+  )
   parser.add_argument(
       "--vertex-model",
       default="gemini-4-hydrogen",
@@ -493,6 +795,8 @@ def main(argv: list[str] | None = None) -> int:
       backend=args.backend,
       project_id=args.project_id,
       location=args.location,
+      decisions_model=args.decisions_model,
+      decisions_api_base=args.decisions_api_base,
       vertex_model=args.vertex_model,
       offline=args.offline,
   )
