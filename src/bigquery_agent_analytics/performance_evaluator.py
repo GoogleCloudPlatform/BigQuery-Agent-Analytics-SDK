@@ -62,8 +62,7 @@ from bigquery_agent_analytics.utils import strip_markdown_fences
 
 from ._telemetry import LabeledBigQueryClient
 from ._telemetry import make_bq_client
-from .trace import _EMPTY_TURN
-from .trace import _is_tool_call_response
+from .trace import _final_answer
 from .trace import Trace
 from .trace import TraceIdentity
 from .trace import TraceScope
@@ -108,6 +107,7 @@ class TraceEvent:
   latency_ms: Optional[float] = None
   status: str = "OK"
   error_message: Optional[str] = None
+  invocation_id: Optional[str] = None
 
   @classmethod
   def from_bigquery_row(cls, row: dict[str, Any]) -> "TraceEvent":
@@ -151,6 +151,7 @@ class TraceEvent:
         latency_ms=latency_ms,
         status=row.get("status", "OK"),
         error_message=row.get("error_message"),
+        invocation_id=row.get("invocation_id"),
     )
 
 
@@ -239,37 +240,13 @@ class SessionTrace:
     return tool_calls
 
   def extract_final_response(self) -> Optional[str]:
-    """Extracts the final agent response from events.
+    """Extracts the agent's answer in the latest invocation.
 
-    Checks LLM_RESPONSE first (most reliable response source),
-    then falls back to AGENT_COMPLETED. Model turns with no content
-    (logged as ``None``) are skipped. If the last model turn with
-    content ends in a tool call, it holds no text answer, so only
-    AGENT_COMPLETED is consulted.
+    Same rules as ``Trace.final_response``: the last LLM_RESPONSE or
+    AGENT_RESPONSE with answer text, then AGENT_COMPLETED, read only from
+    the latest invocation. Always a string or None.
     """
-    # Prefer the last LLM_RESPONSE (most reliable response source)
-    for event in reversed(self.events):
-      if event.event_type == "LLM_RESPONSE":
-        content = event.content
-        if isinstance(content, dict):
-          response = content.get("response") or content.get("text_summary")
-        else:
-          response = str(content) if content else None
-        if _is_tool_call_response(response):
-          break
-        if response == _EMPTY_TURN:
-          continue
-        return response
-
-    # Fallback to AGENT_COMPLETED
-    for event in reversed(self.events):
-      if event.event_type == "AGENT_COMPLETED":
-        content = event.content
-        if isinstance(content, dict):
-          return content.get("response") or content.get("text_summary")
-        return str(content) if content else None
-
-    return None
+    return _final_answer(self.events)
 
 
 class TrajectoryMetrics:
@@ -454,6 +431,8 @@ class PerformanceEvaluator:
       "LLM_REQUEST",
       "LLM_RESPONSE",
       "LLM_ERROR",
+      # The final answer of a final_response tool, or of a BQCA view.
+      "AGENT_RESPONSE",
       "INVOCATION_STARTING",
       "INVOCATION_COMPLETED",
       "STATE_DELTA",
@@ -651,6 +630,7 @@ Required JSON format:
             latency_ms=span.latency_ms,
             status=span.status,
             error_message=span.error_message,
+            invocation_id=span.invocation_id,
         )
         for span in trace.spans
         if span.event_type in included
