@@ -336,13 +336,12 @@ async def _run_live_scenarios(
     user_id: str,
     timeout_sec: int,
 ) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
-  from google.adk.plugins.bigquery_agent_analytics_plugin import BigQueryAgentAnalyticsPlugin  # noqa: PLC0415
-  from google.adk.plugins.bigquery_agent_analytics_plugin import BigQueryLoggerConfig  # noqa: PLC0415
   from google.cloud import bigquery  # noqa: PLC0415
 
   _configure_vertex_env(project_id, agent_location)
   bq_probe_client = bigquery.Client(project=project_id, location=location)
-  # Fail fast before spending LLM calls if eval_turns_table is pre-existing & unowned.
+  # Fail fast before loading ADK or spending LLM calls if eval_turns_table is
+  # pre-existing and unowned, or if the events_fqn probe fails with non-404.
   assert_demo_table_ownership_or_absent(
       bq_probe_client, project_id, dataset_id, eval_turns_table
   )
@@ -355,6 +354,9 @@ async def _run_live_scenarios(
       events_pre_existed = False
     else:
       raise
+
+  from google.adk.plugins.bigquery_agent_analytics_plugin import BigQueryAgentAnalyticsPlugin  # noqa: PLC0415
+  from google.adk.plugins.bigquery_agent_analytics_plugin import BigQueryLoggerConfig  # noqa: PLC0415
 
   config = BigQueryLoggerConfig(
       enabled=True,

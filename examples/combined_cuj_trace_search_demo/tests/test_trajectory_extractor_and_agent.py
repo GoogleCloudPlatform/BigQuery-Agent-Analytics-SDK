@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import types
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -936,10 +937,19 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
     fake_bq_client.get_table.return_value = SimpleNamespace(
         labels={"bqaa_demo": "combined_cuj_trace_search"}
     )
+    fake_adk_pkg = types.ModuleType("google.adk")
+    fake_adk_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_plugins_pkg = types.ModuleType("google.adk.plugins")
+    fake_plugins_pkg.__path__ = []  # type: ignore[attr-defined]
     fake_plugin_mod = SimpleNamespace(
         BigQueryAgentAnalyticsPlugin=_FakePlugin,
         BigQueryLoggerConfig=_FakeLoggerConfig,
     )
+    fake_adk_modules = {
+        "google.adk": fake_adk_pkg,
+        "google.adk.plugins": fake_plugins_pkg,
+        "google.adk.plugins.bigquery_agent_analytics_plugin": fake_plugin_mod,
+    }
 
     async def _fake_single(**kwargs):
       return {
@@ -950,14 +960,7 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
       }
 
     with (
-        mock.patch.dict(
-            sys.modules,
-            {
-                "google.adk.plugins.bigquery_agent_analytics_plugin": (
-                    fake_plugin_mod
-                ),
-            },
-        ),
+        mock.patch.dict(sys.modules, fake_adk_modules),
         mock.patch.object(bq_mod, "Client", return_value=fake_bq_client),
         mock.patch.object(
             run_live_demo, "_run_single_live_scenario", side_effect=_fake_single
@@ -1251,13 +1254,45 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
     from agent import run_live_demo  # noqa: PLC0415
     import google.cloud.bigquery as bq_mod  # noqa: PLC0415
 
-    # 1. Unowned eval_turns_table fails upfront BEFORE any LLM scenario runs.
+    class _FakeLoggerConfig:
+
+      def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    class _FakePlugin:
+
+      def __init__(self, **kwargs):
+        del kwargs
+
+      async def flush(self):
+        return None
+
+      async def shutdown(self, **kwargs):
+        del kwargs
+        return None
+
+    fake_adk_pkg = types.ModuleType("google.adk")
+    fake_adk_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_plugins_pkg = types.ModuleType("google.adk.plugins")
+    fake_plugins_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_plugin_mod = SimpleNamespace(
+        BigQueryAgentAnalyticsPlugin=_FakePlugin,
+        BigQueryLoggerConfig=_FakeLoggerConfig,
+    )
+    fake_adk_modules = {
+        "google.adk": fake_adk_pkg,
+        "google.adk.plugins": fake_plugins_pkg,
+        "google.adk.plugins.bigquery_agent_analytics_plugin": fake_plugin_mod,
+    }
+
+    # 1. Unowned eval_turns_table fails upfront BEFORE loading ADK or running LLMs.
     unowned_eval_client = mock.MagicMock()
     unowned_eval_client.get_table.return_value = SimpleNamespace(
         labels={"owner": "other_team"}
     )
     single_mock = mock.AsyncMock()
     with (
+        mock.patch.dict(sys.modules, fake_adk_modules),
         mock.patch.object(bq_mod, "Client", return_value=unowned_eval_client),
         mock.patch.object(
             run_live_demo, "_run_single_live_scenario", single_mock
@@ -1295,6 +1330,7 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
 
     err503_client.get_table.side_effect = _get_table_503
     with (
+        mock.patch.dict(sys.modules, fake_adk_modules),
         mock.patch.object(bq_mod, "Client", return_value=err503_client),
         mock.patch.object(
             run_live_demo, "_run_single_live_scenario", single_mock
@@ -1319,27 +1355,6 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
 
     # 3. Confirmed 404 on events_fqn followed by newly created table with
     #    labels=None stamps bqaa_demo=combined_cuj_trace_search via update_table.
-    class _FakeLoggerConfig:
-
-      def __init__(self, **kwargs):
-        self.kwargs = kwargs
-
-    class _FakePlugin:
-
-      def __init__(self, **kwargs):
-        del kwargs
-
-      async def flush(self):
-        return None
-
-      async def shutdown(self, **kwargs):
-        del kwargs
-        return None
-
-    fake_plugin_mod = SimpleNamespace(
-        BigQueryAgentAnalyticsPlugin=_FakePlugin,
-        BigQueryLoggerConfig=_FakeLoggerConfig,
-    )
     created_meta = SimpleNamespace(labels=None)
     events_calls = {"n": 0}
 
@@ -1363,14 +1378,7 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
       }
 
     with (
-        mock.patch.dict(
-            sys.modules,
-            {
-                "google.adk.plugins.bigquery_agent_analytics_plugin": (
-                    fake_plugin_mod
-                ),
-            },
-        ),
+        mock.patch.dict(sys.modules, fake_adk_modules),
         mock.patch.object(bq_mod, "Client", return_value=new_tbl_client),
         mock.patch.object(
             run_live_demo, "_run_single_live_scenario", side_effect=_fake_single
