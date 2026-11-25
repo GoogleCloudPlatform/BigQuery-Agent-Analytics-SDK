@@ -33,6 +33,7 @@ from .system_evaluator import EvaluationReport
 from .system_evaluator import SESSION_SUMMARY_QUERY
 from .system_evaluator import SessionScore
 from .system_evaluator import SystemEvaluator
+from .trace import _final_response_sql
 from .utils import _parse_json_from_text
 from .utils import strip_markdown_fences
 
@@ -349,8 +350,18 @@ class LLMAsJudge:
     return judge
 
 
-_AI_GENERATE_JUDGE_BATCH_QUERY_TEMPLATE = """\
-WITH session_traces AS (
+# Each session's final answer, picked with the rules of
+# ``Trace.final_response`` (#595).
+_JUDGE_FINAL_RESPONSES = _final_response_sql(
+    "`{project}.{dataset}.{table}`", "{where}"
+)
+
+_AI_GENERATE_JUDGE_BATCH_QUERY_TEMPLATE = (
+    """\
+WITH """
+    + _JUDGE_FINAL_RESPONSES
+    + """,
+session_traces AS (
   SELECT
     session_id,
     STRING_AGG(
@@ -362,13 +373,10 @@ WITH session_traces AS (
       ),
       '\\n' ORDER BY timestamp
     ) AS trace_text,
-    ARRAY_AGG(
-      JSON_VALUE(content, '$.response')
-      IGNORE NULLS
-      ORDER BY timestamp DESC
-      LIMIT 1
-    )[SAFE_OFFSET(0)] AS final_response
+    -- The final answer, chosen like Trace.final_response.
+    ANY_VALUE(final_responses.final_response) AS final_response
   FROM `{project}.{dataset}.{table}`
+  LEFT JOIN final_responses USING (session_id)
   WHERE {where}
   GROUP BY session_id
   HAVING LENGTH(trace_text) > 10
@@ -404,6 +412,7 @@ FROM (
   FROM session_traces
 )
 """
+)
 
 
 def render_ai_generate_judge_query(
@@ -544,8 +553,12 @@ def _render_ai_generate_judge_query(
 
 # Legacy template kept for backward compatibility with pre-created
 # BQ ML models.
-_LEGACY_LLM_JUDGE_BATCH_QUERY = """\
-WITH session_traces AS (
+_LEGACY_LLM_JUDGE_BATCH_QUERY = (
+    """\
+WITH """
+    + _JUDGE_FINAL_RESPONSES
+    + """,
+session_traces AS (
   SELECT
     session_id,
     STRING_AGG(
@@ -557,13 +570,10 @@ WITH session_traces AS (
       ),
       '\\n' ORDER BY timestamp
     ) AS trace_text,
-    ARRAY_AGG(
-      JSON_VALUE(content, '$.response')
-      IGNORE NULLS
-      ORDER BY timestamp DESC
-      LIMIT 1
-    )[SAFE_OFFSET(0)] AS final_response
+    -- The final answer, chosen like Trace.final_response.
+    ANY_VALUE(final_responses.final_response) AS final_response
   FROM `{project}.{dataset}.{table}`
+  LEFT JOIN final_responses USING (session_id)
   WHERE {where}
   GROUP BY session_id
   HAVING LENGTH(trace_text) > 10
@@ -588,6 +598,7 @@ SELECT
   ).ml_generate_text_result AS evaluation
 FROM session_traces
 """
+)
 
 
 _TRACE_SENTINEL = "\x00__BQAA_JUDGE_TRACE__\x00"

@@ -414,6 +414,8 @@ ORDER BY start_time DESC
 LIMIT @max_sessions
 """
 
+# Callers read only the transcript; the final answer of a session is
+# Trace.final_response.
 _SESSION_TRANSCRIPT_QUERY = """\
 SELECT
   session_id,
@@ -431,13 +433,7 @@ SELECT
       )
     ),
     '\\n' ORDER BY timestamp
-  ) AS transcript,
-  ARRAY_AGG(
-    JSON_VALUE(content, '$.response')
-    IGNORE NULLS
-    ORDER BY timestamp DESC
-    LIMIT 1
-  )[SAFE_OFFSET(0)] AS final_response
+  ) AS transcript
 FROM `{project}.{dataset}.{table}`
 WHERE session_id IN UNNEST(@session_ids)
 GROUP BY session_id

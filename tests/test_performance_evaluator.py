@@ -279,7 +279,7 @@ class TestSessionTrace:
       "turns, expected",
       [
           (("call: run_python", "None"), None),
-          (("text: 'Done.'", "None"), "text: 'Done.'"),
+          (("text: 'Done.'", "None"), "Done."),
       ],
   )
   def test_extract_final_response_skips_empty_turns(self, turns, expected):
