@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **LLM judge for failed sessions, and a rule that combines it with the
+  failure rules** (#435). Three modules; only the judge's backend calls a
+  model, and everything else is offline. See `docs/failure_diagnosis.md`.
+  - `session_dossier` renders one failed session as a plain-text
+    dossier: the task, the expected answer when given, how the run
+    ended, every tool call with its arguments and result, and the final
+    response. Steps are numbered like `rule_taxonomy`'s and map to real
+    `span_id`s. Untrusted text cannot add steps or close the judge's
+    `<trace_data>` tag, and long values are cut with a marker.
+  - `failure_judge` asks a model for a label from the dossier and a
+    benchmark-agnostic rubric, and accepts it only when the category is
+    a G1-frozen name, the step is one the dossier can anchor, and the
+    `evidence_quote` is copied verbatim from the dossier. A rejected
+    reply is sent back once with the reason. The model is reached
+    through a `JudgeBackend` that only sends prompts and returns text
+    and the model id. The built-in `BigQueryJudgeBackend` runs in the
+    project: `AI.GENERATE` for Gemini endpoints, `ML.GENERATE_TEXT` for
+    a `project.dataset.model` remote model. `CallableJudgeBackend` wraps
+    any function for a judge outside BigQuery, with no new dependency.
+    Every label records the model that answered.
+  - `failure_diagnosis` accepts a label only when the rules' primary
+    label and the judge name the same category, and otherwise leaves
+    the session for review with both opinions (`agreed`, `disagreed`,
+    `engine_only`, `judge_only`, `excluded`, `none`). It also flags a
+    judge from the same model family as the agent (`same_family`, from
+    the agent's `LLM_REQUEST` rows).
 - **`Span.is_truncated`** — `Span.from_bigquery_row()` now keeps the
   events table's `is_truncated` column, which `get_trace()` and
   `list_traces()` already selected but dropped. It is the producer's
