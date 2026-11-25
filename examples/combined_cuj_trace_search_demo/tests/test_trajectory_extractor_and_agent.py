@@ -1258,6 +1258,7 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
 
       def __init__(self, **kwargs):
         self.kwargs = kwargs
+        self.clustering_fields = ["event_type", "agent", "user_id"]
 
     class _FakePlugin:
 
@@ -1278,6 +1279,10 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
     fake_plugin_mod = SimpleNamespace(
         BigQueryAgentAnalyticsPlugin=_FakePlugin,
         BigQueryLoggerConfig=_FakeLoggerConfig,
+        _get_events_schema=lambda: [
+            bq_mod.SchemaField("timestamp", "TIMESTAMP"),
+            bq_mod.SchemaField("event_type", "STRING"),
+        ],
     )
     fake_adk_modules = {
         "google.adk": fake_adk_pkg,
@@ -1353,21 +1358,10 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
     err503_client.update_table.assert_not_called()
     single_mock.assert_not_awaited()
 
-    # 3. Confirmed 404 on events_fqn followed by newly created table with
-    #    labels=None stamps bqaa_demo=combined_cuj_trace_search via update_table.
-    created_meta = SimpleNamespace(labels=None)
-    events_calls = {"n": 0}
-
-    def _get_table_new(fqn: str):
-      if fqn.endswith(".eval_turns"):
-        raise _NotFound("absent")
-      events_calls["n"] += 1
-      if events_calls["n"] == 1:
-        raise _NotFound("events absent before run")
-      return created_meta
-
+    # 3. Confirmed 404 on events_fqn creates table atomically with label
+    #    BEFORE running scenarios, and never calls update_table post-run.
     new_tbl_client = mock.MagicMock()
-    new_tbl_client.get_table.side_effect = _get_table_new
+    new_tbl_client.get_table.side_effect = _NotFound("absent")
 
     async def _fake_single(**kwargs):
       return {
@@ -1402,11 +1396,841 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
               timeout_sec=10,
           )
       )
-    new_tbl_client.update_table.assert_called_once_with(
-        created_meta, ["labels"]
+    new_tbl_client.update_table.assert_not_called()
+    new_tbl_client.create_table.assert_called_once()
+    created_arg = new_tbl_client.create_table.call_args.args[0]
+    self.assertTrue(created_arg.schema)
+    self.assertTrue(any(f.name == "timestamp" for f in created_arg.schema))
+    self.assertIsNotNone(created_arg.time_partitioning)
+    self.assertEqual(
+        created_arg.time_partitioning.type_, bq_mod.TimePartitioningType.DAY
+    )
+    self.assertEqual(created_arg.time_partitioning.field, "timestamp")
+    self.assertEqual(
+        created_arg.clustering_fields, ["event_type", "agent", "user_id"]
     )
     self.assertEqual(
-        created_meta.labels, {"bqaa_demo": "combined_cuj_trace_search"}
+        created_arg.labels, {"bqaa_demo": "combined_cuj_trace_search"}
+    )
+    self.assertFalse(new_tbl_client.create_table.call_args.kwargs["exists_ok"])
+
+    # 4. Public get_events_schema is preferred over private _get_events_schema.
+    pub_tbl_client = mock.MagicMock()
+    pub_tbl_client.get_table.side_effect = _NotFound("absent")
+    public_plugin_mod = SimpleNamespace(
+        BigQueryAgentAnalyticsPlugin=_FakePlugin,
+        BigQueryLoggerConfig=_FakeLoggerConfig,
+        get_events_schema=lambda: [
+            bq_mod.SchemaField("timestamp", "TIMESTAMP"),
+            bq_mod.SchemaField("public_marker", "STRING"),
+        ],
+        _get_events_schema=lambda: [
+            bq_mod.SchemaField("timestamp", "TIMESTAMP"),
+            bq_mod.SchemaField("private_marker", "STRING"),
+        ],
+    )
+    with (
+        mock.patch.dict(
+            sys.modules,
+            {
+                **fake_adk_modules,
+                "google.adk.plugins.bigquery_agent_analytics_plugin": (
+                    public_plugin_mod
+                ),
+            },
+        ),
+        mock.patch.object(bq_mod, "Client", return_value=pub_tbl_client),
+        mock.patch.object(
+            run_live_demo, "_run_single_live_scenario", side_effect=_fake_single
+        ),
+        mock.patch.object(
+            run_live_demo,
+            "_materialize_and_fetch_live_eval_turns",
+            return_value=[],
+        ),
+    ):
+      asyncio.run(
+          run_live_demo._run_live_scenarios(
+              project_id="demo-project",
+              dataset_id="demo_ds",
+              table_id="agent_events",
+              eval_turns_table="eval_turns",
+              location="US",
+              agent_location="global",
+              model_name="gemini-4-hydrogen",
+              user_id="demo_user",
+              timeout_sec=10,
+          )
+      )
+    pub_created = pub_tbl_client.create_table.call_args.args[0]
+    self.assertIn("public_marker", [f.name for f in pub_created.schema])
+
+    # 5. Missing schema resolver, empty schema, or schema lacking timestamp
+    #    must fail closed with RuntimeError without calling create_table.
+    for bad_mod_name, bad_plugin_mod in (
+        (
+            "missing_resolver",
+            SimpleNamespace(
+                BigQueryAgentAnalyticsPlugin=_FakePlugin,
+                BigQueryLoggerConfig=_FakeLoggerConfig,
+            ),
+        ),
+        (
+            "empty_schema",
+            SimpleNamespace(
+                BigQueryAgentAnalyticsPlugin=_FakePlugin,
+                BigQueryLoggerConfig=_FakeLoggerConfig,
+                _get_events_schema=lambda: [],
+            ),
+        ),
+        (
+            "missing_timestamp",
+            SimpleNamespace(
+                BigQueryAgentAnalyticsPlugin=_FakePlugin,
+                BigQueryLoggerConfig=_FakeLoggerConfig,
+                _get_events_schema=lambda: [
+                    bq_mod.SchemaField("event_type", "STRING")
+                ],
+            ),
+        ),
+    ):
+      with self.subTest(bad_schema_case=bad_mod_name):
+        fail_client = mock.MagicMock()
+        fail_client.get_table.side_effect = _NotFound("absent")
+        with (
+            mock.patch.dict(
+                sys.modules,
+                {
+                    **fake_adk_modules,
+                    "google.adk.plugins.bigquery_agent_analytics_plugin": (
+                        bad_plugin_mod
+                    ),
+                },
+            ),
+            mock.patch.object(bq_mod, "Client", return_value=fail_client),
+            mock.patch.object(
+                run_live_demo, "_run_single_live_scenario", single_mock
+            ),
+        ):
+          with self.assertRaisesRegex(
+              RuntimeError,
+              "Unable to resolve BigQueryAgentAnalyticsPlugin events schema"
+              " with timestamp field",
+          ):
+            asyncio.run(
+                run_live_demo._run_live_scenarios(
+                    project_id="demo-project",
+                    dataset_id="demo_ds",
+                    table_id="agent_events",
+                    eval_turns_table="eval_turns",
+                    location="US",
+                    agent_location="global",
+                    model_name="gemini-4-hydrogen",
+                    user_id="demo_user",
+                    timeout_sec=10,
+                )
+            )
+        fail_client.create_table.assert_not_called()
+
+  def test_events_table_ownership_conflict_and_http_503_notfound(self) -> None:
+    from agent import run_live_demo  # noqa: PLC0415
+    from analytics.table_guard import _is_bq_not_found_error  # noqa: PLC0415
+    import google.cloud.bigquery as bq_mod  # noqa: PLC0415
+
+    class _NotFound(Exception):
+      code = 404
+
+    class _Conflict(Exception):
+      code = 409
+
+    # Class named NotFound carrying HTTP 503 must NOT be treated as 404.
+    class NotFound(Exception):
+      code = 503
+
+    self.assertFalse(_is_bq_not_found_error(NotFound("transient 503")))
+
+    plugin_inits: list[dict] = []
+
+    class _FakeLoggerConfig:
+
+      def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.clustering_fields = ["event_type", "agent", "user_id"]
+
+    class _FakePlugin:
+
+      def __init__(self, **kwargs):
+        plugin_inits.append(kwargs)
+
+      async def flush(self):
+        return None
+
+      async def shutdown(self, **kwargs):
+        del kwargs
+        return None
+
+    fake_adk_pkg = types.ModuleType("google.adk")
+    fake_adk_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_plugins_pkg = types.ModuleType("google.adk.plugins")
+    fake_plugins_pkg.__path__ = []  # type: ignore[attr-defined]
+    fake_plugin_mod = SimpleNamespace(
+        BigQueryAgentAnalyticsPlugin=_FakePlugin,
+        BigQueryLoggerConfig=_FakeLoggerConfig,
+        _get_events_schema=lambda: [
+            bq_mod.SchemaField("timestamp", "TIMESTAMP"),
+            bq_mod.SchemaField("event_type", "STRING"),
+        ],
+    )
+    fake_adk_modules = {
+        "google.adk": fake_adk_pkg,
+        "google.adk.plugins": fake_plugins_pkg,
+        "google.adk.plugins.bigquery_agent_analytics_plugin": fake_plugin_mod,
+    }
+    single_mock = mock.AsyncMock()
+
+    # 1. Pre-existing unowned agent_events rejected BEFORE logger starts.
+    unowned_events_client = mock.MagicMock()
+
+    def _get_unowned_events(fqn: str):
+      if fqn.endswith(".eval_turns"):
+        raise _NotFound("absent")
+      return SimpleNamespace(labels={"owner": "other_team"})
+
+    unowned_events_client.get_table.side_effect = _get_unowned_events
+    with (
+        mock.patch.dict(sys.modules, fake_adk_modules),
+        mock.patch.object(bq_mod, "Client", return_value=unowned_events_client),
+        mock.patch.object(
+            run_live_demo, "_run_single_live_scenario", single_mock
+        ),
+    ):
+      with self.assertRaisesRegex(RuntimeError, "missing demo ownership label"):
+        asyncio.run(
+            run_live_demo._run_live_scenarios(
+                project_id="demo-project",
+                dataset_id="demo_ds",
+                table_id="agent_events",
+                eval_turns_table="eval_turns",
+                location="US",
+                agent_location="global",
+                model_name="gemini-4-hydrogen",
+                user_id="demo_user",
+                timeout_sec=10,
+            )
+        )
+    self.assertEqual(plugin_inits, [])
+    unowned_events_client.create_table.assert_not_called()
+    unowned_events_client.update_table.assert_not_called()
+    single_mock.assert_not_awaited()
+
+    # 2. NotFound(code=503) re-raises instead of creating or starting logger.
+    err503_client = mock.MagicMock()
+
+    def _get_503(fqn: str):
+      if fqn.endswith(".eval_turns"):
+        raise _NotFound("absent")
+      raise NotFound("backend unavailable")
+
+    err503_client.get_table.side_effect = _get_503
+    with (
+        mock.patch.dict(sys.modules, fake_adk_modules),
+        mock.patch.object(bq_mod, "Client", return_value=err503_client),
+        mock.patch.object(
+            run_live_demo, "_run_single_live_scenario", single_mock
+        ),
+    ):
+      with self.assertRaises(NotFound):
+        asyncio.run(
+            run_live_demo._run_live_scenarios(
+                project_id="demo-project",
+                dataset_id="demo_ds",
+                table_id="agent_events",
+                eval_turns_table="eval_turns",
+                location="US",
+                agent_location="global",
+                model_name="gemini-4-hydrogen",
+                user_id="demo_user",
+                timeout_sec=10,
+            )
+        )
+    self.assertEqual(plugin_inits, [])
+    err503_client.create_table.assert_not_called()
+
+    # 3. 409 Conflict during create_table against unowned table fails closed.
+    conflict_unowned_client = mock.MagicMock()
+    ev_calls = {"n": 0}
+
+    def _get_conflict_unowned(fqn: str):
+      if fqn.endswith(".eval_turns"):
+        raise _NotFound("absent")
+      ev_calls["n"] += 1
+      if ev_calls["n"] == 1:
+        raise _NotFound("absent initially")
+      return SimpleNamespace(labels={"owner": "concurrent_other"})
+
+    conflict_unowned_client.get_table.side_effect = _get_conflict_unowned
+    conflict_unowned_client.create_table.side_effect = _Conflict(
+        "already exists"
+    )
+    with (
+        mock.patch.dict(sys.modules, fake_adk_modules),
+        mock.patch.object(
+            bq_mod, "Client", return_value=conflict_unowned_client
+        ),
+        mock.patch.object(
+            run_live_demo, "_run_single_live_scenario", single_mock
+        ),
+    ):
+      with self.assertRaisesRegex(RuntimeError, "missing demo ownership label"):
+        asyncio.run(
+            run_live_demo._run_live_scenarios(
+                project_id="demo-project",
+                dataset_id="demo_ds",
+                table_id="agent_events",
+                eval_turns_table="eval_turns",
+                location="US",
+                agent_location="global",
+                model_name="gemini-4-hydrogen",
+                user_id="demo_user",
+                timeout_sec=10,
+            )
+        )
+    self.assertEqual(plugin_inits, [])
+    single_mock.assert_not_awaited()
+
+    # 4. 409 Conflict during create_table against demo-owned table succeeds.
+    conflict_owned_client = mock.MagicMock()
+    ev_calls_ok = {"n": 0}
+
+    def _get_conflict_owned(fqn: str):
+      if fqn.endswith(".eval_turns"):
+        raise _NotFound("absent")
+      ev_calls_ok["n"] += 1
+      if ev_calls_ok["n"] == 1:
+        raise _NotFound("absent initially")
+      return SimpleNamespace(labels={"bqaa_demo": "combined_cuj_trace_search"})
+
+    conflict_owned_client.get_table.side_effect = _get_conflict_owned
+    conflict_owned_client.create_table.side_effect = _Conflict("already exists")
+
+    async def _fake_single(**kwargs):
+      return {
+          "scenario_id": kwargs["scenario"].scenario_id,
+          "session_id": kwargs["session_id"],
+          "tools_called": [],
+          "response": "ok",
+      }
+
+    with (
+        mock.patch.dict(sys.modules, fake_adk_modules),
+        mock.patch.object(bq_mod, "Client", return_value=conflict_owned_client),
+        mock.patch.object(
+            run_live_demo, "_run_single_live_scenario", side_effect=_fake_single
+        ),
+        mock.patch.object(
+            run_live_demo,
+            "_materialize_and_fetch_live_eval_turns",
+            return_value=[],
+        ),
+    ):
+      asyncio.run(
+          run_live_demo._run_live_scenarios(
+              project_id="demo-project",
+              dataset_id="demo_ds",
+              table_id="agent_events",
+              eval_turns_table="eval_turns",
+              location="US",
+              agent_location="global",
+              model_name="gemini-4-hydrogen",
+              user_id="demo_user",
+              timeout_sec=10,
+          )
+      )
+    self.assertEqual(len(plugin_inits), 1)
+    conflict_owned_client.update_table.assert_not_called()
+
+  def test_quoted_container_freetext_budget_tail_and_parent_bypass_redaction(
+      self,
+  ) -> None:
+    from agent.tools import sanitized_tool_classifier  # noqa: PLC0415
+    from analytics.trajectory_extractor import extract_s3_outcome_first  # noqa: PLC0415
+    from analytics.trajectory_extractor import is_sensitive_key  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+
+    # 1. Free-text sensitive key + balanced/quoted/unterminated values.
+    err_cred = scrub_sensitive_text(
+        'CARD_EXPIRED credentials={"value":"x_sec"}'
+    )
+    self.assertIn("CARD_EXPIRED", err_cred)
+    self.assertNotIn("x_sec", err_cred)
+    self.assertNotIn('"value"', err_cred)
+    self.assertEqual(err_cred, "CARD_EXPIRED credentials=[REDACTED]")
+
+    py_auth = scrub_sensitive_text(
+        "CARD_EXPIRED auth={'token': 'py_tok_1', 'nested': {'k': 'py_val_2'}}"
+        " tail=ok"
+    )
+    self.assertNotIn("py_tok_1", py_auth)
+    self.assertNotIn("py_val_2", py_auth)
+    self.assertIn("CARD_EXPIRED", py_auth)
+    self.assertIn("tail=ok", py_auth)
+
+    list_sec = scrub_sensitive_text(
+        'secrets=[{"a": "list_s1"}, "list_s2"] status=done'
+    )
+    self.assertNotIn("list_s1", list_sec)
+    self.assertNotIn("list_s2", list_sec)
+    self.assertIn("status=done", list_sec)
+
+    for quoted_case, secret_piece, keep_piece in (
+        ('password="my secret with spaces" ok=1', "with spaces", "ok=1"),
+        ("password: 'my secret with spaces', ok=2", "with spaces", "ok=2"),
+        (
+            'the password is "secret with spaces" and status is delivered',
+            "with spaces",
+            "status is delivered",
+        ),
+        (
+            r'password="escaped \"quote\" secret" ok=3',
+            "secret",
+            "ok=3",
+        ),
+        ('password="unterminated secret tail', "secret tail", "password="),
+        (
+            'credentials={"unterminated": "container_tail',
+            "container_tail",
+            "credentials=",
+        ),
+    ):
+      out = scrub_sensitive_text(quoted_case)
+      self.assertNotIn(secret_piece, out)
+      self.assertIn(keep_piece, out)
+      self.assertIn("[REDACTED]", out)
+
+    # 2. Budget exhaustion in _scrub_embedded_json_containers never leaks tail.
+    many_objs = ("{} " * 40) + '{"password": {"nested": "tail_leak_40"}}'
+    scrubbed_many = scrub_sensitive_text(many_objs)
+    self.assertNotIn("tail_leak_40", scrubbed_many)
+    self.assertIn("[REDACTED]", scrubbed_many)
+
+    large_brackets = ("[" * 20_000) + ' {"password": {"nested": "tail_leak"}}'
+    scrubbed_large = scrub_sensitive_text(large_brackets)
+    self.assertNotIn("tail_leak", scrubbed_large)
+    self.assertIn("[REDACTED]", scrubbed_large)
+
+    oversized_json = (
+        '{"padding": "'
+        + ("a" * 17_000)
+        + '", "password": {"nested": "oversized_leak"}}'
+    )
+    scrubbed_oversized = scrub_sensitive_text(oversized_json)
+    self.assertNotIn("oversized_leak", scrubbed_oversized)
+
+    # 3. Structured parent keys (auth_result, credentials_result, authentication,
+    #    and container-valued auth_error) must redact while scalar diagnostics stay.
+    for key_name in ("auth_result", "credentials_result", "authentication"):
+      self.assertTrue(is_sensitive_key(key_name))
+    self.assertFalse(is_sensitive_key("auth_error", is_container=False))
+    self.assertTrue(is_sensitive_key("auth_error", is_container=True))
+
+    structured = scrub_sensitive_data(
+        {
+            "auth_result": {"value": "s1_leak"},
+            "credentials_result": {"value": "s2_leak"},
+            "authentication": {"value": "s3_leak"},
+            "auth_error": {"secret": "s4_leak"},
+            "auth_status": "forbidden",
+            "credential_type": "oauth_service_account",
+            "oauth_state": "state_nonce_ok",
+            "author": "customer_ops_agent",
+            "authority": "payments.example.com",
+        }
+    )
+    self.assertEqual(structured["auth_result"], "[REDACTED]")
+    self.assertEqual(structured["credentials_result"], "[REDACTED]")
+    self.assertEqual(structured["authentication"], "[REDACTED]")
+    self.assertEqual(structured["auth_error"], "[REDACTED]")
+    self.assertEqual(structured["auth_status"], "forbidden")
+    self.assertEqual(structured["credential_type"], "oauth_service_account")
+    self.assertEqual(structured["oauth_state"], "state_nonce_ok")
+    self.assertEqual(structured["author"], "customer_ops_agent")
+    self.assertEqual(structured["authority"], "payments.example.com")
+
+    # Also verify end-to-end inside classifier and extract_s3_outcome_first.
+    verdict = sanitized_tool_classifier(
+        tool=SimpleNamespace(name="auth_probe"),
+        tool_args={},
+        tool_context=SimpleNamespace(),
+        result={
+            "ok": False,
+            "error_code": "CARD_EXPIRED",
+            "message": 'CARD_EXPIRED credentials={"value":"clf_leak"}',
+        },
+    )
+    self.assertIsNotNone(verdict)
+    self.assertIn("CARD_EXPIRED", verdict.error_message)
+    self.assertNotIn("clf_leak", verdict.error_message)
+
+    s3 = extract_s3_outcome_first(
+        {
+            "turns": [
+                {
+                    "events": [
+                        {
+                            "author": "customer_ops_agent",
+                            "content": {
+                                "role": "model",
+                                "parts": [
+                                    {
+                                        "function_call": {
+                                            "name": "auth_check",
+                                            "args": {
+                                                "auth_result": {
+                                                    "value": "s3_ar_leak"
+                                                },
+                                                "credentials_result": {
+                                                    "value": "s3_cr_leak"
+                                                },
+                                                "authentication": {
+                                                    "value": "s3_an_leak"
+                                                },
+                                            },
+                                        }
+                                    },
+                                    {
+                                        "text": (
+                                            "CARD_EXPIRED"
+                                            ' credentials={"value":"s3_str_leak"}'
+                                        )
+                                    },
+                                ],
+                            },
+                        }
+                    ]
+                }
+            ]
+        },
+        metrics={
+            "has_error": True,
+            "error_summary": 'CARD_EXPIRED credentials={"value":"s3_sum_leak"}',
+        },
+    )
+    for leaked in (
+        "s3_ar_leak",
+        "s3_cr_leak",
+        "s3_an_leak",
+        "s3_str_leak",
+        "s3_sum_leak",
+    ):
+      self.assertNotIn(leaked, s3)
+    self.assertIn("CARD_EXPIRED", s3)
+
+  def test_multiline_unterminated_quotes_unified_kv_parity_and_bomb_perf(
+      self,
+  ) -> None:
+    import time  # noqa: PLC0415
+
+    from analytics.index_and_search import _scrub_error_summary  # noqa: PLC0415
+    from analytics.trajectory_extractor import extract_s3_outcome_first  # noqa: PLC0415
+    from analytics.trajectory_extractor import is_sensitive_key  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+
+    # 1. P1-1: Unterminated / oversized quoted values fail closed to EOS.
+    p1_1_cases = (
+        ('password="line1\nSECRET_LINE_2', "SECRET_LINE_2"),
+        (
+            'credentials=\'{\n  "value": "my_secret",\n  "pad": "truncated',
+            "my_secret",
+        ),
+        (
+            'private_key="-----BEGIN PRIVATE'
+            " KEY-----\nMIIEvQIBADANBgkqhkiG9w0_SECRET",
+            "MIIEvQIBADANBgkqhkiG9w0_SECRET",
+        ),
+        (
+            'credentials="hdr\n' + ("B" * 16500) + 'TAIL_SECRET"',
+            "TAIL_SECRET",
+        ),
+    )
+    for sample, secret_val in p1_1_cases:
+      with self.subTest(p1_1=secret_val):
+        scrubbed = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, scrubbed)
+        self.assertIn("[REDACTED]", scrubbed)
+
+    # 2. P1-2: Unified dynamic KV scrubbing across scrub_sensitive_text,
+    #    error_summary, and S3 trajectory.
+    p1_2_cases = (
+        ('CARD_EXPIRED auth_error={"value":"LEAK_AE_VAL"}', "LEAK_AE_VAL"),
+        (
+            "CARD_EXPIRED auth_error={'value':'LEAK_AE_SQ_VAL'}",
+            "LEAK_AE_SQ_VAL",
+        ),
+        (
+            'CARD_EXPIRED authentication_result={"value":"LEAK_AUTH_RES"}',
+            "LEAK_AUTH_RES",
+        ),
+        (
+            'CARD_EXPIRED credentials_payload={"value":"LEAK_CRED_PAY"}',
+            "LEAK_CRED_PAY",
+        ),
+        (
+            'CARD_EXPIRED credential_data={"value":"LEAK_CRED_DATA"}',
+            "LEAK_CRED_DATA",
+        ),
+        ('credentials=\n{"value":"LEAK_ML_EQ"}', "LEAK_ML_EQ"),
+        ("myPwd=secret_mypwd", "secret_mypwd"),
+    )
+    for sample, secret_val in p1_2_cases:
+      with self.subTest(p1_2=secret_val):
+        out_txt = scrub_sensitive_text(sample)
+        out_err = _scrub_error_summary(sample)
+        out_s3 = extract_s3_outcome_first(
+            {
+                "turns": [
+                    {
+                        "events": [
+                            {
+                                "author": "support_agent",
+                                "content": {
+                                    "role": "model",
+                                    "parts": [{"text": sample}],
+                                },
+                            }
+                        ]
+                    }
+                ]
+            },
+            metrics={"has_error": True, "error_summary": sample},
+        )
+        for surface_name, rendered in (
+            ("text", out_txt),
+            ("error_summary", out_err),
+            ("s3", out_s3),
+        ):
+          self.assertNotIn(secret_val, rendered, msg=surface_name)
+          self.assertIn("[REDACTED]", rendered, msg=surface_name)
+        if "CARD_EXPIRED" in sample:
+          self.assertIn("CARD_EXPIRED", out_txt)
+          self.assertIn("CARD_EXPIRED", out_err)
+          self.assertIn("CARD_EXPIRED", out_s3)
+
+    # 3. P2-2: Dict/text parity for all secret keys + all benign keep forms.
+    secret_parity_pairs = (
+        ("DB_PASSWORD", "sec_db_pw"),
+        ("PGPASSWORD", "sec_pg_pw"),
+        ("myPwd", "sec_my_pwd"),
+        ("auth_result", "sec_auth_res"),
+        ("credentials_result", "sec_cred_res"),
+        ("authentication", "sec_authn"),
+        ("db_password", "sec_db_pw2"),
+        ("x_api_key", "sec_x_api"),
+        ("stripe_api_key", "sec_stripe_api"),
+        ("GOOGLE_CLIENT_SECRET", "sec_gcs"),
+        ("REDIS_AUTH_TOKEN", "sec_redis_tok"),
+        ("ANTHROPIC_API_KEY", "sec_anth_api"),
+        ("newPassword", "sec_new_pw"),
+        ("oldPassword", "sec_old_pw"),
+        ("userPassword", "sec_user_pw"),
+        ("googleApiKey", "sec_g_api"),
+        ("stripeApiKey", "sec_s_api"),
+        ("myClientSecret", "sec_mcs"),
+        ("fbAccessToken", "sec_fb_tok"),
+        ("dbpassword", "sec_dbpw3"),
+    )
+    for key_name, val in secret_parity_pairs:
+      with self.subTest(secret_parity=key_name):
+        self.assertTrue(is_sensitive_key(key_name, is_container=False))
+        d_out = scrub_sensitive_data({key_name: val})
+        self.assertEqual(d_out[key_name], "[REDACTED]")
+        t_out = scrub_sensitive_text(f"{key_name}={val}")
+        self.assertNotIn(val, t_out)
+        self.assertIn("[REDACTED]", t_out)
+
+    # Container auth_error redacts in both dict and text.
+    self.assertTrue(is_sensitive_key("auth_error", is_container=True))
+    self.assertEqual(
+        scrub_sensitive_data({"auth_error": {"value": "cnt_ae"}})["auth_error"],
+        "[REDACTED]",
+    )
+
+    benign_kv_parity = (
+        ("passwordless", "true", "passwordless=true"),
+        (
+            "DB_PASSWORD_FILE",
+            "/var/run/secrets/db_pw",
+            "DB_PASSWORD_FILE=/var/run/secrets/db_pw",
+        ),
+        ("NOPASSWD_FILE", "/etc/sudoers", "NOPASSWD_FILE=/etc/sudoers"),
+        ("total_tokens", "1542", "total_tokens=1542"),
+        ("prompt_token", "412", "prompt_token=412"),
+        ("auth_error", "PERMISSION_DENIED", "auth_error: PERMISSION_DENIED"),
+        ("auth_status", "forbidden", "auth_status: forbidden"),
+        (
+            "credential_type",
+            "oauth_service_account",
+            "credential_type: oauth_service_account",
+        ),
+        ("author", "alice", "author: alice"),
+        ("authority", "ca", "authority: ca"),
+        ("cookies", "3", "cookies=3"),
+    )
+    for key_name, val, text_form in benign_kv_parity:
+      with self.subTest(benign_parity=key_name):
+        self.assertFalse(is_sensitive_key(key_name, is_container=False))
+        d_out = scrub_sensitive_data({key_name: val})
+        self.assertEqual(d_out[key_name], val)
+        self.assertEqual(scrub_sensitive_text(text_form), text_form)
+    self.assertEqual(scrub_sensitive_text("CARD_EXPIRED"), "CARD_EXPIRED")
+    self.assertEqual(
+        scrub_sensitive_text("status is delivered"), "status is delivered"
+    )
+
+    # 4. Pathological bracket bombs remain sub-second with zero leaks.
+    for bomb_name, bomb_text, tail_secret in (
+        ("open_200k", ("[" * 200_000) + " password=bomb_s1", "bomb_s1"),
+        ("mismatch_50k", ("[}" * 50_000) + " password=bomb_s2", "bomb_s2"),
+    ):
+      with self.subTest(bomb=bomb_name):
+        t0 = time.monotonic()
+        scrubbed_bomb = scrub_sensitive_text(bomb_text)
+        elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 1.0)
+        self.assertNotIn(tail_secret, scrubbed_bomb)
+        self.assertIn("[REDACTED]", scrubbed_bomb)
+
+  def test_preceding_word_perf_and_repr_escaped_dotted_numbered_keys(
+      self,
+  ) -> None:
+    import time  # noqa: PLC0415
+
+    from analytics.trajectory_extractor import is_sensitive_key  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+
+    # 1. O(N^2) regression guard: repeated multiword tail keys on one line.
+    long_line = ("x code=1 " * 25_000) + "password=tail7"
+    t0 = time.monotonic()
+    scrubbed_long = scrub_sensitive_text(long_line)
+    elapsed = time.monotonic() - t0
+    self.assertLess(elapsed, 1.0)
+    self.assertNotIn("tail7", scrubbed_long)
+    self.assertTrue(scrubbed_long.endswith("password=[REDACTED]"))
+
+    # 2. Python bytes/string reprs, tuples, constructors, escaped quotes,
+    #    dotted keys, and numbered/plural sensitive keys.
+    secret_cases = (
+        ("bytes_sq", "password=b'my_bytes_secret'", "my_bytes_secret"),
+        ("bytes_dq", 'password=b"my_bytes_secret"', "my_bytes_secret"),
+        ("raw_bytes", "password=rb'raw_bytes_sec'", "raw_bytes_sec"),
+        (
+            "tuple_pw",
+            "password=('user_x', 'secret_pass_tuple')",
+            "secret_pass_tuple",
+        ),
+        (
+            "tuple_auth_err",
+            "auth_error=('secret_ae_tuple',)",
+            "secret_ae_tuple",
+        ),
+        (
+            "ctor_creds",
+            "credentials=Credentials(value='ctor_secret')",
+            "ctor_secret",
+        ),
+        (
+            "ctor_secret_str",
+            "password=SecretStr('my_secret')",
+            "my_secret",
+        ),
+        (
+            "escaped_dq_spaces",
+            r"password=\"my secret with spaces\" ok=1",
+            "my secret with spaces",
+        ),
+        (
+            "escaped_dq_inner",
+            r"password=\"a \\\"inner\\\" b\" ok=1",
+            "inner",
+        ),
+        (
+            "escaped_dq_unterminated",
+            'password=\\"unterminated\nsecret_tail',
+            "secret_tail",
+        ),
+        (
+            "dotted_sq",
+            "{'db.password': 'dot_secret'}",
+            "dot_secret",
+        ),
+        (
+            "dotted_dq",
+            '{"db.password": "dot_secret"}',
+            "dot_secret",
+        ),
+        ("numbered_pw", "password1=s1", "s1"),
+        ("numbered_apikey", "apiKey2=s2", "s2"),
+        ("plural_apikeys", 'api_keys=["k1"]', "k1"),
+    )
+    for label, sample, secret_val in secret_cases:
+      with self.subTest(secret_case=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+        if "ok=1" in sample:
+          self.assertIn("ok=1", out)
+
+    # Dict/text parity for dotted, numbered, and plural sensitive keys.
+    self.assertEqual(
+        scrub_sensitive_data({"db.password": "dot_secret"})["db.password"],
+        "[REDACTED]",
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"password1": "s1"})["password1"], "[REDACTED]"
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"apiKey2": "s2"})["apiKey2"], "[REDACTED]"
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"api_keys": ["k1"]})["api_keys"], "[REDACTED]"
+    )
+    self.assertTrue(is_sensitive_key("db.password"))
+    self.assertTrue(is_sensitive_key("password1"))
+    self.assertTrue(is_sensitive_key("apiKey2"))
+    self.assertTrue(is_sensitive_key("api_keys"))
+
+    # 3. Benign keys and phrases remain preserved.
+    benign_cases = (
+        (
+            "DB_PASSWORD_FILE",
+            "/var/run/db_pw",
+            "DB_PASSWORD_FILE=/var/run/db_pw",
+        ),
+        ("NOPASSWD_FILE", "/etc/sudoers", "NOPASSWD_FILE=/etc/sudoers"),
+        ("passwordless", "true", "passwordless=true"),
+        ("auth_error", "CARD_EXPIRED", 'auth_error="CARD_EXPIRED"'),
+        ("auth_error", "invalid_grant", "auth_error=invalid_grant"),
+        ("auth_status", "forbidden", "auth_status=forbidden"),
+        (
+            "credential_type",
+            "oauth_service_account",
+            "credential_type=oauth_service_account",
+        ),
+        ("total_tokens", "1542", "total_tokens=1542"),
+        ("prompt_token", "412", "prompt_token=412"),
+        ("author", "alice", "author=alice"),
+        ("authority", "payments.example.com", "authority=payments.example.com"),
+        ("cookies", "3", "cookies=3"),
+    )
+    for key_name, val, text_form in benign_cases:
+      with self.subTest(benign_case=f"{key_name}:{val}"):
+        self.assertFalse(is_sensitive_key(key_name, is_container=False))
+        self.assertEqual(scrub_sensitive_data({key_name: val})[key_name], val)
+        self.assertEqual(scrub_sensitive_text(text_form), text_form)
+    self.assertEqual(
+        scrub_sensitive_text("status is delivered"), "status is delivered"
     )
 
 

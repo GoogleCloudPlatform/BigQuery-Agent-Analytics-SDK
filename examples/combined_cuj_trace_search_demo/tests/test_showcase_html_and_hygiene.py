@@ -905,6 +905,488 @@ class ShowcaseHtmlAndHygieneTest(unittest.TestCase):
     rm_calls5 = [c for c in calls5 if c.startswith("rm ")]
     self.assertTrue(any("eval_turns_warn1" in c for c in rm_calls5))
 
+  def test_issue608_readme_safepath_setup_notebook_and_html_redaction(
+      self,
+  ) -> None:
+    from analytics.trajectory_extractor import extract_s3_outcome_first  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+    from report.build_showcase_html import build_showcase_html  # noqa: PLC0415
+
+    # 1. Item #10: README fixture command succeeds under PYTHONSAFEPATH=1.
+    with tempfile.TemporaryDirectory() as tmp:
+      out_html = Path(tmp) / "showcase_preview.html"
+      clean_env = {
+          "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+          "PYTHONDONTWRITEBYTECODE": "1",
+          "PYTHONSAFEPATH": "1",
+      }
+      proc = subprocess.run(
+          [
+              sys.executable,
+              "report/build_showcase_html.py",
+              "--demo-fixture",
+              "--output",
+              str(out_html),
+          ],
+          cwd=str(DEMO_DIR),
+          env=clean_env,
+          capture_output=True,
+          text=True,
+          check=False,
+      )
+      self.assertEqual(
+          proc.returncode,
+          0,
+          f"README fixture command failed:\n{proc.stdout}\n{proc.stderr}",
+      )
+      self.assertTrue(out_html.is_file())
+      self.assertEqual(stat.S_IMODE(out_html.stat().st_mode), 0o600)
+      readme_text = (DEMO_DIR / "README.md").read_text(encoding="utf-8")
+      self.assertIn("python3 report/build_showcase_html.py", readme_text)
+      self.assertNotIn("python3 -m report.build_showcase_html", readme_text)
+
+    # 2. Item #9: setup.sh enables discoveryengine.googleapis.com.
+    setup_text = (DEMO_DIR / "setup.sh").read_text(encoding="utf-8")
+    self.assertIn("discoveryengine.googleapis.com", setup_text)
+
+    # 3. Item #4: notebook Cell 1 shares RUN_ID across table and output dir.
+    nb = json.loads(
+        (DEMO_DIR / "combined_cuj_trace_search_demo.ipynb").read_text(
+            encoding="utf-8"
+        )
+    )
+    cell1_src = "".join(nb["cells"][1]["source"])
+    self.assertIn("RUN_ID =", cell1_src)
+    self.assertIn("eval_turns_{RUN_ID}", cell1_src)
+    self.assertIn("notebook_run_{RUN_ID}", cell1_src)
+
+    # 4. Item #1 + Comment bullets 1-2: error-text secrets, budget tail, and
+    #    structured parent-key bypasses never reach HTML or verifier trajectory.
+    budget_tail = (
+        "{} " * 40
+    ) + '{"password": {"nested": "html_budget_tail_leak"}}'
+    s3_traj = extract_s3_outcome_first(
+        {
+            "turns": [
+                {
+                    "events": [
+                        {
+                            "author": "customer_ops_agent",
+                            "content": {
+                                "role": "model",
+                                "parts": [
+                                    {
+                                        "function_call": {
+                                            "name": "auth_tool",
+                                            "args": {
+                                                "auth_result": {
+                                                    "value": "html_ar_leak"
+                                                },
+                                                "credentials_result": {
+                                                    "value": "html_cr_leak"
+                                                },
+                                                "authentication": {
+                                                    "value": "html_an_leak"
+                                                },
+                                                "auth_error": {
+                                                    "secret": "html_ae_leak"
+                                                },
+                                            },
+                                        }
+                                    },
+                                    {
+                                        "text": (
+                                            "CARD_EXPIRED "
+                                            'credentials={"value":"html_str_leak"} '
+                                            "auth={'token': 'html_py_leak'} "
+                                            'password="html quoted space leak"'
+                                        )
+                                    },
+                                ],
+                            },
+                        }
+                    ]
+                }
+            ]
+        },
+        metrics={"has_error": True, "error_summary": budget_tail},
+    )
+    scrubbed_err = scrub_sensitive_text(
+        'CARD_EXPIRED credentials={"value":"html_err_sum_leak"} ' + budget_tail
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+      tmp_dir = Path(tmp)
+      live_json = tmp_dir / "live.json"
+      search_json = tmp_dir / "search.json"
+      out_html = tmp_dir / "showcase.html"
+      live_json.write_text(
+          json.dumps(
+              {
+                  "generated_at_utc": "2026-11-25T00:00:00Z",
+                  "project_id": "demo-project",
+                  "dataset_id": "demo_ds",
+                  "table_id": "agent_events",
+                  "location": "US",
+                  "model_name": "gemini-4-hydrogen",
+                  "mock_live": True,
+                  "eval_turns": [
+                      {
+                          "session_id": "sess_leak_check",
+                          "invocation_id": "inv_leak_check",
+                          "turn_index": 0,
+                          "root_agent": "customer_ops_agent",
+                          "has_error": True,
+                          "has_tool_loop": False,
+                          "turn_latency_ms": 200,
+                          "total_tokens": 400,
+                          "error_summary": scrubbed_err,
+                          "trace": {
+                              "auth_result": {"value": "trace_ar_leak"},
+                              "credentials_result": {"value": "trace_cr_leak"},
+                              "authentication": {"value": "trace_an_leak"},
+                              "auth_error": {"value": "trace_ae_leak"},
+                              "turns": [],
+                          },
+                          "ablation": {
+                              "s1_bytes": 4000,
+                              "s1_tokens_est": 1000,
+                              "s1_exceeds_2048": False,
+                              "s2_bytes": 1200,
+                              "s2_tokens_est": 300,
+                              "s2_exceeds_2048": False,
+                              "s3_bytes": len(s3_traj.encode("utf-8")),
+                              "s3_tokens_est": 80,
+                              "s3_exceeds_2048": False,
+                              "s3_text": s3_traj,
+                          },
+                      }
+                  ],
+                  "ablation_summary": {"turn_count": 1},
+              }
+          ),
+          encoding="utf-8",
+      )
+      search_json.write_text(
+          json.dumps(
+              {
+                  "index_status": {
+                      "ai_embed_column": "MOCK",
+                      "search_index": "READY",
+                      "vector_index": "SKIPPED_BELOW_5000_ROWS",
+                      "row_count": 1,
+                      "embeddings_ready": 1,
+                  },
+                  "queries": [
+                      {
+                          "query_id": "Q1",
+                          "query_text": "CARD_EXPIRED",
+                          "router_decision": {
+                              "mode": "KEYWORD",
+                              "layer": "L0_RULE",
+                              "confidence": 1.0,
+                              "latency_ms": 0.0,
+                              "input_tokens": 0,
+                              "output_tokens": 0,
+                              "cost_usd": 0.0,
+                          },
+                          "step1_bytes_processed": 0,
+                          "raw_trace_baseline_bytes_processed": 4000,
+                          "step1_hits": [
+                              {
+                                  "session_id": "sess_leak_check",
+                                  "invocation_id": "inv_leak_check",
+                                  "has_error": True,
+                                  "error_summary": scrubbed_err,
+                                  "_ai_index_trajectory": s3_traj,
+                              }
+                          ],
+                          "step2_lazy_trace": None,
+                          "layer3_verifications": [],
+                      }
+                  ],
+              }
+          ),
+          encoding="utf-8",
+      )
+      build_showcase_html(
+          live_json=live_json,
+          search_json=search_json,
+          output_path=out_html,
+      )
+      html_text = out_html.read_text(encoding="utf-8")
+      for secret in (
+          "html_budget_tail_leak",
+          "html_ar_leak",
+          "html_cr_leak",
+          "html_an_leak",
+          "html_ae_leak",
+          "html_str_leak",
+          "html_py_leak",
+          "html quoted space leak",
+          "html_err_sum_leak",
+          "trace_ar_leak",
+          "trace_cr_leak",
+          "trace_an_leak",
+          "trace_ae_leak",
+      ):
+        self.assertNotIn(secret, html_text)
+        self.assertNotIn(secret, s3_traj)
+        self.assertNotIn(secret, scrubbed_err)
+      self.assertIn("CARD_EXPIRED", html_text)
+
+  def test_html_redaction_covers_multiline_unterminated_and_dynamic_kv_forms(
+      self,
+  ) -> None:
+    from report.build_showcase_html import _redact_secrets  # noqa: PLC0415
+    from report.build_showcase_html import build_showcase_html  # noqa: PLC0415
+
+    # P1-1: unterminated / oversized quoted values fail closed to end-of-string.
+    p1_1_cases = (
+        ('password="line1\nSECRET_LINE_2', "SECRET_LINE_2"),
+        (
+            'credentials=\'{\n  "value": "my_secret",\n  "pad": "truncated',
+            "my_secret",
+        ),
+        (
+            'private_key="-----BEGIN PRIVATE'
+            " KEY-----\nMIIEvQIBADANBgkqhkiG9w0_SECRET",
+            "MIIEvQIBADANBgkqhkiG9w0_SECRET",
+        ),
+        (
+            'credentials="hdr\n' + ("B" * 16500) + 'TAIL_SECRET"',
+            "TAIL_SECRET",
+        ),
+    )
+    for sample, secret_val in p1_1_cases:
+      with self.subTest(p1_1=secret_val):
+        scrubbed = _redact_secrets(sample)
+        self.assertNotIn(secret_val, scrubbed)
+        self.assertIn("[REDACTED]", scrubbed)
+
+    # P1-2 + P2-2: dynamic free-text KV forms + dict/text benign keep parity.
+    p1_2_cases = (
+        ('CARD_EXPIRED auth_error={"value":"LEAK_AE_VAL"}', "LEAK_AE_VAL"),
+        (
+            "CARD_EXPIRED auth_error={'value':'LEAK_AE_SQ_VAL'}",
+            "LEAK_AE_SQ_VAL",
+        ),
+        (
+            'CARD_EXPIRED authentication_result={"value":"LEAK_AUTH_RES"}',
+            "LEAK_AUTH_RES",
+        ),
+        (
+            'CARD_EXPIRED credentials_payload={"value":"LEAK_CRED_PAY"}',
+            "LEAK_CRED_PAY",
+        ),
+        (
+            'CARD_EXPIRED credential_data={"value":"LEAK_CRED_DATA"}',
+            "LEAK_CRED_DATA",
+        ),
+        ('credentials=\n{"value":"LEAK_ML_EQ"}', "LEAK_ML_EQ"),
+        ("myPwd=secret_mypwd", "secret_mypwd"),
+    )
+    for sample, secret_val in p1_2_cases:
+      with self.subTest(p1_2=secret_val):
+        scrubbed = _redact_secrets(sample)
+        self.assertNotIn(secret_val, scrubbed)
+        self.assertIn("[REDACTED]", scrubbed)
+
+    # Benign keep forms preserved in both text and dicts.
+    benign_dict = _redact_secrets(
+        {
+            "DB_PASSWORD_FILE": "/var/run/db_pw",
+            "NOPASSWD_FILE": "/etc/sudoers",
+            "passwordless": "true",
+            "total_tokens": 1542,
+            "prompt_token": 412,
+            "auth_error": "PERMISSION_DENIED",
+            "auth_status": "forbidden",
+            "credential_type": "oauth_service_account",
+            "author": "alice",
+            "authority": "ca",
+        }
+    )
+    self.assertEqual(benign_dict["DB_PASSWORD_FILE"], "/var/run/db_pw")
+    self.assertEqual(benign_dict["NOPASSWD_FILE"], "/etc/sudoers")
+    self.assertEqual(benign_dict["passwordless"], "true")
+    self.assertEqual(benign_dict["auth_error"], "PERMISSION_DENIED")
+
+    # End-to-end rendered HTML must never leak any P1-1 or P1-2 payload.
+    p1_2_block = "\n".join(
+        [s for s, _ in p1_2_cases]
+        + ["DB_PASSWORD_FILE=/var/run/db_pw", "passwordless=true"]
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+      root = Path(tmpdir)
+      live_json = root / "live.json"
+      search_json = root / "search.json"
+      out_html = root / "showcase.html"
+      eval_turns = [
+          {
+              "session_id": "sess_html_r2_kv",
+              "invocation_id": "inv_html_r2_kv",
+              "scenario_id": "scn_html_r2_kv",
+              "has_error": True,
+              "error_summary": p1_2_block,
+              "raw_trace_bytes": 1200,
+              "ablation": {
+                  "s1_bytes": 1200,
+                  "s1_tokens_est": 300,
+                  "s1_exceeds_2048": False,
+                  "s2_bytes": 600,
+                  "s2_tokens_est": 150,
+                  "s2_exceeds_2048": False,
+                  "s3_bytes": 200,
+                  "s3_tokens_est": 50,
+                  "s3_exceeds_2048": False,
+                  "s3_text": p1_2_block,
+              },
+          }
+      ]
+      for idx, (p1_sample, _) in enumerate(p1_1_cases[:3]):
+        eval_turns.append(
+            {
+                "session_id": f"sess_html_r2_q{idx}",
+                "invocation_id": f"inv_html_r2_q{idx}",
+                "scenario_id": f"scn_html_r2_q{idx}",
+                "has_error": True,
+                "error_summary": f"CARD_EXPIRED {p1_sample}",
+                "raw_trace_bytes": 1200,
+                "ablation": {
+                    "s1_bytes": 1200,
+                    "s1_tokens_est": 300,
+                    "s1_exceeds_2048": False,
+                    "s2_bytes": 600,
+                    "s2_tokens_est": 150,
+                    "s2_exceeds_2048": False,
+                    "s3_bytes": 200,
+                    "s3_tokens_est": 50,
+                    "s3_exceeds_2048": False,
+                    "s3_text": f"CARD_EXPIRED {p1_sample}",
+                },
+            }
+        )
+      live_json.write_text(
+          json.dumps(
+              {
+                  "eval_turns": eval_turns,
+                  "ablation_summary": {"turn_count": len(eval_turns)},
+              }
+          ),
+          encoding="utf-8",
+      )
+      search_json.write_text(
+          json.dumps(
+              {
+                  "index_status": {
+                      "ai_embed_column": "MOCK",
+                      "search_index": "READY",
+                      "vector_index": "SKIPPED_BELOW_5000_ROWS",
+                      "row_count": len(eval_turns),
+                      "embeddings_ready": len(eval_turns),
+                  },
+                  "queries": [],
+              }
+          ),
+          encoding="utf-8",
+      )
+      build_showcase_html(
+          live_json=live_json, search_json=search_json, output_path=out_html
+      )
+      html_text = out_html.read_text(encoding="utf-8")
+      for _, secret_val in p1_1_cases[:3] + p1_2_cases:
+        self.assertNotIn(secret_val, html_text)
+      self.assertIn("CARD_EXPIRED", html_text)
+      self.assertIn("DB_PASSWORD_FILE=/var/run/db_pw", html_text)
+      self.assertIn("passwordless=true", html_text)
+
+  def test_html_redaction_covers_python_reprs_escaped_quotes_and_dotted_keys(
+      self,
+  ) -> None:
+    from report.build_showcase_html import build_showcase_html  # noqa: PLC0415
+
+    error_payload = (
+        "CARD_EXPIRED "
+        "password=b'html_bytes_sec' "
+        "password=('u', 'html_tuple_sec') "
+        "auth_error=('html_ae_tuple_sec',) "
+        "credentials=Credentials(value='html_ctor_sec') "
+        r"password=\"html escaped sec\" "
+        "{'db.password': 'html_dot_sq_sec'} "
+        '{"db.password": "html_dot_dq_sec"} '
+        "password1=html_num_pw_sec "
+        "apiKey2=html_num_ak_sec "
+        'api_keys=["html_plural_ak_sec"]'
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+      root = Path(tmpdir)
+      live_json = root / "live.json"
+      search_json = root / "search.json"
+      out_html = root / "showcase.html"
+      live_json.write_text(
+          json.dumps(
+              {
+                  "eval_turns": [
+                      {
+                          "session_id": "sess_html_repr",
+                          "invocation_id": "inv_html_repr",
+                          "scenario_id": "scn_html_repr",
+                          "has_error": True,
+                          "error_summary": error_payload,
+                          "raw_trace_bytes": 1200,
+                          "ablation": {
+                              "s1_bytes": 1200,
+                              "s1_tokens_est": 300,
+                              "s1_exceeds_2048": False,
+                              "s2_bytes": 600,
+                              "s2_tokens_est": 150,
+                              "s2_exceeds_2048": False,
+                              "s3_bytes": 200,
+                              "s3_tokens_est": 50,
+                              "s3_exceeds_2048": False,
+                              "s3_text": error_payload,
+                          },
+                      }
+                  ],
+                  "ablation_summary": {"turn_count": 1},
+              }
+          ),
+          encoding="utf-8",
+      )
+      search_json.write_text(
+          json.dumps(
+              {
+                  "index_status": {
+                      "ai_embed_column": "MOCK",
+                      "search_index": "READY",
+                      "vector_index": "SKIPPED_BELOW_5000_ROWS",
+                      "row_count": 1,
+                      "embeddings_ready": 1,
+                  },
+                  "queries": [],
+              }
+          ),
+          encoding="utf-8",
+      )
+      build_showcase_html(
+          live_json=live_json, search_json=search_json, output_path=out_html
+      )
+      html_text = out_html.read_text(encoding="utf-8")
+      for secret_val in (
+          "html_bytes_sec",
+          "html_tuple_sec",
+          "html_ae_tuple_sec",
+          "html_ctor_sec",
+          "html escaped sec",
+          "html_dot_sq_sec",
+          "html_dot_dq_sec",
+          "html_num_pw_sec",
+          "html_num_ak_sec",
+          "html_plural_ak_sec",
+      ):
+        self.assertNotIn(secret_val, html_text)
+      self.assertIn("CARD_EXPIRED", html_text)
+
 
 if __name__ == "__main__":
   unittest.main()

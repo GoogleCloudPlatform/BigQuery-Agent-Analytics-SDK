@@ -29,22 +29,53 @@ DEFAULT_S3_MAX_CHARS = 4800
 _EMBED_TOKEN_LIMIT = 2048
 
 _CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
-_SAFE_DIAGNOSTIC_SUFFIX_RE = re.compile(
-    r"(?:^|_)(?:error|status|type|reason|mode|method|scheme|provider|"
-    r"count|enabled|required|result|state)$"
+_KEY_SEP_RE = re.compile(r"[.\-\s]+")
+_SAFE_DIAGNOSTIC_SCALAR_KEYS = frozenset(
+    {
+        "auth_error",
+        "auth_status",
+        "auth_reason",
+        "auth_mode",
+        "auth_method",
+        "auth_scheme",
+        "auth_provider",
+        "auth_type",
+        "credential_type",
+        "credential_status",
+        "credential_error",
+        "credential_provider",
+        "author",
+        "authority",
+        "oauth_state",
+        "error_code",
+        "status_code",
+        "tail_code",
+    }
+)
+_SAFE_SCALAR_KEY_SUFFIXES: tuple[str, ...] = (
+    "_file",
+    "_path",
+    "_filename",
+    "_filepath",
 )
 _SENSITIVE_KEY_RE = re.compile(
-    r"(?:passwords?|passwd|(?:^|_)pwd(?:$|_)|passphrase|"
-    r"client_?secret|secret_?key|secret_?access_?key|aws_?secret_?access_?key|"
-    r"(?:^|_)secrets?(?:$|_)|private_?key|api_?key|apikey|"
-    r"signing_?key|encryption_?key|master_?key|"
-    r"connection_?string|database_?url|(?:^|_)dsn(?:$|_)|"
-    r"(?:set_?)?cookie|(?:^|_)jwt(?:$|_)|(?:^|_)oauth(?:$|_)|"
+    r"(?:passwords?(?:$|[_\d])|passwd(?:$|[_\d])|(?:^|_)pwd(?:$|[_\d])|"
+    r"passphrase(?:$|[_\d])|client_?secrets?(?:$|[_\d])|"
+    r"secret_?keys?(?:$|[_\d])|secret_?access_?keys?(?:$|[_\d])|"
+    r"aws_?secret_?access_?keys?(?:$|[_\d])|(?:^|_)secrets?(?:$|[_\d])|"
+    r"private_?keys?(?:$|[_\d])|api_?keys?(?:$|[_\d])|apikeys?(?:$|[_\d])|"
+    r"signing_?keys?(?:$|[_\d])|encryption_?keys?(?:$|[_\d])|"
+    r"master_?keys?(?:$|[_\d])|connection_?string(?:$|[_\d])|"
+    r"database_?url(?:$|[_\d])|(?:^|_)dsn(?:$|[_\d])|"
+    r"(?:^|_)(?:set_?)?cookie(?:$|_)|(?:^|_)jwt(?:$|[_\d])|"
+    r"(?:^|_)oauth(?:$|[_\d])|"
     r"(?:auth|access|refresh|id|bearer|session|oauth|csrf|secret|api|github)"
-    r"_?token|^token$|authorization|auth_?header|auth_?key|auth_?secret|"
-    r"auth_?code|auth_?response_?uri|auth_?credentials?|"
-    r"(?:^|_)auth$|^auth_(?:data|info|value|payload)$|"
-    r"(?:^|_)credentials?(?:$|_))",
+    r"_?tokens?(?:$|[_\d])|^token$|authorization(?:$|[_\d])|"
+    r"auth_?headers?(?:$|[_\d])|auth_?keys?(?:$|[_\d])|"
+    r"auth_?secrets?(?:$|[_\d])|auth_?codes?(?:$|[_\d])|"
+    r"auth_?response_?uri(?:$|[_\d])|auth_?credentials?(?:$|[_\d])|"
+    r"(?:^|_)authentications?(?:$|[_\d])|(?:^|_)auth(?:$|[_\d])|"
+    r"(?:^|_)credentials?(?:$|[_\d]))",
     re.IGNORECASE,
 )
 
@@ -81,44 +112,72 @@ _SECRET_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
         ),
         "[REDACTED]",
     ),
-    (
-        re.compile(
-            r"""(["']?(?:(?:aws[-_\s]?secret[-_\s]?access[-_\s]?key|"""
-            r"""secret[-_\s]?access[-_\s]?key|client[-_\s]?secret|"""
-            r"""secret[-_\s]?key|private[-_\s]?key|signing[-_\s]?key|"""
-            r"""encryption[-_\s]?key|master[-_\s]?key|api[-_\s]?key|apikey|"""
-            r"""passwords?|passwd|passphrase|secrets?|"""
-            r"""(?:auth|access|refresh|id|bearer|session|oauth|csrf|secret|api|github)"""
-            r"""[-_\s]?token|authorization|connection[-_\s]?string|"""
-            r"""database[-_\s]?url|(?:set[-_\s]?)?cookie|credentials?)|"""
-            r"""(?<![A-Za-z0-9])(?:pwd|dsn|jwt)|\btoken)\b["']?"""
-            r"""(?:\s*[:=]\s*|\s+(?:is|are)\s*:?\s*)["']?)"""
-            r"""[^\s"',;)}\]]+""",
-            re.IGNORECASE,
-        ),
-        r"\1[REDACTED]",
-    ),
 )
+
+_KV_CANDIDATE_RE = re.compile(
+    r"""(?:(?P<dq>"[A-Za-z_][A-Za-z0-9_. -]{0,60}")|"""
+    r"""(?P<sq>'[A-Za-z_][A-Za-z0-9_. -]{0,60}')|"""
+    r"""(?<![A-Za-z0-9_-])(?:--?)?(?P<bare>[A-Za-z_][A-Za-z0-9_-]*))"""
+    r"""(?P<conn>[ \t]*[:=]|[ \t]+(?:is|are)(?:[ \t]*:|(?=\s)))""",
+    re.IGNORECASE,
+)
+_WORD_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+)
+_WORD_START_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
+)
+_MULTIWORD_KEY_TAIL_WORDS = frozenset(
+    {
+        "key",
+        "keys",
+        "string",
+        "url",
+        "header",
+        "headers",
+        "code",
+        "codes",
+        "uri",
+        "data",
+        "info",
+        "value",
+        "payload",
+        "result",
+    }
+)
+_SAFE_TOKEN_PREFIX_WORDS = frozenset(
+    {
+        "prompt",
+        "input",
+        "output",
+        "completion",
+        "total",
+        "max",
+        "cached",
+        "thinking",
+        "billable",
+    }
+)
+_PY_STR_PREFIX_RE = re.compile(r"""[rRuUbBfF]{1,2}(?=["'])""")
+_CTOR_PREFIX_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*(?=\()")
+_BARE_VALUE_RE = re.compile(r"""[^\s"',;)}\]]+""")
 
 
 def _normalize_key_name(key_name: str) -> str:
-  raw = str(key_name).strip().replace("-", "_")
+  raw = _KEY_SEP_RE.sub("_", str(key_name).strip())
   return _CAMEL_BOUNDARY_RE.sub(r"\1_\2", raw).lower()
 
 
-def is_sensitive_key(key_name: str) -> bool:
+def is_sensitive_key(key_name: str, *, is_container: bool = False) -> bool:
   """Returns True when a dict/field name represents a credential or secret."""
   if not key_name:
     return False
   norm = _normalize_key_name(key_name)
   if not norm:
     return False
-  if _SAFE_DIAGNOSTIC_SUFFIX_RE.search(norm) and not re.search(
-      r"(?:password|passwd|passphrase|private_?key|api_?key|apikey|"
-      r"signing_?key|encryption_?key|master_?key|connection_?string|"
-      r"database_?url|cookie|token|secret_?key|client_?secret|"
-      r"secret_?access_?key|jwt)",
-      norm,
+  if not is_container and (
+      norm in _SAFE_DIAGNOSTIC_SCALAR_KEYS
+      or norm.endswith(_SAFE_SCALAR_KEY_SUFFIXES)
   ):
     return False
   return bool(_SENSITIVE_KEY_RE.search(norm))
@@ -126,48 +185,59 @@ def is_sensitive_key(key_name: str) -> bool:
 
 _MAX_EMBEDDED_JSON_DEPTH = 32
 _MAX_EMBEDDED_JSON_SPAN = 16384
+_MAX_EMBEDDED_JSON_DECODES = 32
 _MAX_EMBEDDED_JSON_FAIL_BUDGET = 32768
 
 
-def _find_balanced_json_end(
+def _find_balanced_container_end(
     text: str,
     start: int,
     *,
+    allow_single_quotes: bool = False,
+    allow_parens: bool = False,
     max_len: int = _MAX_EMBEDDED_JSON_SPAN,
     max_depth: int = _MAX_EMBEDDED_JSON_DEPTH,
 ) -> tuple[int | None, int, bool]:
-  """Finds balanced closing index for JSON object/array starting at ``start``.
+  """Finds balanced closing index for a container starting at ``start``.
 
   Returns ``(end_idx, scanned_pos, depth_exceeded)``. ``end_idx`` is exclusive
   when balanced within limits, else ``None``.
   """
   limit = min(len(text), start + max_len)
-  depth = 0
-  in_string = False
+  stack: list[str] = []
+  quote_char: str | None = None
   escaped = False
   pos = start
   while pos < limit:
     ch = text[pos]
-    if in_string:
+    if quote_char is not None:
       if escaped:
         escaped = False
       elif ch == "\\":
         escaped = True
-      elif ch == '"':
-        in_string = False
+      elif ch == quote_char:
+        quote_char = None
     else:
-      if ch == '"':
-        in_string = True
-      elif ch in "{[":
-        depth += 1
-        if depth > max_depth:
+      if ch == '"' or (allow_single_quotes and ch == "'"):
+        quote_char = ch
+      elif ch == "{":
+        stack.append("}")
+        if len(stack) > max_depth:
           return None, pos + 1, True
-      elif ch in "}]":
-        depth -= 1
-        if depth == 0:
-          return pos + 1, pos + 1, False
-        if depth < 0:
+      elif ch == "[":
+        stack.append("]")
+        if len(stack) > max_depth:
+          return None, pos + 1, True
+      elif allow_parens and ch == "(":
+        stack.append(")")
+        if len(stack) > max_depth:
+          return None, pos + 1, True
+      elif ch in ("}", "]") or (allow_parens and ch == ")"):
+        if not stack or stack[-1] != ch:
           return None, pos + 1, False
+        stack.pop()
+        if not stack:
+          return pos + 1, pos + 1, False
     pos += 1
   return None, pos, False
 
@@ -175,8 +245,10 @@ def _find_balanced_json_end(
 def _scrub_embedded_json_containers(text: str) -> str:
   """Scrubs balanced JSON objects/arrays embedded inside free text safely.
 
-  Bounds parsing to depth <= 32, span <= 16 KiB, and <= 32 decoded containers
-  (falling back cleanly to `_SECRET_RULES` regex redaction beyond those limits).
+  Bounds parsing to depth <= 32, span <= 16 KiB, and <= 32 decoded containers.
+  When any parsing budget or structural limit is exceeded on an embedded
+  container, redacts the remaining unparsed tail conservatively so secrets
+  placed after budget exhaustion never leak.
   """
   if "{" not in text and "[" not in text:
     return text
@@ -188,16 +260,21 @@ def _scrub_embedded_json_containers(text: str) -> str:
   fail_scanned = 0
   while idx < n:
     ch = text[idx]
-    if (
-        ch in "{["
-        and decoded_count < 32
-        and fail_scanned < _MAX_EMBEDDED_JSON_FAIL_BUDGET
-    ):
-      end_idx, scanned_pos, depth_exceeded = _find_balanced_json_end(text, idx)
-      if depth_exceeded:
-        out.append(text[idx:scanned_pos])
-        idx = scanned_pos
-        continue
+    if ch in "{[":
+      if (
+          decoded_count >= _MAX_EMBEDDED_JSON_DECODES
+          or fail_scanned >= _MAX_EMBEDDED_JSON_FAIL_BUDGET
+      ):
+        out.append("[REDACTED]")
+        break
+      end_idx, scanned_pos, depth_exceeded = _find_balanced_container_end(
+          text, idx, allow_single_quotes=False
+      )
+      if depth_exceeded or (
+          end_idx is None and (scanned_pos - idx) >= _MAX_EMBEDDED_JSON_SPAN
+      ):
+        out.append("[REDACTED]")
+        break
       if end_idx is None:
         fail_scanned += scanned_pos - idx
         out.append(ch)
@@ -229,18 +306,219 @@ def _scrub_embedded_json_containers(text: str) -> str:
   return "".join(out)
 
 
+def _scan_quoted_value(text: str, quote_pos: int) -> int | None:
+  """Scans a quoted string literal from ``quote_pos`` within span limit."""
+  n = len(text)
+  if quote_pos >= n:
+    return None
+  quote_char = text[quote_pos]
+  limit = min(n, quote_pos + _MAX_EMBEDDED_JSON_SPAN)
+  escaped = False
+  cursor = quote_pos + 1
+  while cursor < limit:
+    c = text[cursor]
+    if escaped:
+      escaped = False
+    elif c == "\\":
+      escaped = True
+    elif c == quote_char:
+      return cursor + 1
+    cursor += 1
+  return None
+
+
+def _consume_sensitive_kv_value(text: str, pos: int) -> tuple[int, str] | None:
+  """Consumes a quoted, escaped, container, repr, or bare value at ``pos``."""
+  n = len(text)
+  if pos >= n:
+    return None
+  ch = text[pos]
+  if ch in ('"', "'"):
+    end_idx = _scan_quoted_value(text, pos)
+    if end_idx is not None:
+      return end_idx, f"{ch}[REDACTED]{ch}"
+    # Unterminated or oversized quoted value: fail closed to end of string so
+    # multiline/PEM tails never leak after the first newline.
+    return n, "[REDACTED]"
+  if text.startswith('\\"', pos) or text.startswith("\\'", pos):
+    q = text[pos + 1]
+    limit = min(n, pos + _MAX_EMBEDDED_JSON_SPAN)
+    cursor = pos + 2
+    while cursor < limit:
+      if text[cursor] == "\\":
+        bs = 0
+        while cursor + bs < limit and text[cursor + bs] == "\\":
+          bs += 1
+        if cursor + bs < limit and text[cursor + bs] == q:
+          if bs == 1:
+            return cursor + 2, f"\\{q}[REDACTED]\\{q}"
+          cursor += bs + 1
+          continue
+        cursor += max(1, bs)
+        continue
+      cursor += 1
+    return n, "[REDACTED]"
+  if ch in ("{", "[", "("):
+    end_idx, _, depth_exceeded = _find_balanced_container_end(
+        text, pos, allow_single_quotes=True, allow_parens=True
+    )
+    if end_idx is not None and not depth_exceeded:
+      return end_idx, "[REDACTED]"
+    return n, "[REDACTED]"
+  prefix_match = _PY_STR_PREFIX_RE.match(text, pos)
+  if prefix_match is not None:
+    end_idx = _scan_quoted_value(text, prefix_match.end())
+    if end_idx is not None:
+      return end_idx, "[REDACTED]"
+    return n, "[REDACTED]"
+  ctor_match = _CTOR_PREFIX_RE.match(text, pos)
+  if ctor_match is not None:
+    end_idx, _, depth_exceeded = _find_balanced_container_end(
+        text, ctor_match.end(), allow_single_quotes=True, allow_parens=True
+    )
+    if end_idx is not None and not depth_exceeded:
+      return end_idx, "[REDACTED]"
+    return n, "[REDACTED]"
+  bare_match = _BARE_VALUE_RE.match(text, pos)
+  if bare_match:
+    return bare_match.end(), "[REDACTED]"
+  return None
+
+
+def _preceding_same_line_word(
+    text: str, end_pos: int
+) -> tuple[str, int] | None:
+  """Returns the immediately preceding same-line word and its start index."""
+  cursor = end_pos
+  if cursor <= 0 or text[cursor - 1] not in (" ", "\t"):
+    return None
+  while cursor > 0 and text[cursor - 1] in (" ", "\t"):
+    cursor -= 1
+  word_end = cursor
+  if word_end <= 0 or text[word_end - 1] not in _WORD_CHARS:
+    return None
+  word_start = word_end
+  while (
+      word_start > 0
+      and text[word_start - 1] in _WORD_CHARS
+      and (word_end - word_start) <= 64
+  ):
+    word_start -= 1
+  if (
+      (word_end - word_start) > 64
+      or (word_start > 0 and text[word_start - 1] in _WORD_CHARS)
+      or text[word_start] not in _WORD_START_CHARS
+  ):
+    return None
+  return text[word_start:word_end], word_start
+
+
+def _is_matched_kv_sensitive(
+    text: str, match: re.Match[str], *, is_container: bool
+) -> bool:
+  """Classifies a candidate KV regex match dynamically via is_sensitive_key."""
+  dq = match.group("dq")
+  sq = match.group("sq")
+  if dq is not None:
+    return is_sensitive_key(dq[1:-1], is_container=is_container)
+  if sq is not None:
+    return is_sensitive_key(sq[1:-1], is_container=is_container)
+
+  bare = match.group("bare") or ""
+  lower_bare = bare.lower()
+  if lower_bare == "token" and not is_container:
+    prev = _preceding_same_line_word(text, match.start())
+    if prev is not None and prev[0].lower() in _SAFE_TOKEN_PREFIX_WORDS:
+      return False
+  if is_sensitive_key(bare, is_container=is_container):
+    return True
+  if lower_bare not in _MULTIWORD_KEY_TAIL_WORDS:
+    return False
+
+  # Allow 2-to-4 word natural-language phrases (e.g. "api key",
+  # "connection string", "aws secret access key") on the same line.
+  phrase = bare
+  cursor = match.start()
+  for _ in range(3):
+    prev = _preceding_same_line_word(text, cursor)
+    if prev is None:
+      break
+    prev_word, cursor = prev
+    phrase = f"{prev_word} {phrase}"
+    norm = _normalize_key_name(phrase)
+    if not is_container and (
+        norm in _SAFE_DIAGNOSTIC_SCALAR_KEYS
+        or norm.endswith(_SAFE_SCALAR_KEY_SUFFIXES)
+    ):
+      return False
+    if is_sensitive_key(phrase, is_container=is_container):
+      return True
+  return False
+
+
+def _scrub_sensitive_kv_in_text(text: str) -> str:
+  """Redacts sensitive key=value / key: value / key is value pairs in text."""
+  out: list[str] = []
+  idx = 0
+  n = len(text)
+  while idx < n:
+    match = _KV_CANDIDATE_RE.search(text, idx)
+    if match is None:
+      out.append(text[idx:])
+      break
+    pos = match.end()
+    same_line_pos = pos
+    while same_line_pos < n and text[same_line_pos] in (" ", "\t"):
+      same_line_pos += 1
+    any_ws_pos = same_line_pos
+    while any_ws_pos < n and text[any_ws_pos].isspace():
+      any_ws_pos += 1
+    if any_ws_pos < n and (
+        text[any_ws_pos] in ("{", "[", "(", '"', "'")
+        or text.startswith('\\"', any_ws_pos)
+        or text.startswith("\\'", any_ws_pos)
+    ):
+      val_start = any_ws_pos
+    else:
+      val_start = same_line_pos
+    next_char = text[val_start] if val_start < n else ""
+    is_container = next_char in ("{", "[", "(")
+    if not _is_matched_kv_sensitive(text, match, is_container=is_container):
+      out.append(text[idx : match.end()])
+      idx = match.end()
+      continue
+    consumed = _consume_sensitive_kv_value(text, val_start)
+    if consumed is None:
+      out.append(text[idx : match.end()])
+      idx = match.end()
+      continue
+    val_end, replacement = consumed
+    out.append(text[idx:val_start])
+    out.append(replacement)
+    idx = val_end
+  return "".join(out)
+
+
 def scrub_sensitive_text(text: str) -> str:
   """Redacts credential tokens from raw strings while keeping error codes."""
   out = _scrub_embedded_json_containers(str(text))
   for pat, repl in _SECRET_RULES:
     out = pat.sub(repl, out)
-  return out
+  return _scrub_sensitive_kv_in_text(out)
 
 
 def scrub_sensitive_data(value: Any, *, key_name: str = "") -> Any:
   """Key-aware recursive scrubber for dicts, lists, bytes, and strings."""
+  is_container = (
+      isinstance(value, Mapping)
+      or (
+          isinstance(value, Sequence)
+          and not isinstance(value, (str, bytes, bytearray))
+      )
+      or isinstance(value, (set, frozenset))
+  )
   if (
-      is_sensitive_key(key_name)
+      is_sensitive_key(key_name, is_container=is_container)
       and value is not None
       and not isinstance(value, bool)
   ):
@@ -251,7 +529,7 @@ def scrub_sensitive_data(value: Any, *, key_name: str = "") -> Any:
       return "[REDACTED]" if value.strip() else value
     if isinstance(value, Mapping):
       return "[REDACTED]" if value else {}
-    if isinstance(value, Sequence):
+    if isinstance(value, (Sequence, set, frozenset)):
       return "[REDACTED]" if value else []
     return "[REDACTED]"
   if isinstance(value, Mapping):
