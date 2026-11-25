@@ -1,0 +1,2294 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * BQAA Copilot preview: a prompt-driven dashboard over `agent_events`.
+ *
+ * Everything runs in the browser. The prompt parser is rule-based keyword
+ * matching, not a language model. The dashboard reads either the built-in
+ * synthetic sample or rows the user imports, and never connects to BigQuery:
+ * the SQL dialog renders queries for the user to run themselves.
+ */
+(() => {
+  'use strict';
+
+  const DAY_MS = 86400000;
+
+  // ---------------------------------------------------------------------------
+  // Theme
+  // ---------------------------------------------------------------------------
+  const prefersDark = window.matchMedia &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches;
+  let currentTheme = prefersDark ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', currentTheme);
+
+  // ---------------------------------------------------------------------------
+  // Synthetic sample of agent_events rows
+  // ---------------------------------------------------------------------------
+  const CHART_COLORS = [
+    'var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)',
+    'var(--chart-4)', 'var(--chart-5)', 'var(--chart-6)',
+  ];
+
+  const SAMPLE_AGENTS = [
+    'root_agent', 'sql_generator_agent', 'schema_retriever_agent',
+    'chart_composer_agent', 'time_semantics_agent', 'eval_judge_agent',
+  ];
+  const SAMPLE_MODELS = ['llm-pro', 'llm-standard', 'llm-fast', 'llm-lite'];
+  const SAMPLE_TOOLS = [
+    'run_bigquery_sql', 'get_table_schema', 'dry_run_query',
+    'search_glossary', 'render_chart', 'lookup_order',
+  ];
+  const SAMPLE_END_MS = Date.UTC(2026, 6, 16);  // 2026-07-16
+
+  const MODEL_LATENCY_MS = {
+    'llm-pro': 2300, 'llm-standard': 1300, 'llm-fast': 800, 'llm-lite': 600,
+  };
+  const TOOL_LATENCY_MS = {
+    run_bigquery_sql: 1800, get_table_schema: 300, dry_run_query: 600,
+    search_glossary: 450, render_chart: 250, lookup_order: 350,
+  };
+  const TOOL_ERRORS = [
+    '403 Access Denied: caller lacks bigquery.tables.getData on the table',
+    'DEADLINE_EXCEEDED: tool call exceeded the 30s timeout',
+    'Syntax error: Unrecognized name: gross_margin_pct',
+    'Not found: Table my-project:retail.returns was not found',
+  ];
+  const LLM_ERRORS = [
+    '429 RESOURCE_EXHAUSTED: model quota exceeded',
+    'DEADLINE_EXCEEDED: model response timed out',
+  ];
+
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return function() {
+      a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function generateSampleEvents() {
+    const rand = mulberry32(20260716);
+    const pick = (list, skew) => list[Math.min(
+        list.length - 1, Math.floor(Math.pow(rand(), skew) * list.length))];
+    const hex = (n) => (n >>> 0).toString(16).padStart(8, '0');
+    const rows = [];
+    let seq = 0;
+
+    for (let day = 0; day < 30; day++) {
+      const dayStart = SAMPLE_END_MS - (29 - day) * DAY_MS;
+      const weekday = new Date(dayStart).getUTCDay();
+      const weekend = weekday === 0 || weekday === 6;
+      const incident = day === 21 || day === 22;
+      const sessions = Math.round(
+          (14 + day * 0.5) * (weekend ? 0.6 : 1) * (0.85 + rand() * 0.3));
+
+      for (let s = 0; s < sessions; s++) {
+        const userId = 'user-' +
+            String(1 + Math.floor(Math.pow(rand(), 1.6) * 24)).padStart(3, '0');
+        const agent = pick(SAMPLE_AGENTS, 1.2);
+        const sessionId = 'sess-' + hex(++seq * 2654435761);
+        let clock = dayStart + Math.floor(rand() * (DAY_MS - 3600000));
+        const invocations = 1 + Math.floor(rand() * 3);
+
+        for (let inv = 0; inv < invocations; inv++) {
+          const invocationId = 'inv-' + hex(++seq * 2246822519);
+          const traceId = 'trace-' + hex(++seq * 3266489917);
+          const emit = (eventType, fields) => {
+            clock += 40 + Math.floor(rand() * 400);
+            const iso = new Date(clock).toISOString();
+            rows.push(Object.assign({
+              timestamp: iso,
+              event_date: iso.slice(0, 10),
+              event_type: eventType,
+              agent,
+              model: '',
+              tool: '',
+              user_id: userId,
+              session_id: sessionId,
+              invocation_id: invocationId,
+              trace_id: traceId,
+              span_id: 'span-' + hex(++seq * 2654435761),
+              status: 'OK',
+              error_message: '',
+              is_truncated: false,
+              total_ms: null,
+              ttft_ms: null,
+              prompt_tokens: null,
+              cached_tokens: null,
+              candidates_tokens: null,
+              thoughts_tokens: null,
+              total_tokens: null,
+            }, fields));
+          };
+
+          emit('USER_MESSAGE_RECEIVED', {});
+          emit('AGENT_STARTING', {});
+          let agentMs = 0;
+          const steps = 1 + Math.floor(rand() * 3);
+
+          for (let step = 0; step < steps; step++) {
+            const model = pick(SAMPLE_MODELS, 1.1);
+            emit('LLM_REQUEST', {model});
+            if (rand() < (incident ? 0.08 : 0.03)) {
+              const ms = Math.round(4000 + rand() * 8000);
+              agentMs += ms;
+              emit('LLM_ERROR', {
+                model,
+                status: 'ERROR',
+                error_message: LLM_ERRORS[Math.floor(rand() * LLM_ERRORS.length)],
+                total_ms: ms,
+              });
+              break;
+            }
+            const agentFactor = agent === 'sql_generator_agent' ? 1.35 :
+                agent === 'eval_judge_agent'                    ? 1.25 :
+                agent === 'schema_retriever_agent'              ? 0.75 :
+                                                                  1.0;
+            const totalMs = Math.round(MODEL_LATENCY_MS[model] * agentFactor *
+                (incident ? 1.35 : 1) * (0.55 + rand() * 1.1));
+            const promptTokens = Math.round((1200 + rand() * 5000) *
+                (agent === 'schema_retriever_agent' ? 1.4 : 1));
+            const cacheShare = (model === 'llm-pro' || model === 'llm-standard') ?
+                0.35 + rand() * 0.35 :
+                0.2 + rand() * 0.3;
+            const cachedTokens = Math.round(promptTokens * cacheShare);
+            const candidatesTokens = Math.round(200 + rand() * 1100);
+            const thoughtsTokens = model === 'llm-pro' ?
+                Math.round(400 + rand() * 1100) :
+                model === 'llm-standard' ? Math.round(100 + rand() * 400) : 0;
+            agentMs += totalMs;
+            emit('LLM_RESPONSE', {
+              model,
+              total_ms: totalMs,
+              ttft_ms: Math.round(totalMs * (0.18 + rand() * 0.22)),
+              prompt_tokens: promptTokens,
+              cached_tokens: cachedTokens,
+              candidates_tokens: candidatesTokens,
+              thoughts_tokens: thoughtsTokens,
+              total_tokens: promptTokens + candidatesTokens + thoughtsTokens,
+              is_truncated: rand() < 0.03,
+            });
+
+            if (step < steps - 1 || rand() < 0.6) {
+              const tool = pick(SAMPLE_TOOLS, 1.0);
+              emit('TOOL_STARTING', {tool});
+              const toolMs = Math.round(TOOL_LATENCY_MS[tool] *
+                  (incident ? 1.5 : 1) * (0.5 + rand() * 1.2));
+              agentMs += toolMs;
+              if (rand() < (incident ? 0.2 : 0.07)) {
+                emit('TOOL_ERROR', {
+                  tool,
+                  status: 'ERROR',
+                  error_message:
+                      TOOL_ERRORS[Math.floor(rand() * TOOL_ERRORS.length)],
+                  total_ms: toolMs + 900,
+                });
+              } else {
+                emit('TOOL_COMPLETED', {tool, total_ms: toolMs});
+              }
+            }
+          }
+          emit('AGENT_COMPLETED', {total_ms: agentMs});
+          clock += 30000 + Math.floor(rand() * 600000);
+        }
+      }
+    }
+    rows.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+    return rows;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Metrics, dimensions, and preset pages
+  // ---------------------------------------------------------------------------
+  const DIMENSIONS = {
+    event_date: 'Date',
+    agent: 'Agent',
+    model: 'Model',
+    tool: 'Tool',
+    event_type: 'Event type',
+    user_id: 'User',
+    status: 'Status',
+  };
+
+  // `better` says which direction of the period-over-period change is good.
+  // A failed call, in SQL: an *_ERROR event, or a response or tool call
+  // logged with an ERROR status. The temp table upper-cases status. This is
+  // the same rule as isErrorRow() on the page.
+  const FAILED_TOOL_SQL = '(event_type = \'TOOL_ERROR\' OR ' +
+      '(event_type = \'TOOL_COMPLETED\' AND status = \'ERROR\'))';
+  const FAILED_CALL_SQL =
+      '(event_type IN (\'LLM_ERROR\', \'TOOL_ERROR\') OR ' +
+      '(event_type IN (\'LLM_RESPONSE\', \'TOOL_COMPLETED\') AND ' +
+      'status = \'ERROR\'))';
+
+  const METRICS = {
+    events: {label: 'Events', fmt: 'count', sql: 'COUNT(*)'},
+    sessions: {
+      label: 'Sessions', fmt: 'count', sql: 'COUNT(DISTINCT session_id)',
+    },
+    users: {label: 'Users', fmt: 'count', sql: 'COUNT(DISTINCT user_id)'},
+    traces: {label: 'Traces', fmt: 'count', sql: 'COUNT(DISTINCT trace_id)'},
+    llm_calls: {
+      label: 'LLM calls',
+      fmt: 'count',
+      sql: 'COUNTIF(event_type = \'LLM_RESPONSE\')',
+    },
+    tool_calls: {
+      label: 'Tool calls',
+      fmt: 'count',
+      sql: 'COUNTIF(event_type IN (\'TOOL_COMPLETED\', \'TOOL_ERROR\'))',
+    },
+    tool_errors: {
+      label: 'Tool errors',
+      fmt: 'count',
+      better: 'down',
+      sql: `COUNTIF(${FAILED_TOOL_SQL})`,
+    },
+    error_rate: {
+      label: 'Error rate (%)',
+      fmt: 'pct',
+      better: 'down',
+      sql: `100 * SAFE_DIVIDE(COUNTIF(${FAILED_CALL_SQL}), ` +
+          'COUNTIF(event_type IN (\'LLM_RESPONSE\', \'LLM_ERROR\', ' +
+          '\'TOOL_COMPLETED\', \'TOOL_ERROR\')))',
+    },
+    avg_llm_latency: {
+      label: 'Avg LLM latency (ms)',
+      fmt: 'ms',
+      better: 'down',
+      sql: 'AVG(IF(event_type = \'LLM_RESPONSE\', total_ms, NULL))',
+    },
+    p95_llm_latency: {
+      label: 'P95 LLM latency (ms)',
+      fmt: 'ms',
+      better: 'down',
+      sql: 'APPROX_QUANTILES(IF(event_type = \'LLM_RESPONSE\', total_ms, ' +
+          'NULL), 100)[OFFSET(95)]',
+    },
+    avg_ttft: {
+      label: 'Avg time to first token (ms)',
+      fmt: 'ms',
+      better: 'down',
+      sql: 'AVG(IF(event_type = \'LLM_RESPONSE\', ttft_ms, NULL))',
+    },
+    avg_tool_latency: {
+      label: 'Avg tool latency (ms)',
+      fmt: 'ms',
+      better: 'down',
+      sql: 'AVG(IF(event_type = \'TOOL_COMPLETED\', total_ms, NULL))',
+    },
+    p95_tool_latency: {
+      label: 'P95 tool latency (ms)',
+      fmt: 'ms',
+      better: 'down',
+      sql: 'APPROX_QUANTILES(IF(event_type = \'TOOL_COMPLETED\', total_ms, ' +
+          'NULL), 100)[OFFSET(95)]',
+    },
+    total_tokens: {label: 'Total tokens', fmt: 'count', sql: 'SUM(total_tokens)'},
+    cached_tokens: {
+      label: 'Cached prompt tokens', fmt: 'count', sql: 'SUM(cached_tokens)',
+    },
+    thoughts_tokens: {
+      label: 'Thinking tokens', fmt: 'count', sql: 'SUM(thoughts_tokens)',
+    },
+    cache_hit_rate: {
+      label: 'Cache hit rate (%)',
+      fmt: 'pct',
+      better: 'up',
+      sql: '100 * SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens))',
+    },
+  };
+
+  const KPI_SUBTITLES = {
+    events: (s) => `${fmtCount(s.sessions)} sessions, ${fmtCount(s.traces)} traces`,
+    sessions: (s) => `${fmtCount(s.users)} users`,
+    users: (s) => `${fmtCount(s.sessions)} sessions`,
+    llm_calls: (s) => `${fmtCount(s.llm_errors)} LLM errors`,
+    tool_calls: (s) => `${fmtCount(s.tool_errors)} tool errors`,
+    tool_errors: (s) => `of ${fmtCount(s.tool_calls)} tool calls`,
+    error_rate: (s) =>
+        `${fmtCount(s.llm_errors + s.tool_errors)} failed LLM and tool calls`,
+    p95_llm_latency: (s) => `Average ${fmtMs(s.avg_llm_latency)}`,
+    avg_ttft: (s) => `Across ${fmtCount(s.llm_calls)} LLM calls`,
+    p95_tool_latency: (s) => `Average ${fmtMs(s.avg_tool_latency)}`,
+    total_tokens: (s) => `${fmtCount(s.thoughts_tokens)} thinking tokens`,
+    cache_hit_rate: (s) => `${fmtCount(s.cached_tokens)} of ${
+        fmtCount(s.prompt_tokens)} prompt tokens`,
+  };
+
+  function visual(id, title, type, dim, metric, span, extra) {
+    return Object.assign({id, title, type, dim, metric, span}, extra || {});
+  }
+
+  const PAGE_BUILDERS = {
+    activity: (uid, prompt, type) => ({
+      id: uid,
+      title: 'Agent Activity Overview',
+      subtitle: 'Sessions, users, and LLM and tool calls by agent and day.',
+      prompt,
+      kpis: ['sessions', 'users', 'llm_calls', 'tool_calls'],
+      visuals: [
+        visual(uid + '-1', 'Sessions and traces per day', 'line', 'event_date',
+            'sessions', 7, {secondaryMetric: 'traces'}),
+        visual(uid + '-2', 'Event type mix', 'donut', 'event_type', 'events', 5),
+        visual(uid + '-3', 'LLM calls by agent', type || 'hbar', 'agent',
+            'llm_calls', 6),
+        visual(uid + '-4', 'Top users by sessions', 'bar', 'user_id',
+            'sessions', 6),
+      ],
+    }),
+    tokens: (uid, prompt, type) => ({
+      id: uid,
+      title: 'Token Consumption & Caching',
+      subtitle: 'Token usage from attributes.usage_metadata and the share of ' +
+          'prompt tokens served from the context cache.',
+      prompt,
+      kpis: ['total_tokens', 'cache_hit_rate', 'llm_calls', 'avg_ttft'],
+      visuals: [
+        visual(uid + '-1', 'Total and cached tokens per day', 'line',
+            'event_date', 'total_tokens', 7, {secondaryMetric: 'cached_tokens'}),
+        visual(uid + '-2', 'Token share by model', 'donut', 'model',
+            'total_tokens', 5),
+        visual(uid + '-3', 'Total tokens by agent', type || 'hbar', 'agent',
+            'total_tokens', 6),
+        visual(uid + '-4', 'Cache hit rate by model', 'bar', 'model',
+            'cache_hit_rate', 6),
+      ],
+    }),
+    latency: (uid, prompt, type) => ({
+      id: uid,
+      title: 'Latency',
+      subtitle: 'LLM latency and time to first token from latency_ms, and ' +
+          'tool latency for completed calls.',
+      prompt,
+      kpis: ['p95_llm_latency', 'avg_ttft', 'p95_tool_latency', 'error_rate'],
+      visuals: [
+        visual(uid + '-1', 'Avg LLM latency and time to first token per day',
+            'line', 'event_date', 'avg_llm_latency', 7,
+            {secondaryMetric: 'avg_ttft'}),
+        visual(uid + '-2', 'P95 LLM latency by model', type || 'bar', 'model',
+            'p95_llm_latency', 5),
+        visual(uid + '-3', 'Avg tool latency by tool', 'hbar', 'tool',
+            'avg_tool_latency', 6),
+        visual(uid + '-4', 'Slowest LLM and tool calls', 'table', 'span_id',
+            'total_ms', 6),
+      ],
+    }),
+    errors: (uid, prompt, type) => ({
+      id: uid,
+      title: 'Errors',
+      subtitle: 'Failed LLM and tool calls, the tools and agents behind them, ' +
+          'and their error messages.',
+      prompt,
+      kpis: ['error_rate', 'tool_errors', 'llm_calls', 'tool_calls'],
+      visuals: [
+        visual(uid + '-1', 'Tool errors per day', 'line', 'event_date',
+            'tool_errors', 7),
+        visual(uid + '-2', 'Tool errors by tool', type || 'hbar', 'tool',
+            'tool_errors', 5),
+        visual(uid + '-3', 'Error rate by agent', 'bar', 'agent', 'error_rate',
+            6),
+        visual(uid + '-4', 'Recent errors', 'table', 'span_id', 'total_ms', 6,
+            {errorsOnly: true}),
+      ],
+    }),
+    tools: (uid, prompt, type) => ({
+      id: uid,
+      title: 'Tool Usage',
+      subtitle: 'Tool calls, their latency, and the agents that make them.',
+      prompt,
+      kpis: ['tool_calls', 'tool_errors', 'p95_tool_latency', 'error_rate'],
+      visuals: [
+        visual(uid + '-1', 'Tool calls per day', 'line', 'event_date',
+            'tool_calls', 7),
+        visual(uid + '-2', 'Tool call mix', type || 'donut', 'tool',
+            'tool_calls', 5),
+        visual(uid + '-3', 'Tool calls by agent', 'hbar', 'agent', 'tool_calls',
+            6),
+        visual(uid + '-4', 'Avg tool latency by tool', 'bar', 'tool',
+            'avg_tool_latency', 6),
+      ],
+    }),
+  };
+
+  // ---------------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------------
+  const SAMPLE_ROWS = generateSampleEvents();
+  const SAMPLE_LABEL = 'agent_events (synthetic sample, 30 days)';
+
+  const state = {
+    rows: SAMPLE_ROWS,
+    activeView: 'report',
+    slicers: {days: 30, agent: 'ALL', model: 'ALL'},
+    crossFilters: {},
+    copilotMode: 'new',
+    activePageId: 'page-activity',
+    pages: [
+      PAGE_BUILDERS.activity('page-activity', 'Default page', null),
+      PAGE_BUILDERS.latency('page-latency', 'Default page', null),
+    ],
+    tableId: 'your-project.your_dataset.agent_events',
+  };
+
+  // ---------------------------------------------------------------------------
+  // Filtering and aggregation
+  // ---------------------------------------------------------------------------
+  function newestDate(rows) {
+    let max = '';
+    for (const r of rows) {
+      if (r.event_date > max) max = r.event_date;
+    }
+    return max;
+  }
+
+  // Returns rows in the selected window (or the window just before it when
+  // `previousWindow` is true), after slicers and cross-filters.
+  function filterRows(options) {
+    const opts = options || {};
+    const newest = newestDate(state.rows);
+    if (!newest) return [];
+    const days = state.slicers.days;
+    const endMs = Date.parse(newest + 'T00:00:00Z') -
+        (opts.previousWindow ? days * DAY_MS : 0);
+    const startMs = endMs - (days - 1) * DAY_MS;
+    return state.rows.filter((r) => {
+      const dayMs = Date.parse(r.event_date + 'T00:00:00Z');
+      if (Number.isNaN(dayMs) || dayMs < startMs || dayMs > endMs) return false;
+      if (state.slicers.agent !== 'ALL' && r.agent !== state.slicers.agent) {
+        return false;
+      }
+      if (state.slicers.model !== 'ALL' && r.model !== state.slicers.model) {
+        return false;
+      }
+      for (const [field, value] of Object.entries(state.crossFilters)) {
+        if (field === opts.ignoreField) continue;
+        if (String(r[field] ?? '') !== String(value)) return false;
+      }
+      return true;
+    });
+  }
+
+  function mean(values) {
+    return values.length ?
+        values.reduce((a, b) => a + b, 0) / values.length : null;
+  }
+
+  // Nearest-rank percentile; BigQuery's APPROX_QUANTILES can differ slightly.
+  function percentile(values, p) {
+    if (!values.length) return null;
+    const sorted = [...values].sort((a, b) => a - b);
+    const rank = Math.ceil((p / 100) * sorted.length);
+    return sorted[Math.min(sorted.length - 1, Math.max(0, rank - 1))];
+  }
+
+  function isNum(v) {
+    return typeof v === 'number' && Number.isFinite(v);
+  }
+
+  // A call that failed: an *_ERROR event, or a call logged with an error
+  // status.
+  function isErrorRow(r) {
+    return r.event_type === 'LLM_ERROR' || r.event_type === 'TOOL_ERROR' ||
+        ((r.event_type === 'TOOL_COMPLETED' || r.event_type === 'LLM_RESPONSE') &&
+         String(r.status).toUpperCase() === 'ERROR');
+  }
+
+  function summarize(rows) {
+    const sessions = new Set();
+    const users = new Set();
+    const traces = new Set();
+    const llmLatency = [];
+    const ttft = [];
+    const toolLatency = [];
+    let llmCalls = 0;
+    let llmErrors = 0;
+    let toolCalls = 0;
+    let toolErrors = 0;
+    // Token sums stay null when no row has the field, as SUM does in SQL.
+    let promptTokens = null;
+    let cachedTokens = null;
+    let thoughtsTokens = null;
+    let totalTokens = null;
+    const add = (sum, v) => (isNum(v) ? (sum ?? 0) + v : sum);
+
+    for (const r of rows) {
+      if (r.session_id) sessions.add(r.session_id);
+      if (r.user_id) users.add(r.user_id);
+      if (r.trace_id) traces.add(r.trace_id);
+      switch (r.event_type) {
+        case 'LLM_RESPONSE':
+          llmCalls++;
+          // The logger also writes a failed response as LLM_RESPONSE with an
+          // error status.
+          if (isErrorRow(r)) llmErrors++;
+          if (isNum(r.total_ms)) llmLatency.push(r.total_ms);
+          if (isNum(r.ttft_ms)) ttft.push(r.ttft_ms);
+          break;
+        case 'LLM_ERROR':
+          llmErrors++;
+          break;
+        case 'TOOL_COMPLETED':
+          toolCalls++;
+          // Producers also log a failed call as TOOL_COMPLETED with an error
+          // status.
+          if (isErrorRow(r)) toolErrors++;
+          if (isNum(r.total_ms)) toolLatency.push(r.total_ms);
+          break;
+        case 'TOOL_ERROR':
+          toolCalls++;
+          toolErrors++;
+          break;
+        default:
+          break;
+      }
+      promptTokens = add(promptTokens, r.prompt_tokens);
+      cachedTokens = add(cachedTokens, r.cached_tokens);
+      thoughtsTokens = add(thoughtsTokens, r.thoughts_tokens);
+      totalTokens = add(totalTokens, r.total_tokens);
+    }
+
+    // LLM_ERROR events are calls too; failed LLM_RESPONSE rows are already
+    // in llmCalls.
+    const llmErrorEvents = rows.filter((r) => r.event_type === 'LLM_ERROR').length;
+    const operations = llmCalls + llmErrorEvents + toolCalls;
+    return {
+      events: rows.length,
+      sessions: sessions.size,
+      users: users.size,
+      traces: traces.size,
+      llm_calls: llmCalls,
+      llm_errors: llmErrors,
+      tool_calls: toolCalls,
+      tool_errors: toolErrors,
+      error_rate: operations ? ((llmErrors + toolErrors) / operations) * 100 : null,
+      avg_llm_latency: mean(llmLatency),
+      p95_llm_latency: percentile(llmLatency, 95),
+      avg_ttft: mean(ttft),
+      avg_tool_latency: mean(toolLatency),
+      p95_tool_latency: percentile(toolLatency, 95),
+      prompt_tokens: promptTokens,
+      cached_tokens: cachedTokens,
+      thoughts_tokens: thoughtsTokens,
+      total_tokens: totalTokens,
+      // Unknown unless some row reports cached tokens; an explicit 0 is a
+      // real 0%. SAFE_DIVIDE(SUM(cached), SUM(prompt)) behaves the same.
+      cache_hit_rate: promptTokens && cachedTokens !== null ?
+          (cachedTokens / promptTokens) * 100 : null,
+    };
+  }
+
+  // With `keepSecondary`, a group stays when only the secondary metric has a
+  // value, so a line chart can show that series with a gap in the other.
+  function aggregateBy(rows, dim, metric, secondaryMetric, keepSecondary) {
+    const groups = new Map();
+    for (const r of rows) {
+      const key = r[dim];
+      if (key === '' || key === null || key === undefined) continue;
+      const label = String(key);
+      if (!groups.has(label)) groups.set(label, []);
+      groups.get(label).push(r);
+    }
+    const series = [];
+    for (const [label, list] of groups) {
+      const s = summarize(list);
+      const value = s[metric];
+      const secondary = secondaryMetric ? s[secondaryMetric] : null;
+      if (!isNum(value) && !(keepSecondary && isNum(secondary))) continue;
+      series.push({label, value: isNum(value) ? value : null, secondary});
+    }
+    if (dim === 'event_date') {
+      series.sort((a, b) => a.label.localeCompare(b.label));
+    } else {
+      series.sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
+    }
+    return series;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Formatting and escaping
+  // ---------------------------------------------------------------------------
+  function fmtCount(n) {
+    if (!isNum(n)) return '--';
+    const abs = Math.abs(n);
+    if (abs >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+    if (abs >= 1e4) return (n / 1e3).toFixed(1) + 'K';
+    return Math.round(n).toLocaleString('en-US');
+  }
+
+  function fmtMs(n) {
+    return isNum(n) ? `${Math.round(n).toLocaleString('en-US')} ms` : '--';
+  }
+
+  function fmtPct(n) {
+    return isNum(n) ? `${n.toFixed(1)}%` : '--';
+  }
+
+  function fmtMetric(metric, value) {
+    const kind = METRICS[metric] ? METRICS[metric].fmt : 'count';
+    if (kind === 'ms') return fmtMs(value);
+    if (kind === 'pct') return fmtPct(value);
+    return fmtCount(value);
+  }
+
+  function metricLabel(metric) {
+    return METRICS[metric] ? METRICS[metric].label : metric;
+  }
+
+  function escHtml(s) {
+    return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+  }
+
+  function escAttr(s) {
+    return escHtml(s).replace(/"/g, '&quot;');
+  }
+
+  // A text cell that a spreadsheet would read as a formula: one that starts
+  // with = + - @, a tab, or a CR, possibly after leading whitespace.
+  const FORMULA_LEAD = /^[\t\r]|^\s*[=+\-@]/;
+
+  // True for text that, once any leading apostrophes are removed, a
+  // spreadsheet would run as a formula. Guarding these (including ones that
+  // already start with an apostrophe) keeps the guard reversible: removing
+  // one apostrophe on import always restores the original text.
+  function needsFormulaGuard(text) {
+    return FORMULA_LEAD.test(text.replace(/^'+/, ''));
+  }
+
+  // Formats one CSV field per RFC 4180: doubles embedded quotes and quotes any
+  // field that contains a comma, quote, CR, or LF. Text that a spreadsheet
+  // would run as a formula gets a leading apostrophe first, because quoting
+  // alone doesn't stop Excel or Sheets from evaluating it.
+  function csvCell(v) {
+    let s = String(v ?? '');
+    if (typeof v === 'string' && needsFormulaGuard(s)) s = `'${s}`;
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }
+
+  // Export CSV adds this last column to mark that its text cells carry the
+  // formula guard; import removes the guard only when it's present.
+  const GUARD_COLUMN = 'copilot_formula_guard';
+
+  // The data columns Export CSV writes, in order.
+  const EXPORT_COLUMNS = [
+    'timestamp', 'event_date', 'event_type', 'agent', 'model', 'tool',
+    'user_id', 'session_id', 'invocation_id', 'trace_id', 'span_id', 'status',
+    'error_message', 'is_truncated', 'total_ms', 'ttft_ms', 'prompt_tokens',
+    'cached_tokens', 'candidates_tokens', 'thoughts_tokens', 'total_tokens',
+  ];
+
+  // Parses RFC 4180 CSV text into an array of string arrays.
+  function parseCsv(text) {
+    const records = [];
+    let record = [];
+    let field = '';
+    let quoted = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (quoted) {
+        if (c === '"' && text[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else if (c === '"') {
+          quoted = false;
+        } else {
+          field += c;
+        }
+      } else if (c === '"') {
+        quoted = true;
+      } else if (c === ',') {
+        record.push(field);
+        field = '';
+      } else if (c === '\n' || c === '\r') {
+        if (c === '\r' && text[i + 1] === '\n') i++;
+        record.push(field);
+        records.push(record);
+        record = [];
+        field = '';
+      } else {
+        field += c;
+      }
+    }
+    if (field !== '' || record.length) {
+      record.push(field);
+      records.push(record);
+    }
+    return records.filter((r) => r.some((cell) => cell.trim() !== ''));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Prompt compiler (rule-based keyword matching)
+  // ---------------------------------------------------------------------------
+  function distinctValues(field) {
+    const values = new Set();
+    for (const r of state.rows) {
+      if (r[field]) values.add(String(r[field]));
+    }
+    return [...values].sort();
+  }
+
+  function escapeRegex(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function mentions(text, value) {
+    const spaced = value.replace(/[_-]+/g, ' ');
+    return new RegExp(`\\b${escapeRegex(value.toLowerCase())}\\b`).test(text) ||
+        (spaced !== value &&
+         new RegExp(`\\b${escapeRegex(spaced.toLowerCase())}\\b`).test(text));
+  }
+
+  function detectFilters(ql) {
+    const filters = {};
+    let days = null;
+    if (/\b(7d|7 days|last week|past week)\b/.test(ql)) days = 7;
+    else if (/\b(14d|14 days|2 weeks|two weeks)\b/.test(ql)) days = 14;
+    else if (/\b(30d|30 days|last month|past month)\b/.test(ql)) days = 30;
+    for (const agent of distinctValues('agent')) {
+      if (mentions(ql, agent)) filters.agent = agent;
+    }
+    for (const model of distinctValues('model')) {
+      if (mentions(ql, model)) filters.model = model;
+    }
+    for (const tool of distinctValues('tool')) {
+      if (mentions(ql, tool)) filters.tool = tool;
+    }
+    const user = ql.match(/\buser[-_ ]?(\d{1,6})\b/);
+    if (user) {
+      const wanted = distinctValues('user_id').find(
+          (u) => u.toLowerCase().replace(/[^0-9]/g, '').replace(/^0+/, '') ===
+              user[1].replace(/^0+/, ''));
+      if (wanted) filters.user_id = wanted;
+    }
+    if (/\b(only errors|errors only|failed calls only|status error)\b/.test(ql)) {
+      filters.status = 'ERROR';
+    }
+    return {days, filters};
+  }
+
+  function detectChartType(ql) {
+    if (/\b(donut|pie)\b/.test(ql)) return 'donut';
+    if (/\b(line|trend|over time|daily|per day)\b/.test(ql)) return 'line';
+    if (/\b(horizontal|hbar|ranked|ranking|top)\b/.test(ql)) return 'hbar';
+    if (/\b(table|rows|list)\b/.test(ql)) return 'table';
+    if (/\b(bar|column)\b/.test(ql)) return 'bar';
+    return null;
+  }
+
+  function detectDimension(ql) {
+    if (/\bmodels?\b/.test(ql)) return 'model';
+    if (/\btools?\b/.test(ql)) return 'tool';
+    if (/\bagents?\b/.test(ql)) return 'agent';
+    if (/\busers?\b/.test(ql)) return 'user_id';
+    if (/\bevent types?\b/.test(ql)) return 'event_type';
+    if (/\bstatus\b/.test(ql)) return 'status';
+    if (/\b(daily|trend|over time|per day|date)\b/.test(ql)) return 'event_date';
+    return 'agent';
+  }
+
+  function detectMetric(ql) {
+    const tool = /\btools?\b/.test(ql);
+    if (/\bp95\b/.test(ql) && /\blatency\b/.test(ql)) {
+      return tool ? 'p95_tool_latency' : 'p95_llm_latency';
+    }
+    if (/\b(ttft|first token)\b/.test(ql)) return 'avg_ttft';
+    if (/\b(latency|duration|slow\w*)\b/.test(ql)) {
+      return tool ? 'avg_tool_latency' : 'avg_llm_latency';
+    }
+    if (/\bcache\b/.test(ql)) return 'cache_hit_rate';
+    if (/\b(thinking|thoughts?)\b/.test(ql)) return 'thoughts_tokens';
+    if (/\btokens?\b/.test(ql)) return 'total_tokens';
+    if (/\b(error rate|failure rate)\b/.test(ql)) return 'error_rate';
+    if (/\b(errors?|fail\w*)\b/.test(ql)) return 'tool_errors';
+    if (/\bsessions?\b/.test(ql)) return 'sessions';
+    if (/\btraces?\b/.test(ql)) return 'traces';
+    if (/\bllm calls?\b/.test(ql)) return 'llm_calls';
+    if (/\btool calls?\b/.test(ql)) return 'tool_calls';
+    if (/\busers?\b/.test(ql)) return 'users';
+    return 'events';
+  }
+
+  function detectTheme(ql) {
+    if (/\b(errors?|fail\w*|exceptions?|truncat\w*)\b/.test(ql)) return 'errors';
+    if (/\b(latency|ttft|first token|slow\w*|p95|p50|percentile|duration|performance)\b/
+            .test(ql)) {
+      return 'latency';
+    }
+    if (/\b(tokens?|cache|cached|caching|thinking)\b/.test(ql)) return 'tokens';
+    if (/\b(tools?|function calls?)\b/.test(ql)) return 'tools';
+    if (/\b(overview|activity|adoption|usage|sessions?|users?|traces?|summary)\b/
+            .test(ql)) {
+      return 'activity';
+    }
+    return null;
+  }
+
+  // Unique ids for new pages and visuals. A timestamp alone repeats when two
+  // are created in the same millisecond, which reopened the older page.
+  let idCounter = 0;
+  function newId(prefix) {
+    idCounter += 1;
+    return `${prefix}-${Date.now().toString(36)}-${idCounter.toString(36)}`;
+  }
+
+  function compilePrompt(rawPrompt) {
+    const prompt = rawPrompt.trim();
+    const ql = prompt.toLowerCase();
+    const steps = [];
+    const {days, filters} = detectFilters(ql);
+    const chartType = detectChartType(ql);
+    if (days) steps.push(`Time window: last ${days} days`);
+    if (Object.keys(filters).length) {
+      steps.push('Filters: ' +
+          Object.entries(filters).map(([k, v]) => `${k} = ${v}`).join(', '));
+    }
+
+    const filterOnly = /^(filter|show only|restrict|focus on)\b/.test(ql) &&
+        !/(dashboard|chart|plot|create|build|add|compare|breakdown|analy[sz]e)/
+             .test(ql);
+    if (filterOnly && (days || Object.keys(filters).length)) {
+      return {
+        action: 'filter', days, filters, steps,
+        reply: 'Applied the filters to the current page.',
+      };
+    }
+
+    // "Make a new page with a bar chart of ..." asks for a page, not a switch.
+    const wantsNewPage = /\b(new|another)\s+(page|dashboard)\b/.test(ql);
+    if (!wantsNewPage && /\b(switch|change|convert|make)\b/.test(ql) &&
+        chartType) {
+      steps.push(`Chart type: ${chartType}`);
+      return {
+        action: 'switch_chart', chartType, days, filters, steps,
+        reply: `Switched the charts on this page to <b>${chartType}</b>.`,
+      };
+    }
+
+    // "<metric> by <dimension>": read each from its own side of the last
+    // "by", so "tool calls by agent" groups by agent and "events by user"
+    // counts events.
+    const byAt = ql.lastIndexOf(' by ');
+    const metricText = byAt >= 0 ? ql.slice(0, byAt) : ql;
+    const dimText = byAt >= 0 ? ql.slice(byAt + 4) : ql;
+    const dim = detectDimension(dimText);
+    const metric = detectMetric(metricText);
+
+    if (!wantsNewPage &&
+        (/^(add|pin|include|append)\b/.test(ql) ||
+         state.copilotMode === 'modify')) {
+      const type = chartType || (dim === 'event_date' ? 'line' : 'hbar');
+      const added = visual(newId('v'),
+          `${metricLabel(metric)} by ${DIMENSIONS[dim]}`, type, dim, metric, 6,
+          {isNew: true});
+      steps.push(`New ${type} visual: ${metric} by ${dim}`);
+      return {
+        action: 'add_visual', visual: added, days, filters, steps,
+        reply: `Added <b>${escHtml(added.title)}</b> to this page.`,
+      };
+    }
+
+    const uid = newId('page');
+    const theme = detectTheme(ql);
+    let page;
+    if (theme) {
+      page = PAGE_BUILDERS[theme](uid, prompt, chartType);
+      steps.push(`Matched the ${theme} template`);
+    } else {
+      const type = chartType || (dim === 'event_date' ? 'line' : 'bar');
+      const altDim = dim === 'agent' ? 'model' : 'agent';
+      const kpis = [...new Set([
+        KPI_SUBTITLES[metric] ? metric : 'events', 'sessions', 'llm_calls',
+        'error_rate',
+      ])].slice(0, 4);
+      page = {
+        id: uid,
+        title: `${metricLabel(metric)} by ${DIMENSIONS[dim]}`,
+        subtitle: 'Built from your prompt.',
+        prompt,
+        kpis,
+        visuals: [
+          visual(uid + '-1', `${metricLabel(metric)} by ${DIMENSIONS[dim]}`,
+              type, dim, metric, 6),
+          visual(uid + '-2', `${metricLabel(metric)} per day`, 'line',
+              'event_date', metric, 6),
+          visual(uid + '-3', `${metricLabel(metric)} by ${DIMENSIONS[altDim]}`,
+              'donut', altDim, metric, 5),
+          visual(uid + '-4', 'Slowest LLM and tool calls', 'table', 'span_id',
+              'total_ms', 7),
+        ],
+      };
+      steps.push(`No template matched; built a custom page for ${metric} by ${dim}`);
+    }
+    steps.push(`${page.kpis.length} KPIs and ${page.visuals.length} visuals`);
+    return {
+      action: 'create_page', page, days, filters, steps,
+      reply: `Created the page <b>${escHtml(page.title)}</b>.`,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // BigQuery SQL
+  // ---------------------------------------------------------------------------
+  const PROJECT_RE = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
+  const DATASET_RE = /^[A-Za-z_][A-Za-z0-9_]{0,1023}$/;
+  const TABLE_RE = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,1023}$/;
+
+  function parseTableId(text) {
+    const parts = String(text).trim().split('.');
+    if (parts.length !== 3) return null;
+    const [project, dataset, table] = parts;
+    if (!PROJECT_RE.test(project) || !DATASET_RE.test(dataset) ||
+        !TABLE_RE.test(table)) {
+      return null;
+    }
+    return parts;
+  }
+
+  // Renders a GoogleSQL string literal.
+  function sqlString(value) {
+    const escaped = String(value)
+                        .replace(/\\/g, '\\\\')
+                        .replace(/'/g, '\\\'')
+                        .replace(/\r/g, '\\r')
+                        .replace(/\n/g, '\\n');
+    return `'${escaped}'`;
+  }
+
+  function sqlComment(text) {
+    return String(text).replace(/[\r\n]+/g, ' ');
+  }
+
+  function sqlFilters(ignoreField) {
+    const clauses = [];
+    if (state.slicers.agent !== 'ALL') {
+      clauses.push(`agent = ${sqlString(state.slicers.agent)}`);
+    }
+    if (state.slicers.model !== 'ALL') {
+      clauses.push(`model = ${sqlString(state.slicers.model)}`);
+    }
+    for (const [field, value] of Object.entries(state.crossFilters)) {
+      // A visual ignores its own cross-filter, as on the page.
+      if (field === ignoreField) continue;
+      if (DIMENSIONS[field]) clauses.push(`${field} = ${sqlString(value)}`);
+    }
+    return clauses;
+  }
+
+  function whereSql(extra, ignoreField) {
+    const clauses = [...sqlFilters(ignoreField), ...(extra || [])];
+    return clauses.length ? `\nWHERE\n  ${clauses.join('\n  AND ')}` : '';
+  }
+
+  // Members each chart type shows, so the SQL returns the same rows.
+  const DONUT_SLICES = 6;
+  const ROW_LIST_LIMIT = 12;
+  const VISUAL_LIMITS = {
+    bar: 8, hbar: 7, donut: DONUT_SLICES, table: ROW_LIST_LIMIT,
+  };
+
+  // The slowest-calls and recent-errors tables list rows instead of
+  // aggregating a metric by a dimension.
+  function isRowList(v) {
+    return v.dim === 'span_id';
+  }
+
+  function generatePageSql(page, tableParts) {
+    const table = tableParts.join('.');
+    const days = state.slicers.days;
+    // Like the page, the window ends on the newest day with data, and the
+    // KPI deltas compare it with the window of the same length before it.
+    const inWindow = `event_date > DATE_SUB(window_end, INTERVAL ${days} DAY)`;
+    const lines = [
+      `-- BQAA Copilot preview: ${sqlComment(page.title)}`,
+      `-- Prompt: ${sqlComment(page.prompt)}`,
+      '-- Run as one multi-statement query. As on the page, the window ends on',
+      `-- the newest day with data and covers ${days} days; KPIs also return the`,
+      '-- window before it for the deltas.',
+      '',
+      '-- Look for the newest day in recent partitions first, and fall back',
+      '-- to the whole table when it has no recent data.',
+      'DECLARE window_end DATE DEFAULT (',
+      `  SELECT MAX(DATE(timestamp)) FROM \`${table}\``,
+      `  WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${
+          2 * days} DAY));`,
+      'IF window_end IS NULL THEN',
+      '  SET window_end = (',
+      `    SELECT MAX(DATE(timestamp)) FROM \`${table}\``,
+      '    WHERE timestamp >= TIMESTAMP \'0001-01-01\');',
+      'END IF;',
+      '',
+      'CREATE TEMP TABLE events AS',
+      'SELECT',
+      '  DATE(timestamp) AS event_date,',
+      '  timestamp,',
+      '  event_type,',
+      '  agent,',
+      '  user_id,',
+      '  session_id,',
+      '  trace_id,',
+      '  span_id,',
+      '  UPPER(status) AS status,',
+      '  error_message,',
+      '  COALESCE(NULLIF(JSON_VALUE(attributes, \'$.model\'), \'\'),',
+      '           JSON_VALUE(attributes, \'$.model_version\')) AS model,',
+      '  COALESCE(JSON_VALUE(content, \'$.tool\'),',
+      '           JSON_VALUE(content, \'$.tool_name\')) AS tool,',
+      '  SAFE_CAST(JSON_VALUE(latency_ms, \'$.total_ms\') AS FLOAT64) AS total_ms,',
+      '  SAFE_CAST(JSON_VALUE(latency_ms, \'$.time_to_first_token_ms\') AS FLOAT64)',
+      '    AS ttft_ms,',
+      '  COALESCE(',
+      '    SAFE_CAST(JSON_VALUE(attributes,',
+      '      \'$.usage_metadata.prompt_token_count\') AS INT64),',
+      '    SAFE_CAST(JSON_VALUE(attributes,',
+      '      \'$.usage_metadata.prompt_tokens\') AS INT64),',
+      '    SAFE_CAST(JSON_VALUE(content, \'$.usage.prompt\') AS INT64))',
+      '    AS prompt_tokens,',
+      '  SAFE_CAST(JSON_VALUE(attributes,',
+      '    \'$.usage_metadata.cached_content_token_count\') AS INT64) AS cached_tokens,',
+      '  SAFE_CAST(JSON_VALUE(attributes,',
+      '    \'$.usage_metadata.thoughts_token_count\') AS INT64) AS thoughts_tokens,',
+      '  COALESCE(',
+      '    SAFE_CAST(JSON_VALUE(attributes,',
+      '      \'$.usage_metadata.total_token_count\') AS INT64),',
+      '    SAFE_CAST(JSON_VALUE(attributes,',
+      '      \'$.usage_metadata.total_tokens\') AS INT64),',
+      '    SAFE_CAST(JSON_VALUE(content, \'$.usage.total\') AS INT64))',
+      '    AS total_tokens',
+      `FROM \`${table}\``,
+      `WHERE timestamp >= TIMESTAMP(DATE_SUB(window_end, INTERVAL ${
+          2 * days - 1} DAY))`,
+      '  AND timestamp < TIMESTAMP(DATE_ADD(window_end, INTERVAL 1 DAY));',
+      '',
+      '-- KPIs for the window and the one before it',
+      'SELECT',
+      `  IF(${inWindow}, 'current', 'previous') AS period,`,
+      page.kpis.map((k) => `  ${METRICS[k].sql} AS ${k}`).join(',\n'),
+      `FROM events${whereSql()}`,
+      'GROUP BY period',
+      'ORDER BY period;',
+    ];
+
+    for (const v of page.visuals) {
+      lines.push('', `-- ${sqlComment(v.title)}`);
+      if (isRowList(v)) {
+        // Same rows as the table: errors newest first, or the slowest calls
+        // that have a latency.
+        const filter = v.errorsOnly ?
+            '(event_type IN (\'LLM_ERROR\', \'TOOL_ERROR\') OR ' +
+                '(event_type IN (\'LLM_RESPONSE\', \'TOOL_COMPLETED\') ' +
+                'AND status = \'ERROR\'))' :
+            'event_type IN (\'LLM_RESPONSE\', \'LLM_ERROR\', ' +
+                '\'TOOL_COMPLETED\', \'TOOL_ERROR\')';
+        const extraRows = v.errorsOnly ? [inWindow, filter] :
+                                         [inWindow, filter, 'total_ms IS NOT NULL'];
+        lines.push(
+            'SELECT timestamp, event_type, agent, model, tool, total_ms,',
+            '  total_tokens, status, error_message',
+            `FROM events${whereSql(extraRows)}`,
+            `ORDER BY ${v.errorsOnly ? 'timestamp' : 'total_ms'} DESC`,
+            `LIMIT ${ROW_LIST_LIMIT};`);
+        continue;
+      }
+      const select = [`  ${v.dim}`, `  ${METRICS[v.metric].sql} AS ${v.metric}`];
+      if (v.secondaryMetric) {
+        select.push(`  ${METRICS[v.secondaryMetric].sql} AS ${v.secondaryMetric}`);
+      }
+      const extra = v.dim === 'event_date' ? [inWindow] :
+                                             [inWindow, `${v.dim} IS NOT NULL`];
+      const from = `FROM events${whereSql(extra, v.dim)}`;
+      // Like the page, drop groups with no value. A line chart keeps a group
+      // when either of its series has one.
+      const having = v.type === 'line' && v.secondaryMetric ?
+          `HAVING ${v.metric} IS NOT NULL OR ${v.secondaryMetric} IS NOT NULL` :
+          `HAVING ${v.metric} IS NOT NULL`;
+      const limit = VISUAL_LIMITS[v.type];
+      if (v.dim === 'event_date') {
+        if (limit) {
+          // Charts other than lines show the newest days, oldest first.
+          lines.push('SELECT * FROM (', 'SELECT', select.join(',\n'), from,
+              'GROUP BY event_date', having,
+              `ORDER BY event_date DESC\nLIMIT ${limit}`, ')',
+              'ORDER BY event_date;');
+        } else {
+          lines.push('SELECT', select.join(',\n'), from, 'GROUP BY event_date',
+              having, 'ORDER BY event_date;');
+        }
+      } else if (v.type === 'donut' && isAdditiveMetric(v.metric)) {
+        // Same as the donut: the top five, then the rest folded into "Other".
+        lines.push(
+            'WITH grouped AS (',
+            `  SELECT ${v.dim}, ${METRICS[v.metric].sql} AS value`,
+            `  ${from.replace(/\n/g, '\n  ')}`,
+            `  GROUP BY ${v.dim}`,
+            '), ranked AS (',
+            '  SELECT *,',
+            `    ROW_NUMBER() OVER (ORDER BY value DESC, ${v.dim}) AS rn,`,
+            '    COUNT(*) OVER () AS n_groups',
+            '  FROM grouped',
+            '  WHERE value > 0',
+            ')',
+            'SELECT',
+            `  IF(n_groups <= ${DONUT_SLICES} OR rn < ${DONUT_SLICES}, ${v.dim},`,
+            `     CONCAT('Other (', CAST(n_groups - ${
+                DONUT_SLICES - 1} AS STRING), ')')) AS ${v.dim},`,
+            `  SUM(value) AS ${v.metric}`,
+            'FROM ranked',
+            'GROUP BY 1',
+            'ORDER BY MIN(rn);');
+      } else {
+        lines.push('SELECT', select.join(',\n'), from, `GROUP BY ${v.dim}`,
+            having, `ORDER BY ${v.metric} DESC, ${v.dim}` +
+                (limit ? `\nLIMIT ${limit};` : ';'));
+      }
+    }
+    return lines.join('\n');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Charts
+  // ---------------------------------------------------------------------------
+  const tooltipEl = document.getElementById('chartTooltip');
+
+  function showTooltip(e, html) {
+    tooltipEl.innerHTML = html;
+    tooltipEl.classList.remove('hidden');
+    const pad = 12;
+    let x = e.clientX + pad;
+    let y = e.clientY + pad;
+    const rect = tooltipEl.getBoundingClientRect();
+    if (x + rect.width > window.innerWidth - 8) x = e.clientX - rect.width - pad;
+    if (y + rect.height > window.innerHeight - 8) y = e.clientY - rect.height - pad;
+    tooltipEl.style.left = x + 'px';
+    tooltipEl.style.top = y + 'px';
+  }
+
+  function hideTooltip() {
+    tooltipEl.classList.add('hidden');
+  }
+
+  function tooltipHtml(d, metric, secondaryMetric, hint) {
+    let html = `<div style="font-weight:600;">${escHtml(d.label)}</div>` +
+        `<div>${escHtml(metricLabel(metric))}: <b>${
+            escHtml(fmtMetric(metric, d.value))}</b></div>`;
+    if (secondaryMetric) {
+      html += `<div>${escHtml(metricLabel(secondaryMetric))}: <b>${
+          escHtml(fmtMetric(secondaryMetric, d.secondary))}</b></div>`;
+    }
+    if (hint) {
+      html += '<div style="color:var(--muted-foreground);margin-top:2px;">' +
+          'Click to cross-filter</div>';
+    }
+    return html;
+  }
+
+  function toggleCrossFilter(field, value) {
+    if (field === 'event_date' || !DIMENSIONS[field]) return;
+    if (state.crossFilters[field] === value) {
+      delete state.crossFilters[field];
+    } else {
+      state.crossFilters[field] = value;
+    }
+    renderAll();
+  }
+
+  function emptyStateHtml() {
+    return '<div style="height:175px;display:flex;align-items:center;' +
+        'justify-content:center;font-size:12px;color:var(--muted-foreground);">' +
+        'No matching rows for the current filters.</div>';
+  }
+
+  // Dates drop the year ("2026-11-19" -> "11-19"); other labels are
+  // shortened rather than cut at a fixed offset.
+  function axisLabel(label, dim) {
+    if (dim === 'event_date') return label.slice(5);
+    return label.length > 10 ? label.slice(0, 9) + '…' : label;
+  }
+
+  function renderLineChart(container, series, vis) {
+    if (!series.length) {
+      container.innerHTML = emptyStateHtml();
+      return;
+    }
+    const W = 540, H = 210, padL = 56, padR = 16, padT = 18, padB = 34;
+    const plotW = W - padL - padR, plotH = H - padT - padB;
+    const hasSec = Boolean(vis.secondaryMetric);
+    // The axis spans both series; percentage axes stop at 100.
+    const isPctAxis = METRICS[vis.metric] && METRICS[vis.metric].fmt === 'pct' &&
+        (!hasSec ||
+         (METRICS[vis.secondaryMetric] &&
+          METRICS[vis.secondaryMetric].fmt === 'pct'));
+    let maxVal = Math.max(1, ...series.map((d) => Math.max(
+        isNum(d.value) ? d.value : 0,
+        hasSec && isNum(d.secondary) ? d.secondary : 0))) * 1.1;
+    if (isPctAxis) maxVal = Math.min(maxVal, 100);
+    const xFor = (i) => padL +
+        (series.length === 1 ? plotW / 2 : (i / (series.length - 1)) * plotW);
+    const yFor = (v) =>
+        padT + plotH - (Math.min(Math.max(v, 0), maxVal) / maxVal) * plotH;
+    // Runs of consecutive values; a missing value leaves a gap instead of
+    // dropping the line to zero.
+    const runs = (pick) => {
+      const out = [];
+      let cur = [];
+      series.forEach((d, i) => {
+        if (isNum(pick(d))) {
+          cur.push([xFor(i).toFixed(1), yFor(pick(d)).toFixed(1)]);
+        } else if (cur.length) {
+          out.push(cur);
+          cur = [];
+        }
+      });
+      if (cur.length) out.push(cur);
+      return out;
+    };
+    const ptsOf = (run) => run.map(([x, y]) => `${x},${y}`).join(' ');
+    const gid = gradientId();
+    const lineOf = (run, color, attrs) => (run.length === 1 ?
+        // A one-point polyline draws nothing, so mark lone values with a dot.
+        `<circle cx="${run[0][0]}" cy="${run[0][1]}" r="2.5" fill="${color}"/>` :
+        `<polyline fill="none" stroke="${color}" stroke-linejoin="round" ${
+            attrs} points="${ptsOf(run)}"/>`);
+    const runs1 = runs((d) => d.value);
+    const area = runs1.filter((run) => run.length > 1)
+        .map((run) => `<polygon points="${run[0][0]},${padT + plotH} ${
+            ptsOf(run)} ${run[run.length - 1][0]},${padT + plotH}" ` +
+            `fill="url(#${gid})"/>`)
+        .join('');
+    const line1 = runs1.map((run) => lineOf(run, 'var(--chart-1)',
+        'stroke-width="2.2"')).join('');
+    const line2 = hasSec ? runs((d) => d.secondary).map((run) => lineOf(run,
+        'var(--chart-2)', 'stroke-width="2" stroke-dasharray="5,3"')).join('') :
+                           '';
+
+    let grid = '';
+    for (let g = 0; g <= 4; g++) {
+      const y = padT + (g / 4) * plotH;
+      grid += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" ` +
+          'stroke="var(--border)" stroke-dasharray="3,3"/>' +
+          `<text x="${padL - 6}" y="${y + 4}" text-anchor="end" ` +
+          `fill="var(--muted-foreground)" font-size="10">${
+              escHtml(fmtMetric(vis.metric, maxVal * (1 - g / 4)))}</text>`;
+    }
+
+    const step = Math.max(1, Math.ceil(series.length / 6));
+    let xLabels = '';
+    series.forEach((d, i) => {
+      if (i % step === 0 || i === series.length - 1) {
+        xLabels += `<text x="${xFor(i)}" y="${H - 10}" text-anchor="middle" ` +
+            `fill="var(--muted-foreground)" font-size="10">${
+                escHtml(axisLabel(d.label, vis.dim))}</text>`;
+      }
+    });
+    const dots = series
+        .map((d, i) => (!isNum(d.value) ? '' : `<circle cx="${xFor(i).toFixed(1)}" cy="${
+            yFor(d.value).toFixed(1)}" r="3.5" fill="var(--chart-1)" ` +
+            `stroke="var(--card)" stroke-width="1.5" style="cursor:pointer" ` +
+            `data-idx="${i}"/>`))
+        .join('');
+
+    const swatch = (color, metric) => '<span style="display:flex;' +
+        'align-items:center;gap:6px;"><span class="legend-swatch" ' +
+        `style="background:${color}"></span>${escHtml(metricLabel(metric))}</span>`;
+    container.innerHTML = `<div class="line-legend">${
+        swatch('var(--chart-1)', vis.metric)}${
+        hasSec ? swatch('var(--chart-2)', vis.secondaryMetric) : ''}</div>` +
+        `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:208px;` +
+        'overflow:visible;" role="img">' +
+        `<defs><linearGradient id="${gid}" x1="0" y1="0" ` +
+        'x2="0" y2="1"><stop offset="0%" stop-color="var(--chart-1)" ' +
+        'stop-opacity="0.28"/><stop offset="100%" stop-color="var(--chart-1)" ' +
+        'stop-opacity="0.02"/></linearGradient></defs>' + grid +
+        area + line1 + line2 + dots + xLabels + '</svg>';
+
+    container.querySelectorAll('circle[data-idx]').forEach((el) => {
+      const d = series[Number(el.dataset.idx)];
+      el.addEventListener('mousemove',
+          (e) => showTooltip(e, tooltipHtml(d, vis.metric, vis.secondaryMetric)));
+      el.addEventListener('mouseleave', hideTooltip);
+    });
+  }
+
+  function bindSeriesEvents(elements, items, vis) {
+    elements.forEach((el) => {
+      const d = items[Number(el.dataset.idx)];
+      el.addEventListener('click', () => toggleCrossFilter(vis.dim, d.label));
+      el.addEventListener('mousemove',
+          (e) => showTooltip(e, tooltipHtml(d, vis.metric, null, true)));
+      el.addEventListener('mouseleave', hideTooltip);
+    });
+  }
+
+  // The members a chart shows: the top values, or for dates the newest days
+  // (oldest first), matching the generated SQL.
+  function topItems(series, vis, limit) {
+    return vis.dim === 'event_date' ? series.slice(-limit) :
+                                      series.slice(0, limit);
+  }
+
+  // Unique per render, so two copies of a chart (such as Focus) don't share
+  // an SVG gradient id.
+  function gradientId() {
+    return newId('grad');
+  }
+
+  function renderBarChart(container, series, vis) {
+    const items = topItems(series, vis, VISUAL_LIMITS.bar);
+    if (!items.length) {
+      container.innerHTML = emptyStateHtml();
+      return;
+    }
+    const W = 460, H = 215, padL = 56, padR = 12, padT = 16, padB = 54;
+    const plotW = W - padL - padR, plotH = H - padT - padB;
+    const maxVal = Math.max(1, ...items.map((d) => d.value)) * 1.12;
+    const step = plotW / items.length;
+    const barW = Math.min(44, step * 0.64);
+    const active = state.crossFilters[vis.dim];
+
+    let grid = '';
+    for (let g = 0; g <= 3; g++) {
+      const y = padT + (g / 3) * plotH;
+      grid += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" ` +
+          'stroke="var(--border)" stroke-dasharray="3,3"/>' +
+          `<text x="${padL - 6}" y="${y + 4}" text-anchor="end" ` +
+          `fill="var(--muted-foreground)" font-size="10">${
+              escHtml(fmtMetric(vis.metric, maxVal * (1 - g / 3)))}</text>`;
+    }
+    let bars = '';
+    items.forEach((d, i) => {
+      const bh = Math.max(2, (d.value / maxVal) * plotH);
+      const x = padL + i * step + (step - barW) / 2;
+      const y = padT + plotH - bh;
+      const opacity = active && active !== d.label ? '0.32' : '1';
+      const short = d.label.length > 14 ? d.label.slice(0, 13) + '…' : d.label;
+      bars += `<g class="chart-bar" data-idx="${i}" opacity="${opacity}">` +
+          `<rect x="${x}" y="${y}" width="${barW}" height="${bh}" rx="3" ` +
+          `fill="${CHART_COLORS[i % CHART_COLORS.length]}"/>` +
+          `<text x="${x + barW / 2}" y="${y - 4}" text-anchor="middle" ` +
+          'fill="var(--foreground)" font-size="10" font-weight="600">' +
+          `${escHtml(fmtMetric(vis.metric, d.value))}</text>` +
+          `<text x="${x + barW / 2}" y="${padT + plotH + 14}" ` +
+          'text-anchor="middle" fill="var(--muted-foreground)" font-size="10">' +
+          `${escHtml(short)}</text></g>`;
+    });
+    container.innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;` +
+        `height:208px;overflow:visible;" role="img">${grid}${bars}</svg>`;
+    bindSeriesEvents(container.querySelectorAll('.chart-bar'), items, vis);
+  }
+
+  function renderHBarChart(container, series, vis) {
+    const items = topItems(series, vis, VISUAL_LIMITS.hbar);
+    if (!items.length) {
+      container.innerHTML = emptyStateHtml();
+      return;
+    }
+    const maxVal = Math.max(1, ...items.map((d) => d.value));
+    const active = state.crossFilters[vis.dim];
+    container.innerHTML = '<div class="hbar-list">' +
+        items.map((d, i) => {
+          const pct = Math.max(2, (d.value / maxVal) * 100);
+          const opacity = active && active !== d.label ? '0.35' : '1';
+          return `<div class="chart-bar" style="opacity:${opacity}" ` +
+              `data-idx="${i}"><div class="hbar-meta">` +
+              `<span class="truncate" style="font-weight:500;" title="${
+                  escAttr(d.label)}">${escHtml(d.label)}</span>` +
+              '<span class="mono tabular" style="color:var(--muted-foreground);' +
+              `flex-shrink:0;">${escHtml(fmtMetric(vis.metric, d.value))}</span>` +
+              '</div><div class="hbar-track"><div class="hbar-fill" ' +
+              `style="width:${pct.toFixed(1)}%;background:${
+                  CHART_COLORS[i % CHART_COLORS.length]}"></div></div></div>`;
+        }).join('') +
+        '</div>';
+    bindSeriesEvents(container.querySelectorAll('.chart-bar'), items, vis);
+  }
+
+  // True when per-group values can be summed (COUNT(*), COUNTIF, SUM).
+  // Distinct counts, averages, percentiles and rates can't.
+  function isAdditiveMetric(metric) {
+    const m = METRICS[metric];
+    return Boolean(m && /^(COUNT\(\*\)|COUNTIF\(|SUM\()/.test(m.sql));
+  }
+
+  function renderDonutChart(container, series, vis) {
+    const MAX_SLICES = DONUT_SLICES;
+    const additive = isAdditiveMetric(vis.metric);
+    const positive = series.filter((d) => isNum(d.value) && d.value > 0);
+    if (!positive.length) {
+      container.innerHTML = emptyStateHtml();
+      return;
+    }
+    // Shares only make sense for additive metrics. The total covers the
+    // full series, and groups past the top slices are folded into "Other".
+    let items = topItems(positive, vis, MAX_SLICES);
+    // Dates aren't categories, so a donut of days shows the newest ones
+    // without an "Other" slice.
+    if (additive && vis.dim !== 'event_date' && positive.length > MAX_SLICES) {
+      const rest = positive.slice(MAX_SLICES - 1);
+      items = positive.slice(0, MAX_SLICES - 1);
+      items.push({
+        label: `Other (${rest.length})`,
+        value: rest.reduce((a, d) => a + d.value, 0),
+        isOther: true,
+      });
+    }
+    const total = (additive ? positive : items)
+        .reduce((a, d) => a + d.value, 0) || 1;
+    const active = state.crossFilters[vis.dim];
+    const R = 64, r = 40, cx = 82, cy = 82;
+    let angle = -Math.PI / 2;
+
+    const slices = items.map((d, i) => {
+      const frac = Math.max(0.005, d.value / total);
+      const a1 = angle;
+      const a2 = angle + frac * Math.PI * 2;
+      angle = a2;
+      const large = frac > 0.5 ? 1 : 0;
+      const path = frac >= 0.995 ?
+          `M ${cx} ${cy - R} A ${R} ${R} 0 1 1 ${cx - 0.01} ${cy - R} Z ` +
+              `M ${cx} ${cy - r} A ${r} ${r} 0 1 0 ${cx - 0.01} ${cy - r} Z` :
+          `M ${cx + R * Math.cos(a1)} ${cy + R * Math.sin(a1)} ` +
+              `A ${R} ${R} 0 ${large} 1 ${cx + R * Math.cos(a2)} ${
+                  cy + R * Math.sin(a2)} ` +
+              `L ${cx + r * Math.cos(a2)} ${cy + r * Math.sin(a2)} ` +
+              `A ${r} ${r} 0 ${large} 0 ${cx + r * Math.cos(a1)} ${
+                  cy + r * Math.sin(a1)} Z`;
+      const opacity = active && active !== d.label ? '0.3' : '1';
+      const fill = d.isOther ? 'var(--muted-foreground)' :
+                               CHART_COLORS[i % CHART_COLORS.length];
+      // "Other" isn't a real group, so it can't be a cross-filter.
+      const cls = d.isOther ? 'chart-slice-other' : 'chart-slice';
+      return `<path d="${path}" fill="${fill}" ` +
+          `opacity="${opacity}" class="${cls}" data-idx="${i}"/>`;
+    }).join('');
+
+    const legend = items.map((d, i) => {
+      const opacity = active && active !== d.label ? '0.4' : '1';
+      const swatch = d.isOther ? 'var(--muted-foreground)' :
+                                 CHART_COLORS[i % CHART_COLORS.length];
+      const shown = additive ? `${((d.value / total) * 100).toFixed(1)}%` :
+                               fmtMetric(vis.metric, d.value);
+      const cls = d.isOther ? ' donut-legend-row-other' : '';
+      return `<div class="donut-legend-row${cls}" style="opacity:${opacity}" ` +
+          `data-idx="${i}"><div style="display:flex;align-items:center;gap:6px;` +
+          'min-width:0;"><span class="legend-swatch" style="background:' +
+          `${swatch}"></span>` +
+          `<span class="truncate" title="${escAttr(d.label)}">${
+              escHtml(d.label)}</span></div>` +
+          '<span class="mono tabular" style="color:var(--muted-foreground);' +
+          `flex-shrink:0;">${escHtml(shown)}</span></div>`;
+    }).join('');
+
+    const centre = additive && METRICS[vis.metric].fmt === 'count' ?
+        `<text x="${cx}" y="${cy - 2}" text-anchor="middle" ` +
+            'fill="var(--foreground)" font-size="13" font-weight="700">' +
+            `${escHtml(fmtCount(total))}</text><text x="${cx}" y="${cy + 13}" ` +
+            'text-anchor="middle" fill="var(--muted-foreground)" ' +
+            'font-size="9">Total</text>' :
+        '';
+    container.innerHTML = '<div class="donut-wrap"><svg viewBox="0 0 164 164" ' +
+        'style="width:160px;height:160px;flex-shrink:0;margin:0 auto;" ' +
+        `role="img">${slices}${centre}</svg>` +
+        `<div class="donut-legend">${legend}</div></div>`;
+    bindSeriesEvents(container.querySelectorAll('.chart-slice'), items, vis);
+    bindSeriesEvents(
+        container.querySelectorAll('.donut-legend-row:not(.donut-legend-row-other)'),
+        items, vis);
+  }
+
+  // A metric-by-dimension visual shown as a table: one row per member.
+  function renderSeriesTable(container, series, vis) {
+    const items = topItems(series, vis, ROW_LIST_LIMIT);
+    if (!items.length) {
+      container.innerHTML = emptyStateHtml();
+      return;
+    }
+    const sec = vis.secondaryMetric;
+    container.innerHTML = '<div class="data-table-wrap custom-scroll">' +
+        '<table class="data-table"><thead><tr>' +
+        `<th>${escHtml(DIMENSIONS[vis.dim] || vis.dim)}</th>` +
+        `<th class="text-right">${escHtml(metricLabel(vis.metric))}</th>` +
+        (sec ? `<th class="text-right">${escHtml(metricLabel(sec))}</th>` : '') +
+        '</tr></thead><tbody>' +
+        items.map((d, i) => `<tr style="cursor:pointer;" data-idx="${i}">` +
+            `<td class="mono truncate" style="max-width:200px;" title="${
+                escAttr(d.label)}">${escHtml(d.label)}</td>` +
+            `<td class="text-right mono tabular">${
+                escHtml(fmtMetric(vis.metric, d.value))}</td>` +
+            (sec ? `<td class="text-right mono tabular">${
+                escHtml(fmtMetric(sec, d.secondary))}</td>` : '') +
+            '</tr>').join('') +
+        '</tbody></table></div>';
+    bindSeriesEvents(container.querySelectorAll('tr[data-idx]'), items, vis);
+  }
+
+  function renderTableVisual(container, rows, vis) {
+    const callTypes = new Set(
+        ['LLM_RESPONSE', 'LLM_ERROR', 'TOOL_COMPLETED', 'TOOL_ERROR']);
+    let list = rows.filter((r) => callTypes.has(r.event_type) &&
+                                  (!vis.errorsOnly || isErrorRow(r)));
+    if (vis.errorsOnly) {
+      list.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+    } else {
+      list = list.filter((r) => isNum(r.total_ms));
+      list.sort((a, b) => b.total_ms - a.total_ms);
+    }
+    const slice = list.slice(0, ROW_LIST_LIMIT);
+    if (!slice.length) {
+      container.innerHTML = emptyStateHtml();
+      return;
+    }
+    const detail = vis.errorsOnly ? 'Error' : 'Tool / model';
+    container.innerHTML = '<div class="data-table-wrap custom-scroll">' +
+        '<table class="data-table"><thead><tr><th>Agent</th><th>Event</th>' +
+        `<th>${detail}</th><th class="text-right">Latency</th></tr></thead>` +
+        '<tbody>' +
+        slice.map((r) => {
+          const info = vis.errorsOnly ? r.error_message : (r.tool || r.model);
+          return `<tr style="cursor:pointer;" data-agent="${escAttr(r.agent)}">` +
+              `<td class="mono truncate" style="max-width:130px;" title="${
+                  escAttr(r.agent)}">${escHtml(r.agent)}</td>` +
+              `<td>${escHtml(r.event_type)}</td>` +
+              `<td class="truncate" style="max-width:200px;" title="${
+                  escAttr(info)}">${escHtml(info)}</td>` +
+              `<td class="text-right mono tabular">${escHtml(fmtMs(r.total_ms))}</td>` +
+              '</tr>';
+        }).join('') +
+        '</tbody></table></div>';
+    container.querySelectorAll('tr[data-agent]').forEach((tr) => {
+      tr.addEventListener('click', () => toggleCrossFilter('agent', tr.dataset.agent));
+    });
+  }
+
+  function renderVisualInto(container, vis) {
+    if (isRowList(vis)) {
+      renderTableVisual(container, filterRows(), vis);
+      return;
+    }
+    // A visual ignores its own cross-filter so the other members stay visible.
+    const rows = filterRows({ignoreField: vis.dim});
+    const series = aggregateBy(rows, vis.dim, vis.metric, vis.secondaryMetric,
+        vis.type === 'line');
+    if (vis.type === 'table') renderSeriesTable(container, series, vis);
+    else if (vis.type === 'line') renderLineChart(container, series, vis);
+    else if (vis.type === 'donut') renderDonutChart(container, series, vis);
+    else if (vis.type === 'hbar') renderHBarChart(container, series, vis);
+    else renderBarChart(container, series, vis);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Page rendering
+  // ---------------------------------------------------------------------------
+  function activePage() {
+    return state.pages.find((p) => p.id === state.activePageId) || state.pages[0];
+  }
+
+  function changeText(metric, current, previous) {
+    if (!isNum(current) || !isNum(previous)) return {text: '--', tone: 'neutral'};
+    const kind = METRICS[metric].fmt;
+    let delta;
+    let text;
+    if (kind === 'pct') {
+      delta = current - previous;
+      text = `${delta >= 0 ? '+' : ''}${delta.toFixed(1)} pts`;
+    } else {
+      if (previous === 0) return {text: '--', tone: 'neutral'};
+      delta = ((current - previous) / previous) * 100;
+      text = `${delta >= 0 ? '+' : ''}${delta.toFixed(1)}%`;
+    }
+    const better = METRICS[metric].better;
+    let tone = 'neutral';
+    if (better && Math.abs(delta) >= 0.05) {
+      tone = (delta > 0) === (better === 'up') ? 'good' : 'bad';
+    }
+    return {text, tone};
+  }
+
+  function buildNarrative(s, rows) {
+    const filters = Object.entries(state.crossFilters);
+    const scope = filters.length ?
+        ` (filtered to ${filters.map(([k, v]) => `<b>${escHtml(DIMENSIONS[k])} = ${
+            escHtml(v)}</b>`).join(', ')})` :
+        '';
+    const busiest = aggregateBy(rows, 'agent', 'llm_calls')[0];
+    const slowest = aggregateBy(rows, 'model', 'p95_llm_latency')[0];
+    let text = `Over the last <b>${state.slicers.days} days</b>${scope}, agents ` +
+        `handled <b>${escHtml(fmtCount(s.sessions))}</b> sessions from ` +
+        `<b>${escHtml(fmtCount(s.users))}</b> users, with ` +
+        `<b>${escHtml(fmtCount(s.llm_calls))}</b> LLM calls and ` +
+        `<b>${escHtml(fmtCount(s.tool_calls))}</b> tool calls. ` +
+        `P95 LLM latency is <b>${escHtml(fmtMs(s.p95_llm_latency))}</b> ` +
+        `(average time to first token ${escHtml(fmtMs(s.avg_ttft))}), and ` +
+        `<b>${escHtml(fmtPct(s.error_rate))}</b> of LLM and tool calls failed. ` +
+        `The prompt cache served <b>${escHtml(fmtPct(s.cache_hit_rate))}</b> ` +
+        `of prompt tokens.`;
+    if (busiest) {
+      text += ` The busiest agent is <b>${escHtml(busiest.label)}</b> (${
+          escHtml(fmtCount(busiest.value))} LLM calls)`;
+      text += slowest ? `, and <b>${escHtml(slowest.label)}</b> has the ` +
+              `highest P95 latency (${escHtml(fmtMs(slowest.value))}).` :
+                        '.';
+    }
+    return text;
+  }
+
+  function renderAll() {
+    const page = activePage();
+    const rows = filterRows();
+    const summary = summarize(rows);
+    const previous = summarize(filterRows({previousWindow: true}));
+
+    const filterKeys = Object.keys(state.crossFilters);
+    const filterBar = document.getElementById('filterBar');
+    filterBar.classList.toggle('hidden', !filterKeys.length);
+    document.getElementById('filterPills').innerHTML = filterKeys.map((k) =>
+        `<span class="filter-pill"><span style="color:var(--muted-foreground);">` +
+        `${escHtml(DIMENSIONS[k])}:</span><span style="font-weight:500;">${
+            escHtml(state.crossFilters[k])}</span>` +
+        `<button type="button" data-rm-filter="${escAttr(k)}" aria-label="Remove ${
+            escAttr(DIMENSIONS[k])} filter">×</button></span>`).join('');
+    document.querySelectorAll('[data-rm-filter]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        delete state.crossFilters[btn.dataset.rmFilter];
+        renderAll();
+      });
+    });
+
+    document.getElementById('pageTitle').textContent = page.title;
+    document.getElementById('pageSubtitle').textContent = page.subtitle;
+    document.getElementById('smartNarrative').innerHTML = buildNarrative(summary, rows);
+
+    const toneColor = {
+      good: 'var(--success)', bad: 'var(--error)', neutral: 'var(--muted-foreground)',
+    };
+    document.getElementById('kpiGrid').innerHTML = page.kpis.map((k) => {
+      const change = changeText(k, summary[k], previous[k]);
+      const sub = KPI_SUBTITLES[k](summary);
+      return '<div class="kpi-card"><div class="kpi-top">' +
+          `<span class="kpi-label truncate">${escHtml(metricLabel(k))}</span>` +
+          `<span class="mono" title="Change from the previous ${
+              state.slicers.days} days" style="font-weight:600;color:${
+              toneColor[change.tone]};flex-shrink:0;">${escHtml(change.text)}</span>` +
+          `</div><div class="kpi-value tabular">${
+              escHtml(fmtMetric(k, summary[k]))}</div>` +
+          `<div class="kpi-sub truncate" title="${escAttr(sub)}">${
+              escHtml(sub)}</div></div>`;
+    }).join('');
+
+    const grid = document.getElementById('visualsGrid');
+    grid.innerHTML = '';
+    page.visuals.forEach((vis, index) => {
+      const card = document.createElement('div');
+      const span = vis.span >= 12 ? 'span-12' : vis.span >= 7 ? 'span-7' :
+          vis.span === 5 ? 'span-5' : 'span-6';
+      card.className = `vis-card ${span}${vis.isNew ? ' widget-highlight' : ''}`;
+      delete vis.isNew;
+      const types = isRowList(vis) ? ['table'] :
+                                     ['bar', 'hbar', 'line', 'donut', 'table'];
+      card.innerHTML = '<div class="vis-header">' +
+          `<h3 class="vis-title truncate" title="${escAttr(vis.title)}">${
+              escHtml(vis.title)}</h3><div class="vis-tools">` +
+          `<select class="vis-type-select" aria-label="Chart type">${
+              types.map((t) => `<option value="${t}"${
+                  vis.type === t ? ' selected' : ''}>${t.toUpperCase()}</option>`)
+                  .join('')}</select>` +
+          '<button type="button" class="btn btn-sm btn-ghost" data-focus ' +
+          'title="Focus" aria-label="Focus">⤢</button>' +
+          '<button type="button" class="btn btn-sm btn-ghost" data-remove ' +
+          'title="Remove" aria-label="Remove">×</button></div></div>' +
+          '<div class="vis-body"></div>';
+      grid.appendChild(card);
+      renderVisualInto(card.querySelector('.vis-body'), vis);
+
+      card.querySelector('select').addEventListener('change', (e) => {
+        vis.type = e.target.value;
+        renderAll();
+      });
+      card.querySelector('[data-remove]').addEventListener('click', () => {
+        page.visuals.splice(index, 1);
+        renderAll();
+      });
+      card.querySelector('[data-focus]').addEventListener('click', () => {
+        document.getElementById('focusTitle').textContent = vis.title;
+        const body = document.getElementById('focusBody');
+        body.innerHTML = '';
+        renderVisualInto(body, vis);
+        document.getElementById('focusModal').classList.remove('hidden');
+      });
+    });
+
+    const tabs = document.getElementById('pageTabs');
+    tabs.innerHTML = state.pages.map((p) =>
+        `<div class="page-tab${p.id === page.id ? ' active' : ''}" data-tab="${
+            escAttr(p.id)}"><span class="truncate" style="max-width:170px;">${
+            escHtml(p.title)}</span>${state.pages.length > 1 ?
+            `<button type="button" class="page-tab-close" data-close-tab="${
+                escAttr(p.id)}" aria-label="Close page">×</button>` :
+            ''}</div>`).join('');
+    tabs.querySelectorAll('[data-tab]').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        if (e.target.dataset.closeTab) return;
+        state.activePageId = el.dataset.tab;
+        renderAll();
+      });
+    });
+    tabs.querySelectorAll('[data-close-tab]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.closeTab;
+        state.pages = state.pages.filter((p) => p.id !== id);
+        if (state.activePageId === id) state.activePageId = state.pages[0].id;
+        renderAll();
+      });
+    });
+
+    if (state.activeView === 'table') renderExplorer();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Explorer, schema, and slicer options
+  // ---------------------------------------------------------------------------
+  const EXPLORER_COLUMNS = [
+    'timestamp', 'event_type', 'agent', 'model', 'tool', 'user_id', 'session_id',
+    'total_ms', 'ttft_ms', 'total_tokens', 'status', 'error_message',
+  ];
+
+  // Rows after slicers, cross-filters, and the explorer search box.
+  function explorerRows() {
+    const query = document.getElementById('tableSearch').value.trim().toLowerCase();
+    const rows = filterRows();
+    if (!query) return rows;
+    return rows.filter((r) => EXPLORER_COLUMNS.some(
+        (c) => String(r[c] ?? '').toLowerCase().includes(query)));
+  }
+
+  function renderExplorer() {
+    const rows = explorerRows();
+    document.getElementById('explorerHead').innerHTML = '<tr>' +
+        EXPLORER_COLUMNS.map((c) => `<th style="white-space:nowrap;">${c}</th>`)
+            .join('') +
+        '</tr>';
+    const slice = rows.slice(0, 150);
+    document.getElementById('explorerBody').innerHTML = slice.map((r) => '<tr>' +
+        EXPLORER_COLUMNS.map((c) => `<td class="mono truncate" style="max-width:220px;" ` +
+            `title="${escAttr(r[c])}">${escHtml(r[c])}</td>`).join('') +
+        '</tr>').join('');
+    document.getElementById('explorerFoot').innerHTML =
+        `<span>Showing ${slice.length} of ${rows.length} filtered rows</span>` +
+        '<span>Source: agent_events</span>';
+  }
+
+  function renderSchema() {
+    const columns = [
+      ['event_id', 'STRING, newer plugin versions only'],
+      ['timestamp', 'TIMESTAMP, required'],
+      ['event_type', 'STRING, e.g. LLM_RESPONSE'],
+      ['agent', 'STRING'],
+      ['session_id', 'STRING'],
+      ['invocation_id', 'STRING'],
+      ['user_id', 'STRING'],
+      ['trace_id', 'STRING'],
+      ['span_id', 'STRING'],
+      ['parent_span_id', 'STRING'],
+      ['content', 'JSON: tool, args, response'],
+      ['content_parts', 'REPEATED RECORD: mime_type, text, uri, object_ref'],
+      ['attributes', 'JSON: model, usage_metadata'],
+      ['latency_ms', 'JSON: total_ms, time_to_first_token_ms'],
+      ['status', 'STRING'],
+      ['error_message', 'STRING'],
+      ['is_truncated', 'BOOL'],
+    ];
+    const item = ([name, desc]) => '<div class="schema-col-item">' +
+        `<span class="mono truncate">${escHtml(name)}</span>` +
+        '<span class="mono" style="color:var(--muted-foreground);flex-shrink:0;">' +
+        `${escHtml(desc)}</span></div>`;
+    document.getElementById('schemaEventsList').innerHTML = columns.map(item).join('');
+    document.getElementById('metricDefsList').innerHTML = Object.entries(METRICS)
+        .map(([id, m]) => '<div class="schema-col-item" style="flex-direction:column;' +
+            `align-items:flex-start;"><span class="mono">${escHtml(id)}</span>` +
+            '<span class="mono" style="color:var(--muted-foreground);' +
+            `white-space:normal;">${escHtml(m.sql)}</span></div>`)
+        .join('');
+  }
+
+  function fillSelect(id, values, selected) {
+    const select = document.getElementById(id);
+    select.innerHTML = '<option value="ALL">All</option>' +
+        values.map((v) => `<option value="${escAttr(v)}">${escHtml(v)}</option>`)
+            .join('');
+    select.value = values.includes(selected) ? selected : 'ALL';
+    return select.value;
+  }
+
+  function refreshSlicerOptions() {
+    state.slicers.agent =
+        fillSelect('slicerAgent', distinctValues('agent'), state.slicers.agent);
+    state.slicers.model =
+        fillSelect('slicerModel', distinctValues('model'), state.slicers.model);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Copilot chat
+  // ---------------------------------------------------------------------------
+  const STARTER_PROMPTS = [
+    {label: 'Latency', prompt: 'Show p95 LLM latency and time to first token by model'},
+    {label: 'Tokens and caching', prompt: 'Token usage and cache hit rate by agent'},
+    {label: 'Tool errors', prompt: 'Which tools fail most, with recent error messages'},
+    {label: 'Tool usage', prompt: 'Tool usage: tool calls by agent and the tool mix'},
+    {label: 'Last 7 days', prompt: 'Overview of sessions and users for the last 7 days'},
+  ];
+
+  function appendChatMessage(role, html, steps) {
+    const box = document.getElementById('chatMessages');
+    const row = document.createElement('div');
+    row.className = `msg-row ${role}`;
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+    if (role === 'user') {
+      bubble.textContent = html;
+    } else {
+      bubble.innerHTML = html + (steps && steps.length ?
+          '<details class="msg-steps"><summary style="cursor:pointer;">How this ' +
+              `page was built (${steps.length} steps)</summary><ul>${
+                  steps.map((s) => `<li>${escHtml(s)}</li>`).join('')}</ul></details>` :
+          '');
+    }
+    row.appendChild(bubble);
+    box.appendChild(row);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function applyPlanFilters(plan) {
+    if (plan.days) {
+      state.slicers.days = plan.days;
+      document.getElementById('slicerDate').value = String(plan.days);
+    }
+    for (const [field, value] of Object.entries(plan.filters || {})) {
+      if (field === 'agent' || field === 'model') {
+        state.slicers[field] = value;
+      } else {
+        state.crossFilters[field] = value;
+      }
+    }
+    refreshSlicerOptions();
+  }
+
+  function handlePrompt(text) {
+    const prompt = text.trim();
+    if (!prompt) return;
+    appendChatMessage('user', prompt);
+    const plan = compilePrompt(prompt);
+    applyPlanFilters(plan);
+    if (plan.action === 'create_page') {
+      state.pages.push(plan.page);
+      state.activePageId = plan.page.id;
+    } else if (plan.action === 'add_visual') {
+      activePage().visuals.unshift(plan.visual);
+    } else if (plan.action === 'switch_chart') {
+      // Row lists stay tables; every other visual can switch, including back
+      // from a table.
+      activePage().visuals.forEach((v) => {
+        if (!isRowList(v)) v.type = plan.chartType;
+      });
+    }
+    switchView('report');
+    appendChatMessage('agent', plan.reply, plan.steps);
+    renderAll();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Import
+  // ---------------------------------------------------------------------------
+  function parseJsonColumn(value) {
+    if (value === null || value === undefined || value === '') return {};
+    if (typeof value === 'object') return value;
+    if (typeof value === 'number') return {total_ms: value};
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function toNumber(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  // Largest time a JavaScript Date can hold, in milliseconds.
+  const MAX_DATE_MS = 8.64e15;
+
+  // Returns epoch milliseconds for a BigQuery TIMESTAMP value, or NaN.
+  function parseTimestamp(value) {
+    const t = String(value).trim();
+    // The REST API returns epoch seconds, possibly as a FLOAT64 in exponent
+    // form ("1.7635842E9"), or microseconds with useInt64Timestamp.
+    if (/^[+-]?\d+(\.\d+)?(e[+-]?\d+)?$/i.test(t)) {
+      const n = Number(t);
+      const abs = Math.abs(n);
+      const ms = abs >= 1e14 ? n / 1000 : abs >= 1e11 ? n : n * 1000;
+      return Math.abs(ms) <= MAX_DATE_MS ? ms : NaN;
+    }
+    // `bq --format=json` and CSV print UTC with no offset, such as
+    // "2026-11-19 20:30:00" or "2026-11-19 20:30:00 UTC". Date.parse would
+    // read those as local time, so mark them as UTC.
+    const m = t.match(
+        /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?:\s*(?:UTC|Z))?$/i);
+    if (m) return Date.parse(`${m[1]}T${m[2]}Z`);
+    // Keep an explicit offset, written as ISO 8601: "T" separator, no space
+    // before the offset, and +HH:MM (GoogleSQL can print "+00" or " +00:00").
+    const o = t.match(
+        /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*([+-])(\d{2}):?(\d{2})?$/);
+    if (o) return Date.parse(`${o[1]}T${o[2]}${o[3]}${o[4]}:${o[5] || '00'}`);
+    const ms = Date.parse(t.replace(/^(\d{4}-\d{2}-\d{2}) /, '$1T'));
+    return Math.abs(ms) <= MAX_DATE_MS ? ms : NaN;
+  }
+
+  function normalizeRow(r, index) {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) return null;
+    const ts = r.timestamp;
+    if (ts === null || ts === undefined || ts === '') return null;
+    const ms = parseTimestamp(ts);
+    if (Number.isNaN(ms)) return null;
+    const iso = new Date(ms).toISOString();
+    const latency = parseJsonColumn(r.latency_ms);
+    const attributes = parseJsonColumn(r.attributes);
+    const usage = attributes.usage_metadata || {};
+    const content = parseJsonColumn(r.content);
+    // ADK writes *_token_count, the SDK's producer logger writes *_tokens, and
+    // some producers put a usage object in content (as the reporting views do).
+    const contentUsage =
+        content.usage && typeof content.usage === 'object' ? content.usage : {};
+    const text = (v) => (v === null || v === undefined ? '' : String(v));
+    return {
+      timestamp: iso,
+      event_date: iso.slice(0, 10),
+      event_type: text(r.event_type) || 'UNKNOWN',
+      agent: text(r.agent),
+      model: text(r.model || attributes.model || attributes.model_version),
+      tool: text(r.tool || content.tool || content.tool_name),
+      user_id: text(r.user_id),
+      session_id: text(r.session_id),
+      invocation_id: text(r.invocation_id),
+      trace_id: text(r.trace_id),
+      span_id: text(r.span_id) || `row-${index}`,
+      status: (text(r.status) || 'OK').toUpperCase(),
+      error_message: text(r.error_message),
+      is_truncated: r.is_truncated === true || r.is_truncated === 'true',
+      total_ms: toNumber(r.total_ms ?? latency.total_ms),
+      ttft_ms: toNumber(r.ttft_ms ?? latency.time_to_first_token_ms),
+      prompt_tokens: toNumber(r.prompt_tokens ?? usage.prompt_token_count ??
+          usage.prompt_tokens ?? contentUsage.prompt),
+      cached_tokens: toNumber(r.cached_tokens ?? usage.cached_content_token_count),
+      candidates_tokens: toNumber(r.candidates_tokens ??
+          usage.candidates_token_count ?? usage.completion_tokens ??
+          contentUsage.completion),
+      thoughts_tokens: toNumber(r.thoughts_tokens ?? usage.thoughts_token_count),
+      total_tokens: toNumber(r.total_tokens ?? usage.total_token_count ??
+          usage.total_tokens ?? contentUsage.total),
+    };
+  }
+
+  function parseImport(raw) {
+    const text = raw.replace(/^\uFEFF/, '').trim();
+    if (!text) throw new Error('Paste rows or choose a file first.');
+    let records;
+    const lines = text.split(/\r?\n/).filter((l) => l.trim());
+    // A first line of comma-separated names is a CSV header, even when quoted
+    // multiline cells put "{" at the start of later lines.
+    const csvHeader = /^"?[A-Za-z_][\w ]*"?(,"?[A-Za-z_][\w ]*"?)+$/
+                          .test(lines[0].trim());
+    // Otherwise JSON Lines when most lines are objects, so one damaged line
+    // (even the first) doesn't send the paste to the CSV parser.
+    const objectLines = lines.filter((l) => l.trim().startsWith('{')).length;
+    if (text.startsWith('[')) {
+      records = JSON.parse(text);
+    } else if (!csvHeader && objectLines * 2 >= lines.length) {
+      // JSON Lines: a line that doesn't parse is skipped and counted.
+      records = text.split(/\r?\n/).filter((l) => l.trim()).map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch (e) {
+          return null;
+        }
+      });
+    } else {
+      const table = parseCsv(text);
+      const header = (table.shift() || []).map((h) => h.trim());
+      // Undo the formula guard only on files that carry this page's guard
+      // column, so a CSV from elsewhere keeps its text even with the same
+      // 21 data columns.
+      const ownExport = header[header.length - 1] === GUARD_COLUMN;
+      const unguard = (c) =>
+          (ownExport && c.startsWith('\'') && needsFormulaGuard(c) ?
+               c.slice(1) : c);
+      records = table.map((cells) => Object.fromEntries(
+          header.map((h, i) => [h, unguard(cells[i] ?? '')])));
+    }
+    if (!Array.isArray(records) || !records.length) throw new Error('No rows found.');
+    const rows = records.map((r, i) => {
+      try {
+        return normalizeRow(r, i);
+      } catch (e) {
+        return null;
+      }
+    }).filter(Boolean);
+    if (!rows.length) {
+      throw new Error('No row has a parseable timestamp column.');
+    }
+    rows.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+    return {rows, skipped: records.length - rows.length};
+  }
+
+  // ---------------------------------------------------------------------------
+  // Wiring
+  // ---------------------------------------------------------------------------
+  function switchView(view) {
+    state.activeView = view;
+    for (const name of ['report', 'table', 'model']) {
+      document.getElementById(`view-${name}`).classList.toggle('hidden', name !== view);
+    }
+    document.querySelectorAll('.rail-btn[data-view]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.view === view);
+    });
+    if (view === 'table') renderExplorer();
+  }
+
+  function download(name, type, content) {
+    const url = URL.createObjectURL(new Blob([content], {type}));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  function refreshSql() {
+    const input = document.getElementById('tableIdInput');
+    const error = document.getElementById('tableIdError');
+    const parts = parseTableId(input.value);
+    if (!parts) {
+      error.textContent = 'Use project.dataset.table, for example ' +
+          'my-project.my_dataset.agent_events.';
+      // Don't leave the previous table's query on screen to be copied.
+      document.getElementById('sqlModalCode').textContent = '';
+      document.getElementById('btnCopySql').disabled = true;
+      return;
+    }
+    error.textContent = '';
+    document.getElementById('btnCopySql').disabled = false;
+    state.tableId = parts.join('.');
+    document.getElementById('sqlModalCode').textContent =
+        generatePageSql(activePage(), parts);
+  }
+
+  const $ = (id) => document.getElementById(id);
+
+  document.querySelectorAll('.rail-btn[data-view]').forEach((btn) => {
+    btn.addEventListener('click', () => switchView(btn.dataset.view));
+  });
+  $('btnTheme').addEventListener('click', () => {
+    currentTheme = currentTheme === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', currentTheme);
+  });
+  $('slicerDate').addEventListener('change', (e) => {
+    state.slicers.days = Number(e.target.value);
+    renderAll();
+  });
+  $('slicerAgent').addEventListener('change', (e) => {
+    state.slicers.agent = e.target.value;
+    renderAll();
+  });
+  $('slicerModel').addEventListener('change', (e) => {
+    state.slicers.model = e.target.value;
+    renderAll();
+  });
+  $('btnClearFilters').addEventListener('click', () => {
+    state.crossFilters = {};
+    renderAll();
+  });
+  $('btnResetPage').addEventListener('click', () => {
+    state.crossFilters = {};
+    state.slicers = {days: 30, agent: 'ALL', model: 'ALL'};
+    $('slicerDate').value = '30';
+    refreshSlicerOptions();
+    renderAll();
+  });
+  $('btnDuplicatePage').addEventListener('click', () => {
+    const copy = JSON.parse(JSON.stringify(activePage()));
+    copy.id = newId('page');
+    copy.visuals.forEach((v) => {
+      v.id = newId('v');
+    });
+    copy.title += ' (copy)';
+    state.pages.push(copy);
+    state.activePageId = copy.id;
+    renderAll();
+  });
+  $('btnToggleCopilot').addEventListener('click', () => {
+    $('copilotPane').classList.toggle('hidden');
+  });
+  $('btnAddBlankPromptPage').addEventListener('click', () => {
+    // This button starts a new page, so leave "Modify current" mode.
+    state.copilotMode = 'new';
+    $('modeNewPage').classList.add('active');
+    $('modeModifyPage').classList.remove('active');
+    $('copilotPane').classList.remove('hidden');
+    $('promptInput').focus();
+  });
+  $('modeNewPage').addEventListener('click', () => {
+    state.copilotMode = 'new';
+    $('modeNewPage').classList.add('active');
+    $('modeModifyPage').classList.remove('active');
+  });
+  $('modeModifyPage').addEventListener('click', () => {
+    state.copilotMode = 'modify';
+    $('modeModifyPage').classList.add('active');
+    $('modeNewPage').classList.remove('active');
+  });
+  $('promptForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const value = $('promptInput').value;
+    $('promptInput').value = '';
+    handlePrompt(value);
+  });
+  $('promptInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      $('promptForm').requestSubmit();
+    }
+  });
+  $('btnClearChat').addEventListener('click', () => {
+    $('chatMessages').innerHTML = '';
+  });
+
+  $('btnShowSql').addEventListener('click', () => {
+    $('tableIdInput').value = state.tableId;
+    refreshSql();
+    $('sqlModal').classList.remove('hidden');
+  });
+  $('tableIdInput').addEventListener('input', refreshSql);
+  $('btnCloseSql').addEventListener('click', () => $('sqlModal').classList.add('hidden'));
+  $('btnCopySql').addEventListener('click', async () => {
+    const code = $('sqlModalCode');
+    if ($('btnCopySql').disabled || !code.textContent) return;
+    let copied = false;
+    // The Clipboard API exists only in secure contexts (HTTPS or localhost).
+    if (navigator.clipboard && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(code.textContent);
+        copied = true;
+      } catch (err) {
+        copied = false;
+      }
+    }
+    if (!copied) {
+      // Fall back to selecting the SQL so the user can copy it by hand.
+      const range = document.createRange();
+      range.selectNodeContents(code);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      try {
+        copied = document.execCommand('copy');
+      } catch (err) {
+        copied = false;
+      }
+    }
+    $('btnCopySql').textContent = copied ? 'Copied' : 'Selected: press Ctrl+C';
+    setTimeout(() => {
+      $('btnCopySql').textContent = 'Copy SQL';
+    }, copied ? 1200 : 4000);
+  });
+
+  $('btnImport').addEventListener('click', () => $('importModal').classList.remove('hidden'));
+  $('btnCloseImport').addEventListener('click', () => $('importModal').classList.add('hidden'));
+  $('importFile').addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      $('importText').value = reader.result;
+    };
+    reader.readAsText(file);
+  });
+  $('btnApplyImport').addEventListener('click', () => {
+    const status = $('importStatus');
+    try {
+      const {rows, skipped} = parseImport($('importText').value);
+      state.rows = rows;
+      state.crossFilters = {};
+      refreshSlicerOptions();
+      $('dataSourceBadge').textContent = `agent_events (imported, ${rows.length} rows)`;
+      status.style.color = 'var(--success)';
+      status.textContent = `Loaded ${rows.length} rows` +
+          (skipped ? `; skipped ${skipped} without a parseable timestamp.` : '.');
+      renderAll();
+    } catch (err) {
+      status.style.color = 'var(--error)';
+      status.textContent = `Could not import: ${err.message}`;
+    }
+  });
+  $('btnResetSample').addEventListener('click', () => {
+    state.rows = SAMPLE_ROWS;
+    state.crossFilters = {};
+    refreshSlicerOptions();
+    $('dataSourceBadge').textContent = SAMPLE_LABEL;
+    $('importStatus').style.color = 'var(--muted-foreground)';
+    $('importStatus').textContent = 'Restored the synthetic sample.';
+    renderAll();
+  });
+  $('btnCloseFocus').addEventListener('click', () => $('focusModal').classList.add('hidden'));
+
+  $('tableSearch').addEventListener('input', renderExplorer);
+  $('btnExportCsv').addEventListener('click', () => {
+    const rows = explorerRows();
+    if (!rows.length) return;
+    const csv = [
+      [...EXPORT_COLUMNS, GUARD_COLUMN].join(','),
+      ...rows.map((r) =>
+          [...EXPORT_COLUMNS.map((c) => csvCell(r[c])), 'v1'].join(',')),
+    ].join('\r\n');
+    download('agent_events_export.csv', 'text/csv', csv);
+  });
+  $('btnExportSpec').addEventListener('click', () => {
+    download('bqaa_copilot_dashboard.json', 'application/json', JSON.stringify(
+        {pages: state.pages, slicers: state.slicers, crossFilters: state.crossFilters},
+        null, 2));
+  });
+
+  const chips = $('promptChips');
+  chips.innerHTML = STARTER_PROMPTS.map((p, i) =>
+      `<button type="button" class="chip-btn" data-chip="${i}">${escHtml(p.label)}</button>`)
+      .join('');
+  chips.querySelectorAll('[data-chip]').forEach((btn) => {
+    btn.addEventListener('click', () => handlePrompt(STARTER_PROMPTS[Number(btn.dataset.chip)].prompt));
+  });
+
+  refreshSlicerOptions();
+  renderSchema();
+  appendChatMessage('agent', 'Describe the dashboard you want, for example ' +
+      '<i>"p95 LLM latency by model for the last 7 days"</i> or <i>"which tools ' +
+      'fail most"</i>. Prompts are matched to page templates with keyword rules ' +
+      'in this browser tab; nothing is sent to a server. Use <b>Import data</b> to ' +
+      'load your own <code class="mono">agent_events</code> rows.');
+  renderAll();
+})();
