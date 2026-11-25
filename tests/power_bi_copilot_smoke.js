@@ -441,6 +441,68 @@ els.btnApplyImport.fire('click');
 check(/Loaded 2 rows; skipped 1/.test(els.importStatus.textContent),
     `damaged first JSON Lines record: ${els.importStatus.textContent}`);
 
+// A failed LLM_RESPONSE counts in the error rate, on the page and in SQL.
+els.importText.value = JSON.stringify([
+  {timestamp: '2026-07-16T10:00:00Z', event_type: 'LLM_RESPONSE', agent: 'a',
+    status: 'ERROR', error_message: 'quota'},
+  {timestamp: '2026-07-16T10:01:00Z', event_type: 'LLM_RESPONSE', agent: 'a',
+    status: 'OK'},
+]);
+els.btnApplyImport.fire('click');
+els.promptInput.value = 'Which tools fail most, with recent error messages';
+els.promptForm.fire('submit');
+check(/50\.0%/.test(els.kpiGrid.innerHTML),
+    `an error-status LLM_RESPONSE counts in the error rate: ${
+        (els.kpiGrid.innerHTML.match(/[\d.]+%/) || [])[0]}`);
+els.btnShowSql.fire('click');
+const errSql = els.sqlModalCode.textContent;
+check(/event_type IN \('LLM_RESPONSE', 'TOOL_COMPLETED'\) AND status = 'ERROR'/.test(errSql),
+    'the error-rate SQL counts error-status responses');
+check(/UPPER\(status\) AS status/.test(errSql), 'SQL upper-cases status once, like the page');
+check(/COALESCE\(NULLIF\(JSON_VALUE\(attributes, '\$\.model'\), ''\)/.test(errSql),
+    'an empty attributes.model falls back to model_version in SQL');
+check(/TIMESTAMP '0001-01-01'/.test(errSql), 'the fallback anchor covers pre-1970 timestamps');
+
+// No cached-token telemetry shows unknown; an explicit zero is a real 0%.
+els.importText.value = JSON.stringify([{timestamp: '2026-07-16T10:00:00Z',
+  event_type: 'LLM_RESPONSE', agent: 'a',
+  attributes: {usage_metadata: {prompt_token_count: 100, total_token_count: 120}}}]);
+els.btnApplyImport.fire('click');
+els.promptInput.value = 'Token usage and cache hit rate by agent';
+els.promptForm.fire('submit');
+check(!/>0\.0%</.test(els.kpiGrid.innerHTML),
+    'missing cache telemetry is not shown as a 0% hit rate');
+els.importText.value = JSON.stringify([{timestamp: '2026-07-16T10:00:00Z',
+  event_type: 'LLM_RESPONSE', agent: 'a', attributes: {usage_metadata: {
+    prompt_token_count: 100, cached_content_token_count: 0, total_token_count: 120}}}]);
+els.btnApplyImport.fire('click');
+check(/>0\.0%</.test(els.kpiGrid.innerHTML), 'an explicit zero cached count is 0%');
+
+// An export with multiline diagnostics re-imports as CSV.
+const diag = 'trace:\n{"code": 1}\n{"code": 2}\n{"code": 3}';
+els.importText.value = JSON.stringify([0, 1, 2].map((i) => ({
+  timestamp: `2026-07-16T10:00:0${i}Z`, event_type: 'TOOL_ERROR', agent: 'm',
+  status: 'ERROR', error_message: diag})));
+els.btnApplyImport.fire('click');
+els.btnExportCsv.fire('click');
+els.importText.value = downloads[downloads.length - 1];
+els.btnApplyImport.fire('click');
+check(/Loaded 3 rows\./.test(els.importStatus.textContent),
+    `a multiline export re-imports: ${els.importStatus.textContent}`);
+
+// A CSV from elsewhere with the same 21 data columns keeps its apostrophe.
+const dataCols = downloads[downloads.length - 1].split('\r\n')[0].split(',')
+    .filter((c) => c !== 'copilot_formula_guard');
+check(dataCols.length === 21, `export has 21 data columns: ${dataCols.length}`);
+els.importText.value = dataCols.join(',') + '\r\n' + dataCols.map((c) =>
+    (c === 'timestamp' ? '2026-07-16T10:00:00Z' :
+     c === 'event_type' ? 'TOOL_ERROR' : c === 'error_message' ? '\'--flag' : ''))
+    .join(',') + '\r\n';
+els.btnApplyImport.fire('click');
+els.btnExportCsv.fire('click');
+check(csvRows(downloads[downloads.length - 1])[0].error_message === '\'\'--flag',
+    'a same-column CSV from elsewhere keeps its leading apostrophe');
+
 if (failures.length) {
   console.error(`FAILED:\n- ${failures.join('\n- ')}`);
   process.exit(1);

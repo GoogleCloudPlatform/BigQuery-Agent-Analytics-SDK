@@ -63,9 +63,9 @@ The data stays in the browser tab.
 **Export CSV** writes the rows shown in the table view, after slicers,
 cross-filters, and the search box. Text cells that a spreadsheet would run as
 a formula (starting with `=`, `+`, `-`, `@`, a tab, or a CR, even after
-leading apostrophes) get one more leading `'`. The importer removes that one
-apostrophe only from files with this page's export header, so other CSVs keep
-their text as written.
+leading apostrophes) get one more leading `'`. The export ends with a
+`copilot_formula_guard` column, and the importer removes that one apostrophe
+only from files that have it, so other CSVs keep their text as written.
 
 ## Metrics
 
@@ -97,9 +97,11 @@ cover the same days even when that day is in the past. The SQL looks for it in
 the last two windows' worth of partitions first, and scans the whole table's
 `timestamp` column only when those are empty.
 
-A tool call counts as an error when it is logged as `TOOL_ERROR` or as
-`TOOL_COMPLETED` with an `ERROR` status. Token totals and traces stay empty
-when the rows don't carry them, as `SUM` and `COUNT(DISTINCT ...)` do in SQL.
+A call counts as failed when it is logged as `LLM_ERROR` or `TOOL_ERROR`, or
+as `LLM_RESPONSE` or `TOOL_COMPLETED` with an `ERROR` status (compared
+case-insensitively). Token totals, traces, and the cache hit rate stay empty
+when the rows don't carry them, as `SUM`, `COUNT(DISTINCT ...)`, and
+`SAFE_DIVIDE` do in SQL; an explicit zero cached-token count is a real 0%.
 
 ## Files
 

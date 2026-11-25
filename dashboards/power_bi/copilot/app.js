@@ -227,6 +227,16 @@
   };
 
   // `better` says which direction of the period-over-period change is good.
+  // A failed call, in SQL: an *_ERROR event, or a response or tool call
+  // logged with an ERROR status. The temp table upper-cases status. This is
+  // the same rule as isErrorRow() on the page.
+  const FAILED_TOOL_SQL = '(event_type = \'TOOL_ERROR\' OR ' +
+      '(event_type = \'TOOL_COMPLETED\' AND status = \'ERROR\'))';
+  const FAILED_CALL_SQL =
+      '(event_type IN (\'LLM_ERROR\', \'TOOL_ERROR\') OR ' +
+      '(event_type IN (\'LLM_RESPONSE\', \'TOOL_COMPLETED\') AND ' +
+      'status = \'ERROR\'))';
+
   const METRICS = {
     events: {label: 'Events', fmt: 'count', sql: 'COUNT(*)'},
     sessions: {
@@ -248,16 +258,13 @@
       label: 'Tool errors',
       fmt: 'count',
       better: 'down',
-      sql: 'COUNTIF(event_type = \'TOOL_ERROR\' OR ' +
-          '(event_type = \'TOOL_COMPLETED\' AND UPPER(status) = \'ERROR\'))',
+      sql: `COUNTIF(${FAILED_TOOL_SQL})`,
     },
     error_rate: {
       label: 'Error rate (%)',
       fmt: 'pct',
       better: 'down',
-      sql: '100 * SAFE_DIVIDE(' +
-          'COUNTIF(event_type IN (\'LLM_ERROR\', \'TOOL_ERROR\') OR ' +
-          '(event_type = \'TOOL_COMPLETED\' AND UPPER(status) = \'ERROR\')), ' +
+      sql: `100 * SAFE_DIVIDE(COUNTIF(${FAILED_CALL_SQL}), ` +
           'COUNTIF(event_type IN (\'LLM_RESPONSE\', \'LLM_ERROR\', ' +
           '\'TOOL_COMPLETED\', \'TOOL_ERROR\')))',
     },
@@ -528,6 +535,9 @@
       switch (r.event_type) {
         case 'LLM_RESPONSE':
           llmCalls++;
+          // The logger also writes a failed response as LLM_RESPONSE with an
+          // error status.
+          if (isErrorRow(r)) llmErrors++;
           if (isNum(r.total_ms)) llmLatency.push(r.total_ms);
           if (isNum(r.ttft_ms)) ttft.push(r.ttft_ms);
           break;
@@ -554,7 +564,10 @@
       totalTokens = add(totalTokens, r.total_tokens);
     }
 
-    const operations = llmCalls + llmErrors + toolCalls;
+    // LLM_ERROR events are calls too; failed LLM_RESPONSE rows are already
+    // in llmCalls.
+    const llmErrorEvents = rows.filter((r) => r.event_type === 'LLM_ERROR').length;
+    const operations = llmCalls + llmErrorEvents + toolCalls;
     return {
       events: rows.length,
       sessions: sessions.size,
@@ -574,8 +587,10 @@
       cached_tokens: cachedTokens,
       thoughts_tokens: thoughtsTokens,
       total_tokens: totalTokens,
-      cache_hit_rate: promptTokens ? ((cachedTokens ?? 0) / promptTokens) * 100 :
-                                     null,
+      // Unknown unless some row reports cached tokens; an explicit 0 is a
+      // real 0%. SAFE_DIVIDE(SUM(cached), SUM(prompt)) behaves the same.
+      cache_hit_rate: promptTokens && cachedTokens !== null ?
+          (cachedTokens / promptTokens) * 100 : null,
     };
   }
 
@@ -669,8 +684,11 @@
     return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   }
 
-  // The columns Export CSV writes, in order. Import removes the formula guard
-  // only from files with exactly this header, so other CSVs keep their text.
+  // Export CSV adds this last column to mark that its text cells carry the
+  // formula guard; import removes the guard only when it's present.
+  const GUARD_COLUMN = 'copilot_formula_guard';
+
+  // The data columns Export CSV writes, in order.
   const EXPORT_COLUMNS = [
     'timestamp', 'event_date', 'event_type', 'agent', 'model', 'tool',
     'user_id', 'session_id', 'invocation_id', 'trace_id', 'span_id', 'status',
@@ -1015,7 +1033,7 @@
       'IF window_end IS NULL THEN',
       '  SET window_end = (',
       `    SELECT MAX(DATE(timestamp)) FROM \`${table}\``,
-      '    WHERE timestamp >= TIMESTAMP \'1970-01-01\');',
+      '    WHERE timestamp >= TIMESTAMP \'0001-01-01\');',
       'END IF;',
       '',
       'CREATE TEMP TABLE events AS',
@@ -1028,9 +1046,9 @@
       '  session_id,',
       '  trace_id,',
       '  span_id,',
-      '  status,',
+      '  UPPER(status) AS status,',
       '  error_message,',
-      '  COALESCE(JSON_VALUE(attributes, \'$.model\'),',
+      '  COALESCE(NULLIF(JSON_VALUE(attributes, \'$.model\'), \'\'),',
       '           JSON_VALUE(attributes, \'$.model_version\')) AS model,',
       '  COALESCE(JSON_VALUE(content, \'$.tool\'),',
       '           JSON_VALUE(content, \'$.tool_name\')) AS tool,',
@@ -1077,7 +1095,7 @@
         const filter = v.errorsOnly ?
             '(event_type IN (\'LLM_ERROR\', \'TOOL_ERROR\') OR ' +
                 '(event_type IN (\'LLM_RESPONSE\', \'TOOL_COMPLETED\') ' +
-                'AND UPPER(status) = \'ERROR\'))' :
+                'AND status = \'ERROR\'))' :
             'event_type IN (\'LLM_RESPONSE\', \'LLM_ERROR\', ' +
                 '\'TOOL_COMPLETED\', \'TOOL_ERROR\')';
         const extraRows = v.errorsOnly ? [inWindow, filter] :
@@ -1994,12 +2012,16 @@
     if (!text) throw new Error('Paste rows or choose a file first.');
     let records;
     const lines = text.split(/\r?\n/).filter((l) => l.trim());
-    // JSON Lines when most lines are objects, so one damaged line (even the
-    // first) doesn't send the paste to the CSV parser.
+    // A first line of comma-separated names is a CSV header, even when quoted
+    // multiline cells put "{" at the start of later lines.
+    const csvHeader = /^"?[A-Za-z_][\w ]*"?(,"?[A-Za-z_][\w ]*"?)+$/
+                          .test(lines[0].trim());
+    // Otherwise JSON Lines when most lines are objects, so one damaged line
+    // (even the first) doesn't send the paste to the CSV parser.
     const objectLines = lines.filter((l) => l.trim().startsWith('{')).length;
     if (text.startsWith('[')) {
       records = JSON.parse(text);
-    } else if (objectLines * 2 >= lines.length) {
+    } else if (!csvHeader && objectLines * 2 >= lines.length) {
       // JSON Lines: a line that doesn't parse is skipped and counted.
       records = text.split(/\r?\n/).filter((l) => l.trim()).map((l) => {
         try {
@@ -2011,8 +2033,10 @@
     } else {
       const table = parseCsv(text);
       const header = (table.shift() || []).map((h) => h.trim());
-      // Undo the formula guard, but only on this page's own exports.
-      const ownExport = header.join(',') === EXPORT_COLUMNS.join(',');
+      // Undo the formula guard only on files that carry this page's guard
+      // column, so a CSV from elsewhere keeps its text even with the same
+      // 21 data columns.
+      const ownExport = header[header.length - 1] === GUARD_COLUMN;
       const unguard = (c) =>
           (ownExport && c.startsWith('\'') && needsFormulaGuard(c) ?
                c.slice(1) : c);
@@ -2239,8 +2263,9 @@
     const rows = explorerRows();
     if (!rows.length) return;
     const csv = [
-      EXPORT_COLUMNS.join(','),
-      ...rows.map((r) => EXPORT_COLUMNS.map((c) => csvCell(r[c])).join(',')),
+      [...EXPORT_COLUMNS, GUARD_COLUMN].join(','),
+      ...rows.map((r) =>
+          [...EXPORT_COLUMNS.map((c) => csvCell(r[c])), 'v1'].join(',')),
     ].join('\r\n');
     download('agent_events_export.csv', 'text/csv', csv);
   });
