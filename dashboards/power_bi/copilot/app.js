@@ -248,14 +248,16 @@
       label: 'Tool errors',
       fmt: 'count',
       better: 'down',
-      sql: 'COUNTIF(event_type = \'TOOL_ERROR\')',
+      sql: 'COUNTIF(event_type = \'TOOL_ERROR\' OR ' +
+          '(event_type = \'TOOL_COMPLETED\' AND UPPER(status) = \'ERROR\'))',
     },
     error_rate: {
       label: 'Error rate (%)',
       fmt: 'pct',
       better: 'down',
       sql: '100 * SAFE_DIVIDE(' +
-          'COUNTIF(event_type IN (\'LLM_ERROR\', \'TOOL_ERROR\')), ' +
+          'COUNTIF(event_type IN (\'LLM_ERROR\', \'TOOL_ERROR\') OR ' +
+          '(event_type = \'TOOL_COMPLETED\' AND UPPER(status) = \'ERROR\')), ' +
           'COUNTIF(event_type IN (\'LLM_RESPONSE\', \'LLM_ERROR\', ' +
           '\'TOOL_COMPLETED\', \'TOOL_ERROR\')))',
     },
@@ -493,6 +495,14 @@
     return typeof v === 'number' && Number.isFinite(v);
   }
 
+  // A call that failed: an *_ERROR event, or a call logged with an error
+  // status.
+  function isErrorRow(r) {
+    return r.event_type === 'LLM_ERROR' || r.event_type === 'TOOL_ERROR' ||
+        ((r.event_type === 'TOOL_COMPLETED' || r.event_type === 'LLM_RESPONSE') &&
+         String(r.status).toUpperCase() === 'ERROR');
+  }
+
   function summarize(rows) {
     const sessions = new Set();
     const users = new Set();
@@ -504,10 +514,12 @@
     let llmErrors = 0;
     let toolCalls = 0;
     let toolErrors = 0;
-    let promptTokens = 0;
-    let cachedTokens = 0;
-    let thoughtsTokens = 0;
-    let totalTokens = 0;
+    // Token sums stay null when no row has the field, as SUM does in SQL.
+    let promptTokens = null;
+    let cachedTokens = null;
+    let thoughtsTokens = null;
+    let totalTokens = null;
+    const add = (sum, v) => (isNum(v) ? (sum ?? 0) + v : sum);
 
     for (const r of rows) {
       if (r.session_id) sessions.add(r.session_id);
@@ -524,6 +536,9 @@
           break;
         case 'TOOL_COMPLETED':
           toolCalls++;
+          // Producers also log a failed call as TOOL_COMPLETED with an error
+          // status.
+          if (isErrorRow(r)) toolErrors++;
           if (isNum(r.total_ms)) toolLatency.push(r.total_ms);
           break;
         case 'TOOL_ERROR':
@@ -533,10 +548,10 @@
         default:
           break;
       }
-      if (isNum(r.prompt_tokens)) promptTokens += r.prompt_tokens;
-      if (isNum(r.cached_tokens)) cachedTokens += r.cached_tokens;
-      if (isNum(r.thoughts_tokens)) thoughtsTokens += r.thoughts_tokens;
-      if (isNum(r.total_tokens)) totalTokens += r.total_tokens;
+      promptTokens = add(promptTokens, r.prompt_tokens);
+      cachedTokens = add(cachedTokens, r.cached_tokens);
+      thoughtsTokens = add(thoughtsTokens, r.thoughts_tokens);
+      totalTokens = add(totalTokens, r.total_tokens);
     }
 
     const operations = llmCalls + llmErrors + toolCalls;
@@ -559,11 +574,14 @@
       cached_tokens: cachedTokens,
       thoughts_tokens: thoughtsTokens,
       total_tokens: totalTokens,
-      cache_hit_rate: promptTokens ? (cachedTokens / promptTokens) * 100 : null,
+      cache_hit_rate: promptTokens ? ((cachedTokens ?? 0) / promptTokens) * 100 :
+                                     null,
     };
   }
 
-  function aggregateBy(rows, dim, metric, secondaryMetric) {
+  // With `keepSecondary`, a group stays when only the secondary metric has a
+  // value, so a line chart can show that series with a gap in the other.
+  function aggregateBy(rows, dim, metric, secondaryMetric, keepSecondary) {
     const groups = new Map();
     for (const r of rows) {
       const key = r[dim];
@@ -576,12 +594,9 @@
     for (const [label, list] of groups) {
       const s = summarize(list);
       const value = s[metric];
-      if (!isNum(value)) continue;
-      series.push({
-        label,
-        value,
-        secondary: secondaryMetric ? s[secondaryMetric] : null,
-      });
+      const secondary = secondaryMetric ? s[secondaryMetric] : null;
+      if (!isNum(value) && !(keepSecondary && isNum(secondary))) continue;
+      series.push({label, value: isNum(value) ? value : null, secondary});
     }
     if (dim === 'event_date') {
       series.sort((a, b) => a.label.localeCompare(b.label));
@@ -636,15 +651,32 @@
   // with = + - @, a tab, or a CR, possibly after leading whitespace.
   const FORMULA_LEAD = /^[\t\r]|^\s*[=+\-@]/;
 
+  // True for text that, once any leading apostrophes are removed, a
+  // spreadsheet would run as a formula. Guarding these (including ones that
+  // already start with an apostrophe) keeps the guard reversible: removing
+  // one apostrophe on import always restores the original text.
+  function needsFormulaGuard(text) {
+    return FORMULA_LEAD.test(text.replace(/^'+/, ''));
+  }
+
   // Formats one CSV field per RFC 4180: doubles embedded quotes and quotes any
   // field that contains a comma, quote, CR, or LF. Text that a spreadsheet
   // would run as a formula gets a leading apostrophe first, because quoting
   // alone doesn't stop Excel or Sheets from evaluating it.
   function csvCell(v) {
     let s = String(v ?? '');
-    if (typeof v === 'string' && FORMULA_LEAD.test(s)) s = `'${s}`;
+    if (typeof v === 'string' && needsFormulaGuard(s)) s = `'${s}`;
     return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   }
+
+  // The columns Export CSV writes, in order. Import removes the formula guard
+  // only from files with exactly this header, so other CSVs keep their text.
+  const EXPORT_COLUMNS = [
+    'timestamp', 'event_date', 'event_type', 'agent', 'model', 'tool',
+    'user_id', 'session_id', 'invocation_id', 'trace_id', 'span_id', 'status',
+    'error_message', 'is_truncated', 'total_ms', 'ttft_ms', 'prompt_tokens',
+    'cached_tokens', 'candidates_tokens', 'thoughts_tokens', 'total_tokens',
+  ];
 
   // Parses RFC 4180 CSV text into an array of string arrays.
   function parseCsv(text) {
@@ -822,7 +854,10 @@
       };
     }
 
-    if (/\b(switch|change|convert|make)\b/.test(ql) && chartType) {
+    // "Make a new page with a bar chart of ..." asks for a page, not a switch.
+    const wantsNewPage = /\b(new|another)\s+(page|dashboard)\b/.test(ql);
+    if (!wantsNewPage && /\b(switch|change|convert|make)\b/.test(ql) &&
+        chartType) {
       steps.push(`Chart type: ${chartType}`);
       return {
         action: 'switch_chart', chartType, days, filters, steps,
@@ -830,10 +865,18 @@
       };
     }
 
-    const dim = detectDimension(ql);
-    const metric = detectMetric(ql);
+    // "<metric> by <dimension>": read each from its own side of the last
+    // "by", so "tool calls by agent" groups by agent and "events by user"
+    // counts events.
+    const byAt = ql.lastIndexOf(' by ');
+    const metricText = byAt >= 0 ? ql.slice(0, byAt) : ql;
+    const dimText = byAt >= 0 ? ql.slice(byAt + 4) : ql;
+    const dim = detectDimension(dimText);
+    const metric = detectMetric(metricText);
 
-    if (/^(add|pin|include|append)\b/.test(ql) || state.copilotMode === 'modify') {
+    if (!wantsNewPage &&
+        (/^(add|pin|include|append)\b/.test(ql) ||
+         state.copilotMode === 'modify')) {
       const type = chartType || (dim === 'event_date' ? 'line' : 'hbar');
       const added = visual(newId('v'),
           `${metricLabel(metric)} by ${DIMENSIONS[dim]}`, type, dim, metric, 6,
@@ -939,7 +982,16 @@
 
   // Members each chart type shows, so the SQL returns the same rows.
   const DONUT_SLICES = 6;
-  const VISUAL_LIMITS = {bar: 8, hbar: 7, donut: DONUT_SLICES};
+  const ROW_LIST_LIMIT = 12;
+  const VISUAL_LIMITS = {
+    bar: 8, hbar: 7, donut: DONUT_SLICES, table: ROW_LIST_LIMIT,
+  };
+
+  // The slowest-calls and recent-errors tables list rows instead of
+  // aggregating a metric by a dimension.
+  function isRowList(v) {
+    return v.dim === 'span_id';
+  }
 
   function generatePageSql(page, tableParts) {
     const table = tableParts.join('.');
@@ -954,10 +1006,17 @@
       `-- the newest day with data and covers ${days} days; KPIs also return the`,
       '-- window before it for the deltas.',
       '',
+      '-- Look for the newest day in recent partitions first, and fall back',
+      '-- to the whole table when it has no recent data.',
       'DECLARE window_end DATE DEFAULT (',
       `  SELECT MAX(DATE(timestamp)) FROM \`${table}\``,
       `  WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${
           2 * days} DAY));`,
+      'IF window_end IS NULL THEN',
+      '  SET window_end = (',
+      `    SELECT MAX(DATE(timestamp)) FROM \`${table}\``,
+      '    WHERE timestamp >= TIMESTAMP \'1970-01-01\');',
+      'END IF;',
       '',
       'CREATE TEMP TABLE events AS',
       'SELECT',
@@ -1012,16 +1071,23 @@
 
     for (const v of page.visuals) {
       lines.push('', `-- ${sqlComment(v.title)}`);
-      if (v.type === 'table') {
-        const types = v.errorsOnly ? '\'LLM_ERROR\', \'TOOL_ERROR\'' :
-                                     '\'LLM_RESPONSE\', \'LLM_ERROR\', ' +
-                '\'TOOL_COMPLETED\', \'TOOL_ERROR\'';
+      if (isRowList(v)) {
+        // Same rows as the table: errors newest first, or the slowest calls
+        // that have a latency.
+        const filter = v.errorsOnly ?
+            '(event_type IN (\'LLM_ERROR\', \'TOOL_ERROR\') OR ' +
+                '(event_type IN (\'LLM_RESPONSE\', \'TOOL_COMPLETED\') ' +
+                'AND UPPER(status) = \'ERROR\'))' :
+            'event_type IN (\'LLM_RESPONSE\', \'LLM_ERROR\', ' +
+                '\'TOOL_COMPLETED\', \'TOOL_ERROR\')';
+        const extraRows = v.errorsOnly ? [inWindow, filter] :
+                                         [inWindow, filter, 'total_ms IS NOT NULL'];
         lines.push(
             'SELECT timestamp, event_type, agent, model, tool, total_ms,',
             '  total_tokens, status, error_message',
-            `FROM events${whereSql([inWindow, `event_type IN (${types})`])}`,
+            `FROM events${whereSql(extraRows)}`,
             `ORDER BY ${v.errorsOnly ? 'timestamp' : 'total_ms'} DESC`,
-            'LIMIT 12;');
+            `LIMIT ${ROW_LIST_LIMIT};`);
         continue;
       }
       const select = [`  ${v.dim}`, `  ${METRICS[v.metric].sql} AS ${v.metric}`];
@@ -1031,9 +1097,23 @@
       const extra = v.dim === 'event_date' ? [inWindow] :
                                              [inWindow, `${v.dim} IS NOT NULL`];
       const from = `FROM events${whereSql(extra, v.dim)}`;
+      // Like the page, drop groups with no value. A line chart keeps a group
+      // when either of its series has one.
+      const having = v.type === 'line' && v.secondaryMetric ?
+          `HAVING ${v.metric} IS NOT NULL OR ${v.secondaryMetric} IS NOT NULL` :
+          `HAVING ${v.metric} IS NOT NULL`;
+      const limit = VISUAL_LIMITS[v.type];
       if (v.dim === 'event_date') {
-        lines.push('SELECT', select.join(',\n'), from, 'GROUP BY event_date',
-            'ORDER BY event_date;');
+        if (limit) {
+          // Charts other than lines show the newest days, oldest first.
+          lines.push('SELECT * FROM (', 'SELECT', select.join(',\n'), from,
+              'GROUP BY event_date', having,
+              `ORDER BY event_date DESC\nLIMIT ${limit}`, ')',
+              'ORDER BY event_date;');
+        } else {
+          lines.push('SELECT', select.join(',\n'), from, 'GROUP BY event_date',
+              having, 'ORDER BY event_date;');
+        }
       } else if (v.type === 'donut' && isAdditiveMetric(v.metric)) {
         // Same as the donut: the top five, then the rest folded into "Other".
         lines.push(
@@ -1057,9 +1137,8 @@
             'GROUP BY 1',
             'ORDER BY MIN(rn);');
       } else {
-        const limit = VISUAL_LIMITS[v.type];
         lines.push('SELECT', select.join(',\n'), from, `GROUP BY ${v.dim}`,
-            `ORDER BY ${v.metric} DESC, ${v.dim}` +
+            having, `ORDER BY ${v.metric} DESC, ${v.dim}` +
                 (limit ? `\nLIMIT ${limit};` : ';'));
       }
     }
@@ -1119,6 +1198,13 @@
         'No matching rows for the current filters.</div>';
   }
 
+  // Dates drop the year ("2026-11-19" -> "11-19"); other labels are
+  // shortened rather than cut at a fixed offset.
+  function axisLabel(label, dim) {
+    if (dim === 'event_date') return label.slice(5);
+    return label.length > 10 ? label.slice(0, 9) + '…' : label;
+  }
+
   function renderLineChart(container, series, vis) {
     if (!series.length) {
       container.innerHTML = emptyStateHtml();
@@ -1140,12 +1226,40 @@
         (series.length === 1 ? plotW / 2 : (i / (series.length - 1)) * plotW);
     const yFor = (v) =>
         padT + plotH - (Math.min(Math.max(v, 0), maxVal) / maxVal) * plotH;
-    const points = (pick) => series
-        .map((d, i) => `${xFor(i).toFixed(1)},${yFor(pick(d) || 0).toFixed(1)}`)
-        .join(' ');
-    const pts1 = points((d) => d.value);
-    const area = `${padL},${padT + plotH} ${pts1} ${
-        xFor(series.length - 1).toFixed(1)},${padT + plotH}`;
+    // Runs of consecutive values; a missing value leaves a gap instead of
+    // dropping the line to zero.
+    const runs = (pick) => {
+      const out = [];
+      let cur = [];
+      series.forEach((d, i) => {
+        if (isNum(pick(d))) {
+          cur.push([xFor(i).toFixed(1), yFor(pick(d)).toFixed(1)]);
+        } else if (cur.length) {
+          out.push(cur);
+          cur = [];
+        }
+      });
+      if (cur.length) out.push(cur);
+      return out;
+    };
+    const ptsOf = (run) => run.map(([x, y]) => `${x},${y}`).join(' ');
+    const gid = gradientId();
+    const lineOf = (run, color, attrs) => (run.length === 1 ?
+        // A one-point polyline draws nothing, so mark lone values with a dot.
+        `<circle cx="${run[0][0]}" cy="${run[0][1]}" r="2.5" fill="${color}"/>` :
+        `<polyline fill="none" stroke="${color}" stroke-linejoin="round" ${
+            attrs} points="${ptsOf(run)}"/>`);
+    const runs1 = runs((d) => d.value);
+    const area = runs1.filter((run) => run.length > 1)
+        .map((run) => `<polygon points="${run[0][0]},${padT + plotH} ${
+            ptsOf(run)} ${run[run.length - 1][0]},${padT + plotH}" ` +
+            `fill="url(#${gid})"/>`)
+        .join('');
+    const line1 = runs1.map((run) => lineOf(run, 'var(--chart-1)',
+        'stroke-width="2.2"')).join('');
+    const line2 = hasSec ? runs((d) => d.secondary).map((run) => lineOf(run,
+        'var(--chart-2)', 'stroke-width="2" stroke-dasharray="5,3"')).join('') :
+                           '';
 
     let grid = '';
     for (let g = 0; g <= 4; g++) {
@@ -1163,14 +1277,14 @@
       if (i % step === 0 || i === series.length - 1) {
         xLabels += `<text x="${xFor(i)}" y="${H - 10}" text-anchor="middle" ` +
             `fill="var(--muted-foreground)" font-size="10">${
-                escHtml(d.label.slice(5))}</text>`;
+                escHtml(axisLabel(d.label, vis.dim))}</text>`;
       }
     });
     const dots = series
-        .map((d, i) => `<circle cx="${xFor(i).toFixed(1)}" cy="${
+        .map((d, i) => (!isNum(d.value) ? '' : `<circle cx="${xFor(i).toFixed(1)}" cy="${
             yFor(d.value).toFixed(1)}" r="3.5" fill="var(--chart-1)" ` +
             `stroke="var(--card)" stroke-width="1.5" style="cursor:pointer" ` +
-            `data-idx="${i}"/>`)
+            `data-idx="${i}"/>`))
         .join('');
 
     const swatch = (color, metric) => '<span style="display:flex;' +
@@ -1181,19 +1295,11 @@
         hasSec ? swatch('var(--chart-2)', vis.secondaryMetric) : ''}</div>` +
         `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:208px;` +
         'overflow:visible;" role="img">' +
-        `<defs><linearGradient id="grad-${escAttr(vis.id)}" x1="0" y1="0" ` +
+        `<defs><linearGradient id="${gid}" x1="0" y1="0" ` +
         'x2="0" y2="1"><stop offset="0%" stop-color="var(--chart-1)" ' +
         'stop-opacity="0.28"/><stop offset="100%" stop-color="var(--chart-1)" ' +
         'stop-opacity="0.02"/></linearGradient></defs>' + grid +
-        `<polygon points="${area}" fill="url(#grad-${escAttr(vis.id)})"/>` +
-        '<polyline fill="none" stroke="var(--chart-1)" stroke-width="2.2" ' +
-        `stroke-linejoin="round" points="${pts1}"/>` +
-        (hasSec ? '<polyline fill="none" stroke="var(--chart-2)" ' +
-                 'stroke-width="2" stroke-dasharray="5,3" ' +
-                 `stroke-linejoin="round" points="${
-                     points((d) => d.secondary)}"/>` :
-                  '') +
-        dots + xLabels + '</svg>';
+        area + line1 + line2 + dots + xLabels + '</svg>';
 
     container.querySelectorAll('circle[data-idx]').forEach((el) => {
       const d = series[Number(el.dataset.idx)];
@@ -1213,8 +1319,21 @@
     });
   }
 
+  // The members a chart shows: the top values, or for dates the newest days
+  // (oldest first), matching the generated SQL.
+  function topItems(series, vis, limit) {
+    return vis.dim === 'event_date' ? series.slice(-limit) :
+                                      series.slice(0, limit);
+  }
+
+  // Unique per render, so two copies of a chart (such as Focus) don't share
+  // an SVG gradient id.
+  function gradientId() {
+    return newId('grad');
+  }
+
   function renderBarChart(container, series, vis) {
-    const items = series.slice(0, VISUAL_LIMITS.bar);
+    const items = topItems(series, vis, VISUAL_LIMITS.bar);
     if (!items.length) {
       container.innerHTML = emptyStateHtml();
       return;
@@ -1258,7 +1377,7 @@
   }
 
   function renderHBarChart(container, series, vis) {
-    const items = series.slice(0, VISUAL_LIMITS.hbar);
+    const items = topItems(series, vis, VISUAL_LIMITS.hbar);
     if (!items.length) {
       container.innerHTML = emptyStateHtml();
       return;
@@ -1300,8 +1419,10 @@
     }
     // Shares only make sense for additive metrics. The total covers the
     // full series, and groups past the top slices are folded into "Other".
-    let items = positive.slice(0, MAX_SLICES);
-    if (additive && positive.length > MAX_SLICES) {
+    let items = topItems(positive, vis, MAX_SLICES);
+    // Dates aren't categories, so a donut of days shows the newest ones
+    // without an "Other" slice.
+    if (additive && vis.dim !== 'event_date' && positive.length > MAX_SLICES) {
       const rest = positive.slice(MAX_SLICES - 1);
       items = positive.slice(0, MAX_SLICES - 1);
       items.push({
@@ -1374,19 +1495,44 @@
         items, vis);
   }
 
+  // A metric-by-dimension visual shown as a table: one row per member.
+  function renderSeriesTable(container, series, vis) {
+    const items = topItems(series, vis, ROW_LIST_LIMIT);
+    if (!items.length) {
+      container.innerHTML = emptyStateHtml();
+      return;
+    }
+    const sec = vis.secondaryMetric;
+    container.innerHTML = '<div class="data-table-wrap custom-scroll">' +
+        '<table class="data-table"><thead><tr>' +
+        `<th>${escHtml(DIMENSIONS[vis.dim] || vis.dim)}</th>` +
+        `<th class="text-right">${escHtml(metricLabel(vis.metric))}</th>` +
+        (sec ? `<th class="text-right">${escHtml(metricLabel(sec))}</th>` : '') +
+        '</tr></thead><tbody>' +
+        items.map((d, i) => `<tr style="cursor:pointer;" data-idx="${i}">` +
+            `<td class="mono truncate" style="max-width:200px;" title="${
+                escAttr(d.label)}">${escHtml(d.label)}</td>` +
+            `<td class="text-right mono tabular">${
+                escHtml(fmtMetric(vis.metric, d.value))}</td>` +
+            (sec ? `<td class="text-right mono tabular">${
+                escHtml(fmtMetric(sec, d.secondary))}</td>` : '') +
+            '</tr>').join('') +
+        '</tbody></table></div>';
+    bindSeriesEvents(container.querySelectorAll('tr[data-idx]'), items, vis);
+  }
+
   function renderTableVisual(container, rows, vis) {
-    const errorTypes = new Set(['LLM_ERROR', 'TOOL_ERROR']);
     const callTypes = new Set(
         ['LLM_RESPONSE', 'LLM_ERROR', 'TOOL_COMPLETED', 'TOOL_ERROR']);
-    let list = rows.filter((r) => (vis.errorsOnly ? errorTypes : callTypes)
-                                      .has(r.event_type));
+    let list = rows.filter((r) => callTypes.has(r.event_type) &&
+                                  (!vis.errorsOnly || isErrorRow(r)));
     if (vis.errorsOnly) {
       list.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
     } else {
       list = list.filter((r) => isNum(r.total_ms));
       list.sort((a, b) => b.total_ms - a.total_ms);
     }
-    const slice = list.slice(0, 12);
+    const slice = list.slice(0, ROW_LIST_LIMIT);
     if (!slice.length) {
       container.innerHTML = emptyStateHtml();
       return;
@@ -1414,14 +1560,16 @@
   }
 
   function renderVisualInto(container, vis) {
-    if (vis.type === 'table') {
+    if (isRowList(vis)) {
       renderTableVisual(container, filterRows(), vis);
       return;
     }
     // A visual ignores its own cross-filter so the other members stay visible.
     const rows = filterRows({ignoreField: vis.dim});
-    const series = aggregateBy(rows, vis.dim, vis.metric, vis.secondaryMetric);
-    if (vis.type === 'line') renderLineChart(container, series, vis);
+    const series = aggregateBy(rows, vis.dim, vis.metric, vis.secondaryMetric,
+        vis.type === 'line');
+    if (vis.type === 'table') renderSeriesTable(container, series, vis);
+    else if (vis.type === 'line') renderLineChart(container, series, vis);
     else if (vis.type === 'donut') renderDonutChart(container, series, vis);
     else if (vis.type === 'hbar') renderHBarChart(container, series, vis);
     else renderBarChart(container, series, vis);
@@ -1534,8 +1682,8 @@
           vis.span === 5 ? 'span-5' : 'span-6';
       card.className = `vis-card ${span}${vis.isNew ? ' widget-highlight' : ''}`;
       delete vis.isNew;
-      const types = vis.type === 'table' ? ['table'] :
-                                           ['bar', 'hbar', 'line', 'donut'];
+      const types = isRowList(vis) ? ['table'] :
+                                     ['bar', 'hbar', 'line', 'donut', 'table'];
       card.innerHTML = '<div class="vis-header">' +
           `<h3 class="vis-title truncate" title="${escAttr(vis.title)}">${
               escHtml(vis.title)}</h3><div class="vis-tools">` +
@@ -1630,7 +1778,7 @@
 
   function renderSchema() {
     const columns = [
-      ['event_id', 'STRING'],
+      ['event_id', 'STRING, newer plugin versions only'],
       ['timestamp', 'TIMESTAMP, required'],
       ['event_type', 'STRING, e.g. LLM_RESPONSE'],
       ['agent', 'STRING'],
@@ -1641,7 +1789,7 @@
       ['span_id', 'STRING'],
       ['parent_span_id', 'STRING'],
       ['content', 'JSON: tool, args, response'],
-      ['content_parts', 'JSON'],
+      ['content_parts', 'REPEATED RECORD: mime_type, text, uri, object_ref'],
       ['attributes', 'JSON: model, usage_metadata'],
       ['latency_ms', 'JSON: total_ms, time_to_first_token_ms'],
       ['status', 'STRING'],
@@ -1735,8 +1883,10 @@
     } else if (plan.action === 'add_visual') {
       activePage().visuals.unshift(plan.visual);
     } else if (plan.action === 'switch_chart') {
+      // Row lists stay tables; every other visual can switch, including back
+      // from a table.
       activePage().visuals.forEach((v) => {
-        if (v.type !== 'table') v.type = plan.chartType;
+        if (!isRowList(v)) v.type = plan.chartType;
       });
     }
     switchView('report');
@@ -1765,19 +1915,33 @@
     return Number.isFinite(n) ? n : null;
   }
 
+  // Largest time a JavaScript Date can hold, in milliseconds.
+  const MAX_DATE_MS = 8.64e15;
+
   // Returns epoch milliseconds for a BigQuery TIMESTAMP value, or NaN.
   function parseTimestamp(value) {
     const t = String(value).trim();
-    // The BigQuery REST API returns TIMESTAMP values as epoch seconds.
-    if (/^\d+(\.\d+)?$/.test(t)) return Number(t) * 1000;
+    // The REST API returns epoch seconds, possibly as a FLOAT64 in exponent
+    // form ("1.7635842E9"), or microseconds with useInt64Timestamp.
+    if (/^[+-]?\d+(\.\d+)?(e[+-]?\d+)?$/i.test(t)) {
+      const n = Number(t);
+      const abs = Math.abs(n);
+      const ms = abs >= 1e14 ? n / 1000 : abs >= 1e11 ? n : n * 1000;
+      return Math.abs(ms) <= MAX_DATE_MS ? ms : NaN;
+    }
     // `bq --format=json` and CSV print UTC with no offset, such as
     // "2026-11-19 20:30:00" or "2026-11-19 20:30:00 UTC". Date.parse would
     // read those as local time, so mark them as UTC.
     const m = t.match(
         /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?:\s*(?:UTC|Z))?$/i);
     if (m) return Date.parse(`${m[1]}T${m[2]}Z`);
-    // Keep an explicit offset, but use the ISO "T" separator.
-    return Date.parse(t.replace(/^(\d{4}-\d{2}-\d{2}) /, '$1T'));
+    // Keep an explicit offset, written as ISO 8601: "T" separator, no space
+    // before the offset, and +HH:MM (GoogleSQL can print "+00" or " +00:00").
+    const o = t.match(
+        /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)\s*([+-])(\d{2}):?(\d{2})?$/);
+    if (o) return Date.parse(`${o[1]}T${o[2]}${o[3]}${o[4]}:${o[5] || '00'}`);
+    const ms = Date.parse(t.replace(/^(\d{4}-\d{2}-\d{2}) /, '$1T'));
+    return Math.abs(ms) <= MAX_DATE_MS ? ms : NaN;
   }
 
   function normalizeRow(r, index) {
@@ -1806,7 +1970,7 @@
       user_id: text(r.user_id),
       session_id: text(r.session_id),
       invocation_id: text(r.invocation_id),
-      trace_id: text(r.trace_id || r.invocation_id),
+      trace_id: text(r.trace_id),
       span_id: text(r.span_id) || `row-${index}`,
       status: (text(r.status) || 'OK').toUpperCase(),
       error_message: text(r.error_message),
@@ -1829,9 +1993,13 @@
     const text = raw.replace(/^\uFEFF/, '').trim();
     if (!text) throw new Error('Paste rows or choose a file first.');
     let records;
+    const lines = text.split(/\r?\n/).filter((l) => l.trim());
+    // JSON Lines when most lines are objects, so one damaged line (even the
+    // first) doesn't send the paste to the CSV parser.
+    const objectLines = lines.filter((l) => l.trim().startsWith('{')).length;
     if (text.startsWith('[')) {
       records = JSON.parse(text);
-    } else if (text.startsWith('{')) {
+    } else if (objectLines * 2 >= lines.length) {
       // JSON Lines: a line that doesn't parse is skipped and counted.
       records = text.split(/\r?\n/).filter((l) => l.trim()).map((l) => {
         try {
@@ -1843,9 +2011,11 @@
     } else {
       const table = parseCsv(text);
       const header = (table.shift() || []).map((h) => h.trim());
-      // Undo the formula guard that csvCell adds on export.
-      const unguard = (c) => (/^'/.test(c) && FORMULA_LEAD.test(c.slice(1)) ?
-                                  c.slice(1) : c);
+      // Undo the formula guard, but only on this page's own exports.
+      const ownExport = header.join(',') === EXPORT_COLUMNS.join(',');
+      const unguard = (c) =>
+          (ownExport && c.startsWith('\'') && needsFormulaGuard(c) ?
+               c.slice(1) : c);
       records = table.map((cells) => Object.fromEntries(
           header.map((h, i) => [h, unguard(cells[i] ?? '')])));
     }
@@ -1894,9 +2064,13 @@
     if (!parts) {
       error.textContent = 'Use project.dataset.table, for example ' +
           'my-project.my_dataset.agent_events.';
+      // Don't leave the previous table's query on screen to be copied.
+      document.getElementById('sqlModalCode').textContent = '';
+      document.getElementById('btnCopySql').disabled = true;
       return;
     }
     error.textContent = '';
+    document.getElementById('btnCopySql').disabled = false;
     state.tableId = parts.join('.');
     document.getElementById('sqlModalCode').textContent =
         generatePageSql(activePage(), parts);
@@ -1937,6 +2111,9 @@
   $('btnDuplicatePage').addEventListener('click', () => {
     const copy = JSON.parse(JSON.stringify(activePage()));
     copy.id = newId('page');
+    copy.visuals.forEach((v) => {
+      v.id = newId('v');
+    });
     copy.title += ' (copy)';
     state.pages.push(copy);
     state.activePageId = copy.id;
@@ -1946,6 +2123,10 @@
     $('copilotPane').classList.toggle('hidden');
   });
   $('btnAddBlankPromptPage').addEventListener('click', () => {
+    // This button starts a new page, so leave "Modify current" mode.
+    state.copilotMode = 'new';
+    $('modeNewPage').classList.add('active');
+    $('modeModifyPage').classList.remove('active');
     $('copilotPane').classList.remove('hidden');
     $('promptInput').focus();
   });
@@ -1984,6 +2165,7 @@
   $('btnCloseSql').addEventListener('click', () => $('sqlModal').classList.add('hidden'));
   $('btnCopySql').addEventListener('click', async () => {
     const code = $('sqlModalCode');
+    if ($('btnCopySql').disabled || !code.textContent) return;
     let copied = false;
     // The Clipboard API exists only in secure contexts (HTTPS or localhost).
     if (navigator.clipboard && window.isSecureContext) {
@@ -2056,10 +2238,9 @@
   $('btnExportCsv').addEventListener('click', () => {
     const rows = explorerRows();
     if (!rows.length) return;
-    const columns = Object.keys(rows[0]);
     const csv = [
-      columns.map(csvCell).join(','),
-      ...rows.map((r) => columns.map((c) => csvCell(r[c])).join(',')),
+      EXPORT_COLUMNS.join(','),
+      ...rows.map((r) => EXPORT_COLUMNS.map((c) => csvCell(r[c])).join(',')),
     ].join('\r\n');
     download('agent_events_export.csv', 'text/csv', csv);
   });

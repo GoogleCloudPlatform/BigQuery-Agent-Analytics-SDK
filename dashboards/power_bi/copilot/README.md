@@ -20,9 +20,10 @@ PBIP dashboard. It does not need a Power BI license.
 - **It doesn't connect to BigQuery.** It starts with a synthetic sample of
   `agent_events` rows. Use **Import data** to load your own rows, and
   **BigQuery SQL** to copy the queries for a page and run them yourself. As
-  on the page, the SQL window ends on the newest day with data, the KPI query
-  also returns the previous window for the deltas, and each chart query
-  returns the same top members the chart shows.
+  on the page, the SQL window ends on the newest day with data (looking at
+  recent partitions first, then the whole table), the KPI query also returns
+  the previous window for the deltas, and each chart query returns the same
+  members the chart shows.
 - **Numbers are close to, not identical to, BigQuery.** P95 values use a
   nearest-rank percentile, while the generated SQL uses `APPROX_QUANTILES`.
 
@@ -61,8 +62,10 @@ The data stays in the browser tab.
 
 **Export CSV** writes the rows shown in the table view, after slicers,
 cross-filters, and the search box. Text cells that a spreadsheet would run as
-a formula (starting with `=`, `+`, `-`, `@`, a tab, or a CR) get a leading
-`'`, which the importer removes again.
+a formula (starting with `=`, `+`, `-`, `@`, a tab, or a CR, even after
+leading apostrophes) get one more leading `'`. The importer removes that one
+apostrophe only from files with this page's export header, so other CSVs keep
+their text as written.
 
 ## Metrics
 
@@ -89,9 +92,14 @@ visual. The table ID must match `project.dataset.table` using the same
 identifier rules as the PBIP parameters. Filter values are written as escaped
 string literals.
 
-The SQL window is relative to the current time, while the dashboard's window
-ends at the newest date in the loaded data, so the two can cover different days
-on older data.
+Both the page and the SQL end the window on the newest day with data, so they
+cover the same days even when that day is in the past. The SQL looks for it in
+the last two windows' worth of partitions first, and scans the whole table's
+`timestamp` column only when those are empty.
+
+A tool call counts as an error when it is logged as `TOOL_ERROR` or as
+`TOOL_COMPLETED` with an `ERROR` status. Token totals and traces stay empty
+when the rows don't carry them, as `SUM` and `COUNT(DISTINCT ...)` do in SQL.
 
 ## Files
 
