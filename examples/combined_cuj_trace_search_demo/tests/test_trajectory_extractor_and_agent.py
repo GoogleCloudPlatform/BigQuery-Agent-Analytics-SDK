@@ -4332,6 +4332,1089 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
         if must_keep:
           self.assertIn(must_keep, out)
 
+  def test_post_budget_nl_json_scalars_mismatched_quotes_path_headers_and_linear_unescape(
+      self,
+  ) -> None:
+    import time  # noqa: PLC0415
+
+    from analytics.trajectory_extractor import _unescape_safe_ascii_unicode_escapes  # noqa: PLC0415
+    from analytics.trajectory_extractor import extract_s3_outcome_first
+    from analytics.trajectory_extractor import scrub_sensitive_text
+
+    budget_prefix = '{"ok":1} ' * 32
+
+    # 1. Post-budget JSON tail unquoted scalars after blank lines.
+    post_budget_payload = (
+        budget_prefix + '{"password":\n\n 493826,"error_code":"CARD_EXPIRED"}'
+    )
+    for label, sample, secret_val, must_keep in (
+        (
+            "post_budget_json_nl_int",
+            post_budget_payload,
+            "493826",
+            "CARD_EXPIRED",
+        ),
+        (
+            "post_budget_json_nl_neg_sci",
+            budget_prefix
+            + '{"password":\n\n -493826.5e-2,"error_code":"CARD_EXPIRED"}',
+            "493826.5e-2",
+            "CARD_EXPIRED",
+        ),
+        (
+            "post_budget_json_escaped_nl_int",
+            budget_prefix
+            + r'{"password":\n\n 493826,"error_code":"CARD_EXPIRED"}',
+            "493826",
+            "CARD_EXPIRED",
+        ),
+        (
+            "escaped_dq_nl_int",
+            r"\"password\":" + "\n\n 493826",
+            "493826",
+            "",
+        ),
+        (
+            "standalone_dq_nl_int",
+            '"password":\n\n 493826',
+            "493826",
+            "",
+        ),
+        (
+            "post_budget_unsafe_cookies_count",
+            budget_prefix
+            + '{"cookies":\n\n 493826,"error_code":"CARD_EXPIRED"}',
+            "493826",
+            "CARD_EXPIRED",
+        ),
+    ):
+      with self.subTest(post_budget_json_nl_scalar=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+        if must_keep:
+          self.assertIn(must_keep, out)
+
+    safe_cookies_out = scrub_sensitive_text(
+        budget_prefix + '{"cookies":\n\n 3,"error_code":"CARD_EXPIRED"}'
+    )
+    self.assertIn('"cookies":\n\n 3', safe_cookies_out)
+    self.assertIn("CARD_EXPIRED", safe_cookies_out)
+    self.assertNotIn("[REDACTED]", safe_cookies_out)
+
+    for prose_sample in (
+        "password:\n\nERROR: CARD_EXPIRED",
+        'Field "password":\n\nERROR: CARD_EXPIRED',
+        'Field "password" is:\n\n 493826',
+    ):
+      with self.subTest(prose_nl_preserved=prose_sample):
+        self.assertEqual(scrub_sensitive_text(prose_sample), prose_sample)
+
+    s3_trace = {
+        "turns": [
+            {
+                "turn_index": 0,
+                "turn_id": "inv_post_budget_nl",
+                "events": [
+                    {
+                        "author": "customer_ops_agent",
+                        "content": {
+                            "role": "model",
+                            "parts": [{"text": post_budget_payload}],
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    s3_text = extract_s3_outcome_first(
+        s3_trace,
+        metrics={"error_summary": post_budget_payload},
+    )
+    self.assertNotIn("493826", s3_text)
+    self.assertIn("CARD_EXPIRED", s3_text)
+    self.assertIn("[REDACTED]", s3_text)
+
+    # 2. Escaped opening quote and mismatched quote-key recovery.
+    for label, sample, secret_val, must_keep in (
+        (
+            "edq_plain_close",
+            r'\"password": "S3CR3T" CARD_EXPIRED',
+            "S3CR3T",
+            "CARD_EXPIRED",
+        ),
+        (
+            "edq_plain_close_post_budget",
+            '{"ok":1} ' * 33 + r'\"password": "S3CR3T" CARD_EXPIRED',
+            "S3CR3T",
+            "CARD_EXPIRED",
+        ),
+        (
+            "edq_3bs_1bs_close",
+            r'\\\"password\": "S3CR3T" CARD_EXPIRED',
+            "S3CR3T",
+            "CARD_EXPIRED",
+        ),
+        (
+            "edq_stray_prefix",
+            r'\"stray \"password": "S3CR3T" CARD_EXPIRED',
+            "S3CR3T",
+            "CARD_EXPIRED",
+        ),
+        (
+            "dq_escaped_close_str",
+            r'"password\": "S3CR3T" CARD_EXPIRED',
+            "S3CR3T",
+            "CARD_EXPIRED",
+        ),
+        (
+            "dq_escaped_close_num",
+            r'"password\": 493826 CARD_EXPIRED',
+            "493826",
+            "CARD_EXPIRED",
+        ),
+        (
+            "esq_plain_close",
+            r"\'password': 'S3CR3T' CARD_EXPIRED",
+            "S3CR3T",
+            "CARD_EXPIRED",
+        ),
+        (
+            "esq_escaped_close",
+            r"\'password\': \'S3CR3T\' CARD_EXPIRED",
+            "S3CR3T",
+            "CARD_EXPIRED",
+        ),
+        (
+            "edq_sq_close",
+            r"\"password': 'S3CR3T' CARD_EXPIRED",
+            "S3CR3T",
+            "CARD_EXPIRED",
+        ),
+        (
+            "dq_sq_close",
+            '"password\': "S3CR3T" CARD_EXPIRED',
+            "S3CR3T",
+            "CARD_EXPIRED",
+        ),
+        (
+            "sq_dq_close",
+            "'password\": 'S3CR3T' CARD_EXPIRED",
+            "S3CR3T",
+            "CARD_EXPIRED",
+        ),
+        (
+            "auth_next_line_edq_mismatched",
+            'authentication:\n  \\"password": "S3CR3T"',
+            "S3CR3T",
+            '\\"password":',
+        ),
+        (
+            "auth_next_line_dq_escaped_close",
+            'authentication:\n  "password\\": "S3CR3T"',
+            "S3CR3T",
+            '"password\\":',
+        ),
+        (
+            "auth_next_line_esq_plain_close",
+            "authentication:\n  \\'password': 'S3CR3T'",
+            "S3CR3T",
+            "\\'password':",
+        ),
+        (
+            "dq_escaped_close_json_object",
+            r'{"password\": 493826, "error_code": "CARD_EXPIRED"}',
+            "493826",
+            '"error_code": "CARD_EXPIRED"',
+        ),
+        (
+            "dq_escaped_close_json_object_post_budget",
+            '{"ok":1} ' * 33
+            + r'{"password\": 493826, "error_code": "CARD_EXPIRED"}',
+            "493826",
+            '"error_code": "CARD_EXPIRED"',
+        ),
+        (
+            "dq_escaped_close_bare_then_quoted",
+            r'"password\": S3CR3T, "error_code": "CARD_EXPIRED"',
+            "S3CR3T",
+            '"error_code": "CARD_EXPIRED"',
+        ),
+        (
+            "dq_escaped_close_num_then_quoted_err",
+            r'"password\": 493826 "CARD_EXPIRED"',
+            "493826",
+            '"CARD_EXPIRED"',
+        ),
+        (
+            "dq_escaped_close_num_then_quoted_foo",
+            r'"password\": 493826 "foo"',
+            "493826",
+            '"foo"',
+        ),
+        (
+            "dq_sq_close_num_then_quoted_err",
+            '"password\': 493826, "error_code": "CARD_EXPIRED"',
+            "493826",
+            '"error_code": "CARD_EXPIRED"',
+        ),
+        (
+            "edq_esq_close_then_edq_err",
+            r"\"password\': \'S3CR3T\', \"error_code\": \"CARD_EXPIRED\"",
+            "S3CR3T",
+            r"\"error_code\": \"CARD_EXPIRED\"",
+        ),
+        (
+            "edq_3bs_close_str_then_err",
+            r"\"password\\\": \"S3CR3T\" CARD_EXPIRED",
+            "S3CR3T",
+            "CARD_EXPIRED",
+        ),
+        (
+            "edq_3bs_close_num_then_edq_err",
+            r"\"password\\\": 493826, \"error_code\": \"CARD_EXPIRED\"",
+            "493826",
+            r"\"error_code\": \"CARD_EXPIRED\"",
+        ),
+    ):
+      with self.subTest(mismatched_quote_key=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+        if must_keep:
+          self.assertIn(must_keep, out)
+
+    self.assertEqual(scrub_sensitive_text(r"It\'s ok"), r"It\'s ok")
+    for valid_json_sample, expected_obj in (
+        (
+            '{"msg": "he said \\"password\\": \\"S3CR3T\\""}',
+            {"msg": 'he said "password": "[REDACTED]"'},
+        ),
+        (
+            '{"msg": "\\"password\\": \\"S3CR3T\\""}',
+            {"msg": '"password": "[REDACTED]"'},
+        ),
+        (
+            '{"msg": "password\'s value: ok"}',
+            {"msg": "password's value: ok"},
+        ),
+    ):
+      with self.subTest(valid_json_preserved=valid_json_sample):
+        out = scrub_sensitive_text(valid_json_sample)
+        self.assertNotIn("S3CR3T", out)
+        self.assertEqual(json.loads(out), expected_obj)
+        pb_out = scrub_sensitive_text(budget_prefix + valid_json_sample)
+        self.assertNotIn("S3CR3T", pb_out)
+        self.assertEqual(json.loads(pb_out[len(budget_prefix) :]), expected_obj)
+
+    # 3. Slash and colon path headers, URL spans, cookies, and token prefixes.
+    for sample, expected in (
+        (
+            "authentication:\n  request/password: samplevalue",
+            "authentication:\n  request/password: [REDACTED]",
+        ),
+        (
+            "authentication:\n  request:password: samplevalue",
+            "authentication:\n  request:password: [REDACTED]",
+        ),
+        (
+            "authentication:\n  auth:password: samplevalue",
+            "authentication:\n  auth:password: [REDACTED]",
+        ),
+        (
+            "authentication:\n  request:password=samplevalue",
+            "authentication:\n  request:password=[REDACTED]",
+        ),
+        (
+            "authentication:\n  projects/p/secrets/password: samplevalue",
+            "authentication:\n  projects/p/secrets/password: [REDACTED]",
+        ),
+        (
+            "authentication:\n  /request/password: samplevalue",
+            "authentication:\n  /request/password: [REDACTED]",
+        ),
+        (
+            "authentication:\n  request/api key: samplevalue",
+            "authentication:\n  request/api key: [REDACTED]",
+        ),
+        (
+            "authentication:\n  request:api key: samplevalue",
+            "authentication:\n  request:api key: [REDACTED]",
+        ),
+        (
+            "authentication:\n  bearer token: samplevalue",
+            "authentication:\n  bearer token: [REDACTED]",
+        ),
+        (
+            "authentication:\n  request/bearer token: samplevalue",
+            "authentication:\n  request/bearer token: [REDACTED]",
+        ),
+        (
+            "request/secret/val: samplevalue",
+            "request/secret/val: [REDACTED]",
+        ),
+        (
+            "request:auth:password: samplevalue",
+            "request:auth:password: [REDACTED]",
+        ),
+        (
+            "auth:credentials:token: samplevalue",
+            "auth:credentials:token: [REDACTED]",
+        ),
+        (
+            "password:password: login failed",
+            "password:[REDACTED] login failed",
+        ),
+        (
+            "password:secret: FAILED",
+            "password:[REDACTED] FAILED",
+        ),
+        (
+            "token:token: expired",
+            "token:[REDACTED] expired",
+        ),
+        (
+            "api_key:apikey: rejected",
+            "api_key:[REDACTED] rejected",
+        ),
+        (
+            "user:password:password: FAILED",
+            "user:password:[REDACTED] FAILED",
+        ),
+        (
+            "password:letmein:password: FAILED",
+            "password:[REDACTED] FAILED",
+        ),
+        (
+            "password:hunter:my_token: FAILED",
+            "password:[REDACTED] FAILED",
+        ),
+        (
+            "token:abc:def:api_key: x1",
+            "token:[REDACTED] x1",
+        ),
+        (
+            "secret:secret: FAILED",
+            "secret:[REDACTED] FAILED",
+        ),
+        (
+            "auth:password = hunter2",
+            "auth:password = [REDACTED]",
+        ),
+        (
+            "authentication:\n  auth:password = samplevalue",
+            "authentication:\n  auth:password = [REDACTED]",
+        ),
+        (
+            "oauth:accessToken: S3CR3T_TOKEN",
+            "oauth:accessToken: [REDACTED]",
+        ),
+        (
+            "authentication:\n  auth:apiKey: samplevalue",
+            "authentication:\n  auth:apiKey: [REDACTED]",
+        ),
+        (
+            "Auth:Key: samplevalue",
+            "Auth:Key: [REDACTED]",
+        ),
+        (
+            "Secret:Access_Key: samplevalue",
+            "Secret:Access_Key: [REDACTED]",
+        ),
+        (
+            "secrets:db_password: hunter2",
+            "secrets:db_password: [REDACTED]",
+        ),
+        (
+            "authentication:\n  auth:db_password: samplevalue",
+            "authentication:\n  auth:db_password: [REDACTED]",
+        ),
+        (
+            "auth:v1:password: S3CR3T",
+            "auth:v1:password: [REDACTED]",
+        ),
+        (
+            "auth:oauth2:access_token: S3CR3T",
+            "auth:oauth2:access_token: [REDACTED]",
+        ),
+        (
+            "secrets:v2:db_password: hunter2",
+            "secrets:v2:db_password: [REDACTED]",
+        ),
+        (
+            "SECRETS:PROD:DB_PASSWORD: hunter2",
+            "SECRETS:PROD:DB_PASSWORD: [REDACTED]",
+        ),
+        (
+            "https://oauth2:abc&def99@gitlab.com",
+            "https://oauth2:[REDACTED]@gitlab.com",
+        ),
+        (
+            "https://token:p4*ss99@api.example.com",
+            "https://token:[REDACTED]@api.example.com",
+        ),
+        (
+            "https://user:a,b@host.example.com",
+            "https://user:[REDACTED]@host.example.com",
+        ),
+        (
+            "https://user:a;b@host.example.com",
+            "https://user:[REDACTED]@host.example.com",
+        ),
+        (
+            "https://user:a)b@host.example.com",
+            "https://user:[REDACTED]@host.example.com",
+        ),
+        (
+            "https://user:a'b@host.example.com",
+            "https://user:[REDACTED]@host.example.com",
+        ),
+        (
+            "https://auth.example.com:8443,alice@example.com",
+            "https://auth.example.com:8443,alice@example.com",
+        ),
+        (
+            "url=https://example.com:8443,error_code=CARD_EXPIRED,email=alice@corp.com",
+            "url=https://example.com:8443,error_code=CARD_EXPIRED,email=alice@corp.com",
+        ),
+        (
+            "https://user:pass@host.example.com:8443,error_code=CARD_EXPIRED,email=alice@corp.com",
+            "https://user:[REDACTED]@host.example.com:8443,error_code=CARD_EXPIRED,email=alice@corp.com",
+        ),
+        (
+            "https://example.com/.password=SECRET",
+            "https://example.com/.password=[REDACTED]",
+        ),
+        (
+            "https://example.com/-token=SECRET",
+            "https://example.com/-token=[REDACTED]",
+        ),
+        (
+            "https://h/q=1/v1/auth/verify: CARD_EXPIRED",
+            "https://h/q=1/v1/auth/verify: CARD_EXPIRED",
+        ),
+        (
+            "./password: S3CR3T",
+            "./password: [REDACTED]",
+        ),
+        (
+            "../password: S3CR3T",
+            "../password: [REDACTED]",
+        ),
+        (
+            "/.password: S3CR3T",
+            "/.password: [REDACTED]",
+        ),
+        (
+            "/-password=S3CR3T",
+            "/-password=[REDACTED]",
+        ),
+        (
+            "authentication:\n  ./request/password: samplevalue",
+            "authentication:\n  ./request/password: [REDACTED]",
+        ),
+        (
+            "https://example.com/.-password=S3CR3T",
+            "https://example.com/.-password=[REDACTED]",
+        ),
+        (
+            ".api key: S3CR3T",
+            ".api key: [REDACTED]",
+        ),
+        (
+            "./request/api key: S3CR3T",
+            "./request/api key: [REDACTED]",
+        ),
+        (
+            "authentication:\n  ./request/api key: samplevalue",
+            "authentication:\n  ./request/api key: [REDACTED]",
+        ),
+        (
+            "auth/request:password: samplevalue",
+            "auth/request:password: [REDACTED]",
+        ),
+        (
+            "secrets/v1:password: samplevalue",
+            "secrets/v1:password: [REDACTED]",
+        ),
+        (
+            "authentication:\n  auth/v1:password: samplevalue",
+            "authentication:\n  auth/v1:password: [REDACTED]",
+        ),
+        (
+            "password/v1:secret: FAILED",
+            "password/v1:[REDACTED] FAILED",
+        ),
+        (
+            "auth:v1/password: samplevalue",
+            "auth:v1/password: [REDACTED]",
+        ),
+        (
+            "authentication:\n  auth:v1/password: samplevalue",
+            "authentication:\n  auth:v1/password: [REDACTED]",
+        ),
+        (
+            "auth:request/apikey: samplevalue",
+            "auth:request/apikey: [REDACTED]",
+        ),
+        (
+            "auth:oauth2_token: samplevalue",
+            "auth:oauth2_token: [REDACTED]",
+        ),
+        (
+            "credentials:ssh_passphrase: samplevalue",
+            "credentials:ssh_passphrase: [REDACTED]",
+        ),
+        (
+            "secrets:jwt_signing_key: samplevalue",
+            "secrets:jwt_signing_key: [REDACTED]",
+        ),
+        (
+            "auth:Password1: FAILED",
+            "auth:[REDACTED] FAILED",
+        ),
+        (
+            "auth:secret42: FAILED",
+            "auth:[REDACTED] FAILED",
+        ),
+        (
+            "request:password:samplevalue",
+            "request:password:[REDACTED]",
+        ),
+        (
+            "a:" * 20 + "password: samplevalue",
+            "a:" * 20 + "password: [REDACTED]",
+        ),
+        (
+            "password:hunter2: FAILED",
+            "password:[REDACTED] FAILED",
+        ),
+        (
+            "password:hunter2:",
+            "password:[REDACTED]",
+        ),
+        (
+            "password:cGFzc3dvcmQxMjM= CARD_EXPIRED",
+            "password:[REDACTED] CARD_EXPIRED",
+        ),
+        (
+            "client_secret:Zm9vYmFy=",
+            "client_secret:[REDACTED]",
+        ),
+        (
+            "user:password:hunter2: FAILED",
+            "user:password:[REDACTED] FAILED",
+        ),
+        (
+            "config:api_key:sk_live_x9: rejected",
+            "config:api_key:[REDACTED] rejected",
+        ),
+        (
+            '{"msg": "password:hunter2: retry"}',
+            '{"msg":"password:[REDACTED] retry"}',
+        ),
+        (
+            "authentication:\n  password:hunter2: FAILED",
+            "authentication:\n  password:[REDACTED] FAILED",
+        ),
+        (
+            "Cookie:_ga=GA1.2.3; JSESSIONID=9f8e7d6c5b4a",
+            "Cookie:[REDACTED]",
+        ),
+        (
+            "api_key:proj1:secret999",
+            "api_key:[REDACTED]",
+        ),
+        (
+            "auth:error_code: CARD_EXPIRED",
+            "auth:error_code: CARD_EXPIRED",
+        ),
+        (
+            "password:author:hunter2",
+            "password:[REDACTED]",
+        ),
+        (
+            "secret:status_code:abc123",
+            "secret:[REDACTED]",
+        ),
+        (
+            "token:key_file=abc123",
+            "token:[REDACTED]",
+        ),
+        (
+            "password:Password1: FAILED",
+            "password:[REDACTED] FAILED",
+        ),
+        (
+            "password:password123:",
+            "password:[REDACTED]",
+        ),
+        (
+            "password:Secret42: login failed",
+            "password:[REDACTED] login failed",
+        ),
+        (
+            "token:Auth2024: expired",
+            "token:[REDACTED] expired",
+        ),
+        (
+            "user:password:Password1: FAILED",
+            "user:password:[REDACTED] FAILED",
+        ),
+        (
+            "api_key:apikey7: rejected",
+            "api_key:[REDACTED] rejected",
+        ),
+        (
+            'password:my_secret:"x"',
+            'password:[REDACTED]"x"',
+        ),
+        (
+            "authentication:\n  auth:key: samplevalue",
+            "authentication:\n  auth:key: [REDACTED]",
+        ),
+        (
+            "authentication:\n  secret:access_key: samplevalue",
+            "authentication:\n  secret:access_key: [REDACTED]",
+        ),
+        (
+            "aws:secret:access_key: samplevalue",
+            "aws:secret:access_key: [REDACTED]",
+        ),
+        (
+            "auth:code: samplevalue",
+            "auth:code: [REDACTED]",
+        ),
+        (
+            "auth:header: samplevalue",
+            "auth:header: [REDACTED]",
+        ),
+        (
+            "auth:response_uri: https://cb?code=1",
+            "auth:response_uri: [REDACTED]",
+        ),
+        (
+            "auth:user:password: S3CR3T",
+            "auth:user:password: [REDACTED]",
+        ),
+        (
+            "credentials:aws:secret_access_key: wJalrXUtnFEMI",
+            "credentials:aws:secret_access_key: [REDACTED]",
+        ),
+        (
+            "secrets:prod:db_password: hunter2",
+            "secrets:prod:db_password: [REDACTED]",
+        ),
+        (
+            "authentication:\n  https://example.com/secret_token",
+            "authentication:\n  [REDACTED]",
+        ),
+        (
+            "authentication:\n  https://user:pass@example.com/api",
+            "authentication:\n  [REDACTED]",
+        ),
+        (
+            "database_url:\n  postgres://u:p@host",
+            "database_url:\n  [REDACTED]",
+        ),
+        (
+            "error at https://api.example.com/v1/auth/verify: CARD_EXPIRED",
+            "error at https://api.example.com/v1/auth/verify: CARD_EXPIRED",
+        ),
+        (
+            "https://auth.example.com:8443/healthz",
+            "https://auth.example.com:8443/healthz",
+        ),
+        (
+            "https://example.com/cb?access_token=SECRET&error_code=CARD_EXPIRED",
+            "https://example.com/cb?access_token=[REDACTED]&error_code=CARD_EXPIRED",
+        ),
+        (
+            "https://oauth2:glpat-AbCdEf123456@gitlab.com/g/r.git",
+            "https://oauth2:[REDACTED]@gitlab.com/g/r.git",
+        ),
+        (
+            "https://x-access-token:0123456789abcdef@github.com/o/r.git",
+            "https://x-access-token:[REDACTED]@github.com/o/r.git",
+        ),
+        (
+            "https://password:SECRET_PW@example.com:8443/healthz",
+            "https://password:[REDACTED]@example.com:8443/healthz",
+        ),
+        (
+            "https://alice:hunter2@example.com/repo",
+            "https://alice:[REDACTED]@example.com/repo",
+        ),
+        (
+            "wss://token:ws_secret_999@ws.example.com/stream",
+            "wss://token:[REDACTED]@ws.example.com/stream",
+        ),
+        (
+            "ftp://password:ftp_secret_999@ftp.example.com/pub",
+            "ftp://password:[REDACTED]@ftp.example.com/pub",
+        ),
+        (
+            r"https:\/\/oauth2:glpat-AbCdEf123456@gitlab.com\/g\/r.git",
+            r"https:\/\/oauth2:[REDACTED]@gitlab.com\/g\/r.git",
+        ),
+        (
+            "uri:/login/password=hunter2",
+            "uri:/login/password=[REDACTED]",
+        ),
+        (
+            "x:/a/b/c/api_key=SECRET999",
+            "x:/a/b/c/api_key=[REDACTED]",
+        ),
+        (
+            "path:/request/password: samplevalue",
+            "path:/request/password: [REDACTED]",
+        ),
+        (
+            "see https://example.com/v1/password: S3CR3T_VAL next",
+            "see https://example.com/v1/password: [REDACTED] next",
+        ),
+        (
+            "see https://example.com/v1/api_key: sk_test_mysecret_12345678",
+            "see https://example.com/v1/api_key: [REDACTED]",
+        ),
+        (
+            "password=p&ss=w0rd",
+            "password=[REDACTED]",
+        ),
+        (
+            "token=abc123&sig=def456",
+            "token=[REDACTED]",
+        ),
+        (
+            "X-Goog-Credential=abc&X-Goog-Signature=deadbeef",
+            "X-Goog-Credential=[REDACTED]",
+        ),
+        (
+            "access_token=TOK1&client_secret=SEC2",
+            "access_token=[REDACTED]&client_secret=[REDACTED]",
+        ),
+        (
+            "request/error_code: CARD_EXPIRED",
+            "request/error_code: CARD_EXPIRED",
+        ),
+        (
+            "usage.prompt token: 812",
+            "usage.prompt token: 812",
+        ),
+        (
+            "usage/prompt token: 812",
+            "usage/prompt token: 812",
+        ),
+        (
+            "request/prompt token: 42",
+            "request/prompt token: 42",
+        ),
+        (
+            "password/prompt token: SECRET",
+            "password/prompt token: [REDACTED]",
+        ),
+    ):
+      with self.subTest(path_header=sample):
+        self.assertEqual(scrub_sensitive_text(sample), expected)
+
+    for label, sample, secret_val, must_keep in (
+        (
+            "balanced_dq_esc_close_then_secrets",
+            'note="password\\": 123456" secrets=["TOPSECRET"]',
+            "TOPSECRET",
+            'note="password\\": [REDACTED]"',
+        ),
+        (
+            "balanced_dq_sq_close_then_secrets",
+            'note="password\': 123456" secrets=["TOPSECRET"]',
+            "TOPSECRET",
+            'note="password\': [REDACTED]"',
+        ),
+        (
+            "balanced_dq_esc_close_then_ctor",
+            'note="password\\": 123456" secret=SecretStr("TOPSECRET")',
+            "TOPSECRET",
+            'note="password\\": [REDACTED]"',
+        ),
+        (
+            "post_budget_array_mismatched_then_unicode_pw",
+            budget_prefix
+            + '["password\\": 123456", "authentication:\\u000apassword: TOPSECRET"]',
+            "TOPSECRET",
+            "",
+        ),
+        (
+            "balanced_edq_3bs_close_then_secrets",
+            r'note=\"password\\\": 123456\" secrets=["TOPSECRET"]',
+            "TOPSECRET",
+            r"note=\"password\\\": [REDACTED]\"",
+        ),
+        (
+            "balanced_edq_sq_close_then_secrets",
+            r"note=\"password" + "': 123456" + r'\" secrets=["TOPSECRET"]',
+            "TOPSECRET",
+            r"note=\"password" + "': [REDACTED]" + r"\"",
+        ),
+        (
+            "balanced_dq_inner_tail_bar",
+            'note="password\\": 123456 bar" secrets=["TOPSECRET"]',
+            "TOPSECRET",
+            'note="password\\": [REDACTED] bar"',
+        ),
+        (
+            "balanced_dq_inner_tail_comma",
+            'note="password\\": 123456, other=1" secrets=["TOPSECRET"]',
+            "TOPSECRET",
+            'note="password\\": [REDACTED], other=1"',
+        ),
+        (
+            "balanced_dq_sq_inner_tail_ok",
+            'note="password\': 123456 ok" secrets=["TOPSECRET"]',
+            "TOPSECRET",
+            'note="password\': [REDACTED] ok"',
+        ),
+        (
+            "balanced_dq_escaped_val_tail_bar",
+            'note="password\\": \\"123456\\" bar" secrets=["TOPSECRET"]',
+            "TOPSECRET",
+            'note="password\\": \\"[REDACTED]\\" bar"',
+        ),
+        (
+            "balanced_dq_inner_tail_token_and_outer_secrets",
+            'note="password\\": 123456; token=INNER_SEC" secrets=["TOPSECRET"]',
+            "INNER_SEC",
+            'note="password\\": [REDACTED]; token=[REDACTED]"',
+        ),
+        (
+            "balanced_edq_3bs_inner_tail_bar",
+            r"note=\"password\\\": 123456 bar\" secrets=[\"TOPSECRET\"]",
+            "TOPSECRET",
+            r"note=\"password\\\": [REDACTED] bar\"",
+        ),
+        (
+            "balanced_dq_inner_tail_digits",
+            'note="password\\": 123456 789" secrets=["TOPSECRET"]',
+            "TOPSECRET",
+            'note="password\\": [REDACTED] 789"',
+        ),
+        (
+            "balanced_dq_unclosed_inner_sq_preserves_error_code",
+            'note="password\': \'123456" error_code="CARD_EXPIRED"',
+            "123456",
+            'error_code="CARD_EXPIRED"',
+        ),
+        (
+            "balanced_edq_unclosed_inner_sq_preserves_error_code",
+            r"note=\"password': '123456\" error_code=\"CARD_EXPIRED\"",
+            "123456",
+            r"error_code=\"CARD_EXPIRED\"",
+        ),
+        (
+            "url_oauth_query_client_secret",
+            "GET https://auth.example.com/oauth/token?"
+            "grant_type=authorization_code&redirect_uri="
+            "https://app.example.com/cb&client_secret=abc999zz&code=xyz",
+            "abc999zz",
+            "https://auth.example.com/oauth/token?",
+        ),
+        (
+            "url_post_body_client_secret",
+            "POST body: grant_type=authorization_code&code=xyz&redirect_uri="
+            "https://app.example.com/cb&client_id=app1&client_secret=abc999zz",
+            "abc999zz",
+            "redirect_uri=https://app.example.com/cb",
+        ),
+        (
+            "url_json_amp_access_token",
+            '{"url": "https://api.example.com/v1/data&access_token=abc999zz"}',
+            "abc999zz",
+            "https://api.example.com/v1/data",
+        ),
+        (
+            "url_amp_password",
+            "next=https://app.example.com/home&password=hunter2zz",
+            "hunter2zz",
+            "next=https://app.example.com/home",
+        ),
+        (
+            "url_pipe_token",
+            "GET|https://api.example.com/v1|token=abc123zz|200",
+            "abc123zz",
+            "GET|https://api.example.com/v1|",
+        ),
+        (
+            "url_html_gt_token",
+            "<a href=https://h.example.com/x>token=abc123zz</a>",
+            "abc123zz",
+            "<a href=https://h.example.com/x>",
+        ),
+        (
+            "url_star_password",
+            "https://h.example.com/x*password=abc999",
+            "abc999",
+            "https://h.example.com/x*",
+        ),
+        (
+            "url_path_eq_token",
+            "https://h.example.com/dl/token=abc123zz/file.zip",
+            "abc123zz",
+            "https://h.example.com/dl/",
+        ),
+        (
+            "url_path_colon_password",
+            "https://h.example.com/a/password:hunter2/b",
+            "hunter2",
+            "https://h.example.com/a/password:",
+        ),
+        (
+            "url_path_auth_colon_pw_eq",
+            "see https://example.com/foo/auth:password=SEC1 ok",
+            "SEC1",
+            " ok",
+        ),
+        (
+            "balanced_edq_unclosed_inner_esq_preserves_error_code",
+            r"note=\"password\': \'123456\" error_code=\"CARD_EXPIRED\"",
+            "123456",
+            r"error_code=\"CARD_EXPIRED\"",
+        ),
+        (
+            "pathless_url_amp_client_secret_then_email",
+            "redirect_uri=https://app.example.com&client_secret=abc999zz&login_hint=alice@example.com",
+            "abc999zz",
+            "redirect_uri=https://app.example.com",
+        ),
+        (
+            "pathless_url_amp_password_then_email",
+            "next=https://app.example.com&password=hunter2zz&email=a@b.co",
+            "hunter2zz",
+            "next=https://app.example.com",
+        ),
+        (
+            "pathless_url_comma_password_then_email",
+            "url=https://h.example.com,password=abc999,user=a@b.c",
+            "abc999",
+            "user=a@b.c",
+        ),
+        (
+            "pathless_url_semi_token_then_email",
+            "https://h.example.com;token=abc999;u=a@b",
+            "abc999",
+            "u=a@b",
+        ),
+        (
+            "pathless_url_amp_secret_colon_time_then_email",
+            "https://example.com&client_secret=abc999&t=12:30&login_hint=a@b.c",
+            "abc999",
+            "https://example.com",
+        ),
+        (
+            "pathless_url_comma_password_corp_email",
+            "url=https://example.com,password=S3CR3T,email=alice@corp.com",
+            "S3CR3T",
+            "email=alice@corp.com",
+        ),
+        (
+            "pathless_url_semi_api_key_corp_email",
+            "url=https://example.com;api_key=S3CR3T;actor=alice@corp.com",
+            "S3CR3T",
+            "actor=alice@corp.com",
+        ),
+        (
+            "pathless_url_paren_comma_secret_corp_email",
+            "(https://example.com),secret=S3CR3T,contact=alice@corp.com",
+            "S3CR3T",
+            "contact=alice@corp.com",
+        ),
+        (
+            "pathless_url_json_amp_access_token_then_email",
+            '{"url": "https://api.example.com&access_token=abc999zz&user=alice@corp.com"}',
+            "abc999zz",
+            "https://api.example.com",
+        ),
+        (
+            "pathless_url_escaped_sq_comma_password_then_email",
+            r"url=https://example.com\',password=S3CR3T,email=alice@corp.com",
+            "S3CR3T",
+            "email=alice@corp.com",
+        ),
+    ):
+      with self.subTest(round19_guard=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+        if must_keep:
+          self.assertIn(must_keep, out)
+
+    both_inner_and_outer = scrub_sensitive_text(
+        'note="password\\": 123456; token=INNER_SEC" secrets=["TOPSECRET"]'
+    )
+    self.assertNotIn("123456", both_inner_and_outer)
+    self.assertNotIn("INNER_SEC", both_inner_and_outer)
+    self.assertNotIn("TOPSECRET", both_inner_and_outer)
+
+    pb_unclosed_sq_json = scrub_sensitive_text(
+        budget_prefix
+        + '{"note": "password\': \'123456", "error_code": "CARD_EXPIRED"}'
+    )
+    self.assertNotIn("123456", pb_unclosed_sq_json)
+    self.assertEqual(
+        json.loads(pb_unclosed_sq_json[len(budget_prefix) :]),
+        {"note": "password': [REDACTED]", "error_code": "CARD_EXPIRED"},
+    )
+
+    # 4. Linear-time ASCII unicode unescaping & colon-chain perf + parity.
+    for raw_seq, expected in (
+        (r"\u0070", "p"),
+        (r"\\u0070", r"\\u0070"),
+        (r"\\\u0070", r"\\p"),
+        (r"\u0020", " "),
+        (r"\u007e", "~"),
+        (r"\u0022", r"\u0022"),
+        (r"\u005c", r"\u005c"),
+        (r"\u005C", r"\u005C"),
+        (r"\u007f", r"\u007f"),
+        (r"\u007F", r"\u007F"),
+        (r"\u001f", r"\u001f"),
+    ):
+      with self.subTest(ascii_unicode_parity=raw_seq):
+        self.assertEqual(
+            _unescape_safe_ascii_unicode_escapes(raw_seq), expected
+        )
+
+    for label, payload, expected_suffix in (
+        ("bs40k_x_u0070", "\\" * 40000 + "x \\u0070", "x p"),
+        ("bs40k_u0070", "\\" * 40000 + "\\u0070", "\\\\p"),
+    ):
+      with self.subTest(linear_backslash_perf=label):
+        t0 = time.perf_counter()
+        unescaped = _unescape_safe_ascii_unicode_escapes(payload)
+        dt_unescape = time.perf_counter() - t0
+        self.assertTrue(unescaped.endswith(expected_suffix))
+        self.assertLess(dt_unescape, 2.0)
+
+        t1 = time.perf_counter()
+        scrubbed = scrub_sensitive_text(payload)
+        dt_scrub = time.perf_counter() - t1
+        self.assertEqual(scrubbed, payload)
+        self.assertLess(dt_scrub, 2.0)
+
+    colons_payload = "a:" * 20000
+    t2 = time.perf_counter()
+    self.assertEqual(scrub_sensitive_text(colons_payload), colons_payload)
+    self.assertLess(time.perf_counter() - t2, 2.0)
+
+    for label, payload in (
+        ("url_auth_colon_comma_50k", "https://u" + ":1," * 50000),
+        ("url_auth_paren_50k", "https://u:" + ")" * 50000),
+        ("url_auth_alnum_comma_50k", "https://u:1" + "a," * 50000),
+        ("leading_path_punct_50k", "./-" * 50000),
+    ):
+      with self.subTest(linear_url_or_punct_perf=label):
+        t3 = time.perf_counter()
+        self.assertEqual(scrub_sensitive_text(payload), payload)
+        self.assertLess(time.perf_counter() - t3, 2.0)
+
 
 if __name__ == "__main__":
   unittest.main()
