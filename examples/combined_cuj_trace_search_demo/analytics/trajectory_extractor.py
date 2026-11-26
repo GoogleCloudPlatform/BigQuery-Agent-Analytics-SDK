@@ -17,9 +17,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import functools
 import html
 import json
-import math
 import os
 from pathlib import Path
 import re
@@ -30,7 +30,8 @@ DEFAULT_S3_MAX_CHARS = 4800
 _EMBED_TOKEN_LIMIT = 2048
 
 _CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
-_KEY_SEP_RE = re.compile(r"[./\-\s]+")
+_KEY_SEP_RE = re.compile(r"[^A-Za-z0-9_]+")
+_KEY_SEGMENT_SEP_RE = re.compile(r"[./:\s]+")
 _SAFE_DIAGNOSTIC_SCALAR_KEYS = frozenset(
     {
         "auth_error",
@@ -41,7 +42,6 @@ _SAFE_DIAGNOSTIC_SCALAR_KEYS = frozenset(
         "auth_scheme",
         "auth_provider",
         "auth_type",
-        "authentication_result",
         "credential_type",
         "credential_status",
         "credential_error",
@@ -54,6 +54,19 @@ _SAFE_DIAGNOSTIC_SCALAR_KEYS = frozenset(
         "tail_code",
     }
 )
+_SAFE_SMALL_COUNT_KEYS = frozenset(
+    {
+        "cookies",
+        "cookie_count",
+        "credential_count",
+        "credentials_count",
+        "auth_count",
+        "auth_retry_count",
+        "auth_failure_count",
+        "token_count",
+    }
+)
+_MAX_SAFE_COUNT_VALUE = 999
 _SAFE_AUTH_STATUS_VALUES = frozenset(
     {
         "failed",
@@ -87,6 +100,21 @@ _SAFE_AUTH_STATUS_VALUES = frozenset(
         "unknown",
     }
 )
+_PROSE_PREDICATE_WORDS = _SAFE_AUTH_STATUS_VALUES | frozenset(
+    {
+        "bad",
+        "wrong",
+        "incorrect",
+        "empty",
+        "blank",
+        "weak",
+        "not",
+        "too",
+        "a",
+        "an",
+        "the",
+    }
+)
 _SAFE_SCALAR_KEY_SUFFIXES: tuple[str, ...] = (
     "_file",
     "_path",
@@ -104,8 +132,9 @@ _SENSITIVE_KEY_RE = re.compile(
     r"database_?url(?:$|[_\d])|(?:^|_)dsn(?:$|[_\d])|"
     r"(?:set_?)?cookies?(?:$|[_\d])|(?:^|_)jwt(?:$|[_\d])|"
     r"(?:^|_)oauth(?:$|[_\d])|"
-    r"(?:auth|access|refresh|id|bearer|session|oauth|csrf|secret|api|github)"
-    r"_?tokens?(?:$|[_\d])|^token$|authorization(?:$|[_\d])|"
+    r"(?:auth|access|refresh|id|bearer|session|oauth|csrf|secret|api|github|"
+    r"request)_?tokens?(?:$|[_\d])|^token(?:_\d+|\d+)?$|"
+    r"authorization(?:$|[_\d])|"
     r"auth_?headers?(?:$|[_\d])|auth_?keys?(?:$|[_\d])|"
     r"auth_?secrets?(?:$|[_\d])|auth_?codes?(?:$|[_\d])|"
     r"auth_?response_?uri(?:$|[_\d])|auth_?credentials?(?:$|[_\d])|"
@@ -149,14 +178,26 @@ _SECRET_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
 )
 
-_KV_CANDIDATE_RE = re.compile(
-    r"""(?:(?P<edq>\\"(?:[A-Za-z_]|\\{1,2}u[0-9a-fA-F]{4})"""
-    r"""(?:[A-Za-z0-9_./ -]|\\{1,2}u[0-9a-fA-F]{4}){0,255}\\")|"""
-    r"""(?P<dq>"(?:[A-Za-z_]|\\u[0-9a-fA-F]{4})"""
-    r"""(?:[A-Za-z0-9_./ -]|\\u[0-9a-fA-F]{4}){0,255}")|"""
-    r"""(?P<sq>'[A-Za-z_][A-Za-z0-9_./ -]{0,255}')|"""
-    r"""(?<![A-Za-z0-9_-])(?:--?)?(?P<bare>[A-Za-z_][A-Za-z0-9_-]*))"""
-    r"""(?P<conn>[ \t]*[:=]|[ \t]+(?:is|are)(?:[ \t]*:|(?=\s)))""",
+_QUOTED_STRUCTURAL_CONN_RE = re.compile(r"(?:[ \t\r\n]|\\[trn])*[:=]")
+_QUOTED_CONN_RE = re.compile(
+    r"(?:[ \t\r\n]|\\[trn])*[:=]|"
+    r"(?:[ \t]|\\[trn])+(?:is|are)(?:(?:[ \t]|\\[trn])*:|(?=\s|\\[trn]))",
+    re.IGNORECASE,
+)
+_ASCII_UNICODE_ESCAPE_RE = re.compile(r"(\\+)u00([2-7][0-9a-fA-F])")
+_BARE_KV_RE = re.compile(
+    r"(?:(?<=\\[trn])|(?<![A-Za-z0-9_.-]))(?:--?|\.+)?(?P<bare>[A-Za-z0-9_]"
+    r"[A-Za-z0-9_.-]*)"
+    r"(?P<conn>(?:[ \t]|\\[tr])*[:=]|"
+    r"(?:[ \t]|\\[trn])+(?:is|are)(?:(?:[ \t]|\\[tr])*:|(?=\s|\\[trn])))",
+    re.IGNORECASE,
+)
+_KV_SCAN_NEXT_RE = re.compile(
+    r"""\\["'trn]|["']|"""
+    r"(?:(?<=\\[trn])|(?<![A-Za-z0-9_.-]))(?:--?|\.+)?(?P<bare>[A-Za-z0-9_]"
+    r"[A-Za-z0-9_.-]*)"
+    r"(?P<conn>(?:[ \t]|\\[tr])*[:=]|"
+    r"(?:[ \t]|\\[trn])+(?:is|are)(?:(?:[ \t]|\\[tr])*:|(?=\s|\\[trn])))",
     re.IGNORECASE,
 )
 _WORD_CHARS = frozenset(
@@ -198,31 +239,51 @@ _SAFE_TOKEN_PREFIX_WORDS = frozenset(
 )
 _PY_STR_PREFIX_RE = re.compile(r"""[rRuUbBfF]{1,2}(?=["'])""")
 _CTOR_PREFIX_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*(?=\()")
-_BARE_VALUE_RE = re.compile(r"""[^\s"',;)}\]]+""")
+_BARE_VAL_STOP_CHARS = frozenset("\"',;)}]")
+_COOKIE_NAME_STOP_CHARS = frozenset(";)}]=\"',:")
+_COOKIE_VAL_STOP_CHARS = frozenset(';)}]"' + "'")
+_COOKIE_KV_CONN_RE = re.compile(
+    r"[ \t]*[:=]|[ \t]+(?:is|are)(?:[ \t]*:|(?=\s|\\[trn]))",
+    re.IGNORECASE,
+)
+_HTTP_COOKIE_DATE_RE = re.compile(
+    r"[A-Za-z]{3},[ \t]+\d{1,2}[ \t-]+[A-Za-z]{3}[ \t-]+\d{2,4}"
+    r"[ \t]+\d{2}:\d{2}:\d{2}[ \t]+GMT"
+)
 
 
-def _normalize_key_name(key_name: str) -> str:
-  raw = _KEY_SEP_RE.sub("_", str(key_name).strip())
+def _normalize_key_name_impl(key_name: str) -> str:
+  raw = _KEY_SEP_RE.sub("_", key_name.strip()).strip("_")
   return _CAMEL_BOUNDARY_RE.sub(r"\1_\2", raw).lower()
 
 
+@functools.lru_cache(maxsize=2048)
+def _normalize_key_name_cached(key_name: str) -> str:
+  return _normalize_key_name_impl(key_name)
+
+
+def _normalize_key_name(key_name: str) -> str:
+  if isinstance(key_name, str):
+    if len(key_name) <= 128:
+      return _normalize_key_name_cached(key_name)
+    return _normalize_key_name_impl(key_name)
+  key_str = str(key_name)
+  if len(key_str) <= 128:
+    return _normalize_key_name_cached(key_str)
+  return _normalize_key_name_impl(key_str)
+
+
 def _is_numeric_count_scalar(key_name: str, value: Any) -> bool:
-  """Returns True for benign numeric counts on *_count / *_cookies keys."""
+  """Returns True for small non-negative integer counts on allowlisted keys."""
   if not key_name:
     return False
   norm = _normalize_key_name(key_name)
-  is_count_key = norm.endswith("_count") or (
-      (norm == "cookies" or norm.endswith("_cookies"))
-      and not norm.endswith("set_cookies")
-  )
-  if not is_count_key:
+  if norm not in _SAFE_SMALL_COUNT_KEYS:
     return False
   if isinstance(value, bool):
     return False
   if isinstance(value, int):
-    return True
-  if isinstance(value, float):
-    return math.isfinite(value)
+    return 0 <= value <= _MAX_SAFE_COUNT_VALUE
   if isinstance(value, (bytes, bytearray)):
     text_val = value.decode("utf-8", errors="replace").strip()
   elif isinstance(value, str):
@@ -231,25 +292,33 @@ def _is_numeric_count_scalar(key_name: str, value: Any) -> bool:
     return False
   return (
       bool(text_val)
+      and len(text_val) <= 3
       and text_val.isascii()
       and text_val.isdigit()
-      and len(text_val) <= 6
       and not (len(text_val) > 1 and text_val.startswith("0"))
+      and int(text_val) <= _MAX_SAFE_COUNT_VALUE
   )
 
 
 def _is_safe_auth_status_scalar(key_name: str, value: Any) -> bool:
   """Returns True for safe status scalars on authentication keys."""
-  if not key_name or not isinstance(value, str):
+  if not key_name:
+    return False
+  if isinstance(value, (bytes, bytearray)):
+    text_val = value.decode("utf-8", errors="replace")
+  elif isinstance(value, str):
+    text_val = value
+  else:
     return False
   norm = _normalize_key_name(key_name)
-  if norm != "authentication" and not norm.endswith("_authentication"):
+  if norm not in ("authentication", "authentication_result") and not (
+      norm.endswith(("_authentication", "_authentication_result"))
+  ):
     return False
-  return value.strip().lower() in _SAFE_AUTH_STATUS_VALUES
+  return text_val.strip().lower() in _SAFE_AUTH_STATUS_VALUES
 
 
-def is_sensitive_key(key_name: str, *, is_container: bool = False) -> bool:
-  """Returns True when a dict/field name represents a credential or secret."""
+def _is_sensitive_key_impl(key_name: str, is_container: bool) -> bool:
   if not key_name:
     return False
   norm = _normalize_key_name(key_name)
@@ -260,7 +329,40 @@ def is_sensitive_key(key_name: str, *, is_container: bool = False) -> bool:
       or norm.endswith(_SAFE_SCALAR_KEY_SUFFIXES)
   ):
     return False
+  segments = [seg for seg in _KEY_SEGMENT_SEP_RE.split(key_name.strip()) if seg]
+  if len(segments) >= 2:
+    norm_tail = _normalize_key_name(segments[-1])
+    if norm_tail:
+      if not is_container and (
+          norm_tail in _SAFE_DIAGNOSTIC_SCALAR_KEYS
+          or norm_tail.endswith(_SAFE_SCALAR_KEY_SUFFIXES)
+      ):
+        return False
+      if _SENSITIVE_KEY_RE.search(norm):
+        return True
+      if (
+          not is_container
+          and norm_tail == "token"
+          and _normalize_key_name(segments[-2]) in _SAFE_TOKEN_PREFIX_WORDS
+      ):
+        return False
+      if _SENSITIVE_KEY_RE.search(norm_tail):
+        return True
   return bool(_SENSITIVE_KEY_RE.search(norm))
+
+
+@functools.lru_cache(maxsize=2048)
+def _is_sensitive_key_cached(key_name: str, is_container: bool) -> bool:
+  return _is_sensitive_key_impl(key_name, is_container)
+
+
+def is_sensitive_key(key_name: str, *, is_container: bool = False) -> bool:
+  """Returns True when a dict/field name represents a credential or secret."""
+  if not key_name:
+    return False
+  if isinstance(key_name, str) and len(key_name) <= 128:
+    return _is_sensitive_key_cached(key_name, is_container)
+  return _is_sensitive_key_impl(str(key_name), is_container)
 
 
 _MAX_EMBEDDED_JSON_DEPTH = 32
@@ -326,9 +428,9 @@ def _scrub_embedded_json_containers(text: str) -> str:
   """Scrubs balanced JSON objects/arrays embedded inside free text safely.
 
   Bounds parsing to depth <= 32, span <= 16 KiB, and <= 32 decoded containers.
-  Non-object arrays (such as ``[1]`` or ``[INFO]``) and trivial ``{}`` are
-  skipped without consuming budgets. When any budget or structural limit is
-  reached, JSON decoding stops cleanly and defers the remaining text to
+  Non-object/non-string arrays (such as ``[1]`` or ``[INFO]``) and trivial
+  ``{}`` are skipped without consuming budgets. When any budget or structural
+  limit is reached, JSON decoding stops cleanly and defers the remaining text to
   linear-time secret rules and KV scrubbing so large ordinary JSON payloads
   and trailing error codes stay intact while secrets are still redacted.
   """
@@ -361,7 +463,9 @@ def _scrub_embedded_json_containers(text: str) -> str:
         idx += 1
         continue
       snippet = text[idx:end_idx]
-      if snippet == "{}" or (ch == "[" and "{" not in snippet):
+      if snippet == "{}" or (
+          ch == "[" and "{" not in snippet and '"' not in snippet
+      ):
         out.append(snippet)
         idx = end_idx
         continue
@@ -414,6 +518,49 @@ def _scan_quoted_value(text: str, quote_pos: int) -> int | None:
   return None
 
 
+def _scan_bare_value_end(text: str, pos: int) -> int:
+  """Scans a bare KV value stopping before whitespace, delimiters, or JSON \\t/\\r/\\n."""
+  n = len(text)
+  p = pos
+  while p < n and not text[p].isspace() and text[p] not in _BARE_VAL_STOP_CHARS:
+    if text[p] == "\\":
+      bs = 0
+      while p + bs < n and text[p + bs] == "\\":
+        bs += 1
+      if p + bs < n and text[p + bs] in ("t", "r", "n") and bs % 2 == 1:
+        p += bs - 1
+        break
+      p += bs
+    else:
+      p += 1
+  return p
+
+
+def _starts_with_odd_escaped_quote(text: str, pos: int) -> bool:
+  """Returns True when ``pos`` starts with an odd backslash run before a quote."""
+  n = len(text)
+  bs = 0
+  while pos + bs < n and text[pos + bs] == "\\":
+    bs += 1
+  return (
+      bs > 0 and bs % 2 == 1 and pos + bs < n and text[pos + bs] in ('"', "'")
+  )
+
+
+def _escaped_quote_mod_and_period(lead_bs: int) -> tuple[int, int, int]:
+  """Returns (close_mod, period, low_zero) for an odd backslash run.
+
+  Lowest 0-bit of lead_bs identifies the JSON escaping depth d:
+  - d=1 (lead_bs=1, 5, 9, ...):  low_zero=2, close_mod=1, period=4  (skips 3, 7)
+  - d=2 (lead_bs=3, 11, 19, ...): low_zero=4, close_mod=3, period=8  (skips 7, 15)
+  - d=3 (lead_bs=7, 23, ...):    low_zero=8, close_mod=7, period=16 (skips 15, 31)
+  Any bs with ((bs + 1) & -(bs + 1)) < low_zero is a strictly shallower
+  unescaped outer closing quote (including all even bs where it equals 1).
+  """
+  low_zero = (lead_bs + 1) & -(lead_bs + 1)
+  return low_zero - 1, low_zero * 2, low_zero
+
+
 def _consume_sensitive_kv_value(text: str, pos: int) -> tuple[int, str] | None:
   """Consumes a quoted, escaped, container, repr, or bare value at ``pos``."""
   n = len(text)
@@ -423,22 +570,49 @@ def _consume_sensitive_kv_value(text: str, pos: int) -> tuple[int, str] | None:
   if ch in ('"', "'"):
     end_idx = _scan_quoted_value(text, pos)
     if end_idx is not None:
+      close_pos = end_idx - 1
+      if _quote_opens_kv_at(text, close_pos, escaped_dq=False):
+        inner = text[pos + 1 : close_pos]
+        if not any(c.isalnum() for c in inner):
+          return None
+        return close_pos, "[REDACTED]"
       return end_idx, f"{ch}[REDACTED]{ch}"
     # Unterminated or oversized quoted value: fail closed to end of string so
     # multiline/PEM tails never leak after the first newline.
     return n, "[REDACTED]"
-  if text.startswith('\\"', pos) or text.startswith("\\'", pos):
-    q = text[pos + 1]
+  lead_bs = 0
+  while pos + lead_bs < n and text[pos + lead_bs] == "\\":
+    lead_bs += 1
+  if (
+      lead_bs > 0
+      and lead_bs % 2 == 1
+      and pos + lead_bs < n
+      and text[pos + lead_bs] in ('"', "'")
+  ):
+    q = text[pos + lead_bs]
+    close_mod, period, low_zero = _escaped_quote_mod_and_period(lead_bs)
+    delim = "\\" * lead_bs + q
     limit = min(n, pos + _MAX_EMBEDDED_JSON_SPAN)
-    cursor = pos + 2
+    cursor = pos + lead_bs + 1
     while cursor < limit:
+      if text[cursor] == '"' and q == '"':
+        return cursor, "[REDACTED]"
       if text[cursor] == "\\":
         bs = 0
         while cursor + bs < limit and text[cursor + bs] == "\\":
           bs += 1
         if cursor + bs < limit and text[cursor + bs] == q:
-          if bs == 1:
-            return cursor + 2, f"\\{q}[REDACTED]\\{q}"
+          if bs % period == close_mod:
+            if q == '"' and _quote_opens_kv_at(
+                text, cursor + bs - 1, escaped_dq=True
+            ):
+              inner = text[pos + lead_bs + 1 : cursor]
+              if not any(c.isalnum() for c in inner):
+                return None
+              return cursor, "[REDACTED]"
+            return cursor + bs + 1, f"{delim}[REDACTED]{delim}"
+          if ((bs + 1) & -(bs + 1)) < low_zero:
+            return cursor + bs, "[REDACTED]"
           cursor += bs + 1
           continue
         cursor += max(1, bs)
@@ -466,9 +640,9 @@ def _consume_sensitive_kv_value(text: str, pos: int) -> tuple[int, str] | None:
     if end_idx is not None and not depth_exceeded:
       return end_idx, "[REDACTED]"
     return n, "[REDACTED]"
-  bare_match = _BARE_VALUE_RE.match(text, pos)
-  if bare_match:
-    return bare_match.end(), "[REDACTED]"
+  val_end = _scan_bare_value_end(text, pos)
+  if val_end > pos:
+    return val_end, "[REDACTED]"
   return None
 
 
@@ -501,56 +675,45 @@ def _preceding_same_line_word(
 
 
 def _decode_quoted_kv_key(quoted_key: str) -> str:
-  """Decodes a double-quoted KV key, handling ``\\uXXXX`` JSON escapes."""
-  if "\\u" in quoted_key:
+  """Decodes a double-quoted JSON KV key, handling standard JSON escapes."""
+  try:
+    decoded = json.loads(quoted_key)
+    if isinstance(decoded, str):
+      return decoded
+  except ValueError:
+    pass
+  return quoted_key[1:-1].replace("\\/", "/")
+
+
+def _decode_escaped_quoted_kv_key(raw_inner: str) -> str:
+  """Decodes the inner text of an escaped double-quoted KV key."""
+  cur = raw_inner
+  for _ in range(3):
+    if "\\" not in cur:
+      break
     try:
-      decoded = json.loads(quoted_key)
-      if isinstance(decoded, str):
-        return decoded
+      decoded = json.loads(f'"{cur}"')
+      if isinstance(decoded, str) and decoded != cur:
+        cur = decoded
+        continue
     except ValueError:
       pass
-  return quoted_key[1:-1]
+    nxt = cur.replace("\\\\", "\\")
+    if nxt == cur:
+      break
+    cur = nxt
+  return cur.replace("\\/", "/")
 
 
-def _decode_escaped_quoted_kv_key(escaped_key: str) -> str:
-  """Decodes an escaped double-quoted KV key, handling ``\\uXXXX`` escapes."""
-  inner = escaped_key[2:-2]
-  if "\\\\u" in inner:
-    inner = inner.replace("\\\\u", "\\u")
-  if "\\u" in inner:
-    try:
-      decoded = json.loads(f'"{inner}"')
-      if isinstance(decoded, str):
-        return decoded
-    except ValueError:
-      pass
-  return inner
-
-
-def _extract_matched_kv_key(
+def _extract_bare_kv_key(
     text: str, match: re.Match[str], *, is_container: bool = False
 ) -> str | None:
-  """Returns the matched sensitive key/phrase, or ``None`` if non-sensitive."""
-  edq = match.group("edq")
-  dq = match.group("dq")
-  sq = match.group("sq")
-  if edq is not None:
-    raw_key = _decode_escaped_quoted_kv_key(edq)
-    if is_sensitive_key(raw_key, is_container=is_container):
-      return raw_key
-    return None
-  if dq is not None:
-    raw_key = _decode_quoted_kv_key(dq)
-    if is_sensitive_key(raw_key, is_container=is_container):
-      return raw_key
-    return None
-  if sq is not None:
-    raw_key = sq[1:-1]
-    if is_sensitive_key(raw_key, is_container=is_container):
-      return raw_key
-    return None
-
+  """Returns the matched sensitive bare key/phrase, or ``None`` if benign."""
   bare = match.group("bare") or ""
+  if not bare or (
+      not bare[0].isalpha() and not any(ch.isalpha() for ch in bare)
+  ):
+    return None
   lower_bare = bare.lower()
   if lower_bare == "token" and not is_container:
     prev = _preceding_same_line_word(text, match.start())
@@ -571,118 +734,1332 @@ def _extract_matched_kv_key(
       break
     prev_word, cursor = prev
     phrase = f"{prev_word} {phrase}"
-    norm = _normalize_key_name(phrase)
-    if not is_container and (
-        norm in _SAFE_DIAGNOSTIC_SCALAR_KEYS
-        or norm.endswith(_SAFE_SCALAR_KEY_SUFFIXES)
-    ):
-      return None
     if is_sensitive_key(phrase, is_container=is_container):
       return phrase
   return None
 
 
-def _is_matched_kv_sensitive(
-    text: str, match: re.Match[str], *, is_container: bool
-) -> bool:
-  """Classifies a candidate KV regex match dynamically via is_sensitive_key."""
-  return (
-      _extract_matched_kv_key(text, match, is_container=is_container)
-      is not None
+def _might_contain_kv(s: str) -> bool:
+  """Fast substring pre-check before recursing into quoted text."""
+  if ":" in s or "=" in s:
+    return True
+  low = s.lower()
+  return any(
+      tok in low
+      for tok in (
+          " is ",
+          " are ",
+          " is\t",
+          " are\t",
+          "\tis",
+          "\tare",
+          " is\n",
+          " are\n",
+          "\nis",
+          "\nare",
+          "\\tis",
+          "\\nis",
+          "\\ris",
+          " is\\",
+          "\\tare",
+          "\\nare",
+          "\\rare",
+          " are\\",
+      )
   )
+
+
+def _scan_same_line_quote_end(text: str, start: int) -> int | None:
+  """Scans a same-line single- or double-quoted token starting at ``start``."""
+  n = len(text)
+  quote_char = text[start]
+  p = start + 1
+  while p < n:
+    ch = text[p]
+    if ch == "\\" and p + 1 < n and text[p + 1] not in ("\r", "\n"):
+      p += 2
+    elif ch == quote_char:
+      return p + 1
+    elif ch in ("\r", "\n"):
+      return None
+    else:
+      p += 1
+  return None
+
+
+def _scan_same_line_escaped_dq_end(
+    text: str, start: int, *, lead_bs: int = 1
+) -> tuple[int | None, int, int]:
+  """Scans a same-line escaped double-quoted token starting at ``start``.
+
+  Returns ``(end_tok, stop_pos, close_start)`` where ``end_tok`` is the
+  exclusive end index when closed on the same line, ``close_start`` is the
+  index of the first backslash in the closing delimiter run, and ``stop_pos``
+  marks where an unclosed scan terminated so unclosed runs are skipped in O(1).
+  """
+  close_mod, period, low_zero = _escaped_quote_mod_and_period(lead_bs)
+  n = len(text)
+  p = start + 2
+  while p < n:
+    ch = text[p]
+    if ch in ("\r", "\n"):
+      return None, p, p
+    if ch == "\\":
+      bs = 0
+      while p + bs < n and text[p + bs] == "\\":
+        bs += 1
+      if p + bs < n and text[p + bs] == '"':
+        if bs % period == close_mod:
+          return p + bs + 1, p + bs + 1, p
+        if ((bs + 1) & -(bs + 1)) < low_zero:
+          return None, p + bs, p
+        p += bs + 1
+      else:
+        p += bs
+    elif ch == '"':
+      return None, p, p
+    else:
+      p += 1
+  return None, n, n
+
+
+def _count_backslashes_ending_at(text: str, pos: int) -> int:
+  """Counts consecutive backslashes ending inclusively at ``pos``."""
+  bs = 1
+  k = pos - 1
+  while k >= 0 and text[k] == "\\":
+    bs += 1
+    k -= 1
+  return bs
+
+
+def _inner_ends_with_kv_connector(raw_inner: str) -> bool:
+  """Returns True when ``raw_inner`` ends with a KV connector before a quote."""
+  i = len(raw_inner)
+  while i > 0:
+    if raw_inner[i - 1] in (" ", "\t"):
+      i -= 1
+    elif (
+        i >= 2
+        and raw_inner[i - 1] in ("t", "r", "n")
+        and raw_inner[i - 2] == "\\"
+        and _count_backslashes_ending_at(raw_inner, i - 2) % 2 == 1
+    ):
+      i -= 2
+    else:
+      break
+  if i == 0:
+    return False
+  if raw_inner[i - 1] in (":", "="):
+    return True
+  for word in ("is", "are"):
+    wlen = len(word)
+    if i >= wlen and raw_inner[i - wlen : i].lower() == word:
+      before = i - wlen
+      if before == 0 or raw_inner[before - 1].isspace():
+        return True
+      if (
+          before >= 2
+          and raw_inner[before - 1] in ("t", "r", "n")
+          and raw_inner[before - 2] == "\\"
+          and _count_backslashes_ending_at(raw_inner, before - 2) % 2 == 1
+      ):
+        return True
+  return False
+
+
+def _quote_opens_kv_at(text: str, pos: int, *, escaped_dq: bool) -> bool:
+  """Returns True when a quote token at ``pos`` opens a quoted KV key."""
+  n = len(text)
+  if pos < 0 or pos >= n:
+    return False
+  limit = min(n, pos + 1024)
+  if escaped_dq:
+    if not text.startswith('\\"', pos):
+      return False
+    lead_bs = _count_backslashes_ending_at(text, pos)
+    if lead_bs % 2 == 0:
+      return False
+    close_mod, period, low_zero = _escaped_quote_mod_and_period(lead_bs)
+    p = pos + 2
+    while p < limit:
+      ch = text[p]
+      if ch in ("\r", "\n", '"'):
+        return False
+      if ch == "\\":
+        bs = 0
+        while p + bs < limit and text[p + bs] == "\\":
+          bs += 1
+        if p + bs < limit and text[p + bs] == '"':
+          if bs % period == close_mod:
+            inner = text[pos + 2 : p]
+            if (
+                not inner
+                or inner[0].isspace()
+                or inner[0] in ";,)}]"
+                or ";" in inner
+                or inner.rstrip().endswith("=")
+            ):
+              return False
+            next_end = p + bs + 1
+            if _QUOTED_STRUCTURAL_CONN_RE.match(text, next_end) is not None:
+              return True
+            conn_m = _QUOTED_CONN_RE.match(text, next_end)
+            if conn_m is not None:
+              decoded_key = _decode_escaped_quoted_kv_key(inner)
+              val_start, _ = _skip_kv_whitespace(text, conn_m.end())
+              is_container = val_start < n and text[val_start] in (
+                  "{",
+                  "[",
+                  "(",
+              )
+              return is_sensitive_key(decoded_key, is_container=is_container)
+            return False
+          if ((bs + 1) & -(bs + 1)) < low_zero:
+            return False
+          p += bs + 1
+        else:
+          p += bs
+      else:
+        p += 1
+    return False
+  quote_char = text[pos]
+  if quote_char not in ('"', "'"):
+    return False
+  p = pos + 1
+  while p < limit:
+    ch = text[p]
+    if ch == "\\" and p + 1 < limit and text[p + 1] not in ("\r", "\n"):
+      p += 2
+    elif ch == quote_char:
+      inner = text[pos + 1 : p]
+      if (
+          not inner
+          or inner[0].isspace()
+          or inner[0] in ";,)}]"
+          or ";" in inner
+          or inner.rstrip().endswith("=")
+      ):
+        return False
+      next_end = p + 1
+      if _QUOTED_STRUCTURAL_CONN_RE.match(text, next_end) is not None:
+        return True
+      conn_m = _QUOTED_CONN_RE.match(text, next_end)
+      if conn_m is not None:
+        decoded_key = (
+            _decode_quoted_kv_key(text[pos:next_end])
+            if quote_char == '"'
+            else inner
+        )
+        val_start, _ = _skip_kv_whitespace(text, conn_m.end())
+        is_container = val_start < n and text[val_start] in ("{", "[", "(")
+        return is_sensitive_key(decoded_key, is_container=is_container)
+      return False
+    elif ch in ("\r", "\n"):
+      return False
+    else:
+      p += 1
+  return False
+
+
+def _unescape_safe_ascii_unicode_escapes(text: str) -> str:
+  """Unescapes odd-backslash ASCII ``\\u0020``-``\\u007e`` except ``"``/``\\``."""
+  if "\\u00" not in text:
+    return text
+
+  def _replace(match: re.Match[str]) -> str:
+    slashes = match.group(1)
+    if len(slashes) % 2 == 0:
+      return match.group(0)
+    hex_code = match.group(2).lower()
+    if hex_code in ("22", "5c"):
+      return match.group(0)
+    return slashes[:-1] + chr(int(hex_code, 16))
+
+  return _ASCII_UNICODE_ESCAPE_RE.sub(_replace, text)
+
+
+def _might_contain_secret_or_kv(s: str) -> bool:
+  """Fast substring check for KV connectors, containers, unicode, or tokens."""
+  if _might_contain_kv(s) or "{" in s or "[" in s or "\\u" in s:
+    return True
+  low = s.lower()
+  return any(
+      tok in low
+      for tok in (
+          "bearer",
+          "basic",
+          "ya29.",
+          "aiza",
+          "sk-",
+          "ghp_",
+          "gho_",
+          "ghu_",
+          "ghs_",
+          "ghr_",
+          "github_pat_",
+          "private key",
+      )
+  )
+
+
+def _scrub_quoted_inner(
+    raw_inner: str,
+    *,
+    quote_kind: str,
+    depth: int,
+    lead_bs: int = 1,
+) -> str:
+  """Scrubs inner text of a quoted or escaped-quoted token at bounded depth."""
+  if depth >= 3:
+    return raw_inner
+  has_escape = "\\" in raw_inner
+  needs_decode = "\\u" in raw_inner or (
+      has_escape and _might_contain_secret_or_kv(raw_inner)
+  )
+  if quote_kind == '"' and needs_decode:
+    try:
+      decoded_str = json.loads('"' + raw_inner + '"')
+    except ValueError:
+      decoded_str = None
+    if isinstance(decoded_str, str):
+      scrubbed_decoded = _scrub_text_at_depth(decoded_str, _depth=depth + 1)
+      if scrubbed_decoded != decoded_str:
+        return json.dumps(scrubbed_decoded, ensure_ascii=raw_inner.isascii())[
+            1:-1
+        ]
+      return raw_inner
+  elif (
+      quote_kind == '\\"' and lead_bs >= 1 and lead_bs % 2 == 1 and needs_decode
+  ):
+    max_layers = 3 if lead_bs >= 3 else 2
+    layers: list[str] = [raw_inner]
+    cur = raw_inner
+    for _ in range(max_layers):
+      try:
+        nxt = json.loads('"' + cur + '"')
+      except ValueError:
+        break
+      if not isinstance(nxt, str) or nxt == cur:
+        break
+      layers.append(nxt)
+      cur = nxt
+    if len(layers) > 1:
+      scrubbed_decoded = _scrub_text_at_depth(cur, _depth=depth + 1)
+      if scrubbed_decoded != cur:
+        reencoded = scrubbed_decoded
+        ascii_only = raw_inner.isascii()
+        for _ in range(len(layers) - 1):
+          reencoded = json.dumps(reencoded, ensure_ascii=ascii_only)[1:-1]
+        return reencoded
+      return raw_inner
+  if _might_contain_kv(raw_inner):
+    return _scrub_sensitive_kv_in_text(raw_inner, _depth=depth + 1)
+  return raw_inner
+
+
+def _inspect_quoted_kv_token(
+    text: str,
+    start: int,
+    end_tok: int,
+    conn_m: re.Match[str],
+    *,
+    quote_kind: str,
+    depth: int,
+    close_start: int | None = None,
+    lead_bs: int = 1,
+) -> tuple[str, str, int, int, bool]:
+  """Inspects a quoted KV key token followed by a connector match.
+
+  Returns ``(decoded_key, emitted_key, val_start, nl_count, is_sensitive_outer)``.
+  """
+  n = len(text)
+  if quote_kind == '\\"':
+    inner_end = close_start if close_start is not None else end_tok - 2
+    raw_inner = text[start + 2 : inner_end]
+    closing_delim = text[inner_end:end_tok]
+    decoded_key = _decode_escaped_quoted_kv_key(raw_inner)
+    prev_idx = start - lead_bs
+  else:
+    raw_inner = text[start + 1 : end_tok - 1]
+    closing_delim = quote_kind
+    decoded_key = (
+        _decode_quoted_kv_key(text[start:end_tok])
+        if quote_kind == '"'
+        else raw_inner
+    )
+    prev_idx = start - 1
+  scrubbed_inner = _scrub_quoted_inner(
+      raw_inner, quote_kind=quote_kind, depth=depth, lead_bs=lead_bs
+  )
+  inner_changed = scrubbed_inner != raw_inner
+  emitted_key = quote_kind + scrubbed_inner + closing_delim
+  val_start, nl_count = _skip_kv_whitespace(text, conn_m.end())
+  next_char = text[val_start] if val_start < n else ""
+  is_container = next_char in ("{", "[", "(")
+  outer_is_structured_or_quoted = next_char in (
+      '"',
+      "'",
+      "{",
+      "[",
+      "(",
+  ) or _starts_with_odd_escaped_quote(text, val_start)
+  saw_newline = False
+  while prev_idx >= 0:
+    ch = text[prev_idx]
+    if ch in (" ", "\t", "\r", "\n"):
+      if ch == "\n":
+        saw_newline = True
+      prev_idx -= 1
+    elif (
+        prev_idx >= 1
+        and ch in ("t", "r", "n")
+        and text[prev_idx - 1] == "\\"
+        and _count_backslashes_ending_at(text, prev_idx - 1) % 2 == 1
+    ):
+      if ch == "n":
+        saw_newline = True
+      prev_idx -= 2
+    else:
+      break
+  at_key_boundary = prev_idx < 0 or saw_newline or text[prev_idx] in ("{", ",")
+  should_check_outer = (
+      not inner_changed or outer_is_structured_or_quoted or at_key_boundary
+  )
+  is_sensitive_outer = should_check_outer and is_sensitive_key(
+      decoded_key, is_container=is_container
+  )
+  return decoded_key, emitted_key, val_start, nl_count, is_sensitive_outer
+
+
+def _is_quoted_header_value_prose(
+    text: str, conn_text: str, val_start: int
+) -> bool:
+  """Returns True when a quoted ``is``/``are`` header is followed by prose."""
+  if ":" in conn_text or "=" in conn_text:
+    return False
+  n = len(text)
+  if val_start >= n:
+    return True
+  ch = text[val_start]
+  if ch in ('"', "'", "{", "[", "(") or _starts_with_odd_escaped_quote(
+      text, val_start
+  ):
+    return False
+  val_end = _scan_bare_value_end(text, val_start)
+  next_word = text[val_start:val_end].rstrip(".,!?").lower()
+  return next_word in _PROSE_PREDICATE_WORDS
+
+
+def _is_sensitive_header_at(text: str, pos: int) -> bool:
+  """Returns True when ``pos`` begins a sensitive KV header on the next line."""
+  n = len(text)
+  if pos >= n:
+    return False
+  lead_bs = 0
+  while pos + lead_bs < n and text[pos + lead_bs] == "\\":
+    lead_bs += 1
+  if (
+      lead_bs > 0
+      and lead_bs % 2 == 1
+      and pos + lead_bs < n
+      and text[pos + lead_bs] == '"'
+  ):
+    edq_start = pos + lead_bs - 1
+    end_tok, _, close_start = _scan_same_line_escaped_dq_end(
+        text, edq_start, lead_bs=lead_bs
+    )
+    if end_tok is None:
+      return False
+    conn_m = _QUOTED_CONN_RE.match(text, end_tok)
+    if conn_m is None:
+      return False
+    decoded_key = _decode_escaped_quoted_kv_key(
+        text[edq_start + 2 : close_start]
+    )
+    val_start, _ = _skip_kv_whitespace(text, conn_m.end())
+    is_container = val_start < n and text[val_start] in ("{", "[", "(")
+    if not is_sensitive_key(decoded_key, is_container=is_container):
+      return False
+    return not _is_quoted_header_value_prose(text, conn_m.group(0), val_start)
+  if text[pos] in ('"', "'"):
+    ch = text[pos]
+    end_tok = _scan_same_line_quote_end(text, pos)
+    if end_tok is None:
+      return False
+    conn_m = _QUOTED_CONN_RE.match(text, end_tok)
+    if conn_m is None:
+      return False
+    decoded_key = (
+        _decode_quoted_kv_key(text[pos:end_tok])
+        if ch == '"'
+        else text[pos + 1 : end_tok - 1]
+    )
+    val_start, _ = _skip_kv_whitespace(text, conn_m.end())
+    is_container = val_start < n and text[val_start] in ("{", "[", "(")
+    if not is_sensitive_key(decoded_key, is_container=is_container):
+      return False
+    return not _is_quoted_header_value_prose(text, conn_m.group(0), val_start)
+  if (
+      pos >= 2
+      and text[pos - 2 : pos] in ("\\t", "\\r", "\\n")
+      and _count_backslashes_ending_at(text, pos - 2) % 2 == 0
+  ):
+    return False
+  bare_m = _BARE_KV_RE.match(text, pos)
+  if bare_m is not None:
+    next_val_start, _ = _skip_kv_whitespace(text, bare_m.end())
+    next_is_container = next_val_start < n and text[next_val_start] in (
+        "{",
+        "[",
+        "(",
+    )
+    return (
+        _extract_bare_kv_key(text, bare_m, is_container=next_is_container)
+        is not None
+    )
+  # Check up to 3 leading same-line words for multi-word headers (e.g.
+  # "api key: ...", "aws secret access key: ...").
+  word_cursor = pos
+  first_word = ""
+  for words_before in range(1, 4):
+    if word_cursor >= n or text[word_cursor] not in _WORD_START_CHARS:
+      break
+    w_start = word_cursor
+    while (
+        word_cursor < n
+        and text[word_cursor] in _WORD_CHARS
+        and (word_cursor - w_start) <= 64
+    ):
+      word_cursor += 1
+    if (word_cursor - w_start) > 64 or (
+        word_cursor < n and text[word_cursor] in _WORD_CHARS
+    ):
+      break
+    if words_before == 1:
+      first_word = text[w_start:word_cursor]
+    if word_cursor >= n or text[word_cursor] not in (" ", "\t"):
+      break
+    while word_cursor < n and text[word_cursor] in (" ", "\t"):
+      word_cursor += 1
+    cand_m = _BARE_KV_RE.match(text, word_cursor)
+    if cand_m is not None:
+      next_val_start, _ = _skip_kv_whitespace(text, cand_m.end())
+      next_is_container = next_val_start < n and text[next_val_start] in (
+          "{",
+          "[",
+          "(",
+      )
+      matched_key = _extract_bare_kv_key(
+          text, cand_m, is_container=next_is_container
+      )
+      if matched_key is not None and (
+          matched_key.count(" ") == words_before
+          or (
+              words_before == 3
+              and matched_key.lower() == "secret access key"
+              and first_word.lower() == "aws"
+          )
+      ):
+        return True
+  return False
 
 
 def _strip_matching_quotes(raw_val: str) -> str:
   """Strips matching outer quotes (or escaped quotes) from a scalar string."""
-  if (
-      len(raw_val) >= 2
-      and raw_val[0] == raw_val[-1]
-      and raw_val[0] in ('"', "'")
-  ):
+  n = len(raw_val)
+  if n >= 2 and raw_val[0] == raw_val[-1] and raw_val[0] in ('"', "'"):
     return raw_val[1:-1]
-  if len(raw_val) >= 4 and (
-      (raw_val.startswith('\\"') and raw_val.endswith('\\"'))
-      or (raw_val.startswith("\\'") and raw_val.endswith("\\'"))
-  ):
-    return raw_val[2:-2]
+  if n >= 4 and raw_val[0] == "\\" and raw_val[-1] in ('"', "'"):
+    q = raw_val[-1]
+    lead_bs = 0
+    while lead_bs < n and raw_val[lead_bs] == "\\":
+      lead_bs += 1
+    if (
+        lead_bs % 2 == 1
+        and lead_bs < n
+        and raw_val[lead_bs] == q
+        and n >= 2 * (lead_bs + 1)
+    ):
+      delim = "\\" * lead_bs + q
+      if raw_val.endswith(delim):
+        trail_start = n - (lead_bs + 1)
+        if trail_start == lead_bs + 1 or raw_val[trail_start - 1] != "\\":
+          return raw_val[lead_bs + 1 : trail_start]
   return raw_val
 
 
-def _scrub_sensitive_kv_in_text(text: str) -> str:
-  """Redacts sensitive key=value / key: value / key is value pairs in text."""
-  out: list[str] = []
-  idx = 0
+def _skip_kv_whitespace(text: str, pos: int) -> tuple[int, int]:
+  """Advances past whitespace and JSON \\t/\\r/\\n escapes after a KV connector.
+
+  Returns ``(new_pos, newline_count)`` counting both literal ``\\n`` and
+  JSON-escaped ``\\\\n`` line breaks.
+  """
   n = len(text)
-  while idx < n:
-    match = _KV_CANDIDATE_RE.search(text, idx)
-    if match is None:
-      out.append(text[idx:])
+  newlines = 0
+  while pos < n:
+    ch = text[pos]
+    if ch.isspace():
+      if ch == "\n":
+        newlines += 1
+      pos += 1
+    elif ch == "\\":
+      bs = 0
+      while pos + bs < n and text[pos + bs] == "\\":
+        bs += 1
+      if pos + bs < n and text[pos + bs] in ("t", "r", "n"):
+        after_esc = pos + bs + 1
+        if bs % 2 == 1 or (
+            after_esc < n
+            and (
+                text[after_esc].isspace()
+                or (
+                    text[after_esc] == "\\"
+                    and after_esc + 1 < n
+                    and text[after_esc + 1] in ("t", "r", "n", "\\")
+                )
+            )
+        ):
+          if text[pos + bs] == "n":
+            newlines += 1
+          pos = after_esc
+          continue
       break
-    val_start = match.end()
-    while val_start < n and text[val_start].isspace():
-      val_start += 1
-    next_char = text[val_start] if val_start < n else ""
-    is_container = next_char in ("{", "[", "(")
-    matched_key = _extract_matched_kv_key(
-        text, match, is_container=is_container
-    )
-    if matched_key is None:
-      out.append(text[idx : match.end()])
-      idx = match.end()
-      continue
-    ws_span = text[match.end() : val_start]
-    if ws_span.count("\n") >= 2:
-      out.append(text[idx : match.end()])
-      idx = match.end()
+    else:
+      break
+  return pos, newlines
+
+
+def _starts_cookie_eq_pair(text: str, pos: int) -> bool:
+  """Returns True when ``pos`` begins a ``<valid_cookie_name>=`` pair."""
+  n = len(text)
+  k = pos
+  while (
+      k < n and not text[k].isspace() and text[k] not in _COOKIE_NAME_STOP_CHARS
+  ):
+    if text[k] == "\\":
+      bs = 0
+      while k + bs < n and text[k + bs] == "\\":
+        bs += 1
+      if k + bs < n and text[k + bs] in ("t", "r", "n") and bs % 2 == 1:
+        return False
+      k += bs
+    else:
+      k += 1
+  return k > pos and k < n and text[k] == "="
+
+
+def _consume_cookie_header_value(text: str, pos: int) -> tuple[int, str] | None:
+  """Consumes a single-line ``;``-separated Cookie header value in O(N)."""
+  n = len(text)
+  p = pos
+  while p < n and text[p] in (";", " ", "\t"):
+    p += 1
+  last_end = pos
+  found_pair = False
+  seen_eq_pair = False
+  no_semi_until = 0
+  while p < n:
+    stop_cookie_loop = False
+    pair_start = p
+    while (
+        p < n
+        and not text[p].isspace()
+        and text[p] not in _COOKIE_NAME_STOP_CHARS
+    ):
+      if text[p] == "\\":
+        bs = 0
+        while p + bs < n and text[p + bs] == "\\":
+          bs += 1
+        if p + bs < n and text[p + bs] in ("t", "r", "n") and bs % 2 == 1:
+          p += bs - 1
+          break
+        p += bs
+      else:
+        p += 1
+    pair_name = text[pair_start:p]
+    has_name = p > pair_start
+    has_eq = p < n and text[p] == "="
+    if not has_name and not has_eq:
+      break
+    if not has_eq:
+      if p < n and (
+          text[p] == ":" or _COOKIE_KV_CONN_RE.match(text, p) is not None
+      ):
+        if found_pair:
+          break
+        if is_sensitive_key(pair_name):
+          return None
+        if text[p] == ":" and p + 1 < n and not text[p + 1].isspace():
+          p = _scan_bare_value_end(text, pair_start)
+        stop_cookie_loop = True
+    if has_eq:
+      seen_eq_pair = True
+      p += 1
+      date_m = (
+          _HTTP_COOKIE_DATE_RE.match(text, p)
+          if pair_name.lower() == "expires"
+          else None
+      )
+      if date_m is not None:
+        p = date_m.end()
+      else:
+        lead_bs = 0
+        while p + lead_bs < n and text[p + lead_bs] == "\\":
+          lead_bs += 1
+        if (
+            lead_bs > 0
+            and lead_bs % 2 == 1
+            and p + lead_bs < n
+            and text[p + lead_bs] in ('"', "'")
+        ):
+          val_start = p
+          q = text[p + lead_bs]
+          close_mod, period, low_zero = _escaped_quote_mod_and_period(lead_bs)
+          val_open_end = p + lead_bs + 1
+          p = val_open_end
+          stopped_at_outer_q = False
+          while p < n:
+            ch = text[p]
+            if ch in ("\r", "\n"):
+              break
+            if ch == '"' or ch == q:
+              stopped_at_outer_q = True
+              break
+            if ch == "\\":
+              bs = 0
+              while p + bs < n and text[p + bs] == "\\":
+                bs += 1
+              if p + bs < n and text[p + bs] == q:
+                if ((bs + 1) & -(bs + 1)) < low_zero:
+                  p += bs
+                  stopped_at_outer_q = True
+                  break
+                if bs % period == close_mod:
+                  if q == '"' and _quote_opens_kv_at(
+                      text, p + bs - 1, escaped_dq=True
+                  ):
+                    stopped_at_outer_q = True
+                    stop_cookie_loop = True
+                    if not any(c.isalnum() for c in text[val_open_end:p]):
+                      p = val_start
+                    break
+                  p += bs + 1
+                  break
+                p += bs + 1
+                continue
+              if p + bs < n and text[p + bs] == '"':
+                if ((bs + 1) & -(bs + 1)) < low_zero:
+                  p += bs
+                  stopped_at_outer_q = True
+                  break
+                p += bs + 1
+                continue
+              if p + bs < n and text[p + bs] in ("r", "n") and bs % 2 == 1:
+                p += bs - 1
+                stopped_at_outer_q = True
+                break
+              p += bs
+              continue
+            p += 1
+          if not stopped_at_outer_q:
+            while p < n and not text[p].isspace() and text[p] not in ";)}]\r\n":
+              if text[p] == '"' or text[p] == q:
+                break
+              if text[p] == "\\":
+                bs = 0
+                while p + bs < n and text[p + bs] == "\\":
+                  bs += 1
+                if (
+                    p + bs < n
+                    and text[p + bs] in ("t", "r", "n")
+                    and bs % 2 == 1
+                ):
+                  p += bs - 1
+                  break
+                if p + bs < n and text[p + bs] in ('"', "'"):
+                  if bs % 2 == 1:
+                    p += bs + 1
+                    continue
+                  p += bs
+                  break
+                p += bs
+                continue
+              p += 1
+        elif (
+            lead_bs > 0
+            and lead_bs % 2 == 0
+            and p + lead_bs < n
+            and text[p + lead_bs] == "'"
+            and p + lead_bs + 1 < n
+            and text[p + lead_bs + 1] not in ",}]) \t\r\n"
+        ):
+          val_start = p
+          val_open_end = p + lead_bs + 1
+          scan = val_open_end
+          close_end: int | None = None
+          while scan < n:
+            ch = text[scan]
+            if ch in ("\r", "\n", '"'):
+              break
+            if ch == "'":
+              if _quote_opens_kv_at(text, scan, escaped_dq=False):
+                stop_cookie_loop = True
+                close_end = (
+                    val_start
+                    if not any(c.isalnum() for c in text[val_open_end:scan])
+                    else scan
+                )
+              else:
+                close_end = scan + 1
+              break
+            if ch == "\\":
+              bs = 0
+              while scan + bs < n and text[scan + bs] == "\\":
+                bs += 1
+              if scan + bs < n and text[scan + bs] == "'":
+                if bs % 2 == 0:
+                  q_pos = scan + bs
+                  if _quote_opens_kv_at(text, q_pos, escaped_dq=False):
+                    stop_cookie_loop = True
+                    close_end = (
+                        val_start
+                        if not any(
+                            c.isalnum() for c in text[val_open_end:q_pos]
+                        )
+                        else q_pos
+                    )
+                  else:
+                    close_end = q_pos + 1
+                  break
+                scan += bs + 1
+                continue
+              if scan + bs < n and text[scan + bs] == '"':
+                if bs % 2 == 0:
+                  break
+                scan += bs + 1
+                continue
+              if (
+                  scan + bs < n
+                  and text[scan + bs] in ("r", "n")
+                  and bs % 2 == 1
+              ):
+                break
+              scan += bs
+              continue
+            scan += 1
+          if close_end is not None:
+            p = close_end
+          else:
+            p += lead_bs + 1
+            while (
+                p < n and not text[p].isspace() and text[p] not in ';)}]\r\n"'
+            ):
+              if text[p] == "\\":
+                bs = 0
+                while p + bs < n and text[p + bs] == "\\":
+                  bs += 1
+                if (
+                    p + bs < n
+                    and text[p + bs] in ("t", "r", "n")
+                    and bs % 2 == 1
+                ):
+                  p += bs - 1
+                  break
+                if p + bs < n and text[p + bs] == '"':
+                  if bs % 2 == 1:
+                    p += bs + 1
+                    continue
+                  p += bs
+                  break
+                p += bs
+              else:
+                p += 1
+        elif p < n and text[p] in ('"', "'"):
+          val_start = p
+          end_q = _scan_same_line_quote_end(text, p)
+          if end_q is not None:
+            if _quote_opens_kv_at(text, end_q - 1, escaped_dq=False):
+              stop_cookie_loop = True
+              if any(c.isalnum() for c in text[val_start + 1 : end_q - 1]):
+                p = end_q - 1
+            else:
+              p = end_q
+          else:
+            consumed_to_semi = False
+            if p >= no_semi_until:
+              probe = p
+              while probe < n and text[probe] not in ";)}]\r\n":
+                if text[probe] == "\\":
+                  bs = 0
+                  while probe + bs < n and text[probe + bs] == "\\":
+                    bs += 1
+                  if (
+                      probe + bs < n
+                      and text[probe + bs] in ("t", "r", "n")
+                      and bs % 2 == 1
+                  ):
+                    probe += bs - 1
+                    break
+                  probe += bs
+                else:
+                  probe += 1
+              if probe < n and text[probe] == ";":
+                p = probe
+                consumed_to_semi = True
+              else:
+                no_semi_until = probe
+            if not consumed_to_semi:
+              while (
+                  p < n and not text[p].isspace() and text[p] not in ";)}]\r\n"
+              ):
+                if text[p] == "\\":
+                  bs = 0
+                  while p + bs < n and text[p + bs] == "\\":
+                    bs += 1
+                  if (
+                      p + bs < n
+                      and text[p + bs] in ("t", "r", "n")
+                      and bs % 2 == 1
+                  ):
+                    p += bs - 1
+                    break
+                  p += bs
+                else:
+                  p += 1
+        else:
+          while (
+              p < n
+              and not text[p].isspace()
+              and text[p] not in _COOKIE_VAL_STOP_CHARS
+          ):
+            ch = text[p]
+            if ch == ",":
+              if p + 1 >= n or text[p + 1].isspace():
+                break
+              peek = p + 1
+              has_kv_sep = False
+              while (
+                  peek < n
+                  and not text[peek].isspace()
+                  and text[peek] not in ",;)}]\"'"
+              ):
+                if text[peek] in (":", "="):
+                  has_kv_sep = True
+                  break
+                if text[peek] == "\\":
+                  bs = 0
+                  while peek + bs < n and text[peek + bs] == "\\":
+                    bs += 1
+                  if (
+                      peek + bs < n
+                      and text[peek + bs] in ("t", "r", "n")
+                      and bs % 2 == 1
+                  ):
+                    break
+                  peek += bs
+                else:
+                  peek += 1
+              if has_kv_sep or (peek == p + 1 and text[p + 1] != ","):
+                break
+              p += 1
+              continue
+            if ch == "\\":
+              bs = 0
+              while p + bs < n and text[p + bs] == "\\":
+                bs += 1
+              if p + bs < n and text[p + bs] in ("t", "r", "n") and bs % 2 == 1:
+                p += bs - 1
+                break
+              if p + bs < n and text[p + bs] in ('"', "'"):
+                if bs % 2 == 1:
+                  p += bs + 1
+                  continue
+                p += bs
+                break
+              p += bs
+              continue
+            p += 1
+    found_pair = True
+    last_end = p
+    if stop_cookie_loop:
+      break
+    sep_p = p
+    saw_semi = False
+    while sep_p < n and text[sep_p] in (";", " ", "\t"):
+      if text[sep_p] == ";":
+        saw_semi = True
+      sep_p += 1
+    if saw_semi:
+      p = sep_p
+    elif seen_eq_pair and p < n and text[p] == ",":
+      after_comma = p + 1
+      while after_comma < n and text[after_comma] in (" ", "\t"):
+        after_comma += 1
+      if _starts_cookie_eq_pair(text, after_comma):
+        p = after_comma
+      else:
+        break
+    else:
+      break
+  return (last_end, "[REDACTED]") if found_pair and last_end > pos else None
+
+
+def _try_redact_sensitive_kv(
+    text: str,
+    matched_key: str,
+    conn_text: str,
+    val_start: int,
+    nl_count: int,
+    *,
+    is_quoted_key: bool = False,
+) -> tuple[int, str | None] | None:
+  """Consumes a sensitive KV value at ``val_start``.
+
+  Returns ``(val_end, replacement)`` where ``replacement`` is ``None`` if the
+  value is a safe diagnostic scalar to keep verbatim, or ``None`` if no value
+  should be consumed at ``val_start``.
+  """
+  n = len(text)
+  next_char = text[val_start] if val_start < n else ""
+  is_container = next_char in ("{", "[", "(")
+  if (
+      nl_count >= 2
+      and next_char not in ('"', "'", "{", "[", "(")
+      and not _starts_with_odd_escaped_quote(text, val_start)
+  ):
+    return None
+  if (
+      nl_count > 0
+      and not is_container
+      and _is_sensitive_header_at(text, val_start)
+  ):
+    return None
+  norm_key = _normalize_key_name(matched_key)
+  is_cookie_header = (
+      not is_quoted_key
+      and (
+          norm_key in ("cookie", "cookies", "set_cookie", "set_cookies")
+          or norm_key.endswith(("_cookie", "_cookies"))
+      )
+      and ":" in conn_text
+      and next_char not in ("{", "[", "(", '"', "'")
+      and not _starts_with_odd_escaped_quote(text, val_start)
+      and _PY_STR_PREFIX_RE.match(text, val_start) is None
+      and _CTOR_PREFIX_RE.match(text, val_start) is None
+  )
+  if is_cookie_header:
+    consumed = _consume_cookie_header_value(text, val_start)
+  else:
+    consumed = _consume_sensitive_kv_value(text, val_start)
+  if consumed is None:
+    return None
+  val_end, replacement = consumed
+  if not is_container:
+    raw_val = text[val_start:val_end].strip()
+    unquoted_val = _strip_matching_quotes(raw_val)
+    if _is_numeric_count_scalar(
+        matched_key, unquoted_val
+    ) or _is_safe_auth_status_scalar(matched_key, unquoted_val):
+      return val_end, None
+  return val_end, replacement
+
+
+def _scrub_sensitive_kv_in_text(text: str, *, _depth: int = 0) -> str:
+  """Redacts sensitive key=value / key: value / key is value pairs in O(N)."""
+  out: list[str] = []
+  emit_idx = 0
+  scan_idx = 0
+  n = len(text)
+  unclosed_edq_until: dict[int, int] = {}
+  while scan_idx < n:
+    match = _KV_SCAN_NEXT_RE.search(text, scan_idx)
+    if match is None:
+      break
+    start = match.start()
+
+    if match.group("bare") is None:
+      # Branch A: escaped single quote or JSON \t/\r/\n escape sequence.
+      if text[start : start + 2] in ("\\'", "\\t", "\\r", "\\n"):
+        if _count_backslashes_ending_at(text, start) % 2 == 0:
+          scan_idx = start + 1
+        else:
+          scan_idx = start + 2
+        continue
+
+      # Branch B: escaped double-quoted token \"...\".
+      if text[start : start + 2] == '\\"':
+        lead_bs = _count_backslashes_ending_at(text, start)
+        if lead_bs % 2 == 0:
+          scan_idx = start + 1
+          continue
+        close_mod, _, _ = _escaped_quote_mod_and_period(lead_bs)
+        if start < unclosed_edq_until.get(close_mod, 0):
+          end_tok = None
+          close_start = start + 2
+        else:
+          end_tok, stop_pos, close_start = _scan_same_line_escaped_dq_end(
+              text, start, lead_bs=lead_bs
+          )
+          if end_tok is None and stop_pos > unclosed_edq_until.get(
+              close_mod, 0
+          ):
+            unclosed_edq_until[close_mod] = stop_pos
+        if end_tok is None:
+          scan_idx = start + 2
+          continue
+        raw_inner = text[start + 2 : close_start]
+        closing_delim = text[close_start:end_tok]
+        conn_m = _QUOTED_CONN_RE.match(text, end_tok)
+        if conn_m is not None:
+          decoded_key, emitted_key, val_start, nl_count, is_sensitive_outer = (
+              _inspect_quoted_kv_token(
+                  text,
+                  start,
+                  end_tok,
+                  conn_m,
+                  quote_kind='\\"',
+                  depth=_depth,
+                  close_start=close_start,
+                  lead_bs=lead_bs,
+              )
+          )
+          key_changed = emitted_key != text[start:end_tok]
+          if is_sensitive_outer:
+            redacted = _try_redact_sensitive_kv(
+                text,
+                decoded_key,
+                conn_m.group(0),
+                val_start,
+                nl_count,
+                is_quoted_key=True,
+            )
+            if redacted is None:
+              if key_changed:
+                out.append(
+                    text[emit_idx:start]
+                    + emitted_key
+                    + text[end_tok : conn_m.end()]
+                )
+                emit_idx = conn_m.end()
+              scan_idx = conn_m.end()
+            else:
+              val_end, replacement = redacted
+              if replacement is None:
+                if key_changed:
+                  out.append(
+                      text[emit_idx:start] + emitted_key + text[end_tok:val_end]
+                  )
+                  emit_idx = val_end
+              else:
+                if key_changed:
+                  out.append(
+                      text[emit_idx:start]
+                      + emitted_key
+                      + text[end_tok:val_start]
+                  )
+                else:
+                  out.append(text[emit_idx:val_start])
+                out.append(replacement)
+                emit_idx = val_end
+              scan_idx = val_end
+            continue
+          if key_changed:
+            out.append(
+                text[emit_idx:start]
+                + emitted_key
+                + text[end_tok : conn_m.end()]
+            )
+            emit_idx = conn_m.end()
+          scan_idx = conn_m.end()
+          continue
+        if _quote_opens_kv_at(text, end_tok - 2, escaped_dq=True):
+          scan_idx = start + 2
+          continue
+        if _inner_ends_with_kv_connector(raw_inner):
+          after_ws = end_tok
+          while after_ws < n and text[after_ws] in (" ", "\t"):
+            after_ws += 1
+          if (
+              after_ws < n
+              and text[after_ws] not in ',;)}]\r\n"'
+              and not (
+                  after_ws > end_tok
+                  and _BARE_KV_RE.match(text, after_ws) is not None
+              )
+          ):
+            scan_idx = start + 2
+            continue
+        scrubbed = _scrub_quoted_inner(
+            raw_inner, quote_kind='\\"', depth=_depth, lead_bs=lead_bs
+        )
+        if scrubbed != raw_inner:
+          out.append(text[emit_idx:start] + '\\"' + scrubbed + closing_delim)
+          emit_idx = end_tok
+        scan_idx = end_tok
+        continue
+
+      # Branch C: plain double- or single-quoted token "..." / '...'.
+      if text[start] in ('"', "'"):
+        ch = text[start]
+        if ch == "'" and start > 0 and text[start - 1].isalnum():
+          scan_idx = start + 1
+          continue
+        end_tok = _scan_same_line_quote_end(text, start)
+        if end_tok is None:
+          scan_idx = start + 1
+          continue
+        raw_inner = text[start + 1 : end_tok - 1]
+        conn_m = _QUOTED_CONN_RE.match(text, end_tok)
+        if conn_m is not None:
+          decoded_key, emitted_key, val_start, nl_count, is_sensitive_outer = (
+              _inspect_quoted_kv_token(
+                  text, start, end_tok, conn_m, quote_kind=ch, depth=_depth
+              )
+          )
+          key_changed = emitted_key != text[start:end_tok]
+          if is_sensitive_outer:
+            redacted = _try_redact_sensitive_kv(
+                text,
+                decoded_key,
+                conn_m.group(0),
+                val_start,
+                nl_count,
+                is_quoted_key=True,
+            )
+            if redacted is None:
+              if key_changed:
+                out.append(
+                    text[emit_idx:start]
+                    + emitted_key
+                    + text[end_tok : conn_m.end()]
+                )
+                emit_idx = conn_m.end()
+              scan_idx = conn_m.end()
+            else:
+              val_end, replacement = redacted
+              if replacement is None:
+                if key_changed:
+                  out.append(
+                      text[emit_idx:start] + emitted_key + text[end_tok:val_end]
+                  )
+                  emit_idx = val_end
+              else:
+                if key_changed:
+                  out.append(
+                      text[emit_idx:start]
+                      + emitted_key
+                      + text[end_tok:val_start]
+                  )
+                else:
+                  out.append(text[emit_idx:val_start])
+                out.append(replacement)
+                emit_idx = val_end
+              scan_idx = val_end
+            continue
+          if key_changed:
+            out.append(
+                text[emit_idx:start]
+                + emitted_key
+                + text[end_tok : conn_m.end()]
+            )
+            emit_idx = conn_m.end()
+          scan_idx = conn_m.end()
+          continue
+        if _quote_opens_kv_at(text, end_tok - 1, escaped_dq=False):
+          scan_idx = start + 1
+          continue
+        if _inner_ends_with_kv_connector(raw_inner):
+          after_ws = end_tok
+          while after_ws < n and text[after_ws] in (" ", "\t"):
+            after_ws += 1
+          if (
+              after_ws < n
+              and text[after_ws] not in ",;)}]\r\n"
+              and not (
+                  after_ws > end_tok
+                  and _BARE_KV_RE.match(text, after_ws) is not None
+              )
+          ):
+            scan_idx = start + 1
+            continue
+        scrubbed = _scrub_quoted_inner(raw_inner, quote_kind=ch, depth=_depth)
+        if scrubbed != raw_inner:
+          out.append(text[emit_idx:start] + ch + scrubbed + ch)
+          emit_idx = end_tok
+        scan_idx = end_tok
+        continue
+
+    # Branch D: bare KV match.
+    match_end = match.end()
+    if (
+        start >= 2
+        and text[start - 2] == "\\"
+        and text[start - 1] in ("t", "r", "n")
+        and _count_backslashes_ending_at(text, start - 2) % 2 == 0
+    ):
+      scan_idx = match_end
       continue
     if (
-        "\n" in ws_span
-        and next_char not in ("{", "[", "(", '"', "'")
-        and not text.startswith(('\\"', "\\'"), val_start)
+        match_end < n
+        and not text[match_end].isspace()
+        and text[match_end] not in "{[(\\"
     ):
-      next_kv = _KV_CANDIDATE_RE.match(text, val_start)
-      if next_kv is not None:
-        next_val_start = next_kv.end()
-        while next_val_start < n and text[next_val_start].isspace():
-          next_val_start += 1
-        next_is_container = next_val_start < n and text[next_val_start] in (
-            "{",
-            "[",
-            "(",
-        )
-        if _is_matched_kv_sensitive(
-            text, next_kv, is_container=next_is_container
-        ):
-          out.append(text[idx : match.end()])
-          idx = match.end()
-          continue
-    consumed = _consume_sensitive_kv_value(text, val_start)
-    if consumed is None:
-      out.append(text[idx : match.end()])
-      idx = match.end()
+      val_start = match_end
+      nl_count = 0
+      is_container = False
+    else:
+      val_start, nl_count = _skip_kv_whitespace(text, match_end)
+      is_container = val_start < n and text[val_start] in ("{", "[", "(")
+    matched_key = _extract_bare_kv_key(text, match, is_container=is_container)
+    if matched_key is None:
+      scan_idx = match_end
       continue
-    val_end, replacement = consumed
-    if not is_container:
-      raw_val = text[val_start:val_end].strip()
-      unquoted_val = _strip_matching_quotes(raw_val)
-      if _is_numeric_count_scalar(
-          matched_key, unquoted_val
-      ) or _is_safe_auth_status_scalar(matched_key, unquoted_val):
-        out.append(text[idx:val_end])
-        idx = val_end
-        continue
-    out.append(text[idx:val_start])
-    out.append(replacement)
-    idx = val_end
+    redacted = _try_redact_sensitive_kv(
+        text,
+        matched_key,
+        match.group("conn"),
+        val_start,
+        nl_count,
+        is_quoted_key=False,
+    )
+    if redacted is None:
+      scan_idx = match_end
+      continue
+    val_end, replacement = redacted
+    if replacement is not None:
+      out.append(text[emit_idx:val_start])
+      out.append(replacement)
+      emit_idx = val_end
+    scan_idx = val_end
+  if not out:
+    return text
+  out.append(text[emit_idx:])
   return "".join(out)
+
+
+def _scrub_text_at_depth(text: str, *, _depth: int = 0) -> str:
+  """Redacts embedded JSON, secret patterns, and KV pairs at bounded depth."""
+  out = (
+      _scrub_embedded_json_containers(text)
+      if _depth < 3 and ("{" in text or "[" in text)
+      else text
+  )
+  for pat, repl in _SECRET_RULES:
+    out = pat.sub(repl, out)
+  out = _scrub_sensitive_kv_in_text(out, _depth=_depth)
+  if _depth == 0 and "\\u00" in out:
+    decoded_ascii = _unescape_safe_ascii_unicode_escapes(out)
+    if decoded_ascii != out:
+      rescrubbed = _scrub_sensitive_kv_in_text(decoded_ascii, _depth=1)
+      if rescrubbed != decoded_ascii:
+        return rescrubbed
+  return out
 
 
 def scrub_sensitive_text(text: str) -> str:
   """Redacts credential tokens from raw strings while keeping error codes."""
-  out = _scrub_embedded_json_containers(str(text))
-  for pat, repl in _SECRET_RULES:
-    out = pat.sub(repl, out)
-  return _scrub_sensitive_kv_in_text(out)
+  return _scrub_text_at_depth(str(text), _depth=0)
 
 
 def scrub_sensitive_data(value: Any, *, key_name: str = "") -> Any:
@@ -704,6 +2081,8 @@ def scrub_sensitive_data(value: Any, *, key_name: str = "") -> Any:
         _is_numeric_count_scalar(key_name, value)
         or _is_safe_auth_status_scalar(key_name, value)
     ):
+      if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="replace")
       return value
     if isinstance(value, (bytes, bytearray)):
       text_val = value.decode("utf-8", errors="replace")
@@ -927,7 +2306,14 @@ def _flatten_structured_value(
     )
   if isinstance(val, (bytes, bytearray)):
     val = val.decode("utf-8", errors="replace")
-  if is_sensitive_key(key_name) and str(val).strip():
+  if (
+      is_sensitive_key(key_name)
+      and str(val).strip()
+      and not (
+          _is_numeric_count_scalar(key_name, val)
+          or _is_safe_auth_status_scalar(key_name, val)
+      )
+  ):
     return "[REDACTED]"
   return _strip_boilerplate(str(val))
 

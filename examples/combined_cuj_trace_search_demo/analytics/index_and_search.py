@@ -510,28 +510,6 @@ def _extract_s3_text(trace_obj: Any, row: dict[str, Any]) -> str:
   return extract_s3_outcome_first(trace_dict, metrics=row)
 
 
-def _delete_owned_staging_table(
-    bq_client: Any,
-    stage_fqn: str,
-    *,
-    stage_token: str,
-) -> None:
-  """Deletes a staging table only if ownership label and token still match."""
-  try:
-    current_tbl = bq_client.get_table(stage_fqn)
-  except Exception:
-    # Best-effort cleanup: never mask a load/merge failure or delete a table
-    # whose ownership label and staging token could not be verified.
-    return
-  labels = getattr(current_tbl, "labels", None)
-  if (
-      isinstance(labels, Mapping)
-      and labels.get(DEMO_OWNERSHIP_LABEL_KEY) == DEMO_OWNERSHIP_LABEL_VALUE
-      and labels.get(_STAGING_TOKEN_LABEL_KEY) == stage_token
-  ):
-    bq_client.delete_table(stage_fqn, not_found_ok=True)
-
-
 def populate_trajectories_in_bigquery(
     bq_client: Any,
     *,
@@ -576,7 +554,6 @@ def populate_trajectories_in_bigquery(
       bigquery.SchemaField("error_summary", "STRING"),
   ]
   stage_fqn = ""
-  stage_token = ""
   stage_reserved = False
   for _ in range(3):
     candidate_fqn = (
@@ -585,6 +562,7 @@ def populate_trajectories_in_bigquery(
     )
     candidate_token = uuid.uuid4().hex[:16]
     stage_tbl = bigquery.Table(candidate_fqn, schema=stage_schema)
+    stage_tbl.expires = datetime.now(timezone.utc) + timedelta(hours=1)
     stage_tbl.labels = {
         DEMO_OWNERSHIP_LABEL_KEY: DEMO_OWNERSHIP_LABEL_VALUE,
         _STAGING_TOKEN_LABEL_KEY: candidate_token,
@@ -592,7 +570,6 @@ def populate_trajectories_in_bigquery(
     try:
       bq_client.create_table(stage_tbl, exists_ok=False)
       stage_fqn = candidate_fqn
-      stage_token = candidate_token
       stage_reserved = True
       break
     except Exception as exc:
@@ -603,27 +580,23 @@ def populate_trajectories_in_bigquery(
     raise RuntimeError(
         "Failed to reserve unique staging table after 3 conflict attempts."
     )
-  try:
-    load_cfg = bigquery.LoadJobConfig(
-        schema=stage_schema,
-        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-    )
-    bq_client.load_table_from_json(
-        staged, stage_fqn, job_config=load_cfg
-    ).result()
-    merge_sql = (
-        f"MERGE `{table_fqn}` AS t\n"
-        f"USING `{stage_fqn}` AS s\n"
-        "ON t.session_id = s.session_id AND t.invocation_id = s.invocation_id\n"
-        "WHEN MATCHED THEN\n"
-        "  UPDATE SET\n"
-        "    t._ai_index_trajectory = s._ai_index_trajectory,\n"
-        "    t.error_summary = s.error_summary"
-    )
-    bq_client.query(merge_sql).result()
-  finally:
-    if stage_reserved and stage_fqn and stage_token:
-      _delete_owned_staging_table(bq_client, stage_fqn, stage_token=stage_token)
+  load_cfg = bigquery.LoadJobConfig(
+      schema=stage_schema,
+      write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+  )
+  bq_client.load_table_from_json(
+      staged, stage_fqn, job_config=load_cfg
+  ).result()
+  merge_sql = (
+      f"MERGE `{table_fqn}` AS t\n"
+      f"USING `{stage_fqn}` AS s\n"
+      "ON t.session_id = s.session_id AND t.invocation_id = s.invocation_id\n"
+      "WHEN MATCHED THEN\n"
+      "  UPDATE SET\n"
+      "    t._ai_index_trajectory = s._ai_index_trajectory,\n"
+      "    t.error_summary = s.error_summary"
+  )
+  bq_client.query(merge_sql).result()
   return len(staged)
 
 

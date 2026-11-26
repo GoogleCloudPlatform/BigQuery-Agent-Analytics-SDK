@@ -16,6 +16,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 import inspect
 import json
 from pathlib import Path
@@ -3140,7 +3143,6 @@ def test_issue608_manifest_staging_reservation_mixed_session_and_lazy_hydration(
       job.result.return_value = []
     return job
 
-  created_tables: dict[str, object] = {}
   create_attempts = {"n": 0}
 
   def _create_stage_with_retry(tbl, exists_ok=False):
@@ -3148,20 +3150,25 @@ def test_issue608_manifest_staging_reservation_mixed_session_and_lazy_hydration(
     create_attempts["n"] += 1
     if create_attempts["n"] == 1:
       raise _Conflict("collision")
-    fqn = f"{tbl.project}.{tbl.dataset_id}.{tbl.table_id}"
-    created_tables[fqn] = tbl
     return tbl
 
   retry_client = MagicMock()
   retry_client.query.side_effect = _pop_fetch_query
   retry_client.create_table.side_effect = _create_stage_with_retry
-  retry_client.get_table.side_effect = lambda fqn: created_tables[fqn]
+  before_reserve = datetime.now(timezone.utc)
   populated = populate_trajectories_in_bigquery(
       retry_client, project_id="demo-proj", dataset_id="agent_ops"
   )
+  after_reserve = datetime.now(timezone.utc)
   assert populated == 1
   assert retry_client.create_table.call_count == 2
   reserved_tbl = retry_client.create_table.call_args_list[1].args[0]
+  assert reserved_tbl.expires is not None
+  assert (
+      before_reserve + timedelta(minutes=55)
+      <= reserved_tbl.expires
+      <= after_reserve + timedelta(minutes=65)
+  )
   assert reserved_tbl.labels["bqaa_demo"] == "combined_cuj_trace_search"
   assert re.fullmatch(
       r"[0-9a-f]{16}", reserved_tbl.labels["bqaa_demo_stage_token"]
@@ -3175,10 +3182,7 @@ def test_issue608_manifest_staging_reservation_mixed_session_and_lazy_hydration(
       f"{reserved_tbl.project}.{reserved_tbl.dataset_id}.{reserved_tbl.table_id}"
       == reserved_fqn
   )
-  retry_client.delete_table.assert_called_once_with(
-      reserved_fqn,
-      not_found_ok=True,
-  )
+  retry_client.delete_table.assert_not_called()
 
   fail_reserve_client = MagicMock()
   fail_reserve_client.query.side_effect = _pop_fetch_query
@@ -3629,8 +3633,9 @@ def test_manifest_validation_with_explicit_sids_staging_token_and_503_guard(
   assert any("session_id IN ('s1')" in s for s in executed_live_sqls)
   assert not any("s_other" in s for s in executed_live_sqls)
 
-  # 3. Staging cleanup must NOT delete stage_fqn if another producer replaced it
-  #    (either unowned / missing label OR mismatched bqaa_demo_stage_token).
+  # 3. Reserved staging table uses BigQuery table expiration (~1 hour UTC TTL)
+  #    and NEVER calls delete_table on failure (eliminating delete-by-name
+  #    TOCTOU races).
   def _stage_fetch_query(sql_text, job_config=None):
     del job_config
     job = MagicMock()
@@ -3653,27 +3658,30 @@ def test_manifest_validation_with_explicit_sids_staging_token_and_503_guard(
       job.result.return_value = []
     return job
 
-  for replacement_labels in (
-      {},
-      {"env": "prod"},
-      {
-          "bqaa_demo": "combined_cuj_trace_search",
-          "bqaa_demo_stage_token": "otherproducer123",
-      },
-  ):
-    replaced_client = MagicMock()
-    replaced_client.query.side_effect = _stage_fetch_query
-    replaced_client.load_table_from_json.side_effect = RuntimeError(
-        "load failed after table replaced"
+  replaced_client = MagicMock()
+  replaced_client.query.side_effect = _stage_fetch_query
+  replaced_client.load_table_from_json.side_effect = RuntimeError(
+      "load failed after table replaced"
+  )
+  before_fail = datetime.now(timezone.utc)
+  with pytest.raises(RuntimeError, match="load failed after table replaced"):
+    populate_trajectories_in_bigquery(
+        replaced_client, project_id="demo-proj", dataset_id="agent_ops"
     )
-    replaced_client.get_table.return_value = SimpleNamespace(
-        labels=replacement_labels
-    )
-    with pytest.raises(RuntimeError, match="load failed after table replaced"):
-      populate_trajectories_in_bigquery(
-          replaced_client, project_id="demo-proj", dataset_id="agent_ops"
-      )
-    replaced_client.delete_table.assert_not_called()
+  after_fail = datetime.now(timezone.utc)
+  replaced_client.create_table.assert_called_once()
+  failed_stage_tbl = replaced_client.create_table.call_args.args[0]
+  assert failed_stage_tbl.expires is not None
+  assert (
+      before_fail + timedelta(minutes=55)
+      <= failed_stage_tbl.expires
+      <= after_fail + timedelta(minutes=65)
+  )
+  assert failed_stage_tbl.labels["bqaa_demo"] == "combined_cuj_trace_search"
+  assert re.fullmatch(
+      r"[0-9a-f]{16}", failed_stage_tbl.labels["bqaa_demo_stage_token"]
+  )
+  replaced_client.delete_table.assert_not_called()
 
   # 4. NotFound/Conflict carrying HTTP 503 on response.status_code fail closed
   #    even when class attribute code == 404 / 409.

@@ -1455,6 +1455,89 @@ class ShowcaseHtmlAndHygieneTest(unittest.TestCase):
       self.assertIn("NOT_HYDRATED_ON_DEFAULT_SEARCH", html_text)
       self.assertIn("--hydrate-top-trace", html_text)
 
+  def test_html_dynamic_eval_turns_table_and_review2_redaction(self) -> None:
+    from report.build_showcase_html import build_showcase_html  # noqa: PLC0415
+
+    pad_17k = "a" * 17_000
+    error_payload = (
+        "CARD_EXPIRED cookies=3 "
+        f'{{"body": "{pad_17k}", "request:password": "html_tail_leak"}} '
+        '["password:\\t html_arr_leak"] '
+        "password_count=234567 "
+        "authentication_result=html_opaque_tok "
+        "Cookie: a=1; b=html_ck2"
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+      root = Path(tmpdir)
+      live_json = root / "live.json"
+      search_json = root / "search.json"
+      out_html = root / "showcase.html"
+      live_json.write_text(
+          json.dumps(
+              {
+                  "eval_turns_table": "eval_turns_live_fallback",
+                  "eval_turns": [
+                      {
+                          "session_id": "sess_html_r2_tbl",
+                          "invocation_id": "inv_html_r2_tbl",
+                          "scenario_id": "scn_html_r2_tbl",
+                          "has_error": True,
+                          "error_summary": error_payload,
+                          "raw_trace_bytes": 1200,
+                          "ablation": {
+                              "s1_bytes": 1200,
+                              "s1_tokens_est": 300,
+                              "s1_exceeds_2048": False,
+                              "s2_bytes": 600,
+                              "s2_tokens_est": 150,
+                              "s2_exceeds_2048": False,
+                              "s3_bytes": 240,
+                              "s3_tokens_est": 60,
+                              "s3_exceeds_2048": False,
+                              "s3_text": error_payload,
+                          },
+                      }
+                  ],
+                  "ablation_summary": {"turn_count": 1},
+              }
+          ),
+          encoding="utf-8",
+      )
+      search_json.write_text(
+          json.dumps(
+              {
+                  "eval_turns_table": "eval_turns_20261126_01",
+                  "index_status": {
+                      "ai_embed_column": "MOCK",
+                      "search_index": "READY",
+                      "vector_index": "SKIPPED_BELOW_5000_ROWS",
+                      "row_count": 1,
+                      "embeddings_ready": 1,
+                  },
+                  "queries": [],
+              }
+          ),
+          encoding="utf-8",
+      )
+      build_showcase_html(
+          live_json=live_json, search_json=search_json, output_path=out_html
+      )
+      html_text = out_html.read_text(encoding="utf-8")
+      self.assertIn('"eval_turns_table": "eval_turns_20261126_01"', html_text)
+      self.assertIn("evalTurnsTable", html_text)
+      self.assertIn("FROM `' + evalTurnsTable + '`\\n", html_text)
+      self.assertNotIn("FROM eval_turns\\n", html_text)
+      for secret_val in (
+          "html_tail_leak",
+          "html_arr_leak",
+          "234567",
+          "html_opaque_tok",
+          "html_ck2",
+      ):
+        self.assertNotIn(secret_val, html_text)
+      self.assertIn("CARD_EXPIRED", html_text)
+      self.assertIn("cookies=3", html_text)
+
 
 if __name__ == "__main__":
   unittest.main()

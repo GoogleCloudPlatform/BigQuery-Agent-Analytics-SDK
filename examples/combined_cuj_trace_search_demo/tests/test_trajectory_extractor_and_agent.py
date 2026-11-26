@@ -2606,6 +2606,1732 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
         scrub_sensitive_data({"cookies": "120"}), {"cookies": "120"}
     )
 
+  def test_json_keys_arrays_tight_counts_auth_result_s3_bytes_and_cookies(
+      self,
+  ) -> None:
+    from analytics.trajectory_extractor import _flatten_structured_value  # noqa: PLC0415
+    from analytics.trajectory_extractor import extract_s3_outcome_first  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+
+    # 1. Full RFC 8259 JSON keys, string arrays, and double-encoded backslash
+    #    escapes across budget/size tails.
+    pad_17k = "a" * 17_000
+    long_300_key = ("a" * 300) + "_password"
+    tail_cases = (
+        (
+            "colon_key_over_16k",
+            f'{{"body": "{pad_17k}", "request:password": "v_colon"}}'
+            " ERROR: CARD_EXPIRED",
+            ("v_colon",),
+        ),
+        (
+            "after_33_objs",
+            ('{"k":1} ' * 33)
+            + '{"request:password": "v_after32"} '
+            + '{"auth_result": {"value": "v_ar32"}} ERROR: CARD_EXPIRED',
+            ("v_after32", "v_ar32"),
+        ),
+        (
+            "escaped_slash_over_16k",
+            f'{{"body": "{pad_17k}", "db\\/password": "v_escslash"}}'
+            " ERROR: CARD_EXPIRED",
+            ("v_escslash",),
+        ),
+        (
+            "long_300_key_over_16k",
+            f'{{"body": "{pad_17k}", "{long_300_key}": "v_long300"}}'
+            " ERROR: CARD_EXPIRED",
+            ("v_long300",),
+        ),
+        (
+            "dollar_and_digit_keys_over_16k",
+            f'{{"body": "{pad_17k}", "$secret": "v_dollar",'
+            ' "0_password": "v_zero"} ERROR: CARD_EXPIRED',
+            ("v_dollar", "v_zero"),
+        ),
+        (
+            "string_array_tab",
+            '["password:\\t v_arrtab"] ERROR: CARD_EXPIRED',
+            ("v_arrtab",),
+        ),
+        (
+            "string_array_tab_over_16k",
+            f'["{pad_17k}", "password:\\t v_arrtab_big"] ERROR: CARD_EXPIRED',
+            ("v_arrtab_big",),
+        ),
+        (
+            "string_array_literal_tab_over_16k",
+            f'["{pad_17k}", "password:\t v_arr_littab"] ERROR: CARD_EXPIRED',
+            ("v_arr_littab",),
+        ),
+        (
+            "double_encoded_trailing_backslash",
+            r"\"password\": \"v_bs5\\\\\" ERROR: CARD_EXPIRED",
+            ("v_bs5",),
+        ),
+    )
+    for label, sample, secrets in tail_cases:
+      with self.subTest(tail_case=label):
+        out = scrub_sensitive_text(sample)
+        for sec in secrets:
+          self.assertNotIn(sec, out)
+        self.assertIn("[REDACTED]", out)
+        self.assertIn("CARD_EXPIRED", out)
+
+    # 2. Tight small-count allowlist (0..999) and authentication_result status.
+    for text_case, sec in (
+        ("password_count=234567", "234567"),
+        ("password_count=12", "12"),
+        ("credential_count=123456", "123456"),
+        ("cookies=456789", "456789"),
+        ("cookies=1000", "1000"),
+        ("cookies=003", "003"),
+        ("authentication_result=opaque_tok_9f8a7b6c", "opaque_tok_9f8a7b6c"),
+    ):
+      with self.subTest(redacted_text=text_case):
+        out = scrub_sensitive_text(text_case)
+        self.assertNotIn(sec, out)
+        self.assertIn("[REDACTED]", out)
+
+    for key_name, bad_val in (
+        ("password_count", 234567),
+        ("password_count", 12),
+        ("credential_count", 123456),
+        ("cookies", 456789),
+        ("cookies", 123456789012345),
+        ("cookies", 1000),
+        ("cookies", -1),
+        ("cookies", 3.5),
+        ("cookies", "003"),
+        ("authentication_result", "opaque_tok_9f8a7b6c"),
+        ("authentication_result", {"value": "x"}),
+    ):
+      with self.subTest(redacted_dict=(key_name, bad_val)):
+        self.assertEqual(
+            scrub_sensitive_data({key_name: bad_val}),
+            {key_name: "[REDACTED]"},
+        )
+
+    for key_name, ok_val in (
+        ("cookies", 0),
+        ("cookies", 3),
+        ("cookies", 999),
+        ("credential_count", 3),
+        ("authentication_result", "FAILED"),
+    ):
+      self.assertEqual(
+          scrub_sensitive_data({key_name: ok_val}), {key_name: ok_val}
+      )
+    self.assertEqual(scrub_sensitive_text("cookies=3"), "cookies=3")
+    self.assertEqual(
+        scrub_sensitive_text("credential_count=3"), "credential_count=3"
+    )
+    self.assertEqual(
+        scrub_sensitive_text("authentication_result=failed"),
+        "authentication_result=failed",
+    )
+
+    # 3. Next-line dotted and quoted KV headers.
+    self.assertEqual(
+        scrub_sensitive_text("authentication:\n  request.password: v_dot_nl"),
+        "authentication:\n  request.password: [REDACTED]",
+    )
+    self.assertEqual(
+        scrub_sensitive_text('password:\n"token": v_q_nl'),
+        'password:\n"token": [REDACTED]',
+    )
+    self.assertEqual(
+        scrub_sensitive_text('password:\n"my quoted secret"'),
+        'password:\n"[REDACTED]"',
+    )
+
+    # 4. S3 flattener preserves safe scalars while redacting sensitive values.
+    flat_ok = _flatten_structured_value(
+        {
+            "cookies": 3,
+            "credential_count": 3,
+            "authentication": "failed",
+            "authentication_result": "FAILED",
+        }
+    )
+    self.assertIn("cookies=3", flat_ok)
+    self.assertIn("credential_count=3", flat_ok)
+    self.assertIn("authentication=failed", flat_ok)
+    self.assertIn("authentication_result=FAILED", flat_ok)
+
+    s3_out = extract_s3_outcome_first(
+        {
+            "turns": [
+                {
+                    "events": [
+                        {
+                            "author": "customer_ops_agent",
+                            "content": {
+                                "role": "model",
+                                "parts": [
+                                    {
+                                        "function_response": {
+                                            "name": "auth_check",
+                                            "response": {
+                                                "cookies": 3,
+                                                "credential_count": 3,
+                                                "authentication": "failed",
+                                                "authentication_result": (
+                                                    "FAILED"
+                                                ),
+                                            },
+                                        }
+                                    },
+                                    {
+                                        "function_response": {
+                                            "name": "auth_leak_check",
+                                            "response": {
+                                                "cookies": {
+                                                    "sessionid": "s3_ck_sec"
+                                                },
+                                                "authentication_result": (
+                                                    "s3_opaque_tok"
+                                                ),
+                                            },
+                                        }
+                                    },
+                                ],
+                            },
+                        }
+                    ]
+                }
+            ]
+        }
+    )
+    self.assertIn("cookies=3", s3_out)
+    self.assertIn("credential_count=3", s3_out)
+    self.assertIn("authentication=failed", s3_out)
+    self.assertIn("authentication_result=FAILED", s3_out)
+    self.assertNotIn("s3_ck_sec", s3_out)
+    self.assertNotIn("s3_opaque_tok", s3_out)
+
+    # 5. Bytes count & auth-status scalars decode to str for JSON serialization.
+    scrubbed_bytes = scrub_sensitive_data(
+        {
+            "cookies": b"3",
+            "credential_count": b"5",
+            "authentication": b"failed",
+            "authentication_result": b"FAILED",
+        }
+    )
+    serialized = json.dumps(scrubbed_bytes)
+    self.assertEqual(
+        json.loads(serialized),
+        {
+            "cookies": "3",
+            "credential_count": "5",
+            "authentication": "failed",
+            "authentication_result": "FAILED",
+        },
+    )
+
+    # 6. Free-text Cookie / Set-Cookie header masking.
+    self.assertEqual(
+        scrub_sensitive_text("Cookie: a=1; b=2"), "Cookie: [REDACTED]"
+    )
+    self.assertEqual(
+        scrub_sensitive_text("Cookie: a=1; b=2 CARD_EXPIRED"),
+        "Cookie: [REDACTED] CARD_EXPIRED",
+    )
+    self.assertEqual(
+        scrub_sensitive_text("Set-Cookie: sid=abc; Path=/; HttpOnly"),
+        "Set-Cookie: [REDACTED]",
+    )
+    self.assertEqual(scrub_sensitive_text("cookies: 3"), "cookies: 3")
+
+  def test_token_aware_kv_scanner_perf_int_guard_and_cookie_headers(
+      self,
+  ) -> None:
+    import time  # noqa: PLC0415
+
+    from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+
+    # 1. Attribute access after brackets/parens or leading dot redacts cleanly.
+    for sample, secret_val in (
+        ("obj[0].password=supersecret", "supersecret"),
+        ("get_auth().token=my_secret", "my_secret"),
+        (".password=supersecret", "supersecret"),
+    ):
+      with self.subTest(dot_access=sample):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    # 2. Quoted tokens with embedded KV or natural-language connectors.
+    for sample, secret_val in (
+        ('Field "password=my_secret_123" is invalid', "my_secret_123"),
+        ('Check "password=my_secret_123": failed', "my_secret_123"),
+        ("Error 'token=my_secret_123' is expired", "my_secret_123"),
+        ('password:\n"secret_val" is bad', "secret_val"),
+        (
+            '"{\\"msg\\": \\"hello\\", \\"password\\": \\"my_real_pw_123\\"}": 1',
+            "my_real_pw_123",
+        ),
+    ):
+      with self.subTest(quoted_kv=sample):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    # 3. Oversized digit strings on numeric-count keys never raise ValueError.
+    digits_5000 = "1" * 5000
+    self.assertEqual(
+        scrub_sensitive_data({"cookies": digits_5000}),
+        {"cookies": "[REDACTED]"},
+    )
+    out_digits = scrub_sensitive_text("cookies=" + digits_5000)
+    self.assertNotIn(digits_5000, out_digits)
+    self.assertEqual(out_digits, "cookies=[REDACTED]")
+
+    # 4. Pathological quote/escape sequences run strictly in O(N) (< 1.0s).
+    perf_cases = (
+        ("edq_50k", r"\"" * 50_000, None),
+        ("esq_50k", r"\'" * 50_000, None),
+        ("unclosed_dq_5k_edq", '"hello ' + (r"\"a\" " * 5_000), None),
+        ("edq_5k_with_tail", ('\\"a\\" ' * 5_000) + " password=END_S", "END_S"),
+        ("edq_bs2_5k", '\\"a\\\\ ' * 5_000, None),
+        ("edq_bs3_5k", r"\"" + (r"a\\\"" * 5_000), None),
+    )
+    for label, payload, secret_val in perf_cases:
+      with self.subTest(perf_case=label):
+        t0 = time.monotonic()
+        out = scrub_sensitive_text(payload)
+        elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 1.0)
+        if secret_val is not None:
+          self.assertNotIn(secret_val, out)
+          self.assertIn("[REDACTED]", out)
+
+    # 5. Post-budget cross-field quotes, apostrophes, escaped inner quotes,
+    #    and blank-line JSON values.
+    pad_17k = "a" * 17_000
+    post_budget_cases = (
+        (
+            "missing_pw_over_16k",
+            f'{{"body": "{pad_17k}", "note": "Missing password:",'
+            ' "api_key": "REAL_SECRET_LEAK"}',
+            "REAL_SECRET_LEAK",
+        ),
+        (
+            "missing_pw_after_33_objs",
+            ('{"k":1} ' * 33)
+            + '{"note": "Missing password:", "api_key": "REAL_SECRET_LEAK"}',
+            "REAL_SECRET_LEAK",
+        ),
+        (
+            "apostrophe_over_16k",
+            f'{{"body": "{pad_17k}", "msg": "don\'t", "token": "abc\':def"}}',
+            "abc':def",
+        ),
+        (
+            "escaped_inner_quote_key",
+            r"\"auth\\\"_result\": {\"v\": \"my_secret\"}",
+            "my_secret",
+        ),
+        (
+            "nl2_quoted_tail_over_16k",
+            f'{{"body": "{pad_17k}", "password":\n\n"nl2_tail_secret"}}',
+            "nl2_tail_secret",
+        ),
+    )
+    for label, sample, secret_val in post_budget_cases:
+      with self.subTest(post_budget=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    # 6. Quoted and comma-containing Cookie headers.
+    for sample, secrets in (
+        ('Cookie: a="foo"; session=secret_val', ("foo", "secret_val")),
+        ('Cookie: a="secret_1"; b=secret_2', ("secret_1", "secret_2")),
+        ("Cookie: prefs=1,2; session=secret_val", ("1,2", "secret_val")),
+        ('{"msg": "Cookie: a=1; b=2"}', ("a=1", "b=2")),
+    ):
+      with self.subTest(cookie_hdr=sample):
+        out = scrub_sensitive_text(sample)
+        for sec in secrets:
+          self.assertNotIn(sec, out)
+        self.assertIn("Cookie: [REDACTED]", out)
+    self.assertEqual(
+        scrub_sensitive_text("Cookie: a=1; b=2 CARD_EXPIRED"),
+        "Cookie: [REDACTED] CARD_EXPIRED",
+    )
+    self.assertEqual(scrub_sensitive_text("cookies: 3"), "cookies: 3")
+
+  def test_dotted_path_perf_json_escapes_quoted_inner_kv_cookies_and_multiline(
+      self,
+  ) -> None:
+    import time  # noqa: PLC0415
+
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+
+    pad_17k = "a" * 17_000
+
+    # 1. Dotted-path O(N) perf (< 1.0s) with trailing secret redaction.
+    t0 = time.monotonic()
+    dotted_out = scrub_sensitive_text(("a." * 25_000) + " password=END_S")
+    self.assertLess(time.monotonic() - t0, 1.0)
+    self.assertNotIn("END_S", dotted_out)
+    self.assertTrue(dotted_out.endswith(" password=[REDACTED]"))
+
+    # 2. Post-budget JSON \t/\n escapes before anchor-bounded bare keys.
+    for label, sample, secret_val in (
+        (
+            "json_tab_token",
+            f'["{pad_17k}", "\\ttoken: secret_val_t"]',
+            "secret_val_t",
+        ),
+        (
+            "json_nl_token",
+            f'["{pad_17k}", "Error:\\ntoken: secret_val_n"]',
+            "secret_val_n",
+        ),
+        (
+            "json_nl_auth",
+            f'["{pad_17k}", "Error:\\nauth: secret_val_a"]',
+            "secret_val_a",
+        ),
+        (
+            "even_bs_token",
+            r"foo\\token: secret_val_bs",
+            "secret_val_bs",
+        ),
+    ):
+      with self.subTest(json_escape_key=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+    # Even-backslash literal "\\ntoken" is not a \n escape before "token".
+    self.assertEqual(
+        scrub_sensitive_text(r"foo\\ntoken: benign_val"),
+        r"foo\\ntoken: benign_val",
+    )
+
+    # 3. Quoted keys with inner KV and sensitive outer values.
+    for label, sample, secret_val in (
+        (
+            "colon_space_key",
+            f'{{"body":"{pad_17k}","request: password":"SECRET_1"}}',
+            "SECRET_1",
+        ),
+        (
+            "eq_key",
+            f'{{"body":"{pad_17k}","user=password":"SECRET_2"}}',
+            "SECRET_2",
+        ),
+        (
+            "inner_kv_and_outer_val",
+            f'{{"body":"{pad_17k}","password=1":"SECRET_3"}}',
+            "SECRET_3",
+        ),
+        (
+            "escaped_quote_colon_key",
+            f'{{"body":"{pad_17k}","req\\"uest:password":"SECRET_4"}}',
+            "SECRET_4",
+        ),
+        (
+            "nextline_quoted_colon_key",
+            'password:\n"request: token": SECRET_4B',
+            "SECRET_4B",
+        ),
+    ):
+      with self.subTest(quoted_outer=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    for label, sample in (
+        ("colon_nospace_plain", 'Check "password:my_secret_123": failed'),
+        ("colon_nospace_esc", r"Check \"password:my_secret_123\": failed"),
+        ("eq_plain", 'Check "password=my_secret_123": failed'),
+    ):
+      with self.subTest(quoted_inner_only=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn("my_secret_123", out)
+        self.assertIn("[REDACTED]", out)
+        self.assertIn(": failed", out)
+
+    # 4. Hardened Cookie headers (empty value/name, single & escaped quotes).
+    for label, sample, secrets in (
+        ("empty_val", "Cookie: a=; b=SECRET_5", ("SECRET_5",)),
+        (
+            "empty_name",
+            "Cookie: =SECRET_6; b=SECRET_7",
+            ("SECRET_6", "SECRET_7"),
+        ),
+        (
+            "single_quoted",
+            "Cookie: a='foo'; session=sq_ck_sec",
+            ("foo", "sq_ck_sec"),
+        ),
+        (
+            "json_escaped_dq",
+            json.dumps(
+                {"body": pad_17k, "msg": 'Cookie: a="secret_1"; b=secret_2'}
+            ),
+            ("secret_1", "secret_2"),
+        ),
+        (
+            "json_triple_escaped_dq",
+            json.dumps(
+                {"body": pad_17k, "msg": r"Cookie: a=\"foo\"; b=SECRET_8"}
+            ),
+            ("foo", "SECRET_8"),
+        ),
+    ):
+      with self.subTest(cookie_hardened=label):
+        out = scrub_sensitive_text(sample)
+        for sec in secrets:
+          self.assertNotIn(sec, out)
+        self.assertIn("Cookie: [REDACTED]", out)
+
+    # Pathological unclosed escaped-quote backslash run in Cookie stays O(N).
+    t1 = time.monotonic()
+    scrub_sensitive_text('Cookie: a=\\"' + ("\\" * 20_000))
+    self.assertLess(time.monotonic() - t1, 1.0)
+
+    # 5. RFC 8259 multiline / escaped-newline JSON connector before ":".
+    for label, sample, secret_val in (
+        (
+            "literal_nl_conn",
+            f'{{"body":"{pad_17k}","password"\n: "SECRET_9"}}',
+            "SECRET_9",
+        ),
+        (
+            "escaped_nl_conn",
+            f'{{"body":"{pad_17k}","password"\\n: "SECRET_10"}}',
+            "SECRET_10",
+        ),
+    ):
+      with self.subTest(multiline_conn=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+  def test_dotted_keys_even_backslash_cookie_scanner_and_post_budget_json(
+      self,
+  ) -> None:
+    import time  # noqa: PLC0415
+
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+
+    pad_17k = "a" * 17_000
+
+    # 1. Dotted .token/.auth and digit-prefixed dotted keys (+ benign forms).
+    for label, sample, secret_val in (
+        ("user_token", "user.token=SECRET_UT", "SECRET_UT"),
+        ("self_token", "self.token=SECRET", "SECRET"),
+        ("client_auth", "client.auth=SECRET_CA", "SECRET_CA"),
+        (
+            "multiline_user_token",
+            "password:\n  user.token: SECRET_NL_UT",
+            "SECRET_NL_UT",
+        ),
+        ("digit_password", "1.password=SECRET_1PW", "SECRET_1PW"),
+        ("zero_api_key", "0.api_key=SECRET", "SECRET"),
+        ("ip_token", "127.0.0.1.token=SECRET_IP", "SECRET_IP"),
+    ):
+      with self.subTest(dotted_secret=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    for benign in (
+        "usage.prompt.token=412",
+        "prompt.token=412",
+        "resp.auth_status=failed",
+    ):
+      with self.subTest(dotted_benign=benign):
+        self.assertEqual(scrub_sensitive_text(benign), benign)
+
+    # 2. O(N) perf (< 1.0s) for digit-dotted runs and malformed Cookie escapes.
+    for label, payload, secret_val in (
+        ("digit_dotted_25k", ("1." * 25_000) + " password=END_S", "END_S"),
+        (
+            "cookie_edq_10k",
+            'Cookie: a=\\"' + (r"\"" * 10_000) + "; b=END_CK",
+            "END_CK",
+        ),
+        ("cookie_bs_20k", 'Cookie: a=\\"' + ("\\" * 20_000), None),
+    ):
+      with self.subTest(perf=label):
+        t0 = time.monotonic()
+        out = scrub_sensitive_text(payload)
+        self.assertLess(time.monotonic() - t0, 1.0)
+        if secret_val is not None:
+          self.assertNotIn(secret_val, out)
+          self.assertIn("[REDACTED]", out)
+
+    # 3. Even-backslash \\" before quoted keys and unclosed JSON string values.
+    bs2_out = scrub_sensitive_text(r'log: \"x\\" \"password\": \"SECRET_BS2\"')
+    self.assertNotIn("SECRET_BS2", bs2_out)
+    self.assertIn("[REDACTED]", bs2_out)
+
+    for label, sample in (
+        (
+            "short_json",
+            '{"msg": "password: \\"unclosed\\\\", "error_code": "CARD_EXPIRED"}',
+        ),
+        (
+            "post_budget_json",
+            f'{{"body": "{pad_17k}", "msg": "password: \\"unclosed\\\\",'
+            ' "error_code": "CARD_EXPIRED"}',
+        ),
+        (
+            "multiline_post_budget_json",
+            f'{{"body": "{pad_17k}", "msg": "err\npassword: \\"unclosed\\\\",'
+            ' "error_code": "CARD_EXPIRED"}',
+        ),
+    ):
+      with self.subTest(even_bs_unclosed=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn("unclosed", out)
+        self.assertIn("[REDACTED]", out)
+        self.assertIn("CARD_EXPIRED", out)
+
+    # 4. Malformed and inner-escaped Cookie headers.
+    for label, sample, secrets in (
+        (
+            "unclosed_single",
+            'Cookie: session="unclosed_secret_1',
+            ("unclosed_secret_1",),
+        ),
+        (
+            "unclosed_second",
+            'Cookie: a=1; b="unclosed_secret_2',
+            ("unclosed_secret_2",),
+        ),
+        (
+            "json_inner_escaped_dq",
+            json.dumps(
+                {"body": pad_17k, "msg": r'Cookie: a="x\"y"; b=SECRET_EQ'}
+            ),
+            ("SECRET_EQ", r"x\\\"y"),
+        ),
+    ):
+      with self.subTest(cookie_edge=label):
+        out = scrub_sensitive_text(sample)
+        for sec in secrets:
+          self.assertNotIn(sec, out)
+        self.assertIn("Cookie: [REDACTED]", out)
+
+    # 5. Post-budget JSON is/are escapes and JSON object-key numeric scalar.
+    for label, sample, secret_val in (
+        (
+            "json_is_nl",
+            f'["{pad_17k}", "password is\\nsecret"]',
+            "secret",
+        ),
+        (
+            "json_tab_is_colon",
+            f'["{pad_17k}", "password\\tis: secret"]',
+            "secret",
+        ),
+        (
+            "json_obj_key_numeric",
+            f'{{"body": "{pad_17k}", "password=1": 234567}}',
+            "234567",
+        ),
+    ):
+      with self.subTest(post_budget_r9=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    for sample, secret_val, suffix in (
+        ('Check "password=my_secret_123": failed', "my_secret_123", ": failed"),
+        ('Check "auth=123": failed', "123", ": failed"),
+        ('Error "user: token=abc": timed_out', "abc", ": timed_out"),
+    ):
+      with self.subTest(preserve_suffix=sample):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+        self.assertTrue(out.endswith(suffix))
+
+  def test_json_escape_boundaries_cookie_routing_dotted_keys_and_stray_quotes(
+      self,
+  ) -> None:
+    import time  # noqa: PLC0415
+
+    from analytics.trajectory_extractor import is_sensitive_key  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+
+    pad_17k = "a" * 17_000
+
+    # 1. Bare KV values and Cookie headers stop before JSON-escaped \t/\r/\n.
+    for label, sample, secrets, must_keep in (
+        (
+            "bare_nl_next_kv",
+            json.dumps(
+                {"body": pad_17k, "msg": "password: SECRET_1\ntoken: SECRET_2"}
+            ),
+            ("SECRET_1", "SECRET_2"),
+            (),
+        ),
+        (
+            "bare_tab_next_kv",
+            json.dumps(
+                {
+                    "body": pad_17k,
+                    "msg": "password: SECRET_T1\ttoken: SECRET_T2",
+                }
+            ),
+            ("SECRET_T1", "SECRET_T2"),
+            (),
+        ),
+        (
+            "cookie_nl_next_kv",
+            json.dumps(
+                {
+                    "body": pad_17k,
+                    "msg": "Cookie: a=1; b=2\ntoken: SECRET_CK",
+                }
+            ),
+            ("a=1", "b=2", "SECRET_CK"),
+            (),
+        ),
+        (
+            "bare_nl_preserve_error",
+            json.dumps(
+                {"body": pad_17k, "msg": "password: SECRET_1\nCARD_EXPIRED"}
+            ),
+            ("SECRET_1",),
+            ("CARD_EXPIRED",),
+        ),
+    ):
+      with self.subTest(json_esc_stop=label):
+        out = scrub_sensitive_text(sample)
+        for sec in secrets:
+          self.assertNotIn(sec, out)
+        for keep in must_keep:
+          self.assertIn(keep, out)
+        self.assertIn("[REDACTED]", out)
+
+    # 2. Cookie header routing, semicolons, escaped quotes, Expires, and commas.
+    self.assertEqual(
+        scrub_sensitive_text('{"cookies": 3, "status": "ok"}'),
+        '{"cookies": 3, "status": "ok"}',
+    )
+    post_budget_cookies = json.dumps(
+        {"body": pad_17k, "cookies": 3, "status": "ok"}
+    )
+    self.assertIn(
+        '"cookies": 3, "status": "ok"',
+        scrub_sensitive_text(post_budget_cookies),
+    )
+    self.assertEqual(
+        scrub_sensitive_text("cookies: 3,token: SECRET_VAL"),
+        "cookies: 3,token: [REDACTED]",
+    )
+    self.assertEqual(scrub_sensitive_text("Cookie: ;;;"), "Cookie: ;;;")
+
+    for label, sample, secrets, must_keep in (
+        (
+            "cookie_comma_kv",
+            "Cookie: sid=abc,token: SECRET_VAL",
+            ("sid=abc", "SECRET_VAL"),
+            (),
+        ),
+        (
+            "cookie_leading_semi",
+            "Cookie: ; b=SECRET_LSEMI",
+            ("SECRET_LSEMI",),
+            (),
+        ),
+        (
+            "cookie_double_semi",
+            "Cookie: a=1;; b=SECRET_DSEMI",
+            ("SECRET_DSEMI",),
+            (),
+        ),
+        (
+            "cookie_escaped_sq_raw",
+            r"Cookie: a=\'foo\'; b=SECRET_SQ\nstatus=200",
+            ("foo", "SECRET_SQ"),
+            ("status=200",),
+        ),
+        (
+            "cookie_escaped_sq_nl",
+            "Cookie: a=\\'foo\\'; b=SECRET_SQ\nstatus=200",
+            ("foo", "SECRET_SQ"),
+            ("status=200",),
+        ),
+        (
+            "cookie_json_esc_sq_17k",
+            json.dumps(
+                {
+                    "body": pad_17k,
+                    "msg": r"Cookie: a=\'foo\'; b=SECRET_JSQ",
+                    "error_code": "CARD_EXPIRED",
+                }
+            ),
+            ("SECRET_JSQ",),
+            ("CARD_EXPIRED",),
+        ),
+        (
+            "cookie_json_esc_sq_unclosed_17k",
+            json.dumps(
+                {
+                    "body": pad_17k,
+                    "msg": r"Cookie: a=\'unclosed_sq",
+                    "error_code": "CARD_EXPIRED",
+                }
+            ),
+            ("unclosed_sq",),
+            ("CARD_EXPIRED",),
+        ),
+        (
+            "cookie_py_dict_trailing_even_bs",
+            r"{'msg': 'Cookie: a=\\', 'error_code': 'CARD_EXPIRED'}",
+            ("a=\\\\",),
+            ("'error_code': 'CARD_EXPIRED'",),
+        ),
+        (
+            "cookie_py_dict_trailing_single_bs",
+            "{'msg': 'Cookie: a=\\', 'error_code': 'CARD_EXPIRED'}",
+            (),
+            ("'error_code': 'CARD_EXPIRED'",),
+        ),
+        (
+            "cookie_url_colon",
+            "Cookie: next=https://a.com/x; sid=SECRET_URL",
+            ("https://a.com/x", "SECRET_URL"),
+            (),
+        ),
+        (
+            "set_cookie_expires_then_sid",
+            (
+                "Set-Cookie: a=1; Expires=Wed, 21 Oct 2015 07:28:00 GMT;"
+                " sid=SECRET_AFTER_EXP"
+            ),
+            ("a=1", "SECRET_AFTER_EXP"),
+            (),
+        ),
+        (
+            "set_cookie_expires_preserve_err",
+            (
+                "Set-Cookie: a=1; Expires=Wed, 21 Oct 2015 07:28:00 GMT"
+                " CARD_EXPIRED"
+            ),
+            ("a=1",),
+            ("CARD_EXPIRED",),
+        ),
+        (
+            "cookie_comma_value",
+            "Cookie: prefs=1,2; session=secret_val",
+            ("1,2", "secret_val"),
+            (),
+        ),
+    ):
+      with self.subTest(cookie_fix=label):
+        out = scrub_sensitive_text(sample)
+        for sec in secrets:
+          self.assertNotIn(sec, out)
+        for keep in must_keep:
+          self.assertIn(keep, out)
+        self.assertIn("[REDACTED]", out)
+
+    t0 = time.monotonic()
+    semi_out = scrub_sensitive_text("Cookie: " + (";" * 50_000) + " b=END_CK4")
+    self.assertLess(time.monotonic() - t0, 1.0)
+    self.assertNotIn("END_CK4", semi_out)
+    self.assertIn("[REDACTED]", semi_out)
+
+    t1 = time.monotonic()
+    comma_out = scrub_sensitive_text("Cookie: a=1" + (",x" * 20_000))
+    self.assertLess(time.monotonic() - t1, 1.0)
+    self.assertEqual(comma_out, "Cookie: [REDACTED]")
+
+    # 3. Shared dotted-segment matching in is_sensitive_key (dict & text).
+    self.assertTrue(is_sensitive_key("user.token"))
+    self.assertTrue(is_sensitive_key("127.0.0.1.token"))
+    self.assertFalse(is_sensitive_key("usage.prompt.token"))
+    self.assertFalse(is_sensitive_key("prompt.token"))
+    self.assertFalse(is_sensitive_key("resp.auth_status"))
+
+    self.assertEqual(
+        scrub_sensitive_data({"user.token": "SECRET"}),
+        {"user.token": "[REDACTED]"},
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"127.0.0.1.token": "SECRET"}),
+        {"127.0.0.1.token": "[REDACTED]"},
+    )
+    self.assertEqual(
+        scrub_sensitive_data(
+            {
+                "usage.prompt.token": 412,
+                "prompt.token": 18,
+                "resp.auth_status": "failed",
+                "token_count": 1500,
+                "token_type": "bearer",
+            }
+        ),
+        {
+            "usage.prompt.token": 412,
+            "prompt.token": 18,
+            "resp.auth_status": "failed",
+            "token_count": 1500,
+            "token_type": "bearer",
+        },
+    )
+    for label, sample in (
+        ("json_user_token", '{"user.token": "SECRET"}'),
+        ("quoted_user_token", '"user.token": "SECRET"'),
+        (
+            "post_budget_user_token",
+            json.dumps({"body": pad_17k, "user.token": "SECRET"}),
+        ),
+    ):
+      with self.subTest(dotted_text=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn("SECRET", out)
+        self.assertIn("[REDACTED]", out)
+
+    # 4. Unmatched same-line quotes & \" do not hijack following quoted KV keys.
+    for label, sample, secret_val in (
+        (
+            "stray_plain_dq",
+            'log: "oops "password": "SECRET_STRAY_Q"',
+            "SECRET_STRAY_Q",
+        ),
+        (
+            "stray_json_3bs",
+            json.dumps(
+                {"body": pad_17k, "msg": 'x\\" "password": "SECRET_3BS"'}
+            ),
+            "SECRET_3BS",
+        ),
+        (
+            "stray_json_4bs",
+            json.dumps(
+                {"body": pad_17k, "msg": 'x\\\\" "password": "SECRET_4BS"'}
+            ),
+            "SECRET_4BS",
+        ),
+        (
+            "stray_raw_2bs",
+            'x\\\\" "password": "SECRET_4BS_RAW"',
+            "SECRET_4BS_RAW",
+        ),
+    ):
+      with self.subTest(stray_quote=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    # 5. Indented post-budget JSON & start-of-line / next-line quoted KV keys.
+    for label, sample, secret_val in (
+        (
+            "indented_post_budget_json",
+            json.dumps(
+                {
+                    "body": pad_17k,
+                    "msg": json.dumps({"password=1": 234567}, indent=2),
+                }
+            ),
+            "234567",
+        ),
+        (
+            "yaml_newline_quoted_key",
+            'a: 1\n"password=1": SECRET_YAML_BARE',
+            "SECRET_YAML_BARE",
+        ),
+        (
+            "start_of_text_quoted_key",
+            '"password=1": SECRET_TOP_BARE',
+            "SECRET_TOP_BARE",
+        ),
+        (
+            "nextline_quoted_password_eq",
+            'password:\n"password=1": SECRET_OUTER',
+            "SECRET_OUTER",
+        ),
+        (
+            "nextline_quoted_token_eq",
+            'password:\n"token=1": SECRET_NL_TK',
+            "SECRET_NL_TK",
+        ),
+    ):
+      with self.subTest(quoted_boundary=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    for sample, secret_val, suffix in (
+        ('Check "password=my_secret_123": failed', "my_secret_123", ": failed"),
+        ('Check "auth=123": failed', "123", ": failed"),
+        ('Error "user: token=abc": timed_out', "abc", ": timed_out"),
+    ):
+      with self.subTest(control_suffix=sample):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+        self.assertTrue(out.endswith(suffix))
+
+  def test_quote_hijack_guards_quoted_is_are_3bs_cookies_and_hot_path_perf(
+      self,
+  ) -> None:
+    import time  # noqa: PLC0415
+
+    from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+
+    pad_17k = "a" * 17_000
+
+    # 1. Empty/stray-quote hijack guards.
+    for label, sample, secret_val in (
+        (
+            "json_pw_stray_dq",
+            json.dumps(
+                {"body": pad_17k, "msg": 'password=", "token": "SECRET_LEAK"'}
+            ),
+            "SECRET_LEAK",
+        ),
+        (
+            "json_cookie_stray_dq",
+            json.dumps(
+                {"body": pad_17k, "msg": 'Cookie: a=", "token": "SECRET_LEAK"'}
+            ),
+            "SECRET_LEAK",
+        ),
+        (
+            "multiline_pw_stray_dq",
+            'note: "Error\nMissing password:", "api_key": "REAL_SECRET_LEAK"',
+            "REAL_SECRET_LEAK",
+        ),
+        (
+            "multiline_cookie_stray_dq",
+            'note: "Error\nCookie: a=", "api_key": "REAL_SECRET_LEAK"',
+            "REAL_SECRET_LEAK",
+        ),
+        (
+            "multiline_cookie_py_dict_bs",
+            "{'msg': 'Error\nCookie: a=\\\\' , 'api_key': 'REAL_SECRET_LEAK'}",
+            "REAL_SECRET_LEAK",
+        ),
+    ):
+      with self.subTest(quote_hijack=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    # 2. Quoted is/are connectors + benign control.
+    for label, sample, secret_val in (
+        ("quoted_dq_is", '"password" is supersecret', "supersecret"),
+        (
+            "quoted_sq_is_colon",
+            "'api_key' is: my_api_secret_val",
+            "my_api_secret_val",
+        ),
+        (
+            "quoted_dq_are",
+            '"credentials" are my_secret_creds',
+            "my_secret_creds",
+        ),
+        (
+            "escaped_dq_is",
+            r"\"password\" is \"supersecret\"",
+            "supersecret",
+        ),
+    ):
+      with self.subTest(quoted_is_are=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    benign_ctrl = scrub_sensitive_text(
+        'Field "password=my_secret_123" is invalid'
+    )
+    self.assertNotIn("my_secret_123", benign_ctrl)
+    self.assertIn("[REDACTED]", benign_ctrl)
+    self.assertIn(" is invalid", benign_ctrl)
+
+    # 3. Double/triple-escaped \\" (bs=3) KV tokens.
+    for label, sample, secret_val in (
+        (
+            "json_esc_in_msg",
+            json.dumps(
+                {
+                    "body": pad_17k,
+                    "msg": r"\"password\": \"SECRET_ESC_IN_MSG\"",
+                }
+            ),
+            "SECRET_ESC_IN_MSG",
+        ),
+        (
+            "raw_3bs",
+            r"\\\"password\\\": \\\"SECRET_RAW_3BS\\\"",
+            "SECRET_RAW_3BS",
+        ),
+        (
+            "triple_nested_json",
+            json.dumps(
+                {
+                    "body": pad_17k,
+                    "msg": json.dumps(
+                        {"nested": json.dumps({"password": "SECRET_3X_JSON"})}
+                    ),
+                }
+            ),
+            "SECRET_3X_JSON",
+        ),
+    ):
+      with self.subTest(triple_escaped_kv=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    # 4. Unclosed cookie quotes with spaces + comma-folded Set-Cookie.
+    for label, sample, secret_val, must_keep in (
+        (
+            "unclosed_dq_cookie_space",
+            'Cookie: a="foo bar; b=SECRET_SPACE_UNCLOSED\nstatus=ok',
+            "SECRET_SPACE_UNCLOSED",
+            "status=ok",
+        ),
+        (
+            "unclosed_sq_cookie_space",
+            "Cookie: a='foo bar; b=SECRET_SQ_SPACE_UNCLOSED\nstatus=ok",
+            "SECRET_SQ_SPACE_UNCLOSED",
+            "status=ok",
+        ),
+        (
+            "comma_folded_set_cookie",
+            "Set-Cookie: a=1; Path=/, b=SECRET_FOLDED",
+            "SECRET_FOLDED",
+            "",
+        ),
+    ):
+      with self.subTest(cookie_edge=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+        if must_keep:
+          self.assertIn(must_keep, out)
+
+    # 5. is_sensitive_key non-dot separators, password.prompt.token, and
+    #    next-line multi-word header preservation.
+    self.assertEqual(
+        scrub_sensitive_data({"password.prompt.token": "SECRET_PPT"}),
+        {"password.prompt.token": "[REDACTED]"},
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"user/token": "SECRET_SLASH"}),
+        {"user/token": "[REDACTED]"},
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"user: token": "SECRET_COLON"}),
+        {"user: token": "[REDACTED]"},
+    )
+    for label, sample, secret_val in (
+        ("quoted_colon_sep", '"user: token": "SECRET_QCOLON"', "SECRET_QCOLON"),
+        ("quoted_slash_sep", '"user/token": "SECRET_JSLASH"', "SECRET_JSLASH"),
+    ):
+      with self.subTest(non_dot_sep=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+    self.assertEqual(
+        scrub_sensitive_text("password:\n  api key: SECRET_1"),
+        "password:\n  api key: [REDACTED]",
+    )
+
+    # 6. Hot-path performance.
+    t0 = time.monotonic()
+    perf_out = scrub_sensitive_text(("x code=1 " * 25_000) + "password=tail7")
+    self.assertLess(time.monotonic() - t0, 0.5)
+    self.assertNotIn("tail7", perf_out)
+    self.assertIn("[REDACTED]", perf_out)
+
+  def test_stray_quote_kv_values_depth2_escapes_cookie_kv_boundaries_and_3bs_routing(
+      self,
+  ) -> None:
+    import time  # noqa: PLC0415
+
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+
+    pad_17k = "a" * 17_000
+
+    # 1. Stray quotes before quoted KV values & Cookie values.
+    for label, sample, secret_val in (
+        (
+            "stray_dq_before_pw",
+            'x" password="MY_REAL_SECRET"',
+            "MY_REAL_SECRET",
+        ),
+        (
+            "stray_dq_sentence_pw",
+            'note: "user said "hello" and password="MY_REAL_SECRET"',
+            "MY_REAL_SECRET",
+        ),
+        (
+            "stray_sq_before_token",
+            "err='bad, token='MY_SECRET_TOKEN'",
+            "MY_SECRET_TOKEN",
+        ),
+        (
+            "json_stray_dq_pw",
+            json.dumps({"msg": 'err="bad, password="MY_REAL_SECRET"'}),
+            "MY_REAL_SECRET",
+        ),
+        (
+            "json_17k_stray_dq_pw",
+            json.dumps(
+                {
+                    "body": pad_17k,
+                    "msg": 'err="bad, password="MY_REAL_SECRET"',
+                }
+            ),
+            "MY_REAL_SECRET",
+        ),
+        (
+            "escaped_stray_dq_pw",
+            r"x\" password=\"MY_REAL_SECRET\"",
+            "MY_REAL_SECRET",
+        ),
+        (
+            "stray_dq_cookie_sid",
+            'log: "oops, Cookie: a=1; sid="SECRET_COOKIE"',
+            "SECRET_COOKIE",
+        ),
+    ):
+      with self.subTest(stray_quote_kv=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    benign_json_out = scrub_sensitive_text(
+        '{"note": "Missing password:", "error_code": "CARD_EXPIRED"}'
+    )
+    self.assertIn("CARD_EXPIRED", benign_json_out)
+
+    t0 = time.monotonic()
+    _ = scrub_sensitive_text('"a="' * 20_000)
+    self.assertLess(time.monotonic() - t0, 1.0)
+
+    # 2. Depth-2 escaped-quote period (_escaped_quote_mod_and_period).
+    for label, sample, secret_val in (
+        (
+            "depth2_value_embedded_quote",
+            json.dumps(
+                {
+                    "body": pad_17k,
+                    "msg": json.dumps(
+                        {"nested": json.dumps({"password": 'ab"SECRET_TAIL'})}
+                    ),
+                }
+            ),
+            "SECRET_TAIL",
+        ),
+        (
+            "depth2_key_embedded_quote",
+            json.dumps(
+                {
+                    "body": pad_17k,
+                    "msg": json.dumps(
+                        {"nested": json.dumps({'password"1': "SECRET_VAL"})}
+                    ),
+                }
+            ),
+            "SECRET_VAL",
+        ),
+        (
+            "depth1_5bs_prefix_pw",
+            json.dumps(
+                {"body": pad_17k, "msg": r'foo\\"password": "SECRET_L5"'}
+            ),
+            "SECRET_L5",
+        ),
+    ):
+      with self.subTest(depth2_escape=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    # 3. Cookie semicolon KV connector boundaries & opaque colon token.
+    for label, sample in (
+        ("cookie_semi_token_colon", "Cookie: a=1; token: SECRET_VAL"),
+        ("cookie_semi_pw_colon", "Cookie: a=1; password: SECRET_VAL"),
+        ("cookie_semi_pw_spaced_eq", "Cookie: a=1; password = SECRET_VAL"),
+        ("cookie_semi_pw_is", "Cookie: a=1; password is SECRET_VAL"),
+    ):
+      with self.subTest(cookie_kv_boundary=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn("SECRET_VAL", out)
+        self.assertIn("[REDACTED]", out)
+
+    cookies_count_out = scrub_sensitive_text("cookies: 3; token: SECRET_VAL")
+    self.assertIn("cookies: 3", cookies_count_out)
+    self.assertNotIn("SECRET_VAL", cookies_count_out)
+    self.assertIn("[REDACTED]", cookies_count_out)
+
+    self.assertEqual(
+        scrub_sensitive_text("Cookie: sess:opaque_secret_val"),
+        "Cookie: [REDACTED]",
+    )
+    self.assertEqual(
+        scrub_sensitive_text("Set-Cookie: sid=abc; Path=/; HttpOnly"),
+        "Set-Cookie: [REDACTED]",
+    )
+
+    # 4. Multi-backslash escaped-quote routing in _try_redact_sensitive_kv.
+    for label, sample, secret_val in (
+        (
+            "json_17k_cookie_1bs",
+            json.dumps({"body": pad_17k, "msg": r'Cookie: "secret_val"'}),
+            "secret_val",
+        ),
+        (
+            "json_17k_cookie_3bs",
+            json.dumps({"body": pad_17k, "msg": r"Cookie: \"secret_val\""}),
+            "secret_val",
+        ),
+        ("raw_cookie_1bs", r"Cookie: \"secret_val\"", "secret_val"),
+        ("raw_cookie_3bs", r"Cookie: \\\"secret_val\\\"", "secret_val"),
+        ("pw_nl2_1bs", "password:\n\n" + r"\"nl2_secret\"", "nl2_secret"),
+        ("pw_nl2_3bs", "password:\n\n" + r"\\\"nl2_secret\\\"", "nl2_secret"),
+        (
+            "json_17k_pw_nl2_1bs",
+            json.dumps(
+                {"body": pad_17k, "msg": "password:\n\n" + r'"nl2_secret"'}
+            ),
+            "nl2_secret",
+        ),
+        (
+            "json_17k_pw_nl2_3bs",
+            json.dumps(
+                {"body": pad_17k, "msg": "password:\n\n" + r"\"nl2_secret\""}
+            ),
+            "nl2_secret",
+        ),
+    ):
+      with self.subTest(multi_bs_routing=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    # 5. Stray quote before quoted sensitive key with `is`.
+    for label, sample, secret_val in (
+        (
+            "stray_dq_quoted_pw_is",
+            'log: "oops "password" is supersecret',
+            "supersecret",
+        ),
+        (
+            "json_17k_stray_dq_quoted_token_is",
+            json.dumps(
+                {
+                    "body": pad_17k,
+                    "msg": 'password=", "token" is "SECRET_LEAK_IS"',
+                }
+            ),
+            "SECRET_LEAK_IS",
+        ),
+    ):
+      with self.subTest(stray_quote_key_is=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    self.assertEqual(
+        scrub_sensitive_text('He said "hello" is a greeting'),
+        'He said "hello" is a greeting',
+    )
+
+  def test_quote_kv_false_positive_nested_json_escapes_unicode_and_nl_quoted_is(
+      self,
+  ) -> None:
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+
+    pad_17k = "x" * 17000
+
+    # 1. Balanced quotes before `:en` / `=en` / `: auth failed`.
+    for label, sample, secret_val in (
+        (
+            "cookie_colon_en",
+            'Cookie: a="foo"; prefs=":en"; sid=REAL_SESSION_SECRET',
+            "REAL_SESSION_SECRET",
+        ),
+        (
+            "cookie_eq_en",
+            'Cookie: a="foo"; prefs="=en"; sid=REAL_SESSION_SECRET',
+            "REAL_SESSION_SECRET",
+        ),
+        (
+            "escaped_cookie_colon_en",
+            r"Cookie: a=\"foo\"; prefs=\":en\"; sid=REAL_SESSION_SECRET",
+            "REAL_SESSION_SECRET",
+        ),
+    ):
+      with self.subTest(balanced_quote_before_connector=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    self.assertEqual(
+        scrub_sensitive_text('password="!@#$%^" msg=": auth failed"'),
+        'password="[REDACTED]" msg=": auth failed"',
+    )
+    self.assertEqual(
+        scrub_sensitive_text('password="my_secret_pw" msg=": auth failed"'),
+        'password="[REDACTED]" msg=": auth failed"',
+    )
+
+    # 2. Post-budget nested JSON `\\t`/`\\n` and `\uXXXX` escapes.
+    for label, sample, secrets in (
+        (
+            "nested_json_list_tab",
+            json.dumps(
+                {"body": pad_17k, "msg": json.dumps(["password:\t secret_tab"])}
+            ),
+            ("secret_tab",),
+        ),
+        (
+            "nested_json_dict_nl_two_secrets",
+            json.dumps(
+                {
+                    "body": pad_17k,
+                    "msg": json.dumps({"err": "password: s1\ntoken: s2"}),
+                }
+            ),
+            ("s1", "s2"),
+        ),
+        (
+            "nested_json_dict_nl_second_line_token",
+            json.dumps(
+                {
+                    "body": pad_17k,
+                    "msg": json.dumps({"err": "login failed\ntoken: s2"}),
+                }
+            ),
+            ("s2",),
+        ),
+        (
+            "unicode_escaped_key",
+            f'{{"body": "{pad_17k}", "err": "\\u0070assword: secret_val"}}',
+            ("secret_val",),
+        ),
+        (
+            "unicode_escaped_colon",
+            f'{{"body": "{pad_17k}", "err": "password\\u003a secret_val"}}',
+            ("secret_val",),
+        ),
+    ):
+      with self.subTest(post_budget_nested_or_unicode=label):
+        out = scrub_sensitive_text(sample)
+        for secret_val in secrets:
+          self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    # 3. Next-line quoted `is`/`are` headers.
+    self.assertEqual(
+        scrub_sensitive_text('password:\n"token" is secret_val'),
+        'password:\n"token" is [REDACTED]',
+    )
+    self.assertEqual(
+        scrub_sensitive_text('password:\n"cookies" are secret_val'),
+        'password:\n"cookies" are [REDACTED]',
+    )
+    self.assertEqual(
+        scrub_sensitive_text('password:\n"secret_val" is bad'),
+        'password:\n"[REDACTED]" is bad',
+    )
+
+    # 4. Balanced `msg="password=" password="END_S"`.
+    self.assertEqual(
+        scrub_sensitive_text('msg="password=" password="END_S"'),
+        'msg="password=" password="[REDACTED]"',
+    )
+
+    # 5. Oversized (>16 KiB) JSON string literals still unescape cleanly.
+    for label, sample, secrets in (
+        (
+            "oversized_nested_list_tab",
+            json.dumps(
+                {"msg": json.dumps(["a" * 17_000, "password:\t secret_tab"])}
+            ),
+            ("secret_tab",),
+        ),
+        (
+            "oversized_nested_dict_nl",
+            json.dumps(
+                {
+                    "msg": json.dumps(
+                        {"body": "a" * 17_000, "err": "password: s1\ntoken: s2"}
+                    )
+                }
+            ),
+            ("s1", "s2"),
+        ),
+        (
+            "oversized_nested_cookie_nl",
+            json.dumps(
+                {
+                    "msg": json.dumps(
+                        {
+                            "body": "a" * 17_000,
+                            "err": "Cookie: a=1; b=2\ntoken: SECRET_CK",
+                        }
+                    )
+                }
+            ),
+            ("SECRET_CK",),
+        ),
+        (
+            "oversized_unicode_escaped_key",
+            '{"msg": "' + ("a" * 17_000) + ' \\u0070assword: secret_val"}',
+            ("secret_val",),
+        ),
+        (
+            "oversized_triple_nested_indented",
+            json.dumps(
+                {
+                    "outer": json.dumps(
+                        {
+                            "msg": json.dumps(
+                                {"body": "a" * 17_000, "password=1": 234567},
+                                indent=2,
+                            )
+                        }
+                    )
+                }
+            ),
+            ("234567",),
+        ),
+    ):
+      with self.subTest(oversized_json_string=label):
+        out = scrub_sensitive_text(sample)
+        for secret_val in secrets:
+          self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    # 6. Truncated/multiline Branch B JSON escapes, _inspect_quoted_kv_token,
+    #    and unclosed ASCII unicode escapes.
+    for label, sample, secret_val, must_keep in (
+        (
+            "truncated_nested_dict_tab",
+            json.dumps({"msg": json.dumps({"err": "password:\t SECRET_TTAB"})})[
+                :-3
+            ],
+            "SECRET_TTAB",
+            "",
+        ),
+        (
+            "truncated_nested_list_nl",
+            json.dumps(
+                {"msg": json.dumps(["a" * 100, "password:\n SECRET_ANL"])}
+            )[:-3],
+            "SECRET_ANL",
+            "",
+        ),
+        (
+            "truncated_nested_unicode",
+            json.dumps({"msg": '{"err": "\\u0070assword: SECRET_DTU"}'})[:-3],
+            "SECRET_DTU",
+            "",
+        ),
+        (
+            "branch_b_escaped_tab",
+            r"[\"password:\\t SECRET_VALUE\"]",
+            "SECRET_VALUE",
+            "",
+        ),
+        (
+            "branch_b_escaped_unicode",
+            r"[\"\\u0070assword: SECRET_U\"]",
+            "SECRET_U",
+            "",
+        ),
+        (
+            "multiline_unicode_escape",
+            '{"msg": "line1\n\\u0070assword: SECRET_MLU"}',
+            "SECRET_MLU",
+            "",
+        ),
+        (
+            "unclosed_unicode_escape",
+            '{"msg": "err \\u0070assword: SECRET_TUU',
+            "SECRET_TUU",
+            "",
+        ),
+        (
+            "quoted_is_nested_json_tab",
+            "Payload "
+            + json.dumps(json.dumps({"err": "password:\t SECRET_QTAB"}))
+            + " is invalid",
+            "SECRET_QTAB",
+            " is invalid",
+        ),
+        (
+            "quoted_is_unicode_kv",
+            'Field "\\u0070assword=SECRET_QUIS" is invalid',
+            "SECRET_QUIS",
+            " is invalid",
+        ),
+        (
+            "quoted_colon_nested_json_tab",
+            '"{\\"err\\": \\"password:\\\\t SECRET_VALUE\\"}": ok',
+            "SECRET_VALUE",
+            "",
+        ),
+        (
+            "prose_quoted_colon_nested_json_tab",
+            'Log "{\\"err\\": \\"password:\\\\t SECRET_VALUE\\"}": ok',
+            "SECRET_VALUE",
+            ": ok",
+        ),
+    ):
+      with self.subTest(unified_json_decode=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+        if must_keep:
+          self.assertIn(must_keep, out)
+
+    self.assertEqual(
+        scrub_sensitive_text('{"msg": "benign \\u0041"}'),
+        '{"msg": "benign \\u0041"}',
+    )
+
+    # 7. Opaque Cookie tokens before is/are/:/=, post-budget _SECRET_RULES
+    #    escapes, and truncated/3bs whitespace.
+    for sample, expected in (
+        (
+            "Cookie: sess_9f8a7b6c1234 is expired",
+            "Cookie: [REDACTED] is expired",
+        ),
+        (
+            "Set-Cookie: c9f8a7b6c5d4 is rejected",
+            "Set-Cookie: [REDACTED] is rejected",
+        ),
+        (
+            "Cookie: c9f8a7b6c5d4: rejected",
+            "Cookie: [REDACTED]: rejected",
+        ),
+        (
+            "Cookie: c9f8a7b6c5d4 : rejected",
+            "Cookie: [REDACTED] : rejected",
+        ),
+        (
+            "Cookie: c9f8a7b6c5d4 = rejected",
+            "Cookie: [REDACTED] = rejected",
+        ),
+        (
+            "Cookies: tok1_tok2 are invalid",
+            "Cookies: [REDACTED] are invalid",
+        ),
+    ):
+      with self.subTest(opaque_cookie_connector=sample):
+        self.assertEqual(scrub_sensitive_text(sample), expected)
+
+    cookie_nested_key_out = scrub_sensitive_text("Cookie: token: SECRET_VAL")
+    self.assertNotIn("SECRET_VAL", cookie_nested_key_out)
+    self.assertIn("Cookie: token:", cookie_nested_key_out)
+    self.assertIn("[REDACTED]", cookie_nested_key_out)
+
+    for label, sample, secret_val in (
+        (
+            "post_budget_bearer_tab",
+            json.dumps({"body": pad_17k, "msg": "Bearer\tmy_secret_token_99"}),
+            "my_secret_token_99",
+        ),
+        (
+            "post_budget_bearer_nl",
+            json.dumps({"body": pad_17k, "msg": "Bearer\nmy_secret_token_nl"}),
+            "my_secret_token_nl",
+        ),
+        (
+            "post_budget_auth_bearer_sk",
+            json.dumps(
+                {
+                    "body": pad_17k,
+                    "msg": "Authorization\nBearer sk_live_1234567890abcdef",
+                }
+            ),
+            "sk_live_1234567890abcdef",
+        ),
+        (
+            "post_budget_basic_tab",
+            json.dumps({"body": pad_17k, "msg": "Basic\tdXNlcjpwYXNz"}),
+            "dXNlcjpwYXNz",
+        ),
+        (
+            "post_budget_aiza_tab",
+            json.dumps(
+                {
+                    "body": pad_17k,
+                    "msg": "x\tAIzaSyDUMMYKEY12345678901234567890",
+                }
+            ),
+            "AIzaSyDUMMYKEY12345678901234567890",
+        ),
+    ):
+      with self.subTest(post_budget_secret_rule=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    for label, sample, secret_val, must_keep in (
+        (
+            "truncated_5_nested_tab",
+            json.dumps(
+                {"msg": json.dumps({"err": "password:\t SECRET_TTAB_5"})}
+            )[:-5],
+            "SECRET_TTAB_5",
+            "",
+        ),
+        (
+            "truncated_5_nested_nl",
+            json.dumps(
+                {"msg": json.dumps({"err": "password:\n SECRET_TNL_5"})}
+            )[:-5],
+            "SECRET_TNL_5",
+            "",
+        ),
+        (
+            "lead_bs_3_double_escaped_tab",
+            r"[\\\"password:\\\\t SECRET_3BS\\\"]",
+            "SECRET_3BS",
+            "",
+        ),
+        (
+            "truncated_5_triple_nested_tab",
+            json.dumps(
+                {
+                    "outer": json.dumps(
+                        {"inner": json.dumps({"err": "password:\t SECRET_T3X"})}
+                    )
+                }
+            )[:-5],
+            "SECRET_T3X",
+            "",
+        ),
+        (
+            "unclosed_escaped_dq_preserves_error_code",
+            '{"body": "'
+            + pad_17k
+            + '", "msg": "err\npassword: \\"unclosed", "error_code": "CARD_EXPIRED"}',
+            "unclosed",
+            '"error_code": "CARD_EXPIRED"',
+        ),
+    ):
+      with self.subTest(truncated_or_3bs_or_unclosed=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+        if must_keep:
+          self.assertIn(must_keep, out)
+
 
 if __name__ == "__main__":
   unittest.main()
