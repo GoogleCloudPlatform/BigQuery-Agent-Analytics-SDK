@@ -29,6 +29,12 @@
   - [Namespace filtering](#namespace-filtering)
   - [FILL_IN placeholders](#fill_in-placeholders)
   - [Drop annotations](#drop-annotations)
+- [Importing from a Dataplex Business Glossary](#importing-from-a-dataplex-business-glossary)
+  - [Dataplex prerequisites](#dataplex-prerequisites)
+  - [Importing a glossary](#importing-a-glossary)
+  - [Glossary mapping](#glossary-mapping)
+  - [Entity names and collisions](#entity-names-and-collisions)
+  - [From glossary to concept index](#from-glossary-to-concept-index)
 - [Scaffolding a New Project](#scaffolding-a-new-project)
 - [End-to-End Walkthrough](#end-to-end-walkthrough)
 
@@ -296,6 +302,15 @@ pip install bigquery-agent-analytics[owl]
 pip install -e '.[owl]'
 ```
 
+If you plan to use `gm import-dataplex-glossary`, install with the Dataplex extra (it adds `google-cloud-dataplex>=2.12.0`):
+
+```bash
+pip install 'bigquery-agent-analytics[dataplex]'
+
+# or, in editable mode:
+pip install -e '.[dataplex]'
+```
+
 ---
 
 ### Validating and Compiling
@@ -531,6 +546,125 @@ relationships:
 If every entity ends up abstract, the drop summary emits a hint: *"all entities are abstract (SKOS-only). No concrete entities are available for binding. Consider representing the taxonomy as dimension columns instead of entity types."*
 
 **Generic literal annotations.** Literal-valued predicates outside the RDF/RDFS/OWL/SKOS namespaces — Dublin Core (`dc:title`, `dcterms:creator`), Schema.org, custom vocabularies — are preserved as `annotations: { <key>: <value> }`, where `<key>` is `prefix:local` when the predicate's namespace has a bound prefix and the full IRI otherwise. Retaining the prefix keeps `dc:title` and `dcterms:title` distinguishable. Multiple values for the same predicate merge into a sorted list.
+
+---
+
+### Importing from a Dataplex Business Glossary
+
+If your business vocabulary already lives in a Knowledge Catalog (formerly Dataplex Universal Catalog) **Business Glossary**, `gm import-dataplex-glossary` reads it through the read-only `dataplex.googleapis.com` v1 API and writes an `ontology.yaml`: the glossary becomes a SKOS concept scheme, every category and term becomes an abstract entity, and category nesting becomes `skos_broader` relationships.
+
+#### Dataplex prerequisites
+
+- Install the optional extra: `pip install 'bigquery-agent-analytics[dataplex]'` (`google-cloud-dataplex>=2.12.0`). Without it the command exits with code 2 (`cli-missing-dependency`).
+- Credentials come from Application Default Credentials (for example `gcloud auth application-default login`).
+- The import is read-only: `roles/dataplex.catalogViewer` on the glossary's project is enough. Nothing is written back to the catalog.
+
+#### Importing a glossary
+
+```bash
+gm import-dataplex-glossary \
+  projects/my-project/locations/us-central1/glossaries/retail \
+  -o retail.ontology.yaml
+```
+
+The command calls `GetGlossary`, then lists every category and term (all pages) under the glossary's canonical name. The YAML goes to stdout (or `-o`), and an import summary goes to stderr. `--ontology-name` overrides the ontology name, which defaults to the glossary ID; characters outside `[A-Za-z0-9_]` become `_`, and a leading digit gets a `_` prefix.
+
+From Python, `import_dataplex_glossary(glossary_name, glossary_client=...)` does the same. `map_dataplex_glossary(glossary, categories, terms)` maps records you have already fetched (the `google-cloud-dataplex` messages, or any objects or dicts with the same fields) without any network call:
+
+```python
+from bigquery_ontology.dataplex_glossary_importer import map_dataplex_glossary
+
+yaml_text, summary = map_dataplex_glossary(glossary, categories, terms)
+```
+
+#### Glossary mapping
+
+| Dataplex resource or field | `ontology.yaml` |
+|---|---|
+| `Glossary` | Root `ontology` (glossary ID), `description`, and `annotations` `dataplex:glossary` (canonical resource name) and `dataplex:uid` |
+| `GlossaryCategory`, `GlossaryTerm` | Abstract entity (`abstract: true`) with `description` |
+| `display_name` | `skos:prefLabel` |
+| Resource ID (`category_id` / `term_id`) | `skos:notation`, verbatim |
+| Resource `name` | `dataplex:resource` |
+| `parent` is the glossary | `skos:topConceptOf` and `skos:inScheme` (the glossary name) |
+| `parent` is a category of the glossary | `skos:inScheme` plus an abstract `skos_broader` relationship from the child to the parent category |
+| Any other `parent` (an unknown category, another glossary or project, the category itself) | `skos:inScheme` plus `dataplex:orphan_parent`, counted in the summary |
+
+Blank display names and descriptions are omitted. A parent is matched on its project, location, glossary ID and category ID. Resource names may give the project by ID or by number, so a project ID and a project number count as the same project: a parent that names the project by ID still matches a glossary whose canonical name uses the project number, and the other way round. Two different project IDs, or two different project numbers, never match.
+
+The output is canonical: entities are sorted by name, relationships by `(name, from, to)` and annotations by key, so re-importing an unchanged glossary produces byte-identical YAML and the same `compile_fingerprint`, whatever order the API returns pages in. Identical repeated records are deduplicated. Two different records with the same resource ID fail the import (exit 1, `import-validation`), as do a category or term whose resource name is in another project, location or glossary (projects are compared as above) and a glossary with no categories or terms.
+
+#### Entity names and collisions
+
+Entity names come from the full resource identity, so the separate category and term ID spaces never collide:
+
+| Resource | Entity name |
+|---|---|
+| `…/categories/net-revenue` | `category_net_revenue` |
+| `…/terms/net_revenue` | `term_net_revenue` |
+| `…/terms/2026-q1` | `term_2026_q1` |
+
+Every character outside `[A-Za-z0-9_]` becomes `_`. If two resources of the **same** kind still end up with the same name (for example `terms/net-revenue` and `terms/net_revenue`), each of them gets a `_<first 8 hex digits of sha256(raw ID)>` suffix, which does not depend on the order the API returns them in. The raw ID is always kept in `skos:notation`, and the resource name in `dataplex:resource`.
+
+These rules are specific to this importer. `gm import-owl` does not replace characters in local names, fails on a name collision instead of adding a suffix, and leaves out SKOS hierarchy edges whose other end it did not import; `gm import-dataplex-glossary` sanitizes and disambiguates names, and keeps and reports orphan parents in its summary.
+
+#### From glossary to concept index
+
+Every imported entity is abstract, so nothing is bound to tables, but `gm compile` and `OntologyRuntime` still take a binding. A binding with no entities is enough. Take this small nested glossary:
+
+```
+retail                      (glossary)
+├── customer                (category, "Customer")
+│   └── metrics             (category, "Customer Metrics")
+│       └── clv             (term, "Customer Lifetime Value")
+└── churn-rate              (term, "Churn Rate")
+```
+
+1. Import and validate the ontology:
+
+   ```bash
+   gm import-dataplex-glossary \
+     projects/my-project/locations/us-central1/glossaries/retail \
+     -o retail.ontology.yaml
+   gm validate retail.ontology.yaml
+   ```
+
+   The term `clv` becomes the entity below, plus a `skos_broader` relationship from `term_clv` to `category_metrics`:
+
+   ```yaml
+   - name: term_clv
+     abstract: true
+     annotations:
+       dataplex:resource: projects/my-project/locations/us-central1/glossaries/retail/terms/clv
+       skos:inScheme: projects/my-project/locations/us-central1/glossaries/retail
+       skos:notation: clv
+       skos:prefLabel: Customer Lifetime Value
+   ```
+
+2. Write a companion binding with no entities, `retail-bq.binding.yaml`:
+
+   ```yaml
+   binding: retail-bq
+   ontology: retail
+   target:
+     backend: bigquery
+     project: my-project
+     dataset: glossary
+   ```
+
+3. Emit the concept index (`--emit-concept-index` requires `--concept-index-table`):
+
+   ```bash
+   gm validate retail-bq.binding.yaml
+   gm compile retail-bq.binding.yaml \
+     --emit-concept-index \
+     --concept-index-table my-project.glossary.retail_concept_index \
+     -o retail_concept_index.sql
+   ```
+
+   Because nothing is bound, the output starts with a bare `CREATE PROPERTY GRAPH retail;` header that has no node tables. Drop that statement and run the two `CREATE OR REPLACE TABLE` statements (the index and its `__meta` table). Each entity contributes a `name` row, a `pref` row (its display name, when set) and a `notation` row (its resource ID), all scoped to the glossary's scheme. From Python, `compile_concept_index(ontology, binding, output_table=..., compiler_version=...)` emits only those two statements, and `bigquery_ontology.concept_index.build_rows(...)` returns the rows themselves.
+
+4. Load the pair with `OntologyRuntime.from_files(ontology_path=..., binding_path=..., compiler_version=...)` for in-memory traversal (`schemes_for`, `in_scheme`, `broader`, `narrower`, `notation_for`, `labels_for`). To resolve labels against the emitted index with `LabelSynonymResolver`, also pass `concept_index_table=` and a BigQuery client, with the `compiler_version` the index was compiled with (`gm compile` defaults to `bigquery_ontology <installed version>`; pin it with `--compiler-version`). A display name then resolves as a `pref` match and a resource ID as a `notation` match.
 
 ---
 
@@ -928,6 +1062,25 @@ The importer recognizes both OWL and SKOS constructs. See the **Importing SKOS**
 
 Requires `rdflib`. Install with `pip install 'bigquery-agent-analytics[owl]'`.
 
+#### `gm import-dataplex-glossary`
+
+```
+gm import-dataplex-glossary <glossary> [--ontology-name <name>] [-o <out>] [--json]
+```
+
+| Argument/Option | Required | Default | Description |
+|-----------------|----------|---------|-------------|
+| `glossary` | yes | — | Glossary resource name: `projects/<project>/locations/<location>/glossaries/<glossary_id>`. |
+| `--ontology-name <name>` | no | glossary ID | Name for the emitted ontology. Characters outside `[A-Za-z0-9_]` become `_`; a leading digit gets a `_` prefix. |
+| `-o` / `--out <file>` | no | stdout | Write ontology YAML to file. |
+| `--json` | no | false | Emit structured JSON errors on stderr. |
+
+Read-only: needs `roles/dataplex.catalogViewer` and Application Default Credentials. An import summary (category, term and `skos_broader` counts, plus sanitized or hash-suffixed names, orphan parents and deduplicated records) is always printed to stderr, regardless of `--json`. An invalid resource name or `--ontology-name` exits 2 (`cli-usage`), as does a missing `google-cloud-dataplex` (`cli-missing-dependency`). An empty or inconsistent glossary (`import-validation`), a Dataplex API or authentication failure (`import-api-error`) and an unwritable `-o` path (`cli-output-error`) exit 1.
+
+See **Importing from a Dataplex Business Glossary** above for the mapping, the naming rules, and the path to a concept index.
+
+Requires `google-cloud-dataplex>=2.12.0`. Install with `pip install 'bigquery-agent-analytics[dataplex]'`.
+
 #### `gm scaffold`
 
 ```
@@ -992,10 +1145,11 @@ Writes `table_ddl.sql` and `binding.yaml` to the output directory. Refuses to ov
 | `cli-unknown-kind` | File is neither ontology nor binding |
 | `cli-wrong-kind` | Compile invoked on a non-binding file |
 | `cli-output-error` | Cannot write output file |
-| `cli-missing-dependency` | Required optional dependency not installed (e.g. rdflib for OWL import) |
-| `cli-usage` | Invalid flag value (e.g. bad `--naming`, bad `--format`) |
+| `cli-missing-dependency` | Required optional dependency not installed (e.g. rdflib for OWL import, google-cloud-dataplex for glossary import) |
+| `cli-usage` | Invalid flag or argument value (e.g. bad `--naming`, bad `--format`, malformed glossary resource name) |
 | `cli-non-empty-dir` | Scaffold output directory is not empty |
-| `import-validation` | Semantic error during OWL import (e.g. name collision) |
+| `import-validation` | Semantic error during OWL or Dataplex glossary import (e.g. name collision, empty glossary) |
+| `import-api-error` | Dataplex API, transport, or authentication failure during glossary import |
 | `scaffold-validation` | Scaffold-time validation (e.g. `extends`, endpoint-column collision) |
 
 ---

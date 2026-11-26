@@ -58,7 +58,7 @@ deployed property graph.
 | [ontology/ontology.md](ontology/ontology.md) | Ontology core design — logical ontology spec |
 | [ontology/binding.md](ontology/binding.md) | Binding design — attaching ontology to physical tables |
 | [ontology/compilation.md](ontology/compilation.md) | Compilation — resolving ontology + binding into backend DDL |
-| [ontology/cli.md](ontology/cli.md) | CLI design for the `gm` tool (validate, compile, import-owl) |
+| [ontology/cli.md](ontology/cli.md) | CLI design for the `gm` tool (validate, compile, import-owl, import-dataplex-glossary). `gm import-dataplex-glossary` imports a Knowledge Catalog (Dataplex) Business Glossary as abstract SKOS entities; `gm compile` and `OntologyRuntime` still need a companion binding (one with no entities is enough), and `--emit-concept-index` needs `--concept-index-table` |
 | [ontology/scaffold.md](ontology/scaffold.md) | `gm scaffold` design — generate starter table DDL and a matching binding stub from an ontology |
 | [ontology/owl-import.md](ontology/owl-import.md) | OWL import — converting OWL ontologies to YAML format |
 | [ontology/ontology-build.md](ontology/ontology-build.md) | `bq-agent-sdk ontology-build` orchestrator + `--skip-property-graph` reference |

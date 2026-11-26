@@ -17,6 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `False` when the column is false, NULL, NaN or missing. Key-based
   redaction can leave it `False`. The field is appended after the existing
   fields, so positional construction is unchanged.
+- **`gm import-dataplex-glossary` (#612)** — imports a Knowledge Catalog
+  (Dataplex) Business Glossary into an `ontology.yaml` through the
+  read-only `dataplex.googleapis.com` v1 API. The glossary becomes a SKOS
+  concept scheme and every category and term an abstract entity named
+  `category_<id>` or `term_<id>`: characters outside `[A-Za-z0-9_]`
+  become `_`, and names of one kind that still collide get a hash suffix.
+  Each entity keeps its resource ID in `skos:notation`, its display name
+  in `skos:prefLabel` and its resource name in `dataplex:resource`, and
+  category nesting becomes `skos_broader` relationships. Re-importing an
+  unchanged glossary gives byte-identical YAML, whatever order the API
+  returns pages in. From Python,
+  `bigquery_ontology.dataplex_glossary_importer.import_dataplex_glossary()`
+  fetches and maps a glossary, and `map_dataplex_glossary()` maps records
+  that were already fetched, without a network call. The new `[dataplex]`
+  extra (included in `[all]`) adds `google-cloud-dataplex>=2.12.0`, which
+  is imported only when the API is called. Entry links (synonyms, related
+  terms and asset definitions) are not imported.
 
 ### Fixed
 

@@ -19,10 +19,12 @@ dispatches to the matching loader. ``gm compile`` takes a binding YAML
 and emits the corresponding ``CREATE PROPERTY GRAPH`` DDL on stdout
 (or to ``-o PATH``). ``gm scaffold`` generates starter ``CREATE TABLE``
 DDL and a matching binding stub from an ontology. ``gm import-owl``
-reads OWL source files and emits ``ontology.yaml``. Both ``validate``
-and ``compile`` resolve a binding's companion ontology by auto-discovering
-``<name>.ontology.yaml`` next to the binding; ``--ontology PATH``
-overrides that lookup.
+reads OWL source files and emits ``ontology.yaml``. ``gm
+import-dataplex-glossary`` reads a Knowledge Catalog (Dataplex) Business
+Glossary through the read-only Dataplex API and emits ``ontology.yaml``.
+Both ``validate`` and ``compile`` resolve a binding's companion ontology
+by auto-discovering ``<name>.ontology.yaml`` next to the binding;
+``--ontology PATH`` overrides that lookup.
 
 Exit codes:
 
@@ -80,7 +82,10 @@ def _default_compiler_version() -> str:
 
 app = typer.Typer(
     name="gm",
-    help="Graph-model CLI. Commands: validate, compile, scaffold, import-owl.",
+    help=(
+        "Graph-model CLI. Commands: validate, compile, scaffold, import-owl, "
+        "import-dataplex-glossary."
+    ),
     add_completion=False,
     no_args_is_help=True,
 )
@@ -899,6 +904,173 @@ def import_owl_command(
 
   if drop_summary:
     typer.echo(drop_summary, err=True)
+
+  if output_path is not None:
+    resolved_output = Path(output_path)
+    try:
+      resolved_output.write_text(yaml_text, encoding="utf-8")
+    except OSError as exc:
+      _emit_errors(
+          [
+              {
+                  "file": str(resolved_output),
+                  "line": 0,
+                  "col": 0,
+                  "rule": "cli-output-error",
+                  "severity": "error",
+                  "message": f"Cannot write output file: {exc}",
+              }
+          ],
+          as_json=json_output,
+      )
+      raise typer.Exit(code=1)
+  else:
+    typer.echo(yaml_text, nl=False)
+
+
+# --------------------------------------------------------------------- #
+# gm import-dataplex-glossary                                            #
+# --------------------------------------------------------------------- #
+
+
+@app.command("import-dataplex-glossary")
+def import_dataplex_glossary_command(
+    glossary: str = typer.Argument(
+        ...,
+        help=(
+            "Glossary resource name: "
+            "projects/<project>/locations/<location>/glossaries/<glossary_id>."
+        ),
+    ),
+    ontology_name: str | None = typer.Option(
+        None,
+        "--ontology-name",
+        help=(
+            "Name for the emitted ontology. Characters outside "
+            "[A-Za-z0-9_] become '_'. Defaults to the glossary ID."
+        ),
+    ),
+    output_path: str | None = typer.Option(
+        None,
+        "-o",
+        "--out",
+        help="Write YAML to this file instead of stdout.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit structured JSON errors on stderr.",
+    ),
+) -> None:
+  """Import a Knowledge Catalog (Dataplex) Business Glossary as ontology YAML.
+
+  Reads the glossary, its categories, and its terms through the read-only
+  ``dataplex.googleapis.com`` v1 API (``roles/dataplex.catalogViewer`` is
+  sufficient) and emits a validated ``ontology.yaml`` in which every
+  category and term is an abstract, SKOS-annotated entity and category
+  nesting becomes ``skos_broader`` relationships.
+
+  An import summary is always printed to stderr. Requires the optional
+  ``google-cloud-dataplex`` dependency.
+  """
+  try:
+    from .dataplex_glossary_importer import DataplexImportError
+    from .dataplex_glossary_importer import import_dataplex_glossary
+    from .dataplex_glossary_importer import MissingDataplexDependencyError
+    from .dataplex_glossary_importer import validate_import_arguments
+  except ImportError as exc:
+    _emit_errors(
+        [
+            {
+                "file": "<cli>",
+                "line": 0,
+                "col": 0,
+                "rule": "cli-missing-dependency",
+                "severity": "error",
+                "message": (
+                    f"Cannot load the Dataplex glossary importer: {exc}. "
+                    "Install it with: pip install "
+                    "'bigquery-agent-analytics[dataplex]'"
+                ),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=2)
+
+  try:
+    validate_import_arguments(glossary, ontology_name=ontology_name)
+  except ValueError as exc:
+    _emit_errors(
+        [
+            {
+                "file": "<cli>",
+                "line": 0,
+                "col": 0,
+                "rule": "cli-usage",
+                "severity": "error",
+                "message": str(exc),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=2)
+
+  try:
+    yaml_text, summary = import_dataplex_glossary(
+        glossary, ontology_name=ontology_name
+    )
+  except (MissingDataplexDependencyError, ImportError) as exc:
+    _emit_errors(
+        [
+            {
+                "file": "<cli>",
+                "line": 0,
+                "col": 0,
+                "rule": "cli-missing-dependency",
+                "severity": "error",
+                "message": str(exc),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=2)
+  except DataplexImportError as exc:
+    _emit_errors(
+        [
+            {
+                "file": glossary,
+                "line": 0,
+                "col": 0,
+                "rule": "import-api-error",
+                "severity": "error",
+                "message": str(exc),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=1)
+  except ValueError as exc:
+    _emit_errors(
+        [
+            {
+                "file": glossary,
+                "line": 0,
+                "col": 0,
+                "rule": "import-validation",
+                "severity": "error",
+                "message": str(exc),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=1)
+  except Exception as exc:  # noqa: BLE001 - reported as an internal error
+    typer.echo(f"internal error: {exc}", err=True)
+    raise typer.Exit(code=3)
+
+  if summary:
+    typer.echo(summary, err=True)
 
   if output_path is not None:
     resolved_output = Path(output_path)

@@ -3,12 +3,14 @@
 Status: draft
 Scope: the v0 CLI for the `gm` tool. Three commands (`validate`,
 `compile`, `import-owl`) plus global conventions for output, errors, and
-exit codes. Out-of-scope items enumerated in §8.
+exit codes, and the later `import-dataplex-glossary` importer (§7).
+Out-of-scope items enumerated in §9.
 
 ## 1. Goals
 
 - **Minimal surface.** Three commands cover both user workflows end to
-  end. Nothing else ships in v0.
+  end. `import-dataplex-glossary` (§7) is a second, optional importer:
+  it only produces an ontology and adds no new workflow.
 - **Composable.** Output is just text, stdout is where results go, exit
   codes are honest. `gm compile … | bq query` works; CI parses errors
   with `--json`.
@@ -54,12 +56,12 @@ Installed binary `gm`. Subcommand style is flat verb-noun hyphenated
 ### Output destinations
 
 - **stdout** — the primary result: DDL text (`gm compile`), imported
-  YAML (`gm import-owl` without `-o`), nothing on success
-  (`gm validate`).
+  YAML (`gm import-owl` and `gm import-dataplex-glossary` without
+  `-o`), nothing on success (`gm validate`).
 - **stderr** — diagnostics, warnings, human-readable errors.
 - `-o <file>` — redirect stdout to a file. Where applicable: the long
   form is `--output <file>` on `gm compile` and `--out <file>` on
-  `gm import-owl`.
+  `gm import-owl` and `gm import-dataplex-glossary`.
 
 ### Exit codes
 
@@ -223,7 +225,84 @@ abstract, annotations preserved, labels discarded by language
 selection, external match targets, generic literal annotations) and a
 hint when every imported entity is abstract.
 
-## 7. Open questions
+## 7. `gm import-dataplex-glossary`
+
+Read a Knowledge Catalog (Dataplex) Business Glossary through the
+read-only `dataplex.googleapis.com` v1 API and emit a `*.ontology.yaml`.
+The user manual has the full mapping table and a worked example.
+
+### Usage
+
+```
+gm import-dataplex-glossary <glossary> [--ontology-name <name>]
+                            [-o <out>] [--json]
+```
+
+- `<glossary>` is a glossary resource name,
+  `projects/<project>/locations/<location>/glossaries/<glossary_id>`.
+  Anything else exits 2 (`cli-usage`) before any API call.
+- Requires the `[dataplex]` extra (`google-cloud-dataplex>=2.12.0`);
+  without it the command exits 2 (`cli-missing-dependency`).
+  Credentials come from Application Default Credentials. The import is
+  read-only: `roles/dataplex.catalogViewer` is enough, and nothing is
+  written to the catalog.
+- Calls `GetGlossary`, then lists every category and term (all pages)
+  under the glossary's canonical resource name.
+- The glossary becomes the concept scheme: the root `ontology`, named
+  after the glossary ID unless `--ontology-name` is given, with
+  `dataplex:glossary` and `dataplex:uid` annotations. Every category
+  and term becomes an abstract entity named `category_<id>` or
+  `term_<id>`, with each character outside `[A-Za-z0-9_]` replaced by
+  `_`. Names of the same kind that still collide each get a
+  `_<sha256(raw id)[:8]>` suffix (longer if that still collides), so
+  names never depend on API order. The raw ID is kept in
+  `skos:notation`, the display name in `skos:prefLabel`, and the
+  resource name in `dataplex:resource`.
+- A resource whose parent is the glossary gets `skos:topConceptOf` and
+  `skos:inScheme`; one whose parent is a category of the glossary gets
+  `skos:inScheme` and a `skos_broader` relationship to that category.
+  Parents are matched on project, location, glossary ID and category
+  ID. Resource names may give the project by ID or by number, so an ID
+  and a number count as the same project (a parent that names the
+  project by ID matches a glossary named by project number), while two
+  different IDs or two different numbers never match. Any other parent
+  is kept as `dataplex:orphan_parent` and counted in the summary.
+- Output is canonical (entities, relationships and annotations sorted;
+  identical repeated records deduplicated), so re-importing an
+  unchanged glossary gives byte-identical YAML whatever order the API
+  returns pages in. The YAML is validated before it is written.
+- Every entity is abstract, so nothing is bound to tables, but
+  `gm compile` and `OntologyRuntime` still take a binding; a companion
+  binding with no entities validates. `gm compile --emit-concept-index
+  --concept-index-table <project.dataset.table>` then emits the concept
+  index and its `__meta` table after a bare
+  `CREATE PROPERTY GRAPH <ontology>;` header that has no node tables
+  (nothing is bound); drop that statement before running the rest.
+
+### Flags
+
+| Flag | Purpose |
+|---|---|
+| `--ontology-name <name>` | Ontology name (default: the glossary ID). Characters outside `[A-Za-z0-9_]` become `_` and a leading digit gets a `_` prefix; a blank name, or one with no ASCII letter or digit, exits 2 (`cli-usage`). |
+| `-o <file>`, `--out <file>` | Write YAML to file instead of stdout. |
+| `--json` | Structured errors (see §3). |
+
+The import summary is printed to stderr regardless of `--json`: the
+category and term counts; when nonzero, the `skos_broader`,
+sanitized-ID, hash-suffixed-name, orphan-parent and
+deduplicated-record counts; and a note that every entity is abstract.
+Sanitization, hash suffixes and orphan-parent reporting are specific to
+this importer: `gm import-owl` does not replace characters in local
+names, fails on a name collision instead of adding a suffix, and leaves
+out SKOS hierarchy edges whose other end it did not import.
+
+Exit codes follow §3. Exit 1 covers an empty glossary, conflicting
+records for one resource ID, or a record from another project,
+location or glossary (`import-validation`); a Dataplex API, transport,
+credential or client construction failure (`import-api-error`); and an
+unwritable `-o` path (`cli-output-error`).
+
+## 8. Open questions
 
 - **Warnings as errors.** A `--strict` flag that turns warnings into
   exit-1 errors is common in similar tools. Defer until CI users ask.
@@ -234,7 +313,7 @@ hint when every imported entity is abstract.
   (namespace filters, target dataset) would simplify repeated
   invocations. Defer until a concrete need surfaces.
 
-## 8. Out of scope
+## 9. Out of scope
 
 - **`gm init`** — scaffold a minimal project. Users can copy from
   `docs/distillation/examples/` once that exists.
