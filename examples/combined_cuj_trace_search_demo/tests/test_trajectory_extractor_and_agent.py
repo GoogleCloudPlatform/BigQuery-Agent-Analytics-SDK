@@ -2075,7 +2075,6 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
         ),
         ("author", "alice", "author: alice"),
         ("authority", "ca", "authority: ca"),
-        ("cookies", "3", "cookies=3"),
     )
     for key_name, val, text_form in benign_kv_parity:
       with self.subTest(benign_parity=key_name):
@@ -2083,6 +2082,33 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
         d_out = scrub_sensitive_data({key_name: val})
         self.assertEqual(d_out[key_name], val)
         self.assertEqual(scrub_sensitive_text(text_form), text_form)
+    # Numeric cookies counts are preserved while cookie jars/strings redact.
+    self.assertTrue(is_sensitive_key("cookies", is_container=False))
+    self.assertEqual(scrub_sensitive_data({"cookies": 3})["cookies"], 3)
+    self.assertEqual(scrub_sensitive_data({"cookies": "3"})["cookies"], "3")
+    self.assertEqual(scrub_sensitive_text("cookies=3"), "cookies=3")
+    self.assertEqual(
+        scrub_sensitive_data({"cookies": {"sessionid": "s_val"}})["cookies"],
+        "[REDACTED]",
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"cookies": "sessionid=s_val"})["cookies"],
+        "[REDACTED]",
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"request": {"cookies": ["sessionid=s_val"]}})[
+            "request"
+        ]["cookies"],
+        "[REDACTED]",
+    )
+    for cookie_text in (
+        'cookies={"sessionid": "s_val"}',
+        'cookies="sessionid=s_val"',
+        'request.cookies=["sessionid=s_val"]',
+    ):
+      out_c = scrub_sensitive_text(cookie_text)
+      self.assertNotIn("s_val", out_c)
+      self.assertIn("[REDACTED]", out_c)
     self.assertEqual(scrub_sensitive_text("CARD_EXPIRED"), "CARD_EXPIRED")
     self.assertEqual(
         scrub_sensitive_text("status is delivered"), "status is delivered"
@@ -2222,15 +2248,362 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
         ("prompt_token", "412", "prompt_token=412"),
         ("author", "alice", "author=alice"),
         ("authority", "payments.example.com", "authority=payments.example.com"),
-        ("cookies", "3", "cookies=3"),
     )
     for key_name, val, text_form in benign_cases:
       with self.subTest(benign_case=f"{key_name}:{val}"):
         self.assertFalse(is_sensitive_key(key_name, is_container=False))
         self.assertEqual(scrub_sensitive_data({key_name: val})[key_name], val)
         self.assertEqual(scrub_sensitive_text(text_form), text_form)
+    # Numeric cookies remain preserved while structured cookie values redact.
+    self.assertEqual(scrub_sensitive_data({"cookies": 3})["cookies"], 3)
+    self.assertEqual(scrub_sensitive_text("cookies=3"), "cookies=3")
+    self.assertEqual(
+        scrub_sensitive_data({"cookies": {"sessionid": "s_val"}})["cookies"],
+        "[REDACTED]",
+    )
     self.assertEqual(
         scrub_sensitive_text("status is delivered"), "status is delivered"
+    )
+
+  def test_cookie_jars_nextline_merge_base_diagnostics_large_json_and_503_guard(
+      self,
+  ) -> None:
+    from unittest.mock import MagicMock  # noqa: PLC0415
+
+    from analytics.table_guard import _is_bq_conflict_error  # noqa: PLC0415
+    from analytics.table_guard import _is_bq_not_found_error  # noqa: PLC0415
+    from analytics.table_guard import assert_demo_table_ownership_or_absent  # noqa: PLC0415
+    from analytics.trajectory_extractor import is_sensitive_key  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+
+    # 1. Cookie jars & cookie strings redact while numeric counts survive.
+    self.assertEqual(
+        scrub_sensitive_data({"cookies": {"sessionid": "abc"}}),
+        {"cookies": "[REDACTED]"},
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"cookies": ["sessionid=abc"]}),
+        {"cookies": "[REDACTED]"},
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"request": {"cookies": ["sessionid=abc"]}}),
+        {"request": {"cookies": "[REDACTED]"}},
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"cookies": "sessionid=abc"}),
+        {"cookies": "[REDACTED]"},
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"set_cookies": 3}),
+        {"set_cookies": "[REDACTED]"},
+    )
+    self.assertEqual(scrub_sensitive_data({"cookies": 3}), {"cookies": 3})
+    self.assertEqual(scrub_sensitive_data({"cookies": "3"}), {"cookies": "3"})
+    self.assertEqual(
+        scrub_sensitive_data({"credential_count": 3}),
+        {"credential_count": 3},
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"credential_count": "3"}),
+        {"credential_count": "3"},
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"credential_count": {"secret": "x"}}),
+        {"credential_count": "[REDACTED]"},
+    )
+    self.assertEqual(scrub_sensitive_text("cookies=3"), "cookies=3")
+    self.assertEqual(scrub_sensitive_text("cookies: 3"), "cookies: 3")
+    self.assertEqual(
+        scrub_sensitive_text("credential_count=3"), "credential_count=3"
+    )
+    for sample, secret_val in (
+        ('cookies={"sessionid":"s_val"}', "s_val"),
+        ('cookies=["sid=s_val"]', "s_val"),
+        ('cookies="sessionid=s_val"', "s_val"),
+        ("cookies=sessionid=s_val", "s_val"),
+        ('request.cookies=["sid=s_val"]', "s_val"),
+        ('credential_count={"value": "cc_sec"}', "cc_sec"),
+    ):
+      with self.subTest(cookie_or_count=sample):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+
+    # 2. Next-line bare values after sensitive keys redact cleanly.
+    for sample, secret_val in (
+        ("CARD_EXPIRED password:\n  nextline_sec", "nextline_sec"),
+        ("password is:\nnextline_sec2", "nextline_sec2"),
+        ("credentials:\n  nextline_sec3", "nextline_sec3"),
+        ('credentials=\n{"value":"nl_json_sec"}', "nl_json_sec"),
+    ):
+      with self.subTest(nextline=sample):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+        if "CARD_EXPIRED" in sample:
+          self.assertIn("CARD_EXPIRED", out)
+
+    # 3. Merge-base key spellings redact while benign neighbors stay intact.
+    for key_name, val in (
+        ("passWord", "pw_sec"),
+        ("mysecret", "ms_sec"),
+        ("usercredentials", "uc_sec"),
+        ("mypwd", "mp_sec"),
+    ):
+      with self.subTest(merge_base_key=key_name):
+        self.assertTrue(is_sensitive_key(key_name, is_container=False))
+        self.assertEqual(
+            scrub_sensitive_data({key_name: val})[key_name], "[REDACTED]"
+        )
+        out = scrub_sensitive_text(f"{key_name}={val}")
+        self.assertNotIn(val, out)
+        self.assertIn("[REDACTED]", out)
+    self.assertEqual(
+        scrub_sensitive_text("secretary=alice author=bob authority=ca"),
+        "secretary=alice author=bob authority=ca",
+    )
+
+    # 4. Preserved scalar diagnostics vs redacted containers/tokens.
+    self.assertEqual(
+        scrub_sensitive_data({"authentication_result": "FAILED"}),
+        {"authentication_result": "FAILED"},
+    )
+    self.assertEqual(
+        scrub_sensitive_text("authentication_result=failed"),
+        "authentication_result=failed",
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"authentication_result": {"value": "ar_sec"}}),
+        {"authentication_result": "[REDACTED]"},
+    )
+    self.assertNotIn(
+        "ar_sec",
+        scrub_sensitive_text('authentication_result={"value": "ar_sec"}'),
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"authentication": "failed"}),
+        {"authentication": "failed"},
+    )
+    self.assertEqual(
+        scrub_sensitive_text("Authentication: failed"),
+        "Authentication: failed",
+    )
+    self.assertEqual(
+        scrub_sensitive_text("Authentication:\n  failed"),
+        "Authentication:\n  failed",
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"authentication": {"value": "auth_cnt_sec"}}),
+        {"authentication": "[REDACTED]"},
+    )
+    for sample, secret_val in (
+        ("Authentication: raw_secret_tok", "raw_secret_tok"),
+        ('authentication={"token": "auth_tok_sec"}', "auth_tok_sec"),
+    ):
+      out = scrub_sensitive_text(sample)
+      self.assertNotIn(secret_val, out)
+      self.assertIn("[REDACTED]", out)
+
+    # 5. Large ordinary JSON (>17 KiB) and 50 [] citations keep CARD_EXPIRED
+    #    while tail / nested / Unicode-escaped secrets still redact.
+    large_items = ",".join(f'{{"id":{i},"ok":true}}' for i in range(1100))
+    large_ordinary = f'{{"items":[{large_items}]}} ERROR: CARD_EXPIRED'
+    self.assertGreater(len(large_ordinary), 17_000)
+    out_large_ord = scrub_sensitive_text(large_ordinary)
+    self.assertIn("ERROR: CARD_EXPIRED", out_large_ord)
+    self.assertNotIn("[REDACTED]", out_large_ord)
+
+    cite_nums = ("[1] " * 50) + "ERROR: CARD_EXPIRED"
+    self.assertEqual(scrub_sensitive_text(cite_nums), cite_nums)
+    cite_info = ("[INFO] " * 50) + "ERROR: CARD_EXPIRED"
+    self.assertEqual(scrub_sensitive_text(cite_info), cite_info)
+
+    for label, sample, secret_val in (
+        (
+            "after_40_empty_objs",
+            ("{} " * 40) + '{"password": "tail_sec_40"} ERROR: CARD_EXPIRED',
+            "tail_sec_40",
+        ),
+        (
+            "after_40_nonempty_objs",
+            ('{"k":1} ' * 40)
+            + '{"password": {"nested": "tail_sec_nonempty"}}'
+            + " ERROR: CARD_EXPIRED",
+            "tail_sec_nonempty",
+        ),
+        (
+            "after_50_citations",
+            ("[1] " * 50) + '{"password": "cite_sec"} ERROR: CARD_EXPIRED',
+            "cite_sec",
+        ),
+        (
+            "after_20k_brackets",
+            ("[" * 20_000)
+            + ' {"password": {"nested": "b20k_sec"}} ERROR: CARD_EXPIRED',
+            "b20k_sec",
+        ),
+        (
+            "inside_large_json",
+            '{"padding": "'
+            + ("a" * 17_000)
+            + '", "password": {"nested": "big_sec"}} ERROR: CARD_EXPIRED',
+            "big_sec",
+        ),
+        (
+            "unicode_key_in_large_json",
+            '{"padding": "'
+            + ("a" * 17_000)
+            + '", "\\u0070assword": "uni_sec"} ERROR: CARD_EXPIRED',
+            "uni_sec",
+        ),
+        (
+            "unicode_key_after_40_objs",
+            ('{"k":1} ' * 40)
+            + '{"\\u0070assword": "uni_sec_40"} ERROR: CARD_EXPIRED',
+            "uni_sec_40",
+        ),
+    ):
+      with self.subTest(budget_case=label):
+        out = scrub_sensitive_text(sample)
+        self.assertNotIn(secret_val, out)
+        self.assertIn("[REDACTED]", out)
+        self.assertIn("CARD_EXPIRED", out)
+
+    # 6. NotFound/Conflict with HTTP 503 on response.status_code fail closed.
+    class NotFoundWith404(Exception):
+      code = 404
+
+      def __init__(self, msg: str, *, response: object = None) -> None:
+        super().__init__(msg)
+        self.response = response
+
+    class NotFoundNoCode(Exception):
+
+      def __init__(self, msg: str, *, response: object = None) -> None:
+        super().__init__(msg)
+        self.response = response
+
+    class ConflictWith409(Exception):
+      code = 409
+
+      def __init__(self, msg: str, *, response: object = None) -> None:
+        super().__init__(msg)
+        self.response = response
+
+    exc_nf_404_503 = NotFoundWith404(
+        "upstream 503", response=SimpleNamespace(status_code=503)
+    )
+    exc_nf_nocode_503 = NotFoundNoCode(
+        "upstream 503", response=SimpleNamespace(status_code=503)
+    )
+    exc_cf_409_503 = ConflictWith409(
+        "upstream 503", response=SimpleNamespace(status_code=503)
+    )
+    self.assertFalse(_is_bq_not_found_error(exc_nf_404_503))
+    self.assertFalse(_is_bq_not_found_error(exc_nf_nocode_503))
+    self.assertFalse(_is_bq_conflict_error(exc_cf_409_503))
+
+    for exc_503 in (exc_nf_404_503, exc_nf_nocode_503):
+      mock_bq = MagicMock()
+      mock_bq.get_table.side_effect = exc_503
+      with self.assertRaises(type(exc_503)):
+        assert_demo_table_ownership_or_absent(
+            mock_bq, "demo-proj", "agent_ops", "agent_events"
+        )
+
+  def test_post_budget_escaped_slash_long_keys_nextline_and_cookie_ids(
+      self,
+  ) -> None:
+    from analytics.trajectory_extractor import is_sensitive_key  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+
+    long_pw_key = ("very_long_prefix_" * 4) + "password"
+    self.assertGreaterEqual(len(long_pw_key), 65)
+    nested_esc = (
+        r'"{\"password\": \"esc_sec\", '
+        r'\"\\u0070assword\": \"esc_uni_sec\"}"'
+    )
+    tail_blob = (
+        f'{{"nested": {nested_esc}, "db/password": "slash_sec", '
+        f'"{long_pw_key}": "long_sec"}} ERROR: CARD_EXPIRED'
+    )
+    post_32_payload = ('{"k":1} ' * 35) + tail_blob
+    large_20k_payload = (
+        '{"padding": "'
+        + ("a" * 20_500)
+        + f'", "nested": {nested_esc}, "db/password": "slash_sec", '
+        + f'"{long_pw_key}": "long_sec"}} ERROR: CARD_EXPIRED'
+    )
+    self.assertGreater(len(large_20k_payload), 20_480)
+
+    for label, sample in (
+        ("post_32_objects", post_32_payload),
+        ("over_20kib_json", large_20k_payload),
+    ):
+      with self.subTest(case=label):
+        out = scrub_sensitive_text(sample)
+        for secret_val in ("esc_sec", "esc_uni_sec", "slash_sec", "long_sec"):
+          self.assertNotIn(secret_val, out)
+        self.assertIn("CARD_EXPIRED", out)
+
+    # Dict and single-quoted parity for slash-separated sensitive keys.
+    self.assertTrue(is_sensitive_key("db/password"))
+    self.assertEqual(
+        scrub_sensitive_data({"db/password": "slash_sec"})["db/password"],
+        "[REDACTED]",
+    )
+    sq_slash = scrub_sensitive_text("{'db/password': 'sq_slash_sec'}")
+    self.assertNotIn("sq_slash_sec", sq_slash)
+    self.assertIn("[REDACTED]", sq_slash)
+
+    # Next-line consecutive sensitive KV vs bare value vs blank-line boundary.
+    self.assertEqual(
+        scrub_sensitive_text("password:\ntoken: sec_colon_nextline"),
+        "password:\ntoken: [REDACTED]",
+    )
+    db_url_out = scrub_sensitive_text("database_url:\n  postgres://u:p@host")
+    self.assertNotIn("postgres://u:p@host", db_url_out)
+    self.assertEqual(db_url_out, "database_url:\n  [REDACTED]")
+    user_pw_out = scrub_sensitive_text("password:\n  user:pass123")
+    self.assertNotIn("pass123", user_pw_out)
+    self.assertEqual(user_pw_out, "password:\n  [REDACTED]")
+    self.assertEqual(
+        scrub_sensitive_text("password:\n\nERROR: CARD_EXPIRED"),
+        "password:\n\nERROR: CARD_EXPIRED",
+    )
+
+    # Long / leading-zero numeric cookie IDs and non-finite floats redact
+    # while short numeric counts stay preserved.
+    cookie_id_out = scrub_sensitive_text('cookies="00481923819283"')
+    self.assertNotIn("00481923819283", cookie_id_out)
+    self.assertIn("[REDACTED]", cookie_id_out)
+    long_cookie_out = scrub_sensitive_text('cookies="9876543210"')
+    self.assertNotIn("9876543210", long_cookie_out)
+    self.assertIn("[REDACTED]", long_cookie_out)
+    self.assertEqual(
+        scrub_sensitive_data({"cookies": "00481923819283"}),
+        {"cookies": "[REDACTED]"},
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"cookies": "9876543210"}),
+        {"cookies": "[REDACTED]"},
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"cookies": float("nan")}),
+        {"cookies": "[REDACTED]"},
+    )
+    self.assertEqual(
+        scrub_sensitive_data({"cookies": float("inf")}),
+        {"cookies": "[REDACTED]"},
+    )
+    self.assertEqual(scrub_sensitive_text("cookies=3"), "cookies=3")
+    self.assertEqual(scrub_sensitive_data({"cookies": 3}), {"cookies": 3})
+    self.assertEqual(scrub_sensitive_data({"cookies": "3"}), {"cookies": "3"})
+    self.assertEqual(scrub_sensitive_data({"cookies": "0"}), {"cookies": "0"})
+    self.assertEqual(
+        scrub_sensitive_data({"cookies": "120"}), {"cookies": "120"}
     )
 
 

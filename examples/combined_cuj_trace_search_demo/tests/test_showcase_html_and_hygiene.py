@@ -1387,6 +1387,74 @@ class ShowcaseHtmlAndHygieneTest(unittest.TestCase):
         self.assertNotIn(secret_val, html_text)
       self.assertIn("CARD_EXPIRED", html_text)
 
+  def test_html_cookie_jar_nextline_citations_and_deferred_hydration_drawer(
+      self,
+  ) -> None:
+    from analytics.index_and_search import run_index_and_search  # noqa: PLC0415
+    from report.build_showcase_html import build_showcase_html  # noqa: PLC0415
+
+    citation_prefix = "[1] " * 50
+    error_payload = (
+        f"{citation_prefix}CARD_EXPIRED "
+        "Authentication: failed "
+        '{"cookies": {"sessionid": "html_cookie_leak"}} '
+        "password:\n  html_nl_leak"
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+      root = Path(tmpdir)
+      live_json = root / "live.json"
+      search_json = root / "search.json"
+      out_html = root / "showcase.html"
+      live_json.write_text(
+          json.dumps(
+              {
+                  "eval_turns": [
+                      {
+                          "session_id": "sess_html_fix",
+                          "invocation_id": "inv_html_fix",
+                          "scenario_id": "scn_html_fix",
+                          "has_error": True,
+                          "error_summary": error_payload,
+                          "raw_trace_bytes": 1200,
+                          "ablation": {
+                              "s1_bytes": 1200,
+                              "s1_tokens_est": 300,
+                              "s1_exceeds_2048": False,
+                              "s2_bytes": 600,
+                              "s2_tokens_est": 150,
+                              "s2_exceeds_2048": False,
+                              "s3_bytes": 240,
+                              "s3_tokens_est": 60,
+                              "s3_exceeds_2048": False,
+                              "s3_text": error_payload,
+                          },
+                      }
+                  ],
+                  "ablation_summary": {"turn_count": 1},
+              }
+          ),
+          encoding="utf-8",
+      )
+      default_report = run_index_and_search(
+          output_json=search_json, offline=True
+      )
+      self.assertTrue(
+          all(q["step2_lazy_trace"] is None for q in default_report["queries"])
+      )
+      build_showcase_html(
+          live_json=live_json, search_json=search_json, output_path=out_html
+      )
+      html_text = out_html.read_text(encoding="utf-8")
+      self.assertNotIn("html_cookie_leak", html_text)
+      self.assertNotIn("html_nl_leak", html_text)
+      self.assertIn("CARD_EXPIRED", html_text)
+      self.assertIn("Authentication: failed", html_text)
+      self.assertNotIn(
+          "JSON.stringify(q.step2_lazy_trace || {}, null, 2)", html_text
+      )
+      self.assertIn("NOT_HYDRATED_ON_DEFAULT_SEARCH", html_text)
+      self.assertIn("--hydrate-top-trace", html_text)
+
 
 if __name__ == "__main__":
   unittest.main()

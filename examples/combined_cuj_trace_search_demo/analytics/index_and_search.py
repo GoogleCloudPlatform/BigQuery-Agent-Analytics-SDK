@@ -28,7 +28,7 @@ Supports both:
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -63,6 +63,7 @@ from analytics.trajectory_extractor import write_owner_only_text
 _IVF_MIN_ROWS = 5000
 _TEN_GIB_BYTES = 10 * 1024 * 1024 * 1024
 _DEFAULT_TOP_K = 5
+_STAGING_TOKEN_LABEL_KEY = "bqaa_demo_stage_token"
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 _CONNECTION_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
@@ -509,6 +510,28 @@ def _extract_s3_text(trace_obj: Any, row: dict[str, Any]) -> str:
   return extract_s3_outcome_first(trace_dict, metrics=row)
 
 
+def _delete_owned_staging_table(
+    bq_client: Any,
+    stage_fqn: str,
+    *,
+    stage_token: str,
+) -> None:
+  """Deletes a staging table only if ownership label and token still match."""
+  try:
+    current_tbl = bq_client.get_table(stage_fqn)
+  except Exception:
+    # Best-effort cleanup: never mask a load/merge failure or delete a table
+    # whose ownership label and staging token could not be verified.
+    return
+  labels = getattr(current_tbl, "labels", None)
+  if (
+      isinstance(labels, Mapping)
+      and labels.get(DEMO_OWNERSHIP_LABEL_KEY) == DEMO_OWNERSHIP_LABEL_VALUE
+      and labels.get(_STAGING_TOKEN_LABEL_KEY) == stage_token
+  ):
+    bq_client.delete_table(stage_fqn, not_found_ok=True)
+
+
 def populate_trajectories_in_bigquery(
     bq_client: Any,
     *,
@@ -553,17 +576,23 @@ def populate_trajectories_in_bigquery(
       bigquery.SchemaField("error_summary", "STRING"),
   ]
   stage_fqn = ""
+  stage_token = ""
   stage_reserved = False
   for _ in range(3):
     candidate_fqn = (
         f"{project_id}.{dataset_id}.{eval_turns_table}"
         f"__stage_{uuid.uuid4().hex[:8]}"
     )
+    candidate_token = uuid.uuid4().hex[:16]
     stage_tbl = bigquery.Table(candidate_fqn, schema=stage_schema)
-    stage_tbl.labels = {DEMO_OWNERSHIP_LABEL_KEY: DEMO_OWNERSHIP_LABEL_VALUE}
+    stage_tbl.labels = {
+        DEMO_OWNERSHIP_LABEL_KEY: DEMO_OWNERSHIP_LABEL_VALUE,
+        _STAGING_TOKEN_LABEL_KEY: candidate_token,
+    }
     try:
       bq_client.create_table(stage_tbl, exists_ok=False)
       stage_fqn = candidate_fqn
+      stage_token = candidate_token
       stage_reserved = True
       break
     except Exception as exc:
@@ -593,8 +622,8 @@ def populate_trajectories_in_bigquery(
     )
     bq_client.query(merge_sql).result()
   finally:
-    if stage_reserved and stage_fqn:
-      bq_client.delete_table(stage_fqn, not_found_ok=True)
+    if stage_reserved and stage_fqn and stage_token:
+      _delete_owned_staging_table(bq_client, stage_fqn, stage_token=stage_token)
   return len(staged)
 
 
@@ -1335,13 +1364,72 @@ def run_index_and_search(
   explicit_sids: list[str] | None = None
   if session_ids is not None:
     explicit_sids = [
-        str(s) for s in session_ids if s is not None and str(s).strip()
+        str(s).strip() for s in session_ids if s is not None and str(s).strip()
     ]
     if not explicit_sids:
       raise ValueError(
           "Explicit session_ids contains no session_ids; refusing to drop"
           " session filter and scan entire table."
       )
+
+  manifest_turns: list[dict[str, Any]] = []
+  resolved_manifest_sids: list[str] = []
+  if input_json is not None:
+    payload = json.loads(Path(input_json).read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+      raise ValueError("Session manifest must be a JSON object.")
+    raw_manifest_turns = payload.get("eval_turns")
+    if raw_manifest_turns is not None and not isinstance(
+        raw_manifest_turns, list
+    ):
+      raise TypeError("Session manifest 'eval_turns' must be a JSON array.")
+    raw_manifest_sids = payload.get("session_ids")
+    if raw_manifest_sids is not None and not isinstance(
+        raw_manifest_sids, list
+    ):
+      raise TypeError(
+          "Session manifest 'session_ids' must be a JSON array of strings."
+      )
+    manifest_turns = [
+        dict(t) for t in (raw_manifest_turns or []) if isinstance(t, Mapping)
+    ]
+    manifest_sids = [
+        str(s).strip()
+        for s in (raw_manifest_sids or [])
+        if s is not None and str(s).strip()
+    ]
+    manifest_turn_sids = [
+        str(t["session_id"]).strip()
+        for t in manifest_turns
+        if t.get("session_id") is not None and str(t.get("session_id")).strip()
+    ]
+    resolved_manifest_sids = manifest_sids or manifest_turn_sids
+    if not offline and not resolved_manifest_sids:
+      raise ValueError(
+          "Session manifest contains no session_ids; refusing to drop"
+          " session filter and scan entire table."
+      )
+    if not manifest_turns and not resolved_manifest_sids:
+      raise ValueError(
+          "Session manifest contains no valid session_ids or eval_turns;"
+          " refusing to drop session filter or fall back to default fixtures."
+      )
+
+  effective_sids: list[str] | None
+  if explicit_sids is not None and input_json is not None:
+    manifest_sid_set = set(resolved_manifest_sids)
+    effective_sids = [s for s in explicit_sids if s in manifest_sid_set]
+    if not effective_sids:
+      raise ValueError(
+          "Explicit session_ids did not match any session_id in the supplied"
+          " session manifest; refusing to run query."
+      )
+  elif explicit_sids is not None:
+    effective_sids = explicit_sids
+  elif input_json is not None:
+    effective_sids = resolved_manifest_sids or None
+  else:
+    effective_sids = None
 
   queries = [dict(q) for q in DEFAULT_BENCHMARK_QUERIES]
   active_router = router or QueryRouter(
@@ -1355,31 +1443,15 @@ def run_index_and_search(
   )
 
   if offline:
-    turn_rows: list[dict[str, Any]] = []
-    manifest_sids: list[str] = []
-    if input_json is not None:
-      payload = json.loads(Path(input_json).read_text(encoding="utf-8"))
-      turn_rows = list(payload.get("eval_turns") or [])
-      manifest_sids = [
-          str(s)
-          for s in (payload.get("session_ids") or [])
-          if s is not None and str(s).strip()
-      ]
-      if not turn_rows and not manifest_sids:
-        raise ValueError(
-            "Session manifest contains no valid session_ids or eval_turns;"
-            " refusing to fall back to default offline fixtures."
-        )
-    if not turn_rows:
-      turn_rows = _default_offline_turn_rows()
-
-    effective_sids = (
-        explicit_sids if explicit_sids is not None else (manifest_sids or None)
+    turn_rows: list[dict[str, Any]] = (
+        list(manifest_turns) if manifest_turns else _default_offline_turn_rows()
     )
     if effective_sids is not None:
       allowed = set(effective_sids)
       turn_rows = [
-          r for r in turn_rows if str(r.get("session_id") or "") in allowed
+          r
+          for r in turn_rows
+          if str(r.get("session_id") or "").strip() in allowed
       ]
       if not turn_rows:
         raise ValueError(
@@ -1502,30 +1574,11 @@ def run_index_and_search(
   else:
     from google.cloud import bigquery
 
-    raw_where_clause = ""
-    if explicit_sids is not None:
-      raw_where_clause = _build_session_raw_where_clause(explicit_sids)
-    elif input_json is not None:
-      payload = json.loads(Path(input_json).read_text(encoding="utf-8"))
-      manifest_sids = [
-          str(s)
-          for s in (payload.get("session_ids") or [])
-          if s is not None and str(s).strip()
-      ]
-      if not manifest_sids:
-        manifest_sids = [
-            str(t["session_id"])
-            for t in (payload.get("eval_turns") or [])
-            if isinstance(t, dict)
-            and t.get("session_id") is not None
-            and str(t.get("session_id")).strip()
-        ]
-      if not manifest_sids:
-        raise ValueError(
-            "Session manifest contains no session_ids; refusing to drop"
-            " session filter and scan entire table."
-        )
-      raw_where_clause = _build_session_raw_where_clause(manifest_sids)
+    raw_where_clause = (
+        _build_session_raw_where_clause(effective_sids)
+        if effective_sids is not None
+        else ""
+    )
 
     client = bq_client or bigquery.Client(project=project_id, location=location)
     existed_owned = assert_demo_table_ownership_or_absent(

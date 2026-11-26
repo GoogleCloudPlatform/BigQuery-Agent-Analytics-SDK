@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 import html
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -29,7 +30,7 @@ DEFAULT_S3_MAX_CHARS = 4800
 _EMBED_TOKEN_LIMIT = 2048
 
 _CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
-_KEY_SEP_RE = re.compile(r"[.\-\s]+")
+_KEY_SEP_RE = re.compile(r"[./\-\s]+")
 _SAFE_DIAGNOSTIC_SCALAR_KEYS = frozenset(
     {
         "auth_error",
@@ -40,6 +41,7 @@ _SAFE_DIAGNOSTIC_SCALAR_KEYS = frozenset(
         "auth_scheme",
         "auth_provider",
         "auth_type",
+        "authentication_result",
         "credential_type",
         "credential_status",
         "credential_error",
@@ -52,6 +54,39 @@ _SAFE_DIAGNOSTIC_SCALAR_KEYS = frozenset(
         "tail_code",
     }
 )
+_SAFE_AUTH_STATUS_VALUES = frozenset(
+    {
+        "failed",
+        "failure",
+        "error",
+        "denied",
+        "rejected",
+        "expired",
+        "invalid",
+        "missing",
+        "required",
+        "timeout",
+        "timed_out",
+        "unauthorized",
+        "unauthenticated",
+        "forbidden",
+        "ok",
+        "success",
+        "succeeded",
+        "passed",
+        "valid",
+        "verified",
+        "enabled",
+        "disabled",
+        "skipped",
+        "none",
+        "null",
+        "true",
+        "false",
+        "pending",
+        "unknown",
+    }
+)
 _SAFE_SCALAR_KEY_SUFFIXES: tuple[str, ...] = (
     "_file",
     "_path",
@@ -59,15 +94,15 @@ _SAFE_SCALAR_KEY_SUFFIXES: tuple[str, ...] = (
     "_filepath",
 )
 _SENSITIVE_KEY_RE = re.compile(
-    r"(?:passwords?(?:$|[_\d])|passwd(?:$|[_\d])|(?:^|_)pwd(?:$|[_\d])|"
+    r"(?:pass_?words?(?:$|[_\d])|passwd(?:$|[_\d])|pwd(?:$|[_\d])|"
     r"passphrase(?:$|[_\d])|client_?secrets?(?:$|[_\d])|"
     r"secret_?keys?(?:$|[_\d])|secret_?access_?keys?(?:$|[_\d])|"
-    r"aws_?secret_?access_?keys?(?:$|[_\d])|(?:^|_)secrets?(?:$|[_\d])|"
+    r"aws_?secret_?access_?keys?(?:$|[_\d])|secrets?(?:$|[_\d])|"
     r"private_?keys?(?:$|[_\d])|api_?keys?(?:$|[_\d])|apikeys?(?:$|[_\d])|"
     r"signing_?keys?(?:$|[_\d])|encryption_?keys?(?:$|[_\d])|"
     r"master_?keys?(?:$|[_\d])|connection_?string(?:$|[_\d])|"
     r"database_?url(?:$|[_\d])|(?:^|_)dsn(?:$|[_\d])|"
-    r"(?:^|_)(?:set_?)?cookie(?:$|_)|(?:^|_)jwt(?:$|[_\d])|"
+    r"(?:set_?)?cookies?(?:$|[_\d])|(?:^|_)jwt(?:$|[_\d])|"
     r"(?:^|_)oauth(?:$|[_\d])|"
     r"(?:auth|access|refresh|id|bearer|session|oauth|csrf|secret|api|github)"
     r"_?tokens?(?:$|[_\d])|^token$|authorization(?:$|[_\d])|"
@@ -75,7 +110,7 @@ _SENSITIVE_KEY_RE = re.compile(
     r"auth_?secrets?(?:$|[_\d])|auth_?codes?(?:$|[_\d])|"
     r"auth_?response_?uri(?:$|[_\d])|auth_?credentials?(?:$|[_\d])|"
     r"(?:^|_)authentications?(?:$|[_\d])|(?:^|_)auth(?:$|[_\d])|"
-    r"(?:^|_)credentials?(?:$|[_\d]))",
+    r"credentials?(?:$|[_\d]))",
     re.IGNORECASE,
 )
 
@@ -115,8 +150,11 @@ _SECRET_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 _KV_CANDIDATE_RE = re.compile(
-    r"""(?:(?P<dq>"[A-Za-z_][A-Za-z0-9_. -]{0,60}")|"""
-    r"""(?P<sq>'[A-Za-z_][A-Za-z0-9_. -]{0,60}')|"""
+    r"""(?:(?P<edq>\\"(?:[A-Za-z_]|\\{1,2}u[0-9a-fA-F]{4})"""
+    r"""(?:[A-Za-z0-9_./ -]|\\{1,2}u[0-9a-fA-F]{4}){0,255}\\")|"""
+    r"""(?P<dq>"(?:[A-Za-z_]|\\u[0-9a-fA-F]{4})"""
+    r"""(?:[A-Za-z0-9_./ -]|\\u[0-9a-fA-F]{4}){0,255}")|"""
+    r"""(?P<sq>'[A-Za-z_][A-Za-z0-9_./ -]{0,255}')|"""
     r"""(?<![A-Za-z0-9_-])(?:--?)?(?P<bare>[A-Za-z_][A-Za-z0-9_-]*))"""
     r"""(?P<conn>[ \t]*[:=]|[ \t]+(?:is|are)(?:[ \t]*:|(?=\s)))""",
     re.IGNORECASE,
@@ -166,6 +204,48 @@ _BARE_VALUE_RE = re.compile(r"""[^\s"',;)}\]]+""")
 def _normalize_key_name(key_name: str) -> str:
   raw = _KEY_SEP_RE.sub("_", str(key_name).strip())
   return _CAMEL_BOUNDARY_RE.sub(r"\1_\2", raw).lower()
+
+
+def _is_numeric_count_scalar(key_name: str, value: Any) -> bool:
+  """Returns True for benign numeric counts on *_count / *_cookies keys."""
+  if not key_name:
+    return False
+  norm = _normalize_key_name(key_name)
+  is_count_key = norm.endswith("_count") or (
+      (norm == "cookies" or norm.endswith("_cookies"))
+      and not norm.endswith("set_cookies")
+  )
+  if not is_count_key:
+    return False
+  if isinstance(value, bool):
+    return False
+  if isinstance(value, int):
+    return True
+  if isinstance(value, float):
+    return math.isfinite(value)
+  if isinstance(value, (bytes, bytearray)):
+    text_val = value.decode("utf-8", errors="replace").strip()
+  elif isinstance(value, str):
+    text_val = value.strip()
+  else:
+    return False
+  return (
+      bool(text_val)
+      and text_val.isascii()
+      and text_val.isdigit()
+      and len(text_val) <= 6
+      and not (len(text_val) > 1 and text_val.startswith("0"))
+  )
+
+
+def _is_safe_auth_status_scalar(key_name: str, value: Any) -> bool:
+  """Returns True for safe status scalars on authentication keys."""
+  if not key_name or not isinstance(value, str):
+    return False
+  norm = _normalize_key_name(key_name)
+  if norm != "authentication" and not norm.endswith("_authentication"):
+    return False
+  return value.strip().lower() in _SAFE_AUTH_STATUS_VALUES
 
 
 def is_sensitive_key(key_name: str, *, is_container: bool = False) -> bool:
@@ -246,9 +326,11 @@ def _scrub_embedded_json_containers(text: str) -> str:
   """Scrubs balanced JSON objects/arrays embedded inside free text safely.
 
   Bounds parsing to depth <= 32, span <= 16 KiB, and <= 32 decoded containers.
-  When any parsing budget or structural limit is exceeded on an embedded
-  container, redacts the remaining unparsed tail conservatively so secrets
-  placed after budget exhaustion never leak.
+  Non-object arrays (such as ``[1]`` or ``[INFO]``) and trivial ``{}`` are
+  skipped without consuming budgets. When any budget or structural limit is
+  reached, JSON decoding stops cleanly and defers the remaining text to
+  linear-time secret rules and KV scrubbing so large ordinary JSON payloads
+  and trailing error codes stay intact while secrets are still redacted.
   """
   if "{" not in text and "[" not in text:
     return text
@@ -265,26 +347,31 @@ def _scrub_embedded_json_containers(text: str) -> str:
           decoded_count >= _MAX_EMBEDDED_JSON_DECODES
           or fail_scanned >= _MAX_EMBEDDED_JSON_FAIL_BUDGET
       ):
-        out.append("[REDACTED]")
+        out.append(text[idx:])
         break
       end_idx, scanned_pos, depth_exceeded = _find_balanced_container_end(
           text, idx, allow_single_quotes=False
       )
-      if depth_exceeded or (
-          end_idx is None and (scanned_pos - idx) >= _MAX_EMBEDDED_JSON_SPAN
-      ):
-        out.append("[REDACTED]")
-        break
-      if end_idx is None:
+      if depth_exceeded or end_idx is None:
         fail_scanned += scanned_pos - idx
+        if fail_scanned >= _MAX_EMBEDDED_JSON_FAIL_BUDGET:
+          out.append(text[idx:])
+          break
         out.append(ch)
         idx += 1
         continue
       snippet = text[idx:end_idx]
+      if snippet == "{}" or (ch == "[" and "{" not in snippet):
+        out.append(snippet)
+        idx = end_idx
+        continue
       try:
         parsed, local_end = decoder.raw_decode(snippet, 0)
       except (json.JSONDecodeError, RecursionError, ValueError):
         fail_scanned += len(snippet)
+        if fail_scanned >= _MAX_EMBEDDED_JSON_FAIL_BUDGET:
+          out.append(text[idx:])
+          break
         out.append(ch)
         idx += 1
         continue
@@ -413,27 +500,66 @@ def _preceding_same_line_word(
   return text[word_start:word_end], word_start
 
 
-def _is_matched_kv_sensitive(
-    text: str, match: re.Match[str], *, is_container: bool
-) -> bool:
-  """Classifies a candidate KV regex match dynamically via is_sensitive_key."""
+def _decode_quoted_kv_key(quoted_key: str) -> str:
+  """Decodes a double-quoted KV key, handling ``\\uXXXX`` JSON escapes."""
+  if "\\u" in quoted_key:
+    try:
+      decoded = json.loads(quoted_key)
+      if isinstance(decoded, str):
+        return decoded
+    except ValueError:
+      pass
+  return quoted_key[1:-1]
+
+
+def _decode_escaped_quoted_kv_key(escaped_key: str) -> str:
+  """Decodes an escaped double-quoted KV key, handling ``\\uXXXX`` escapes."""
+  inner = escaped_key[2:-2]
+  if "\\\\u" in inner:
+    inner = inner.replace("\\\\u", "\\u")
+  if "\\u" in inner:
+    try:
+      decoded = json.loads(f'"{inner}"')
+      if isinstance(decoded, str):
+        return decoded
+    except ValueError:
+      pass
+  return inner
+
+
+def _extract_matched_kv_key(
+    text: str, match: re.Match[str], *, is_container: bool = False
+) -> str | None:
+  """Returns the matched sensitive key/phrase, or ``None`` if non-sensitive."""
+  edq = match.group("edq")
   dq = match.group("dq")
   sq = match.group("sq")
+  if edq is not None:
+    raw_key = _decode_escaped_quoted_kv_key(edq)
+    if is_sensitive_key(raw_key, is_container=is_container):
+      return raw_key
+    return None
   if dq is not None:
-    return is_sensitive_key(dq[1:-1], is_container=is_container)
+    raw_key = _decode_quoted_kv_key(dq)
+    if is_sensitive_key(raw_key, is_container=is_container):
+      return raw_key
+    return None
   if sq is not None:
-    return is_sensitive_key(sq[1:-1], is_container=is_container)
+    raw_key = sq[1:-1]
+    if is_sensitive_key(raw_key, is_container=is_container):
+      return raw_key
+    return None
 
   bare = match.group("bare") or ""
   lower_bare = bare.lower()
   if lower_bare == "token" and not is_container:
     prev = _preceding_same_line_word(text, match.start())
     if prev is not None and prev[0].lower() in _SAFE_TOKEN_PREFIX_WORDS:
-      return False
+      return None
   if is_sensitive_key(bare, is_container=is_container):
-    return True
+    return bare
   if lower_bare not in _MULTIWORD_KEY_TAIL_WORDS:
-    return False
+    return None
 
   # Allow 2-to-4 word natural-language phrases (e.g. "api key",
   # "connection string", "aws secret access key") on the same line.
@@ -450,10 +576,36 @@ def _is_matched_kv_sensitive(
         norm in _SAFE_DIAGNOSTIC_SCALAR_KEYS
         or norm.endswith(_SAFE_SCALAR_KEY_SUFFIXES)
     ):
-      return False
+      return None
     if is_sensitive_key(phrase, is_container=is_container):
-      return True
-  return False
+      return phrase
+  return None
+
+
+def _is_matched_kv_sensitive(
+    text: str, match: re.Match[str], *, is_container: bool
+) -> bool:
+  """Classifies a candidate KV regex match dynamically via is_sensitive_key."""
+  return (
+      _extract_matched_kv_key(text, match, is_container=is_container)
+      is not None
+  )
+
+
+def _strip_matching_quotes(raw_val: str) -> str:
+  """Strips matching outer quotes (or escaped quotes) from a scalar string."""
+  if (
+      len(raw_val) >= 2
+      and raw_val[0] == raw_val[-1]
+      and raw_val[0] in ('"', "'")
+  ):
+    return raw_val[1:-1]
+  if len(raw_val) >= 4 and (
+      (raw_val.startswith('\\"') and raw_val.endswith('\\"'))
+      or (raw_val.startswith("\\'") and raw_val.endswith("\\'"))
+  ):
+    return raw_val[2:-2]
+  return raw_val
 
 
 def _scrub_sensitive_kv_in_text(text: str) -> str:
@@ -466,33 +618,59 @@ def _scrub_sensitive_kv_in_text(text: str) -> str:
     if match is None:
       out.append(text[idx:])
       break
-    pos = match.end()
-    same_line_pos = pos
-    while same_line_pos < n and text[same_line_pos] in (" ", "\t"):
-      same_line_pos += 1
-    any_ws_pos = same_line_pos
-    while any_ws_pos < n and text[any_ws_pos].isspace():
-      any_ws_pos += 1
-    if any_ws_pos < n and (
-        text[any_ws_pos] in ("{", "[", "(", '"', "'")
-        or text.startswith('\\"', any_ws_pos)
-        or text.startswith("\\'", any_ws_pos)
-    ):
-      val_start = any_ws_pos
-    else:
-      val_start = same_line_pos
+    val_start = match.end()
+    while val_start < n and text[val_start].isspace():
+      val_start += 1
     next_char = text[val_start] if val_start < n else ""
     is_container = next_char in ("{", "[", "(")
-    if not _is_matched_kv_sensitive(text, match, is_container=is_container):
+    matched_key = _extract_matched_kv_key(
+        text, match, is_container=is_container
+    )
+    if matched_key is None:
       out.append(text[idx : match.end()])
       idx = match.end()
       continue
+    ws_span = text[match.end() : val_start]
+    if ws_span.count("\n") >= 2:
+      out.append(text[idx : match.end()])
+      idx = match.end()
+      continue
+    if (
+        "\n" in ws_span
+        and next_char not in ("{", "[", "(", '"', "'")
+        and not text.startswith(('\\"', "\\'"), val_start)
+    ):
+      next_kv = _KV_CANDIDATE_RE.match(text, val_start)
+      if next_kv is not None:
+        next_val_start = next_kv.end()
+        while next_val_start < n and text[next_val_start].isspace():
+          next_val_start += 1
+        next_is_container = next_val_start < n and text[next_val_start] in (
+            "{",
+            "[",
+            "(",
+        )
+        if _is_matched_kv_sensitive(
+            text, next_kv, is_container=next_is_container
+        ):
+          out.append(text[idx : match.end()])
+          idx = match.end()
+          continue
     consumed = _consume_sensitive_kv_value(text, val_start)
     if consumed is None:
       out.append(text[idx : match.end()])
       idx = match.end()
       continue
     val_end, replacement = consumed
+    if not is_container:
+      raw_val = text[val_start:val_end].strip()
+      unquoted_val = _strip_matching_quotes(raw_val)
+      if _is_numeric_count_scalar(
+          matched_key, unquoted_val
+      ) or _is_safe_auth_status_scalar(matched_key, unquoted_val):
+        out.append(text[idx:val_end])
+        idx = val_end
+        continue
     out.append(text[idx:val_start])
     out.append(replacement)
     idx = val_end
@@ -522,6 +700,11 @@ def scrub_sensitive_data(value: Any, *, key_name: str = "") -> Any:
       and value is not None
       and not isinstance(value, bool)
   ):
+    if not is_container and (
+        _is_numeric_count_scalar(key_name, value)
+        or _is_safe_auth_status_scalar(key_name, value)
+    ):
+      return value
     if isinstance(value, (bytes, bytearray)):
       text_val = value.decode("utf-8", errors="replace")
       return "[REDACTED]" if text_val.strip() else ""

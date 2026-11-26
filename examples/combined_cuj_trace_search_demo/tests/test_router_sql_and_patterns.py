@@ -3140,16 +3140,32 @@ def test_issue608_manifest_staging_reservation_mixed_session_and_lazy_hydration(
       job.result.return_value = []
     return job
 
+  created_tables: dict[str, object] = {}
+  create_attempts = {"n": 0}
+
+  def _create_stage_with_retry(tbl, exists_ok=False):
+    del exists_ok
+    create_attempts["n"] += 1
+    if create_attempts["n"] == 1:
+      raise _Conflict("collision")
+    fqn = f"{tbl.project}.{tbl.dataset_id}.{tbl.table_id}"
+    created_tables[fqn] = tbl
+    return tbl
+
   retry_client = MagicMock()
   retry_client.query.side_effect = _pop_fetch_query
-  retry_client.create_table.side_effect = [_Conflict("collision"), None]
+  retry_client.create_table.side_effect = _create_stage_with_retry
+  retry_client.get_table.side_effect = lambda fqn: created_tables[fqn]
   populated = populate_trajectories_in_bigquery(
       retry_client, project_id="demo-proj", dataset_id="agent_ops"
   )
   assert populated == 1
   assert retry_client.create_table.call_count == 2
   reserved_tbl = retry_client.create_table.call_args_list[1].args[0]
-  assert reserved_tbl.labels == {"bqaa_demo": "combined_cuj_trace_search"}
+  assert reserved_tbl.labels["bqaa_demo"] == "combined_cuj_trace_search"
+  assert re.fullmatch(
+      r"[0-9a-f]{16}", reserved_tbl.labels["bqaa_demo_stage_token"]
+  )
   assert (
       retry_client.create_table.call_args_list[1].kwargs["exists_ok"] is False
   )
@@ -3467,3 +3483,277 @@ def test_offline_mode_honors_session_ids_and_manifest_sids_fail_closed(
   ]
   assert matched_hits
   assert all(hit["session_id"] == subset_sid for hit in matched_hits)
+
+
+def test_manifest_validation_with_explicit_sids_staging_token_and_503_guard(
+    tmp_path: Path,
+):
+  from analytics.index_and_search import populate_trajectories_in_bigquery  # noqa: PLC0415
+  from analytics.table_guard import _extract_http_status_code  # noqa: PLC0415
+  from analytics.table_guard import _is_bq_conflict_error  # noqa: PLC0415
+  from analytics.table_guard import _is_bq_not_found_error  # noqa: PLC0415
+  from analytics.table_guard import assert_demo_table_ownership_or_absent  # noqa: PLC0415
+
+  # 1. Explicit session_ids must NOT skip validating an empty input_json
+  #    manifest in either live or offline mode, and must run before any BQ SQL.
+  no_sql_client = MagicMock()
+  empty_manifest = tmp_path / "empty_manifest.json"
+  empty_manifest.write_text(json.dumps({"session_ids": []}), encoding="utf-8")
+
+  with pytest.raises(ValueError, match="no session_ids"):
+    run_index_and_search(
+        project_id="demo-proj",
+        dataset_id="agent_ops",
+        input_json=empty_manifest,
+        session_ids=["s1"],
+        output_json=tmp_path / "live_empty_with_sids.json",
+        offline=False,
+        bq_client=no_sql_client,
+        router=QueryRouter(backend="offline", offline=True),
+    )
+  no_sql_client.query.assert_not_called()
+
+  with pytest.raises(ValueError, match="no valid session_ids or eval_turns"):
+    run_index_and_search(
+        input_json=empty_manifest,
+        session_ids=["s1"],
+        output_json=tmp_path / "offline_empty_with_sids.json",
+        offline=True,
+    )
+
+  # Non-object JSON manifest also fails closed before BQ SQL.
+  list_manifest = tmp_path / "list_manifest.json"
+  list_manifest.write_text(json.dumps(["s1"]), encoding="utf-8")
+  with pytest.raises(ValueError, match="JSON object"):
+    run_index_and_search(
+        project_id="demo-proj",
+        dataset_id="agent_ops",
+        input_json=list_manifest,
+        session_ids=["s1"],
+        output_json=tmp_path / "live_list_manifest.json",
+        offline=False,
+        bq_client=no_sql_client,
+        router=QueryRouter(backend="offline", offline=True),
+    )
+  no_sql_client.query.assert_not_called()
+
+  # 2. Disjoint explicit session_ids vs manifest fails closed before BQ SQL;
+  #    overlapping session_ids succeeds scoped to the intersection.
+  sample_turns = _sample_turn_rows()
+  s1_turn = dict(sample_turns[0])
+  s1_turn["session_id"] = "s1"
+  manifest_s1 = tmp_path / "manifest_s1.json"
+  manifest_s1.write_text(
+      json.dumps({"session_ids": ["s1"], "eval_turns": [s1_turn]}),
+      encoding="utf-8",
+  )
+
+  with pytest.raises(ValueError, match="did not match any session_id"):
+    run_index_and_search(
+        project_id="demo-proj",
+        dataset_id="agent_ops",
+        input_json=manifest_s1,
+        session_ids=["s2"],
+        output_json=tmp_path / "live_disjoint.json",
+        offline=False,
+        bq_client=no_sql_client,
+        router=QueryRouter(backend="offline", offline=True),
+    )
+  no_sql_client.query.assert_not_called()
+
+  with pytest.raises(ValueError, match="did not match any session_id"):
+    run_index_and_search(
+        input_json=manifest_s1,
+        session_ids=["s2"],
+        output_json=tmp_path / "offline_disjoint.json",
+        offline=True,
+    )
+
+  offline_scoped = run_index_and_search(
+      input_json=manifest_s1,
+      session_ids=["s1"],
+      output_json=tmp_path / "offline_s1.json",
+      offline=True,
+  )
+  assert offline_scoped["index_status"]["row_count"] == 1
+  for q in offline_scoped["queries"]:
+    for hit in q["step1_hits"]:
+      assert hit["session_id"] == "s1"
+
+  executed_live_sqls: list[str] = []
+
+  def _scoped_live_sql(sql_text, job_config=None):
+    del job_config
+    executed_live_sqls.append(sql_text)
+    job = MagicMock()
+    job.total_bytes_processed = 128
+    job.slot_millis = 2
+    job._properties = {"statistics": {"query": {}}}
+    if "COUNT(*)" in sql_text:
+      job.result.return_value = [{"row_count": 1, "ready": 1}]
+    elif "WHERE _ai_index_trajectory IS NULL" in sql_text:
+      job.result.return_value = []
+    elif "AI.GENERATE(" in sql_text:
+      job.result.return_value = []
+    else:
+      job.result.return_value = [
+          {
+              "session_id": "s1",
+              "invocation_id": "inv_s1",
+              "turn_index": 0,
+              "root_agent": "support_agent",
+              "has_error": True,
+              "turn_latency_ms": 100,
+              "_ai_index_trajectory": "CARD_EXPIRED",
+          }
+      ]
+    return job
+
+  live_s1_client = MagicMock()
+  live_s1_client.query.side_effect = _scoped_live_sql
+  live_s1_client.get_table.return_value = SimpleNamespace(
+      num_bytes=512, labels={"bqaa_demo": "combined_cuj_trace_search"}
+  )
+  live_scoped = run_index_and_search(
+      project_id="demo-proj",
+      dataset_id="agent_ops",
+      input_json=manifest_s1,
+      session_ids=["s1", "s_other"],
+      output_json=tmp_path / "live_s1.json",
+      embed_wait_seconds=0,
+      offline=False,
+      bq_client=live_s1_client,
+      router=QueryRouter(backend="offline", offline=True),
+  )
+  assert live_scoped["index_status"]["row_count"] == 1
+  assert any("session_id IN ('s1')" in s for s in executed_live_sqls)
+  assert not any("s_other" in s for s in executed_live_sqls)
+
+  # 3. Staging cleanup must NOT delete stage_fqn if another producer replaced it
+  #    (either unowned / missing label OR mismatched bqaa_demo_stage_token).
+  def _stage_fetch_query(sql_text, job_config=None):
+    del job_config
+    job = MagicMock()
+    if "WHERE _ai_index_trajectory IS NULL" in sql_text:
+      job.result.return_value = [
+          {
+              "session_id": "s1",
+              "invocation_id": "i1",
+              "root_agent": "a",
+              "has_error": False,
+              "tool_call_count": 0,
+              "tool_error_count": 0,
+              "has_tool_loop": False,
+              "turn_latency_ms": 10,
+              "error_summary": "",
+              "trace": {},
+          }
+      ]
+    else:
+      job.result.return_value = []
+    return job
+
+  for replacement_labels in (
+      {},
+      {"env": "prod"},
+      {
+          "bqaa_demo": "combined_cuj_trace_search",
+          "bqaa_demo_stage_token": "otherproducer123",
+      },
+  ):
+    replaced_client = MagicMock()
+    replaced_client.query.side_effect = _stage_fetch_query
+    replaced_client.load_table_from_json.side_effect = RuntimeError(
+        "load failed after table replaced"
+    )
+    replaced_client.get_table.return_value = SimpleNamespace(
+        labels=replacement_labels
+    )
+    with pytest.raises(RuntimeError, match="load failed after table replaced"):
+      populate_trajectories_in_bigquery(
+          replaced_client, project_id="demo-proj", dataset_id="agent_ops"
+      )
+    replaced_client.delete_table.assert_not_called()
+
+  # 4. NotFound/Conflict carrying HTTP 503 on response.status_code fail closed
+  #    even when class attribute code == 404 / 409.
+  class NotFoundWithClassCode(Exception):
+    code = 404
+
+    def __init__(self, message: str, *, response: object = None) -> None:
+      super().__init__(message)
+      self.response = response
+
+  class ConflictWithClassCode(Exception):
+    code = 409
+
+    def __init__(self, message: str, *, response: object = None) -> None:
+      super().__init__(message)
+      self.response = response
+
+  nf_503 = NotFoundWithClassCode(
+      "upstream 503", response=SimpleNamespace(status_code=503)
+  )
+  cf_503 = ConflictWithClassCode(
+      "upstream 503", response=SimpleNamespace(status_code=503)
+  )
+  assert _extract_http_status_code(nf_503) == 503
+  assert _is_bq_not_found_error(nf_503) is False
+  assert _is_bq_conflict_error(cf_503) is False
+
+  client_nf_503 = MagicMock()
+  client_nf_503.get_table.side_effect = nf_503
+  with pytest.raises(NotFoundWithClassCode):
+    assert_demo_table_ownership_or_absent(
+        client_nf_503, "demo-proj", "agent_ops", "eval_turns"
+    )
+
+  try:
+    from google.api_core.exceptions import NotFound as ApiCoreNotFound  # noqa: PLC0415
+
+    api_nf_503 = ApiCoreNotFound(
+        "upstream 503", response=SimpleNamespace(status_code=503)
+    )
+    assert _extract_http_status_code(api_nf_503) == 503
+    assert _is_bq_not_found_error(api_nf_503) is False
+    client_api_503 = MagicMock()
+    client_api_503.get_table.side_effect = api_nf_503
+    with pytest.raises(ApiCoreNotFound):
+      assert_demo_table_ownership_or_absent(
+          client_api_503, "demo-proj", "agent_ops", "eval_turns"
+      )
+  except ImportError:
+    pass
+
+
+def test_manifest_non_array_session_ids_and_eval_turns_raise_type_error(
+    tmp_path: Path,
+):
+  no_sql_client = MagicMock()
+  bad_cases = (
+      ("bare_str_sids.json", {"session_ids": "sess_1"}, "session_ids"),
+      ("empty_str_sids.json", {"session_ids": ""}, "session_ids"),
+      ("bare_str_turns.json", {"eval_turns": "not_a_list"}, "eval_turns"),
+  )
+  for filename, payload, expected_field in bad_cases:
+    manifest_path = tmp_path / filename
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(TypeError, match=expected_field):
+      run_index_and_search(
+          project_id="demo-proj",
+          dataset_id="agent_ops",
+          input_json=manifest_path,
+          output_json=tmp_path / f"live_{filename}",
+          offline=False,
+          bq_client=no_sql_client,
+          router=QueryRouter(backend="offline", offline=True),
+      )
+    no_sql_client.query.assert_not_called()
+
+    with pytest.raises(TypeError, match=expected_field):
+      run_index_and_search(
+          input_json=manifest_path,
+          output_json=tmp_path / f"offline_{filename}",
+          offline=True,
+      )

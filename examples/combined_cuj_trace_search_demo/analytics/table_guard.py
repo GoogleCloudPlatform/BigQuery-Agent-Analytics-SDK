@@ -23,20 +23,33 @@ DEMO_OWNERSHIP_LABEL_KEY = "bqaa_demo"
 DEMO_OWNERSHIP_LABEL_VALUE = "combined_cuj_trace_search"
 
 
-def _extract_http_status_code(exc: Exception) -> int | None:
-  """Returns an integer HTTP status code from ``exc`` if present."""
-  for attr in ("code", "status_code"):
+def _extract_http_status_codes(exc: Exception) -> list[int]:
+  """Collects integer HTTP status codes from response and exception attrs."""
+  codes: list[int] = []
+  response = getattr(exc, "response", None)
+  if response is not None:
+    for attr in ("status_code", "status", "code"):
+      val = getattr(response, attr, None)
+      if isinstance(val, int) and not isinstance(val, bool):
+        codes.append(val)
+  for attr in ("status_code", "code"):
     val = getattr(exc, attr, None)
     if isinstance(val, int) and not isinstance(val, bool):
-      return val
-  return None
+      codes.append(val)
+  return codes
+
+
+def _extract_http_status_code(exc: Exception) -> int | None:
+  """Returns an integer HTTP status code from ``exc`` if present."""
+  codes = _extract_http_status_codes(exc)
+  return codes[0] if codes else None
 
 
 def _is_bq_not_found_error(exc: Exception) -> bool:
   """Returns True only for a confirmed BigQuery 404 NotFound error."""
-  status_code = _extract_http_status_code(exc)
-  if status_code is not None:
-    return status_code == 404
+  codes = _extract_http_status_codes(exc)
+  if codes:
+    return all(code == 404 for code in codes)
   try:
     from google.api_core.exceptions import NotFound  # noqa: PLC0415
 
@@ -49,9 +62,9 @@ def _is_bq_not_found_error(exc: Exception) -> bool:
 
 def _is_bq_conflict_error(exc: Exception) -> bool:
   """Returns True only for a confirmed BigQuery 409 Conflict error."""
-  status_code = _extract_http_status_code(exc)
-  if status_code is not None:
-    return status_code == 409
+  codes = _extract_http_status_codes(exc)
+  if codes:
+    return all(code == 409 for code in codes)
   try:
     from google.api_core.exceptions import Conflict  # noqa: PLC0415
 
