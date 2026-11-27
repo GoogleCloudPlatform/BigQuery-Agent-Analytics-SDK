@@ -27,7 +27,8 @@ the real GAPIC client accepts, so neither GCP credentials nor
 * Naming: kind-prefixed names, sanitization, category/term pairs that
   normalize alike, same-kind hash-suffixed collisions.
 * Records: repeated pages, conflicting records, malformed records.
-* API orchestration: request shape, canonical names, error wrapping,
+* API orchestration: request shape, canonical names and the verified
+  project pair, error wrapping, pages with unreachable locations,
   missing dependency, lazy client construction.
 * YAML: quoting, multiline / Unicode round-trips, byte-identical output
   and ``compile_fingerprint`` across shuffled and repeated pages.
@@ -129,11 +130,39 @@ def _term(term_id: str, **kwargs: Any) -> FakeConcept:
   return FakeConcept(name=_term_name(term_id), **kwargs)
 
 
+@dataclasses.dataclass
+class FakePage:
+  """A ``List...Response`` page, as a GAPIC pager's ``pages`` yields it."""
+
+  categories: list = dataclasses.field(default_factory=list)
+  terms: list = dataclasses.field(default_factory=list)
+  unreachable_locations: list = dataclasses.field(default_factory=list)
+
+
+class FakePager:
+  """A GAPIC-style pager: ``pages`` yields the responses lazily, while
+  iterating the pager yields only items (and so hides
+  ``unreachable_locations``)."""
+
+  def __init__(self, pages: list[FakePage], items_attr: str) -> None:
+    self._pages = pages
+    self._items_attr = items_attr
+
+  @property
+  def pages(self):
+    yield from self._pages
+
+  def __iter__(self):
+    for page in self.pages:
+      yield from getattr(page, self._items_attr)
+
+
 class FakeGlossaryClient:
   """In-memory ``BusinessGlossaryServiceClient``.
 
   List calls return a lazy generator over pre-built pages, like a GAPIC
-  pager, so a test can shuffle, repeat, or break pages.
+  pager, so a test can shuffle, repeat, or break pages. Pages given as
+  :class:`FakePage` objects come back as a :class:`FakePager` instead.
   """
 
   def __init__(
@@ -142,8 +171,8 @@ class FakeGlossaryClient:
       glossary: FakeGlossary | None = None,
       categories: list | tuple = (),
       terms: list | tuple = (),
-      category_pages: list[list[Any]] | None = None,
-      term_pages: list[list[Any]] | None = None,
+      category_pages: list[Any] | None = None,
+      term_pages: list[Any] | None = None,
       errors: dict[str, Exception] | None = None,
   ) -> None:
     self.glossary = glossary or FakeGlossary()
@@ -160,9 +189,10 @@ class FakeGlossaryClient:
       raise self.errors[method]
 
   @staticmethod
-  def _pager(pages):
-    for page in pages:
-      yield from page
+  def _pager(pages, items_attr):
+    if any(isinstance(page, FakePage) for page in pages):
+      return FakePager(pages, items_attr)
+    return (item for page in pages for item in page)
 
   def get_glossary(self, request=None, **kwargs):
     self._record("get_glossary", request)
@@ -170,11 +200,11 @@ class FakeGlossaryClient:
 
   def list_glossary_categories(self, request=None, **kwargs):
     self._record("list_glossary_categories", request)
-    return self._pager(self.category_pages)
+    return self._pager(self.category_pages, "categories")
 
   def list_glossary_terms(self, request=None, **kwargs):
     self._record("list_glossary_terms", request)
-    return self._pager(self.term_pages)
+    return self._pager(self.term_pages, "terms")
 
 
 class PermissionDenied(Exception):
@@ -478,9 +508,9 @@ def test_relationships_are_sorted_by_child_whatever_the_input_order():
   ]
 
 
-def test_parents_written_with_project_id_match_a_project_number_glossary():
-  """A parent may name the project by ID while the canonical glossary and
-  resource names use its number (or the other way round)."""
+def test_project_alias_admits_the_other_form_of_the_glossary_project():
+  """With a verified pair, records and parents may name the glossary's
+  project by ID or by number."""
   glossary = FakeGlossary(name=_GLOSSARY_BY_NUMBER)
   ontology = load_ontology_from_string(
       _map(
@@ -501,6 +531,7 @@ def test_parents_written_with_project_id_match_a_project_number_glossary():
               ),
           ],
           glossary=glossary,
+          project_alias=_PROJECT,
       )[0]
   )
 
@@ -515,6 +546,60 @@ def test_parents_written_with_project_id_match_a_project_number_glossary():
   # The resource name is kept exactly as returned.
   assert _entity(ontology, "term_visit").annotations["dataplex:resource"] == (
       _term_name("visit", _GLOSSARY)
+  )
+
+
+def test_without_project_alias_the_other_form_is_another_project():
+  """An ID and a number can't be compared offline, so without a verified
+  pair they never match; the error and the summary say how to pair them."""
+  with pytest.raises(ValueError, match="does not belong to glossary") as info:
+    _map(
+        terms=[FakeConcept(name=_term_name("visit", _GLOSSARY))],
+        glossary=FakeGlossary(name=_GLOSSARY_BY_NUMBER),
+    )
+  assert f"import {_GLOSSARY} instead" in str(info.value)
+
+  yaml_text, summary = _map(
+      categories=[
+          FakeConcept(
+              name=_category_name("customer", _GLOSSARY_BY_NUMBER),
+              parent=_GLOSSARY,
+          )
+      ],
+      terms=[
+          FakeConcept(
+              name=_term_name("buyer", _GLOSSARY_BY_NUMBER),
+              parent=_category_name("customer", _GLOSSARY),
+          ),
+          FakeConcept(
+              name=_term_name("ghost", _GLOSSARY_BY_NUMBER),
+              parent=_category_name("missing", _GLOSSARY),
+          ),
+      ],
+      glossary=FakeGlossary(name=_GLOSSARY_BY_NUMBER),
+  )
+  ontology = load_ontology_from_string(yaml_text)
+
+  assert ontology.relationships == []
+  expected_orphans = {
+      "category_customer": _GLOSSARY,
+      "term_buyer": _category_name("customer", _GLOSSARY),
+      "term_ghost": _category_name("missing", _GLOSSARY),
+  }
+  for name, parent in expected_orphans.items():
+    annotations = _entity(ontology, name).annotations
+    assert annotations["dataplex:orphan_parent"] == parent
+    assert "skos:topConceptOf" not in annotations
+  lines = summary.splitlines()
+  assert (
+      "Orphan parents (entity kept in the scheme without a broader edge; "
+      "parent kept as dataplex:orphan_parent): 3" in lines
+  )
+  # ``missing`` is no category of this glossary, so pairing wouldn't help.
+  assert (
+      "Orphan parents naming this glossary under an unverified project ID "
+      "or number (if it is the same project, import the glossary by that "
+      "form to pair them): 2" in lines
   )
 
 
@@ -556,8 +641,8 @@ def test_orphan_parents_are_preserved_and_reported():
   )
 
 
-# Two different project IDs, or two different project numbers, are two
-# projects; only an ID paired with a number is accepted as one project.
+# Two different project IDs, or two different project numbers, are always
+# two projects (an ID and a number match only through ``project_alias``).
 _OTHER_PROJECT_PAIRS = pytest.mark.parametrize(
     "glossary_project, other_project",
     [("proj-a", "proj-b"), ("111111", "222222")],
@@ -684,20 +769,152 @@ def test_records_from_another_location_are_rejected(kind, collection):
 
 
 @pytest.mark.parametrize(
-    "project_a, project_b, same",
+    "glossary_project, project_alias, expected",
     [
-        ("demo-project", "demo-project", True),
-        ("123456789012", "123456789012", True),
-        ("demo-project", "123456789012", True),
-        ("123456789012", "demo-project", True),
-        ("proj-a", "proj-b", False),
-        ("111111", "222222", False),
+        ("demo-project", None, {"demo-project"}),
+        ("123456789012", None, {"123456789012"}),
+        ("demo-project", "demo-project", {"demo-project"}),
+        ("demo-project", "123456789012", {"demo-project", "123456789012"}),
+        ("123456789012", "demo-project", {"demo-project", "123456789012"}),
+        (
+            "example.com:demo",
+            "123456789012",
+            {"example.com:demo", "123456789012"},
+        ),
     ],
 )
-def test_an_id_and_a_number_are_one_project_but_two_of_a_kind_are_not(
-    project_a, project_b, same
+def test_projects_match_exactly_unless_a_verified_alias_is_given(
+    glossary_project, project_alias, expected
 ):
-  assert importer._same_project(project_a, project_b) is same
+  glossary = importer._parse_glossary_name(_glossary_in(glossary_project))
+
+  assert importer._allowed_projects(glossary, project_alias) == expected
+
+
+@pytest.mark.parametrize(
+    "glossary_name, project_alias",
+    [
+        (_GLOSSARY, "project-b"),  # Two different project IDs.
+        (_GLOSSARY_BY_NUMBER, "999999999999"),  # Two different numbers.
+        (_GLOSSARY, ""),
+        (_GLOSSARY, "bad!project"),
+        (_GLOSSARY, " 123456789012"),
+        (_GLOSSARY, 123456789012),
+    ],
+)
+def test_invalid_project_alias_is_rejected(glossary_name, project_alias):
+  with pytest.raises(ValueError, match="project_alias"):
+    _map(
+        terms=[FakeConcept(name=_term_name("t1", glossary_name))],
+        glossary=FakeGlossary(name=glossary_name),
+        project_alias=project_alias,
+    )
+
+
+@pytest.mark.parametrize("third_project", ["project-b", "999999999999"])
+def test_project_alias_still_rejects_records_from_a_third_project(
+    third_project,
+):
+  record = FakeConcept(name=_term_name("t1", _glossary_in(third_project)))
+
+  with pytest.raises(ValueError, match="does not belong to glossary") as info:
+    _map(
+        terms=[record],
+        glossary=FakeGlossary(name=_GLOSSARY_BY_NUMBER),
+        project_alias=_PROJECT,
+    )
+  # Both forms of the glossary's project are known, so no pairing hint.
+  assert "instead" not in str(info.value)
+
+
+@pytest.mark.parametrize("third_project", ["project-b", "999999999999"])
+def test_project_alias_still_orphans_parents_in_a_third_project(
+    third_project,
+):
+  other_glossary = _glossary_in(third_project)
+  other_customer = _category_name("customer", other_glossary)
+  yaml_text, summary = _map(
+      categories=[
+          FakeConcept(
+              name=_category_name("customer", _GLOSSARY_BY_NUMBER),
+              parent=_GLOSSARY,
+          )
+      ],
+      terms=[
+          FakeConcept(
+              name=_term_name("t1", _GLOSSARY_BY_NUMBER), parent=other_glossary
+          ),
+          FakeConcept(
+              name=_term_name("t2", _GLOSSARY_BY_NUMBER), parent=other_customer
+          ),
+      ],
+      glossary=FakeGlossary(name=_GLOSSARY_BY_NUMBER),
+      project_alias=_PROJECT,
+  )
+  ontology = load_ontology_from_string(yaml_text)
+
+  customer = _entity(ontology, "category_customer").annotations
+  assert customer["skos:topConceptOf"] == _GLOSSARY_BY_NUMBER
+  assert ontology.relationships == []
+  for name, parent in {
+      "term_t1": other_glossary,
+      "term_t2": other_customer,
+  }.items():
+    assert _entity(ontology, name).annotations["dataplex:orphan_parent"] == (
+        parent
+    )
+  lines = summary.splitlines()
+  assert (
+      "Orphan parents (entity kept in the scheme without a broader edge; "
+      "parent kept as dataplex:orphan_parent): 2" in lines
+  )
+  assert not any("unverified project" in line for line in lines)
+
+
+# A glossary named by project ID must not absorb records that name an
+# unrelated project number, whatever the ID is.
+@pytest.mark.parametrize("glossary_project", ["project-a", "project-b"])
+def test_record_in_an_unrelated_project_number_is_rejected(glossary_project):
+  foreign_glossary = _glossary_in(_PROJECT_NUMBER)
+  record = FakeConcept(
+      name=_term_name("foreign", foreign_glossary), parent=foreign_glossary
+  )
+
+  with pytest.raises(ValueError, match="does not belong to glossary"):
+    _map(
+        terms=[record],
+        glossary=FakeGlossary(name=_glossary_in(glossary_project)),
+    )
+
+
+@pytest.mark.parametrize("glossary_project", ["project-a", "project-b"])
+def test_parent_in_an_unrelated_project_number_stays_an_orphan(
+    glossary_project,
+):
+  glossary = _glossary_in(glossary_project)
+  foreign_customer = _category_name("customer", _glossary_in(_PROJECT_NUMBER))
+  yaml_text, summary = _map(
+      categories=[
+          FakeConcept(
+              name=_category_name("customer", glossary), parent=glossary
+          )
+      ],
+      terms=[
+          FakeConcept(
+              name=_term_name("churn", glossary), parent=foreign_customer
+          )
+      ],
+      glossary=FakeGlossary(name=glossary),
+  )
+  ontology = load_ontology_from_string(yaml_text)
+
+  assert ontology.relationships == []
+  annotations = _entity(ontology, "term_churn").annotations
+  assert annotations["dataplex:orphan_parent"] == foreign_customer
+  assert any(
+      line.startswith("Orphan parents naming this glossary under an unverified")
+      for line in summary.splitlines()
+  )
 
 
 def test_term_under_a_category_with_the_same_id():
@@ -800,6 +1017,44 @@ def test_hash_suffixes_never_steal_a_natural_name():
   }
 
 
+def test_hash_suffix_falls_back_to_a_counter_when_every_length_is_taken():
+  """Natural IDs can hold every suffix length from 8 to 64 hex digits; the
+  colliding pair then gets the full digest plus ``_2``, in any order."""
+  digest_ab = hashlib.sha256(b"a-b").hexdigest()
+  digest_a_b = hashlib.sha256(b"a_b").hexdigest()
+  squatters = [_term(f"a_b_{digest_ab[:n]}") for n in range(8, 65)]
+  assert len(squatters) == 57
+
+  outputs = set()
+  for seed in range(4):
+    terms = squatters + [_term("a-b"), _term("a_b")]
+    random.Random(seed).shuffle(terms)
+    outputs.add(_map(terms=terms)[0])
+
+  assert len(outputs) == 1
+  notations = _notations(load_ontology_from_string(outputs.pop()))
+  names = {raw_id: name for name, raw_id in notations.items()}
+  assert names["a-b"] == f"term_a_b_{digest_ab}_2"
+  assert names["a_b"] == f"term_a_b_{digest_a_b}_2"
+  for n in range(8, 65):
+    assert names[f"a_b_{digest_ab[:n]}"] == f"term_a_b_{digest_ab[:n]}"
+
+
+def test_counter_skips_names_that_are_already_taken():
+  digest_ab = hashlib.sha256(b"a-b").hexdigest()
+  squatters = [_term(f"a_b_{digest_ab[:n]}") for n in range(8, 65)]
+  squatters.append(_term(f"a_b_{digest_ab}_2"))
+
+  notations = _notations(
+      load_ontology_from_string(
+          _map(terms=squatters + [_term("a-b"), _term("a_b")])[0]
+      )
+  )
+
+  assert notations[f"term_a_b_{digest_ab}_3"] == "a-b"
+  assert notations[f"term_a_b_{digest_ab}_2"] == f"a_b_{digest_ab}_2"
+
+
 def test_custom_ontology_name_is_stripped_and_sanitized():
   terms = [_term("customer")]
   yaml_text, summary = _map(terms=terms, ontology_name="  retail-terms v2 ")
@@ -892,7 +1147,8 @@ def test_conflicting_records_with_the_same_id_are_rejected(conflict):
   second = dataclasses.replace(first, **conflict)
 
   with pytest.raises(ValueError, match="Conflicting records for glossary term"):
-    _map(terms=[first, second])
+    # The alias keeps the number-form name in scope, so it is a conflict.
+    _map(terms=[first, second], project_alias=_PROJECT_NUMBER)
 
 
 def test_same_id_in_different_kinds_is_not_a_conflict():
@@ -949,6 +1205,14 @@ def test_empty_glossary_is_a_validation_error():
         f" {_GLOSSARY}",
         "projects/demo project/locations/us-central1/glossaries/retail",
         "locations/us-central1/glossaries/retail",
+        # Project and location segments are checked before any API call.
+        "projects/demo!/locations/us-central1/glossaries/retail",
+        "projects/demo@corp/locations/us-central1/glossaries/retail",
+        "projects/-demo/locations/us-central1/glossaries/retail",
+        "projects/demo-project/locations/us-central1!/glossaries/retail",
+        "projects/demo-project/locations/us@central1/glossaries/retail",
+        "projects/demo-project/locations/US-CENTRAL1/glossaries/retail",
+        "projects/demo-project/locations/1us/glossaries/retail",
     ],
 )
 def test_invalid_glossary_resource_name_is_rejected(bad_name):
@@ -969,6 +1233,28 @@ def test_glossary_record_with_an_invalid_name_is_rejected():
 def test_validate_import_arguments_accepts_valid_input():
   validate_import_arguments(_GLOSSARY)
   validate_import_arguments(_GLOSSARY_BY_NUMBER, ontology_name="retail")
+
+
+@pytest.mark.parametrize(
+    "glossary_name",
+    [
+        "projects/example.com:my-proj/locations/us/glossaries/retail",
+        "projects/Demo-Project/locations/global/glossaries/retail_2026",
+        "projects/demo-project/locations/europe-west1/glossaries/\u8ca9\u58f2",
+    ],
+)
+def test_domain_scoped_projects_and_standard_locations_are_accepted(
+    glossary_name,
+):
+  validate_import_arguments(glossary_name)
+  ontology = load_ontology_from_string(
+      _map(
+          terms=[FakeConcept(name=_term_name("t1", glossary_name))],
+          glossary=FakeGlossary(name=glossary_name),
+      )[0]
+  )
+
+  assert ontology.annotations["dataplex:glossary"] == glossary_name
 
 
 # --------------------------------------------------------------------- #
@@ -1109,6 +1395,97 @@ def test_blank_canonical_name_falls_back_to_the_requested_name():
   assert ontology.annotations["dataplex:glossary"] == _GLOSSARY
 
 
+def test_import_pairs_the_requested_id_with_the_returned_number():
+  """A request by project ID answered by project number verifies the
+  pair: either form is in scope, and nothing else is."""
+  requested = _glossary_in("project-a")
+  returned = _glossary_in("123456789012")
+  stray_parent = _category_name("customer", _glossary_in("project-b"))
+  client = FakeGlossaryClient(
+      glossary=FakeGlossary(name=returned),
+      categories=[
+          FakeConcept(
+              name=_category_name("customer", returned), parent=requested
+          )
+      ],
+      terms=[
+          FakeConcept(
+              name=_term_name("churn", requested),
+              parent=_category_name("customer", requested),
+          ),
+          FakeConcept(name=_term_name("visit", returned), parent=returned),
+          FakeConcept(name=_term_name("stray", returned), parent=stray_parent),
+      ],
+  )
+
+  yaml_text, summary = import_dataplex_glossary(
+      requested, glossary_client=client
+  )
+  ontology = load_ontology_from_string(yaml_text)
+
+  assert client.calls[1:] == [
+      ("list_glossary_categories", {"parent": returned}),
+      ("list_glossary_terms", {"parent": returned}),
+  ]
+  for name in ("category_customer", "term_visit"):
+    assert _entity(ontology, name).annotations["skos:topConceptOf"] == returned
+  assert _relationships(ontology) == [
+      ("skos_broader", "term_churn", "category_customer")
+  ]
+  stray = _entity(ontology, "term_stray").annotations
+  assert stray["dataplex:orphan_parent"] == stray_parent
+  assert "unverified project" not in summary
+
+
+@pytest.mark.parametrize("foreign_project", ["project-b", "999999999999"])
+def test_import_rejects_records_from_a_third_project(foreign_project):
+  returned = _glossary_in("123456789012")
+  client = FakeGlossaryClient(
+      glossary=FakeGlossary(name=returned),
+      categories=[FakeConcept(name=_category_name("customer", returned))],
+      terms=[
+          FakeConcept(
+              name=_term_name("foreign", _glossary_in(foreign_project)),
+              parent=returned,
+          )
+      ],
+  )
+
+  with pytest.raises(ValueError, match="does not belong to glossary"):
+    import_dataplex_glossary(_glossary_in("project-a"), glossary_client=client)
+
+
+@pytest.mark.parametrize(
+    "requested, returned",
+    [
+        (
+            _glossary_in("project-a"),
+            "projects/project-a/locations/europe-west1/glossaries/"
+            f"{_GLOSSARY_ID}",
+        ),
+        (
+            _glossary_in("project-a"),
+            "projects/project-a/locations/us-central1/glossaries/finance",
+        ),
+        (_glossary_in("project-a"), _glossary_in("project-b")),
+        (_glossary_in("111111111111"), _glossary_in("222222222222")),
+        (_glossary_in("project-a"), "glossaries/retail-glossary"),
+    ],
+    ids=["location", "glossary_id", "project_ids", "project_numbers", "bad"],
+)
+def test_mismatched_get_glossary_response_is_rejected_before_listing(
+    requested, returned
+):
+  client = FakeGlossaryClient(
+      glossary=FakeGlossary(name=returned), terms=[_term("customer")]
+  )
+
+  with pytest.raises(ValueError, match="GetGlossary for") as info:
+    import_dataplex_glossary(requested, glossary_client=client)
+  assert "nothing was listed" in str(info.value)
+  assert [method for method, _ in client.calls] == ["get_glossary"]
+
+
 def _shuffled_repeated_pages(records, rng, page_size=2):
   """Shuffle records into pages, then replay a few pages the way a flaky
   pager might."""
@@ -1197,14 +1574,116 @@ def test_errors_raised_while_paging_are_wrapped():
     import_dataplex_glossary(_GLOSSARY, glossary_client=client)
 
 
-def test_value_errors_from_the_client_keep_their_type():
+@pytest.mark.parametrize("bad_page", [0, 1])
+def test_unreachable_locations_on_any_page_fail_the_import(bad_page):
+  pages = [
+      FakePage(categories=[_category("customer")]),
+      FakePage(categories=[_category("party")]),
+  ]
+  pages[bad_page].unreachable_locations = ["us-east1", "", "eu", "us-east1"]
+  client = FakeGlossaryClient(category_pages=pages, terms=[_term("churn")])
+
+  with pytest.raises(DataplexImportError) as info:
+    import_dataplex_glossary(_GLOSSARY, glossary_client=client)
+  assert str(info.value).startswith(
+      "Dataplex ListGlossaryCategories could not reach location(s) "
+      "eu, us-east1, so its result is incomplete; refusing to emit a "
+      "partial ontology."
+  )
+  # The import stopped at the incomplete list.
+  assert [method for method, _ in client.calls] == [
+      "get_glossary",
+      "list_glossary_categories",
+  ]
+
+
+def test_unreachable_locations_in_term_pages_fail_the_import():
   client = FakeGlossaryClient(
-      errors={"get_glossary": ValueError("bad request")}
+      categories=[_category("customer")],
+      term_pages=[
+          FakePage(terms=[_term("churn")]),
+          FakePage(terms=[_term("visit")], unreachable_locations=["asia1"]),
+      ],
   )
 
-  with pytest.raises(ValueError, match="bad request") as excinfo:
+  with pytest.raises(
+      DataplexImportError,
+      match=r"^Dataplex ListGlossaryTerms could not reach location\(s\) asia1",
+  ):
     import_dataplex_glossary(_GLOSSARY, glossary_client=client)
-  assert not isinstance(excinfo.value, DataplexImportError)
+
+
+def test_pages_without_unreachable_locations_are_all_read():
+  client = FakeGlossaryClient(
+      category_pages=[
+          FakePage(categories=[_category("customer")]),
+          FakePage(categories=[_category("party")], unreachable_locations=[]),
+      ],
+      term_pages=[
+          FakePage(terms=[_term("churn", parent=_category_name("customer"))]),
+          FakePage(terms=[_term("visit")]),
+      ],
+  )
+
+  ontology = load_ontology_from_string(
+      import_dataplex_glossary(_GLOSSARY, glossary_client=client)[0]
+  )
+
+  assert [e.name for e in ontology.entities] == [
+      "category_customer",
+      "category_party",
+      "term_churn",
+      "term_visit",
+  ]
+  assert _relationships(ontology) == [
+      ("skos_broader", "term_churn", "category_customer")
+  ]
+
+
+class MalformedError(ValueError):
+  """Name-compatible with ``google.auth.exceptions.MalformedError``."""
+
+
+class JSONDecodeError(ValueError):
+  """Name-compatible with ``requests.exceptions.JSONDecodeError``."""
+
+
+@pytest.mark.parametrize(
+    "method, operation, error",
+    [
+        ("get_glossary", "GetGlossary", ValueError("bad request")),
+        (
+            "get_glossary",
+            "GetGlossary",
+            MalformedError("malformed service account info"),
+        ),
+        (
+            "list_glossary_terms",
+            "ListGlossaryTerms",
+            JSONDecodeError("Expecting value: line 1 column 1 (char 0)"),
+        ),
+    ],
+    ids=["value_error", "malformed_credentials", "json_decode"],
+)
+def test_value_errors_from_the_client_are_api_errors(method, operation, error):
+  client = FakeGlossaryClient(terms=[_term("customer")], errors={method: error})
+
+  with pytest.raises(DataplexImportError) as info:
+    import_dataplex_glossary(_GLOSSARY, glossary_client=client)
+  assert str(info.value) == (
+      f"Dataplex {operation} failed: {type(error).__name__}: {error}"
+  )
+  assert info.value.__cause__ is error
+
+
+def test_mapping_errors_from_the_import_stay_validation_errors():
+  client = FakeGlossaryClient(
+      terms=[_term("customer"), _term("customer", display_name="Other")]
+  )
+
+  with pytest.raises(ValueError, match="Conflicting records") as info:
+    import_dataplex_glossary(_GLOSSARY, glossary_client=client)
+  assert not isinstance(info.value, DataplexImportError)
 
 
 def test_missing_dependency_raises_an_import_error(monkeypatch):
@@ -1284,15 +1763,41 @@ def test_client_construction_failures_are_api_errors(monkeypatch):
   assert "gcloud auth application-default login" in str(info.value)
 
 
+def _dataplex_imports(source: str) -> list[str]:
+  """Every imported module path in ``source`` that mentions dataplex,
+  including ``from google.cloud import dataplex_v1``."""
+  found = []
+  for node in ast.walk(ast.parse(source)):
+    if isinstance(node, ast.Import):
+      found += [alias.name for alias in node.names if "dataplex" in alias.name]
+    elif isinstance(node, ast.ImportFrom):
+      module = node.module or ""
+      for alias in node.names:
+        qualified = f"{module}.{alias.name}" if module else alias.name
+        if "dataplex" in module or "dataplex" in qualified:
+          found.append(qualified)
+  return found
+
+
+def test_dataplex_import_check_catches_every_import_form():
+  assert _dataplex_imports("from google.cloud import dataplex_v1") == [
+      "google.cloud.dataplex_v1"
+  ]
+  assert _dataplex_imports("import google.cloud.dataplex_v1 as dp") == [
+      "google.cloud.dataplex_v1"
+  ]
+  assert _dataplex_imports("from google.cloud.dataplex_v1 import Glossary") == [
+      "google.cloud.dataplex_v1.Glossary"
+  ]
+  assert _dataplex_imports("from google.cloud import storage") == []
+
+
 def test_module_never_imports_google_cloud_dataplex_eagerly():
   """Static guard: the only reference to ``google.cloud.dataplex_v1`` is
   the lazy ``importlib`` call inside ``_create_default_glossary_client``."""
-  tree = ast.parse(pathlib.Path(importer.__file__).read_text(encoding="utf-8"))
-  for node in ast.walk(tree):
-    if isinstance(node, ast.Import):
-      assert not any("dataplex" in alias.name for alias in node.names)
-    if isinstance(node, ast.ImportFrom):
-      assert "dataplex" not in (node.module or "")
+  source = pathlib.Path(importer.__file__).read_text(encoding="utf-8")
+  assert _dataplex_imports(source) == []
+  tree = ast.parse(source)
   references = [
       node
       for node in ast.walk(tree)
@@ -1342,6 +1847,84 @@ def test_real_dataplex_messages_are_supported():
   assert _relationships(ontology) == [
       ("skos_broader", "term_churn", "category_customer")
   ]
+
+
+def test_real_gapic_pagers_are_read_page_by_page():
+  """Parity with the real pagers: every page is read, and an unreachable
+  location on a later page still fails the import."""
+  dataplex_v1 = pytest.importorskip("google.cloud.dataplex_v1")
+  pagers = pytest.importorskip(
+      "google.cloud.dataplex_v1.services.business_glossary_service.pagers"
+  )
+
+  def real_pager(pager_cls, request_cls, response_cls, field, pages):
+    responses = [
+        response_cls(
+            **{field: items},
+            unreachable_locations=unreachable,
+            next_page_token=f"page-{i + 1}" if i + 1 < len(pages) else "",
+        )
+        for i, (items, unreachable) in enumerate(pages)
+    ]
+    later = iter(responses[1:])
+    return pager_cls(
+        method=lambda request, **kwargs: next(later),
+        request=request_cls(parent=_GLOSSARY),
+        response=responses[0],
+    )
+
+  def client(term_unreachable):
+    fake = FakeGlossaryClient(glossary=dataplex_v1.Glossary(name=_GLOSSARY))
+    fake.list_glossary_categories = lambda request=None, **kwargs: real_pager(
+        pagers.ListGlossaryCategoriesPager,
+        dataplex_v1.ListGlossaryCategoriesRequest,
+        dataplex_v1.ListGlossaryCategoriesResponse,
+        "categories",
+        [
+            ([dataplex_v1.GlossaryCategory(name=_category_name("a"))], []),
+            ([dataplex_v1.GlossaryCategory(name=_category_name("b"))], []),
+        ],
+    )
+    fake.list_glossary_terms = lambda request=None, **kwargs: real_pager(
+        pagers.ListGlossaryTermsPager,
+        dataplex_v1.ListGlossaryTermsRequest,
+        dataplex_v1.ListGlossaryTermsResponse,
+        "terms",
+        [
+            (
+                [
+                    dataplex_v1.GlossaryTerm(
+                        name=_term_name("churn"), parent=_category_name("a")
+                    )
+                ],
+                [],
+            ),
+            (
+                [dataplex_v1.GlossaryTerm(name=_term_name("visit"))],
+                term_unreachable,
+            ),
+        ],
+    )
+    return fake
+
+  ontology = load_ontology_from_string(
+      import_dataplex_glossary(_GLOSSARY, glossary_client=client([]))[0]
+  )
+  assert [e.name for e in ontology.entities] == [
+      "category_a",
+      "category_b",
+      "term_churn",
+      "term_visit",
+  ]
+  assert _relationships(ontology) == [
+      ("skos_broader", "term_churn", "category_a")
+  ]
+
+  with pytest.raises(
+      DataplexImportError,
+      match=r"ListGlossaryTerms could not reach location\(s\) us-east1",
+  ):
+    import_dataplex_glossary(_GLOSSARY, glossary_client=client(["us-east1"]))
 
 
 # --------------------------------------------------------------------- #

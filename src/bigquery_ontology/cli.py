@@ -37,10 +37,13 @@ Exit codes:
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
+import stat
 import sys
+import tempfile
 
 from pydantic import ValidationError
 import typer
@@ -933,6 +936,68 @@ def import_owl_command(
 # --------------------------------------------------------------------- #
 
 
+def _new_file_mode(existing: os.stat_result | None) -> int:
+  """Permission bits for the replacement file: the existing file's, or the
+  ``0o666`` minus the process umask that ``open()`` would apply."""
+  if existing is not None:
+    return stat.S_IMODE(existing.st_mode)
+  umask = os.umask(0)
+  os.umask(umask)
+  return 0o666 & ~umask
+
+
+def _write_text_atomically(path: Path, text: str) -> None:
+  """Replace ``path`` with ``text`` without ever leaving a partial file.
+
+  The text goes to a temporary file in the destination's directory, which
+  then replaces the destination with one ``os.replace``. On any failure the
+  temporary file is removed and an existing destination keeps its
+  contents. A symlinked destination is resolved first, so the link's
+  target is replaced and the link is kept. The replacement keeps the
+  destination's permission bits (best effort: filesystems that refuse
+  ``chmod`` keep theirs), or follows the umask for a new file. A read-only
+  destination is refused, as opening it for writing would. A destination
+  that is not a regular file (``/dev/null``, ``/dev/stdout``, a named
+  pipe) has nothing to replace and is written through.
+  """
+  try:
+    # The kernel follows the path, so ``/dev/stdout`` is seen as what it is.
+    existing = os.stat(path)
+  except FileNotFoundError:
+    existing = None  # A new file, or a dangling symlink.
+  if existing is not None and not stat.S_ISREG(existing.st_mode):
+    path.write_text(text, encoding="utf-8")
+    return
+  target = path.resolve()
+  if existing is not None and not os.access(target, os.W_OK):
+    raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
+  tmp_path = None
+  try:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=target.parent,
+        prefix=".gm-import-",
+        suffix=".tmp",
+        delete=False,
+    ) as tmp:
+      tmp_path = tmp.name
+      tmp.write(text)
+      tmp.flush()
+    try:
+      os.chmod(tmp_path, _new_file_mode(existing))
+    except OSError:
+      pass
+    os.replace(tmp_path, target)
+  except BaseException:
+    if tmp_path is not None:
+      try:
+        os.unlink(tmp_path)
+      except OSError:
+        pass
+    raise
+
+
 @app.command("import-dataplex-glossary")
 def import_dataplex_glossary_command(
     glossary: str = typer.Argument(
@@ -970,8 +1035,8 @@ def import_dataplex_glossary_command(
   category and term is an abstract, SKOS-annotated entity and category
   nesting becomes ``skos_broader`` relationships.
 
-  An import summary is always printed to stderr. Requires the optional
-  ``google-cloud-dataplex`` dependency.
+  An import summary is printed to stderr (with ``-o``, only after the file
+  is written). Requires the optional ``google-cloud-dataplex`` dependency.
   """
   try:
     from .dataplex_glossary_importer import DataplexImportError
@@ -1066,33 +1131,52 @@ def import_dataplex_glossary_command(
     )
     raise typer.Exit(code=1)
   except Exception as exc:  # noqa: BLE001 - reported as an internal error
-    typer.echo(f"internal error: {exc}", err=True)
-    raise typer.Exit(code=3)
-
-  if summary:
-    typer.echo(summary, err=True)
-
-  if output_path is not None:
-    resolved_output = Path(output_path)
-    try:
-      resolved_output.write_text(yaml_text, encoding="utf-8")
-    except OSError as exc:
+    if json_output:
       _emit_errors(
           [
               {
-                  "file": str(resolved_output),
+                  "file": glossary,
                   "line": 0,
                   "col": 0,
-                  "rule": "cli-output-error",
+                  "rule": "cli-internal-error",
                   "severity": "error",
-                  "message": f"Cannot write output file: {exc}",
+                  "message": f"internal error: {exc}",
               }
           ],
-          as_json=json_output,
+          as_json=True,
       )
-      raise typer.Exit(code=1)
-  else:
+    else:
+      typer.echo(f"internal error: {exc}", err=True)
+    raise typer.Exit(code=3)
+
+  if output_path is None:
+    if summary:
+      typer.echo(summary, err=True)
     typer.echo(yaml_text, nl=False)
+    return
+
+  resolved_output = Path(output_path)
+  try:
+    _write_text_atomically(resolved_output, yaml_text)
+  except OSError as exc:
+    _emit_errors(
+        [
+            {
+                "file": str(resolved_output),
+                "line": 0,
+                "col": 0,
+                "rule": "cli-output-error",
+                "severity": "error",
+                "message": f"Cannot write output file: {exc}",
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=1)
+  # Only after the write succeeds, so a failure leaves a single error
+  # (one JSON document with ``--json``) on stderr.
+  if summary:
+    typer.echo(summary, err=True)
 
 
 def _validate_binding_file(
