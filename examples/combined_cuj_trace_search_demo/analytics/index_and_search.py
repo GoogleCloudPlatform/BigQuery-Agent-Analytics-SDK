@@ -28,6 +28,7 @@ Supports both:
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -50,6 +51,7 @@ from analytics.query_router import ROUTE_NATURAL_LANGUAGE
 from analytics.seed_scale_benchmark import generate_synthetic_eval_turns
 from analytics.seed_scale_benchmark import seed_scale_rows_to_bigquery
 from analytics.seed_scale_benchmark import validate_bq_identifiers
+from analytics.table_guard import _is_bq_conflict_error
 from analytics.table_guard import apply_demo_table_label
 from analytics.table_guard import assert_demo_table_ownership_or_absent
 from analytics.table_guard import DEMO_OWNERSHIP_LABEL_KEY
@@ -61,6 +63,7 @@ from analytics.trajectory_extractor import write_owner_only_text
 _IVF_MIN_ROWS = 5000
 _TEN_GIB_BYTES = 10 * 1024 * 1024 * 1024
 _DEFAULT_TOP_K = 5
+_STAGING_TOKEN_LABEL_KEY = "bqaa_demo_stage_token"
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 _CONNECTION_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
@@ -317,11 +320,18 @@ def sanitize_search_query_for_bq(
   return " ".join(fallback_kw)
 
 
-def _build_session_raw_where_clause(session_ids: list[str]) -> str:
+def _build_session_raw_where_clause(session_ids: Sequence[Any]) -> str:
   """Builds a validated `session_id IN (...)` raw_where_clause filter."""
+  if isinstance(session_ids, (str, bytes)):
+    raise TypeError(
+        "session_ids must be a sequence of session ID strings, not a bare"
+        " str or bytes."
+    )
   cleaned: list[str] = []
   seen: set[str] = set()
   for sid in session_ids:
+    if sid is None:
+      continue
     s = str(sid).strip()
     if not s:
       continue
@@ -537,16 +547,39 @@ def populate_trajectories_in_bigquery(
         }
     )
 
-  stage_fqn = (
-      f"{project_id}.{dataset_id}.{eval_turns_table}"
-      f"__stage_{uuid.uuid4().hex[:8]}"
-  )
   stage_schema = [
       bigquery.SchemaField("session_id", "STRING", mode="REQUIRED"),
       bigquery.SchemaField("invocation_id", "STRING", mode="REQUIRED"),
       bigquery.SchemaField("_ai_index_trajectory", "STRING"),
       bigquery.SchemaField("error_summary", "STRING"),
   ]
+  stage_fqn = ""
+  stage_reserved = False
+  for _ in range(3):
+    candidate_fqn = (
+        f"{project_id}.{dataset_id}.{eval_turns_table}"
+        f"__stage_{uuid.uuid4().hex[:8]}"
+    )
+    candidate_token = uuid.uuid4().hex[:16]
+    stage_tbl = bigquery.Table(candidate_fqn, schema=stage_schema)
+    stage_tbl.expires = datetime.now(timezone.utc) + timedelta(hours=1)
+    stage_tbl.labels = {
+        DEMO_OWNERSHIP_LABEL_KEY: DEMO_OWNERSHIP_LABEL_VALUE,
+        _STAGING_TOKEN_LABEL_KEY: candidate_token,
+    }
+    try:
+      bq_client.create_table(stage_tbl, exists_ok=False)
+      stage_fqn = candidate_fqn
+      stage_reserved = True
+      break
+    except Exception as exc:
+      if _is_bq_conflict_error(exc):
+        continue
+      raise
+  if not stage_reserved:
+    raise RuntimeError(
+        "Failed to reserve unique staging table after 3 conflict attempts."
+    )
   load_cfg = bigquery.LoadJobConfig(
       schema=stage_schema,
       write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
@@ -554,19 +587,16 @@ def populate_trajectories_in_bigquery(
   bq_client.load_table_from_json(
       staged, stage_fqn, job_config=load_cfg
   ).result()
-  try:
-    merge_sql = (
-        f"MERGE `{table_fqn}` AS t\n"
-        f"USING `{stage_fqn}` AS s\n"
-        "ON t.session_id = s.session_id AND t.invocation_id = s.invocation_id\n"
-        "WHEN MATCHED THEN\n"
-        "  UPDATE SET\n"
-        "    t._ai_index_trajectory = s._ai_index_trajectory,\n"
-        "    t.error_summary = s.error_summary"
-    )
-    bq_client.query(merge_sql).result()
-  finally:
-    bq_client.delete_table(stage_fqn, not_found_ok=True)
+  merge_sql = (
+      f"MERGE `{table_fqn}` AS t\n"
+      f"USING `{stage_fqn}` AS s\n"
+      "ON t.session_id = s.session_id AND t.invocation_id = s.invocation_id\n"
+      "WHEN MATCHED THEN\n"
+      "  UPDATE SET\n"
+      "    t._ai_index_trajectory = s._ai_index_trajectory,\n"
+      "    t.error_summary = s.error_summary"
+  )
+  bq_client.query(merge_sql).result()
   return len(staged)
 
 
@@ -960,6 +990,44 @@ def _execute_hybrid_python_fallback(
   return "PATH_C_HYBRID_PYTHON_FALLBACK", fused_rows, combined_stats
 
 
+def hydrate_trace_on_demand(
+    bq_client: Any,
+    *,
+    project_id: str,
+    dataset_id: str,
+    eval_turns_table: str = "eval_turns",
+    session_id: str,
+    invocation_id: str,
+) -> dict[str, Any] | None:
+  """Loads raw ``trace`` JSON on demand for a single expanded turn."""
+  from google.cloud import bigquery
+
+  _validate_bq_identifiers(project_id, dataset_id, eval_turns_table)
+  search_queries = load_named_sql_queries(
+      _sql_dir() / "03_search_keyword_and_semantic.sql"
+  )
+  replacements = {
+      "PROJECT_ID": project_id,
+      "DATASET_ID": dataset_id,
+      "EVAL_TURNS_TABLE": eval_turns_table,
+  }
+  step2_sql = render_sql_tokens(
+      search_queries["STEP2_LAZY_TRACE_HYDRATION"], replacements
+  )
+  step2_cfg = bigquery.QueryJobConfig(
+      query_parameters=[
+          bigquery.ScalarQueryParameter("session_id", "STRING", session_id),
+          bigquery.ScalarQueryParameter(
+              "invocation_id", "STRING", invocation_id
+          ),
+      ]
+  )
+  hydrated = list(bq_client.query(step2_sql, job_config=step2_cfg).result())
+  if not hydrated:
+    return None
+  return _normalize_bq_row(hydrated[0])
+
+
 def _run_live_bigquery_search(
     bq_client: Any,
     *,
@@ -973,6 +1041,7 @@ def _run_live_bigquery_search(
     embeddings_ready: int,
     endpoint: str,
     connection_id: str | None,
+    hydrate_top_trace: bool = False,
 ) -> list[dict[str, Any]]:
   from google.cloud import bigquery
 
@@ -1114,24 +1183,16 @@ def _run_live_bigquery_search(
           raise
 
     step2_lazy_trace = None
-    if rows:
+    if hydrate_top_trace and rows:
       top_hit = rows[0]
-      step2_sql = render_sql_tokens(
-          search_queries["STEP2_LAZY_TRACE_HYDRATION"], replacements
+      step2_lazy_trace = hydrate_trace_on_demand(
+          bq_client,
+          project_id=project_id,
+          dataset_id=dataset_id,
+          eval_turns_table=eval_turns_table,
+          session_id=str(top_hit["session_id"]),
+          invocation_id=str(top_hit["invocation_id"]),
       )
-      step2_cfg = bigquery.QueryJobConfig(
-          query_parameters=[
-              bigquery.ScalarQueryParameter(
-                  "session_id", "STRING", str(top_hit["session_id"])
-              ),
-              bigquery.ScalarQueryParameter(
-                  "invocation_id", "STRING", str(top_hit["invocation_id"])
-              ),
-          ]
-      )
-      hydrated = list(bq_client.query(step2_sql, job_config=step2_cfg).result())
-      if hydrated:
-        step2_lazy_trace = _normalize_bq_row(hydrated[0])
 
     verifications: list[dict[str, Any]] = []
     if rows:
@@ -1251,9 +1312,11 @@ def run_index_and_search(
     decisions_model: str = "gemini-decision-1",
     decisions_api_base: str | None = None,
     input_json: str | Path | None = None,
+    session_ids: Sequence[str] | None = None,
     output_json: str | Path = "search_results.json",
     top_k: int = _DEFAULT_TOP_K,
     rerank: bool = True,
+    hydrate_top_trace: bool = False,
     with_vector_index_scale: bool = False,
     embed_wait_seconds: int = 65,
     offline: bool = False,
@@ -1261,6 +1324,86 @@ def run_index_and_search(
     router: QueryRouter | None = None,
 ) -> dict[str, Any]:
   """Runs materialization, dual indexing, 5-query search, and L3 verify."""
+  if session_ids is not None and isinstance(session_ids, (str, bytes)):
+    raise TypeError(
+        "session_ids must be a sequence of session ID strings, not a bare"
+        " str or bytes."
+    )
+  if input_json is not None and not Path(input_json).is_file():
+    raise FileNotFoundError(
+        f"Explicit session manifest not found: {Path(input_json)}"
+    )
+
+  explicit_sids: list[str] | None = None
+  if session_ids is not None:
+    explicit_sids = [
+        str(s).strip() for s in session_ids if s is not None and str(s).strip()
+    ]
+    if not explicit_sids:
+      raise ValueError(
+          "Explicit session_ids contains no session_ids; refusing to drop"
+          " session filter and scan entire table."
+      )
+
+  manifest_turns: list[dict[str, Any]] = []
+  resolved_manifest_sids: list[str] = []
+  if input_json is not None:
+    payload = json.loads(Path(input_json).read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+      raise ValueError("Session manifest must be a JSON object.")
+    raw_manifest_turns = payload.get("eval_turns")
+    if raw_manifest_turns is not None and not isinstance(
+        raw_manifest_turns, list
+    ):
+      raise TypeError("Session manifest 'eval_turns' must be a JSON array.")
+    raw_manifest_sids = payload.get("session_ids")
+    if raw_manifest_sids is not None and not isinstance(
+        raw_manifest_sids, list
+    ):
+      raise TypeError(
+          "Session manifest 'session_ids' must be a JSON array of strings."
+      )
+    manifest_turns = [
+        dict(t) for t in (raw_manifest_turns or []) if isinstance(t, Mapping)
+    ]
+    manifest_sids = [
+        str(s).strip()
+        for s in (raw_manifest_sids or [])
+        if s is not None and str(s).strip()
+    ]
+    manifest_turn_sids = [
+        str(t["session_id"]).strip()
+        for t in manifest_turns
+        if t.get("session_id") is not None and str(t.get("session_id")).strip()
+    ]
+    resolved_manifest_sids = manifest_sids or manifest_turn_sids
+    if not offline and not resolved_manifest_sids:
+      raise ValueError(
+          "Session manifest contains no session_ids; refusing to drop"
+          " session filter and scan entire table."
+      )
+    if not manifest_turns and not resolved_manifest_sids:
+      raise ValueError(
+          "Session manifest contains no valid session_ids or eval_turns;"
+          " refusing to drop session filter or fall back to default fixtures."
+      )
+
+  effective_sids: list[str] | None
+  if explicit_sids is not None and input_json is not None:
+    manifest_sid_set = set(resolved_manifest_sids)
+    effective_sids = [s for s in explicit_sids if s in manifest_sid_set]
+    if not effective_sids:
+      raise ValueError(
+          "Explicit session_ids did not match any session_id in the supplied"
+          " session manifest; refusing to run query."
+      )
+  elif explicit_sids is not None:
+    effective_sids = explicit_sids
+  elif input_json is not None:
+    effective_sids = resolved_manifest_sids or None
+  else:
+    effective_sids = None
+
   queries = [dict(q) for q in DEFAULT_BENCHMARK_QUERIES]
   active_router = router or QueryRouter(
       backend="offline" if offline else router_backend,
@@ -1273,12 +1416,21 @@ def run_index_and_search(
   )
 
   if offline:
-    turn_rows: list[dict[str, Any]] = []
-    if input_json is not None and Path(input_json).is_file():
-      payload = json.loads(Path(input_json).read_text(encoding="utf-8"))
-      turn_rows = list(payload.get("eval_turns") or [])
-    if not turn_rows:
-      turn_rows = _default_offline_turn_rows()
+    turn_rows: list[dict[str, Any]] = (
+        list(manifest_turns) if manifest_turns else _default_offline_turn_rows()
+    )
+    if effective_sids is not None:
+      allowed = set(effective_sids)
+      turn_rows = [
+          r
+          for r in turn_rows
+          if str(r.get("session_id") or "").strip() in allowed
+      ]
+      if not turn_rows:
+        raise ValueError(
+            "No offline eval turns matched the requested session_ids;"
+            " refusing to fall back to default offline fixtures."
+        )
 
     for row in turn_rows:
       if row.get("error_summary") is not None:
@@ -1303,7 +1455,7 @@ def run_index_and_search(
           turn_rows, mode=decision.mode, query_text=qtext, top_k=top_k
       )
       step2_lazy = None
-      if hits:
+      if hydrate_top_trace and hits:
         top_key = (hits[0]["session_id"], hits[0]["invocation_id"])
         match = next(
             (
@@ -1395,18 +1547,11 @@ def run_index_and_search(
   else:
     from google.cloud import bigquery
 
-    raw_where_clause = ""
-    if input_json is not None and Path(input_json).is_file():
-      payload = json.loads(Path(input_json).read_text(encoding="utf-8"))
-      session_ids = [str(s) for s in (payload.get("session_ids") or []) if s]
-      if not session_ids:
-        session_ids = [
-            str(t["session_id"])
-            for t in (payload.get("eval_turns") or [])
-            if t.get("session_id")
-        ]
-      if session_ids:
-        raw_where_clause = _build_session_raw_where_clause(session_ids)
+    raw_where_clause = (
+        _build_session_raw_where_clause(effective_sids)
+        if effective_sids is not None
+        else ""
+    )
 
     client = bq_client or bigquery.Client(project=project_id, location=location)
     existed_owned = assert_demo_table_ownership_or_absent(
@@ -1455,6 +1600,7 @@ def run_index_and_search(
         embeddings_ready=int(index_status["embeddings_ready"]),
         endpoint=ai_generate_endpoint,
         connection_id=connection_id,
+        hydrate_top_trace=hydrate_top_trace,
     )
     report = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -1507,6 +1653,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   parser.add_argument("--output-json", default="search_results.json")
   parser.add_argument("--top-k", type=int, default=_DEFAULT_TOP_K)
   parser.add_argument("--no-rerank", action="store_true")
+  parser.add_argument(
+      "--hydrate-top-trace",
+      action="store_true",
+      help="Optionally hydrate raw Step-2 trace for the top hit per query.",
+  )
   parser.add_argument("--with-vector-index-scale", action="store_true")
   parser.add_argument("--embed-wait-seconds", type=int, default=65)
   parser.add_argument("--offline", action="store_true")
@@ -1531,6 +1682,7 @@ def main(argv: list[str] | None = None) -> int:
       output_json=args.output_json,
       top_k=args.top_k,
       rerank=not args.no_rerank,
+      hydrate_top_trace=args.hydrate_top_trace,
       with_vector_index_scale=args.with_vector_index_scale,
       embed_wait_seconds=args.embed_wait_seconds,
       offline=args.offline,

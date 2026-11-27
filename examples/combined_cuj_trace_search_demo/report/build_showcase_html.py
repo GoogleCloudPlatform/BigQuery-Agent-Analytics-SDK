@@ -768,6 +768,7 @@ def build_demo_fixture_payload() -> dict[str, Any]:
       "project_id": "demo-project",
       "dataset_id": "combined_cuj_trace_search_demo",
       "table_id": "agent_events",
+      "eval_turns_table": "eval_turns",
       "location": "US",
       "model_name": "gemini-4-hydrogen",
       "eval_turns": eval_turns,
@@ -850,6 +851,7 @@ def _merge_inputs(
             "dataset_id", "combined_cuj_trace_search_demo"
         ),
         "table_id": meta_src.get("table_id", "agent_events"),
+        "eval_turns_table": meta_src.get("eval_turns_table") or "eval_turns",
         "location": meta_src.get("location", "US"),
         "model_name": meta_src.get("model_name", "gemini-4-hydrogen"),
         "eval_turns": [],
@@ -875,8 +877,12 @@ def _merge_inputs(
     ):
       if key in live_data and live_data[key] is not None:
         data[key] = live_data[key]
+    if live_data.get("eval_turns_table"):
+      data["eval_turns_table"] = live_data["eval_turns_table"]
 
   if search_data:
+    if search_data.get("eval_turns_table"):
+      data["eval_turns_table"] = search_data["eval_turns_table"]
     if (
         "index_status" in search_data
         and search_data["index_status"] is not None
@@ -1752,11 +1758,34 @@ td.mono {{ font-family: var(--mono); font-size: 12px; }}
     const code = document.getElementById('lazy-trace-code');
     if (drawer && !drawer.classList.contains('hidden') && code) {{
       const firstHit = (q.step1_hits || [])[0] || {{}};
-      code.textContent =
-        'SELECT session_id, invocation_id, trace FROM eval_turns\\n' +
+      const evalTurnsTable = String(DATA.eval_turns_table || 'eval_turns').replace(/[^A-Za-z0-9_.-]/g, '') || 'eval_turns';
+      const step2Sql =
+        'SELECT session_id, invocation_id, trace FROM `' + evalTurnsTable + '`\\n' +
         'WHERE session_id = ' + JSON.stringify(firstHit.session_id || '') +
-        ' AND invocation_id = ' + JSON.stringify(firstHit.invocation_id || '') + ';\\n\\n' +
-        JSON.stringify(q.step2_lazy_trace || {{}}, null, 2);
+        ' AND invocation_id = ' + JSON.stringify(firstHit.invocation_id || '') + ';\\n\\n';
+      const hasHydratedTrace = Boolean(
+        q.step2_lazy_trace &&
+        typeof q.step2_lazy_trace === 'object' &&
+        !Array.isArray(q.step2_lazy_trace) &&
+        Object.keys(q.step2_lazy_trace).length > 0
+      );
+      if (hasHydratedTrace) {{
+        code.textContent = step2Sql + JSON.stringify(q.step2_lazy_trace, null, 2);
+      }} else {{
+        const deferredSummary = {{
+          status: 'NOT_HYDRATED_ON_DEFAULT_SEARCH',
+          session_id: firstHit.session_id || '',
+          invocation_id: firstHit.invocation_id || '',
+          has_error: Boolean(firstHit.has_error),
+          step1_s3_snippet: String(firstHit.snippet ?? firstHit._ai_index_trajectory ?? '').slice(0, 240),
+          hydrate_cli_flag: '--hydrate-top-trace'
+        }};
+        code.textContent =
+          step2Sql +
+          '-- Step-2 raw trace hydration is deferred by default (0 B trace scanned in Step 1).\\n' +
+          '-- Re-run with --hydrate-top-trace or call hydrate_trace_on_demand(...) to fetch this row:\\n' +
+          JSON.stringify(deferredSummary, null, 2);
+      }}
     }}
   }}
   for (let i = 1; i <= 5; i++) {{

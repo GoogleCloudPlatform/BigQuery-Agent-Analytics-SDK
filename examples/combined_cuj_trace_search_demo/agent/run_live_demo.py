@@ -41,9 +41,8 @@ from agent.prompts_and_scenarios import DemoScenario  # noqa: E402
 from agent.prompts_and_scenarios import ROOT_AGENT_NAME  # noqa: E402
 from agent.prompts_and_scenarios import TOOL_FUNCTIONS  # noqa: E402
 from agent.tools import sanitized_tool_classifier  # noqa: E402
-from analytics.table_guard import _is_bq_not_found_error  # noqa: E402
-from analytics.table_guard import apply_demo_table_label  # noqa: E402
 from analytics.table_guard import assert_demo_table_ownership_or_absent  # noqa: E402
+from analytics.table_guard import ensure_demo_table_created_with_label  # noqa: E402
 from analytics.trajectory_extractor import compute_ablation_metrics  # noqa: E402
 from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: E402
 from analytics.trajectory_extractor import summarize_ablation  # noqa: E402
@@ -340,21 +339,16 @@ async def _run_live_scenarios(
 
   _configure_vertex_env(project_id, agent_location)
   bq_probe_client = bigquery.Client(project=project_id, location=location)
-  # Fail fast before loading ADK or spending LLM calls if eval_turns_table is
-  # pre-existing and unowned, or if the events_fqn probe fails with non-404.
+  # Fail fast before loading ADK or spending LLM calls if either table is
+  # pre-existing and unowned, or if either probe fails with non-404.
   assert_demo_table_ownership_or_absent(
       bq_probe_client, project_id, dataset_id, eval_turns_table
   )
-  events_fqn = f"{project_id}.{dataset_id}.{table_id}"
-  try:
-    bq_probe_client.get_table(events_fqn)
-    events_pre_existed = True
-  except Exception as exc:
-    if _is_bq_not_found_error(exc):
-      events_pre_existed = False
-    else:
-      raise
+  events_existed_owned = assert_demo_table_ownership_or_absent(
+      bq_probe_client, project_id, dataset_id, table_id
+  )
 
+  from google.adk.plugins import bigquery_agent_analytics_plugin as bqaa_plugin_mod  # noqa: PLC0415
   from google.adk.plugins.bigquery_agent_analytics_plugin import BigQueryAgentAnalyticsPlugin  # noqa: PLC0415
   from google.adk.plugins.bigquery_agent_analytics_plugin import BigQueryLoggerConfig  # noqa: PLC0415
 
@@ -368,6 +362,31 @@ async def _run_live_scenarios(
       flush_on_run_end=True,
       tool_result_classifier=sanitized_tool_classifier,
   )
+  if not events_existed_owned:
+    events_fqn = f"{project_id}.{dataset_id}.{table_id}"
+    schema_fn = getattr(bqaa_plugin_mod, "get_events_schema", None)
+    if not callable(schema_fn):
+      schema_fn = getattr(bqaa_plugin_mod, "_get_events_schema", None)
+    schema = schema_fn() if callable(schema_fn) else None
+    if not schema or not any(
+        getattr(field, "name", None) == "timestamp" for field in schema
+    ):
+      raise RuntimeError(
+          "Unable to resolve BigQueryAgentAnalyticsPlugin events schema with"
+          " timestamp field; refusing to create an unpartitioned agent_events"
+          " table."
+      )
+    events_table_obj = bigquery.Table(events_fqn, schema=schema)
+    events_table_obj.time_partitioning = bigquery.TimePartitioning(
+        type_=bigquery.TimePartitioningType.DAY,
+        field="timestamp",
+    )
+    clustering_fields = getattr(config, "clustering_fields", None)
+    if clustering_fields:
+      events_table_obj.clustering_fields = list(clustering_fields)
+    ensure_demo_table_created_with_label(
+        bq_probe_client, events_table_obj, project_id, dataset_id, table_id
+    )
   plugin = BigQueryAgentAnalyticsPlugin(
       project_id=project_id,
       dataset_id=dataset_id,
@@ -419,9 +438,6 @@ async def _run_live_scenarios(
       scenario_runs.append(res)
   finally:
     await _shutdown_bqaa_plugin(plugin)
-
-  if not events_pre_existed:
-    apply_demo_table_label(bq_probe_client, project_id, dataset_id, table_id)
 
   eval_turns = _materialize_and_fetch_live_eval_turns(
       project_id=project_id,

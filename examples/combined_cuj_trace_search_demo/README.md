@@ -113,7 +113,7 @@ Optional flags and router configuration:
 ### 3. Build Showcase HTML Directly from Fixture
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONSAFEPATH=1 python3 -m report.build_showcase_html \
+PYTHONDONTWRITEBYTECODE=1 PYTHONSAFEPATH=1 python3 report/build_showcase_html.py \
   --demo-fixture --output reports/showcase_preview.html
 ```
 

@@ -123,8 +123,8 @@ if ! gcloud auth application-default print-access-token &>/dev/null 2>&1; then
   gcloud auth application-default login
 fi
 
-echo "Enabling BigQuery and Vertex AI APIs on $PROJECT_ID..."
-gcloud services enable bigquery.googleapis.com aiplatform.googleapis.com --project="$PROJECT_ID" >/dev/null
+echo "Enabling BigQuery, Vertex AI, and Discovery Engine APIs on $PROJECT_ID..."
+gcloud services enable bigquery.googleapis.com aiplatform.googleapis.com discoveryengine.googleapis.com --project="$PROJECT_ID" >/dev/null
 
 if ! "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1; then
 import bigquery_agent_analytics
