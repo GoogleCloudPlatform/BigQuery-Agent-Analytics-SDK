@@ -23,8 +23,33 @@ DEMO_OWNERSHIP_LABEL_KEY = "bqaa_demo"
 DEMO_OWNERSHIP_LABEL_VALUE = "combined_cuj_trace_search"
 
 
+def _extract_http_status_codes(exc: Exception) -> list[int]:
+  """Collects integer HTTP status codes from response and exception attrs."""
+  codes: list[int] = []
+  response = getattr(exc, "response", None)
+  if response is not None:
+    for attr in ("status_code", "status", "code"):
+      val = getattr(response, attr, None)
+      if isinstance(val, int) and not isinstance(val, bool):
+        codes.append(val)
+  for attr in ("status_code", "code"):
+    val = getattr(exc, attr, None)
+    if isinstance(val, int) and not isinstance(val, bool):
+      codes.append(val)
+  return codes
+
+
+def _extract_http_status_code(exc: Exception) -> int | None:
+  """Returns an integer HTTP status code from ``exc`` if present."""
+  codes = _extract_http_status_codes(exc)
+  return codes[0] if codes else None
+
+
 def _is_bq_not_found_error(exc: Exception) -> bool:
   """Returns True only for a confirmed BigQuery 404 NotFound error."""
+  codes = _extract_http_status_codes(exc)
+  if codes:
+    return all(code == 404 for code in codes)
   try:
     from google.api_core.exceptions import NotFound  # noqa: PLC0415
 
@@ -32,7 +57,56 @@ def _is_bq_not_found_error(exc: Exception) -> bool:
       return True
   except ImportError:
     pass
-  return getattr(exc, "code", None) == 404 or type(exc).__name__ == "NotFound"
+  return type(exc).__name__ == "NotFound"
+
+
+def _is_bq_conflict_error(exc: Exception) -> bool:
+  """Returns True only for a confirmed BigQuery 409 Conflict error."""
+  codes = _extract_http_status_codes(exc)
+  if codes:
+    return all(code == 409 for code in codes)
+  try:
+    from google.api_core.exceptions import Conflict  # noqa: PLC0415
+
+    if isinstance(exc, Conflict):
+      return True
+  except ImportError:
+    pass
+  return type(exc).__name__ == "Conflict"
+
+
+def ensure_demo_table_created_with_label(
+    bq_client: Any,
+    table_obj: Any,
+    project_id: str,
+    dataset_id: str,
+    table_name: str,
+) -> bool:
+  """Atomically creates a BigQuery table with the demo ownership label.
+
+  On a 409 Conflict during ``create_table(..., exists_ok=False)``, immediately
+  verifies ownership of the existing table via
+  ``assert_demo_table_ownership_or_absent`` and fails closed if unowned.
+  """
+  existing_labels = getattr(table_obj, "labels", None)
+  labels = dict(existing_labels) if isinstance(existing_labels, Mapping) else {}
+  labels[DEMO_OWNERSHIP_LABEL_KEY] = DEMO_OWNERSHIP_LABEL_VALUE
+  table_obj.labels = labels
+  try:
+    bq_client.create_table(table_obj, exists_ok=False)
+    return True
+  except Exception as exc:
+    if _is_bq_conflict_error(exc):
+      owned = assert_demo_table_ownership_or_absent(
+          bq_client, project_id, dataset_id, table_name
+      )
+      if not owned:
+        raise RuntimeError(
+            f"Refusing to modify table `{project_id}.{dataset_id}.{table_name}`:"
+            " concurrent create conflict against absent or unowned table."
+        ) from exc
+      return True
+    raise
 
 
 def assert_demo_table_ownership_or_absent(

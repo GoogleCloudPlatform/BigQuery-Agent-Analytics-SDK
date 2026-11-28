@@ -401,9 +401,18 @@ def build_eval_suite_from_patterns(
     for idx in range(target_positive):
       row = healthy_rows[idx]
       sess_id = str(row["session_id"])
+      inv_id = str(row.get("invocation_id") or "").strip()
       tool_name = _infer_tool_from_sample(row)
       row_agent = str(row.get("root_agent") or default_root_agent)
       task_id = f"cap_positive_{sess_id}_{idx}"
+      pos_tags = [
+          "pattern:HEALTHY_BASELINE",
+          f"root_agent:{row_agent}",
+          "source:pattern_discovery",
+          f"source_session_id:{sess_id}",
+      ]
+      if inv_id:
+        pos_tags.append(f"source_invocation_id:{inv_id}")
       suite.add_task(
           EvalTaskDef(
               task_id=task_id,
@@ -416,11 +425,7 @@ def build_eval_suite_from_patterns(
               expected_trajectory=[{"tool_name": tool_name, "args": {}}],
               expected_response="Provide accurate order or policy confirmation.",
               thresholds={"task_completion": 1.0},
-              tags=[
-                  "pattern:HEALTHY_BASELINE",
-                  f"root_agent:{row_agent}",
-                  "source:pattern_discovery",
-              ],
+              tags=pos_tags,
               is_positive_case=True,
           )
       )
@@ -429,16 +434,31 @@ def build_eval_suite_from_patterns(
   return suite, health
 
 
+def _extract_source_invocation_id(task: Any) -> str:
+  explicit = str(getattr(task, "source_invocation_id", "") or "").strip()
+  if explicit:
+    return explicit
+  for tag in getattr(task, "tags", None) or ():
+    tag_str = str(tag)
+    if tag_str.startswith("source_invocation_id:"):
+      return tag_str.split(":", 1)[1].strip()
+  return ""
+
+
 def evaluate_suite_against_turns(
     suite: EvalSuite,
     turn_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
   """Scores every exported EvalSuite task threshold against observed turns."""
   by_session: dict[str, list[dict[str, Any]]] = {}
+  by_turn: dict[tuple[str, str], dict[str, Any]] = {}
   for row in turn_rows:
     sid = str(row.get("session_id") or "").strip()
+    iid = str(row.get("invocation_id") or "").strip()
     if sid:
       by_session.setdefault(sid, []).append(row)
+      if iid:
+        by_turn[(sid, iid)] = row
 
   task_results: list[dict[str, Any]] = []
   passed_tasks = 0
@@ -454,7 +474,12 @@ def evaluate_suite_against_turns(
       positive_tasks_total += 1
     else:
       negative_tasks_total += 1
-    matched = by_session.get(task.session_id, [])
+    target_inv_id = _extract_source_invocation_id(task)
+    if is_positive and target_inv_id:
+      turn_row = by_turn.get((task.session_id, target_inv_id))
+      matched = [turn_row] if turn_row is not None else []
+    else:
+      matched = by_session.get(task.session_id, [])
     if not matched:
       task_results.append(
           {
