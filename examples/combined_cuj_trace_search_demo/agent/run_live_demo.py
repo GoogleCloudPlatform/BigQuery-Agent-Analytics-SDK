@@ -67,6 +67,14 @@ def _validate_live_bq_identifiers(
     eval_turns_table: str,
 ) -> None:
   """Validates BigQuery identifiers before DDL/SQL interpolation."""
+  for ident_name, ident_val in (
+      ("project_id", project_id),
+      ("dataset_id", dataset_id),
+      ("table_id", table_id),
+      ("table_id", eval_turns_table),
+  ):
+    if not isinstance(ident_val, str):
+      raise ValueError(f"Invalid BigQuery {ident_name}: {ident_val!r}")
   try:
     from analytics.seed_scale_benchmark import validate_bq_identifiers  # noqa: PLC0415
 
@@ -480,6 +488,7 @@ def _assemble_run_payload(
     project_id: str,
     dataset_id: str,
     table_id: str,
+    eval_turns_table: str = "eval_turns",
     location: str,
     agent_location: str,
     model_name: str,
@@ -496,6 +505,7 @@ def _assemble_run_payload(
       "project_id": project_id,
       "dataset_id": dataset_id,
       "table_id": table_id,
+      "eval_turns_table": eval_turns_table,
       "location": location,
       "agent_location": agent_location,
       "model_name": model_name,
@@ -527,6 +537,9 @@ async def run_demo_async(
     output_json: str | Path | None = None,
 ) -> dict[str, Any]:
   """Async entrypoint executing the 8 scenarios in live or mock-live mode."""
+  _validate_live_bq_identifiers(
+      project_id, dataset_id, table_id, eval_turns_table
+  )
   if mock_live:
     session_ids, eval_turns, scenario_runs, mock_events_count = (
         _prepare_mock_live_runs(user_id=user_id, model_name=model_name)
@@ -549,6 +562,7 @@ async def run_demo_async(
       project_id=project_id,
       dataset_id=dataset_id,
       table_id=table_id,
+      eval_turns_table=eval_turns_table,
       location=location,
       agent_location=agent_location,
       model_name=model_name,
@@ -576,14 +590,14 @@ def run_demo(
     output_json: str | Path | None = None,
 ) -> dict[str, Any]:
   """Executes the 8 scenarios in live BigQuery mode or --mock-live mode."""
+  _validate_live_bq_identifiers(
+      project_id, dataset_id, table_id, eval_turns_table
+  )
   if mock_live:
     session_ids, eval_turns, scenario_runs, mock_events_count = (
         _prepare_mock_live_runs(user_id=user_id, model_name=model_name)
     )
   else:
-    _validate_live_bq_identifiers(
-        project_id, dataset_id, table_id, eval_turns_table
-    )
     live_coro = _run_live_scenarios(
         project_id=project_id,
         dataset_id=dataset_id,
@@ -615,6 +629,7 @@ def run_demo(
       project_id=project_id,
       dataset_id=dataset_id,
       table_id=table_id,
+      eval_turns_table=eval_turns_table,
       location=location,
       agent_location=agent_location,
       model_name=model_name,

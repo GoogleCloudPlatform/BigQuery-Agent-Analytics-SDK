@@ -1398,6 +1398,69 @@ def test_build_materialize_eval_turns_sql_uses_adk_and_fallback(
   assert "CAST(NULL AS STRING) AS _ai_index_trajectory" in sql_fb
 
 
+def _attach_staging_table_store(
+    client,
+    *,
+    conflict_attempts: int = 0,
+):
+  """Wires create_table/get_table mocks to track reserved staging tables."""
+  from analytics.table_guard import DEMO_OWNERSHIP_LABEL_KEY  # noqa: PLC0415
+  from analytics.table_guard import DEMO_OWNERSHIP_LABEL_VALUE  # noqa: PLC0415
+  from google.cloud import bigquery  # noqa: PLC0415
+
+  try:
+    from google.api_core.exceptions import NotFound  # noqa: PLC0415
+
+    not_found_exc_cls = NotFound
+  except ImportError:
+
+    class _StageNotFound(Exception):
+      code = 404
+
+    not_found_exc_cls = _StageNotFound
+
+  class _Conflict(Exception):
+    code = 409
+
+  created_tables: dict[str, object] = {}
+  colliding_tables: dict[str, object] = {}
+  attempts = {"n": 0}
+
+  def _create_table(tbl, exists_ok=False):
+    assert exists_ok is False
+    attempts["n"] += 1
+    fqn = f"{tbl.project}.{tbl.dataset_id}.{tbl.table_id}"
+    if attempts["n"] <= conflict_attempts:
+      colliding_tbl = bigquery.Table(
+          fqn, schema=list(getattr(tbl, "schema", []) or [])
+      )
+      colliding_tbl.expires = getattr(tbl, "expires", None)
+      colliding_tbl.labels = {
+          DEMO_OWNERSHIP_LABEL_KEY: DEMO_OWNERSHIP_LABEL_VALUE,
+          "bqaa_demo_stage_token": f"colliding_stage_{attempts['n']:04d}",
+      }
+      colliding_tables[fqn] = colliding_tbl
+      raise _Conflict("staging table already exists")
+    created_tables[fqn] = tbl
+    return tbl
+
+  def _get_table(ref):
+    fqn = (
+        f"{ref.project}.{ref.dataset_id}.{ref.table_id}"
+        if hasattr(ref, "table_id")
+        else str(ref)
+    )
+    if fqn in created_tables:
+      return created_tables[fqn]
+    if fqn in colliding_tables:
+      return colliding_tables[fqn]
+    raise not_found_exc_cls(f"Table not found: {fqn}")
+
+  client.create_table.side_effect = _create_table
+  client.get_table.side_effect = _get_table
+  return created_tables, not_found_exc_cls
+
+
 def _mock_bq_client_for_counts(row_count: int, ready_count: int):
   executed_sql = []
 
@@ -2236,8 +2299,12 @@ def test_staging_ownership_verifier_error_and_partial_embeddings(
   )
 
   # populate_trajectories_in_bigquery creates unique per-run __stage_<hex> tables.
+  from google.cloud import bigquery  # noqa: PLC0415
+
   stage_names = []
+  load_configs = []
   pop_client = MagicMock()
+  pop_created_tables, not_found_exc = _attach_staging_table_store(pop_client)
 
   def _fake_pop_query(sql_text, job_config=None):
     del job_config
@@ -2262,8 +2329,9 @@ def test_staging_ownership_verifier_error_and_partial_embeddings(
     return job
 
   def _fake_load(staged, stage_fqn, job_config=None):
-    del staged, job_config
+    del staged
     stage_names.append(stage_fqn)
+    load_configs.append(job_config)
     return MagicMock()
 
   pop_client.query.side_effect = _fake_pop_query
@@ -2277,6 +2345,20 @@ def test_staging_ownership_verifier_error_and_partial_embeddings(
   assert len(stage_names) == 2
   assert stage_names[0] != stage_names[1]
   assert "__stage_" in stage_names[0]
+  assert set(pop_created_tables) == set(stage_names)
+  for load_cfg in load_configs:
+    assert (
+        load_cfg.create_disposition == bigquery.CreateDisposition.CREATE_NEVER
+    )
+    assert load_cfg.write_disposition == bigquery.WriteDisposition.WRITE_EMPTY
+  for stage_fqn in stage_names:
+    captured_tbl = pop_client.get_table(stage_fqn)
+    assert captured_tbl.expires is not None
+    assert captured_tbl.labels["bqaa_demo"] == "combined_cuj_trace_search"
+    assert captured_tbl.labels["bqaa_demo_stage_token"]
+  with pytest.raises(not_found_exc):
+    pop_client.get_table("demo-proj.agent_ops.missing_stage")
+  pop_client.delete_table.assert_not_called()
 
   # Partial embeddings emit explicit warning + L3 error emits VERIFIER_ERROR.
   def fake_partial_and_verifier_err(sql_text, job_config=None):
@@ -2415,9 +2497,13 @@ def test_fallback_extractor_and_populate_scrub_nested_secrets_and_error_summary(
   assert "CARD_EXPIRED" in s3_fb
   assert "customer_ops_agent" in s3_fb
 
+  from google.cloud import bigquery  # noqa: PLC0415
+
   staged_rows: list[dict] = []
   executed_sql: list[str] = []
+  load_configs = []
   pop_client = MagicMock()
+  pop_created_tables, not_found_exc = _attach_staging_table_store(pop_client)
 
   def _fake_query(sql_text, job_config=None):
     del job_config
@@ -2443,8 +2529,9 @@ def test_fallback_extractor_and_populate_scrub_nested_secrets_and_error_summary(
     return job
 
   def _fake_load(staged, stage_fqn, job_config=None):
-    del stage_fqn, job_config
+    del stage_fqn
     staged_rows.extend(staged)
+    load_configs.append(job_config)
     return MagicMock()
 
   pop_client.query.side_effect = _fake_query
@@ -2456,6 +2543,23 @@ def test_fallback_extractor_and_populate_scrub_nested_secrets_and_error_summary(
   assert "bq_err_secret" not in str(staged_rows[0]["error_summary"])
   assert "CARD_EXPIRED" in str(staged_rows[0]["error_summary"])
   assert any("t.error_summary = s.error_summary" in s for s in executed_sql)
+  assert len(load_configs) == 1
+  assert (
+      load_configs[0].create_disposition
+      == bigquery.CreateDisposition.CREATE_NEVER
+  )
+  assert (
+      load_configs[0].write_disposition == bigquery.WriteDisposition.WRITE_EMPTY
+  )
+  assert len(pop_created_tables) == 1
+  captured_fqn = next(iter(pop_created_tables))
+  captured_tbl = pop_client.get_table(captured_fqn)
+  assert captured_tbl.expires is not None
+  assert captured_tbl.labels["bqaa_demo"] == "combined_cuj_trace_search"
+  assert captured_tbl.labels["bqaa_demo_stage_token"]
+  with pytest.raises(not_found_exc):
+    pop_client.get_table("demo-proj.agent_ops.missing_stage")
+  pop_client.delete_table.assert_not_called()
 
 
 def test_ownership_guard_fail_closed_and_scale_seeder_validation():
@@ -3118,9 +3222,6 @@ def test_issue608_manifest_staging_reservation_mixed_session_and_lazy_hydration(
 
   # 3. Staging table reservation uses create_table(..., exists_ok=False) with
   #    demo label, retries on 409 Conflict, and never deletes on failed reserve.
-  class _Conflict(Exception):
-    code = 409
-
   def _pop_fetch_query(sql_text, job_config=None):
     del job_config
     job = MagicMock()
@@ -3143,18 +3244,13 @@ def test_issue608_manifest_staging_reservation_mixed_session_and_lazy_hydration(
       job.result.return_value = []
     return job
 
-  create_attempts = {"n": 0}
-
-  def _create_stage_with_retry(tbl, exists_ok=False):
-    del exists_ok
-    create_attempts["n"] += 1
-    if create_attempts["n"] == 1:
-      raise _Conflict("collision")
-    return tbl
+  from google.cloud import bigquery  # noqa: PLC0415
 
   retry_client = MagicMock()
   retry_client.query.side_effect = _pop_fetch_query
-  retry_client.create_table.side_effect = _create_stage_with_retry
+  retry_created_tables, retry_not_found = _attach_staging_table_store(
+      retry_client, conflict_attempts=1
+  )
   before_reserve = datetime.now(timezone.utc)
   populated = populate_trajectories_in_bigquery(
       retry_client, project_id="demo-proj", dataset_id="agent_ops"
@@ -3178,20 +3274,61 @@ def test_issue608_manifest_staging_reservation_mixed_session_and_lazy_hydration(
   )
   retry_client.load_table_from_json.assert_called_once()
   reserved_fqn = retry_client.load_table_from_json.call_args.args[1]
+  load_cfg = retry_client.load_table_from_json.call_args.kwargs["job_config"]
+  assert load_cfg.create_disposition == bigquery.CreateDisposition.CREATE_NEVER
+  assert load_cfg.write_disposition == bigquery.WriteDisposition.WRITE_EMPTY
   assert (
       f"{reserved_tbl.project}.{reserved_tbl.dataset_id}.{reserved_tbl.table_id}"
       == reserved_fqn
   )
+  assert list(retry_created_tables) == [reserved_fqn]
+  assert retry_client.get_table(reserved_fqn) is reserved_tbl
+  colliding_tbl = retry_client.create_table.call_args_list[0].args[0]
+  colliding_fqn = (
+      f"{colliding_tbl.project}.{colliding_tbl.dataset_id}"
+      f".{colliding_tbl.table_id}"
+  )
+  stored_colliding = retry_client.get_table(colliding_fqn)
+  assert stored_colliding.labels["bqaa_demo"] == "combined_cuj_trace_search"
+  assert stored_colliding.labels["bqaa_demo_stage_token"] == (
+      "colliding_stage_0001"
+  )
+  assert (
+      stored_colliding.labels["bqaa_demo_stage_token"]
+      != reserved_tbl.labels["bqaa_demo_stage_token"]
+  )
+  with pytest.raises(retry_not_found):
+    retry_client.get_table("demo-proj.agent_ops.missing_stage")
   retry_client.delete_table.assert_not_called()
 
   fail_reserve_client = MagicMock()
   fail_reserve_client.query.side_effect = _pop_fetch_query
-  fail_reserve_client.create_table.side_effect = _Conflict("always collides")
+  fail_created_tables, fail_not_found = _attach_staging_table_store(
+      fail_reserve_client, conflict_attempts=10
+  )
   with pytest.raises(RuntimeError, match="Failed to reserve unique staging"):
     populate_trajectories_in_bigquery(
         fail_reserve_client, project_id="demo-proj", dataset_id="agent_ops"
     )
+  assert not fail_created_tables
   fail_reserve_client.load_table_from_json.assert_not_called()
+  fail_colliding_tbl = fail_reserve_client.create_table.call_args_list[0].args[
+      0
+  ]
+  fail_colliding_fqn = (
+      f"{fail_colliding_tbl.project}.{fail_colliding_tbl.dataset_id}"
+      f".{fail_colliding_tbl.table_id}"
+  )
+  fail_stored_colliding = fail_reserve_client.get_table(fail_colliding_fqn)
+  assert (
+      fail_stored_colliding.labels["bqaa_demo"] == "combined_cuj_trace_search"
+  )
+  assert (
+      fail_stored_colliding.labels["bqaa_demo_stage_token"]
+      == "colliding_stage_0001"
+  )
+  with pytest.raises(fail_not_found):
+    fail_reserve_client.get_table("demo-proj.agent_ops.missing_stage")
   fail_reserve_client.delete_table.assert_not_called()
 
   # 4. Mixed session (1 healthy turn + 1 error turn) positive task passes
@@ -3658,8 +3795,13 @@ def test_manifest_validation_with_explicit_sids_staging_token_and_503_guard(
       job.result.return_value = []
     return job
 
+  from google.cloud import bigquery  # noqa: PLC0415
+
   replaced_client = MagicMock()
   replaced_client.query.side_effect = _stage_fetch_query
+  replaced_created_tables, replaced_not_found = _attach_staging_table_store(
+      replaced_client
+  )
   replaced_client.load_table_from_json.side_effect = RuntimeError(
       "load failed after table replaced"
   )
@@ -3681,6 +3823,25 @@ def test_manifest_validation_with_explicit_sids_staging_token_and_503_guard(
   assert re.fullmatch(
       r"[0-9a-f]{16}", failed_stage_tbl.labels["bqaa_demo_stage_token"]
   )
+  replaced_client.load_table_from_json.assert_called_once()
+  failed_load_cfg = replaced_client.load_table_from_json.call_args.kwargs[
+      "job_config"
+  ]
+  assert (
+      failed_load_cfg.create_disposition
+      == bigquery.CreateDisposition.CREATE_NEVER
+  )
+  assert (
+      failed_load_cfg.write_disposition == bigquery.WriteDisposition.WRITE_EMPTY
+  )
+  failed_stage_fqn = (
+      f"{failed_stage_tbl.project}.{failed_stage_tbl.dataset_id}"
+      f".{failed_stage_tbl.table_id}"
+  )
+  assert list(replaced_created_tables) == [failed_stage_fqn]
+  assert replaced_client.get_table(failed_stage_fqn) is failed_stage_tbl
+  with pytest.raises(replaced_not_found):
+    replaced_client.get_table("demo-proj.agent_ops.missing_stage")
   replaced_client.delete_table.assert_not_called()
 
   # 4. NotFound/Conflict carrying HTTP 503 on response.status_code fail closed

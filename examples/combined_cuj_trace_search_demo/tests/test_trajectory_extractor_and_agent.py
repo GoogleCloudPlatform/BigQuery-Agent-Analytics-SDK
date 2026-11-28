@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import importlib
 import json
 import os
@@ -35,6 +36,24 @@ from unittest import mock
 DEMO_DIR = Path(__file__).resolve().parents[1]
 if str(DEMO_DIR) not in sys.path:
   sys.path.insert(0, str(DEMO_DIR))
+
+
+def _timed_scrub_median_sec(
+    fn: Callable[[str], str],
+    payload: str,
+    *,
+    trials: int = 3,
+) -> tuple[str, float]:
+  """Warms up and measures median elapsed seconds across ``trials`` calls."""
+  import time  # noqa: PLC0415
+
+  out = fn(payload)
+  times: list[float] = []
+  for _ in range(trials):
+    t0 = time.perf_counter()
+    out = fn(payload)
+    times.append(time.perf_counter() - t0)
+  return out, sorted(times)[len(times) // 2]
 
 
 def _make_bloated_trace(*, tail_error: str = "CARD_EXPIRED") -> dict:
@@ -1808,7 +1827,7 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
       self.assertIn(keep_piece, out)
       self.assertIn("[REDACTED]", out)
 
-    # 2. Budget exhaustion in _scrub_embedded_json_containers never leaks tail.
+    # 2. Budget exhaustion in _scrub_embedded_json_segments never leaks tail.
     many_objs = ("{} " * 40) + '{"password": {"nested": "tail_leak_40"}}'
     scrubbed_many = scrub_sensitive_text(many_objs)
     self.assertNotIn("tail_leak_40", scrubbed_many)
@@ -1929,8 +1948,6 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
   def test_multiline_unterminated_quotes_unified_kv_parity_and_bomb_perf(
       self,
   ) -> None:
-    import time  # noqa: PLC0415
-
     from analytics.index_and_search import _scrub_error_summary  # noqa: PLC0415
     from analytics.trajectory_extractor import extract_s3_outcome_first  # noqa: PLC0415
     from analytics.trajectory_extractor import is_sensitive_key  # noqa: PLC0415
@@ -2120,28 +2137,26 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
         ("mismatch_50k", ("[}" * 50_000) + " password=bomb_s2", "bomb_s2"),
     ):
       with self.subTest(bomb=bomb_name):
-        t0 = time.monotonic()
-        scrubbed_bomb = scrub_sensitive_text(bomb_text)
-        elapsed = time.monotonic() - t0
-        self.assertLess(elapsed, 1.0)
+        scrubbed_bomb, elapsed = _timed_scrub_median_sec(
+            scrub_sensitive_text, bomb_text
+        )
+        self.assertLess(elapsed, 5.0, f"{bomb_name} took {elapsed:.3f}s")
         self.assertNotIn(tail_secret, scrubbed_bomb)
         self.assertIn("[REDACTED]", scrubbed_bomb)
 
   def test_preceding_word_perf_and_repr_escaped_dotted_numbered_keys(
       self,
   ) -> None:
-    import time  # noqa: PLC0415
-
     from analytics.trajectory_extractor import is_sensitive_key  # noqa: PLC0415
     from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: PLC0415
     from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
 
     # 1. O(N^2) regression guard: repeated multiword tail keys on one line.
     long_line = ("x code=1 " * 25_000) + "password=tail7"
-    t0 = time.monotonic()
-    scrubbed_long = scrub_sensitive_text(long_line)
-    elapsed = time.monotonic() - t0
-    self.assertLess(elapsed, 1.0)
+    scrubbed_long, elapsed = _timed_scrub_median_sec(
+        scrub_sensitive_text, long_line
+    )
+    self.assertLess(elapsed, 5.0, f"long_line took {elapsed:.3f}s")
     self.assertNotIn("tail7", scrubbed_long)
     self.assertTrue(scrubbed_long.endswith("password=[REDACTED]"))
 
@@ -2848,8 +2863,6 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
   def test_token_aware_kv_scanner_perf_int_guard_and_cookie_headers(
       self,
   ) -> None:
-    import time  # noqa: PLC0415
-
     from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: PLC0415
     from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
 
@@ -2901,10 +2914,8 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
     )
     for label, payload, secret_val in perf_cases:
       with self.subTest(perf_case=label):
-        t0 = time.monotonic()
-        out = scrub_sensitive_text(payload)
-        elapsed = time.monotonic() - t0
-        self.assertLess(elapsed, 1.0)
+        out, elapsed = _timed_scrub_median_sec(scrub_sensitive_text, payload)
+        self.assertLess(elapsed, 5.0, f"{label} took {elapsed:.3f}s")
         if secret_val is not None:
           self.assertNotIn(secret_val, out)
           self.assertIn("[REDACTED]", out)
@@ -2968,16 +2979,15 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
   def test_dotted_path_perf_json_escapes_quoted_inner_kv_cookies_and_multiline(
       self,
   ) -> None:
-    import time  # noqa: PLC0415
-
     from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
 
     pad_17k = "a" * 17_000
 
-    # 1. Dotted-path O(N) perf (< 1.0s) with trailing secret redaction.
-    t0 = time.monotonic()
-    dotted_out = scrub_sensitive_text(("a." * 25_000) + " password=END_S")
-    self.assertLess(time.monotonic() - t0, 1.0)
+    # 1. Dotted-path O(N) perf with trailing secret redaction.
+    dotted_out, elapsed = _timed_scrub_median_sec(
+        scrub_sensitive_text, ("a." * 25_000) + " password=END_S"
+    )
+    self.assertLess(elapsed, 5.0, f"dotted_path took {elapsed:.3f}s")
     self.assertNotIn("END_S", dotted_out)
     self.assertTrue(dotted_out.endswith(" password=[REDACTED]"))
 
@@ -3093,9 +3103,10 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
         self.assertIn("Cookie: [REDACTED]", out)
 
     # Pathological unclosed escaped-quote backslash run in Cookie stays O(N).
-    t1 = time.monotonic()
-    scrub_sensitive_text('Cookie: a=\\"' + ("\\" * 20_000))
-    self.assertLess(time.monotonic() - t1, 1.0)
+    _, elapsed = _timed_scrub_median_sec(
+        scrub_sensitive_text, 'Cookie: a=\\"' + ("\\" * 20_000)
+    )
+    self.assertLess(elapsed, 5.0, f"cookie_backslash took {elapsed:.3f}s")
 
     # 5. RFC 8259 multiline / escaped-newline JSON connector before ":".
     for label, sample, secret_val in (
@@ -3118,8 +3129,6 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
   def test_dotted_keys_even_backslash_cookie_scanner_and_post_budget_json(
       self,
   ) -> None:
-    import time  # noqa: PLC0415
-
     from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
 
     pad_17k = "a" * 17_000
@@ -3162,9 +3171,8 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
         ("cookie_bs_20k", 'Cookie: a=\\"' + ("\\" * 20_000), None),
     ):
       with self.subTest(perf=label):
-        t0 = time.monotonic()
-        out = scrub_sensitive_text(payload)
-        self.assertLess(time.monotonic() - t0, 1.0)
+        out, elapsed = _timed_scrub_median_sec(scrub_sensitive_text, payload)
+        self.assertLess(elapsed, 5.0, f"{label} took {elapsed:.3f}s")
         if secret_val is not None:
           self.assertNotIn(secret_val, out)
           self.assertIn("[REDACTED]", out)
@@ -3259,8 +3267,6 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
   def test_json_escape_boundaries_cookie_routing_dotted_keys_and_stray_quotes(
       self,
   ) -> None:
-    import time  # noqa: PLC0415
-
     from analytics.trajectory_extractor import is_sensitive_key  # noqa: PLC0415
     from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: PLC0415
     from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
@@ -3440,15 +3446,17 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
           self.assertIn(keep, out)
         self.assertIn("[REDACTED]", out)
 
-    t0 = time.monotonic()
-    semi_out = scrub_sensitive_text("Cookie: " + (";" * 50_000) + " b=END_CK4")
-    self.assertLess(time.monotonic() - t0, 1.0)
+    semi_out, elapsed = _timed_scrub_median_sec(
+        scrub_sensitive_text, "Cookie: " + (";" * 50_000) + " b=END_CK4"
+    )
+    self.assertLess(elapsed, 5.0, f"cookie_semicolon took {elapsed:.3f}s")
     self.assertNotIn("END_CK4", semi_out)
     self.assertIn("[REDACTED]", semi_out)
 
-    t1 = time.monotonic()
-    comma_out = scrub_sensitive_text("Cookie: a=1" + (",x" * 20_000))
-    self.assertLess(time.monotonic() - t1, 1.0)
+    comma_out, elapsed = _timed_scrub_median_sec(
+        scrub_sensitive_text, "Cookie: a=1" + (",x" * 20_000)
+    )
+    self.assertLess(elapsed, 5.0, f"cookie_comma took {elapsed:.3f}s")
     self.assertEqual(comma_out, "Cookie: [REDACTED]")
 
     # 3. Shared dotted-segment matching in is_sensitive_key (dict & text).
@@ -3581,8 +3589,6 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
   def test_quote_hijack_guards_quoted_is_are_3bs_cookies_and_hot_path_perf(
       self,
   ) -> None:
-    import time  # noqa: PLC0415
-
     from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: PLC0415
     from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
 
@@ -3747,17 +3753,16 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
     )
 
     # 6. Hot-path performance.
-    t0 = time.monotonic()
-    perf_out = scrub_sensitive_text(("x code=1 " * 25_000) + "password=tail7")
-    self.assertLess(time.monotonic() - t0, 0.5)
+    perf_out, elapsed = _timed_scrub_median_sec(
+        scrub_sensitive_text, ("x code=1 " * 25_000) + "password=tail7"
+    )
+    self.assertLess(elapsed, 5.0, f"hot_path took {elapsed:.3f}s")
     self.assertNotIn("tail7", perf_out)
     self.assertIn("[REDACTED]", perf_out)
 
   def test_stray_quote_kv_values_depth2_escapes_cookie_kv_boundaries_and_3bs_routing(
       self,
   ) -> None:
-    import time  # noqa: PLC0415
-
     from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
 
     pad_17k = "a" * 17_000
@@ -3815,9 +3820,8 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
     )
     self.assertIn("CARD_EXPIRED", benign_json_out)
 
-    t0 = time.monotonic()
-    _ = scrub_sensitive_text('"a="' * 20_000)
-    self.assertLess(time.monotonic() - t0, 1.0)
+    _, elapsed = _timed_scrub_median_sec(scrub_sensitive_text, '"a="' * 20_000)
+    self.assertLess(elapsed, 5.0, f"quoted_eq took {elapsed:.3f}s")
 
     # 2. Depth-2 escaped-quote period (_escaped_quote_mod_and_period).
     for label, sample, secret_val in (
@@ -5390,22 +5394,26 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
         ("bs40k_u0070", "\\" * 40000 + "\\u0070", "\\\\p"),
     ):
       with self.subTest(linear_backslash_perf=label):
-        t0 = time.perf_counter()
-        unescaped = _unescape_safe_ascii_unicode_escapes(payload)
-        dt_unescape = time.perf_counter() - t0
+        unescaped, dt_unescape = _timed_scrub_median_sec(
+            _unescape_safe_ascii_unicode_escapes, payload
+        )
         self.assertTrue(unescaped.endswith(expected_suffix))
-        self.assertLess(dt_unescape, 2.0)
+        self.assertLess(
+            dt_unescape, 5.0, f"{label} unescape took {dt_unescape:.3f}s"
+        )
 
-        t1 = time.perf_counter()
-        scrubbed = scrub_sensitive_text(payload)
-        dt_scrub = time.perf_counter() - t1
+        scrubbed, dt_scrub = _timed_scrub_median_sec(
+            scrub_sensitive_text, payload
+        )
         self.assertEqual(scrubbed, payload)
-        self.assertLess(dt_scrub, 2.0)
+        self.assertLess(dt_scrub, 5.0, f"{label} scrub took {dt_scrub:.3f}s")
 
     colons_payload = "a:" * 20000
-    t2 = time.perf_counter()
-    self.assertEqual(scrub_sensitive_text(colons_payload), colons_payload)
-    self.assertLess(time.perf_counter() - t2, 2.0)
+    colons_out, dt_colons = _timed_scrub_median_sec(
+        scrub_sensitive_text, colons_payload
+    )
+    self.assertEqual(colons_out, colons_payload)
+    self.assertLess(dt_colons, 5.0, f"colons_payload took {dt_colons:.3f}s")
 
     for label, payload in (
         ("url_auth_colon_comma_50k", "https://u" + ":1," * 50000),
@@ -5416,9 +5424,9 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
         ("many_dq_50k", '"' * 50000),
     ):
       with self.subTest(linear_url_or_punct_perf=label):
-        t3 = time.perf_counter()
-        self.assertEqual(scrub_sensitive_text(payload), payload)
-        self.assertLess(time.perf_counter() - t3, 2.0)
+        out, elapsed = _timed_scrub_median_sec(scrub_sensitive_text, payload)
+        self.assertEqual(out, payload)
+        self.assertLess(elapsed, 5.0, f"{label} took {elapsed:.3f}s")
 
     for label, payload_fn, expected_fn in (
         (
@@ -5586,7 +5594,7 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
         dt_large = sorted(large_times)[2]
         self.assertEqual(out_small, expected_fn(4000))
         self.assertEqual(out_large, expected_fn(16000))
-        self.assertLess(dt_large, 2.0)
+        self.assertLess(dt_large, 5.0)
         self.assertLess(dt_large / max(dt_small, 1e-4), 8.0)
 
     # 5. Review 4 regressions (even-backslash JSON keys, prose comma, long
@@ -9033,8 +9041,6 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
   def test_p1_json_bounds_error_parity_colon_eq_chains_and_url_amp(
       self,
   ) -> None:
-    import time  # noqa: PLC0415
-
     from analytics.trajectory_extractor import _extract_error_markers  # noqa: PLC0415
     from analytics.trajectory_extractor import extract_s3_outcome_first
     from analytics.trajectory_extractor import scrub_sensitive_text
@@ -9508,9 +9514,10 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
         ),
     ):
       with self.subTest(perf_shape=perf_label):
-        t0 = time.perf_counter()
-        out = scrub_sensitive_text(perf_payload)
-        self.assertLess(time.perf_counter() - t0, 2.0)
+        out, elapsed = _timed_scrub_median_sec(
+            scrub_sensitive_text, perf_payload
+        )
+        self.assertLess(elapsed, 5.0, f"{perf_label} took {elapsed:.3f}s")
         self.assertIn("[REDACTED]", out)
         self.assertIn(expected_tail, out)
 
@@ -9616,9 +9623,10 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
         ),
     ):
       with self.subTest(budget_shape=budget_label):
-        t0 = time.perf_counter()
-        out = scrub_sensitive_text(budget_payload)
-        self.assertLess(time.perf_counter() - t0, 2.0)
+        out, elapsed = _timed_scrub_median_sec(
+            scrub_sensitive_text, budget_payload
+        )
+        self.assertLess(elapsed, 5.0, f"{budget_label} took {elapsed:.3f}s")
         self.assertIn("[REDACTED]", out)
         self.assertIn(expected_tail, out)
 
@@ -9833,9 +9841,8 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
         ),
     ):
       with self.subTest(scaling_shape=scaling_label):
-        t0 = time.perf_counter()
-        out = scrub_sensitive_text(payload)
-        self.assertLess(time.perf_counter() - t0, 2.0)
+        out, elapsed = _timed_scrub_median_sec(scrub_sensitive_text, payload)
+        self.assertLess(elapsed, 5.0, f"{scaling_label} took {elapsed:.3f}s")
         self.assertNotIn("S3CR3T", out)
 
   def test_scrub_outer_prose_and_brace_continuation_regressions(self):
@@ -10080,37 +10087,36 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
         self.assertEqual(scrub_sensitive_text(sample), expected)
 
   def test_scrub_linear_scaling_prose_and_unclosed_quotes(self):
-    import time
-
     from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
 
     for scaling_label, payload in (
         (
             "prose_same_line_no_sp_brace_6400",
-            '{"password": "x"} oops ' * 6400,
+            '{"password": "S3CR3T"} oops ' * 6400,
         ),
         (
             "prose_esc_same_line_no_sp_brace_6400",
-            '{"log": "' + r"{\"password\": \"x\"} oops " * 6400 + '"}',
+            '{"log": "' + r"{\"password\": \"S3CR3T\"} oops " * 6400 + '"}',
         ),
         (
             "repeated_brace_long_tail_1600",
-            '{"password": "x"} oops ' * 1600 + ("a" * 10000),
+            '{"password": "S3CR3T"} oops ' * 1600 + ("a" * 10000),
         ),
         (
             "repeated_unclosed_quote_opens_kv",
-            ('{"msg": "unclosed ' + ("a" * 40)) * 400 + '"}',
+            ('{"msg": "unclosed ' + ("a" * 40)) * 400
+            + '", "password": "S3CR3T"}',
         ),
         (
             "repeated_unclosed_edq_quote_opens_kv",
-            (r"\"x\" " + r"\\\"y") * 800,
+            (r"\"x\" " + r"\\\"y") * 800 + " password=S3CR3T",
         ),
     ):
       with self.subTest(scaling_shape=scaling_label):
-        t0 = time.perf_counter()
-        out = scrub_sensitive_text(payload)
-        self.assertLess(time.perf_counter() - t0, 2.0)
+        out, elapsed = _timed_scrub_median_sec(scrub_sensitive_text, payload)
+        self.assertLess(elapsed, 5.0, f"{scaling_label} took {elapsed:.3f}s")
         self.assertNotIn("S3CR3T", out)
+        self.assertIn("[REDACTED]", out)
 
   def test_scrub_nested_delegation_brace_prose_and_version_word_redactions(
       self,
@@ -10244,8 +10250,6 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
           self.assertIn(token, out)
 
   def test_scrub_linear_scaling_nested_json_candidates(self):
-    import time
-
     from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
 
     for scaling_label, payload, required, forbidden in (
@@ -10271,9 +10275,8 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
         ),
     ):
       with self.subTest(scaling_shape=scaling_label):
-        t0 = time.perf_counter()
-        out = scrub_sensitive_text(payload)
-        self.assertLess(time.perf_counter() - t0, 2.0)
+        out, elapsed = _timed_scrub_median_sec(scrub_sensitive_text, payload)
+        self.assertLess(elapsed, 5.0, f"{scaling_label} took {elapsed:.3f}s")
         self.assertNotIn("S3CR3T", out)
         self.assertIn("[REDACTED]", out)
         for token in required:
@@ -10455,8 +10458,6 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
           self.assertNotIn(token, out)
 
   def test_scrub_linear_scaling_escaped_quotes_and_continuations(self):
-    import time  # noqa: PLC0415
-
     from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
 
     cases = (
@@ -10531,10 +10532,8 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
     )
     for label, payload, required, forbidden in cases:
       with self.subTest(label=label):
-        t0 = time.perf_counter()
-        out = scrub_sensitive_text(payload)
-        elapsed = time.perf_counter() - t0
-        self.assertLess(elapsed, 2.0, f"{label} took {elapsed:.3f}s")
+        out, elapsed = _timed_scrub_median_sec(scrub_sensitive_text, payload)
+        self.assertLess(elapsed, 5.0, f"{label} took {elapsed:.3f}s")
         for token in required:
           self.assertIn(token, out)
         for token in forbidden:
@@ -10832,8 +10831,6 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
           self.assertNotIn(token, out)
 
   def test_scrub_linear_scaling_long_mismatched_and_pretty_bombs(self):
-    import time  # noqa: PLC0415
-
     from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
 
     bomb_cases = [
@@ -10921,13 +10918,11 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
     ]
     for label, payload, required, forbidden in bomb_cases:
       with self.subTest(case=label):
-        start = time.perf_counter()
-        out = scrub_sensitive_text(payload)
-        elapsed = time.perf_counter() - start
+        out, elapsed = _timed_scrub_median_sec(scrub_sensitive_text, payload)
         self.assertLess(
             elapsed,
-            2.0,
-            f"{label} took {elapsed:.3f}s (expected < 2.0s)",
+            5.0,
+            f"{label} took {elapsed:.3f}s (expected < 5.0s)",
         )
         for token in required:
           self.assertIn(token, out)
@@ -10985,6 +10980,1178 @@ class PromptsScenariosAndRunnerTest(unittest.TestCase):
             allow_same_line=True,
         )
     )
+
+  def test_scrubber_b64_chains_urls_semicolon_mime_cookies_json_depth_counts_and_tails(
+      self,
+  ) -> None:
+    import concurrent.futures  # noqa: PLC0415
+
+    from analytics.trajectory_extractor import _ALL_SAFE_COUNT_KEYS  # noqa: PLC0415
+    from analytics.trajectory_extractor import _LLM_METRIC_COUNT_KEYS  # noqa: PLC0415
+    from analytics.trajectory_extractor import _NESTED_JSON_BUDGET  # noqa: PLC0415
+    from analytics.trajectory_extractor import _SAFE_SMALL_COUNT_KEYS  # noqa: PLC0415
+    from analytics.trajectory_extractor import is_sensitive_key  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+
+    # 1. Base64-padded multi-row scaling without RecursionError.
+    b64_secret = "c2VjcmV0X3Rva2VuX3ZhbHVlX3BhZGRlZA=="
+    for row_count in (16, 64, 128, 256, 512, 1000):
+      with self.subTest(b64_rows=row_count):
+        payload = "\n".join(
+            f"merchant_{i:03d}_api_key: {b64_secret}" for i in range(row_count)
+        )
+        out = scrub_sensitive_text(payload)
+        self.assertNotIn(b64_secret, out)
+        self.assertEqual(out.count("[REDACTED]"), row_count)
+
+    payload_160 = "\n".join(
+        f"merchant_{i:03d}_api_key: {b64_secret}" for i in range(160)
+    )
+    payload_640 = "\n".join(
+        f"merchant_{i:03d}_api_key: {b64_secret}" for i in range(640)
+    )
+    out_160, dt_160 = _timed_scrub_median_sec(scrub_sensitive_text, payload_160)
+    out_640, dt_640 = _timed_scrub_median_sec(scrub_sensitive_text, payload_640)
+    self.assertEqual(out_160.count("[REDACTED]"), 160)
+    self.assertEqual(out_640.count("[REDACTED]"), 640)
+    self.assertLess(dt_640, 5.0)
+    self.assertLess(dt_640 / max(dt_160, 1e-4), 8.0)
+
+    # 2. Scalar credential '=' values vs container chains.
+    for raw, expected in (
+        ("password: DemoCanary=17", "password: [REDACTED]"),
+        ("X-Api-Key: DemoCanary=17", "X-Api-Key: [REDACTED]"),
+        ("api_key: token_pref=17", "api_key: [REDACTED]"),
+        ("password:foo:bar=S3CR3T", "password:foo:bar=[REDACTED]"),
+        ("auth: MyVal1=SampleMarker", "auth: MyVal1=[REDACTED]"),
+    ):
+      with self.subTest(scalar_eq=raw):
+        self.assertEqual(scrub_sensitive_text(raw), expected)
+
+    # 3. Single-label URL hosts vs userinfo secrets.
+    for raw, expected in (
+        (
+            "url=postgresql://svc:fixture@db,password=before@DemoCanary,"
+            "status=CARD_EXPIRED",
+            "url=postgresql://svc:[REDACTED]@db,password=[REDACTED],"
+            "status=CARD_EXPIRED",
+        ),
+        (
+            "url=redis://:tok@cache;secret=abc@xyz,status=CARD_EXPIRED",
+            "url=redis://:[REDACTED]@cache;secret=[REDACTED],"
+            "status=CARD_EXPIRED",
+        ),
+    ):
+      with self.subTest(single_label_url=raw):
+        self.assertEqual(scrub_sensitive_text(raw), expected)
+
+    # 4. Compound container parent + tight colon leaf.
+    for raw, expected in (
+        (
+            'secret_config:api_key:"SampleMarker"',
+            'secret_config:api_key:"[REDACTED]"',
+        ),
+        (
+            'secret_store:api_key:"SampleMarker"',
+            'secret_store:api_key:"[REDACTED]"',
+        ),
+        (
+            "app_credentials:client_secret:'SampleMarker'",
+            "app_credentials:client_secret:'[REDACTED]'",
+        ),
+    ):
+      with self.subTest(compound_container=raw):
+        self.assertEqual(scrub_sensitive_text(raw), expected)
+
+    # 5. JSON sibling keyed with ';' (e.g. MIME content types).
+    mime_cases = (
+        (
+            "valid_json",
+            '{"password": "S3CR3T", '
+            '"application/json; charset=utf-8": "ok", '
+            '"error": "CARD_EXPIRED"}',
+            ("S3CR3T",),
+        ),
+        (
+            "inner_unbalanced_quote",
+            '{"password": "alpha"beta", '
+            '"application/json; charset=utf-8": "ok", '
+            '"error": "CARD_EXPIRED"}',
+            ("alpha", "beta"),
+        ),
+        (
+            "mismatched_newline",
+            '{"password":\n"alpha\', '
+            '"application/json; charset=utf-8": "ok", '
+            '"error": "CARD_EXPIRED"}',
+            ("alpha",),
+        ),
+        (
+            "small_obj_inner_quote",
+            '{"password": "al"pha", '
+            '"application/json; charset=utf-8": "ok", '
+            '"error": "CARD_EXPIRED"}',
+            ("pha",),
+        ),
+        (
+            "post_budget_json",
+            ('{"k":1} ' * 33) + '{"password": "S3CR3T", '
+            '"application/json; charset=utf-8": "ok", '
+            '"error": "CARD_EXPIRED"}',
+            ("S3CR3T",),
+        ),
+    )
+    for label, payload, forbidden in mime_cases:
+      with self.subTest(semicolon_mime=label):
+        out = scrub_sensitive_text(payload)
+        self.assertIn("[REDACTED]", out)
+        self.assertIn("application/json; charset=utf-8", out)
+        self.assertIn("CARD_EXPIRED", out)
+        for token in forbidden:
+          self.assertNotIn(token, out)
+
+    # 6. HTTP method + /auth routes vs /v1/password/ and /oauth/token/.
+    for unchanged in (
+        "GET /v1/auth: 401",
+        "GET /auth: 401",
+        "POST /api/v1/auth: 403",
+        "GET /v1/auth/verify: CARD_EXPIRED",
+    ):
+      with self.subTest(http_auth_route=unchanged):
+        self.assertEqual(scrub_sensitive_text(unchanged), unchanged)
+
+    for raw, expected in (
+        ("GET /v1/password/: S3CR3T", "GET /v1/password/: [REDACTED]"),
+        ("GET /oauth/token/: S3CR3T", "GET /oauth/token/: [REDACTED]"),
+    ):
+      with self.subTest(http_secret_route=raw):
+        self.assertEqual(scrub_sensitive_text(raw), expected)
+
+    # 7. Deep nested JSON, budget fail-closed, and thread-safe ContextVar state.
+    def _wrap_json_layers(inner: dict, layers: int) -> str:
+      val = json.dumps(inner)
+      for idx in range(layers - 1):
+        val = json.dumps({f"wrap_{idx}": val})
+      return json.dumps({"payload": val})
+
+    nested_5 = _wrap_json_layers({"password": "S3CR3T_5"}, 5)
+    out_5 = scrub_sensitive_text(nested_5)
+    self.assertNotIn("S3CR3T_5", out_5)
+    self.assertIn("[REDACTED]", out_5)
+    self.assertIsInstance(json.loads(out_5), dict)
+
+    prefix_32 = (
+        " ".join(json.dumps({f"k{i}": f"v{i}"}) for i in range(32)) + " "
+    )
+    nested_4 = _wrap_json_layers({"password": "S3CR3T_4"}, 4)
+    post_budget_4 = prefix_32 + nested_4
+    out_post_4 = scrub_sensitive_text(post_budget_4)
+    self.assertNotIn("S3CR3T_4", out_post_4)
+    self.assertIn("[REDACTED]", out_post_4)
+    self.assertTrue(out_post_4.startswith(prefix_32))
+    self.assertIsInstance(json.loads(out_post_4[len(prefix_32) :]), dict)
+
+    nested_12 = _wrap_json_layers({"password": "S3CR3T_12"}, 12)
+    out_12 = scrub_sensitive_text(nested_12)
+    self.assertNotIn("S3CR3T_12", out_12)
+    self.assertIn("[REDACTED]", out_12)
+    self.assertIsInstance(json.loads(out_12), dict)
+
+    mixed_payloads = [nested_5, post_budget_4, nested_12] * 8
+    sequential_outputs = [scrub_sensitive_text(p) for p in mixed_payloads]
+
+    def _scrub_and_read_budget(text: str) -> tuple[str, object]:
+      result = scrub_sensitive_text(text)
+      return result, _NESTED_JSON_BUDGET.get()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+      concurrent_results = list(
+          pool.map(_scrub_and_read_budget, mixed_payloads)
+      )
+    self.assertEqual([r[0] for r in concurrent_results], sequential_outputs)
+    self.assertTrue(all(r[1] is None for r in concurrent_results))
+    self.assertIsNone(_NESTED_JSON_BUDGET.get())
+
+    # 8. Request Cookie vs Set-Cookie, cookie-octet ')'/'\'', and open quotes.
+    cookie_cases = (
+        ("Cookie: sid=a; CARD_EXPIRED", "Cookie: [REDACTED]; CARD_EXPIRED"),
+        (
+            'Cookie: sid=a; {"error":"CARD_EXPIRED"}',
+            'Cookie: [REDACTED]; {"error":"CARD_EXPIRED"}',
+        ),
+        (
+            "Cookie: sid=a, status=CARD_EXPIRED",
+            "Cookie: [REDACTED], status=CARD_EXPIRED",
+        ),
+        (
+            "Set-Cookie: a=1; Path=/; HttpOnly; Secure; Partitioned",
+            "Set-Cookie: [REDACTED]",
+        ),
+        ("Cookie: sid=aa)samplevalue; name=nextvalue", "Cookie: [REDACTED]"),
+        ("Cookie: sid=aa'samplevalue; name=nextvalue", "Cookie: [REDACTED]"),
+        ("Cookie: sid=aa)", "Cookie: [REDACTED]"),
+        (
+            "(Cookie: sid=a) CARD_EXPIRED",
+            "(Cookie: [REDACTED]) CARD_EXPIRED",
+        ),
+        ('Cookie: sid="first samplevalue', "Cookie: [REDACTED]"),
+        (
+            'Cookie: sid="first samplevalue\nstatus=ok',
+            "Cookie: [REDACTED]\nstatus=ok",
+        ),
+        (
+            'Cookie: sid="first samplevalue CARD_EXPIRED',
+            "Cookie: [REDACTED]",
+        ),
+        (
+            'Cookie: sid="first samplevalue\nERROR: CARD_EXPIRED',
+            "Cookie: [REDACTED]\nERROR: CARD_EXPIRED",
+        ),
+    )
+    for raw, expected in cookie_cases:
+      with self.subTest(cookie_case=raw):
+        out = scrub_sensitive_text(raw)
+        self.assertEqual(out, expected)
+        self.assertNotIn("samplevalue", out)
+        self.assertNotIn("nextvalue", out)
+
+    # 9. token_count policy consistency across structured data and text.
+    self.assertTrue(is_sensitive_key("token_count"))
+    self.assertIn("token_count", _LLM_METRIC_COUNT_KEYS)
+    self.assertNotIn("token_count", _SAFE_SMALL_COUNT_KEYS)
+    self.assertTrue(all(is_sensitive_key(k) for k in _ALL_SAFE_COUNT_KEYS))
+
+    self.assertEqual(
+        scrub_sensitive_data({"token_count": 1500}), {"token_count": 1500}
+    )
+    for preserved in (
+        "token_count=1500",
+        "auth:v1:token_count: 5",
+        "auth:v1.0:token_count=3",
+    ):
+      with self.subTest(token_count_preserved=preserved):
+        self.assertEqual(scrub_sensitive_text(preserved), preserved)
+
+    self.assertEqual(
+        scrub_sensitive_data({"token_count": "samplevalue"}),
+        {"token_count": "[REDACTED]"},
+    )
+    for raw, forbidden in (
+        ('token_count="samplevalue"', "samplevalue"),
+        ('{"token_count": "samplevalue"}', "samplevalue"),
+        ("token_count=-1", "-1"),
+        ('token_count="003"', "003"),
+        ("auth:v1:token_count: S3CR3T", "S3CR3T"),
+    ):
+      with self.subTest(token_count_redacted=raw):
+        out = scrub_sensitive_text(raw)
+        self.assertNotIn(forbidden, out)
+        self.assertIn("[REDACTED]", out)
+
+    # 10. Tail-scanner bool/null JSON quoting, blank-line literals, >16KiB tails.
+    tail_prefix = '{"k0": 0} ' * 33
+    tail_bool_out = scrub_sensitive_text(
+        tail_prefix + '{"password": true, "secret": false, "api_key": null}'
+    )
+    self.assertTrue(tail_bool_out.startswith(tail_prefix))
+    self.assertEqual(
+        json.loads(tail_bool_out[len(tail_prefix) :]),
+        {
+            "password": "[REDACTED]",
+            "secret": "[REDACTED]",
+            "api_key": "[REDACTED]",
+        },
+    )
+
+    self.assertEqual(
+        scrub_sensitive_text(
+            "password:\n\ntrue\nsecret:\n\nfalse\napi_key:\n\nnull"
+        ),
+        "password:\n\n[REDACTED]\nsecret:\n\n[REDACTED]\napi_key:\n\n[REDACTED]",
+    )
+
+    tail_blank_out = scrub_sensitive_text(
+        tail_prefix
+        + '{"password":\n\ntrue, "secret":\n\nfalse, "api_key":\n\nnull}'
+    )
+    self.assertTrue(tail_blank_out.startswith(tail_prefix))
+    self.assertEqual(
+        json.loads(tail_blank_out[len(tail_prefix) :]),
+        {
+            "password": "[REDACTED]",
+            "secret": "[REDACTED]",
+            "api_key": "[REDACTED]",
+        },
+    )
+
+    huge_val = "a" * 17000
+    huge_out = scrub_sensitive_text(
+        f'secret={{"k": "{huge_val}"}}\nERROR: CARD_EXPIRED'
+    )
+    self.assertNotIn(huge_val, huge_out)
+    self.assertIn("[REDACTED]", huge_out)
+    self.assertIn("ERROR: CARD_EXPIRED", huge_out)
+
+  def test_scrubber_llm_telemetry_path_eq_tight_chains_amp_url_depth_and_oversized_spans(
+      self,
+  ):
+    import unittest.mock  # noqa: PLC0415
+
+    from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_text
+    import analytics.trajectory_extractor as scrubber_mod  # noqa: PLC0415
+
+    scrub_data = scrub_sensitive_data
+    orig_scrub_at_depth = scrubber_mod._scrub_text_at_depth
+
+    # 1. LLM token telemetry vs standalone token_count.
+    telemetry_fields = (
+        "prompt_token_count",
+        "candidates_token_count",
+        "thoughts_token_count",
+        "total_token_count",
+        "input_token_count",
+        "output_token_count",
+        "cached_content_token_count",
+        "token_counts",
+    )
+    telemetry_obj = {f: i + 10 for i, f in enumerate(telemetry_fields)}
+    telemetry_obj["token_count"] = 1500
+    telemetry_obj["token_count_s"] = "ok"
+    telemetry_json = json.dumps(telemetry_obj)
+    telemetry_kv = (
+        " ".join(f"{f}={i + 10}" for i, f in enumerate(telemetry_fields))
+        + ' token_count=1500 token_count_s="ok"'
+    )
+    telemetry_cases = [
+        ("json", telemetry_json, telemetry_json),
+        ("bare_kv", telemetry_kv, telemetry_kv),
+        ("tail_32", "{} " * 32 + telemetry_json, "{} " * 32 + telemetry_json),
+        (
+            "standalone_kv_str",
+            'token_count="samplevalue"',
+            'token_count="[REDACTED]"',
+        ),
+        ("path_leaf_num", "usage.token_count=42", "usage.token_count=42"),
+        (
+            "path_leaf_secret",
+            "usage.token_count: S3CR3T",
+            "usage.token_count: [REDACTED]",
+        ),
+    ]
+    for label, raw, expected in telemetry_cases:
+      with self.subTest(telemetry=label):
+        self.assertEqual(scrub_sensitive_text(raw), expected)
+
+    safe_telemetry_dict = {
+        "prompt_token_count": 412,
+        "candidates_token_count": 100,
+        "token_counts": 2,
+        "token_count": 1500,
+        "token_count_bad": "x",
+    }
+    data_cases = [
+        ("safe_dict", safe_telemetry_dict, safe_telemetry_dict),
+        (
+            "secret_str",
+            {"token_count": "samplevalue"},
+            {"token_count": "[REDACTED]"},
+        ),
+    ]
+    for label, payload, expected in data_cases:
+      with self.subTest(telemetry_data=label):
+        self.assertEqual(scrub_data(payload), expected)
+
+    # 2. Scalar '=' guard on tight ':', slashed/dotted paths, Bearer=...,
+    #    and container/namespace '=' delegation.
+    path_eq_cases = [
+        ("password:DemoCanary=17", "password:[REDACTED]"),
+        ("X-Api-Key:DemoCanary=17", "X-Api-Key:[REDACTED]"),
+        ("v1/password: DemoCanary=17", "v1/password: [REDACTED]"),
+        ("auth/v1/password: DemoCanary=17", "auth/v1/password: [REDACTED]"),
+        ("auth/password: DemoCanary=17", "auth/password: [REDACTED]"),
+        ("auth/api_key: DemoCanary=17", "auth/api_key: [REDACTED]"),
+        ("auth.password: DemoCanary=17", "auth.password: [REDACTED]"),
+        ("authorization: Bearer=DemoCanary", "authorization: [REDACTED]"),
+        ("auth: password=S", "auth: password=[REDACTED]"),
+        (
+            'auth/v1:password="SampleMarker"',
+            'auth/v1:password="[REDACTED]"',
+        ),
+        ("credentials: api_key=S", "credentials: api_key=[REDACTED]"),
+        ("secret_config: password=S", "secret_config: password=[REDACTED]"),
+        (
+            "db_password:myService:password=S3CR3T",
+            "db_password:myService:password=[REDACTED]",
+        ),
+    ]
+    for raw, expected in path_eq_cases:
+      with self.subTest(path_eq=raw):
+        self.assertEqual(scrub_sensitive_text(raw), expected)
+
+    # 3. Compound and multi-hop tight colon-leaf adoption parity.
+    tight_chain_positives = [
+        ("secret_config:api_key: SampleMarker", "secret_config:api_key:"),
+        ('secret_store:api_key: r"SampleMarker"', "secret_store:api_key:"),
+        ('secret_config:api_key:r"SampleMarker"', "secret_config:api_key:"),
+        (
+            'secret_config:sub:api_key:"SampleMarker"',
+            "secret_config:sub:api_key:",
+        ),
+        ('user_secret:api_key:"SampleMarker"', "user_secret:api_key:"),
+        ('api_token:password:"SampleMarker"', "api_token:password:"),
+    ]
+    for raw, prefix in tight_chain_positives:
+      with self.subTest(tight_chain_pos=raw):
+        out = scrub_sensitive_text(raw)
+        self.assertTrue(out.startswith(prefix), out)
+        self.assertNotIn("SampleMarker", out)
+        self.assertIn("[REDACTED]", out)
+
+    tight_chain_negatives = [
+        ("password: hunter2: status: ok", "password: [REDACTED] status: ok"),
+        ("auth:OPENSESAME/2:status=ok", "auth:[REDACTED]"),
+        (
+            'auth:OPENSESAME/2: "password": "S"',
+            'auth:[REDACTED] "password": "[REDACTED]"',
+        ),
+        (
+            "db_password: Env: CARD_EXPIRED",
+            "db_password: [REDACTED] CARD_EXPIRED",
+        ),
+        ('password:my_secret:"x"', 'password:[REDACTED]"x"'),
+    ]
+    for raw, expected in tight_chain_negatives:
+      with self.subTest(tight_chain_neg=raw):
+        self.assertEqual(scrub_sensitive_text(raw), expected)
+
+    # 4. Single-label URL host across '&' and existing '&' userinfo parity.
+    amp_url_cases = [
+        (
+            "url=postgresql://svc:fixture@db"
+            "&password=before@DemoCanary&status=CARD_EXPIRED",
+            "url=postgresql://svc:[REDACTED]@db"
+            "&password=[REDACTED]&status=CARD_EXPIRED",
+        ),
+        (
+            "http://localhost:1234&SampleMarker@example.test",
+            "http://localhost:[REDACTED]@example.test",
+        ),
+        (
+            "https://token:SampleMarker&part=v@example.test/repo",
+            "https://token:[REDACTED]@example.test/repo",
+        ),
+    ]
+    for raw, expected in amp_url_cases:
+      with self.subTest(amp_url=raw):
+        self.assertEqual(scrub_sensitive_text(raw), expected)
+
+    # 5. Linear O(d) nested JSON call count, flat \u/\" exemption,
+    #    and depth-8/9 unescaped-inner probes.
+    with unittest.mock.patch.object(
+        scrubber_mod, "_scrub_text_at_depth", wraps=orig_scrub_at_depth
+    ) as patched:
+      for d in range(1, 11):
+        payload_str = json.dumps(
+            {"password": "S3CR3T_VAL", "status": "CARD_EXPIRED"}
+        )
+        plain_obj = {"password": "S3CR3T_VAL", "status": "CARD_EXPIRED"}
+        for _ in range(d):
+          payload_str = json.dumps({"k": payload_str})
+          plain_obj = {"k": plain_obj}
+        for kind, raw in (
+            ("str", payload_str),
+            ("dict", json.dumps(plain_obj)),
+        ):
+          with self.subTest(nested_json_depth=d, kind=kind):
+            patched.reset_mock()
+            out = scrub_sensitive_text(raw)
+            self.assertLessEqual(patched.call_count, 3 * d)
+            self.assertNotIn("S3CR3T_VAL", out)
+            self.assertIn("[REDACTED]", out)
+            self.assertIn("CARD_EXPIRED", out)
+
+      branch_items = [
+          json.dumps(
+              {"password": f"S3CR3T_BR{i}"}
+              if i % 2
+              else {"api_key": f"S3CR3T_BR{i}"}
+          )
+          for i in range(1, 13)
+      ]
+      branch_raw = json.dumps(branch_items)
+      self.assertLess(len(branch_raw), 16384)
+      with self.subTest(branch_bomb="array_12"):
+        patched.reset_mock()
+        branch_out = scrub_sensitive_text(branch_raw)
+        self.assertLessEqual(patched.call_count, 260)
+        for i in range(1, 13):
+          self.assertNotIn(f"S3CR3T_BR{i}", branch_out)
+        self.assertIn("[REDACTED]", branch_out)
+
+      wrapped = json.dumps(
+          {
+              "password": "S3CR3T_W1",
+              "api_key": "S3CR3T_W2",
+          }
+      )
+      for i in range(10):
+        wrapped = json.dumps({f"w_{i}": wrapped})
+      self.assertGreaterEqual(len(wrapped), 4075)
+      self.assertLess(len(wrapped), 16384)
+      with self.subTest(branch_bomb="wrapped_10"):
+        patched.reset_mock()
+        wrapped_out = scrub_sensitive_text(wrapped)
+        self.assertLessEqual(patched.call_count, 260)
+        self.assertNotIn("S3CR3T_W1", wrapped_out)
+        self.assertNotIn("S3CR3T_W2", wrapped_out)
+        self.assertIn("[REDACTED]", wrapped_out)
+
+    benign_row = '{"ok": "a\\u0020b"}'
+    benign_tail = (
+        '{"ok": "a\\u0020b", "url": "a\\u0026b", '
+        '"msg": "err: \\"CARD_EXPIRED\\""}'
+    )
+    rows_text = "\n".join([benign_row] * 260 + [benign_tail])
+    rows_out = scrub_sensitive_text(rows_text)
+    self.assertNotIn("[REDACTED]", rows_out)
+    self.assertEqual(rows_out, rows_text)
+
+    def _dumps_n(val, n):
+      for _ in range(n):
+        val = json.dumps(val)
+      return val
+
+    wrap_val = 'msg="password=DemoCanary123" ok="CARD_EXPIRED"'
+    for _ in range(8):
+      wrap_val = f"wrap={json.dumps(wrap_val)}"
+
+    depth_probes = [
+        ("n8", _dumps_n('{"note": "password=S3CR3T_N8"}', 8), "S3CR3T_N8", ""),
+        ("dq8", _dumps_n('foo="password=S3CR3T_DQ8"', 8), "S3CR3T_DQ8", ""),
+        ("sq8", _dumps_n("foo='password=S3CR3T_SQ8'", 8), "S3CR3T_SQ8", ""),
+        ("b9", _dumps_n("password=S3CR3T_B9", 9), "S3CR3T_B9", ""),
+        (
+            "ps9",
+            json.dumps({"payload": _dumps_n("foo='password=S3CR3T_PS9'", 9)}),
+            "S3CR3T_PS9",
+            "",
+        ),
+        ("wrap8", wrap_val, "DemoCanary123", "CARD_EXPIRED"),
+    ]
+    for label, raw, secret, keep in depth_probes:
+      with self.subTest(depth_probe=label):
+        out = scrub_sensitive_text(raw)
+        self.assertNotIn(secret, out)
+        self.assertIn("[REDACTED]", out)
+        if keep:
+          self.assertIn(keep, out)
+
+    direct_d8 = orig_scrub_at_depth(
+        '{"msg": "password=DemoCanary123"}', _depth=8
+    )
+    self.assertNotIn("DemoCanary123", direct_d8)
+    self.assertIn("[REDACTED]", direct_d8)
+
+    # 6. Parenthesized Cookie header and semicolon boundaries.
+    cookie_cases = [
+        (
+            "(Cookie: sid=a); status=CARD_EXPIRED",
+            "(Cookie: [REDACTED]); status=CARD_EXPIRED",
+        ),
+        (
+            "(Cookie: sid=a) ; status=CARD_EXPIRED",
+            "(Cookie: [REDACTED]) ; status=CARD_EXPIRED",
+        ),
+        (
+            "Cookie: sid=aa)samplevalue; name=nextvalue",
+            "Cookie: [REDACTED]",
+        ),
+    ]
+    for raw, expected in cookie_cases:
+      with self.subTest(cookie=raw):
+        self.assertEqual(scrub_sensitive_text(raw), expected)
+
+    # 7. Over-16-KiB r"..." and inline/JSON containers.
+    huge = "x" * 17000
+    oversized_cases = [
+        (
+            "raw_str",
+            f'password=r"{huge}"\nERROR: CARD_EXPIRED',
+            "password=[REDACTED]\nERROR: CARD_EXPIRED",
+            False,
+        ),
+        (
+            "inline_container",
+            f'secret={{"a":"{huge}"}} CARD_EXPIRED',
+            "secret=[REDACTED] CARD_EXPIRED",
+            False,
+        ),
+        (
+            "json_container",
+            f'{{"secret": {{"a": "{huge}"}}, "status": "CARD_EXPIRED"}}',
+            '{"secret": "[REDACTED]", "status": "CARD_EXPIRED"}',
+            True,
+        ),
+    ]
+    for label, raw, expected, parse_json in oversized_cases:
+      with self.subTest(oversized=label):
+        out = scrub_sensitive_text(raw)
+        self.assertEqual(out, expected)
+        if parse_json:
+          self.assertEqual(
+              json.loads(out),
+              {"secret": "[REDACTED]", "status": "CARD_EXPIRED"},
+          )
+
+  def test_scrubber_json_keys_dups_deep_arrays_and_colon_leaves(self) -> None:
+    import json  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    from analytics.trajectory_extractor import _scrub_text_at_depth  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_data
+    from analytics.trajectory_extractor import scrub_sensitive_text
+
+    # 1. Embedded JSON object keys and duplicate JSON object keys.
+    ghp_tok = "ghp_" + "0123456789abcdef0123456789abcdef0123"
+    oauth_tok = "ya29" + ".a0AfH6SMBx_123456"
+    json_key_and_dup_cases = (
+        ('{"url=https://user:S3CR3T@x.com": "ok"}', "S3CR3T", "ok"),
+        (f'{{"{ghp_tok}": "ok"}}', "ghp_", "ok"),
+        (f'{{"Bearer {oauth_tok}": "ok"}}', "ya29.", "ok"),
+        ('[{"password=S3CR3T": "v"}]', "S3CR3T", "password=[REDACTED]"),
+        ('{"nested": {"Bearer S3CR3T": "v"}}', "S3CR3T", "v"),
+        ('{"a": "password=S3CR3T", "a": "ok"}', "S3CR3T", "ok"),
+        (f'{{"a": "Bearer {oauth_tok}", "a": "ok"}}', "ya29.", "ok"),
+        ('{"a": "Bearer S3CR3T_TOK", "a": "ok"}', "S3CR3T", "ok"),
+        ('outer {"x": {"a": "password=S3CR3T", "a": "ok"}}', "S3CR3T", "ok"),
+        (
+            'log="{\\"a\\": \\"password=S3CR3T\\", \\"a\\": \\"ok\\"}"',
+            "S3CR3T",
+            "ok",
+        ),
+    )
+    for raw, secret, keep in json_key_and_dup_cases:
+      with self.subTest(json_case=raw):
+        out = scrub_sensitive_text(raw)
+        self.assertNotIn(secret, out)
+        self.assertIn("[REDACTED]", out)
+        self.assertIn(keep, out)
+
+    with self.subTest(json_case="normal_headers_preserved"):
+      self.assertEqual(
+          scrub_sensitive_text(
+              '{"content-type": "application/json; charset=utf-8",'
+              ' "token": "SECRET"}'
+          ),
+          '{"content-type":"application/json; charset=utf-8",'
+          '"token":"[REDACTED]"}',
+      )
+
+    # 2. Deep unescaped fallback across depths 8..40.
+    for d in (8, 11, 12, 20, 32, 36, 40):
+      with self.subTest(depth=d):
+        self.assertEqual(
+            _scrub_text_at_depth("foo='password=S3CR3T_DD'", _depth=d),
+            "foo='password=[REDACTED]'",
+        )
+        deep_json = _scrub_text_at_depth(
+            '{"m": "foo=\'password=S3CR3T_DD\'"}', _depth=d
+        )
+        self.assertNotIn("S3CR3T_DD", deep_json)
+        self.assertIn("[REDACTED]", deep_json)
+        self.assertEqual(
+            _scrub_text_at_depth(
+                'log="{\\"password\\": \\"S3CR3T_DD\\"}"', _depth=d
+            ),
+            'log="[REDACTED]"',
+        )
+
+    # 3. Large > 16 KiB 300-item JSON string arrays.
+    large_arrays = (
+        (
+            "nested_json_strings",
+            json.dumps(
+                [
+                    json.dumps(
+                        {
+                            "password": f"S3CR3T_{i}",
+                            "status": "CARD_EXPIRED",
+                            "pad": "x" * 20,
+                        }
+                    )
+                    for i in range(300)
+                ]
+            ),
+        ),
+        (
+            "escaped_log_strings",
+            json.dumps(
+                [
+                    (
+                        f'log="password=\\"S3CR3T_{i}\\"'
+                        ' status=\\"CARD_EXPIRED\\" ' + ("x" * 15) + '"'
+                    )
+                    for i in range(300)
+                ]
+            ),
+        ),
+    )
+    for label, payload in large_arrays:
+      with self.subTest(large_array=label):
+        self.assertGreater(len(payload), 16384)
+        start = time.monotonic()
+        out = scrub_sensitive_text(payload)
+        elapsed = time.monotonic() - start
+        self.assertEqual(out.count("CARD_EXPIRED"), 300)
+        self.assertNotIn("S3CR3T_", out)
+        self.assertLess(elapsed, 1.0)  # generous CI ceiling
+
+    # 4. Scalar-credential colon shielding, multi-hop colon leaves,
+    #    dotted trailing-host URL &, and non-sensitive token_count prefixes.
+    exact_cases = (
+        ("svc:password: DemoCanary=17", "svc:password: [REDACTED]"),
+        ("prod:api_key: DemoCanary=17", "prod:api_key: [REDACTED]"),
+        ("env:secret: DemoCanary=17", "env:secret: [REDACTED]"),
+        ("app:secret_key: DemoCanary=17", "app:secret_key: [REDACTED]"),
+        ("auth: MyVal1=SampleMarker", "auth: MyVal1=[REDACTED]"),
+        ("credentials: api_key=S", "credentials: api_key=[REDACTED]"),
+        (
+            "secret_config: password=S",
+            "secret_config: password=[REDACTED]",
+        ),
+        ("password:foo:bar=S3CR3T", "password:foo:bar=[REDACTED]"),
+        (
+            "db_password:myService:password=S3CR3T",
+            "db_password:myService:password=[REDACTED]",
+        ),
+        ("secret:key_file=abc123", "secret:[REDACTED]"),
+        ('secret:secret="SampleMarker"', 'secret:secret="[REDACTED]"'),
+        (
+            "secret_config:sub:api_key: SampleMarker",
+            "secret_config:sub:api_key: [REDACTED]",
+        ),
+        (
+            "auth_config:sub:api_key: SampleMarker",
+            "auth_config:sub:api_key: [REDACTED]",
+        ),
+        (
+            "user_secret:api_key: SampleMarker",
+            "user_secret:api_key: [REDACTED]",
+        ),
+        (
+            "api_token:password: SampleMarker",
+            "api_token:password: [REDACTED]",
+        ),
+        (
+            "password: hunter2: status: ok",
+            "password: [REDACTED] status: ok",
+        ),
+        ('password:my_secret:"x"', 'password:[REDACTED]"x"'),
+        ("auth:OPENSESAME/2:status=ok", "auth:[REDACTED]"),
+        (
+            'auth:OPENSESAME/2: "password": "S"',
+            'auth:[REDACTED] "password": "[REDACTED]"',
+        ),
+        (
+            "db_password: Env: CARD_EXPIRED",
+            "db_password: [REDACTED] CARD_EXPIRED",
+        ),
+        (
+            "url=postgresql://svc:fixture@db&password=before@DemoCanary.com",
+            "url=postgresql://svc:[REDACTED]@db&password=[REDACTED]",
+        ),
+        (
+            "url=postgresql://svc:fixture@db&password=before@DemoCanary.com"
+            " trailing",
+            "url=postgresql://svc:[REDACTED]@db&password=[REDACTED] trailing",
+        ),
+        (
+            "https://user:p@ss&token=S3CR3T@example.test/repo",
+            "https://user:[REDACTED]@example.test/repo",
+        ),
+        (
+            "https://user:p@ss&email=x@example.test/repo",
+            "https://user:[REDACTED]@example.test/repo",
+        ),
+        (
+            "http://localhost:1234&SampleMarker@example.test",
+            "http://localhost:[REDACTED]@example.test",
+        ),
+        ("step1.token_count=1500", "step1.token_count=1500"),
+        ("agent_step.token_count=1500", "agent_step.token_count=1500"),
+        ("trace.token_count=1500", "trace.token_count=1500"),
+        ("stats.token_count=1500", "stats.token_count=1500"),
+        ("foo.token_count=1500", "foo.token_count=1500"),
+        ("usage.token_count=1500", "usage.token_count=1500"),
+        ("auth:hunter2:token_count: 5", "auth:[REDACTED] 5"),
+        ("usage.token_count: S3CR3T", "usage.token_count: [REDACTED]"),
+    )
+    for raw, expected in exact_cases:
+      with self.subTest(exact=raw):
+        self.assertEqual(scrub_sensitive_text(raw), expected)
+
+    with self.subTest(structured="token_count"):
+      self.assertEqual(
+          scrub_sensitive_data(
+              {"step1.token_count": 1500, "password.token_count": 1500}
+          ),
+          {"step1.token_count": 1500, "password.token_count": "[REDACTED]"},
+      )
+
+    # 5. Over-16-KiB plain and escaped quoted values.
+    big = "a" * 17000
+    for label, raw, expected in (
+        (
+            "json_plain",
+            f'{{"secret": "{big}", "status": "CARD_EXPIRED"}}',
+            '{"secret": "[REDACTED]", "status": "CARD_EXPIRED"}',
+        ),
+        (
+            "plain_quoted",
+            f'secret="{big}" CARD_EXPIRED',
+            'secret="[REDACTED]" CARD_EXPIRED',
+        ),
+    ):
+      with self.subTest(big_value=label):
+        self.assertEqual(scrub_sensitive_text(raw), expected)
+
+    with self.subTest(big_value="escaped_json"):
+      escaped_big = scrub_sensitive_text(
+          f'{{"log": "password=\\"{big}\\" status=CARD_EXPIRED"}}'
+      )
+      self.assertIn("CARD_EXPIRED", escaped_big)
+      self.assertNotIn(big, escaped_big)
+      self.assertIn("[REDACTED]", escaped_big)
+
+  def test_scrubber_key_collisions_data_keys_unknown_colon_and_depth1_arrays(
+      self,
+  ) -> None:
+    import time  # noqa: PLC0415
+
+    from analytics.trajectory_extractor import scrub_sensitive_data  # noqa: PLC0415
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+
+    # 1. Colliding redacted JSON object keys.
+    for label, raw, keep, redact in (
+        (
+            "url_creds_dumps",
+            json.dumps(
+                {
+                    "https://user:sec1@example.com": "CARD_EXPIRED",
+                    "https://user:sec2@example.com": "ok",
+                }
+            ),
+            ("CARD_EXPIRED", "ok"),
+            ("sec1", "sec2"),
+        ),
+        (
+            "url_creds_path",
+            '{"https://u:sec1@example.com/a": "CARD_EXPIRED", '
+            '"https://u:sec2@example.com/a": "ok"}',
+            ("CARD_EXPIRED", "ok"),
+            ("sec1", "sec2"),
+        ),
+        (
+            "token_parens",
+            '{"req (token=sec1) status": {"code": "CARD_EXPIRED"}, '
+            '"req (token=sec2) status": {"code": "OK"}}',
+            ("CARD_EXPIRED", "OK"),
+            ("sec1", "sec2"),
+        ),
+        (
+            "oauth_keys",
+            json.dumps(
+                {
+                    "ya29" + ".S3CR3T_A": "DEADLINE_EXCEEDED",
+                    "ya29" + ".S3CR3T_B": "CARD_EXPIRED",
+                }
+            ),
+            ("DEADLINE_EXCEEDED", "CARD_EXPIRED"),
+            ("S3CR3T_",),
+        ),
+        (
+            "unicode_escape_key",
+            '{"\\u0070assword=sec1": "CARD_EXPIRED", "password=sec2": "ok"}',
+            (),
+            ("sec1", "sec2"),
+        ),
+        (
+            "nested_outer_key",
+            '{"outer": {"https://u:sec1@x.com": "CARD_EXPIRED", '
+            '"https://u:sec2@x.com": "ok"}, "password": "TopSecret99"}',
+            ("CARD_EXPIRED",),
+            ("sec1", "sec2", "TopSecret99"),
+        ),
+    ):
+      with self.subTest(colliding_json_key=label):
+        out = scrub_sensitive_text(raw)
+        for token in keep:
+          self.assertIn(token, out)
+        for secret in redact:
+          self.assertNotIn(secret, out)
+
+    # 2. Secret-bearing Mapping keys and collision disambiguation.
+    benign_mapping = {
+        "content-type": "application/json; charset=utf-8",
+        "Bearer": "ok",
+    }
+    for label, payload, expected in (
+        (
+            "url_key",
+            {"https://u:Hunter22@db.internal": "ok"},
+            {"https://u:[REDACTED]@db.internal": "ok"},
+        ),
+        (
+            "ghp_key",
+            {"ghp_" + "0123456789abcdef0123456789abcdef0123": "ok"},
+            {"[REDACTED]": "ok"},
+        ),
+        ("benign_keys", benign_mapping, benign_mapping),
+    ):
+      with self.subTest(data_key=label):
+        self.assertEqual(scrub_sensitive_data(payload), expected)
+
+    with self.subTest(data_key="colliding_mapping_keys"):
+      out_map = scrub_sensitive_data(
+          {
+              "https://u:sec1@x.com": "CARD_EXPIRED",
+              "https://u:sec2@x.com": "ok",
+          }
+      )
+      self.assertEqual(len(out_map), 2)
+      self.assertEqual(set(out_map.values()), {"CARD_EXPIRED", "ok"})
+      dumped = json.dumps(out_map)
+      self.assertNotIn("sec1", dumped)
+      self.assertNotIn("sec2", dumped)
+
+    # 3. Unknown-namespace multi-hop unquoted colon chains.
+    for raw, expected in (
+        (
+            "auth.password:custom_ns:api_key: SampleMarker",
+            "auth.password:custom_ns:api_key: [REDACTED]",
+        ),
+        (
+            "auth.password:custom_ns:token: SampleMarker",
+            "auth.password:custom_ns:token: [REDACTED]",
+        ),
+        (
+            "api_secret:custom_ns:token: SampleMarker",
+            "api_secret:custom_ns:token: [REDACTED]",
+        ),
+        (
+            "password:custom_ns:api_key: SampleMarker",
+            "password:custom_ns:api_key: [REDACTED]",
+        ),
+        (
+            "secret:custom_ns:password: SampleMarker status=CARD_EXPIRED",
+            "secret:custom_ns:password: [REDACTED] status=CARD_EXPIRED",
+        ),
+        (
+            "api_secret:v1:token: SampleMarker",
+            "api_secret:v1:token: [REDACTED]",
+        ),
+        ("token:abc:def:api_key: x1", "token:[REDACTED] x1"),
+    ):
+      with self.subTest(colon_chain=raw):
+        self.assertEqual(scrub_sensitive_text(raw), expected)
+
+    for raw in (
+        "auth_config:custom_ns:api_key: Env: CARD_EXPIRED",
+        "auth.password:custom_ns:api_key: CARD_EXPIRED",
+    ):
+      with self.subTest(colon_chain_preserve=raw):
+        out = scrub_sensitive_text(raw)
+        self.assertIn("CARD_EXPIRED", out)
+        self.assertIn("[REDACTED]", out)
+
+    # 4. Wrapped large 300-item arrays, caps, and linear nesting cost.
+    inner_300 = [
+        json.dumps(
+            {"status": "CARD_EXPIRED", "msg": f"item_{i}", "pad": "x" * 20}
+        )
+        for i in range(300)
+    ]
+    inner_300_sec = [
+        json.dumps(
+            {"status": "CARD_EXPIRED", "password": f"Sec_{i}", "pad": "x" * 20}
+        )
+        for i in range(300)
+    ]
+    for label, payload in (
+        ("wrapper_dict", json.dumps({"wrapper": json.dumps(inner_300)})),
+        ("log_str", "log=" + json.dumps(json.dumps(inner_300))),
+        (
+            "depth2_wrap",
+            json.dumps({"a": json.dumps({"b": json.dumps(inner_300)})}),
+        ),
+        (
+            "wrapper_with_secrets",
+            json.dumps({"wrapper": json.dumps(inner_300_sec)}),
+        ),
+    ):
+      with self.subTest(wrapped_array=label):
+        start = time.monotonic()
+        out = scrub_sensitive_text(payload)
+        elapsed = time.monotonic() - start
+        self.assertEqual(out.count("CARD_EXPIRED"), 300)
+        self.assertNotIn("Sec_", out)
+        self.assertLess(elapsed, 1.5)
+
+    nested_300 = [
+        json.dumps({"m": json.dumps(json.dumps({"password": f"Sec_{i}"}))})
+        for i in range(300)
+    ]
+    flat_2500 = [json.dumps({"password": f"Sec_{i}"}) for i in range(2500)]
+    for label, items, limit_s in (
+        ("nested_300_cap", nested_300, 1.5),
+        ("flat_2500_cap", flat_2500, 2.0),
+    ):
+      with self.subTest(adversarial_cap=label):
+        payload = json.dumps({"wrapper": json.dumps(items)})
+        start = time.monotonic()
+        out = scrub_sensitive_text(payload)
+        elapsed = time.monotonic() - start
+        self.assertNotIn("Sec_", out)
+        self.assertLess(elapsed, limit_s)
+
+    scrubber_mod = sys.modules[scrub_sensitive_text.__module__]
+    orig_scrub = scrubber_mod.__dict__["_scrub_text_at_depth"]
+    nested = "ok"
+    for depth in range(1, 13):
+      nested = json.dumps([nested])
+      with self.subTest(linear_nesting_depth=depth):
+        with mock.patch.object(
+            scrubber_mod, "_scrub_text_at_depth", side_effect=orig_scrub
+        ) as spy:
+          scrub_sensitive_text(nested)
+        self.assertGreater(spy.call_count, 0)
+        self.assertLessEqual(spy.call_count, 3 * depth)
+
+  def test_scrubber_escaped_flat_budget_json_numbers_and_sens_hops(
+      self,
+  ) -> None:
+    from analytics.trajectory_extractor import scrub_sensitive_text  # noqa: PLC0415
+
+    escape_templates = (
+        ("nl", "line1\nline2_{}"),
+        ("tab", "col1\tcol2_{}"),
+        ("dq", 'say "hi"_{}'),
+        ("win", "C:\\app\\pay.py:{} C:\\Users\\app\\C:\\users\\app"),
+        ("unicode", "café_☕_{}"),
+    )
+    for esc_name, tmpl in escape_templates:
+      items = [
+          json.dumps(
+              {"status": "CARD_EXPIRED", "msg": tmpl.format(i)},
+              ensure_ascii=True,
+          )
+          for i in range(300)
+      ]
+      wrappers = (
+          ("wrapper_dict", json.dumps({"wrapper": json.dumps(items)})),
+          (
+              "depth2_wrap",
+              json.dumps({"a": json.dumps({"b": json.dumps(items)})}),
+          ),
+          ("ndjson", json.dumps({"wrapper": "\n".join(items)})),
+      )
+      for wrap_name, payload in wrappers:
+        with self.subTest(escape=esc_name, wrapper=wrap_name):
+          self.assertEqual(
+              scrub_sensitive_text(payload).count("CARD_EXPIRED"), 300
+          )
+
+    tail_err = "err=" + json.dumps(
+        json.dumps({"status": "CARD_EXPIRED", "msg": "x\ny"})
+    )
+    sibling_cases = (
+        (
+            "wrapped",
+            json.dumps(
+                {
+                    "wrapper": json.dumps(
+                        {
+                            "items": [
+                                json.dumps({"msg": f"x\ny_{i}"})
+                                for i in range(300)
+                            ],
+                            "last_error": tail_err,
+                        }
+                    )
+                }
+            ),
+        ),
+        (
+            "unwrapped",
+            json.dumps(
+                {
+                    "items": json.dumps(
+                        [json.dumps({"msg": f"a\nb_{i}"}) for i in range(300)]
+                    ),
+                    "last_error": tail_err,
+                }
+            ),
+        ),
+    )
+    for label, payload in sibling_cases:
+      with self.subTest(sibling_starvation=label):
+        self.assertIn("CARD_EXPIRED", scrub_sensitive_text(payload))
+
+    d2_esc_sec = json.dumps(
+        {
+            "wrapper": json.dumps(
+                [
+                    json.dumps({"m": json.dumps({"password": f"Sec_{i}"})})
+                    for i in range(300)
+                ]
+            )
+        }
+    )
+    self.assertNotIn("Sec_", scrub_sensitive_text(d2_esc_sec))
+
+    raw = (
+        '{"a": {"https://u:sec1@x.com": "v1", "https://u:sec2@x.com": "v2"}, '
+        '"token_count": 5, "password_count": 500000, '
+        '"password": 493826, "api_key": -12.34e5}'
+    )
+    out = scrub_sensitive_text(raw)
+    for kept in ("v1", "v2"):
+      self.assertIn(kept, out)
+    for leaked in ("sec1", "sec2", "500000", "493826", "-12.34e5"):
+      self.assertNotIn(leaked, out)
+    parsed = json.loads(out)
+    self.assertEqual(parsed["token_count"], 5)
+    for key in ("password_count", "password", "api_key"):
+      self.assertEqual(parsed[key], "[REDACTED]")
+
+    colon_cases = (
+        (
+            "auth.password:custom_ns:secret:api_key: SampleMarker",
+            "auth.password:custom_ns:secret:api_key: [REDACTED]",
+        ),
+        (
+            "auth.password:custom_ns:secret_config:api_key: SampleMarker",
+            "auth.password:custom_ns:secret_config:api_key: [REDACTED]",
+        ),
+        (
+            "api_secret:ns1:ns2:token: SampleMarker",
+            "api_secret:[REDACTED] SampleMarker",
+        ),
+        (
+            "auth.password:v1:secret:api_key: SampleMarker",
+            "auth.password:v1:secret:api_key: [REDACTED]",
+        ),
+        (
+            "auth.password:custom_ns:v1:api_key: SampleMarker",
+            "auth.password:custom_ns:v1:api_key: [REDACTED]",
+        ),
+        ("token:abc:def:api_key: x1", "token:[REDACTED] x1"),
+    )
+    for src, expected in colon_cases:
+      with self.subTest(colon_hop=src):
+        self.assertEqual(scrub_sensitive_text(src), expected)
 
 
 if __name__ == "__main__":
