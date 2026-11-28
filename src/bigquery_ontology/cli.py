@@ -19,10 +19,12 @@ dispatches to the matching loader. ``gm compile`` takes a binding YAML
 and emits the corresponding ``CREATE PROPERTY GRAPH`` DDL on stdout
 (or to ``-o PATH``). ``gm scaffold`` generates starter ``CREATE TABLE``
 DDL and a matching binding stub from an ontology. ``gm import-owl``
-reads OWL source files and emits ``ontology.yaml``. Both ``validate``
-and ``compile`` resolve a binding's companion ontology by auto-discovering
-``<name>.ontology.yaml`` next to the binding; ``--ontology PATH``
-overrides that lookup.
+reads OWL source files and emits ``ontology.yaml``. ``gm
+import-dataplex-glossary`` reads a Knowledge Catalog (Dataplex) Business
+Glossary through the read-only Dataplex API and emits ``ontology.yaml``.
+Both ``validate`` and ``compile`` resolve a binding's companion ontology
+by auto-discovering ``<name>.ontology.yaml`` next to the binding;
+``--ontology PATH`` overrides that lookup.
 
 Exit codes:
 
@@ -35,9 +37,13 @@ Exit codes:
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
+import re
+import secrets
+import stat
 import sys
 
 from pydantic import ValidationError
@@ -80,7 +86,10 @@ def _default_compiler_version() -> str:
 
 app = typer.Typer(
     name="gm",
-    help="Graph-model CLI. Commands: validate, compile, scaffold, import-owl.",
+    help=(
+        "Graph-model CLI. Commands: validate, compile, scaffold, import-owl, "
+        "import-dataplex-glossary."
+    ),
     add_completion=False,
     no_args_is_help=True,
 )
@@ -921,6 +930,403 @@ def import_owl_command(
       raise typer.Exit(code=1)
   else:
     typer.echo(yaml_text, nl=False)
+
+
+# --------------------------------------------------------------------- #
+# gm import-dataplex-glossary                                            #
+# --------------------------------------------------------------------- #
+
+
+# Output paths that name an already-open file descriptor. Writing through
+# them reaches that descriptor's file; replacing the file they resolve to
+# would not, and may not be possible at all.
+_DESCRIPTOR_PATH_RE = re.compile(
+    r"/dev/(?:stdout|stderr|stdin|fd/[0-9]+)"
+    r"|/proc/(?:self|thread-self|[0-9]+)/fd/[0-9]+"
+)
+# Symlinks followed while resolving a new output file. As on Linux, a chain
+# of this many links resolves and one more is an error.
+_MAX_SYMLINK_HOPS = 40
+_TEMP_NAME_ATTEMPTS = 100
+
+
+def _emit_internal_error(
+    file: str, exc: BaseException, *, as_json: bool
+) -> None:
+  """Report an unexpected error (exit 3): plain text, or with ``--json`` a
+  single ``cli-internal-error`` object."""
+  message = f"internal error: {exc}"
+  if not as_json:
+    typer.echo(message, err=True)
+    return
+  _emit_errors(
+      [
+          {
+              "file": file,
+              "line": 0,
+              "col": 0,
+              "rule": "cli-internal-error",
+              "severity": "error",
+              "message": message,
+          }
+      ],
+      as_json=True,
+  )
+
+
+def _discard_stdout() -> None:
+  """Point the stdout descriptor at the null device after a failed write.
+
+  Python flushes ``sys.stdout`` again at exit. After a broken pipe that
+  flush fails too, printing a second error on stderr and turning exit
+  code 1 into 120, so the descriptor is redirected first. Without a real
+  descriptor (as under a test runner) there is nothing to redirect.
+  """
+  try:
+    fd = sys.stdout.fileno()
+    devnull = os.open(os.devnull, os.O_WRONLY)
+  except (AttributeError, OSError, ValueError):
+    return
+  try:
+    os.dup2(devnull, fd)
+  except OSError:
+    pass
+  finally:
+    os.close(devnull)
+
+
+# Path separators. Output paths are checked as given, because ``pathlib``
+# drops a trailing separator (and a trailing ``.``), which would turn
+# ``out.yaml/`` into ``out.yaml``.
+_SEPARATORS = tuple(sep for sep in (os.sep, os.altsep) if sep)
+
+
+def _final_component(raw: str) -> str:
+  """The part of ``raw`` after its last path separator."""
+  return raw[max(raw.rfind(sep) for sep in _SEPARATORS) + 1 :]
+
+
+def _names_a_directory(raw: str) -> bool:
+  """Whether ``raw`` can only name a directory, as the kernel reads it: it
+  ends in a separator, or its last component is ``.`` or ``..``."""
+  return raw.endswith(_SEPARATORS) or _final_component(raw) in (".", "..")
+
+
+def _parent_directory(raw: str) -> str:
+  """The directory that holds the last component of ``raw``, as given."""
+  return os.path.dirname(raw.rstrip("".join(_SEPARATORS))) or os.curdir
+
+
+def _is_descriptor_path(raw: str) -> bool:
+  normalized = re.sub("/+", "/", raw)
+  return _DESCRIPTOR_PATH_RE.fullmatch(normalized) is not None
+
+
+def _write_through(raw: str, text: str) -> None:
+  with open(raw, "w", encoding="utf-8") as f:
+    f.write(text)
+
+
+def _resolve_new_file(path: str) -> Path:
+  """Where opening ``path`` for writing would create the file.
+
+  ``path`` does not exist, and its last component is a name. Its parent
+  directory is resolved strictly, as the kernel does, so a missing
+  directory fails even when ``..`` follows it (``missing/../out.yaml`` is
+  not ``out.yaml``), and a dangling symlink is followed hop by hop the
+  same way. A link target that names a directory (``dir/``, ``dir/.``)
+  creates nothing, and fails as opening it would.
+
+  Raises:
+      FileNotFoundError: A directory on the way does not exist.
+      IsADirectoryError: A dangling link's target ends in a separator, and
+          the directory that would hold it exists.
+      OSError: Too many symlinks, or the file appeared meanwhile.
+  """
+  current = Path(path)
+  # One pass more than links, so the target of the last link is still looked
+  # at: a chain of exactly _MAX_SYMLINK_HOPS links ends in a name to create.
+  for _ in range(_MAX_SYMLINK_HOPS + 1):
+    if current.name in ("", ".", ".."):
+      raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), path)
+    parent = Path(os.path.realpath(current.parent, strict=True))
+    candidate = parent / current.name
+    try:
+      mode = os.lstat(candidate).st_mode
+    except FileNotFoundError:
+      return candidate
+    if not stat.S_ISLNK(mode):
+      # Only reachable if something created the file concurrently.
+      raise FileExistsError(
+          errno.EEXIST, "output file appeared while it was resolved", path
+      )
+    link = os.readlink(candidate)
+    if _names_a_directory(link):
+      # As opening it would: a missing directory on the way fails as such,
+      # and otherwise a target that ends in a separator names a directory.
+      if link.endswith(_SEPARATORS) and os.path.isdir(
+          os.path.join(parent, _parent_directory(link))
+      ):
+        raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), path)
+      raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), path)
+    current = Path(link) if os.path.isabs(link) else parent / link
+  raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), path)
+
+
+def _create_temp_file(directory: Path, mode: int) -> tuple[int, Path]:
+  """Create ``.gm-import-<random>.tmp`` in ``directory``, exclusively."""
+  flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+  for _ in range(_TEMP_NAME_ATTEMPTS):
+    tmp_path = directory / f".gm-import-{secrets.token_hex(6)}.tmp"
+    try:
+      return os.open(tmp_path, flags, mode), tmp_path
+    except FileExistsError:
+      continue
+  raise FileExistsError(
+      errno.EEXIST, "no unused temporary file name", str(directory)
+  )
+
+
+def _write_text_atomically(path: str | Path, text: str) -> None:
+  """Write ``text`` to ``path`` without ever leaving a partial file.
+
+  ``path`` is used as given, not normalized: as when opening it, one that
+  ends in a separator, ``.`` or ``..`` names a directory, so ``out.yaml/``
+  fails instead of replacing ``out.yaml``. A regular file, new or
+  existing, is written to a temporary file in its real directory, which
+  then replaces it with one ``os.replace``; on any failure the temporary
+  file is removed and an existing file keeps its contents. Symlinks are
+  followed: an existing link's target is replaced and the link kept, and
+  a dangling link creates its target. Directories are resolved strictly,
+  so ``missing/../out.yaml`` fails as opening it would instead of
+  replacing ``out.yaml``. A replaced file keeps its permission bits (best
+  effort: filesystems that refuse ``chmod`` keep their own); a new one
+  gets ``0o666`` minus the umask, applied by ``open`` itself. A read-only
+  file is refused, as opening it for writing would be. Descriptor paths
+  (``/dev/stdout``, ``/dev/fd/<n>``, ``/proc/self/fd/<n>``) and other
+  non-regular files (``/dev/null``, a named pipe) are written directly,
+  and a directory is an error.
+  """
+  raw = os.fspath(path)
+  if _is_descriptor_path(raw):
+    _write_through(raw, text)
+    return
+  try:
+    st = os.stat(raw)
+  except FileNotFoundError:
+    if raw.endswith(_SEPARATORS) and os.path.isdir(_parent_directory(raw)):
+      # As opening it would: with its directories present, a path that
+      # ends in a separator names a directory, never a new file.
+      raise IsADirectoryError(
+          errno.EISDIR, os.strerror(errno.EISDIR), raw
+      ) from None
+    if _names_a_directory(raw):
+      raise
+    target = _resolve_new_file(raw)
+    existing_mode = None
+  else:
+    if stat.S_ISDIR(st.st_mode):
+      raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), raw)
+    if not stat.S_ISREG(st.st_mode):
+      _write_through(raw, text)
+      return
+    target = Path(os.path.realpath(raw, strict=True))
+    if not os.access(target, os.W_OK):
+      raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), raw)
+    existing_mode = stat.S_IMODE(st.st_mode)
+  # A new file gets 0o666 minus the umask from open() itself; the copy of
+  # an existing file starts private and gets the old bits before the swap.
+  fd, tmp_path = _create_temp_file(
+      target.parent, 0o666 if existing_mode is None else 0o600
+  )
+  try:
+    with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+      tmp.write(text)
+    if existing_mode is not None:
+      try:
+        os.chmod(tmp_path, existing_mode)
+      except OSError:
+        pass  # Best effort: some filesystems refuse chmod.
+    os.replace(tmp_path, target)
+  except BaseException:
+    try:
+      os.unlink(tmp_path)
+    except OSError:
+      pass
+    raise
+
+
+@app.command("import-dataplex-glossary")
+def import_dataplex_glossary_command(
+    glossary: str = typer.Argument(
+        ...,
+        help=(
+            "Glossary resource name: "
+            "projects/<project>/locations/<location>/glossaries/<glossary_id>."
+        ),
+    ),
+    ontology_name: str | None = typer.Option(
+        None,
+        "--ontology-name",
+        help=(
+            "Name for the emitted ontology. Characters outside "
+            "[A-Za-z0-9_] become '_'. Defaults to the glossary ID."
+        ),
+    ),
+    output_path: str | None = typer.Option(
+        None,
+        "-o",
+        "--out",
+        help="Write YAML to this file instead of stdout.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit structured JSON errors on stderr.",
+    ),
+) -> None:
+  """Import a Knowledge Catalog (Dataplex) Business Glossary as ontology YAML.
+
+  Reads the glossary, its categories, and its terms through the read-only
+  ``dataplex.googleapis.com`` v1 API (``roles/dataplex.catalogViewer`` is
+  sufficient) and emits a validated ``ontology.yaml`` in which every
+  category and term is an abstract, SKOS-annotated entity and category
+  nesting becomes ``skos_broader`` relationships.
+
+  An import summary is printed to stderr once the YAML has been written.
+  Requires the optional ``google-cloud-dataplex`` dependency.
+  """
+  try:
+    from .dataplex_glossary_importer import DataplexImportError
+    from .dataplex_glossary_importer import import_dataplex_glossary
+    from .dataplex_glossary_importer import MissingDataplexDependencyError
+    from .dataplex_glossary_importer import validate_import_arguments
+  except ImportError as exc:
+    _emit_errors(
+        [
+            {
+                "file": "<cli>",
+                "line": 0,
+                "col": 0,
+                "rule": "cli-missing-dependency",
+                "severity": "error",
+                "message": (
+                    f"Cannot load the Dataplex glossary importer: {exc}. "
+                    "Install it with: pip install "
+                    "'bigquery-agent-analytics[dataplex]'"
+                ),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=2)
+
+  try:
+    validate_import_arguments(glossary, ontology_name=ontology_name)
+  except ValueError as exc:
+    _emit_errors(
+        [
+            {
+                "file": "<cli>",
+                "line": 0,
+                "col": 0,
+                "rule": "cli-usage",
+                "severity": "error",
+                "message": str(exc),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=2)
+
+  try:
+    yaml_text, summary = import_dataplex_glossary(
+        glossary, ontology_name=ontology_name
+    )
+  except (MissingDataplexDependencyError, ImportError) as exc:
+    _emit_errors(
+        [
+            {
+                "file": "<cli>",
+                "line": 0,
+                "col": 0,
+                "rule": "cli-missing-dependency",
+                "severity": "error",
+                "message": str(exc),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=2)
+  except DataplexImportError as exc:
+    _emit_errors(
+        [
+            {
+                "file": glossary,
+                "line": 0,
+                "col": 0,
+                "rule": "import-api-error",
+                "severity": "error",
+                "message": str(exc),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=1)
+  except ValueError as exc:
+    _emit_errors(
+        [
+            {
+                "file": glossary,
+                "line": 0,
+                "col": 0,
+                "rule": "import-validation",
+                "severity": "error",
+                "message": str(exc),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=1)
+  except Exception as exc:  # noqa: BLE001 - reported as an internal error
+    _emit_internal_error(glossary, exc, as_json=json_output)
+    raise typer.Exit(code=3)
+
+  # The path goes on as given: ``Path()`` would drop a trailing separator
+  # that makes it name a directory.
+  destination = "<stdout>" if output_path is None else output_path
+  try:
+    if output_path is None:
+      typer.echo(yaml_text, nl=False)
+    else:
+      _write_text_atomically(output_path, yaml_text)
+  except OSError as exc:
+    if output_path is None:
+      _discard_stdout()
+      message = f"Cannot write to stdout: {exc}"
+    else:
+      message = f"Cannot write output file: {exc}"
+    _emit_errors(
+        [
+            {
+                "file": destination,
+                "line": 0,
+                "col": 0,
+                "rule": "cli-output-error",
+                "severity": "error",
+                "message": message,
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=1)
+  except Exception as exc:  # noqa: BLE001 - reported as an internal error
+    _emit_internal_error(destination, exc, as_json=json_output)
+    raise typer.Exit(code=3)
+  # Only after the YAML is written, so a failed write leaves a single error
+  # (one JSON document with ``--json``) on stderr.
+  if summary:
+    typer.echo(summary, err=True)
 
 
 def _validate_binding_file(

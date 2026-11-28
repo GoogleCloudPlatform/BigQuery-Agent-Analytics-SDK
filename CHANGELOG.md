@@ -17,6 +17,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `False` when the column is false, NULL, NaN or missing. Key-based
   redaction can leave it `False`. The field is appended after the existing
   fields, so positional construction is unchanged.
+- **`gm import-dataplex-glossary` (#612)** — imports a Knowledge Catalog
+  (Dataplex) Business Glossary into an `ontology.yaml` through the
+  read-only `dataplex.googleapis.com` v1 API. The glossary becomes a SKOS
+  concept scheme and every category and term an abstract entity named
+  `category_<id>` or `term_<id>`: characters outside `[A-Za-z0-9_]`
+  become `_`, and names of one kind that still collide get a suffix of
+  the first 8 hex digits of the ID's SHA-256, longer (up to the full
+  digest, then with a `_2`, `_3`, … counter) only if that name is taken.
+  Each entity keeps its resource ID in `skos:notation`, its display name
+  in `skos:prefLabel` and its resource name in `dataplex:resource`, and
+  category nesting becomes `skos_broader` relationships. Every category
+  and term must name the glossary's own project, location and glossary
+  ID, or the import fails; a parent anywhere else is kept as
+  `dataplex:orphan_parent`. Projects must match exactly: a project ID and
+  a project number count as one project only when `GetGlossary` answers a
+  request by one form with a name in the other, or when the pair is
+  passed as `map_dataplex_glossary(..., project_alias=...)`. The glossary
+  name is checked before any API call (a project number or a lowercase
+  project ID, optionally domain-scoped, and a lowercase location), and
+  `GetGlossary` must answer with the requested glossary's resource name
+  before anything is listed. A list page that reports unreachable
+  locations, or a response page that can't be read, fails the import
+  instead of producing a partial ontology. `-o` replaces a regular file
+  atomically, resolving its directory strictly and following symlinks,
+  and writes descriptor paths (`/dev/stdout`, `/dev/fd/<n>`) and other
+  non-regular files directly.
+  Re-importing an unchanged glossary gives byte-identical YAML, whatever
+  order the API returns pages in. From Python,
+  `bigquery_ontology.dataplex_glossary_importer.import_dataplex_glossary()`
+  fetches and maps a glossary, and `map_dataplex_glossary()` maps records
+  that were already fetched, without a network call. The new `[dataplex]`
+  extra (included in `[all]`) adds `google-cloud-dataplex>=2.12.0`, which
+  is imported only when the API is called. Entry links (synonyms, related
+  terms and asset definitions) are not imported.
 
 ### Fixed
 

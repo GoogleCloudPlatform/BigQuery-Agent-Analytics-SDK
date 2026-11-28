@@ -45,6 +45,9 @@ langsmith = [
 owl = [
   "rdflib>=7.0",
 ]
+dataplex = [
+  "google-cloud-dataplex>=2.12.0",
+]
 cli = []
 dev = [
   "pytest>=7.0",
@@ -70,7 +73,7 @@ dashboards = [
   "bigquery-agent-analytics[streamlit]",
 ]
 all = [
-  "bigquery-agent-analytics[llm,bigframes,langsmith,owl,cli,dev,improvement,dashboards]",
+  "bigquery-agent-analytics[llm,bigframes,langsmith,owl,dataplex,cli,dev,improvement,dashboards]",
 ]
 
 [project.scripts]
