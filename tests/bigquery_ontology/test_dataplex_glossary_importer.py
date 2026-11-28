@@ -22,13 +22,14 @@ the real GAPIC client accepts, so neither GCP credentials nor
 
 * Mapping: glossary root, categories and terms as abstract SKOS
   entities, hierarchy (top concepts, ``skos_broader``, orphan parents),
-  project matching (a project ID and a project number are one project;
-  two different IDs or two different numbers are not).
+  project matching (exact, unless a project ID / project number pair is
+  verified, by ``GetGlossary`` or as ``project_alias``).
 * Naming: kind-prefixed names, sanitization, category/term pairs that
   normalize alike, same-kind hash-suffixed collisions.
 * Records: repeated pages, conflicting records, malformed records.
 * API orchestration: request shape, canonical names and the verified
-  project pair, error wrapping, pages with unreachable locations,
+  project pair, nameless responses, error wrapping, pages with
+  unreachable locations or without items, item-iterable clients,
   missing dependency, lazy client construction.
 * YAML: quoting, multiline / Unicode round-trips, byte-identical output
   and ``compile_fingerprint`` across shuffled and repeated pages.
@@ -47,6 +48,7 @@ import random
 import sys
 import types
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -1213,6 +1215,17 @@ def test_empty_glossary_is_a_validation_error():
         "projects/demo-project/locations/us@central1/glossaries/retail",
         "projects/demo-project/locations/US-CENTRAL1/glossaries/retail",
         "projects/demo-project/locations/1us/glossaries/retail",
+        # A project ID is lowercase, starts with a letter and doesn't end
+        # with a hyphen; a domain prefix needs a dotted domain.
+        "projects/123abc/locations/us-central1/glossaries/retail",
+        "projects/UPPER-project/locations/us-central1/glossaries/retail",
+        "projects/Demo-Project/locations/us-central1/glossaries/retail",
+        "projects/demo-project-/locations/us-central1/glossaries/retail",
+        "projects/a::b/locations/us-central1/glossaries/retail",
+        "projects/example:demo/locations/us-central1/glossaries/retail",
+        "projects/example.com:/locations/us-central1/glossaries/retail",
+        "projects/example.com:Demo/locations/us-central1/glossaries/retail",
+        "projects/demo-project/locations/us-central1-/glossaries/retail",
     ],
 )
 def test_invalid_glossary_resource_name_is_rejected(bad_name):
@@ -1239,7 +1252,11 @@ def test_validate_import_arguments_accepts_valid_input():
     "glossary_name",
     [
         "projects/example.com:my-proj/locations/us/glossaries/retail",
-        "projects/Demo-Project/locations/global/glossaries/retail_2026",
+        "projects/example.co.uk:my-proj/locations/us/glossaries/retail",
+        "projects/123456789012/locations/us-central1/glossaries/retail",
+        "projects/demo-project/locations/global/glossaries/retail_2026",
+        "projects/p/locations/us/glossaries/retail",
+        "projects/proj-a/locations/us-central1/glossaries/retail",
         "projects/demo-project/locations/europe-west1/glossaries/\u8ca9\u58f2",
     ],
 )
@@ -1383,16 +1400,38 @@ def test_canonical_glossary_name_drives_lists_and_scheme():
   )
 
 
-def test_blank_canonical_name_falls_back_to_the_requested_name():
-  client = FakeGlossaryClient(
-      glossary=FakeGlossary(name=""), terms=[_term("customer")]
-  )
-  ontology = load_ontology_from_string(
-      import_dataplex_glossary(_GLOSSARY, glossary_client=client)[0]
-  )
+@pytest.mark.parametrize(
+    "response",
+    [
+        None,
+        {},
+        {"name": None},
+        {"name": ""},
+        {"name": "   "},
+        {"name": 123},
+        FakeGlossary(name=""),
+    ],
+    ids=[
+        "none",
+        "empty_mapping",
+        "null_name",
+        "empty_name",
+        "blank_name",
+        "non_string_name",
+        "record_with_empty_name",
+    ],
+)
+def test_nameless_get_glossary_response_is_rejected_before_listing(response):
+  client = FakeGlossaryClient(terms=[_term("customer")])
+  client.glossary = response
 
-  assert client.calls[1] == ("list_glossary_categories", {"parent": _GLOSSARY})
-  assert ontology.annotations["dataplex:glossary"] == _GLOSSARY
+  with pytest.raises(ValueError) as info:
+    import_dataplex_glossary(_GLOSSARY, glossary_client=client)
+  assert str(info.value) == (
+      f"GetGlossary for {_GLOSSARY!r} returned no glossary resource name; "
+      "nothing was listed."
+  )
+  assert [method for method, _ in client.calls] == ["get_glossary"]
 
 
 def test_import_pairs_the_requested_id_with_the_returned_number():
@@ -1587,7 +1626,7 @@ def test_unreachable_locations_on_any_page_fail_the_import(bad_page):
     import_dataplex_glossary(_GLOSSARY, glossary_client=client)
   assert str(info.value).startswith(
       "Dataplex ListGlossaryCategories could not reach location(s) "
-      "eu, us-east1, so its result is incomplete; refusing to emit a "
+      "'', eu, us-east1, so its result is incomplete; refusing to emit a "
       "partial ontology."
   )
   # The import stopped at the incomplete list.
@@ -1638,6 +1677,362 @@ def test_pages_without_unreachable_locations_are_all_read():
   assert _relationships(ontology) == [
       ("skos_broader", "term_churn", "category_customer")
   ]
+
+
+@pytest.mark.parametrize(
+    "marker, shown", [([" "], "' '"), ([""], "''")], ids=["blank", "empty"]
+)
+def test_blank_unreachable_location_markers_still_fail_the_import(
+    marker, shown
+):
+  client = FakeGlossaryClient(
+      category_pages=[
+          FakePage(
+              categories=[_category("customer")], unreachable_locations=marker
+          )
+      ],
+      terms=[_term("churn")],
+  )
+
+  with pytest.raises(DataplexImportError) as info:
+    import_dataplex_glossary(_GLOSSARY, glossary_client=client)
+  assert str(info.value).startswith(
+      f"Dataplex ListGlossaryCategories could not reach location(s) {shown}, "
+      "so its result is incomplete"
+  )
+
+
+class _ItemIterablePager:
+  """An iterable-of-items list result that also keeps ``pages``, as plain
+  lists of items rather than ``List...Response`` messages."""
+
+  def __init__(self, items, pages):
+    self._items = items
+    self.pages = pages
+
+  def __iter__(self):
+    return iter(self._items)
+
+
+@pytest.mark.parametrize(
+    "pages",
+    [[[_category("customer")], [_category("party")]], [], None],
+    ids=["plain_list_pages", "no_pages", "non_iterable_pages"],
+)
+def test_item_iterable_results_with_plain_pages_are_read_item_by_item(pages):
+  categories = [_category("customer"), _category("party")]
+  client = FakeGlossaryClient(
+      terms=[_term("churn", parent=_category_name("customer"))]
+  )
+  client.list_glossary_categories = lambda request=None, **kw: (
+      _ItemIterablePager(categories, pages)
+  )
+
+  ontology = load_ontology_from_string(
+      import_dataplex_glossary(_GLOSSARY, glossary_client=client)[0]
+  )
+
+  assert [e.name for e in ontology.entities] == [
+      "category_customer",
+      "category_party",
+      "term_churn",
+  ]
+  assert _relationships(ontology) == [
+      ("skos_broader", "term_churn", "category_customer")
+  ]
+
+
+class _SharedPagesPager:
+  """An item-iterable list result whose ``pages`` is the very iterator its
+  own item iteration draws from."""
+
+  def __init__(self, pages):
+    self.pages = iter(pages)
+
+  def __iter__(self):
+    for page in self.pages:
+      yield from page
+
+
+class _SingleUsePager:
+  """An item-iterable list result that can be started only once, as
+  ``google.api_core`` page iterators are: reading ``pages`` and iterating
+  the result both start it."""
+
+  def __init__(self, pages):
+    self._pages = pages
+    self._started = False
+
+  def _start(self):
+    if self._started:
+      raise ValueError("Iterator has already started")
+    self._started = True
+
+  @property
+  def pages(self):
+    self._start()
+    return iter(self._pages)
+
+  def __iter__(self):
+    self._start()
+    return (item for page in self._pages for item in page)
+
+
+@pytest.mark.parametrize(
+    "pager_class",
+    [_SharedPagesPager, _SingleUsePager],
+    ids=["shared_pages_iterator", "single_use_iterator"],
+)
+@pytest.mark.parametrize(
+    "pages, expected",
+    [
+        (
+            [[_category("customer"), _category("party")]],
+            ["category_customer", "category_party"],
+        ),
+        (
+            [[_category("customer")], [_category("party")]],
+            ["category_customer", "category_party"],
+        ),
+        (
+            [[_category("customer")], [], [_category("party")]],
+            ["category_customer", "category_party"],
+        ),
+        ([[]], []),
+        ([], []),
+    ],
+    ids=[
+        "one_page",
+        "two_pages",
+        "empty_page_between",
+        "empty_page",
+        "no_pages",
+    ],
+)
+def test_single_use_item_pages_are_read_once_without_losing_items(
+    pager_class, pages, expected
+):
+  client = FakeGlossaryClient(terms=[_term("churn")])
+  client.list_glossary_categories = lambda request=None, **kw: pager_class(
+      pages
+  )
+
+  ontology = load_ontology_from_string(
+      import_dataplex_glossary(_GLOSSARY, glossary_client=client)[0]
+  )
+
+  assert [e.name for e in ontology.entities] == expected + ["term_churn"]
+
+
+@pytest.mark.parametrize(
+    "pages",
+    [
+        [[_category("customer")], _category("party")],
+        [[_category("customer")], "party"],
+        [[_category("customer")], {"categories": []}],
+        [[_category("customer")], None],
+        [_category("customer")],
+    ],
+    ids=[
+        "item_page",
+        "str_page",
+        "mapping_page",
+        "none_page",
+        "items_as_pages",
+    ],
+)
+def test_single_use_pages_that_are_not_item_collections_fail(pages):
+  client = FakeGlossaryClient(terms=[_term("churn")])
+  client.list_glossary_categories = lambda request=None, **kw: (
+      _SharedPagesPager(pages)
+  )
+
+  with pytest.raises(DataplexImportError) as info:
+    import_dataplex_glossary(_GLOSSARY, glossary_client=client)
+  assert str(info.value) == (
+      "Dataplex ListGlossaryCategories returned a page that is not a "
+      "collection of items; refusing to emit a partial ontology."
+  )
+
+
+def test_api_core_page_iterators_are_read_once():
+  page_iterator = pytest.importorskip("google.api_core.page_iterator")
+  responses = iter(
+      [
+          types.SimpleNamespace(
+              categories=[_category("customer")], next_page_token="more"
+          ),
+          types.SimpleNamespace(
+              categories=[_category("party")], next_page_token=""
+          ),
+      ]
+  )
+  pager = page_iterator.GRPCIterator(
+      client=None,
+      method=lambda request, **kwargs: next(responses),
+      request=types.SimpleNamespace(page_token=""),
+      items_field="categories",
+  )
+  client = FakeGlossaryClient(terms=[_term("churn")])
+  client.list_glossary_categories = lambda request=None, **kw: pager
+
+  ontology = load_ontology_from_string(
+      import_dataplex_glossary(_GLOSSARY, glossary_client=client)[0]
+  )
+
+  assert [e.name for e in ontology.entities] == [
+      "category_customer",
+      "category_party",
+      "term_churn",
+  ]
+
+
+def test_mock_list_results_are_read_item_by_item():
+  pager = mock.MagicMock()
+  pager.__iter__.return_value = iter(
+      [_category("customer"), _category("party")]
+  )
+  client = FakeGlossaryClient(terms=[_term("churn")])
+  client.list_glossary_categories = lambda request=None, **kw: pager
+
+  ontology = load_ontology_from_string(
+      import_dataplex_glossary(_GLOSSARY, glossary_client=client)[0]
+  )
+
+  assert [e.name for e in ontology.entities] == [
+      "category_customer",
+      "category_party",
+      "term_churn",
+  ]
+
+
+class _PagesOnlyPager:
+  """A list result read only through ``pages``; iterating it directly
+  yields nothing."""
+
+  def __init__(self, pages):
+    self.pages = pages
+
+  def __iter__(self):
+    return iter(())
+
+
+@pytest.mark.parametrize("reusable", [True, False], ids=["list", "iterator"])
+@pytest.mark.parametrize(
+    "unreachable, problem",
+    [
+        (
+            ["us-west1"],
+            "could not reach location(s) us-west1, so its result is "
+            "incomplete",
+        ),
+        ([], "returned an unexpected page object without 'categories'"),
+    ],
+    ids=["unreachable", "no_items"],
+)
+def test_pages_with_unreachable_locations_are_never_read_as_plain(
+    reusable, unreachable, problem
+):
+  pages = [types.SimpleNamespace(unreachable_locations=unreachable)]
+  client = FakeGlossaryClient(terms=[_term("churn")])
+  client.list_glossary_categories = lambda request=None, **kw: (
+      _PagesOnlyPager(pages if reusable else iter(pages))
+  )
+
+  with pytest.raises(DataplexImportError) as info:
+    import_dataplex_glossary(_GLOSSARY, glossary_client=client)
+  assert str(info.value).startswith(
+      f"Dataplex ListGlossaryCategories {problem}"
+  )
+
+
+class _UnreachableItems(list):
+  """A plain page of items that still reports an unreachable location."""
+
+  unreachable_locations = ("eu",)
+
+
+def test_a_later_plain_page_with_unreachable_locations_fails():
+  pages = [[_category("customer")], _UnreachableItems([_category("party")])]
+  client = FakeGlossaryClient(terms=[_term("churn")])
+  client.list_glossary_categories = lambda request=None, **kw: (
+      _SharedPagesPager(pages)
+  )
+
+  with pytest.raises(DataplexImportError) as info:
+    import_dataplex_glossary(_GLOSSARY, glossary_client=client)
+  assert str(info.value).startswith(
+      "Dataplex ListGlossaryCategories could not reach location(s) eu, so "
+      "its result is incomplete"
+  )
+
+
+class _ResponseFieldsPager:
+  """Exposes a response field itself, as a GAPIC pager does, so its pages
+  have to be responses too."""
+
+  categories = ()
+
+  def __init__(self, pages):
+    self.pages = pages
+
+  def __iter__(self):
+    return iter(())
+
+
+class _ReportsUnreachableLocationsPager:
+  """Exposes ``unreachable_locations`` itself, as a GAPIC pager does for its
+  current response, so its pages have to be responses too."""
+
+  unreachable_locations = ("eu",)
+
+  def __init__(self, pages):
+    self.pages = pages
+
+  def __iter__(self):
+    return iter(())
+
+
+@pytest.mark.parametrize(
+    "pager, problem",
+    [
+        (
+            FakePager(
+                [
+                    FakePage(categories=[_category("customer")]),
+                    [_category("party")],
+                ],
+                "categories",
+            ),
+            "an unexpected page object without 'categories'",
+        ),
+        (
+            _ResponseFieldsPager([[_category("customer")]]),
+            "an unexpected page object without 'categories'",
+        ),
+        (_ResponseFieldsPager(None), "pages that cannot be iterated"),
+        (
+            _ReportsUnreachableLocationsPager([[_category("customer")]]),
+            "an unexpected page object without 'categories'",
+        ),
+    ],
+    ids=[
+        "later_page_is_not_a_response",
+        "first_page_is_not_a_response",
+        "pages_are_not_iterable",
+        "result_reports_unreachable_locations",
+    ],
+)
+def test_unreadable_pages_fail_instead_of_reading_as_empty(pager, problem):
+  client = FakeGlossaryClient(terms=[_term("churn")])
+  client.list_glossary_categories = lambda request=None, **kw: pager
+
+  with pytest.raises(DataplexImportError) as info:
+    import_dataplex_glossary(_GLOSSARY, glossary_client=client)
+  assert str(info.value) == (
+      f"Dataplex ListGlossaryCategories returned {problem}; refusing to emit "
+      "a partial ontology."
+  )
 
 
 class MalformedError(ValueError):

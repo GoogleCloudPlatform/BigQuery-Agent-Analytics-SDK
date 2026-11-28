@@ -33,9 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `dataplex:orphan_parent`. Projects must match exactly: a project ID and
   a project number count as one project only when `GetGlossary` answers a
   request by one form with a name in the other, or when the pair is
-  passed as `map_dataplex_glossary(..., project_alias=...)`. A list page
-  that reports unreachable locations fails the import instead of
-  producing a partial ontology, and `-o` replaces its file atomically.
+  passed as `map_dataplex_glossary(..., project_alias=...)`. The glossary
+  name is checked before any API call (a project number or a lowercase
+  project ID, optionally domain-scoped, and a lowercase location), and
+  `GetGlossary` must answer with the requested glossary's resource name
+  before anything is listed. A list page that reports unreachable
+  locations, or a response page that can't be read, fails the import
+  instead of producing a partial ontology. `-o` replaces a regular file
+  atomically, resolving its directory strictly and following symlinks,
+  and writes descriptor paths (`/dev/stdout`, `/dev/fd/<n>`) and other
+  non-regular files directly.
   Re-importing an unchanged glossary gives byte-identical YAML, whatever
   order the API returns pages in. From Python,
   `bigquery_ontology.dataplex_glossary_importer.import_dataplex_glossary()`

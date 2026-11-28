@@ -240,22 +240,26 @@ gm import-dataplex-glossary <glossary> [--ontology-name <name>]
 
 - `<glossary>` is a glossary resource name,
   `projects/<project>/locations/<location>/glossaries/<glossary_id>`,
-  where the project is a project ID (domain-scoped IDs such as
-  `example.com:my-project` included) or a project number, and the
-  location is a lowercase region or zone such as `us-central1`.
-  Anything else exits 2 (`cli-usage`) before any API call.
+  where the project is a project number or a project ID (lowercase
+  letters, digits and hyphens, starting with a letter and not ending
+  with a hyphen; legacy domain-scoped IDs such as
+  `example.com:my-project` included), and the location is a lowercase
+  region or zone such as `us-central1` or `global`. Anything else exits
+  2 (`cli-usage`) before any API call.
 - Requires the `[dataplex]` extra (`google-cloud-dataplex>=2.12.0`);
   without it the command exits 2 (`cli-missing-dependency`).
   Credentials come from Application Default Credentials. The import is
   read-only: `roles/dataplex.catalogViewer` is enough, and nothing is
   written to the catalog.
 - Calls `GetGlossary` and checks that the response names the requested
-  glossary: the same location and glossary ID, and the same project or
-  that project under its other form (ID or number). Only then does it
-  list every category and term (all pages) under the glossary's
-  canonical resource name. A list page that reports unreachable
-  locations fails the import (`import-api-error`) instead of producing
-  a partial ontology.
+  glossary: a response without a resource name is rejected, and the
+  name must have the same location and glossary ID, and the same
+  project or that project under its other form (ID or number). Only
+  then does it list every category and term (all pages) under the
+  glossary's canonical resource name. A list page that reports any
+  unreachable location (even a blank entry), or a response page without
+  its `categories` or `terms` field, fails the import
+  (`import-api-error`) instead of producing a partial ontology.
 - The glossary becomes the concept scheme: the root `ontology`, named
   after the glossary ID unless `--ontology-name` is given, with
   `dataplex:glossary` and `dataplex:uid` annotations. Every category
@@ -282,11 +286,17 @@ gm import-dataplex-glossary <glossary> [--ontology-name <name>]
   identical repeated records deduplicated), so re-importing an
   unchanged glossary gives byte-identical YAML whatever order the API
   returns pages in. The YAML is validated before it is written. With
-  `-o`, a regular file is replaced through a temporary file in the same
-  directory, so a failed write leaves an existing file untouched; that
-  directory must be writable, and a read-only destination is refused. A
-  destination that is not a regular file, such as `/dev/null` or a named
-  pipe, is written directly.
+  `-o`, a regular file, new or existing, is written to a temporary file
+  in its real directory and then moved into place, so a failed write
+  leaves an existing file untouched; that directory must be writable,
+  and a read-only file is refused. Directories are resolved strictly,
+  as opening the path would: `missing/../out.yaml` fails instead of
+  replacing `out.yaml`, a path ending in `/` or `/.` names a directory
+  (so `out.yaml/` fails too), and a symlink, dangling or not, is
+  followed to the file it names. A new file gets `0o666` minus the
+  umask. Descriptor paths (`/dev/stdout`, `/dev/fd/<n>`,
+  `/proc/self/fd/<n>`) and other non-regular destinations (`/dev/null`,
+  a named pipe) are written directly; a directory is an error.
 - Every entity is abstract, so nothing is bound to tables, but
   `gm compile` and `OntologyRuntime` still take a binding; a companion
   binding with no entities validates. `gm compile --emit-concept-index
@@ -301,26 +311,29 @@ gm import-dataplex-glossary <glossary> [--ontology-name <name>]
 |---|---|
 | `--ontology-name <name>` | Ontology name (default: the glossary ID). Characters outside `[A-Za-z0-9_]` become `_` and a leading digit gets a `_` prefix; a blank name, or one with no ASCII letter or digit, exits 2 (`cli-usage`). |
 | `-o <file>`, `--out <file>` | Write YAML to file instead of stdout. |
-| `--json` | Structured errors (see §3): on failure stderr holds exactly one JSON document. |
+| `--json` | Structured errors (see §3): on failure stderr holds exactly one JSON document. Argument-parsing errors (a missing `<glossary>` or option value) are reported by the CLI framework in plain text, as for every `gm` command. |
 
-The import summary is printed to stderr regardless of `--json` (with
-`-o`, only after the file is written): the category and term counts;
-when nonzero, the `skos_broader`, sanitized-ID, hash-suffixed-name,
-orphan-parent, unpaired-project-parent and deduplicated-record counts;
-and a note that every entity is abstract. Sanitization, hash suffixes
-and orphan-parent reporting are specific to this importer:
+The import summary is printed to stderr regardless of `--json`, once
+the YAML has been written to stdout or the `-o` file: the category and
+term counts; when nonzero, the `skos_broader`, sanitized-ID,
+hash-suffixed-name, orphan-parent, unpaired-project-parent and
+deduplicated-record counts; and a note that every entity is abstract.
+Sanitization, hash suffixes and orphan-parent reporting are specific to
+this importer:
 `gm import-owl` does not replace characters in local names, fails on a
 name collision instead of adding a suffix, and leaves out SKOS
 hierarchy edges whose other end it did not import.
 
 Exit codes follow §3. Exit 1 covers an empty glossary, conflicting
 records for one resource ID, a record from another project, location
-or glossary, or a `GetGlossary` response that names another glossary
-(`import-validation`); a Dataplex API, transport, credential,
-response-decoding or client construction failure, or a list page with
-unreachable locations (`import-api-error`); and an unwritable `-o` path
-(`cli-output-error`). Exit 3 is an unexpected error; with `--json` it
-is reported as a `cli-internal-error` object.
+or glossary, or a `GetGlossary` response without a resource name or
+naming another glossary (`import-validation`); a Dataplex API,
+transport, credential, response-decoding or client construction
+failure, or a list page with unreachable locations or without its
+items (`import-api-error`); and an unwritable `-o` path or stdout
+(`cli-output-error`). Exit 3 is an unexpected error, including one
+raised while writing the output; with `--json` it is reported as a
+`cli-internal-error` object.
 
 ## 8. Open questions
 

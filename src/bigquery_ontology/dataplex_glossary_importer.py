@@ -24,9 +24,10 @@ deterministic, SKOS-aligned ``ontology.yaml``. The module has two layers:
 * :func:`import_dataplex_glossary` — a thin wrapper that fetches those
   records with ``GetGlossary``, ``ListGlossaryCategories`` and
   ``ListGlossaryTerms`` and hands them to :func:`map_dataplex_glossary`.
-  It checks that ``GetGlossary`` returned the requested glossary before
-  listing anything, and fails instead of emitting a partial ontology when
-  a list page reports unreachable locations.
+  It checks that ``GetGlossary`` returned the requested glossary (a
+  response without a resource name is rejected) before listing anything,
+  and fails instead of emitting a partial ontology when a list page
+  reports unreachable locations or can't be read.
 
 Mapping:
 
@@ -155,13 +156,20 @@ class BusinessGlossaryClientProtocol(Protocol):
 _INSTALL_HINT = "pip install 'bigquery-agent-analytics[dataplex]'"
 _MIN_DATAPLEX_VERSION = "2.12.0"
 
-# Resource-name segments. A project is a project ID (letters, digits and
-# hyphens; legacy domain-scoped IDs add ``.`` and ``:``) or a project
-# number. A location is a lowercase region or zone such as ``global`` or
-# ``us-central1``. Glossary, category and term IDs only exclude ``/`` and
-# whitespace, so unusual IDs still reach sanitization.
-_PROJECT_SEGMENT = r"[A-Za-z0-9][A-Za-z0-9.:-]*"
-_LOCATION_SEGMENT = r"[a-z][a-z0-9-]*"
+# Resource-name segments. A project is a project number, or a project ID:
+# lowercase letters, digits and hyphens, starting with a letter and not
+# ending with a hyphen, optionally after a legacy domain prefix such as
+# ``example.com:``. A location is lowercase letters, digits and hyphens,
+# starting with a letter and not ending with a hyphen, such as ``global``
+# or ``us-central1``. Glossary, category and term IDs only exclude ``/``
+# and whitespace, so unusual IDs still reach sanitization.
+_PROJECT_ID_PART = r"[a-z](?:[a-z0-9-]*[a-z0-9])?"
+_DOMAIN_LABEL = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
+_PROJECT_SEGMENT = (
+    rf"(?:[0-9]+|(?:{_DOMAIN_LABEL}(?:\.{_DOMAIN_LABEL})+:)?"
+    rf"{_PROJECT_ID_PART})"
+)
+_LOCATION_SEGMENT = r"[a-z](?:[a-z0-9-]*[a-z0-9])?"
 _ID_SEGMENT = r"[^/\s]+"
 _GLOSSARY_PREFIX = (
     rf"projects/(?P<project>{_PROJECT_SEGMENT})"
@@ -340,9 +348,10 @@ def validate_import_arguments(
   Raises:
       ValueError: ``glossary_name`` is not
           ``projects/<project>/locations/<location>/glossaries/<id>`` (a
-          project ID or number, a lowercase location such as
-          ``us-central1``, and a glossary ID without ``/`` or whitespace),
-          or ``ontology_name`` is blank or has no ASCII letter or digit.
+          project number or a lowercase project ID, optionally
+          domain-scoped; a lowercase location such as ``us-central1``;
+          and a glossary ID without ``/`` or whitespace), or
+          ``ontology_name`` is blank or has no ASCII letter or digit.
   """
   _parse_glossary_name(glossary_name)
   if ontology_name is not None:
@@ -900,36 +909,109 @@ def _call_api(operation: str, fn: Callable[[], Any]) -> Any:
     raise _api_error(operation, exc) from exc
 
 
+# Sentinels: an exhausted page iterator (a page itself could be anything,
+# even ``None``) and a list result that has no ``pages`` at all.
+_NO_PAGE = object()
+_NO_PAGES = object()
+
+
+def _check_reachable(operation: str, page: Any) -> None:
+  """Raise when a list page reports locations the service couldn't read.
+
+  Any entry counts, even a blank one: an empty or whitespace-only marker
+  still says the result is partial, so it is shown by its ``repr``.
+  """
+  unreachable = list(getattr(page, "unreachable_locations", None) or ())
+  if unreachable:
+    shown = sorted({str(loc).strip() or repr(loc) for loc in unreachable})
+    raise DataplexImportError(
+        f"Dataplex {operation} could not reach location(s) "
+        f"{', '.join(shown)}, so its result is incomplete; refusing to emit "
+        "a partial ontology. Retry the import later."
+    )
+
+
+def _plain_page_items(operation: str, page: Any) -> Iterable[Any]:
+  """Return the items of a page that is a plain collection of items."""
+  if not isinstance(page, (str, bytes, bytearray, Mapping)):
+    try:
+      return iter(page)
+    except TypeError:
+      pass
+  raise DataplexImportError(
+      f"Dataplex {operation} returned a page that is not a collection of "
+      "items; refusing to emit a partial ontology."
+  )
+
+
 def _collect_pager_items(operation: str, pager: Any, items_attr: str) -> list:
   """Read every item of a list call, refusing partial results.
 
-  A GAPIC pager exposes ``pages``: the raw ``List...Response`` messages,
-  whose ``unreachable_locations`` lists the locations the service could
-  not read. Any such location means the result is incomplete, so this
-  raises instead of returning it. Other iterables (such as test fakes)
-  are read item by item.
+  A GAPIC pager's ``pages`` yields the raw ``List...Response`` messages,
+  each holding its items in ``items_attr`` and, in
+  ``unreachable_locations``, the locations the service could not read.
+  Any such location, on any page, means the result is incomplete, so this
+  raises instead of returning it. The pages are read as such responses
+  when the result exposes response fields itself, as a GAPIC pager does,
+  or its first page has ``items_attr`` or ``unreachable_locations``: then
+  a page without ``items_attr`` is an error, never an empty page. A
+  result without ``pages``, or whose pages are plain collections of
+  items, is read item by item.
+
+  ``pages`` is read once. When it is an iterator, which can be consumed
+  only once, its plain pages are read as the items, and the result is
+  never iterated again, so no item is lost or read twice.
 
   Raises:
-      DataplexImportError: A page reports unreachable locations.
+      DataplexImportError: A page reports unreachable locations, or can't
+          be read: a GAPIC-style result has a page without ``items_attr``,
+          or a plain page is not a collection of items.
   """
-  if not hasattr(pager, "pages"):
+  pages_attr = getattr(pager, "pages", _NO_PAGES)
+  if pages_attr is _NO_PAGES:
+    return list(pager)
+  # A GAPIC pager also exposes the current response's fields.
+  response_like = hasattr(pager, items_attr) or hasattr(
+      pager, "unreachable_locations"
+  )
+  try:
+    pages = iter(pages_attr)
+  except TypeError:
+    if not response_like:
+      return list(pager)
+    raise DataplexImportError(
+        f"Dataplex {operation} returned pages that cannot be iterated; "
+        "refusing to emit a partial ontology."
+    ) from None
+  # An iterator is its own iterator, and can be consumed only once.
+  single_use = pages is pages_attr
+  page = next(pages, _NO_PAGE)
+  if page is _NO_PAGE:
+    return [] if single_use else list(pager)
+  plain = (
+      not response_like
+      and not hasattr(page, items_attr)
+      and not hasattr(page, "unreachable_locations")
+  )
+  if plain and not single_use:
+    # Plain pages of items, not responses, that can be read again: iterate
+    # the items instead.
     return list(pager)
   items: list[Any] = []
-  for page in pager.pages:
-    unreachable = sorted(
-        {
-            str(location).strip()
-            for location in getattr(page, "unreachable_locations", None) or ()
-            if str(location).strip()
-        }
-    )
-    if unreachable:
+  while page is not _NO_PAGE:
+    # First, so a page that reports unreachable locations always fails as
+    # incomplete, whatever else it holds.
+    _check_reachable(operation, page)
+    if plain:
+      items.extend(_plain_page_items(operation, page))
+    elif not hasattr(page, items_attr):
       raise DataplexImportError(
-          f"Dataplex {operation} could not reach location(s) "
-          f"{', '.join(unreachable)}, so its result is incomplete; refusing "
-          "to emit a partial ontology. Retry the import later."
+          f"Dataplex {operation} returned an unexpected page object "
+          f"without {items_attr!r}; refusing to emit a partial ontology."
       )
-    items.extend(getattr(page, items_attr, None) or ())
+    else:
+      items.extend(getattr(page, items_attr) or ())
+    page = next(pages, _NO_PAGE)
   return items
 
 
@@ -984,11 +1066,13 @@ def import_dataplex_glossary(
   Calls ``GetGlossary`` and checks that the response names the requested
   glossary (the same location and glossary ID, and the same project or
   the same project under its other form) before listing the glossary's
-  categories and terms under its canonical name, all pages. A request by
-  project ID answered by project number (or the other way round) verifies
-  that pair, so records and parents may use either form. Mapping, YAML
-  emission, and validation are delegated to :func:`map_dataplex_glossary`.
-  Read-only: ``roles/dataplex.catalogViewer`` is sufficient.
+  categories and terms under its canonical name, all pages; a response
+  without a resource name is rejected before anything is listed. A
+  request by project ID answered by project number (or the other way
+  round) verifies that pair, so records and parents may use either form.
+  Mapping, YAML emission, and validation are delegated to
+  :func:`map_dataplex_glossary`. Read-only:
+  ``roles/dataplex.catalogViewer`` is sufficient.
 
   Args:
       glossary_name: Glossary resource name,
@@ -1003,13 +1087,14 @@ def import_dataplex_glossary(
       :func:`map_dataplex_glossary`.
 
   Raises:
-      ValueError: Invalid arguments, a ``GetGlossary`` response that names
-          another glossary, or invalid glossary content (see
-          :func:`map_dataplex_glossary`).
+      ValueError: Invalid arguments, a ``GetGlossary`` response without a
+          glossary resource name or naming another glossary, or invalid
+          glossary content (see :func:`map_dataplex_glossary`).
       MissingDataplexDependencyError: No client was injected and
           ``google-cloud-dataplex>=2.12.0`` is not installed.
       DataplexImportError: A Dataplex API, transport, or authentication
-          call failed, or a list page reported unreachable locations.
+          call failed, or a list page reported unreachable locations or
+          could not be read.
   """
   validate_import_arguments(glossary_name, ontology_name=ontology_name)
   requested = _parse_glossary_name(glossary_name)
@@ -1020,7 +1105,12 @@ def import_dataplex_glossary(
       "GetGlossary",
       lambda: glossary_client.get_glossary(request={"name": glossary_name}),
   )
-  canonical_name = _field(glossary, "name").strip() or glossary_name
+  canonical_name = _field(glossary, "name").strip()
+  if not canonical_name:
+    raise ValueError(
+        f"GetGlossary for {glossary_name!r} returned no glossary resource "
+        "name; nothing was listed."
+    )
   try:
     returned = _parse_glossary_name(canonical_name)
   except ValueError:

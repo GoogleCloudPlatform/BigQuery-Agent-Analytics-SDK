@@ -41,9 +41,10 @@ import errno
 import json
 import os
 from pathlib import Path
+import re
+import secrets
 import stat
 import sys
-import tempfile
 
 from pydantic import ValidationError
 import typer
@@ -936,65 +937,222 @@ def import_owl_command(
 # --------------------------------------------------------------------- #
 
 
-def _new_file_mode(existing: os.stat_result | None) -> int:
-  """Permission bits for the replacement file: the existing file's, or the
-  ``0o666`` minus the process umask that ``open()`` would apply."""
-  if existing is not None:
-    return stat.S_IMODE(existing.st_mode)
-  umask = os.umask(0)
-  os.umask(umask)
-  return 0o666 & ~umask
+# Output paths that name an already-open file descriptor. Writing through
+# them reaches that descriptor's file; replacing the file they resolve to
+# would not, and may not be possible at all.
+_DESCRIPTOR_PATH_RE = re.compile(
+    r"/dev/(?:stdout|stderr|stdin|fd/[0-9]+)"
+    r"|/proc/(?:self|thread-self|[0-9]+)/fd/[0-9]+"
+)
+# Symlinks followed while resolving a new output file. As on Linux, a chain
+# of this many links resolves and one more is an error.
+_MAX_SYMLINK_HOPS = 40
+_TEMP_NAME_ATTEMPTS = 100
 
 
-def _write_text_atomically(path: Path, text: str) -> None:
-  """Replace ``path`` with ``text`` without ever leaving a partial file.
+def _emit_internal_error(
+    file: str, exc: BaseException, *, as_json: bool
+) -> None:
+  """Report an unexpected error (exit 3): plain text, or with ``--json`` a
+  single ``cli-internal-error`` object."""
+  message = f"internal error: {exc}"
+  if not as_json:
+    typer.echo(message, err=True)
+    return
+  _emit_errors(
+      [
+          {
+              "file": file,
+              "line": 0,
+              "col": 0,
+              "rule": "cli-internal-error",
+              "severity": "error",
+              "message": message,
+          }
+      ],
+      as_json=True,
+  )
 
-  The text goes to a temporary file in the destination's directory, which
-  then replaces the destination with one ``os.replace``. On any failure the
-  temporary file is removed and an existing destination keeps its
-  contents. A symlinked destination is resolved first, so the link's
-  target is replaced and the link is kept. The replacement keeps the
-  destination's permission bits (best effort: filesystems that refuse
-  ``chmod`` keep theirs), or follows the umask for a new file. A read-only
-  destination is refused, as opening it for writing would. A destination
-  that is not a regular file (``/dev/null``, ``/dev/stdout``, a named
-  pipe) has nothing to replace and is written through.
+
+def _discard_stdout() -> None:
+  """Point the stdout descriptor at the null device after a failed write.
+
+  Python flushes ``sys.stdout`` again at exit. After a broken pipe that
+  flush fails too, printing a second error on stderr and turning exit
+  code 1 into 120, so the descriptor is redirected first. Without a real
+  descriptor (as under a test runner) there is nothing to redirect.
   """
   try:
-    # The kernel follows the path, so ``/dev/stdout`` is seen as what it is.
-    existing = os.stat(path)
-  except FileNotFoundError:
-    existing = None  # A new file, or a dangling symlink.
-  if existing is not None and not stat.S_ISREG(existing.st_mode):
-    path.write_text(text, encoding="utf-8")
+    fd = sys.stdout.fileno()
+    devnull = os.open(os.devnull, os.O_WRONLY)
+  except (AttributeError, OSError, ValueError):
     return
-  target = path.resolve()
-  if existing is not None and not os.access(target, os.W_OK):
-    raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
-  tmp_path = None
   try:
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=target.parent,
-        prefix=".gm-import-",
-        suffix=".tmp",
-        delete=False,
-    ) as tmp:
-      tmp_path = tmp.name
-      tmp.write(text)
-      tmp.flush()
+    os.dup2(devnull, fd)
+  except OSError:
+    pass
+  finally:
+    os.close(devnull)
+
+
+# Path separators. Output paths are checked as given, because ``pathlib``
+# drops a trailing separator (and a trailing ``.``), which would turn
+# ``out.yaml/`` into ``out.yaml``.
+_SEPARATORS = tuple(sep for sep in (os.sep, os.altsep) if sep)
+
+
+def _final_component(raw: str) -> str:
+  """The part of ``raw`` after its last path separator."""
+  return raw[max(raw.rfind(sep) for sep in _SEPARATORS) + 1 :]
+
+
+def _names_a_directory(raw: str) -> bool:
+  """Whether ``raw`` can only name a directory, as the kernel reads it: it
+  ends in a separator, or its last component is ``.`` or ``..``."""
+  return raw.endswith(_SEPARATORS) or _final_component(raw) in (".", "..")
+
+
+def _parent_directory(raw: str) -> str:
+  """The directory that holds the last component of ``raw``, as given."""
+  return os.path.dirname(raw.rstrip("".join(_SEPARATORS))) or os.curdir
+
+
+def _is_descriptor_path(raw: str) -> bool:
+  normalized = re.sub("/+", "/", raw)
+  return _DESCRIPTOR_PATH_RE.fullmatch(normalized) is not None
+
+
+def _write_through(raw: str, text: str) -> None:
+  with open(raw, "w", encoding="utf-8") as f:
+    f.write(text)
+
+
+def _resolve_new_file(path: str) -> Path:
+  """Where opening ``path`` for writing would create the file.
+
+  ``path`` does not exist, and its last component is a name. Its parent
+  directory is resolved strictly, as the kernel does, so a missing
+  directory fails even when ``..`` follows it (``missing/../out.yaml`` is
+  not ``out.yaml``), and a dangling symlink is followed hop by hop the
+  same way. A link target that names a directory (``dir/``, ``dir/.``)
+  creates nothing, and fails as opening it would.
+
+  Raises:
+      FileNotFoundError: A directory on the way does not exist.
+      IsADirectoryError: A dangling link's target ends in a separator, and
+          the directory that would hold it exists.
+      OSError: Too many symlinks, or the file appeared meanwhile.
+  """
+  current = Path(path)
+  # One pass more than links, so the target of the last link is still looked
+  # at: a chain of exactly _MAX_SYMLINK_HOPS links ends in a name to create.
+  for _ in range(_MAX_SYMLINK_HOPS + 1):
+    if current.name in ("", ".", ".."):
+      raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), path)
+    parent = Path(os.path.realpath(current.parent, strict=True))
+    candidate = parent / current.name
     try:
-      os.chmod(tmp_path, _new_file_mode(existing))
-    except OSError:
-      pass
+      mode = os.lstat(candidate).st_mode
+    except FileNotFoundError:
+      return candidate
+    if not stat.S_ISLNK(mode):
+      # Only reachable if something created the file concurrently.
+      raise FileExistsError(
+          errno.EEXIST, "output file appeared while it was resolved", path
+      )
+    link = os.readlink(candidate)
+    if _names_a_directory(link):
+      # As opening it would: a missing directory on the way fails as such,
+      # and otherwise a target that ends in a separator names a directory.
+      if link.endswith(_SEPARATORS) and os.path.isdir(
+          os.path.join(parent, _parent_directory(link))
+      ):
+        raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), path)
+      raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), path)
+    current = Path(link) if os.path.isabs(link) else parent / link
+  raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), path)
+
+
+def _create_temp_file(directory: Path, mode: int) -> tuple[int, Path]:
+  """Create ``.gm-import-<random>.tmp`` in ``directory``, exclusively."""
+  flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+  for _ in range(_TEMP_NAME_ATTEMPTS):
+    tmp_path = directory / f".gm-import-{secrets.token_hex(6)}.tmp"
+    try:
+      return os.open(tmp_path, flags, mode), tmp_path
+    except FileExistsError:
+      continue
+  raise FileExistsError(
+      errno.EEXIST, "no unused temporary file name", str(directory)
+  )
+
+
+def _write_text_atomically(path: str | Path, text: str) -> None:
+  """Write ``text`` to ``path`` without ever leaving a partial file.
+
+  ``path`` is used as given, not normalized: as when opening it, one that
+  ends in a separator, ``.`` or ``..`` names a directory, so ``out.yaml/``
+  fails instead of replacing ``out.yaml``. A regular file, new or
+  existing, is written to a temporary file in its real directory, which
+  then replaces it with one ``os.replace``; on any failure the temporary
+  file is removed and an existing file keeps its contents. Symlinks are
+  followed: an existing link's target is replaced and the link kept, and
+  a dangling link creates its target. Directories are resolved strictly,
+  so ``missing/../out.yaml`` fails as opening it would instead of
+  replacing ``out.yaml``. A replaced file keeps its permission bits (best
+  effort: filesystems that refuse ``chmod`` keep their own); a new one
+  gets ``0o666`` minus the umask, applied by ``open`` itself. A read-only
+  file is refused, as opening it for writing would be. Descriptor paths
+  (``/dev/stdout``, ``/dev/fd/<n>``, ``/proc/self/fd/<n>``) and other
+  non-regular files (``/dev/null``, a named pipe) are written directly,
+  and a directory is an error.
+  """
+  raw = os.fspath(path)
+  if _is_descriptor_path(raw):
+    _write_through(raw, text)
+    return
+  try:
+    st = os.stat(raw)
+  except FileNotFoundError:
+    if raw.endswith(_SEPARATORS) and os.path.isdir(_parent_directory(raw)):
+      # As opening it would: with its directories present, a path that
+      # ends in a separator names a directory, never a new file.
+      raise IsADirectoryError(
+          errno.EISDIR, os.strerror(errno.EISDIR), raw
+      ) from None
+    if _names_a_directory(raw):
+      raise
+    target = _resolve_new_file(raw)
+    existing_mode = None
+  else:
+    if stat.S_ISDIR(st.st_mode):
+      raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), raw)
+    if not stat.S_ISREG(st.st_mode):
+      _write_through(raw, text)
+      return
+    target = Path(os.path.realpath(raw, strict=True))
+    if not os.access(target, os.W_OK):
+      raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), raw)
+    existing_mode = stat.S_IMODE(st.st_mode)
+  # A new file gets 0o666 minus the umask from open() itself; the copy of
+  # an existing file starts private and gets the old bits before the swap.
+  fd, tmp_path = _create_temp_file(
+      target.parent, 0o666 if existing_mode is None else 0o600
+  )
+  try:
+    with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+      tmp.write(text)
+    if existing_mode is not None:
+      try:
+        os.chmod(tmp_path, existing_mode)
+      except OSError:
+        pass  # Best effort: some filesystems refuse chmod.
     os.replace(tmp_path, target)
   except BaseException:
-    if tmp_path is not None:
-      try:
-        os.unlink(tmp_path)
-      except OSError:
-        pass
+    try:
+      os.unlink(tmp_path)
+    except OSError:
+      pass
     raise
 
 
@@ -1035,8 +1193,8 @@ def import_dataplex_glossary_command(
   category and term is an abstract, SKOS-annotated entity and category
   nesting becomes ``skos_broader`` relationships.
 
-  An import summary is printed to stderr (with ``-o``, only after the file
-  is written). Requires the optional ``google-cloud-dataplex`` dependency.
+  An import summary is printed to stderr once the YAML has been written.
+  Requires the optional ``google-cloud-dataplex`` dependency.
   """
   try:
     from .dataplex_glossary_importer import DataplexImportError
@@ -1131,49 +1289,41 @@ def import_dataplex_glossary_command(
     )
     raise typer.Exit(code=1)
   except Exception as exc:  # noqa: BLE001 - reported as an internal error
-    if json_output:
-      _emit_errors(
-          [
-              {
-                  "file": glossary,
-                  "line": 0,
-                  "col": 0,
-                  "rule": "cli-internal-error",
-                  "severity": "error",
-                  "message": f"internal error: {exc}",
-              }
-          ],
-          as_json=True,
-      )
-    else:
-      typer.echo(f"internal error: {exc}", err=True)
+    _emit_internal_error(glossary, exc, as_json=json_output)
     raise typer.Exit(code=3)
 
-  if output_path is None:
-    if summary:
-      typer.echo(summary, err=True)
-    typer.echo(yaml_text, nl=False)
-    return
-
-  resolved_output = Path(output_path)
+  # The path goes on as given: ``Path()`` would drop a trailing separator
+  # that makes it name a directory.
+  destination = "<stdout>" if output_path is None else output_path
   try:
-    _write_text_atomically(resolved_output, yaml_text)
+    if output_path is None:
+      typer.echo(yaml_text, nl=False)
+    else:
+      _write_text_atomically(output_path, yaml_text)
   except OSError as exc:
+    if output_path is None:
+      _discard_stdout()
+      message = f"Cannot write to stdout: {exc}"
+    else:
+      message = f"Cannot write output file: {exc}"
     _emit_errors(
         [
             {
-                "file": str(resolved_output),
+                "file": destination,
                 "line": 0,
                 "col": 0,
                 "rule": "cli-output-error",
                 "severity": "error",
-                "message": f"Cannot write output file: {exc}",
+                "message": message,
             }
         ],
         as_json=json_output,
     )
     raise typer.Exit(code=1)
-  # Only after the write succeeds, so a failure leaves a single error
+  except Exception as exc:  # noqa: BLE001 - reported as an internal error
+    _emit_internal_error(destination, exc, as_json=json_output)
+    raise typer.Exit(code=3)
+  # Only after the YAML is written, so a failed write leaves a single error
   # (one JSON document with ``--json``) on stderr.
   if summary:
     typer.echo(summary, err=True)

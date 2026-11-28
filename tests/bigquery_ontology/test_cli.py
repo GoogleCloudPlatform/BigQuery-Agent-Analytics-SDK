@@ -29,16 +29,18 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
-import tempfile
 import textwrap
 import threading
 import types
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from bigquery_ontology import dataplex_glossary_importer
+from bigquery_ontology.cli import _is_descriptor_path
 from bigquery_ontology.cli import app
 
 _has_rdflib = True
@@ -1705,12 +1707,11 @@ def _write_previous_output(tmp_path: Path) -> Path:
 
 
 class _HalfWrittenFile:
-  """Wraps a real temporary file whose ``write`` stores half of the text
-  and then fails the way a full disk would."""
+  """Wraps the real temporary file object; its ``write`` stores half of
+  the text and then fails the way a full disk would."""
 
   def __init__(self, real):
     self._real = real
-    self.name = real.name
 
   def write(self, text):
     self._real.write(text[: len(text) // 2])
@@ -1734,11 +1735,13 @@ def test_import_dataplex_glossary_failed_overwrite_keeps_the_previous_file(
 ):
   out = _write_previous_output(tmp_path)
   if failure == "write":
-    real_named_temporary_file = tempfile.NamedTemporaryFile
+    real_fdopen = os.fdopen
     monkeypatch.setattr(
-        tempfile,
-        "NamedTemporaryFile",
-        lambda **kwargs: _HalfWrittenFile(real_named_temporary_file(**kwargs)),
+        os,
+        "fdopen",
+        lambda fd, *args, **kwargs: _HalfWrittenFile(
+            real_fdopen(fd, *args, **kwargs)
+        ),
     )
   else:
 
@@ -1904,6 +1907,702 @@ def test_import_dataplex_glossary_write_survives_a_chmod_refusal(
   assert [p.name for p in tmp_path.iterdir()] == [out.name]
 
 
+def test_import_dataplex_glossary_missing_directory_before_dotdot_fails(
+    tmp_path, dataplex_client
+):
+  out = _write_previous_output(tmp_path)
+  through_missing = tmp_path / "missing" / ".." / out.name
+
+  result = _RUNNER.invoke(
+      app,
+      ["import-dataplex-glossary", _DP_GLOSSARY, "-o", str(through_missing)],
+  )
+
+  assert result.exit_code == 1
+  assert result.stderr.startswith(f"{through_missing}:0:0: cli-output-error")
+  assert "No such file or directory" in result.stderr
+  assert out.read_text(encoding="utf-8") == "previous: content\n"
+  assert [p.name for p in tmp_path.iterdir()] == [out.name]
+
+
+def test_import_dataplex_glossary_dangling_link_through_missing_dir_fails(
+    tmp_path, dataplex_client
+):
+  out = _write_previous_output(tmp_path)
+  link = tmp_path / "link.yaml"
+  link.symlink_to(os.path.join("missing", "..", out.name))
+
+  result = _RUNNER.invoke(
+      app, ["import-dataplex-glossary", _DP_GLOSSARY, "-o", str(link)]
+  )
+
+  assert result.exit_code == 1
+  assert result.stderr.startswith(f"{link}:0:0: cli-output-error")
+  assert out.read_text(encoding="utf-8") == "previous: content\n"
+  assert link.is_symlink()
+  assert sorted(p.name for p in tmp_path.iterdir()) == sorted(
+      [link.name, out.name]
+  )
+
+
+@pytest.mark.parametrize("form", ["relative", "absolute", "chain"])
+def test_import_dataplex_glossary_dangling_link_creates_its_target(
+    tmp_path, dataplex_client, form
+):
+  existing = tmp_path / "existing"
+  existing.mkdir()
+  new_file = existing / "new.yaml"
+  link = tmp_path / "link.yaml"
+  if form == "relative":
+    link.symlink_to(os.path.join("existing", "new.yaml"))
+  elif form == "absolute":
+    link.symlink_to(new_file)
+  else:
+    (tmp_path / "hop.yaml").symlink_to(os.path.join("existing", "new.yaml"))
+    link.symlink_to("hop.yaml")
+
+  result = _RUNNER.invoke(
+      app, ["import-dataplex-glossary", _DP_GLOSSARY, "-o", str(link)]
+  )
+
+  assert result.exit_code == 0
+  assert new_file.read_text(encoding="utf-8") == _DP_EXPECTED_YAML
+  assert link.is_symlink()
+  assert [p.name for p in existing.iterdir()] == ["new.yaml"]
+
+
+@pytest.mark.parametrize("suffix", ["", "/"], ids=["plain", "trailing_slash"])
+def test_import_dataplex_glossary_output_to_a_directory_is_refused(
+    tmp_path, dataplex_client, suffix
+):
+  destination = f"{tmp_path}{suffix}"
+
+  result = _RUNNER.invoke(
+      app, ["import-dataplex-glossary", _DP_GLOSSARY, "-o", destination]
+  )
+
+  assert result.exit_code == 1
+  assert result.stderr.startswith(f"{destination}:0:0: cli-output-error")
+  assert "Is a directory" in result.stderr
+  assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("suffix", ["/", "/."], ids=["slash", "slash_dot"])
+def test_import_dataplex_glossary_file_path_named_as_a_directory_is_kept(
+    tmp_path, dataplex_client, suffix
+):
+  out = _write_previous_output(tmp_path)
+  destination = f"{out}{suffix}"
+
+  result = _RUNNER.invoke(
+      app, ["import-dataplex-glossary", _DP_GLOSSARY, "-o", destination]
+  )
+
+  assert result.exit_code == 1
+  assert result.stderr.startswith(f"{destination}:0:0: cli-output-error")
+  assert "Not a directory" in result.stderr
+  assert out.read_text(encoding="utf-8") == "previous: content\n"
+  assert [p.name for p in tmp_path.iterdir()] == [out.name]
+
+
+@pytest.mark.parametrize(
+    "relative, reason",
+    [
+        ("no_such_dir/", "Is a directory"),
+        ("no_such_dir/.", "No such file or directory"),
+        ("no_such_dir/new.yaml/", "No such file or directory"),
+    ],
+    ids=["slash", "slash_dot", "missing_parent_slash"],
+)
+def test_import_dataplex_glossary_missing_directory_path_creates_nothing(
+    tmp_path, dataplex_client, relative, reason
+):
+  destination = os.path.join(tmp_path, relative)
+
+  result = _RUNNER.invoke(
+      app, ["import-dataplex-glossary", _DP_GLOSSARY, "-o", destination]
+  )
+
+  assert result.exit_code == 1
+  assert result.stderr.startswith(f"{destination}:0:0: cli-output-error")
+  assert reason in result.stderr
+  assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "target, reason",
+    [
+        ("no_such_dir/", "Is a directory"),
+        ("no_such_dir/.", "No such file or directory"),
+        ("no_such_dir/new.yaml/", "No such file or directory"),
+    ],
+    ids=["slash", "slash_dot", "missing_parent_slash"],
+)
+def test_import_dataplex_glossary_dangling_link_to_a_directory_path_fails(
+    tmp_path, dataplex_client, target, reason
+):
+  link = tmp_path / "link.yaml"
+  link.symlink_to(target)
+
+  result = _RUNNER.invoke(
+      app, ["import-dataplex-glossary", _DP_GLOSSARY, "-o", str(link)]
+  )
+
+  assert result.exit_code == 1
+  assert result.stderr.startswith(f"{link}:0:0: cli-output-error")
+  assert reason in result.stderr
+  assert link.is_symlink()
+  assert [p.name for p in tmp_path.iterdir()] == [link.name]
+
+
+def test_import_dataplex_glossary_output_symlink_loop_is_an_output_error(
+    tmp_path, dataplex_client
+):
+  loop = tmp_path / "loop.yaml"
+  loop.symlink_to(loop.name)
+
+  result = _RUNNER.invoke(
+      app, ["import-dataplex-glossary", _DP_GLOSSARY, "-o", str(loop)]
+  )
+
+  assert result.exit_code == 1
+  assert result.stderr.startswith(f"{loop}:0:0: cli-output-error")
+  assert loop.is_symlink()
+
+
+@pytest.mark.parametrize(
+    "links, creates",
+    [
+        (2, True),
+        pytest.param(
+            40,
+            True,
+            marks=pytest.mark.skipif(
+                not sys.platform.startswith("linux"),
+                reason="needs the limit of 40 symlinks that Linux sets",
+            ),
+        ),
+        (41, False),
+    ],
+    ids=["two_links", "forty_links", "forty_one_links"],
+)
+def test_import_dataplex_glossary_dangling_link_chain_is_limited_to_forty_links(
+    tmp_path, dataplex_client, links, creates
+):
+  # As Linux does, follow at most 40 links to a file that is not there.
+  target = tmp_path / "real.yaml"
+  names = [f"link{n}" for n in range(1, links + 1)]
+  for name, points_to in zip(names, names[1:] + [target.name]):
+    (tmp_path / name).symlink_to(points_to)
+
+  result = _RUNNER.invoke(
+      app,
+      [
+          "import-dataplex-glossary",
+          _DP_GLOSSARY,
+          "-o",
+          str(tmp_path / names[0]),
+      ],
+  )
+
+  if creates:
+    assert result.exit_code == 0
+    assert target.read_text(encoding="utf-8") == _DP_EXPECTED_YAML
+  else:
+    assert result.exit_code == 1
+    assert "cli-output-error" in result.stderr
+    assert not target.exists()
+  assert all((tmp_path / name).is_symlink() for name in names)
+  assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_import_dataplex_glossary_empty_output_path_is_an_output_error(
+    tmp_path, monkeypatch, dataplex_client
+):
+  monkeypatch.chdir(tmp_path)
+
+  result = _RUNNER.invoke(
+      app, ["import-dataplex-glossary", _DP_GLOSSARY, "-o", ""]
+  )
+
+  assert result.exit_code == 1
+  assert result.stdout == ""
+  assert result.stderr.startswith(":0:0: cli-output-error")
+  assert "No such file or directory" in result.stderr
+  assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "/dev/fd/{fd}",
+        "//dev//fd/{fd}",
+        "/proc/self/fd/{fd}",
+        "/proc/thread-self/fd/{fd}",
+        "/proc/{pid}/fd/{fd}",
+    ],
+    ids=[
+        "dev_fd",
+        "redundant_slashes",
+        "proc_self",
+        "proc_thread_self",
+        "proc_pid",
+    ],
+)
+def test_import_dataplex_glossary_output_to_a_descriptor_path_writes_through(
+    tmp_path, dataplex_client, template
+):
+  target = tmp_path / "descriptor-target.yaml"
+  fd = os.open(target, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+  try:
+    descriptor_path = template.format(fd=fd, pid=os.getpid())
+    if not os.path.exists(descriptor_path):
+      pytest.skip(f"needs {descriptor_path}")
+    result = _RUNNER.invoke(
+        app, ["import-dataplex-glossary", _DP_GLOSSARY, "-o", descriptor_path]
+    )
+    inode_behind_fd = os.fstat(fd).st_ino
+  finally:
+    os.close(fd)
+
+  assert result.exit_code == 0
+  assert result.stdout == ""
+  assert target.read_text(encoding="utf-8") == _DP_EXPECTED_YAML
+  # Written through the descriptor, not replaced by a new file.
+  assert target.stat().st_ino == inode_behind_fd
+  assert [p.name for p in tmp_path.iterdir()] == [target.name]
+
+
+@pytest.mark.parametrize(
+    "path, expected",
+    [
+        ("/dev/stdin", True),
+        ("/dev/stdout", True),
+        ("/dev/stderr", True),
+        ("/dev/fd/0", True),
+        ("/dev/fd/12", True),
+        ("//dev//fd/3", True),
+        ("/proc/self/fd/3", True),
+        ("/proc/thread-self/fd/3", True),
+        ("/proc/1234/fd/3", True),
+        ("/dev/null", False),
+        ("/dev/fd/", False),
+        ("/dev/fd/x", False),
+        ("/dev/fd/3/", False),
+        ("/dev/stdout/x", False),
+        ("/dev/stdout2", False),
+        ("/proc/self/fd/", False),
+        ("/proc/self/fdinfo/3", False),
+        ("/proc/x/fd/3", False),
+        ("dev/fd/3", False),
+        ("retail.ontology.yaml", False),
+    ],
+)
+def test_descriptor_output_paths_are_recognized_exactly(path, expected):
+  assert _is_descriptor_path(path) is expected
+
+
+_DESCRIPTOR_OUTPUT_SCRIPT = textwrap.dedent(
+    """\
+    import sys
+
+    from bigquery_ontology import dataplex_glossary_importer
+    from bigquery_ontology.cli import app
+
+    dataplex_glossary_importer.import_dataplex_glossary = (
+        lambda *args, **kwargs: ("ontology: retail\\n", "")
+    )
+    app(["import-dataplex-glossary", sys.argv[1], "-o", sys.argv[2]])
+    """
+)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="needs POSIX standard-stream paths"
+)
+@pytest.mark.parametrize("stream", ["stdin", "stdout", "stderr"])
+def test_import_dataplex_glossary_output_to_a_standard_stream_path_writes_through(
+    tmp_path, stream
+):
+  stream_path = f"/dev/{stream}"
+  if not os.path.exists(stream_path):
+    pytest.skip(f"needs {stream_path}")
+  src_dir = str(Path(dataplex_glossary_importer.__file__).resolve().parents[1])
+  env = dict(os.environ)
+  env["PYTHONPATH"] = os.pathsep.join(
+      path for path in (src_dir, env.get("PYTHONPATH")) if path
+  )
+  target = tmp_path / "stream-target.yaml"
+  fd = os.open(target, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+  try:
+    inode_behind_fd = os.fstat(fd).st_ino
+    streams = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.PIPE,
+    }
+    streams[stream] = fd  # The stream the output path names.
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _DESCRIPTOR_OUTPUT_SCRIPT,
+            _DP_GLOSSARY,
+            stream_path,
+        ],
+        env=env,
+        timeout=120,
+        check=False,
+        **streams,
+    )
+  finally:
+    os.close(fd)
+
+  assert proc.returncode == 0, proc.stderr or target.read_text(errors="replace")
+  assert target.read_text(encoding="utf-8") == "ontology: retail\n"
+  # Written through the stream, not replaced by a new file.
+  assert target.stat().st_ino == inode_behind_fd
+  assert [p.name for p in tmp_path.iterdir()] == [target.name]
+
+
+@pytest.mark.parametrize("existing", [False, True], ids=["new", "existing"])
+def test_import_dataplex_glossary_write_leaves_the_process_umask_alone(
+    tmp_path, monkeypatch, dataplex_client, existing
+):
+  out = (
+      _write_previous_output(tmp_path)
+      if existing
+      else tmp_path / "retail.ontology.yaml"
+  )
+  umask = os.umask(0o022)
+  os.umask(umask)
+
+  def _forbidden_umask(mask):
+    raise AssertionError("writing the output must not change the umask")
+
+  monkeypatch.setattr(os, "umask", _forbidden_umask)
+
+  result = _RUNNER.invoke(
+      app, ["import-dataplex-glossary", _DP_GLOSSARY, "-o", str(out)]
+  )
+
+  assert result.exit_code == 0
+  assert out.read_text(encoding="utf-8") == _DP_EXPECTED_YAML
+  assert stat.S_IMODE(out.stat().st_mode) == 0o666 & ~umask
+
+
+def _fixed_temp_names(monkeypatch, *names):
+  """The CLI's temporary file names come from ``names`` in order; the last
+  one then repeats."""
+  remaining = list(names)
+
+  def _token_hex(nbytes=None):
+    return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+  monkeypatch.setattr("bigquery_ontology.cli.secrets.token_hex", _token_hex)
+
+
+def test_import_dataplex_glossary_temporary_file_never_reuses_a_taken_name(
+    tmp_path, monkeypatch, dataplex_client
+):
+  squatter = tmp_path / ".gm-import-aaaaaaaaaaaa.tmp"
+  squatter.write_text("squatter\n", encoding="utf-8")
+  victim = tmp_path / "victim.txt"
+  victim.write_text("victim\n", encoding="utf-8")
+  planted = tmp_path / ".gm-import-bbbbbbbbbbbb.tmp"
+  planted.symlink_to(victim.name)
+  _fixed_temp_names(monkeypatch, "aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc")
+  out = tmp_path / "retail.ontology.yaml"
+
+  result = _RUNNER.invoke(
+      app, ["import-dataplex-glossary", _DP_GLOSSARY, "-o", str(out)]
+  )
+
+  assert result.exit_code == 0
+  assert out.read_text(encoding="utf-8") == _DP_EXPECTED_YAML
+  # Neither the taken name nor the planted link was written through.
+  assert squatter.read_text(encoding="utf-8") == "squatter\n"
+  assert victim.read_text(encoding="utf-8") == "victim\n"
+  assert planted.is_symlink()
+  assert sorted(p.name for p in tmp_path.iterdir()) == sorted(
+      [out.name, squatter.name, planted.name, victim.name]
+  )
+
+
+def test_import_dataplex_glossary_without_a_free_temporary_name_keeps_the_file(
+    tmp_path, monkeypatch, dataplex_client
+):
+  squatter = tmp_path / ".gm-import-aaaaaaaaaaaa.tmp"
+  squatter.write_text("squatter\n", encoding="utf-8")
+  _fixed_temp_names(monkeypatch, "aaaaaaaaaaaa")
+  out = _write_previous_output(tmp_path)
+
+  result = _RUNNER.invoke(
+      app, ["import-dataplex-glossary", _DP_GLOSSARY, "-o", str(out)]
+  )
+
+  assert result.exit_code == 1
+  assert result.stderr.startswith(f"{out}:0:0: cli-output-error")
+  assert "no unused temporary file name" in result.stderr
+  assert "Imported Dataplex glossary" not in result.stderr
+  assert out.read_text(encoding="utf-8") == "previous: content\n"
+  assert squatter.read_text(encoding="utf-8") == "squatter\n"
+  assert sorted(p.name for p in tmp_path.iterdir()) == sorted(
+      [out.name, squatter.name]
+  )
+
+
+@pytest.mark.parametrize(
+    "existing", [True, False], ids=["existing", "dangling"]
+)
+def test_import_dataplex_glossary_symlinked_output_is_staged_beside_its_target(
+    tmp_path, monkeypatch, dataplex_client, existing
+):
+  links = tmp_path / "links"
+  real = tmp_path / "real"
+  links.mkdir()
+  real.mkdir()
+  target = real / "retail.ontology.yaml"
+  if existing:
+    target.write_text("previous: content\n", encoding="utf-8")
+  link = links / "retail.ontology.yaml"
+  link.symlink_to(os.path.join("..", "real", target.name))
+  replaced = []
+  real_replace = os.replace
+
+  def _spy_replace(src, dst):
+    replaced.append((Path(src).parent, Path(dst)))
+    real_replace(src, dst)
+
+  monkeypatch.setattr(os, "replace", _spy_replace)
+
+  result = _RUNNER.invoke(
+      app, ["import-dataplex-glossary", _DP_GLOSSARY, "-o", str(link)]
+  )
+
+  assert result.exit_code == 0
+  # The temporary file lives in the target's real directory, so the swap
+  # stays on one filesystem whatever the link's directory is.
+  assert replaced == [(real.resolve(), target.resolve())]
+  assert target.read_text(encoding="utf-8") == _DP_EXPECTED_YAML
+  assert link.is_symlink()
+  assert [p.name for p in real.iterdir()] == [target.name]
+  assert [p.name for p in links.iterdir()] == [link.name]
+
+
+class _Interrupted(BaseException):
+  """Stands in for ``KeyboardInterrupt``, which would stop the test run."""
+
+
+def test_import_dataplex_glossary_interrupted_write_removes_its_temporary_file(
+    tmp_path, monkeypatch, dataplex_client
+):
+  out = _write_previous_output(tmp_path)
+
+  def _interrupt(src, dst):
+    raise _Interrupted
+
+  monkeypatch.setattr(os, "replace", _interrupt)
+
+  with pytest.raises(_Interrupted):
+    _RUNNER.invoke(
+        app, ["import-dataplex-glossary", _DP_GLOSSARY, "-o", str(out)]
+    )
+
+  assert out.read_text(encoding="utf-8") == "previous: content\n"
+  assert [p.name for p in tmp_path.iterdir()] == [out.name]
+
+
+def _raise_from_write(monkeypatch):
+  def _gremlin(path, text):
+    raise RuntimeError("disk gremlin")
+
+  monkeypatch.setattr("bigquery_ontology.cli._write_text_atomically", _gremlin)
+
+
+def test_import_dataplex_glossary_unexpected_write_error_exits_3(
+    tmp_path, monkeypatch, dataplex_client
+):
+  _raise_from_write(monkeypatch)
+  out = tmp_path / "retail.ontology.yaml"
+
+  result = _RUNNER.invoke(
+      app, ["import-dataplex-glossary", _DP_GLOSSARY, "-o", str(out)]
+  )
+
+  assert result.exit_code == 3
+  assert result.stdout == ""
+  assert result.stderr == "internal error: disk gremlin\n"
+  assert not out.exists()
+
+
+def test_import_dataplex_glossary_unexpected_write_error_json(
+    tmp_path, monkeypatch, dataplex_client
+):
+  _raise_from_write(monkeypatch)
+  out = tmp_path / "retail.ontology.yaml"
+
+  result = _RUNNER.invoke(
+      app,
+      ["import-dataplex-glossary", _DP_GLOSSARY, "-o", str(out), "--json"],
+  )
+
+  assert result.exit_code == 3
+  assert result.stdout == ""
+  assert json.loads(result.stderr) == [
+      {
+          "file": str(out),
+          "line": 0,
+          "col": 0,
+          "rule": "cli-internal-error",
+          "severity": "error",
+          "message": "internal error: disk gremlin",
+      }
+  ]
+
+
+def _fail_stdout_writes(monkeypatch, error):
+  """Make every ``typer.echo`` to stdout raise ``error``; stderr works."""
+  real_echo = typer.echo
+
+  def _echo(message=None, file=None, nl=True, err=False, color=None):
+    if not err and file is None:
+      raise error
+    real_echo(message, file=file, nl=nl, err=err, color=color)
+
+  monkeypatch.setattr(typer, "echo", _echo)
+
+
+def test_import_dataplex_glossary_stdout_write_error_exits_1(
+    monkeypatch, dataplex_client
+):
+  _fail_stdout_writes(monkeypatch, BrokenPipeError(errno.EPIPE, "Broken pipe"))
+
+  result = _RUNNER.invoke(app, ["import-dataplex-glossary", _DP_GLOSSARY])
+
+  assert result.exit_code == 1
+  # The summary follows the YAML, so a failed write leaves only the error.
+  assert result.stderr == (
+      "<stdout>:0:0: cli-output-error \u2014 Cannot write to stdout: "
+      "[Errno 32] Broken pipe\n"
+  )
+
+
+def test_import_dataplex_glossary_stdout_write_error_json(
+    monkeypatch, dataplex_client
+):
+  _fail_stdout_writes(monkeypatch, BrokenPipeError(errno.EPIPE, "Broken pipe"))
+
+  result = _RUNNER.invoke(
+      app, ["import-dataplex-glossary", _DP_GLOSSARY, "--json"]
+  )
+
+  assert result.exit_code == 1
+  assert json.loads(result.stderr) == [
+      {
+          "file": "<stdout>",
+          "line": 0,
+          "col": 0,
+          "rule": "cli-output-error",
+          "severity": "error",
+          "message": "Cannot write to stdout: [Errno 32] Broken pipe",
+      }
+  ]
+
+
+def test_import_dataplex_glossary_unexpected_stdout_error_json(
+    monkeypatch, dataplex_client
+):
+  _fail_stdout_writes(monkeypatch, RuntimeError("stdout gremlin"))
+
+  result = _RUNNER.invoke(
+      app, ["import-dataplex-glossary", _DP_GLOSSARY, "--json"]
+  )
+
+  assert result.exit_code == 3
+  assert json.loads(result.stderr) == [
+      {
+          "file": "<stdout>",
+          "line": 0,
+          "col": 0,
+          "rule": "cli-internal-error",
+          "severity": "error",
+          "message": "internal error: stdout gremlin",
+      }
+  ]
+
+
+_BROKEN_PIPE_SCRIPT = textwrap.dedent(
+    """\
+    import sys
+
+    from bigquery_ontology import dataplex_glossary_importer
+    from bigquery_ontology.cli import app
+
+    dataplex_glossary_importer.import_dataplex_glossary = (
+        lambda *args, **kwargs: ("ontology: retail\\n", "summary\\n")
+    )
+    app(["import-dataplex-glossary", sys.argv[1], "--json"])
+    """
+)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="needs POSIX broken-pipe semantics"
+)
+def test_import_dataplex_glossary_broken_stdout_pipe_leaves_one_json_error():
+  src_dir = str(Path(dataplex_glossary_importer.__file__).resolve().parents[1])
+  env = dict(os.environ)
+  env["PYTHONPATH"] = os.pathsep.join(
+      path for path in (src_dir, env.get("PYTHONPATH")) if path
+  )
+  read_end, write_end = os.pipe()
+  os.close(read_end)  # Nobody reads stdout, so writing to it fails.
+  try:
+    proc = subprocess.run(
+        [sys.executable, "-c", _BROKEN_PIPE_SCRIPT, _DP_GLOSSARY],
+        stdout=write_end,
+        stderr=subprocess.PIPE,
+        env=env,
+        timeout=120,
+        check=False,
+    )
+  finally:
+    os.close(write_end)
+
+  # Without discarding stdout, Python's exit-time flush would add a second
+  # error on stderr and turn exit code 1 into 120.
+  assert proc.returncode == 1, proc.stderr
+  errors = json.loads(proc.stderr)
+  assert [(e["file"], e["rule"]) for e in errors] == [
+      ("<stdout>", "cli-output-error")
+  ]
+
+
+class _NamelessGlossaryClient(_FakeDataplexGlossaryClient):
+  """``GetGlossary`` answers without a resource name."""
+
+  def get_glossary(self, request=None, **kwargs):
+    super().get_glossary(request, **kwargs)
+    return types.SimpleNamespace(name="", uid="u-1", description="")
+
+
+def test_import_dataplex_glossary_nameless_response_exits_1(monkeypatch):
+  client = _NamelessGlossaryClient()
+  _use_fake_dataplex_client(monkeypatch, client)
+
+  result = _RUNNER.invoke(
+      app, ["import-dataplex-glossary", _DP_GLOSSARY, "--json"]
+  )
+
+  assert result.exit_code == 1
+  assert result.stdout == ""
+  errors = json.loads(result.stderr)
+  assert [e["rule"] for e in errors] == ["import-validation"]
+  assert "returned no glossary resource name" in errors[0]["message"]
+  assert [method for method, _ in client.calls] == ["get_glossary"]
+
+
 def test_import_dataplex_glossary_unexpected_error_exits_3(monkeypatch):
   def _boom(*args, **kwargs):
     raise RuntimeError("boom")
@@ -2010,6 +2709,11 @@ def test_import_dataplex_glossary_unreachable_locations_exit_1(
         "projects/demo@corp/locations/us-central1/glossaries/retail",
         "projects/demo-project/locations/us-central1!/glossaries/retail",
         "projects/demo-project/locations/us@central1/glossaries/retail",
+        "projects/123abc/locations/us-central1/glossaries/retail",
+        "projects/UPPER-project/locations/us-central1/glossaries/retail",
+        "projects/demo-project-/locations/us-central1/glossaries/retail",
+        "projects/a::b/locations/us-central1/glossaries/retail",
+        "projects/demo-project/locations/us-central1-/glossaries/retail",
     ],
 )
 def test_import_dataplex_glossary_bad_project_or_location_is_usage_error(
