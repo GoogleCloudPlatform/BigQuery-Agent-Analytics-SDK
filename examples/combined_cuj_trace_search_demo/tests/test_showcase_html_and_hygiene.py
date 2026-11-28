@@ -1538,6 +1538,80 @@ class ShowcaseHtmlAndHygieneTest(unittest.TestCase):
       self.assertIn("CARD_EXPIRED", html_text)
       self.assertIn("cookies=3", html_text)
 
+  def test_live_only_custom_eval_turns_table_end_to_end(self) -> None:
+    import asyncio  # noqa: PLC0415
+
+    from agent.run_live_demo import run_demo  # noqa: PLC0415
+    from agent.run_live_demo import run_demo_async
+    from report.build_showcase_html import _merge_inputs  # noqa: PLC0415
+    from report.build_showcase_html import build_showcase_html
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      root = Path(tmpdir)
+      live_json = root / "live_custom.json"
+      out_html = root / "showcase_live_only.html"
+      live_payload = run_demo(
+          mock_live=True,
+          eval_turns_table="eval_turns_run_42",
+          output_json=live_json,
+      )
+      self.assertEqual(live_payload["eval_turns_table"], "eval_turns_run_42")
+      persisted = json.loads(live_json.read_text(encoding="utf-8"))
+      self.assertEqual(persisted["eval_turns_table"], "eval_turns_run_42")
+
+      async_payload = asyncio.run(
+          run_demo_async(
+              mock_live=True,
+              eval_turns_table="eval_turns_run_42",
+          )
+      )
+      self.assertEqual(async_payload["eval_turns_table"], "eval_turns_run_42")
+
+      merged = _merge_inputs(
+          live_json=live_json,
+          search_json=None,
+          pattern_json=None,
+          eval_suite_json=None,
+          demo_fixture=False,
+      )
+      self.assertEqual(merged["eval_turns_table"], "eval_turns_run_42")
+
+      build_showcase_html(
+          live_json=live_json,
+          search_json=None,
+          output_path=out_html,
+      )
+      html_text = out_html.read_text(encoding="utf-8")
+      match = re.search(
+          r'<script[^>]*\bid=["\']showcase-data["\'][^>]*>(.*?)</script>',
+          html_text,
+          flags=re.DOTALL,
+      )
+      self.assertIsNotNone(match)
+      assert match is not None
+      embedded = json.loads(match.group(1))
+      self.assertEqual(embedded["eval_turns_table"], "eval_turns_run_42")
+      self.assertNotIn('"eval_turns_table": "eval_turns"', html_text)
+      self.assertIn("DATA.eval_turns_table", html_text)
+      self.assertIn("evalTurnsTable", html_text)
+      self.assertIn("FROM `' + evalTurnsTable + '`\\n", html_text)
+      self.assertNotIn("FROM eval_turns\\n", html_text)
+
+  def test_run_demo_mock_live_rejects_invalid_eval_turns_table(self) -> None:
+    import asyncio  # noqa: PLC0415
+
+    from agent.run_live_demo import run_demo  # noqa: PLC0415
+    from agent.run_live_demo import run_demo_async  # noqa: PLC0415
+
+    for bad_table in ("bad; DROP TABLE x", "bad-table", ""):
+      with self.subTest(eval_turns_table=bad_table):
+        with self.assertRaises(ValueError):
+          run_demo(mock_live=True, eval_turns_table=bad_table)
+        with self.assertRaises(ValueError):
+          asyncio.run(
+              run_demo_async(mock_live=True, eval_turns_table=bad_table)
+          )
+
 
 if __name__ == "__main__":
   unittest.main()

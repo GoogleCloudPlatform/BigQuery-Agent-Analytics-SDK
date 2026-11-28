@@ -582,7 +582,8 @@ def populate_trajectories_in_bigquery(
     )
   load_cfg = bigquery.LoadJobConfig(
       schema=stage_schema,
-      write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+      create_disposition=bigquery.CreateDisposition.CREATE_NEVER,
+      write_disposition=bigquery.WriteDisposition.WRITE_EMPTY,
   )
   bq_client.load_table_from_json(
       staged, stage_fqn, job_config=load_cfg

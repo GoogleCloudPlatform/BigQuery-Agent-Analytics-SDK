@@ -64,10 +64,12 @@ _SAFE_SMALL_COUNT_KEYS = frozenset(
         "auth_count",
         "auth_retry_count",
         "auth_failure_count",
-        "token_count",
     }
 )
 _MAX_SAFE_COUNT_VALUE = 999
+_LLM_METRIC_COUNT_KEYS = frozenset({"token_count"})
+_MAX_LLM_METRIC_COUNT_VALUE = 10_000_000
+_ALL_SAFE_COUNT_KEYS = _SAFE_SMALL_COUNT_KEYS | _LLM_METRIC_COUNT_KEYS
 _SAFE_AUTH_STATUS_VALUES = frozenset(
     {
         "failed",
@@ -156,6 +158,7 @@ _SENSITIVE_KEY_RE = re.compile(
     r"(?:^|_)oauth(?:$|[_\d])|"
     r"(?:auth|access|refresh|id|bearer|session|oauth|csrf|secret|api|github|"
     r"request)_?tokens?(?:$|[_\d])|^token(?:_\d+|\d+)?$|"
+    r"^token_count$|"
     r"authorization(?:$|[_\d])|"
     r"auth_?headers?(?:$|[_\d])|auth_?keys?(?:$|[_\d])|"
     r"auth_?secrets?(?:$|[_\d])|auth_?codes?(?:$|[_\d])|"
@@ -210,6 +213,10 @@ _JSON_SCALAR_START_RE = re.compile(
     r"(?:-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)"
     r"(?=$|[\s,;)}\]\"']|\\[trn])"
 )
+_JSON_BOOL_OR_NULL_RE = re.compile(
+    r"(?:true|false|null)(?=$|[\s,;)}\]\"']|\\[trn])"
+)
+_JSON_NUMBER_RE = re.compile(r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?")
 _BARE_KV_RE = re.compile(
     r"(?:(?<=\\[trn])|(?<![A-Za-z0-9_./-]))[./-]*(?P<bare>[A-Za-z0-9_]"
     r"[A-Za-z0-9_./-]*)"
@@ -284,6 +291,7 @@ _HTTP_REQUEST_METHODS = frozenset(
         "CONNECT",
     }
 )
+_HTTP_STATUS_CODE_RE = re.compile(r"[1-5]\d{2}")
 _PY_STR_PREFIX_RE = re.compile(r"""[rRuUbBfF]{1,2}(?=["'])""")
 _CTOR_PREFIX_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*(?=\()")
 _QUERY_PARAM_AFTER_AMP_RE = re.compile(r"&(?P<param>[A-Za-z_][A-Za-z0-9_.-]*)=")
@@ -351,6 +359,67 @@ _COLON_CHAIN_CONTAINER_KEYS = frozenset(
         "authorization",
     }
 )
+_COMPOUND_CONTAINER_SUFFIXES: tuple[str, ...] = (
+    "_auth",
+    "_authentication",
+    "_oauth",
+    "_oauth2",
+    "_credentials",
+    "_credential",
+    "_creds",
+    "_secrets",
+    "_config",
+    "_store",
+    "_settings",
+    "_params",
+    "_env",
+    "_context",
+    "_ctx",
+    "_section",
+    "_vault",
+    "_manager",
+)
+_PURE_COLON_CONTAINER_KEYS = frozenset(
+    {
+        "auth",
+        "authentication",
+        "authentications",
+        "oauth",
+        "oauth2",
+        "credentials",
+        "credential",
+        "creds",
+        "secrets",
+    }
+)
+
+
+def _has_compound_container_suffix(key_norm: str) -> bool:
+  """Returns True when ``key_norm`` ends with a compound container suffix."""
+  return key_norm.endswith(_COMPOUND_CONTAINER_SUFFIXES)
+
+
+def _is_compound_container_parent(key_bare: str) -> bool:
+  """Returns True when ``key_bare`` names a compound container parent."""
+  tail = key_bare.rsplit("/", 1)[-1].rsplit(".", 1)[-1]
+  tail_norm = _normalize_key_name(tail)
+  return tail_norm in _COLON_CHAIN_CONTAINER_KEYS or (
+      _has_compound_container_suffix(tail_norm)
+      and is_sensitive_key(tail, is_container=True)
+  )
+
+
+def _is_scalar_cred_parent(key_bare: str) -> bool:
+  """Returns True when ``key_bare`` names a scalar credential parent."""
+  tail = key_bare.rsplit("/", 1)[-1].rsplit(".", 1)[-1]
+  norm = _normalize_key_name(tail)
+  return (
+      is_sensitive_key(tail, is_container=False)
+      and norm not in _PURE_COLON_CONTAINER_KEYS
+      and not _has_compound_container_suffix(norm)
+  )
+
+
 _CANONICAL_SENSITIVE_KEY_EXACT = frozenset(
     {
         "password",
@@ -505,8 +574,9 @@ _CANONICAL_SENSITIVE_KEY_SUFFIXES: tuple[str, ...] = (
 )
 _BARE_VAL_STOP_CHARS = frozenset("\"',;)}]")
 _BARE_END_SCAN_RE = re.compile(r"[^\s,;)}\]\"'\\&]+")
-_COOKIE_NAME_STOP_CHARS = frozenset(";)}]=\"',:")
-_COOKIE_VAL_STOP_CHARS = frozenset(';)}]"' + "'")
+_COOKIE_NAME_STOP_CHARS = frozenset(";)}]{[(=\"',:")
+_COOKIE_VAL_ALWAYS_STOP_CHARS = frozenset(';}]"')
+_SET_COOKIE_BOOL_ATTRS = frozenset({"httponly", "secure", "partitioned"})
 _COOKIE_KV_CONN_RE = re.compile(
     r"[ \t]*[:=]|[ \t]+(?:is|are)(?:[ \t]*:|(?=\s|\\[trn]))",
     re.IGNORECASE,
@@ -635,34 +705,63 @@ def _is_numeric_count_scalar(key_name: str, value: Any) -> bool:
     return False
   if isinstance(value, bool):
     return False
-  if isinstance(value, int):
-    if not (0 <= value <= _MAX_SAFE_COUNT_VALUE):
-      return False
-  else:
-    if isinstance(value, (bytes, bytearray)):
-      text_val = value.decode("utf-8", errors="replace").strip()
-    elif isinstance(value, str):
-      text_val = value.strip()
-    else:
-      return False
-    if not (
-        bool(text_val)
-        and len(text_val) <= 3
-        and text_val.isascii()
-        and text_val.isdigit()
-        and not (len(text_val) > 1 and text_val.startswith("0"))
-        and int(text_val) <= _MAX_SAFE_COUNT_VALUE
-    ):
-      return False
   norm = _normalize_key_name(key_name)
-  if norm in _SAFE_SMALL_COUNT_KEYS:
-    return True
+  leaf_norm: str | None = None
   if isinstance(key_name, str) and any(
       sep in key_name for sep in (":", "/", ".")
   ):
     leaf_norm = _extract_valid_scalar_path_leaf_norm(key_name)
-    return leaf_norm in _SAFE_SMALL_COUNT_KEYS
-  return False
+    if leaf_norm == "":
+      parts = _KEY_SEGMENT_SEP_RE.split(key_name.strip())
+      if len(parts) >= 2:
+        candidate = _normalize_key_name(parts[-1])
+        if candidate in _LLM_METRIC_COUNT_KEYS and all(
+            bool(p)
+            and not is_sensitive_key(p, is_container=False)
+            and not is_sensitive_key(p, is_container=True)
+            and (
+                _is_valid_colon_path_segment(p)
+                or _is_valid_tight_ident_path(p, require_alpha=False)
+            )
+            for p in parts[:-1]
+        ):
+          leaf_norm = candidate
+    if leaf_norm:
+      prefix_parts = _KEY_SEGMENT_SEP_RE.split(key_name.strip())[:-1]
+      if any(
+          p
+          and (
+              is_sensitive_key(p, is_container=False)
+              or is_sensitive_key(p, is_container=True)
+          )
+          and _normalize_key_name(p) not in _PURE_COLON_CONTAINER_KEYS
+          for p in prefix_parts
+      ):
+        leaf_norm = ""
+  if norm in _SAFE_SMALL_COUNT_KEYS or leaf_norm in _SAFE_SMALL_COUNT_KEYS:
+    max_val = _MAX_SAFE_COUNT_VALUE
+    max_len = 3
+  elif norm in _LLM_METRIC_COUNT_KEYS or leaf_norm in _LLM_METRIC_COUNT_KEYS:
+    max_val = _MAX_LLM_METRIC_COUNT_VALUE
+    max_len = 8
+  else:
+    return False
+  if isinstance(value, int):
+    return 0 <= value <= max_val
+  if isinstance(value, (bytes, bytearray)):
+    text_val = value.decode("utf-8", errors="replace").strip()
+  elif isinstance(value, str):
+    text_val = value.strip()
+  else:
+    return False
+  return (
+      bool(text_val)
+      and len(text_val) <= max_len
+      and text_val.isascii()
+      and text_val.isdigit()
+      and not (len(text_val) > 1 and text_val.startswith("0"))
+      and int(text_val) <= max_val
+  )
 
 
 def _is_safe_auth_status_scalar(key_name: str, value: Any) -> bool:
@@ -740,8 +839,15 @@ def is_sensitive_key(key_name: str, *, is_container: bool = False) -> bool:
 
 _MAX_EMBEDDED_JSON_DEPTH = 32
 _MAX_EMBEDDED_JSON_SPAN = 16384
+_MAX_KV_CONTAINER_SPAN = 262_144
 _MAX_EMBEDDED_JSON_DECODES = 32
 _MAX_EMBEDDED_JSON_FAIL_BUDGET = 32768
+_MAX_QUOTED_NEST_DEPTH = 8
+_MAX_NESTED_JSON_DECODES = 256
+_MAX_NESTED_JSON_BYTES = 524_288
+_NESTED_JSON_BUDGET: contextvars.ContextVar[dict[str, int] | None] = (
+    contextvars.ContextVar("_NESTED_JSON_BUDGET", default=None)
+)
 
 
 def _find_balanced_container_end(
@@ -797,20 +903,36 @@ def _find_balanced_container_end(
   return None, pos, False
 
 
-def _scrub_embedded_json_containers(text: str) -> str:
+_JSON_NUMERIC_ARRAY_CHARS = frozenset("[]0123456789.,-+eE \t\r\n")
+
+
+def _scrub_embedded_json_segments(
+    text: str, *, _depth: int = 0, _skip_outer_budget: bool = False
+) -> list[tuple[bool, str]]:
   """Scrubs balanced JSON objects/arrays embedded inside free text safely.
 
-  Bounds parsing to depth <= 32, span <= 16 KiB, and <= 32 decoded containers.
-  Non-object/non-string arrays (such as ``[1]`` or ``[INFO]``) and trivial
-  ``{}`` are skipped without consuming budgets. When any budget or structural
-  limit is reached, JSON decoding stops cleanly and defers the remaining text to
-  linear-time secret rules and KV scrubbing so large ordinary JSON payloads
-  and trailing error codes stay intact while secrets are still redacted.
+  Returns ``(is_scrubbed_json, chunk)`` segments so callers skip re-scanning
+  already-scrubbed JSON containers while still scrubbing non-container text and
+  budget-exhausted tails.
   """
-  if "{" not in text and "[" not in text:
-    return text
-  decoder = json.JSONDecoder()
-  out: list[str] = []
+  if _depth >= _MAX_EMBEDDED_JSON_DEPTH or (
+      "{" not in text and "[" not in text
+  ):
+    return [(False, text)]
+  has_dup_key = False
+
+  def _pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    nonlocal has_dup_key
+    out_obj: dict[str, Any] = {}
+    for k, v in pairs:
+      if k in out_obj:
+        has_dup_key = True
+      out_obj[k] = v
+    return out_obj
+
+  decoder = json.JSONDecoder(object_pairs_hook=_pairs_hook)
+  segments: list[tuple[bool, str]] = []
+  plain_start = 0
   idx = 0
   n = len(text)
   decoded_count = 0
@@ -822,7 +944,6 @@ def _scrub_embedded_json_containers(text: str) -> str:
           decoded_count >= _MAX_EMBEDDED_JSON_DECODES
           or fail_scanned >= _MAX_EMBEDDED_JSON_FAIL_BUDGET
       ):
-        out.append(text[idx:])
         break
       end_idx, scanned_pos, depth_exceeded = _find_balanced_container_end(
           text, idx, allow_single_quotes=False
@@ -830,53 +951,83 @@ def _scrub_embedded_json_containers(text: str) -> str:
       if depth_exceeded or end_idx is None:
         fail_scanned += scanned_pos - idx
         if fail_scanned >= _MAX_EMBEDDED_JSON_FAIL_BUDGET:
-          out.append(text[idx:])
           break
-        out.append(ch)
         idx += 1
         continue
       snippet = text[idx:end_idx]
       if snippet == "{}" or (
           ch == "[" and "{" not in snippet and '"' not in snippet
       ):
-        out.append(snippet)
+        if snippet == "{}" or set(snippet) <= _JSON_NUMERIC_ARRAY_CHARS:
+          if idx > plain_start:
+            segments.append((False, text[plain_start:idx]))
+          segments.append((True, snippet))
+          idx = end_idx
+          plain_start = idx
+          continue
         idx = end_idx
         continue
+      if _depth >= 2 and not (_skip_outer_budget and idx == 0 and end_idx == n):
+        if not _consume_nested_json_budget(
+            len(snippet),
+            charge=True,
+            flat=(_depth == 2 and not _has_escaped_nested_json(snippet)),
+        ):
+          break
+      has_dup_key = False
       try:
         parsed, local_end = decoder.raw_decode(snippet, 0)
       except (json.JSONDecodeError, RecursionError, ValueError):
         fail_scanned += len(snippet)
         if fail_scanned >= _MAX_EMBEDDED_JSON_FAIL_BUDGET:
-          out.append(text[idx:])
           break
-        out.append(ch)
         idx += 1
         continue
       decoded_count += 1
       abs_end = idx + local_end
+      if has_dup_key:
+        idx = abs_end
+        continue
       if isinstance(parsed, (Mapping, list)):
-        scrubbed = scrub_sensitive_data(parsed)
-        if scrubbed != parsed:
-          out.append(
-              json.dumps(scrubbed, separators=(",", ":"), ensure_ascii=False)
-          )
+        key_collision = [False]
+        scrubbed = _scrub_data_at_depth(
+            parsed,
+            _depth=_depth + 1,
+            scrub_keys=True,
+            key_collision_out=key_collision,
+        )
+        if key_collision[0]:
           idx = abs_end
           continue
-      out.append(text[idx:abs_end])
+        if idx > plain_start:
+          segments.append((False, text[plain_start:idx]))
+        if scrubbed != parsed:
+          emitted = json.dumps(
+              scrubbed, separators=(",", ":"), ensure_ascii=False
+          )
+        else:
+          emitted = text[idx:abs_end]
+        segments.append((True, emitted))
+        idx = abs_end
+        plain_start = idx
+        continue
       idx = abs_end
       continue
-    out.append(ch)
     idx += 1
-  return "".join(out)
+  if plain_start < n:
+    segments.append((False, text[plain_start:]))
+  return segments
 
 
-def _scan_quoted_value(text: str, quote_pos: int) -> int | None:
+def _scan_quoted_value(
+    text: str, quote_pos: int, *, max_len: int = _MAX_EMBEDDED_JSON_SPAN
+) -> int | None:
   """Scans a quoted string literal from ``quote_pos`` within span limit."""
   n = len(text)
   if quote_pos >= n:
     return None
   quote_char = text[quote_pos]
-  limit = min(n, quote_pos + _MAX_EMBEDDED_JSON_SPAN)
+  limit = min(n, quote_pos + max_len)
   escaped = False
   cursor = quote_pos + 1
   while cursor < limit:
@@ -911,12 +1062,31 @@ def _scan_bare_value_end(text: str, pos: int) -> int:
       amp_m = _QUERY_PARAM_AFTER_AMP_RE.match(text, p)
       if amp_m is not None:
         param = amp_m.group("param")
-        if _normalize_key_name(
-            param
-        ) in _SAFE_DIAGNOSTIC_SCALAR_KEYS or is_sensitive_key(
+        param_norm = _normalize_key_name(param)
+        if param_norm in _SAFE_DIAGNOSTIC_SCALAR_KEYS or is_sensitive_key(
             param, is_container=False
         ):
           break
+        if param_norm in (
+            "status",
+            "reason",
+            "result",
+            "state",
+            "error",
+            "code",
+        ):
+          val_s = amp_m.end()
+          if _CRITICAL_ERROR_MARKERS_RE.match(text, val_s) is not None:
+            break
+          val_e = val_s
+          while (
+              val_e < n
+              and not text[val_e].isspace()
+              and text[val_e] not in ",;)}]\"'\\&"
+          ):
+            val_e += 1
+          if text[val_s:val_e].strip().lower() in _SAFE_AUTH_STATUS_VALUES:
+            break
     if text[p] == "\\":
       bs = 0
       while p + bs < n and text[p + bs] == "\\":
@@ -1160,10 +1330,12 @@ def _consume_sensitive_kv_value(text: str, pos: int) -> tuple[int, str] | None:
     return None
   ch = text[pos]
   if ch in ('"', "'"):
-    end_idx = _scan_quoted_value(text, pos)
+    end_idx = _scan_quoted_value(text, pos, max_len=_MAX_KV_CONTAINER_SPAN)
     if end_idx is not None:
       close_pos = end_idx - 1
-      if _quote_opens_kv_at(text, close_pos, escaped_dq=False):
+      if _quote_opens_kv_at(
+          text, close_pos, escaped_dq=False, allow_semicolon_key=True
+      ):
         inner = text[pos + 1 : close_pos]
         if not any(c.isalnum() for c in inner):
           return None
@@ -1190,7 +1362,7 @@ def _consume_sensitive_kv_value(text: str, pos: int) -> tuple[int, str] | None:
     close_mod, period, low_zero = _escaped_quote_mod_and_period(lead_bs)
     nl_bs = max(1, low_zero // 2)
     delim = "\\" * lead_bs + q
-    limit = min(n, pos + _MAX_EMBEDDED_JSON_SPAN)
+    limit = min(n, pos + _MAX_KV_CONTAINER_SPAN)
     cursor = pos + lead_bs + 1
     while cursor < limit:
       if text[cursor] == '"' and q == '"':
@@ -1214,7 +1386,10 @@ def _consume_sensitive_kv_value(text: str, pos: int) -> tuple[int, str] | None:
         if cursor + bs < limit and text[cursor + bs] == q:
           if bs % period == close_mod:
             if q == '"' and _quote_opens_kv_at(
-                text, cursor + bs - 1, escaped_dq=True
+                text,
+                cursor + bs - 1,
+                escaped_dq=True,
+                allow_semicolon_key=True,
             ):
               inner = text[pos + lead_bs + 1 : cursor]
               if not any(c.isalnum() for c in inner):
@@ -1246,25 +1421,50 @@ def _consume_sensitive_kv_value(text: str, pos: int) -> tuple[int, str] | None:
     return n, "[REDACTED]"
   if ch in ("{", "[", "("):
     end_idx, _, depth_exceeded = _find_balanced_container_end(
-        text, pos, allow_single_quotes=True, allow_parens=True
+        text,
+        pos,
+        allow_single_quotes=True,
+        allow_parens=True,
+        max_len=_MAX_KV_CONTAINER_SPAN,
     )
     if end_idx is not None and not depth_exceeded:
       return end_idx, "[REDACTED]"
-    return n, "[REDACTED]"
+    return (
+        _unterminated_quote_error_stop(
+            text, pos + 1, n, include_escaped_nl=True
+        ),
+        "[REDACTED]",
+    )
   prefix_match = _PY_STR_PREFIX_RE.match(text, pos)
   if prefix_match is not None:
-    end_idx = _scan_quoted_value(text, prefix_match.end())
+    end_idx = _scan_quoted_value(
+        text, prefix_match.end(), max_len=_MAX_KV_CONTAINER_SPAN
+    )
     if end_idx is not None:
       return end_idx, "[REDACTED]"
-    return n, "[REDACTED]"
+    return (
+        _unterminated_quote_error_stop(
+            text, prefix_match.end() + 1, n, include_escaped_nl=True
+        ),
+        "[REDACTED]",
+    )
   ctor_match = _CTOR_PREFIX_RE.match(text, pos)
   if ctor_match is not None:
     end_idx, _, depth_exceeded = _find_balanced_container_end(
-        text, ctor_match.end(), allow_single_quotes=True, allow_parens=True
+        text,
+        ctor_match.end(),
+        allow_single_quotes=True,
+        allow_parens=True,
+        max_len=_MAX_KV_CONTAINER_SPAN,
     )
     if end_idx is not None and not depth_exceeded:
       return end_idx, "[REDACTED]"
-    return n, "[REDACTED]"
+    return (
+        _unterminated_quote_error_stop(
+            text, pos + 1, n, include_escaped_nl=True
+        ),
+        "[REDACTED]",
+    )
   val_end = _scan_bare_value_end(text, pos)
   if val_end > pos:
     return val_end, "[REDACTED]"
@@ -1366,15 +1566,23 @@ def _extract_bare_kv_key(
           and _normalize_key_name(prev_segs[-1]) in _SAFE_TOKEN_PREFIX_WORDS
       ):
         return None
-  if "/" in bare and text[match.start() : match.start("bare")].startswith("/"):
+  if text[match.start() : match.start("bare")].startswith("/"):
     prev = _preceding_same_line_word(text, match.start())
     if prev is not None and prev[0].upper() in _HTTP_REQUEST_METHODS:
       tail_seg = bare.rstrip("/").rsplit("/", 1)[-1]
-      return (
-          bare
-          if is_sensitive_key(tail_seg, is_container=is_container)
-          else None
-      )
+      if not is_sensitive_key(tail_seg, is_container=is_container):
+        return None
+      if match.group("conn").strip() == ":" and not is_container:
+        val_s, nl_c = _skip_kv_whitespace(text, match.end())
+        if nl_c == 0 and val_s < len(text):
+          raw_tok = text[val_s : _scan_bare_value_end(text, val_s)].strip()
+          if (
+              _HTTP_STATUS_CODE_RE.fullmatch(raw_tok) is not None
+              or raw_tok.lower() in _SAFE_AUTH_STATUS_VALUES
+              or _CRITICAL_ERROR_MARKERS_RE.match(text, val_s) is not None
+          ):
+            return None
+      return bare
   if is_sensitive_key(bare, is_container=is_container):
     return bare
   if lower_bare not in _MULTIWORD_KEY_TAIL_WORDS:
@@ -1554,12 +1762,12 @@ def _can_try_mismatched_quote_before(
   if _inner_ends_with_kv_connector(raw_inner):
     return True
   return _inner_ends_with_member_sep(raw_inner) and _quote_opens_kv_at(
-      text, quote_open_pos, escaped_dq=escaped_dq
+      text, quote_open_pos, escaped_dq=escaped_dq, allow_semicolon_key=True
   )
 
 
 _QUOTE_KV_FAIL_UNTIL: contextvars.ContextVar[
-    dict[tuple[bool, int, str], int] | None
+    dict[tuple[bool, int, str, bool], int] | None
 ] = contextvars.ContextVar("_QUOTE_KV_FAIL_UNTIL", default=None)
 
 _JSON_OBJ_CLOSE_CACHE: contextvars.ContextVar[
@@ -1573,7 +1781,13 @@ _UNQUOTED_SENS_HDR_CACHE: contextvars.ContextVar[dict[int, bool] | None] = (
 )
 
 
-def _quote_opens_kv_at(text: str, pos: int, *, escaped_dq: bool) -> bool:
+def _quote_opens_kv_at(
+    text: str,
+    pos: int,
+    *,
+    escaped_dq: bool,
+    allow_semicolon_key: bool = False,
+) -> bool:
   """Returns True when a quote token at ``pos`` opens a quoted KV key."""
   n = len(text)
   if pos < 0 or pos >= n:
@@ -1587,7 +1801,7 @@ def _quote_opens_kv_at(text: str, pos: int, *, escaped_dq: bool) -> bool:
     if lead_bs % 2 == 0:
       return False
     close_mod, period, low_zero = _escaped_quote_mod_and_period(lead_bs)
-    fail_key = (True, close_mod, '"')
+    fail_key = (True, close_mod, '"', allow_semicolon_key)
     if fail_cache is not None and pos < fail_cache.get(fail_key, -1):
       return False
 
@@ -1598,10 +1812,14 @@ def _quote_opens_kv_at(text: str, pos: int, *, escaped_dq: bool) -> bool:
           not inner
           or not inner.strip()
           or inner[0] in ";,)}]"
-          or ";" in inner
           or inner.rstrip().endswith("=")
       ):
         return False
+      if ";" in inner:
+        if not allow_semicolon_key or require_sensitive or inner[0].isspace():
+          return False
+        struct_m = _QUOTED_STRUCTURAL_CONN_RE.match(text, next_end)
+        return struct_m is not None and struct_m.group(0).rstrip().endswith(":")
       if (
           not inner[0].isspace()
           and not require_sensitive
@@ -1661,7 +1879,7 @@ def _quote_opens_kv_at(text: str, pos: int, *, escaped_dq: bool) -> bool:
   quote_char = text[pos]
   if quote_char not in ('"', "'"):
     return False
-  fail_key = (False, 0, quote_char)
+  fail_key = (False, 0, quote_char, allow_semicolon_key)
   if fail_cache is not None and pos < fail_cache.get(fail_key, -1):
     return False
   p = pos + 1
@@ -1675,11 +1893,15 @@ def _quote_opens_kv_at(text: str, pos: int, *, escaped_dq: bool) -> bool:
           not inner
           or not inner.strip()
           or inner[0] in ";,)}]"
-          or ";" in inner
           or inner.rstrip().endswith("=")
       ):
         return False
       next_end = p + 1
+      if ";" in inner:
+        if not allow_semicolon_key or inner[0].isspace():
+          return False
+        struct_m = _QUOTED_STRUCTURAL_CONN_RE.match(text, next_end)
+        return struct_m is not None and struct_m.group(0).rstrip().endswith(":")
       if (
           not inner[0].isspace()
           and _QUOTED_STRUCTURAL_CONN_RE.match(text, next_end) is not None
@@ -1964,27 +2186,119 @@ def _might_contain_secret_or_kv(s: str) -> bool:
   )
 
 
+_MAX_FLAT_JSON_DECODES = 2048
+_DOUBLE_ESC_UNICODE_RE = re.compile(r"\\\\u[0-9a-fA-F]{4}")
+
+
+def _has_escaped_nested_json(text: str) -> bool:
+  """Returns True when text still carries multi-layer JSON string escapes."""
+  return r'\\"' in text or (
+      r"\\u" in text and _DOUBLE_ESC_UNICODE_RE.search(text) is not None
+  )
+
+
+def _consume_nested_json_budget(
+    span_len: int, *, charge: bool = True, flat: bool = False
+) -> bool:
+  """Charges a nested JSON decode against the per-call budget."""
+  if span_len > _MAX_NESTED_JSON_BYTES:
+    return False
+  if not charge:
+    return True
+  budget = _NESTED_JSON_BUDGET.get()
+  if budget is None:
+    return True
+  if budget["bytes"] + span_len > _MAX_NESTED_JSON_BYTES:
+    return False
+  if flat:
+    flat_decodes = budget.get("flat_decodes", 0)
+    if flat_decodes >= _MAX_FLAT_JSON_DECODES:
+      return False
+    budget["flat_decodes"] = flat_decodes + 1
+  else:
+    if budget["decodes"] >= _MAX_NESTED_JSON_DECODES:
+      return False
+    budget["decodes"] += 1
+  budget["bytes"] += span_len
+  return True
+
+
+def _fail_closed_if_nested_json(raw_val: str) -> str:
+  """Redacts unexamined nested escaped JSON or secret-like payloads."""
+  if (
+      '\\"' in raw_val
+      or "\\u" in raw_val
+      or (
+          "\\" in raw_val
+          and (
+              "{" in raw_val
+              or "[" in raw_val
+              or _might_contain_secret_or_kv(raw_val)
+          )
+      )
+  ):
+    return "[REDACTED]"
+  return raw_val
+
+
+def _scrub_unescaped_fallback(
+    raw_inner: str, *, depth: int, fallback_hops: int = 0
+) -> str:
+  """Scrubs unescaped inner plaintext when decode depth or budget is hit."""
+  if _fail_closed_if_nested_json(raw_inner) != raw_inner:
+    return "[REDACTED]"
+  out = raw_inner
+  for pat, repl in _SECRET_RULES:
+    out = pat.sub(repl, out)
+  if fallback_hops < 4 and _might_contain_kv(out):
+    out = _scrub_sensitive_kv_in_text(
+        out, _depth=depth + 1, fallback_hops=fallback_hops + 1
+    )
+  if (
+      depth >= _MAX_EMBEDDED_JSON_DEPTH + 4
+      and _fail_closed_if_nested_json(out) != out
+  ):
+    return "[REDACTED]"
+  return out
+
+
 def _scrub_quoted_inner(
     raw_inner: str,
     *,
     quote_kind: str,
     depth: int,
     lead_bs: int = 1,
+    fallback_hops: int = 0,
 ) -> str:
   """Scrubs inner text of a quoted or escaped-quoted token at bounded depth."""
-  if depth >= 3:
-    return raw_inner
+  if depth >= _MAX_QUOTED_NEST_DEPTH:
+    return _scrub_unescaped_fallback(
+        raw_inner, depth=depth, fallback_hops=fallback_hops
+    )
   has_escape = "\\" in raw_inner
   needs_decode = "\\u" in raw_inner or (
       has_escape and _might_contain_secret_or_kv(raw_inner)
   )
   if quote_kind == '"' and needs_decode:
+    if len(raw_inner) > _MAX_NESTED_JSON_BYTES:
+      return _scrub_unescaped_fallback(
+          raw_inner, depth=depth, fallback_hops=fallback_hops
+      )
     try:
       decoded_str = json.loads('"' + raw_inner + '"')
     except ValueError:
       decoded_str = None
     if isinstance(decoded_str, str):
-      scrubbed_decoded = _scrub_text_at_depth(decoded_str, _depth=depth + 1)
+      is_flat_leaf = not _has_escaped_nested_json(decoded_str)
+      if not _consume_nested_json_budget(
+          len(raw_inner), charge=(depth >= 1), flat=is_flat_leaf
+      ):
+        return _scrub_unescaped_fallback(
+            raw_inner, depth=depth, fallback_hops=fallback_hops
+        )
+      scrubbed_decoded = _scrub_text_at_depth(
+          decoded_str, _depth=depth + 1, _skip_outer_budget=True
+      )
       if scrubbed_decoded != decoded_str:
         return json.dumps(scrubbed_decoded, ensure_ascii=raw_inner.isascii())[
             1:-1
@@ -1993,20 +2307,52 @@ def _scrub_quoted_inner(
   elif (
       quote_kind == '\\"' and lead_bs >= 1 and lead_bs % 2 == 1 and needs_decode
   ):
-    max_layers = 3 if lead_bs >= 3 else 2
+    max_layers = _MAX_QUOTED_NEST_DEPTH
     layers: list[str] = [raw_inner]
     cur = raw_inner
-    for _ in range(max_layers):
+    budget_exhausted = False
+    for layer_idx in range(max_layers):
+      if layer_idx > 0 and "\\" not in cur:
+        break
+      if len(cur) > _MAX_NESTED_JSON_BYTES:
+        budget_exhausted = True
+        break
+      if layer_idx >= 1:
+        if not _consume_nested_json_budget(len(cur), charge=True, flat=False):
+          budget_exhausted = True
+          break
       try:
         nxt = json.loads('"' + cur + '"')
       except ValueError:
         break
       if not isinstance(nxt, str) or nxt == cur:
         break
+      if layer_idx == 0:
+        is_flat_leaf = not _has_escaped_nested_json(nxt)
+        if not _consume_nested_json_budget(
+            len(cur), charge=(depth >= 1), flat=is_flat_leaf
+        ):
+          budget_exhausted = True
+          break
       layers.append(nxt)
       cur = nxt
+    if budget_exhausted:
+      return _scrub_unescaped_fallback(
+          raw_inner, depth=depth, fallback_hops=fallback_hops
+      )
+    if len(layers) > max_layers:
+      try:
+        extra = json.loads('"' + cur + '"')
+      except ValueError:
+        extra = None
+      if isinstance(extra, str) and extra != cur:
+        return _scrub_unescaped_fallback(
+            raw_inner, depth=depth, fallback_hops=fallback_hops
+        )
     if len(layers) > 1:
-      scrubbed_decoded = _scrub_text_at_depth(cur, _depth=depth + 1)
+      scrubbed_decoded = _scrub_text_at_depth(
+          cur, _depth=depth + 1, _skip_outer_budget=True
+      )
       if scrubbed_decoded != cur:
         reencoded = scrubbed_decoded
         ascii_only = raw_inner.isascii()
@@ -2015,7 +2361,9 @@ def _scrub_quoted_inner(
         return reencoded
       return raw_inner
   if _might_contain_kv(raw_inner):
-    return _scrub_sensitive_kv_in_text(raw_inner, _depth=depth + 1)
+    return _scrub_sensitive_kv_in_text(
+        raw_inner, _depth=depth + 1, fallback_hops=fallback_hops
+    )
   return raw_inner
 
 
@@ -2029,6 +2377,8 @@ def _inspect_quoted_kv_token(
     depth: int,
     close_start: int | None = None,
     lead_bs: int = 1,
+    skip_inner_scrub: bool = False,
+    fallback_hops: int = 0,
 ) -> tuple[str, str, int, int, bool, bool]:
   """Inspects a quoted KV key token followed by a connector match.
 
@@ -2051,9 +2401,16 @@ def _inspect_quoted_kv_token(
         else raw_inner
     )
     quote_start = start
-  scrubbed_inner = _scrub_quoted_inner(
-      raw_inner, quote_kind=quote_kind, depth=depth, lead_bs=lead_bs
-  )
+  if skip_inner_scrub:
+    scrubbed_inner = raw_inner
+  else:
+    scrubbed_inner = _scrub_quoted_inner(
+        raw_inner,
+        quote_kind=quote_kind,
+        depth=depth,
+        lead_bs=lead_bs,
+        fallback_hops=fallback_hops,
+    )
   inner_changed = scrubbed_inner != raw_inner
   emitted_key = quote_kind + scrubbed_inner + closing_delim
   val_start, nl_count = _skip_kv_whitespace(text, conn_m.end())
@@ -2112,6 +2469,7 @@ def _has_colon_value_sep(text: str, pos: int) -> bool:
       pos >= n
       or text[pos].isspace()
       or text[pos] in ('"', "'", "{", "[", "(")
+      or _PY_STR_PREFIX_RE.match(text, pos) is not None
       or _starts_with_odd_escaped_quote(text, pos)
       or (
           text[pos] == "\\" and pos + 1 < n and text[pos + 1] in ("t", "r", "n")
@@ -2251,7 +2609,9 @@ def _extract_container_colon_head(bare: str) -> str:
   return _extract_container_colon_head_impl(bare)
 
 
-def _has_eq_value(text: str, pos: int) -> bool:
+def _has_eq_value(
+    text: str, pos: int, *, allow_nl_header_check: bool = True
+) -> bool:
   """Returns True when ``=`` at ``pos`` is followed by a non-empty value."""
   n = len(text)
   if pos >= n or text[pos] in ",;)}]=":
@@ -2268,9 +2628,13 @@ def _has_eq_value(text: str, pos: int) -> bool:
       text, val_start
   ):
     return True
-  if _is_sensitive_header_at(text, val_start, allow_mismatched_quote=False):
+  if _BARE_KV_RE.match(text, val_start) is not None:
     return False
-  return _BARE_KV_RE.match(text, val_start) is None
+  if not allow_nl_header_check:
+    return True
+  return not _is_sensitive_header_at(
+      text, val_start, allow_mismatched_quote=False, allow_eq_nl_check=False
+  )
 
 
 def _is_valid_tight_ident_path(
@@ -2304,10 +2668,14 @@ def _is_explicit_container_eq_leaf(
     text: str,
     seg_end: int,
     prev_norm: str = "",
+    *,
+    allow_nl_header_check: bool = True,
 ) -> bool:
   """Returns True for an explicit ``=`` leaf assignment under a container key."""
   del prev_norm
-  if seg_conn.strip() != "=" or not _has_eq_value(text, seg_end):
+  if seg_conn.strip() != "=" or not _has_eq_value(
+      text, seg_end, allow_nl_header_check=allow_nl_header_check
+  ):
     return False
   if not _is_valid_tight_ident_path(seg_bare, max_len=128):
     return False
@@ -2626,6 +2994,7 @@ def _has_tight_eq_leaf_ahead(
     prev_seg: str,
     *,
     max_hops: int = 12,
+    allow_eq_nl_check: bool = True,
 ) -> bool:
   """Returns True when tight colon-chained segments end in an ``=`` leaf."""
   n = len(text)
@@ -2642,22 +3011,123 @@ def _has_tight_eq_leaf_ahead(
       return False
     seg_conn = seg_m.group("conn")
     seg_end = seg_m.end()
-    if seg_conn.strip() == "=" and _has_eq_value(text, seg_end):
+    if seg_conn.strip() == "=" and _has_eq_value(
+        text, seg_end, allow_nl_header_check=allow_eq_nl_check
+    ):
       seg_norm = _normalize_key_name(seg_bare)
       if (
           seg_norm in _SAFE_DIAGNOSTIC_SCALAR_KEYS
-          or seg_norm in _SAFE_SMALL_COUNT_KEYS
+          or seg_norm in _ALL_SAFE_COUNT_KEYS
           or seg_norm in ("status", "reason", "result", "state")
       ):
         return False
       return is_sensitive_key(
           seg_bare, is_container=False
       ) or _is_explicit_container_eq_leaf(
-          seg_bare, seg_conn, text, seg_end, prev_norm
+          seg_bare,
+          seg_conn,
+          text,
+          seg_end,
+          prev_norm,
+          allow_nl_header_check=allow_eq_nl_check,
       )
     if seg_conn == ":":
       cur = seg_end
       prev_norm = _normalize_key_name(seg_bare)
+      continue
+    return False
+  return False
+
+
+def _is_valid_unquoted_colon_val(
+    text: str, seg_end: int, val_s: int, val_nl: int
+) -> bool:
+  """Returns True when an unquoted same-line colon value may be redacted."""
+  if (
+      val_nl != 0
+      or val_s <= seg_end
+      or val_s >= len(text)
+      or _CRITICAL_ERROR_MARKERS_RE.match(text, val_s) is not None
+  ):
+    return False
+  raw_val_tok = text[val_s : _scan_bare_value_end(text, val_s)].strip()
+  return (
+      bool(raw_val_tok)
+      and not raw_val_tok.endswith(":")
+      and raw_val_tok.lower() not in _PROSE_PREDICATE_WORDS
+  )
+
+
+def _has_tight_colon_sens_leaf_ahead(
+    text: str,
+    pos: int,
+    *,
+    max_hops: int = 8,
+    allow_unquoted: bool = False,
+    unquoted_unknown_budget: int = 8,
+) -> bool:
+  """Returns True when tight colon segments end in a quoted/container leaf."""
+  n = len(text)
+  cur = pos
+  unknown_seen = 0
+  prev_unknown = False
+  for _ in range(max_hops):
+    if prev_unknown:
+      unknown_seen += 1
+      if unknown_seen > unquoted_unknown_budget:
+        allow_unquoted = False
+      prev_unknown = False
+    if cur >= n or text[cur] not in _PATH_SEG_START_CHARS:
+      return False
+    seg_m = _BARE_KV_RE.match(text, cur, min(n, cur + 256))
+    if seg_m is None or seg_m.start("bare") != cur:
+      return False
+    seg_bare = seg_m.group("bare") or ""
+    if not _is_tight_colon_ident(seg_bare):
+      return False
+    seg_conn = seg_m.group("conn")
+    if seg_conn != ":":
+      return False
+    seg_end = seg_m.end()
+    seg_norm = _normalize_key_name(seg_bare)
+    is_known_ns, is_title_ns = _classify_colon_namespace_seg(seg_bare, seg_norm)
+    is_sens_seg = (
+        is_sensitive_key(seg_bare, is_container=False)
+        and seg_norm not in _SAFE_DIAGNOSTIC_SCALAR_KEYS
+        and seg_norm not in _ALL_SAFE_COUNT_KEYS
+    )
+    is_sens_cont = is_sensitive_key(seg_bare, is_container=True)
+    prev_unknown = not (is_known_ns or is_sens_seg or is_sens_cont)
+    if is_sens_seg:
+      if _has_colon_value_sep(text, seg_end):
+        val_s, val_nl = _skip_kv_whitespace(text, seg_end)
+        if (
+            val_nl == 0
+            and val_s < n
+            and (
+                text[val_s] in ('"', "'", "{", "[", "(")
+                or _PY_STR_PREFIX_RE.match(text, val_s) is not None
+                or _starts_with_odd_escaped_quote(text, val_s)
+                or (
+                    allow_unquoted
+                    and _is_valid_unquoted_colon_val(
+                        text, seg_end, val_s, val_nl
+                    )
+                )
+            )
+        ):
+          return True
+        return False
+      cur = seg_end
+      continue
+    if (
+        is_known_ns
+        or is_title_ns
+        or is_sens_cont
+        or _is_namespace_colon_path(seg_bare, allow_upper=False)
+        or (seg_bare.islower() and any(c.isalpha() for c in seg_bare))
+    ):
+      cur = seg_end
       continue
     return False
   return False
@@ -2703,6 +3173,7 @@ def _scan_url_authority_and_safe_path(
   cur_cand_first_key = ""
   cur_cand_last_key = ""
   confirmed_post_at_break_pos = -1
+  single_label_amp_break_pos = -1
   pending_bare_break_pos = -1
   first_passwordless_break_pos = -1
   while (
@@ -2876,8 +3347,20 @@ def _scan_url_authority_and_safe_path(
           if (
               cur_cand_had_valid_host
               or (cur_cand_had_valid_port and cur_cand_had_valid_host_syntax)
+              or (
+                  cur_cand_break_ch in (",", ";")
+                  and cur_cand_had_valid_host_syntax
+              )
           ) and cand_last_is_sens_or_email:
             confirmed_post_at_break_pos = cur_cand_break_pos
+          elif (
+              single_label_amp_break_pos == -1
+              and cur_cand_break_ch == "&"
+              and cur_cand_had_valid_host_syntax
+              and not cur_cand_had_valid_host
+              and cand_last_is_sens_or_email
+          ):
+            single_label_amp_break_pos = cur_cand_break_pos
           elif (
               pending_bare_break_pos == -1
               and cur_cand_break_ch != "&"
@@ -2966,6 +3449,23 @@ def _scan_url_authority_and_safe_path(
       hard_p = first_passwordless_break_pos
     elif confirmed_post_at_break_pos != -1:
       hard_p = confirmed_post_at_break_pos
+    elif single_label_amp_break_pos != -1 and (
+        not post_at_is_valid_host
+        or cur_cand_break_pos != -1
+        or not has_path_after_at
+    ):
+      hard_p = single_label_amp_break_pos
+    elif (
+        cur_cand_break_pos != -1
+        and cur_cand_had_valid_host_syntax
+        and not post_at_is_valid_host
+        and bool(cur_cand_last_key)
+        and (
+            is_sensitive_key(cur_cand_last_key, is_container=False)
+            or cur_cand_last_key in _URL_EMAIL_OR_REDIRECT_PARAM_KEYS
+        )
+    ):
+      hard_p = cur_cand_break_pos
     elif (
         pending_bare_break_pos != -1
         and not has_path_after_at
@@ -3365,6 +3865,7 @@ def _resolve_container_continuation(
     seen_containers: frozenset[str] | None = None,
     nl_depth: int = 0,
     initial_seg_m: re.Match[str] | None = None,
+    allow_eq_nl_check: bool = True,
 ) -> tuple[str | None, str, int, int, int] | None:
   """Resolves bounded same-line tight or spaced container continuations."""
   n = len(text)
@@ -3446,7 +3947,9 @@ def _resolve_container_continuation(
                       or seg_is_metadata
                       or (seg_is_diag_suffix and not is_tight_no_ws_head)
                   )
-                  and _has_eq_value(text, seg_end)
+                  and _has_eq_value(
+                      text, seg_end, allow_nl_header_check=allow_eq_nl_check
+                  )
               )
               or (
                   seg_conn_stripped == ":"
@@ -3467,7 +3970,9 @@ def _resolve_container_continuation(
           not saw_unknown_ns
           and seg_conn_stripped == "="
           and "." in seg_bare
-          and _has_eq_value(text, seg_end)
+          and _has_eq_value(
+              text, seg_end, allow_nl_header_check=allow_eq_nl_check
+          )
       ):
         dot_parts = seg_bare.split(".")
         if (
@@ -3491,7 +3996,7 @@ def _resolve_container_continuation(
         if seg_conn_stripped == "=":
           seg_is_safe_eq_leaf = not seg_is_sens_leaf and (
               seg_is_diag
-              or seg_norm in _SAFE_SMALL_COUNT_KEYS
+              or seg_norm in _ALL_SAFE_COUNT_KEYS
               or seg_norm in ("status", "reason", "result", "state")
           )
           allow_eq_leaf = (
@@ -3499,17 +4004,24 @@ def _resolve_container_continuation(
               or (not saw_ws_before_seg and not seg_is_safe_eq_leaf)
               or (seg_is_sens_leaf and not saw_colon_unknown_ns)
           )
+          cur_cont_is_scalar_cred = _is_scalar_cred_parent(cur_container)
           if allow_eq_leaf and (
-              _is_explicit_container_eq_leaf(
-                  seg_bare,
-                  seg_conn,
-                  text,
-                  seg_end,
-                  prev_norm,
+              (
+                  (not cur_cont_is_scalar_cred or seg_is_sens_leaf)
+                  and _is_explicit_container_eq_leaf(
+                      seg_bare,
+                      seg_conn,
+                      text,
+                      seg_end,
+                      prev_norm,
+                      allow_nl_header_check=allow_eq_nl_check,
+                  )
               )
               or (
                   seg_norm != prev_norm
-                  and _has_eq_value(text, seg_end)
+                  and _has_eq_value(
+                      text, seg_end, allow_nl_header_check=allow_eq_nl_check
+                  )
                   and (
                       canon_leaf_static
                       if canon_leaf_static is not None
@@ -3530,7 +4042,7 @@ def _resolve_container_continuation(
               not saw_ws_before_seg
               and seg_is_sens_leaf
               and not seg_is_diag
-              and seg_norm not in _SAFE_SMALL_COUNT_KEYS
+              and seg_norm not in _ALL_SAFE_COUNT_KEYS
           )
           if (
               allow_colon_leaf
@@ -3570,10 +4082,23 @@ def _resolve_container_continuation(
       tight_eq_ahead = (
           not saw_ws_before_seg
           and seg_conn == ":"
-          and _has_tight_eq_leaf_ahead(text, seg_end, seg_bare, max_hops=12)
+          and _has_tight_eq_leaf_ahead(
+              text,
+              seg_end,
+              seg_bare,
+              max_hops=12,
+              allow_eq_nl_check=allow_eq_nl_check,
+          )
+      )
+      tight_colon_leaf_ahead = (
+          not saw_ws_before_seg
+          and seg_conn == ":"
+          and _has_tight_colon_sens_leaf_ahead(text, seg_end, max_hops=8)
       )
       if is_nested_container:
-        if saw_colon_unknown_ns and not tight_eq_ahead:
+        if saw_colon_unknown_ns and not (
+            tight_eq_ahead or tight_colon_leaf_ahead
+        ):
           return None
         if (
             nl_depth > 0
@@ -3586,7 +4111,9 @@ def _resolve_container_continuation(
             (seg_end < n and text[seg_end] == " ")
             or _has_colon_value_sep(text, seg_end)
         )
-        if container_hops < (12 if tight_eq_ahead else 3):
+        if container_hops < (
+            12 if tight_eq_ahead else (8 if tight_colon_leaf_ahead else 3)
+        ):
           last_container_can_fallback = (
               not saw_colon_unknown_ns
               and nested_cont_norm not in seen_containers_set
@@ -3617,7 +4144,7 @@ def _resolve_container_continuation(
             )
         )
         is_known_count_tail = (
-            not saw_unknown_ns and seg_norm in _SAFE_SMALL_COUNT_KEYS
+            not saw_unknown_ns and seg_norm in _ALL_SAFE_COUNT_KEYS
         )
         if saw_ws_before_seg:
           can_hop_ns = (
@@ -3627,13 +4154,32 @@ def _resolve_container_continuation(
                   or is_auth_status_tail
                   or is_known_count_tail
               )
-              and (is_known_tight_ns or is_ns_path or is_title_ns)
+              and (
+                  is_known_tight_ns
+                  or is_ns_path
+                  or is_title_ns
+                  or is_known_count_tail
+              )
           )
         else:
           can_hop_ns = (
               is_known_tight_ns
               or is_ns_path
+              or is_known_count_tail
               or (tight_eq_ahead and is_tight_ident)
+              or (
+                  tight_colon_leaf_ahead
+                  and is_tight_ident
+                  and (
+                      is_known_tight_ns
+                      or is_title_ns
+                      or _is_namespace_colon_path(seg_bare, allow_upper=False)
+                      or (
+                          seg_bare.islower()
+                          and any(c.isalpha() for c in seg_bare)
+                      )
+                  )
+              )
           )
         if can_hop_ns:
           if not (
@@ -3889,6 +4435,7 @@ def _resolve_bare_or_path_kv(
     match: re.Match[str],
     *,
     max_nl_hops: int = 3,
+    allow_eq_nl_check: bool = True,
 ) -> tuple[str | None, str, int, int, int]:
   """Resolves a bare or colon/slash-chained KV header from ``match``.
 
@@ -3939,6 +4486,7 @@ def _resolve_bare_or_path_kv(
             head_has_path_sep=head_facts.has_sep or conn_text != ":",
             head_has_unknown_ns=head_facts.head_has_unknown_ns,
             initial_seg_m=init_seg_m,
+            allow_eq_nl_check=allow_eq_nl_check,
         )
         if cont_res is not None:
           return cont_res
@@ -3986,6 +4534,7 @@ def _resolve_bare_or_path_kv(
       and text[match_end] not in ("\n", "\r")
   ):
     acc_sensitive = is_sensitive_key(head_bare, is_container=False)
+    is_compound_parent = _is_compound_container_parent(head_bare)
     can_chain = conn_text == ":" and text[match_end] in _PATH_SEG_START_CHARS
     if not can_chain and acc_sensitive:
       if text[match_end] in _PATH_SEG_START_CHARS:
@@ -4004,6 +4553,7 @@ def _resolve_bare_or_path_kv(
       chained = False
       saw_ns_hop = False
       saw_tight_unknown_ns = _has_unknown_path_segment(head_bare)
+      unknown_tight_ns_hops = 0
       ns_hops = 0
       orig_head_has_container_ctx = acc_sensitive and any(
           tok in head_facts.norm_head for tok in _SENSITIVE_CONTAINER_CTX_TOKS
@@ -4082,7 +4632,9 @@ def _resolve_bare_or_path_kv(
               or (
                   seg_allows_eq_safe_tail
                   and seg_conn_stripped == "="
-                  and _has_eq_value(text, seg_end)
+                  and _has_eq_value(
+                      text, seg_end, allow_nl_header_check=allow_eq_nl_check
+                  )
               )
           )
           if (
@@ -4096,12 +4648,14 @@ def _resolve_bare_or_path_kv(
             return None, seg_conn, seg_end, 0, seg_end
           prev_tail = prev_seg.rsplit("/", 1)[-1].rsplit(".", 1)[-1]
           prev_tail_norm = _normalize_key_name(prev_tail)
-          if seg_conn_stripped == "=" and _has_eq_value(text, seg_end):
+          if seg_conn_stripped == "=" and _has_eq_value(
+              text, seg_end, allow_nl_header_check=allow_eq_nl_check
+          ):
             seg_is_sens_leaf = is_sensitive_key(seg_bare, is_container=False)
             seg_bare_norm = _normalize_key_name(seg_bare)
             seg_is_safe_eq_leaf = not seg_is_sens_leaf and (
                 seg_is_diag
-                or seg_bare_norm in _SAFE_SMALL_COUNT_KEYS
+                or seg_bare_norm in _ALL_SAFE_COUNT_KEYS
                 or seg_bare_norm in ("status", "reason", "result", "state")
             )
             if not (saw_tight_unknown_ns and seg_is_safe_eq_leaf) and (
@@ -4114,12 +4668,17 @@ def _resolve_bare_or_path_kv(
                 )
                 or (
                     (not saw_tight_unknown_ns or not saw_ws_before_seg)
+                    and not (
+                        _is_scalar_cred_parent(prev_tail)
+                        and not text[last_m.end() : seg_m.start()].strip()
+                    )
                     and _is_explicit_container_eq_leaf(
                         seg_bare,
                         seg_conn,
                         text,
                         seg_end,
                         prev_tail_norm,
+                        allow_nl_header_check=allow_eq_nl_check,
                     )
                 )
             ):
@@ -4131,7 +4690,13 @@ def _resolve_bare_or_path_kv(
           tight_eq_ahead = (
               not saw_ws_before_seg
               and seg_conn == ":"
-              and _has_tight_eq_leaf_ahead(text, seg_end, seg_bare, max_hops=12)
+              and _has_tight_eq_leaf_ahead(
+                  text,
+                  seg_end,
+                  seg_bare,
+                  max_hops=12,
+                  allow_eq_nl_check=allow_eq_nl_check,
+              )
           )
           if (
               (not saw_tight_unknown_ns or tight_eq_ahead)
@@ -4152,6 +4717,7 @@ def _resolve_bare_or_path_kv(
                       saw_tight_unknown_ns
                       or _has_unknown_path_segment(seg_bare)
                   ),
+                  allow_eq_nl_check=allow_eq_nl_check,
               )
               if cont_res is not None:
                 return cont_res
@@ -4171,8 +4737,18 @@ def _resolve_bare_or_path_kv(
                   last_seen_conn = seg_conn
                   break
           seg_is_sens_leaf = is_sensitive_key(seg_bare, is_container=False)
+          allow_tight_unknown_colon_leaf = (
+              saw_tight_unknown_ns
+              and not saw_ws_before_seg
+              and seg_is_sens_leaf
+              and norm_seg not in _SAFE_DIAGNOSTIC_SCALAR_KEYS
+              and norm_seg not in _ALL_SAFE_COUNT_KEYS
+          )
+          allow_unquoted_colon = (
+              is_compound_parent or orig_head_has_container_ctx or acc_sensitive
+          )
           if (
-              not saw_tight_unknown_ns
+              (not saw_tight_unknown_ns or allow_tight_unknown_colon_leaf)
               and seg_conn_stripped == ":"
               and _has_colon_value_sep(text, seg_end)
               and (
@@ -4186,23 +4762,98 @@ def _resolve_bare_or_path_kv(
               )
           ):
             val_s, val_nl = _skip_kv_whitespace(text, seg_end)
+            is_quoted_or_container_val = val_s < n and (
+                text[val_s] in ('"', "'", "{", "[", "(")
+                or _PY_STR_PREFIX_RE.match(text, val_s) is not None
+                or _starts_with_odd_escaped_quote(text, val_s)
+            )
+            is_unquoted_colon_val = (
+                not is_quoted_or_container_val
+                and _is_valid_unquoted_colon_val(text, seg_end, val_s, val_nl)
+            )
+            has_distinct_unquoted_colon_leaf = (
+                is_unquoted_colon_val
+                and norm_seg.replace("_", "")
+                != _normalize_key_name(prev_tail).replace("_", "")
+            )
             if val_s < n and (
-                head_has_sep
-                or saw_ws_before_seg
-                or (seg_is_sens_leaf and val_nl == 1)
+                (
+                    allow_tight_unknown_colon_leaf
+                    and val_nl == 0
+                    and (
+                        is_quoted_or_container_val
+                        or (
+                            allow_unquoted_colon
+                            and is_unquoted_colon_val
+                            and (
+                                is_compound_parent or unknown_tight_ns_hops <= 1
+                            )
+                        )
+                    )
+                )
+                or (
+                    not saw_tight_unknown_ns
+                    and (
+                        head_has_sep
+                        or saw_ws_before_seg
+                        or (seg_is_sens_leaf and val_nl == 1)
+                        or (
+                            is_compound_parent
+                            and seg_is_sens_leaf
+                            and val_nl == 0
+                        )
+                        or (
+                            acc_sensitive
+                            and not saw_ws_before_seg
+                            and seg_is_sens_leaf
+                            and val_nl == 0
+                            and (
+                                is_quoted_or_container_val
+                                or has_distinct_unquoted_colon_leaf
+                            )
+                            and _is_canonical_colon_key_segment(
+                                prev_tail,
+                                seg_bare,
+                                allow_suffix=False,
+                                container_seg=ctx_container,
+                            )
+                        )
+                    )
+                )
             ):
-              is_quoted_or_container_val = text[val_s] in (
-                  '"',
-                  "'",
-                  "{",
-                  "[",
-                  "(",
-              ) or _starts_with_odd_escaped_quote(text, val_s)
               can_adopt_colon_leaf = False
               if val_nl == 0:
-                can_adopt_colon_leaf = is_quoted_or_container_val or (
-                    (saw_ns_hop or orig_head_has_container_ctx)
-                    and _CRITICAL_ERROR_MARKERS_RE.match(text, val_s) is None
+                can_adopt_colon_leaf = (
+                    is_quoted_or_container_val
+                    or (
+                        not saw_tight_unknown_ns
+                        and (
+                            saw_ns_hop
+                            or orig_head_has_container_ctx
+                            or is_compound_parent
+                        )
+                        and _CRITICAL_ERROR_MARKERS_RE.match(text, val_s)
+                        is None
+                    )
+                    or (
+                        allow_tight_unknown_colon_leaf
+                        and allow_unquoted_colon
+                        and is_unquoted_colon_val
+                        and (is_compound_parent or unknown_tight_ns_hops <= 1)
+                    )
+                    or (
+                        not saw_tight_unknown_ns
+                        and acc_sensitive
+                        and not saw_ws_before_seg
+                        and seg_is_sens_leaf
+                        and has_distinct_unquoted_colon_leaf
+                        and _is_canonical_colon_key_segment(
+                            prev_tail,
+                            seg_bare,
+                            allow_suffix=False,
+                            container_seg=ctx_container,
+                        )
+                    )
                 )
               elif (
                   val_nl == 1
@@ -4225,6 +4876,31 @@ def _resolve_bare_or_path_kv(
           is_known_tight_ns, is_title_ns = _classify_colon_namespace_seg(
               seg_bare, norm_seg
           )
+          is_sens_hop_seg = (
+              is_sensitive_key(seg_bare, is_container=True) or seg_is_sens_leaf
+          )
+          tight_colon_leaf_ahead = (
+              not saw_ws_before_seg
+              and seg_conn == ":"
+              and _has_tight_colon_sens_leaf_ahead(
+                  text,
+                  seg_end,
+                  max_hops=8,
+                  allow_unquoted=allow_unquoted_colon,
+                  unquoted_unknown_budget=(
+                      8
+                      if is_compound_parent
+                      else max(
+                          0,
+                          1
+                          - unknown_tight_ns_hops
+                          - (
+                              0 if (is_known_tight_ns or is_sens_hop_seg) else 1
+                          ),
+                      )
+                  ),
+              )
+          )
           is_auth_status_tail = (
               not saw_tight_unknown_ns
               and has_auth_status_ctx
@@ -4237,14 +4913,36 @@ def _resolve_bare_or_path_kv(
               )
           )
           is_tight_eq_hop = tight_eq_ahead and _is_tight_colon_ident(seg_bare)
+          is_tight_colon_hop = (
+              tight_colon_leaf_ahead
+              and _is_tight_colon_ident(seg_bare)
+              and (
+                  is_known_tight_ns
+                  or is_title_ns
+                  or is_sens_hop_seg
+                  or _is_namespace_colon_path(seg_bare, allow_upper=False)
+                  or (seg_bare.islower() and any(c.isalpha() for c in seg_bare))
+              )
+          )
+          is_known_count_bare = (
+              not saw_tight_unknown_ns and norm_seg in _ALL_SAFE_COUNT_KEYS
+          )
           if (
-              ns_hops < (12 if tight_eq_ahead else 4)
+              ns_hops
+              < (12 if tight_eq_ahead else (8 if tight_colon_leaf_ahead else 4))
               and not (saw_tight_unknown_ns and saw_ws_before_seg)
               and seg_conn_stripped == ":"
-              and (is_tight_eq_hop or not seg_is_sens_leaf)
               and (
                   is_tight_eq_hop
+                  or is_tight_colon_hop
+                  or is_known_count_bare
+                  or not seg_is_sens_leaf
+              )
+              and (
+                  is_tight_eq_hop
+                  or is_tight_colon_hop
                   or is_known_tight_ns
+                  or is_known_count_bare
                   or (is_auth_status_tail and saw_ws_before_seg)
                   or (
                       not saw_ws_before_seg
@@ -4254,7 +4952,9 @@ def _resolve_bare_or_path_kv(
               )
               and (
                   is_tight_eq_hop
+                  or is_tight_colon_hop
                   or is_known_tight_ns
+                  or is_known_count_bare
                   or _is_namespace_colon_path(seg_bare, allow_upper=True)
                   or (
                       is_title_ns
@@ -4268,7 +4968,7 @@ def _resolve_bare_or_path_kv(
           ):
             is_known_count_tail = (
                 not saw_tight_unknown_ns
-                and _normalize_key_name(seg_bare) in _SAFE_SMALL_COUNT_KEYS
+                and _normalize_key_name(seg_bare) in _ALL_SAFE_COUNT_KEYS
             )
             if not (
                 is_known_tight_ns or is_auth_status_tail or is_known_count_tail
@@ -4276,6 +4976,8 @@ def _resolve_bare_or_path_kv(
               has_auth_status_ctx = False
               if not saw_ws_before_seg:
                 saw_tight_unknown_ns = True
+                if not is_sens_hop_seg:
+                  unknown_tight_ns_hops += 1
                 last_m = match
                 chained = False
             elif not is_known_tight_ns:
@@ -4336,7 +5038,7 @@ def _resolve_bare_or_path_kv(
         allow_tight_sens_leaf = (
             not saw_ws_before_seg
             and not seg_is_container
-            and seg_norm_full not in _SAFE_SMALL_COUNT_KEYS
+            and seg_norm_full not in _ALL_SAFE_COUNT_KEYS
             and is_sensitive_key(seg_bare, is_container=False)
             and _is_canonical_colon_key_segment(
                 prev_seg,
@@ -4467,10 +5169,7 @@ def _resolve_bare_or_path_kv(
       and len(head_bare) <= 128
       and head_facts.is_sens_false
       and head_facts.lower_bare != "token"
-      and not (
-          head_facts.has_sep
-          and text[match.start() : match.start("bare")].startswith("/")
-      )
+      and not text[match.start() : match.start("bare")].startswith("/")
   ):
     return head_bare, conn_text, val_start, 0, match_end
   matched_key = _extract_bare_kv_key(text, match, is_container=is_container)
@@ -4737,7 +5436,9 @@ def _has_plain_json_string_continuation_close(
         )
         or (
             text[q] == quote_char
-            and _quote_opens_kv_at(text, q, escaped_dq=False)
+            and _quote_opens_kv_at(
+                text, q, escaped_dq=False, allow_semicolon_key=True
+            )
         )
     ):
       return _finish_cont(False, False)
@@ -4903,7 +5604,9 @@ def _is_json_comma_member_sep(
         bs += 1
       if bs % 2 == 1 and k + bs < n:
         if text[k + bs] == '"':
-          return _quote_opens_kv_at(text, k + bs - 1, escaped_dq=True)
+          return _quote_opens_kv_at(
+              text, k + bs - 1, escaped_dq=True, allow_semicolon_key=True
+          )
         if text[k + bs] == "'":
           found = _scan_mismatched_quote_key_kv(text, k + bs + 1)
           return (
@@ -4911,10 +5614,14 @@ def _is_json_comma_member_sep(
               and text[found[1]] == "\\"
               and found[2].start() - found[1] == 2
           )
-    if text[k] in ('"', "'") and _quote_opens_kv_at(text, k, escaped_dq=False):
+    if text[k] in ('"', "'") and _quote_opens_kv_at(
+        text, k, escaped_dq=False, allow_semicolon_key=True
+    ):
       return True
     return False
-  return text[k] in ('"', "'") and _quote_opens_kv_at(text, k, escaped_dq=False)
+  return text[k] in ('"', "'") and _quote_opens_kv_at(
+      text, k, escaped_dq=False, allow_semicolon_key=True
+  )
 
 
 def _scan_same_line_escaped_sq_end(
@@ -5320,7 +6027,7 @@ def _is_enclosing_json_string_literal(
       ):
         return _finish_esc_cont(False, False)
       if text[p] in ('"', "'") and _quote_opens_kv_at(
-          text, p, escaped_dq=False
+          text, p, escaped_dq=False, allow_semicolon_key=True
       ):
         return _finish_esc_cont(False, False)
       if text[p] == "\\":
@@ -5331,7 +6038,9 @@ def _is_enclosing_json_string_literal(
             bs_ls % 2 == 1
             and p + bs_ls < n
             and text[p + bs_ls] == '"'
-            and _quote_opens_kv_at(text, p + bs_ls - 1, escaped_dq=True)
+            and _quote_opens_kv_at(
+                text, p + bs_ls - 1, escaped_dq=True, allow_semicolon_key=True
+            )
         ):
           return _finish_esc_cont(False, False)
       seen_sensitive_hdr = seen_sensitive_hdr or _is_sensitive_header_at(
@@ -5414,7 +6123,9 @@ def _is_enclosing_json_string_literal(
   return _finish_esc_cont(False, not seen_sensitive_hdr)
 
 
-def _is_sensitive_header_bare_at(text: str, pos: int) -> bool:
+def _is_sensitive_header_bare_at(
+    text: str, pos: int, *, allow_eq_nl_check: bool = True
+) -> bool:
   """Returns True when ``pos`` begins an unquoted bare sensitive KV header."""
   n = len(text)
   if (
@@ -5426,7 +6137,7 @@ def _is_sensitive_header_bare_at(text: str, pos: int) -> bool:
   bare_m = _BARE_KV_RE.match(text, pos)
   if bare_m is not None:
     matched_key, _, _, _, _ = _resolve_bare_or_path_kv(
-        text, bare_m, max_nl_hops=0
+        text, bare_m, max_nl_hops=0, allow_eq_nl_check=allow_eq_nl_check
     )
     if matched_key is not None:
       return True
@@ -5475,7 +6186,7 @@ def _is_sensitive_header_bare_at(text: str, pos: int) -> bool:
     cand_m = _BARE_KV_RE.match(text, word_cursor)
     if cand_m is not None:
       matched_key, _, next_val_start, _, _ = _resolve_bare_or_path_kv(
-          text, cand_m, max_nl_hops=0
+          text, cand_m, max_nl_hops=0, allow_eq_nl_check=allow_eq_nl_check
       )
       next_is_container = next_val_start < n and text[next_val_start] in (
           "{",
@@ -5514,23 +6225,27 @@ def _is_sensitive_header_at(
     check_enclosing_quote: bool | None = None,
     enclosing_fail_from: dict[tuple[bool, int, str], int] | None = None,
     out_enclosed_match: list[bool] | None = None,
+    allow_eq_nl_check: bool = True,
 ) -> bool:
   """Returns True when ``pos`` begins a sensitive KV header on the next line."""
   n = len(text)
   if pos >= n:
     return False
   if not is_quoted_parent and text[pos] not in ('"', "'", "\\"):
-    hdr_cache = _UNQUOTED_SENS_HDR_CACHE.get()
-    if hdr_cache is not None:
-      cached_hit = hdr_cache.get(pos)
-      if cached_hit is not None:
-        return cached_hit
-      res = _is_sensitive_header_bare_at(text, pos)
-      if len(hdr_cache) >= 32768:
-        hdr_cache.clear()
-      hdr_cache[pos] = res
-      return res
-    return _is_sensitive_header_bare_at(text, pos)
+    if allow_eq_nl_check:
+      hdr_cache = _UNQUOTED_SENS_HDR_CACHE.get()
+      if hdr_cache is not None:
+        cached_hit = hdr_cache.get(pos)
+        if cached_hit is not None:
+          return cached_hit
+        res = _is_sensitive_header_bare_at(text, pos, allow_eq_nl_check=True)
+        if len(hdr_cache) >= 32768:
+          hdr_cache.clear()
+        hdr_cache[pos] = res
+        return res
+    return _is_sensitive_header_bare_at(
+        text, pos, allow_eq_nl_check=allow_eq_nl_check
+    )
   check_enclosing = (
       is_quoted_parent
       if check_enclosing_quote is None
@@ -5837,9 +6552,48 @@ def _starts_cookie_eq_pair(text: str, pos: int) -> bool:
   return k > pos and k < n and text[k] == "="
 
 
-def _consume_cookie_header_value(text: str, pos: int) -> tuple[int, str] | None:
+def _consume_cookie_header_value(
+    text: str, pos: int, *, is_set_cookie: bool = False
+) -> tuple[int, str] | None:
   """Consumes a single-line ``;``-separated Cookie header value in O(N)."""
   n = len(text)
+  colon_p = text.rfind(":", max(0, pos - 64), pos)
+  if colon_p < 0:
+    colon_p = pos
+  lb_start = max(0, colon_p - 256)
+  nl_idx = max(
+      text.rfind("\n", lb_start, colon_p),
+      text.rfind("\r", lb_start, colon_p),
+  )
+  if nl_idx >= 0:
+    lb_start = nl_idx + 1
+  paren_bal = 0
+  in_sq = False
+  idx = lb_start
+  while idx < colon_p:
+    c = text[idx]
+    if c == "\\":
+      idx += 2
+      continue
+    if c == "(":
+      paren_bal += 1
+    elif c == ")":
+      if paren_bal > 0:
+        paren_bal -= 1
+    elif c == "'":
+      if in_sq:
+        in_sq = False
+      elif not (
+          idx > lb_start
+          and idx + 1 < colon_p
+          and text[idx - 1].isalnum()
+          and text[idx + 1].isalnum()
+      ):
+        in_sq = True
+    idx += 1
+  has_unclosed_paren = paren_bal > 0
+  has_unclosed_sq = in_sq
+
   p = pos
   while p < n and text[p] in (";", " ", "\t"):
     p += 1
@@ -5871,11 +6625,22 @@ def _consume_cookie_header_value(text: str, pos: int) -> tuple[int, str] | None:
     if not has_name and not has_eq:
       break
     if not has_eq:
-      if p < n and (
+      if found_pair:
+        if (
+            not is_set_cookie
+            or pair_name.lower() not in _SET_COOKIE_BOOL_ATTRS
+            or (
+                p < n
+                and (
+                    text[p] == ":"
+                    or _COOKIE_KV_CONN_RE.match(text, p) is not None
+                )
+            )
+        ):
+          break
+      elif p < n and (
           text[p] == ":" or _COOKIE_KV_CONN_RE.match(text, p) is not None
       ):
-        if found_pair:
-          break
         if is_sensitive_key(pair_name):
           return None
         if text[p] == ":" and p + 1 < n and not text[p + 1].isspace():
@@ -6074,11 +6839,32 @@ def _consume_cookie_header_value(text: str, pos: int) -> tuple[int, str] | None:
             else:
               p = end_q
           else:
+            open_q = text[val_start]
             consumed_to_semi = False
             if p >= no_semi_until:
-              probe = p
-              while probe < n and text[probe] not in ";)}]\r\n":
-                if text[probe] == "\\":
+              probe = val_start + 1
+              while probe < n:
+                pch = text[probe]
+                if pch in ";}\r\n]":
+                  break
+                if pch == ")" and has_unclosed_paren:
+                  break
+                if pch == '"' and open_q == "'":
+                  break
+                if pch == "'" and open_q == '"' and has_unclosed_sq:
+                  break
+                if pch in ('"', "'") and _quote_opens_kv_at(
+                    text, probe, escaped_dq=False, allow_semicolon_key=True
+                ):
+                  while probe > val_start + 1 and text[probe - 1] in (
+                      " ",
+                      "\t",
+                  ):
+                    probe -= 1
+                  if probe > val_start + 1 and text[probe - 1] == ",":
+                    probe -= 1
+                  break
+                if pch == "\\":
                   bs = 0
                   while probe + bs < n and text[probe + bs] == "\\":
                     bs += 1
@@ -6097,31 +6883,53 @@ def _consume_cookie_header_value(text: str, pos: int) -> tuple[int, str] | None:
                 consumed_to_semi = True
               else:
                 no_semi_until = probe
+            else:
+              probe = no_semi_until
             if not consumed_to_semi:
-              while (
-                  p < n and not text[p].isspace() and text[p] not in ";)}]\r\n"
-              ):
-                if text[p] == "\\":
-                  bs = 0
-                  while p + bs < n and text[p + bs] == "\\":
-                    bs += 1
-                  if (
-                      p + bs < n
-                      and text[p + bs] in ("t", "r", "n")
-                      and bs % 2 == 1
-                  ):
-                    p += bs - 1
-                    break
-                  p += bs
-                else:
-                  p += 1
+              stop_cookie_loop = True
+              p = _unterminated_quote_error_stop(
+                  text, val_start + 1, probe, include_escaped_nl=True
+              )
         else:
+          local_paren = 0
           while (
               p < n
               and not text[p].isspace()
-              and text[p] not in _COOKIE_VAL_STOP_CHARS
+              and text[p] not in _COOKIE_VAL_ALWAYS_STOP_CHARS
           ):
             ch = text[p]
+            if ch == "(":
+              local_paren += 1
+              p += 1
+              continue
+            if ch == ")":
+              if local_paren > 0:
+                local_paren -= 1
+                p += 1
+                continue
+              if (
+                  p + 1 < n
+                  and not text[p + 1].isspace()
+                  and text[p + 1] not in ",;)}]\"'"
+              ):
+                p += 1
+                continue
+              if has_unclosed_paren:
+                break
+              p += 1
+              continue
+            if ch == "'":
+              if (
+                  p + 1 < n
+                  and not text[p + 1].isspace()
+                  and text[p + 1] not in ",;)}]\"'"
+              ):
+                p += 1
+                continue
+              if has_unclosed_sq:
+                break
+              p += 1
+              continue
             if ch == ",":
               if p + 1 >= n or text[p + 1].isspace():
                 break
@@ -6180,7 +6988,7 @@ def _consume_cookie_header_value(text: str, pos: int) -> tuple[int, str] | None:
       sep_p += 1
     if saw_semi:
       p = sep_p
-    elif seen_eq_pair and p < n and text[p] == ",":
+    elif is_set_cookie and seen_eq_pair and p < n and text[p] == ",":
       after_comma = p + 1
       while after_comma < n and text[after_comma] in (" ", "\t"):
         after_comma += 1
@@ -6230,11 +7038,17 @@ def _looks_like_json_object_open(
       while k + bs < n and text[k + bs] == "\\":
         bs += 1
       if bs % 2 == 1 and k + bs < n and text[k + bs] == '"':
-        return _quote_opens_kv_at(text, k + bs - 1, escaped_dq=True)
+        return _quote_opens_kv_at(
+            text, k + bs - 1, escaped_dq=True, allow_semicolon_key=True
+        )
     if text[k] in ('"', "'"):
-      return _quote_opens_kv_at(text, k, escaped_dq=False)
+      return _quote_opens_kv_at(
+          text, k, escaped_dq=False, allow_semicolon_key=True
+      )
     return False
-  return text[k] in ('"', "'") and _quote_opens_kv_at(text, k, escaped_dq=False)
+  return text[k] in ('"', "'") and _quote_opens_kv_at(
+      text, k, escaped_dq=False, allow_semicolon_key=True
+  )
 
 
 def _resolve_json_object_close_pos(
@@ -6385,7 +7199,9 @@ def _is_balanced_outer_prose_after_brace(
             brace_index_cache=active_brace_cache,
         ):
           return _finish(False)
-        if not in_quote and _quote_opens_kv_at(text, p, escaped_dq=False):
+        if not in_quote and _quote_opens_kv_at(
+            text, p, escaped_dq=False, allow_semicolon_key=True
+        ):
           saw_outer_escaped_q = False
         in_quote = not in_quote
       p += 1
@@ -6411,7 +7227,7 @@ def _is_balanced_outer_prose_after_brace(
           ):
             return _finish(False)
           if not in_quote and _quote_opens_kv_at(
-              text, p + bs - 1, escaped_dq=True
+              text, p + bs - 1, escaped_dq=True, allow_semicolon_key=True
           ):
             saw_outer_escaped_q = False
           in_quote = not in_quote
@@ -6603,7 +7419,9 @@ def _is_json_multiline_str_boundary(
         allow_open_brace=False,
         allow_open_bracket=False,
     )
-  if lch in ('"', "'") and _quote_opens_kv_at(text, ls, escaped_dq=False):
+  if lch in ('"', "'") and _quote_opens_kv_at(
+      text, ls, escaped_dq=False, allow_semicolon_key=True
+  ):
     return True
   if is_escaped and lch == "\\":
     bs = 0
@@ -6613,7 +7431,9 @@ def _is_json_multiline_str_boundary(
         bs % 2 == 1
         and ls + bs < n
         and text[ls + bs] == '"'
-        and _quote_opens_kv_at(text, ls + bs - 1, escaped_dq=True)
+        and _quote_opens_kv_at(
+            text, ls + bs - 1, escaped_dq=True, allow_semicolon_key=True
+        )
     ):
       return True
   if lch == "{":
@@ -7808,6 +8628,7 @@ def _try_redact_sensitive_kv(
     *,
     is_quoted_key: bool = False,
     in_json_object: bool = False,
+    key_lead_bs: int = 0,
     enclosing_fail_from: dict[tuple[bool, int, str], int] | None = None,
     json_close_fail_from: dict[tuple[bool, int, str, int], int] | None = None,
     brace_index_cache: (
@@ -7832,9 +8653,14 @@ def _try_redact_sensitive_kv(
           or _JSON_SCALAR_START_RE.match(text, val_start) is not None
       )
   )
+  allow_blank_line_literal = (
+      conn_text.strip() in (":", "=")
+      and _JSON_BOOL_OR_NULL_RE.match(text, val_start) is not None
+  )
   if (
       nl_count >= 2
       and not allow_multiline_json_scalar
+      and not allow_blank_line_literal
       and next_char not in ('"', "'", "{", "[", "(")
       and not _starts_with_odd_escaped_quote(text, val_start)
   ):
@@ -7885,7 +8711,7 @@ def _try_redact_sensitive_kv(
       return None
     raw_val = text[val_start:val_end].strip()
     if (
-        len(raw_val) <= 3
+        len(raw_val) <= 8
         and raw_val.isascii()
         and raw_val.isdigit()
         and _is_numeric_count_scalar(matched_key, raw_val)
@@ -7906,7 +8732,16 @@ def _try_redact_sensitive_kv(
       and _CTOR_PREFIX_RE.match(text, val_start) is None
   )
   if is_cookie_header:
-    consumed = _consume_cookie_header_value(text, val_start)
+    key_tail_norm = _normalize_key_name(
+        matched_key.rsplit(":", 1)[-1].rsplit("/", 1)[-1].rsplit(".", 1)[-1]
+    )
+    is_set_cookie = key_tail_norm in (
+        "set_cookie",
+        "set_cookies",
+    ) or key_tail_norm.endswith(("_set_cookie", "_set_cookies"))
+    consumed = _consume_cookie_header_value(
+        text, val_start, is_set_cookie=is_set_cookie
+    )
   else:
     consumed = _consume_sensitive_kv_value(text, val_start)
   if consumed is None:
@@ -7987,6 +8822,7 @@ def _try_redact_sensitive_kv(
         val_end = cf
       else:
         return None
+  raw_val = ""
   if not is_container:
     raw_val = text[val_start:val_end].strip()
     unquoted_val = _strip_matching_quotes(raw_val)
@@ -7994,6 +8830,24 @@ def _try_redact_sensitive_kv(
         matched_key, unquoted_val
     ) or _is_safe_auth_status_scalar(matched_key, unquoted_val):
       return val_end, None
+  if (
+      is_quoted_key
+      and _is_json_colon_connector(conn_text)
+      and in_json_object
+      and replacement == "[REDACTED]"
+      and (
+          (
+              not is_container
+              and (
+                  raw_val in ("true", "false", "null")
+                  or _JSON_NUMBER_RE.fullmatch(raw_val) is not None
+              )
+          )
+          or (is_container and next_char in ("{", "[") and val_end < n)
+      )
+  ):
+    delim = "\\" * key_lead_bs + '"'
+    return val_end, f"{delim}[REDACTED]{delim}"
   return val_end, replacement
 
 
@@ -8053,6 +8907,7 @@ def _scrub_multiline_nonsensitive_json_value(
     is_escaped: bool,
     lead_bs: int = 0,
     depth: int = 0,
+    fallback_hops: int = 0,
     brace_index_cache: (
         dict[tuple[bool, int], tuple[list[int], dict[int, int]]] | None
     ) = None,
@@ -8164,6 +9019,7 @@ def _scrub_multiline_nonsensitive_json_value(
       quote_kind='\\"' if is_escaped else quote_char,
       depth=depth,
       lead_bs=val_bs if is_escaped else 1,
+      fallback_hops=fallback_hops,
   )
   replacement = (
       text[ml_val_start:ml_inner_start]
@@ -8173,14 +9029,25 @@ def _scrub_multiline_nonsensitive_json_value(
   return ml_val_start, ml_end, replacement, scrubbed_val != inner_val
 
 
-def _scrub_sensitive_kv_in_text(text: str, *, _depth: int = 0) -> str:
+def _scrub_sensitive_kv_in_text(
+    text: str,
+    *,
+    _depth: int = 0,
+    fallback_hops: int = 0,
+    scrubbed_json_spans: Sequence[tuple[int, int]] = (),
+) -> str:
   """Redacts sensitive key=value / key: value / key is value pairs in O(N)."""
   token = _QUOTE_KV_FAIL_UNTIL.set({})
   obj_cache_token = _JSON_OBJ_CLOSE_CACHE.set({})
   cont_token = _ENCLOSING_CONT_MEMO.set({})
   hdr_token = _UNQUOTED_SENS_HDR_CACHE.set({})
   try:
-    return _scrub_sensitive_kv_in_text_impl(text, _depth=_depth)
+    return _scrub_sensitive_kv_in_text_impl(
+        text,
+        _depth=_depth,
+        fallback_hops=fallback_hops,
+        scrubbed_json_spans=scrubbed_json_spans,
+    )
   finally:
     _UNQUOTED_SENS_HDR_CACHE.reset(hdr_token)
     _ENCLOSING_CONT_MEMO.reset(cont_token)
@@ -8188,12 +9055,20 @@ def _scrub_sensitive_kv_in_text(text: str, *, _depth: int = 0) -> str:
     _QUOTE_KV_FAIL_UNTIL.reset(token)
 
 
-def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
+def _scrub_sensitive_kv_in_text_impl(
+    text: str,
+    *,
+    _depth: int = 0,
+    fallback_hops: int = 0,
+    scrubbed_json_spans: Sequence[tuple[int, int]] = (),
+) -> str:
   """Redacts sensitive key=value / key: value / key is value pairs in O(N)."""
   out: list[str] = []
   emit_idx = 0
   scan_idx = 0
   n = len(text)
+  num_spans = len(scrubbed_json_spans)
+  span_idx = 0
   unclosed_edq_until: dict[int, int] = {}
   enclosing_fail_from: dict[tuple[bool, int, str], int] = {}
   json_close_fail_from: dict[tuple[bool, int, str, int], int] = {}
@@ -8206,6 +9081,11 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
     if match is None:
       break
     start = match.start()
+    while span_idx < num_spans and scrubbed_json_spans[span_idx][1] <= start:
+      span_idx += 1
+    in_scrubbed_span = (
+        span_idx < num_spans and scrubbed_json_spans[span_idx][0] <= start
+    )
 
     if match.group("bare") is None:
       # Branch A: escaped single quote or JSON \t/\r/\n escape sequence.
@@ -8276,6 +9156,8 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
                   depth=_depth,
                   close_start=close_start,
                   lead_bs=lead_bs,
+                  skip_inner_scrub=in_scrubbed_span,
+                  fallback_hops=fallback_hops,
               )
               key_changed = emitted_key != text[start:mismatched_end]
               if is_sensitive_outer:
@@ -8379,6 +9261,8 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
               depth=_depth,
               close_start=close_start,
               lead_bs=lead_bs,
+              skip_inner_scrub=in_scrubbed_span,
+              fallback_hops=fallback_hops,
           )
           key_changed = emitted_key != text[start:end_tok]
           if is_sensitive_outer:
@@ -8390,6 +9274,7 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
                 nl_count,
                 is_quoted_key=True,
                 in_json_object=in_json_object,
+                key_lead_bs=lead_bs,
                 enclosing_fail_from=enclosing_fail_from,
                 json_close_fail_from=json_close_fail_from,
                 brace_index_cache=brace_index_cache,
@@ -8425,8 +9310,10 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
                 emit_idx = val_end
               scan_idx = val_end
             continue
-          if not is_sensitive_outer and _is_json_colon_connector(
-              conn_m.group(0)
+          if (
+              not in_scrubbed_span
+              and not is_sensitive_outer
+              and _is_json_colon_connector(conn_m.group(0))
           ):
             ml_res = _scrub_multiline_nonsensitive_json_value(
                 text,
@@ -8435,6 +9322,7 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
                 is_escaped=True,
                 lead_bs=lead_bs,
                 depth=_depth,
+                fallback_hops=fallback_hops,
                 brace_index_cache=brace_index_cache,
             )
             if ml_res is not None:
@@ -8460,7 +9348,7 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
             emit_idx = conn_m.end()
           scan_idx = conn_m.end()
           continue
-        if "\\" in raw_inner or "'" in raw_inner:
+        if not in_scrubbed_span and ("\\" in raw_inner or "'" in raw_inner):
           mismatched = _try_mismatched_kv_redaction(
               text,
               start - lead_bs + 1,
@@ -8477,7 +9365,9 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
             outer_is_balanced_close = (
                 val_start < outer_close_start
                 and (end_tok >= n or text[end_tok] in " \t\r\n,;)}]")
-                and not _quote_opens_kv_at(text, end_tok - 2, escaped_dq=True)
+                and not _quote_opens_kv_at(
+                    text, end_tok - 2, escaped_dq=True, allow_semicolon_key=True
+                )
             )
             if outer_is_balanced_close:
               val_end = min(val_end, outer_close_start)
@@ -8488,7 +9378,11 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
                   tail = text[val_end:outer_close_start]
                   out.append(
                       _scrub_quoted_inner(
-                          tail, quote_kind='\\"', depth=_depth, lead_bs=lead_bs
+                          tail,
+                          quote_kind='\\"',
+                          depth=_depth,
+                          lead_bs=lead_bs,
+                          fallback_hops=fallback_hops,
                       )
                   )
                 out.append(text[outer_close_start:end_tok])
@@ -8496,7 +9390,11 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
               elif val_end < outer_close_start:
                 tail = text[val_end:outer_close_start]
                 scrubbed_tail = _scrub_quoted_inner(
-                    tail, quote_kind='\\"', depth=_depth, lead_bs=lead_bs
+                    tail,
+                    quote_kind='\\"',
+                    depth=_depth,
+                    lead_bs=lead_bs,
+                    fallback_hops=fallback_hops,
                 )
                 if scrubbed_tail != tail:
                   out.append(text[emit_idx:val_end])
@@ -8528,8 +9426,20 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
           ):
             scan_idx = start + 2
             continue
+        if in_scrubbed_span:
+          scan_idx = end_tok
+          continue
+        if span_idx < num_spans:
+          c_start, c_end = scrubbed_json_spans[span_idx]
+          if c_start <= start + 1 and end_tok - 1 <= c_end:
+            scan_idx = end_tok
+            continue
         scrubbed = _scrub_quoted_inner(
-            raw_inner, quote_kind='\\"', depth=_depth, lead_bs=lead_bs
+            raw_inner,
+            quote_kind='\\"',
+            depth=_depth,
+            lead_bs=lead_bs,
+            fallback_hops=fallback_hops,
         )
         if scrubbed != raw_inner:
           out.append(text[emit_idx:start] + '\\"' + scrubbed + closing_delim)
@@ -8576,7 +9486,14 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
               is_sensitive_outer,
               in_json_object,
           ) = _inspect_quoted_kv_token(
-              text, start, end_tok, conn_m, quote_kind=ch, depth=_depth
+              text,
+              start,
+              end_tok,
+              conn_m,
+              quote_kind=ch,
+              depth=_depth,
+              skip_inner_scrub=in_scrubbed_span,
+              fallback_hops=fallback_hops,
           )
           key_changed = emitted_key != text[start:end_tok]
           if is_sensitive_outer:
@@ -8623,8 +9540,10 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
                 emit_idx = val_end
               scan_idx = val_end
             continue
-          if not is_sensitive_outer and _is_json_colon_connector(
-              conn_m.group(0)
+          if (
+              not in_scrubbed_span
+              and not is_sensitive_outer
+              and _is_json_colon_connector(conn_m.group(0))
           ):
             ml_res = _scrub_multiline_nonsensitive_json_value(
                 text,
@@ -8632,6 +9551,7 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
                 ch,
                 is_escaped=False,
                 depth=_depth,
+                fallback_hops=fallback_hops,
                 brace_index_cache=brace_index_cache,
             )
             if ml_res is not None:
@@ -8657,7 +9577,9 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
             emit_idx = conn_m.end()
           scan_idx = conn_m.end()
           continue
-        if "\\" in raw_inner or ("'" if ch == '"' else '"') in raw_inner:
+        if not in_scrubbed_span and (
+            "\\" in raw_inner or ("'" if ch == '"' else '"') in raw_inner
+        ):
           mismatched = _try_mismatched_kv_redaction(
               text,
               start,
@@ -8675,7 +9597,10 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
                 val_start < outer_close_start
                 and (end_tok >= n or text[end_tok] in " \t\r\n,;)}]")
                 and not _quote_opens_kv_at(
-                    text, outer_close_start, escaped_dq=False
+                    text,
+                    outer_close_start,
+                    escaped_dq=False,
+                    allow_semicolon_key=True,
                 )
             )
             if outer_is_balanced_close:
@@ -8686,14 +9611,22 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
                 if val_end < outer_close_start:
                   tail = text[val_end:outer_close_start]
                   out.append(
-                      _scrub_quoted_inner(tail, quote_kind=ch, depth=_depth)
+                      _scrub_quoted_inner(
+                          tail,
+                          quote_kind=ch,
+                          depth=_depth,
+                          fallback_hops=fallback_hops,
+                      )
                   )
                 out.append(text[outer_close_start:end_tok])
                 emit_idx = end_tok
               elif val_end < outer_close_start:
                 tail = text[val_end:outer_close_start]
                 scrubbed_tail = _scrub_quoted_inner(
-                    tail, quote_kind=ch, depth=_depth
+                    tail,
+                    quote_kind=ch,
+                    depth=_depth,
+                    fallback_hops=fallback_hops,
                 )
                 if scrubbed_tail != tail:
                   out.append(text[emit_idx:val_end])
@@ -8725,7 +9658,20 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
           ):
             scan_idx = start + 1
             continue
-        scrubbed = _scrub_quoted_inner(raw_inner, quote_kind=ch, depth=_depth)
+        if in_scrubbed_span:
+          scan_idx = end_tok
+          continue
+        if span_idx < num_spans:
+          c_start, c_end = scrubbed_json_spans[span_idx]
+          if c_start <= start + 1 and end_tok - 1 <= c_end:
+            scan_idx = end_tok
+            continue
+        scrubbed = _scrub_quoted_inner(
+            raw_inner,
+            quote_kind=ch,
+            depth=_depth,
+            fallback_hops=fallback_hops,
+        )
         if scrubbed != raw_inner:
           out.append(text[emit_idx:start] + ch + scrubbed + ch)
           emit_idx = end_tok
@@ -8812,16 +9758,40 @@ def _scrub_sensitive_kv_in_text_impl(text: str, *, _depth: int = 0) -> str:
   return "".join(out)
 
 
-def _scrub_text_at_depth(text: str, *, _depth: int = 0) -> str:
+def _scrub_text_at_depth(
+    text: str, *, _depth: int = 0, _skip_outer_budget: bool = False
+) -> str:
   """Redacts embedded JSON, secret patterns, and KV pairs at bounded depth."""
-  out = (
-      _scrub_embedded_json_containers(text)
-      if _depth < 3 and ("{" in text or "[" in text)
-      else text
+  if _depth < _MAX_EMBEDDED_JSON_DEPTH and ("{" in text or "[" in text):
+    segments = _scrub_embedded_json_segments(
+        text, _depth=_depth, _skip_outer_budget=_skip_outer_budget
+    )
+  else:
+    segments = [(False, text)]
+  parts: list[str] = []
+  scrubbed_json_spans: list[tuple[int, int]] = []
+  pos = 0
+  for is_scrubbed, chunk in segments:
+    if not chunk:
+      continue
+    if is_scrubbed:
+      end_pos = pos + len(chunk)
+      if scrubbed_json_spans and scrubbed_json_spans[-1][1] == pos:
+        scrubbed_json_spans[-1] = (scrubbed_json_spans[-1][0], end_pos)
+      else:
+        scrubbed_json_spans.append((pos, end_pos))
+      parts.append(chunk)
+      pos = end_pos
+    else:
+      scrubbed_chunk = chunk
+      for pat, repl in _SECRET_RULES:
+        scrubbed_chunk = pat.sub(repl, scrubbed_chunk)
+      parts.append(scrubbed_chunk)
+      pos += len(scrubbed_chunk)
+  out = "".join(parts)
+  out = _scrub_sensitive_kv_in_text(
+      out, _depth=_depth, scrubbed_json_spans=scrubbed_json_spans
   )
-  for pat, repl in _SECRET_RULES:
-    out = pat.sub(repl, out)
-  out = _scrub_sensitive_kv_in_text(out, _depth=_depth)
   if _depth == 0 and "\\u00" in out:
     decoded_ascii = _unescape_safe_ascii_unicode_escapes(out)
     if decoded_ascii != out:
@@ -8833,10 +9803,25 @@ def _scrub_text_at_depth(text: str, *, _depth: int = 0) -> str:
 
 def scrub_sensitive_text(text: str) -> str:
   """Redacts credential tokens from raw strings while keeping error codes."""
+  if _NESTED_JSON_BUDGET.get() is None:
+    token = _NESTED_JSON_BUDGET.set(
+        {"decodes": 0, "flat_decodes": 0, "bytes": 0}
+    )
+    try:
+      return _scrub_text_at_depth(str(text), _depth=0)
+    finally:
+      _NESTED_JSON_BUDGET.reset(token)
   return _scrub_text_at_depth(str(text), _depth=0)
 
 
-def scrub_sensitive_data(value: Any, *, key_name: str = "") -> Any:
+def _scrub_data_at_depth(
+    value: Any,
+    *,
+    key_name: str = "",
+    _depth: int = 0,
+    scrub_keys: bool = False,
+    key_collision_out: list[bool] | None = None,
+) -> Any:
   """Key-aware recursive scrubber for dicts, lists, bytes, and strings."""
   is_container = (
       isinstance(value, Mapping)
@@ -8869,20 +9854,78 @@ def scrub_sensitive_data(value: Any, *, key_name: str = "") -> Any:
       return "[REDACTED]" if value else []
     return "[REDACTED]"
   if isinstance(value, Mapping):
-    return {
-        str(k): scrub_sensitive_data(v, key_name=str(k))
-        for k, v in value.items()
-    }
+    out_map: dict[str, Any] = {}
+    orig_keys: set[str] | None = None
+    for k, v in value.items():
+      orig_k = str(k)
+      scrubbed_v = _scrub_data_at_depth(
+          v,
+          key_name=orig_k,
+          _depth=_depth,
+          scrub_keys=scrub_keys,
+          key_collision_out=key_collision_out,
+      )
+      if key_collision_out is not None and key_collision_out[0]:
+        return out_map
+      out_k = (
+          _scrub_text_at_depth(orig_k, _depth=_depth + 1)
+          if scrub_keys and _might_contain_secret_or_kv(orig_k)
+          else orig_k
+      )
+      if out_k in out_map:
+        if key_collision_out is not None:
+          key_collision_out[0] = True
+          return out_map
+        if orig_keys is None:
+          orig_keys = {str(ek) for ek in value}
+        suffix = 2
+        candidate = f"{out_k}#{suffix}"
+        while candidate in out_map or candidate in orig_keys:
+          suffix += 1
+          candidate = f"{out_k}#{suffix}"
+        out_k = candidate
+      out_map[out_k] = scrubbed_v
+    return out_map
   if isinstance(value, Sequence) and not isinstance(
       value, (str, bytes, bytearray)
   ):
-    return [scrub_sensitive_data(item, key_name=key_name) for item in value]
+    res_list: list[Any] = []
+    for item in value:
+      res_list.append(
+          _scrub_data_at_depth(
+              item,
+              key_name=key_name,
+              _depth=_depth,
+              scrub_keys=scrub_keys,
+              key_collision_out=key_collision_out,
+          )
+      )
+      if key_collision_out is not None and key_collision_out[0]:
+        return res_list
+    return res_list
   if isinstance(value, (bytes, bytearray)):
     text_val = value.decode("utf-8", errors="replace")
-    return scrub_sensitive_text(text_val)
+    return _scrub_text_at_depth(text_val, _depth=_depth)
   if isinstance(value, str):
-    return scrub_sensitive_text(value)
+    return _scrub_text_at_depth(value, _depth=_depth)
   return value
+
+
+def scrub_sensitive_data(value: Any, *, key_name: str = "") -> Any:
+  """Key-aware recursive scrubber for dicts, lists, bytes, and strings."""
+  if _NESTED_JSON_BUDGET.get() is None:
+    token = _NESTED_JSON_BUDGET.set(
+        {"decodes": 0, "flat_decodes": 0, "bytes": 0}
+    )
+    try:
+      return _scrub_data_at_depth(
+          value, key_name=key_name, _depth=0, scrub_keys=True
+      )
+    finally:
+      _NESTED_JSON_BUDGET.reset(token)
+  return _scrub_data_at_depth(
+      value, key_name=key_name, _depth=0, scrub_keys=True
+  )
 
 
 def ensure_owner_only_dir(dir_path: Path) -> None:
